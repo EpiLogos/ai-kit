@@ -1,0 +1,25 @@
+[package]
+name = "aikit-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AIKit persistence: registries, catalog index, context generations, trust, events, capture inbox."
+
+[dependencies]
+aikit-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+ulid = { workspace = true }
+jiff = { workspace = true }
+regex = { workspace = true }
+walkdir = { workspace = true }
+fs4 = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

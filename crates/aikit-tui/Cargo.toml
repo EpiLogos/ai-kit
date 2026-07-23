@@ -1,0 +1,22 @@
+[package]
+name = "aikit-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AIKit Ratatui palette: search, preview, staging, argument forms, promotion."
+
+[dependencies]
+aikit-core = { workspace = true }
+aikit-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+nucleo-matcher = { workspace = true }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+insta = { workspace = true }

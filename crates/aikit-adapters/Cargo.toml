@@ -1,0 +1,19 @@
+[package]
+name = "aikit-adapters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AIKit adapters: multiplexers (tmux, cmux, plain), agent clients (Claude Code, Codex, broker), shells."
+
+[dependencies]
+aikit-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+shell-words = { workspace = true }
+jiff = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
