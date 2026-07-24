@@ -1,0 +1,25 @@
+{
+  "workspaces": [
+    {
+      "id": "workspace:9",
+      "uuid": "1D0F6C2E-0000-4000-8000-000000000009",
+      "title": "payments · code",
+      "window": "window:4",
+      "cwd": "/work/payments"
+    },
+    {
+      "id": "workspace:11",
+      "uuid": "1D0F6C2E-0000-4000-8000-000000000011",
+      "title": "payments · ops",
+      "window": "window:4",
+      "cwd": "/work/payments"
+    },
+    {
+      "id": "workspace:12",
+      "uuid": "1D0F6C2E-0000-4000-8000-000000000012",
+      "title": "scratch",
+      "window": "window:1",
+      "cwd": "/tmp"
+    }
+  ]
+}

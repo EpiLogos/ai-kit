@@ -1,0 +1,22 @@
+---
+source: crates/aikit-tui/tests/render.rs
+expression: "frame(&state, 120, 18)"
+---
+┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│/ > run a script or tool   + manage capabilities   @ sessions and tasks   : AIKit actions                             │
+│exited with status 1                                                                                                  │
+│checking the payments index                                                                                           │
+│index is 3 generations behind                                                                                         │
+│… output truncated                                                                                                    │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│Enter or Esc returns to the list                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

@@ -1,0 +1,68 @@
+schema = 1
+id = "script/search/project-semantic"
+kind = "script"
+name = "bkmr semantic search (local)"
+description = "Semantic and hybrid search of the bound bkmr database using bkmr 7.x local fastembed vectors. No network, no API key. The expensive verb: it runs an embedding pass per query."
+maturity = "candidate"
+tags = ["bkmr", "search", "semantic", "hybrid", "embeddings", "offline"]
+platforms = ["linux", "macos"]
+targets = ["shell", "claude-code", "codex"]
+
+[[requires]]
+id = "tool/search/bkmr"
+version = ">=7.0.0"
+reason = "Local fastembed embedding is the baseline; it exists from 7.0.0."
+
+# One capsule. bkmr 7.x with local fastembed is the assumed baseline — this is a
+# new thing, and it targets the good version rather than carrying a legacy path.
+# The effect declaration is a claim about what happens when you run it, and for
+# local embedding it is simply true: no network, no key.
+[effects]
+filesystem = ["read:outside"]
+network = false
+subprocess = true
+credentials = []
+
+[script]
+entry = "payload/search-semantic.sh"
+interpreter = ["/bin/sh"]
+cwd = "project"
+mode = "capture"
+interactive = false
+timeout = "2m"
+exports = ["bkmr-semantic"]
+
+[[args]]
+name = "query"
+label = "Query"
+help = "Natural language. Semantic search finds neighbours of an idea, not occurrences of a word."
+type = "string"
+position = 1
+
+[[args]]
+name = "limit"
+label = "Limit"
+type = "integer"
+flag = "--limit"
+default = 10
+min = 1
+max = 200
+
+[[args]]
+name = "tags"
+label = "Require all tags"
+type = "string"
+flag = "--tags"
+
+[[args]]
+name = "mode"
+label = "Mode"
+help = "hybrid uses `bkmr hsearch --json` (FTS + vectors, RRF-fused, JSON with rrf_score). semantic uses `bkmr sem-search`, which still has no --json as of 7.6.7 and emits TSV."
+type = "enum"
+flag = "--mode"
+choices = ["hybrid", "semantic"]
+default = "hybrid"
+
+[provenance]
+source = "authored"
+upstream = "https://github.com/sysid/bkmr/releases/tag/v7.0.0"

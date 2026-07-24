@@ -1,0 +1,42 @@
+{
+  "version": "0.63.1",
+  "build": "78",
+  "commands": [
+    "browser",
+    "capabilities",
+    "close-surface",
+    "close-workspace",
+    "current-workspace",
+    "focus-pane",
+    "focus-window",
+    "identify",
+    "list-pane-surfaces",
+    "list-panes",
+    "list-windows",
+    "list-workspaces",
+    "markdown",
+    "move-workspace-to-window",
+    "new-pane",
+    "new-split",
+    "new-surface",
+    "new-window",
+    "new-workspace",
+    "notify",
+    "ping",
+    "rename-workspace",
+    "respawn-pane",
+    "select-workspace",
+    "version",
+    "workspace-action"
+  ],
+  "features": {
+    "workspaces": true,
+    "workspace_groups": true,
+    "windows": true,
+    "panes": true,
+    "browser_surface": true,
+    "status_pill": true,
+    "progress": true,
+    "log_panel": true
+  }
+}

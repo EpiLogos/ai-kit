@@ -19,7 +19,7 @@ jiff = { workspace = true }
 regex = { workspace = true }
 walkdir = { workspace = true }
 fs4 = { workspace = true }
-rusqlite = { workspace = true }
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

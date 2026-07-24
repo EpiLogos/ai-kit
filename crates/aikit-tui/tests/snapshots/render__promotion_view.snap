@@ -1,0 +1,22 @@
+---
+source: crates/aikit-tui/tests/render.rs
+expression: "frame(&state, 120, 18)"
+---
+┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│/ :                                                                                                                   │
+│Rebuild the search index                                                                                              │
+│would become  script/ops/rebuild-index                                                                                │
+│description   Rebuilds the project search index from scratch.                                                         │
+│exports       rebuild-index                                                                                           │
+│maturity      draft                                                                                                   │
+│Similar to                                                                                                            │
+│  62%  script/ops/reindex  — same three shell steps, different index path                                             │
+│Body                                                                                                                  │
+│  #!/usr/bin/env bash                                                                                                 │
+│  set -euo pipefail                                                                                                   │
+│  cargo run --bin reindex                                                                                             │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│Enter promotes · Esc goes back                                                                                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

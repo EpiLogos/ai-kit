@@ -42,17 +42,14 @@ pub enum DefaultSource {
 /// Restrict a `path` argument to a file or a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum PathKind {
+    #[default]
     Any,
     File,
     Directory,
 }
 
-impl Default for PathKind {
-    fn default() -> Self {
-        Self::Any
-    }
-}
 
 /// A literal default value as written in TOML.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

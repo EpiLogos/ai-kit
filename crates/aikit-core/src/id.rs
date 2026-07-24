@@ -207,6 +207,31 @@ impl<'de> Deserialize<'de> for ProfileId {
     }
 }
 
+/// A process-wide monotonic ULID source.
+///
+/// A plain `Ulid::generate()` only orders correctly across *different*
+/// milliseconds: two ids minted inside one millisecond differ only in their
+/// random bits and sort arbitrarily. AIKit leans on the sortability — session and
+/// context ids are used as a creation order in listings and in the event log —
+/// and two sessions or two contexts really are created back to back inside a
+/// millisecond during `session up`. So the guarantee has to be real, not
+/// probabilistic.
+fn next_ulid() -> ulid::Ulid {
+    use std::sync::Mutex;
+    static GENERATOR: Mutex<ulid::Generator> = Mutex::new(ulid::Generator::new());
+
+    // A poisoned lock means another thread panicked mid-generation. The
+    // generator's only state is the previous id, so recovering it is safe and
+    // strictly better than propagating a panic into id minting.
+    let mut generator = GENERATOR.lock().unwrap_or_else(|e| e.into_inner());
+    match generator.generate() {
+        Ok(id) => id,
+        // Overflow needs 2^80 ids inside one millisecond. Incrementing keeps the
+        // ordering guarantee rather than trading it for fresh randomness.
+        Err(overflow) => overflow.commit_overflow_increment(),
+    }
+}
+
 macro_rules! prefixed_id {
     ($name:ident, $prefix:literal, $doc:literal) => {
         #[doc = $doc]
@@ -217,7 +242,7 @@ macro_rules! prefixed_id {
         impl $name {
             /// Generate a fresh, lexicographically sortable identifier.
             pub fn generate() -> Self {
-                Self(format!("{}{}", $prefix, ulid::Ulid::generate()))
+                Self(format!("{}{}", $prefix, next_ulid()))
             }
 
             pub fn parse(raw: &str) -> Result<Self> {

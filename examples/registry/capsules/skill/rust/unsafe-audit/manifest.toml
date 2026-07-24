@@ -1,0 +1,13 @@
+# A second skill. Its whole reason for being in the seed registry is to make the
+# "two sessions carry different skill sets" acceptance case a comparison of two
+# non-empty sets — but it is also a genuinely useful, focused skill on its own.
+schema = 1
+id = "skill/rust/unsafe-audit"
+kind = "skill"
+name = "Unsafe audit"
+description = "Audit every unsafe block in a Rust change: state each safety invariant and show it holds. Use before merging code that adds or edits unsafe."
+maturity = "candidate"
+tags = ["rust", "unsafe", "safety", "audit"]
+
+[skill]
+root = "payload"

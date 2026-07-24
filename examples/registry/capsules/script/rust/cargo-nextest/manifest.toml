@@ -1,0 +1,20 @@
+# A script capsule. Activation exports its commands onto the contextual PATH and
+# boosts it in search; it can also be run explicitly with `aikit run` while
+# inactive, because a script's activation only governs *ambient* exposure.
+schema = 1
+id = "script/rust/cargo-nextest"
+kind = "script"
+name = "cargo nextest"
+description = "Run the workspace test suite with cargo-nextest, falling back to cargo test where nextest is not installed."
+maturity = "stable"
+tags = ["rust", "test", "nextest", "ci"]
+
+[script]
+entry = "payload/run.sh"
+interpreter = ["/bin/sh"]
+# Run from the resolved project root, not wherever the palette happened to be.
+cwd = "project"
+mode = "foreground"
+# The command name placed on the contextual PATH. Without this it would default
+# to the capsule leaf, `cargo-nextest`, which collides with the real subcommand.
+exports = ["nt"]

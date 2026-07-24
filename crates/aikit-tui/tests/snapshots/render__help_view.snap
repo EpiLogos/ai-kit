@@ -1,0 +1,24 @@
+---
+source: crates/aikit-tui/tests/render.rs
+expression: "frame(&state, 120, 20)"
+---
+┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│/ > run a script or tool   + manage capabilities   @ sessions and tasks   : AIKit actions                             │
+│Keys                                                                                                                  │
+│↑ ↓           move                                                                                                    │
+│Space         stage a change (Ctrl+Space while typing)                                                                │
+│Tab           change where the change is written                                                                      │
+│Enter         run or open                                                                                             │
+│Shift+Enter   explain this row, or review the staged set                                                              │
+│Ctrl+Enter    apply everything staged                                                                                 │
+│Alt+Enter     run in a new pane                                                                                       │
+│Ctrl+O        reveal the source                                                                                       │
+│Ctrl+R        repeat the last run                                                                                     │
+│Esc           clear, then discard, then close                                                                         │
+│?             this screen                                                                                             │
+│Lanes                                                                                                                 │
+│>             run a script or tool                                                                                    │
+│+             manage capabilities                                                                                     │
+│@             sessions and tasks                                                                                      │
+│Esc returns                                                                                                           │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

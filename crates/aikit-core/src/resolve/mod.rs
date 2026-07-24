@@ -234,12 +234,14 @@ impl ResolvedView {
     /// Scripts, tools and templates can be run while inactive — activation only
     /// controls ambient exposure. Hooks, skills and guidance cannot: for them,
     /// "run" is not a meaningful separate act.
+    ///
+    /// Note what is deliberately *not* here: being active does not confer
+    /// runnability. Activation and runnability answer different questions, and
+    /// conflating them would put every live hook into the palette's `>` lane,
+    /// where choosing one could only disappoint.
     pub fn can_run(&self, id: &CapsuleId) -> bool {
         match self.catalog_index.get(id) {
-            Some(entry) => {
-                entry.maturity.is_selectable()
-                    && (entry.kind.runnable_while_inactive() || self.is_active(id))
-            }
+            Some(entry) => entry.maturity.is_selectable() && entry.kind.runnable_while_inactive(),
             None => false,
         }
     }

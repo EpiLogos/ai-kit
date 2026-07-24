@@ -1,0 +1,22 @@
+---
+source: crates/aikit-tui/tests/render.rs
+expression: "frame(&state, 120, 18)"
+---
+┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│/ deploy                                                                                                              │
+│❯◆ ·○   deploy                   Test script depl… script    reviewed  script/ops/deploy@rev-sc                       │
+│                                                                       State: inactive                                │
+│                       ┌ Write to the project profile ────────────────────────────────────────┐                       │
+│                       │Write 1 change to the project profile?                                │                       │
+│                       │<repo>/.aikit/profile.toml is committed: everyone working on this     │                       │
+│                       │repository resolves it. Use project-local or the session overlay for a│ects it                │
+│                       │private change.                                                       │                       │
+│                       │Enter to confirm · Esc to go back                                     │                       │
+│                       │                                                                      │                       │
+│                       │                                                                      │                       │
+│                       └──────────────────────────────────────────────────────────────────────┘ed into the contextual │
+│                                                                       command path and boosted in search             │
+│                                                                                                                      │
+│                                                                                                                      │
+│1 staged change  ·  Claude: live                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

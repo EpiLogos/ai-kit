@@ -1,0 +1,67 @@
+schema = 1
+id = "script/bkmr/project-snapshot"
+kind = "script"
+name = "bkmr project snapshot"
+description = "Consistent, timestamped backup of the bound bkmr database using VACUUM INTO, with retention and a read-back check. Replaces the wrapper's gzip-of-a-live-file, which is not a valid backup under WAL."
+maturity = "candidate"
+tags = ["bkmr", "backup", "snapshot", "sqlite", "upgrade"]
+platforms = ["linux", "macos"]
+targets = ["shell"]
+
+# sqlite3 is used rather than bkmr: bkmr has no backup verb, and VACUUM INTO
+# takes the read lock that makes the copy internally consistent. That is the
+# whole reason this capsule exists, so bkmr is not a hard requirement.
+[[requires]]
+id = "tool/search/bkmr"
+reason = "Only for context; the snapshot itself is taken by sqlite3."
+optional = true
+
+[effects]
+filesystem = ["read:outside", "write:outside"]
+network = false
+subprocess = true
+credentials = []
+
+[script]
+entry = "payload/project-snapshot.sh"
+interpreter = ["/bin/sh"]
+cwd = "project"
+mode = "capture"
+interactive = false
+timeout = "10m"
+exports = ["bkmr-snapshot"]
+
+[[args]]
+name = "dir"
+label = "Snapshot directory"
+help = "Default: $AIKIT_BKMR_SNAPSHOT_DIR, else <db dir>/.snapshots."
+type = "path"
+flag = "--dir"
+path_kind = "directory"
+
+[[args]]
+name = "keep"
+label = "Retain"
+help = "Keep the newest N snapshots of this database. 0 disables pruning."
+type = "integer"
+flag = "--keep"
+default = 10
+min = 0
+max = 1000
+
+[[args]]
+name = "list"
+label = "List snapshots"
+type = "bool"
+flag = "--list"
+default = false
+
+[[args]]
+name = "compress"
+label = "gzip the snapshot"
+type = "bool"
+flag = "--gzip"
+default = false
+
+[provenance]
+source = "authored"

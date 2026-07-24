@@ -1,0 +1,22 @@
+---
+source: crates/aikit-tui/tests/render.rs
+expression: "frame(&state, 120, 18)"
+---
+┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│/ beta                                                                                                                │
+│script/fmt/alpha conflicts with script/fmt/beta                                                                       │
+│code: resolution.conflict                                                                                             │
+│script/fmt/alpha and script/fmt/beta cannot both be active in this context.                                           │
+│Choose:                                                                                                               │
+│  · keep script/fmt/alpha                                                                                             │
+│  · keep script/fmt/beta                                                                                              │
+│Esc to go back — nothing has been written.                                                                            │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│script/fmt/alpha conflicts with script/fmt/beta  [resolution.conflict]                                                │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

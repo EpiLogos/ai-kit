@@ -1,0 +1,69 @@
+schema = 1
+id = "script/bkmr/project-init"
+kind = "script"
+name = "bkmr project init"
+description = "Create a bkmr database for a project and print the .aikit/project.toml stanza that binds it. Also lists and reports on existing databases, read-only. Never switches anything."
+maturity = "candidate"
+tags = ["bkmr", "project", "init", "sqlite", "inventory"]
+platforms = ["linux", "macos"]
+targets = ["shell"]
+
+[[requires]]
+id = "tool/search/bkmr"
+version = ">=6.5.0"
+reason = "`bkmr create-db <path>` creates the schema."
+
+# Creates one new file in the database directory, which is outside the project.
+# It writes nothing else: in particular it does not write
+# ~/.config/bkmr/projects/.current, which is the global mutable active set this
+# integration exists to remove.
+[effects]
+filesystem = ["read:outside", "write:outside"]
+network = false
+subprocess = true
+credentials = []
+
+[script]
+entry = "payload/project-init.sh"
+interpreter = ["/bin/sh"]
+cwd = "project"
+mode = "capture"
+interactive = false
+timeout = "2m"
+exports = ["bkmr-project"]
+
+[[args]]
+name = "name"
+label = "Project name"
+help = "Becomes <dir>/<name>.db and the value of `db` in [integrations.bkmr]."
+type = "string"
+position = 1
+pattern = "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+
+[[args]]
+name = "dir"
+label = "Database directory"
+help = "Default: $AIKIT_BKMR_DB_DIR, else ~/.config/bkmr/projects."
+type = "path"
+flag = "--dir"
+path_kind = "directory"
+
+[[args]]
+name = "list"
+label = "List databases"
+help = "Read-only inventory. Skips the *_backup_YYYYMMDD.db files bkmr 7.x leaves behind."
+type = "bool"
+flag = "--list"
+default = false
+
+[[args]]
+name = "info"
+label = "Report on one database"
+type = "path"
+flag = "--info"
+path_kind = "file"
+must_exist = true
+
+[provenance]
+source = "authored"
+upstream = "https://github.com/sysid/bkmr"

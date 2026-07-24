@@ -1,0 +1,41 @@
+schema = 1
+id = "guidance/tools/bkmr"
+kind = "guidance"
+name = "Using bkmr"
+description = "Teaches an agent the bkmr composition grammar: which verb is cheap, which is expensive, that results are file:// pointers rather than content, and which command silently mutates the corpus."
+maturity = "candidate"
+tags = ["bkmr", "search", "guidance", "knowledge-base"]
+targets = ["claude-code", "codex"]
+
+# Guidance is prose, not execution. The commands it names come from the script
+# capsules; enabling this without them would describe verbs that do not exist,
+# so the requirement is real rather than decorative.
+[[requires]]
+id = "script/search/project-text"
+reason = "Names bkmr-text as the cheap verb."
+
+[[requires]]
+id = "tool/search/bkmr"
+reason = "Everything described here is a wrapper around this binary."
+
+[effects]
+filesystem = []
+network = false
+subprocess = false
+credentials = []
+
+# 354 estimated tokens by aikit_core::guidance::estimate_tokens. The budget is
+# the author's own claim about size; the composer charges the real cost against
+# the total and reports any fragment that exceeds what it promised.
+#
+# dedup_key is set so that a project- or session-scoped override describing a
+# different bkmr setup replaces this fragment instead of stacking with it.
+[guidance]
+entry = "payload/guidance.md"
+inject = ["SessionStart"]
+order = 40
+token_budget = 400
+dedup_key = "tool:bkmr"
+
+[provenance]
+source = "authored"

@@ -25,8 +25,10 @@ use crate::platform::{MuxKind, Platform, TargetId};
 /// How a task context relates to the session's working tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum Isolation {
     /// The default. The context uses the session's working tree as-is.
+    #[default]
     Shared,
     /// A dedicated directory that is not a git worktree (a scratch checkout, a
     /// copied tree, a subdirectory). Gives filesystem isolation without touching
@@ -36,11 +38,6 @@ pub enum Isolation {
     Worktree,
 }
 
-impl Default for Isolation {
-    fn default() -> Self {
-        Self::Shared
-    }
-}
 
 impl Isolation {
     pub fn as_str(self) -> &'static str {

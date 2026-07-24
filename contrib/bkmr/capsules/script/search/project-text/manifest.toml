@@ -1,0 +1,75 @@
+schema = 1
+id = "script/search/project-text"
+kind = "script"
+name = "bkmr text search"
+description = "Full-text and tag search of the bkmr database bound to this context. Offline, no credentials, JSON output. The cheap verb: reach for it first."
+maturity = "candidate"
+tags = ["bkmr", "search", "fts", "offline", "json"]
+platforms = ["linux", "macos"]
+targets = ["shell", "claude-code", "codex"]
+
+[[requires]]
+id = "tool/search/bkmr"
+version = ">=6.5.0"
+reason = "`search --json` and BKMR_DB_URL both exist from 6.5.0."
+
+# No network and no credentials, on every supported bkmr version. The database
+# is outside the project tree, hence read:outside. Measured on 6.5.0:
+# `bkmr search --json` leaves the database file byte-identical.
+[effects]
+filesystem = ["read:outside"]
+network = false
+subprocess = true
+credentials = []
+
+[script]
+entry = "payload/search-text.sh"
+interpreter = ["/bin/sh"]
+cwd = "project"
+mode = "capture"
+interactive = false
+timeout = "30s"
+exports = ["bkmr-text"]
+
+[[args]]
+name = "query"
+label = "Query"
+help = "SQLite FTS query."
+type = "string"
+position = 1
+
+[[args]]
+name = "limit"
+label = "Limit"
+type = "integer"
+flag = "--limit"
+default = 10
+min = 1
+max = 200
+
+[[args]]
+name = "tags"
+label = "Require all tags"
+help = "Comma-separated. System tags start and end with an underscore: _md_, _snip_, _shell_, _mem_."
+type = "string"
+flag = "--tags"
+
+[[args]]
+name = "all"
+label = "Search the declared database set"
+help = "Needs AIKIT_BKMR_DB_SET, from `also = [...]` in .aikit/project.toml. Never a directory glob."
+type = "bool"
+flag = "--all"
+default = false
+
+[[args]]
+name = "raw"
+label = "Human-readable output"
+help = "bkmr's own rendering instead of JSON."
+type = "bool"
+flag = "--raw"
+default = false
+
+[provenance]
+source = "authored"
+upstream = "https://github.com/sysid/bkmr"

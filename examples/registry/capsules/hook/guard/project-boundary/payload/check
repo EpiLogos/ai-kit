@@ -1,0 +1,20 @@
+#!/bin/sh
+# Project-boundary gate.
+#
+# The dispatcher hands us the normalised client event as JSON on stdin. We refuse
+# a tool call that reaches outside the project's working tree: a system path, an
+# ssh key, or a parent-directory escape. A zero exit allows; a non-zero exit
+# denies, and because this step's phase is `gate`, that denial stops the chain.
+#
+# The check is intentionally simple and text-based rather than a JSON parser: a
+# guardrail people can read in ten seconds is one they will trust and keep on.
+payload=$(cat)
+
+case "$payload" in
+    */etc/*|*/private/etc/*|*/root/*|*.ssh/*|*.aws/credentials*|*/../*)
+        echo "project-boundary: refusing a tool call that reaches outside the project" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

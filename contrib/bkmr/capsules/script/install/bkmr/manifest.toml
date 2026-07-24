@@ -1,0 +1,70 @@
+schema = 1
+id = "script/install/bkmr"
+kind = "script"
+name = "Install bkmr 7.x"
+description = "Explicitly install or upgrade bkmr to 7.x via cargo, after reporting how many existing embeddings the upgrade would discard. Prints a plan and does nothing without --apply."
+maturity = "candidate"
+tags = ["bkmr", "install", "upgrade", "cargo", "embeddings"]
+platforms = ["linux", "macos"]
+targets = ["shell"]
+
+[[requires]]
+id = "tool/search/bkmr"
+reason = "This capsule exists to satisfy that tool's install_hint; it verifies the binary it produced."
+optional = true
+
+# cargo fetches crates.io and, because bkmr enables fastembed's
+# ort-download-binaries feature by default, an ONNX Runtime binary at build
+# time. It writes the binary into the cargo bin directory, outside any project.
+[effects]
+filesystem = ["read:outside", "write:outside"]
+network = true
+subprocess = true
+credentials = []
+
+[script]
+entry = "payload/install.sh"
+interpreter = ["/bin/sh"]
+cwd = "cwd"
+mode = "capture"
+interactive = false
+timeout = "30m"
+exports = ["bkmr-install"]
+
+[[args]]
+name = "apply"
+label = "Actually install"
+help = "Without this the script only prints the plan and the embeddings at risk."
+type = "bool"
+flag = "--apply"
+default = false
+
+[[args]]
+name = "allow_reembed"
+label = "Accept losing existing embeddings"
+help = "bkmr 7.0.0's migration nulls every 6.x embedding. Required when any were found."
+type = "bool"
+flag = "--allow-reembed"
+default = false
+
+[[args]]
+name = "version"
+label = "Version"
+help = "A specific 7.x version, e.g. 7.6.7. Default is the newest 7.x."
+type = "string"
+flag = "--version"
+pattern = "^7(\\.[0-9]+){0,2}$"
+
+[[args]]
+name = "scan"
+label = "Extra directory to scan"
+help = "Additional directory to search for bkmr databases when counting embeddings at risk."
+type = "path"
+flag = "--scan"
+path_kind = "directory"
+must_exist = true
+repeatable = true
+
+[provenance]
+source = "authored"
+upstream = "https://github.com/sysid/bkmr/releases/tag/v7.0.0"

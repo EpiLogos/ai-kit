@@ -1,0 +1,22 @@
+---
+source: crates/aikit-tui/tests/render.rs
+expression: drawn
+---
+┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│/ :                                                                                                                   │
+│Deploy with the release token                                                                                         │
+│would become  script/ops/deploy-token                                                                                 │
+│description   Deploys using a personal access token.                                                                  │
+│exports       none                                                                                                    │
+│maturity      draft                                                                                                   │
+│Withheld: quarantined by the capture scanner: github-token                                                            │
+│Its text is not shown and it cannot be promoted.                                                                      │
+│  github-token — ghp_…8 chars…                                                                                        │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│Enter promotes · Esc goes back                                                                                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

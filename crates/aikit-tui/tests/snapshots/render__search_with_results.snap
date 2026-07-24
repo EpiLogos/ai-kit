@@ -1,0 +1,22 @@
+---
+source: crates/aikit-tui/tests/render.rs
+expression: "frame(&state, 120, 18)"
+---
+┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│/ o                                                                                                                   │
+│❯  +● P deploy                   Test script depl… script    reviewed  script/ops/deploy@rev-sc                       │
+│   ·○   boundary                 Test hook bounda… hook      unseen    State: active                                  │
+│   ·○   core                     Test script core. script    reviewed  Trust: reviewed                                │
+│   ·○   cargo-nextest            Test script carg… script    reviewed  Maturity: draft                                │
+│                                                                       Selected by:                                   │
+│                                                                         enabled by project .aikit/project.toml       │
+│                                                                       Required by:                                   │
+│                                                                         none                                         │
+│                                                                       Dependencies:                                  │
+│                                                                         none                                         │
+│                                                                       Projection:                                    │
+│                                                                         shell                                        │
+│                                                                         claude-code                                  │
+│                                                                       Activation means: exported into the contextual │
+│4 capabilities · writing to session S · ? for keys                                                                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

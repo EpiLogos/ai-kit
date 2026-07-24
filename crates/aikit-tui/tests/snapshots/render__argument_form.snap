@@ -1,0 +1,22 @@
+---
+source: crates/aikit-tui/tests/render.rs
+expression: "frame(&state, 120, 18)"
+---
+┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│/ > run a script or tool   + manage capabilities   @ sessions and tasks   : AIKit actions                             │
+│ * target           staging                   staging/production       Command           release                      │
+│❯  token            •••••••                   secret                   Arguments         staging --token ••••••       │
+│   dry-run          false                     true/false               Working directory /work/payments               │
+│                                                                       Context           payments · session · shared  │
+│                                                                       Environment       none                         │
+│                                                                       Effects           network                      │
+│                                                                       Mode              capture                      │
+│                                                                       Secrets           •••••• — supplied for this   │
+│                                                                       run only, never recorded                       │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│Enter runs · Esc goes back · * required                                                                               │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

@@ -97,6 +97,16 @@ pub fn hook_with(id: &str, top: &str) -> Capsule {
     )
 }
 
+/// A hook capsule with full control over its `[hook]` table, for the chain tests.
+pub fn hook_table(id: &str, top: &str, hook_body: &str) -> Capsule {
+    manifest("hook", id, top, hook_body, "")
+}
+
+/// A guidance capsule with full control over its `[guidance]` table.
+pub fn guidance_table(id: &str, top: &str, guidance_body: &str) -> Capsule {
+    manifest("guidance", id, top, guidance_body, "")
+}
+
 pub fn guidance(id: &str) -> Capsule {
     guidance_with(id, "")
 }

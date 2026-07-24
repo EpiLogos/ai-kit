@@ -1,0 +1,37 @@
+# Portable session topology for `session/dev/rust-dev`.
+#
+# This is the canonical form (`SessionSpec`). It is declarative: views and panes,
+# with each non-root pane an incremental split of a pane declared before it. The
+# compiler turns it into an ordered creation script so an adapter can walk it top
+# to bottom, issuing one command per step, without looking ahead — which is what
+# makes the same file launchable under tmux and cmux.
+#
+# Every pane ends by exec-ing a login shell, so a pane is a durable place to work
+# rather than something that vanishes when its first command exits.
+schema = 1
+id = "rust-dev"
+name = "rust-dev"
+
+# View one: code. An editor pane above a test-watch pane.
+[[views]]
+id = "code"
+
+[[views.panes]]
+id = "editor"
+focus = true
+command = ["sh", "-c", "echo 'rust-dev · editor — open your editor here'; exec \"${SHELL:-/bin/sh}\""]
+
+[[views.panes]]
+id = "tests"
+split_from = "editor"
+direction = "down"
+ratio = 0.35
+command = ["sh", "-c", "if command -v cargo-watch >/dev/null 2>&1; then exec cargo watch -x 'nextest run'; else echo 'rust-dev · tests — install cargo-watch to auto-run tests'; exec \"${SHELL:-/bin/sh}\"; fi"]
+
+# View two: agent. One pane for a coding agent.
+[[views]]
+id = "agent"
+
+[[views.panes]]
+id = "assistant"
+command = ["sh", "-c", "echo 'rust-dev · agent — launch your coding agent here'; exec \"${SHELL:-/bin/sh}\""]

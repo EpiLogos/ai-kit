@@ -305,11 +305,9 @@ fn capsule_id_round_trips_and_rejects_malformed_input() {
 
 #[test]
 fn capsule_ids_order_deterministically_for_stable_hashing() {
-    let mut ids = vec![
-        CapsuleId::parse("script/test/b").unwrap(),
+    let mut ids = [CapsuleId::parse("script/test/b").unwrap(),
         CapsuleId::parse("skill/rust/a").unwrap(),
-        CapsuleId::parse("script/test/a").unwrap(),
-    ];
+        CapsuleId::parse("script/test/a").unwrap()];
     ids.sort();
     let rendered: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
     assert_eq!(

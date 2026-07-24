@@ -1,0 +1,22 @@
+---
+source: crates/aikit-tui/tests/render.rs
+expression: "frame(&state, 120, 18)"
+---
+┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│/ deploy                                                                                                              │
+│❯  ·○   deploy                   Test script depl… script    unseen    script/ops/deploy@rev-sc                       │
+│                                                                       State: inactive                                │
+│                       ┌ Run an unreviewed revision of script/ops/deploy ─────────────────────┐                       │
+│                       │Run script/ops/deploy without a reviewed revision?                    │                       │
+│                       │Nobody has reviewed this revision. Running it is a one-off decision;  │                       │
+│                       │it does not record trust.                                             │ects it                │
+│                       │Enter to confirm · Esc to go back                                     │                       │
+│                       │                                                                      │                       │
+│                       │                                                                      │                       │
+│                       │                                                                      │                       │
+│                       └──────────────────────────────────────────────────────────────────────┘ed into the contextual │
+│                                                                       command path and boosted in search             │
+│                                                                                                                      │
+│                                                                                                                      │
+│1 capability · writing to session S · ? for keys                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

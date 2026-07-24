@@ -1,10 +1,27 @@
 //! Trust.
 //!
-//! Trust attaches to a *revision*, never to an id and never to a self-declaration
-//! inside a manifest. Updating a trusted capsule therefore yields the same id, a
-//! new revision, and a state that requires review again.
+//! Trust never comes from a self-declaration inside a manifest, and it never
+//! comes from mere presence in a registry. Being catalogued is not being
+//! reviewed. That distinction is the whole point.
 //!
-//! Being catalogued is not being reviewed. That distinction is the whole point.
+//! ## The keying is deliberately asymmetric
+//!
+//! **Approval is keyed on content.** `(source, capsule, revision)`. Editing a
+//! capsule yields the same id, a new revision, and a state that requires review
+//! again — because the thing you approved is not the thing that would now run.
+//!
+//! **Refusal is keyed on identity.** `(source, capsule)`, revision excluded. A
+//! block that a version bump clears is not a block: an unwanted capsule would
+//! only have to change a byte to come back. direnv reaches the same conclusion
+//! from the other direction — its allow list hashes path *and* contents, while
+//! its deny list is keyed on the path alone.
+//!
+//! Getting this symmetric in either direction is a security bug. Symmetric on
+//! content means "no" expires silently; symmetric on identity means "yes"
+//! survives an edit you never saw.
+//!
+//! A **standing verdict** (block or dismissal) is therefore stored separately
+//! from per-revision approvals, and consulted first.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -17,37 +34,55 @@ use crate::id::{CapsuleId, RegistrySource, Revision};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum TrustState {
     /// Catalogued, never looked at.
+    #[default]
     Unseen,
+    /// The user declined to review it for now.
+    ///
+    /// Distinct from both `Unseen` and `Blocked`, and the distinction earns its
+    /// keep: without it, every prompt is a choice between "yes" and "forever",
+    /// so users learn to say yes. Dismissal stops the asking without becoming a
+    /// refusal. (mise keeps `ignored` separate from `trusted` for this reason.)
+    Dismissed,
     /// Held back — usually because capture found a possible secret.
     Quarantined,
     /// A human has read this revision.
     Reviewed,
     /// Reviewed and explicitly promoted; may be activated without further prompting.
     Trusted,
-    /// Explicitly refused.
+    /// Explicitly refused. Keyed on identity, not content — see the module header.
     Blocked,
     /// A newer revision has been reviewed; this one is retained for audit only.
     Superseded,
 }
 
-impl Default for TrustState {
-    fn default() -> Self {
-        Self::Unseen
-    }
-}
 
 impl TrustState {
     pub fn as_str(self) -> &'static str {
         match self {
             TrustState::Unseen => "unseen",
+            TrustState::Dismissed => "dismissed",
             TrustState::Quarantined => "quarantined",
             TrustState::Reviewed => "reviewed",
             TrustState::Trusted => "trusted",
             TrustState::Blocked => "blocked",
             TrustState::Superseded => "superseded",
         }
+    }
+
+    /// Should the palette stop offering this for review?
+    ///
+    /// True for every state where the user has already answered the question,
+    /// in either direction. Only `Unseen` is an open question.
+    pub fn suppresses_prompting(self) -> bool {
+        !matches!(self, TrustState::Unseen)
+    }
+
+    /// Is this a standing verdict — one that must survive a content change?
+    pub fn is_standing(self) -> bool {
+        matches!(self, TrustState::Blocked | TrustState::Dismissed)
     }
 
     /// May a capsule in this state be projected into a client at all?
@@ -107,26 +142,81 @@ impl TrustKey {
 
 /// Where trust decisions are read from.
 pub trait TrustOracle {
+    /// The per-revision approval record. Keyed on content.
     fn state(&self, key: &TrustKey) -> TrustState;
 
-    /// Convenience: an unstamped capsule (no source/revision yet) is unseen.
+    /// A verdict that holds for *every* revision of a capsule.
+    ///
+    /// Only refusals live here — `Blocked` and `Dismissed`. Implementations that
+    /// have no standing ledger return `None` and get ordinary per-revision
+    /// behaviour, which is safe but means a block can be cleared by an edit; a
+    /// persistent oracle must override this.
+    fn standing_verdict(
+        &self,
+        source: &RegistrySource,
+        capsule: &CapsuleId,
+    ) -> Option<TrustState> {
+        let _ = (source, capsule);
+        None
+    }
+
+    /// The effective state, consulting the standing verdict first.
+    ///
+    /// An unstamped capsule — one the store has not yet given a source and a
+    /// revision — is `Unseen`, never trusted by default.
     fn state_for(
         &self,
         source: Option<&RegistrySource>,
         capsule: &CapsuleId,
         revision: Option<&Revision>,
     ) -> TrustState {
-        match (source, revision) {
-            (Some(s), Some(r)) => self.state(&TrustKey::new(s.clone(), capsule.clone(), r.clone())),
-            _ => TrustState::Unseen,
+        let Some(source) = source else {
+            return TrustState::Unseen;
+        };
+        if let Some(standing) = self.standing_verdict(source, capsule) {
+            // A block is final. A dismissal is a "not now", so an explicit review
+            // of *this* revision answers it and takes precedence.
+            if standing == TrustState::Blocked {
+                return standing;
+            }
+            let per_revision = revision
+                .map(|r| self.state(&TrustKey::new(source.clone(), capsule.clone(), r.clone())))
+                .unwrap_or(TrustState::Unseen);
+            return if per_revision == TrustState::Unseen {
+                standing
+            } else {
+                per_revision
+            };
+        }
+        match revision {
+            Some(r) => self.state(&TrustKey::new(source.clone(), capsule.clone(), r.clone())),
+            None => TrustState::Unseen,
         }
     }
+}
+
+/// One row of the trust ledger, carrying human-readable identity alongside the key.
+///
+/// direnv names its grant files by hash but stores the path inside them, which is
+/// the only reason `direnv status` and `direnv prune` can exist at all. A ledger
+/// you cannot enumerate in human terms cannot be audited or pruned, so identity
+/// travels with every entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustEntry {
+    pub source: RegistrySource,
+    pub capsule: CapsuleId,
+    /// `None` for a standing verdict, which applies to every revision.
+    pub revision: Option<Revision>,
+    pub state: TrustState,
 }
 
 /// An in-memory oracle. The store provides the persistent one.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryTrust {
+    /// Per-revision approvals, keyed on content.
     entries: BTreeMap<TrustKey, TrustState>,
+    /// Standing refusals, keyed on identity so an edit cannot clear them.
+    standing: BTreeMap<(RegistrySource, CapsuleId), TrustState>,
 }
 
 impl MemoryTrust {
@@ -144,11 +234,63 @@ impl MemoryTrust {
     pub fn entries(&self) -> &BTreeMap<TrustKey, TrustState> {
         &self.entries
     }
+
+    /// Refuse a capsule for every revision, present and future.
+    pub fn block(&mut self, source: RegistrySource, capsule: CapsuleId) {
+        self.standing
+            .insert((source, capsule), TrustState::Blocked);
+    }
+
+    /// Stop asking about a capsule without refusing it.
+    pub fn dismiss(&mut self, source: RegistrySource, capsule: CapsuleId) {
+        self.standing
+            .insert((source, capsule), TrustState::Dismissed);
+    }
+
+    /// Lift a standing verdict.
+    ///
+    /// This restores ordinary per-revision keying; it does not grant approval,
+    /// because "I no longer refuse this" and "I have reviewed this" are
+    /// different statements and only the user makes the second one.
+    pub fn unblock(&mut self, source: &RegistrySource, capsule: &CapsuleId) {
+        self.standing.remove(&(source.clone(), capsule.clone()));
+    }
+
+    /// Every recorded decision, in a form a person can read and prune.
+    pub fn ledger(&self) -> Vec<TrustEntry> {
+        let mut out: Vec<TrustEntry> = self
+            .standing
+            .iter()
+            .map(|((source, capsule), state)| TrustEntry {
+                source: source.clone(),
+                capsule: capsule.clone(),
+                revision: None,
+                state: *state,
+            })
+            .collect();
+        out.extend(self.entries.iter().map(|(key, state)| TrustEntry {
+            source: key.source.clone(),
+            capsule: key.capsule.clone(),
+            revision: Some(key.revision.clone()),
+            state: *state,
+        }));
+        out
+    }
 }
 
 impl TrustOracle for MemoryTrust {
     fn state(&self, key: &TrustKey) -> TrustState {
         self.entries.get(key).copied().unwrap_or_default()
+    }
+
+    fn standing_verdict(
+        &self,
+        source: &RegistrySource,
+        capsule: &CapsuleId,
+    ) -> Option<TrustState> {
+        self.standing
+            .get(&(source.clone(), capsule.clone()))
+            .copied()
     }
 }
 

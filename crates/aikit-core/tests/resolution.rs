@@ -856,6 +856,46 @@ fn an_inactive_script_is_still_runnable_but_an_inactive_hook_is_not() {
     assert!(Kind::Script.runnable_while_inactive());
 }
 
+#[test]
+fn activating_a_hook_or_guidance_capsule_does_not_make_it_runnable() {
+    // "Run" is not a meaningful separate act for a hook, a skill or a guidance
+    // capsule: a hook runs when its event fires and guidance is composed into a
+    // prompt. Activation controls *ambient exposure*, so letting it also confer
+    // runnability would put every active hook into the palette's `>` lane, where
+    // selecting one could do nothing useful.
+    let f = Fixture::new(vec![
+        script("script/test/a"),
+        hook("hook/gate/b"),
+        guidance("guidance/mode/c"),
+        skill("skill/rust/d"),
+    ])
+    .with_layers(vec![layer(
+        ScopeKind::Session,
+        &[
+            "script/test/a",
+            "hook/gate/b",
+            "guidance/mode/c",
+            "skill/rust/d",
+        ],
+        &[],
+    )]);
+    let view = f.resolve().unwrap();
+
+    for id in [
+        "script/test/a",
+        "hook/gate/b",
+        "guidance/mode/c",
+        "skill/rust/d",
+    ] {
+        assert!(view.is_active(&cid(id)), "{id} should be active");
+    }
+
+    assert!(view.can_run(&cid("script/test/a")));
+    assert!(!view.can_run(&cid("hook/gate/b")));
+    assert!(!view.can_run(&cid("guidance/mode/c")));
+    assert!(!view.can_run(&cid("skill/rust/d")));
+}
+
 // ---------------------------------------------------------------------------
 // local helpers
 // ---------------------------------------------------------------------------

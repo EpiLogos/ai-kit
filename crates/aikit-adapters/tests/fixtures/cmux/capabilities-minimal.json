@@ -1,0 +1,16 @@
+{
+  "version": "0.41.0",
+  "commands": [
+    "capabilities",
+    "close-workspace",
+    "list-workspaces",
+    "new-split",
+    "new-workspace",
+    "popup",
+    "select-workspace",
+    "version"
+  ],
+  "features": {
+    "workspaces": true
+  }
+}

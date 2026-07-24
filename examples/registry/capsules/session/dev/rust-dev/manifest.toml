@@ -1,0 +1,17 @@
+# A session capsule. It packages a *portable* session topology (see
+# payload/session.toml). tmux and cmux are export targets of that one description,
+# never the source of truth — which is what lets the identical capsule launch in
+# either multiplexer with their different geometry models.
+schema = 1
+id = "session/dev/rust-dev"
+kind = "session"
+name = "Rust dev session"
+description = "A portable three-pane Rust development session: an editor, a test watcher, and an agent pane, in two views."
+maturity = "stable"
+tags = ["rust", "session", "dev", "tmux", "cmux"]
+
+[session]
+# A payload-relative path to the portable spec. `aikit session up session/dev/rust-dev`
+# compiles this into an ordered creation script and hands it to whichever
+# multiplexer is in front of you.
+spec = "payload/session.toml"

@@ -1,0 +1,27 @@
+# A hook capsule. It contributes one step to the PreToolUse dispatcher chain. As a
+# gate, a non-zero exit denies the event and short-circuits the chain. Like every
+# behaviour-changing kind it stays inert until its revision is reviewed.
+schema = 1
+id = "hook/guard/project-boundary"
+kind = "hook"
+name = "Project boundary guard"
+description = "Deny a tool call that reaches outside the project: system paths, ssh keys, or a parent-directory escape."
+maturity = "stable"
+tags = ["security", "guardrail", "gate", "boundary"]
+
+[hook]
+entry = "payload/check"
+events = ["PreToolUse"]
+# A gate is a phase whose denial has teeth and stops the chain.
+phase = "gate"
+# Fail closed: if the gate itself crashes, treat that as a denial rather than
+# quietly letting the event through. A system failure and a policy denial are
+# still reported distinctly.
+failure = "closed"
+
+# This gate opts in to being bypassable, so a scoped, reasoned, single-use bypass
+# token can let one event through when a human decides the guard is in the way.
+# The default is *not* bypassable, so this is a deliberate choice by the author.
+[hook.bypass]
+allowed = true
+reason_required = true

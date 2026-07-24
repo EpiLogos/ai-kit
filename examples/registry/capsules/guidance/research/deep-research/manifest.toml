@@ -1,0 +1,21 @@
+# A guidance capsule. Activation makes its fragment eligible for context
+# composition and injection at the declared client events, within a token budget.
+# Guidance changes model behaviour, so it too needs a reviewed revision.
+schema = 1
+id = "guidance/research/deep-research"
+kind = "guidance"
+name = "Deep research method"
+description = "A method for multi-source research: fan out, verify each claim against a primary source, and cite what survives."
+maturity = "candidate"
+tags = ["research", "method", "verification", "citations"]
+
+[guidance]
+entry = "payload/guidance.md"
+# Inject at the start of a session and again on each prompt, so the method is in
+# front of the model when a research task begins.
+inject = ["SessionStart", "UserPromptSubmit"]
+order = 10
+# A ceiling on how much of the context budget this fragment may take.
+token_budget = 400
+# Fragments sharing a dedup key are injected once; the highest-precedence wins.
+dedup_key = "research-method"

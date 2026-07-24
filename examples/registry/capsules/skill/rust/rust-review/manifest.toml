@@ -1,0 +1,16 @@
+# A skill capsule in the native Agent Skills form: the payload directory is a
+# skill tree (SKILL.md plus optional references/). Activation projects it into the
+# relevant agent's skill surface — but only once the revision is reviewed, because
+# a skill changes what the model does.
+schema = 1
+id = "skill/rust/rust-review"
+kind = "skill"
+name = "Rust review"
+description = "A reviewer's checklist for a Rust change: correctness, error handling, unsafe, and public API surface."
+maturity = "stable"
+tags = ["rust", "review", "quality", "code-review"]
+
+[skill]
+# `format = "agent-skill"` (the default): the payload/ directory is taken as an
+# existing SKILL.md tree and reproduced faithfully, not flattened.
+root = "payload"

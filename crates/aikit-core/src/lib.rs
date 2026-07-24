@@ -38,4 +38,61 @@ pub mod search;
 pub mod session;
 pub mod trust;
 
+// ---------------------------------------------------------------------------
+// Crate-root re-exports
+// ---------------------------------------------------------------------------
+//
+// The modules stay public and are the documented home of each type; these are a
+// convenience surface for the four consuming crates, which otherwise spend a
+// dozen `use` lines reaching for the same names.
+//
+// A bare verb at the crate root says nothing about what it acts on, so the two
+// that would be ambiguous are renamed rather than dropped: `session::compile`
+// becomes `compile_session` and `hooks::matches` becomes `hook_matches`. Names
+// that genuinely collide keep their module path and are deliberately absent here
+// — `capsule::SUPPORTED_SCHEMA` and `session::SUPPORTED_SCHEMA` are different
+// numbers for different documents and must not be reachable under one name.
+
 pub use error::{AikitError, Result};
+
+pub use capsule::{
+    BypassPolicy, Capsule, FailurePolicy, HookPhase, Kind, Maturity, Payload, Requirement,
+};
+pub use catalog::{Catalog, MemoryCatalog};
+pub use context::{ContextBinding, ContextDescriptor, Isolation};
+pub use duration::HumanDuration;
+pub use effects::{EffectClass, Effects};
+pub use guidance::{
+    compose, estimate_tokens, Composition, CompositionEntry, CompositionRequest, FragmentStatus,
+    GuidanceFragment,
+};
+pub use hooks::{
+    build_chains, matches as hook_matches, BypassScope, BypassToken, Denial, Dispatcher,
+    ExecutionGroup, HookChain, HookDecision, HookEvent, HookEventKind, HookStep, StepOutcome,
+    StepRecord, StepResult, StepVerdict,
+};
+pub use id::{
+    CapsuleId, ContextId, EventId, GenerationId, ProfileId, ProjectId, RegistrySource, Revision,
+    SessionId,
+};
+pub use platform::{MuxKind, Platform, TargetId};
+pub use policy::ManagedPolicy;
+pub use profile::{ConfigTable, PoolPatch, Profile};
+pub use projection::{
+    target_label, ActivationEffect, MaterializationMode, ProjectionItem, ProjectionPlan,
+    ResolvedContext, TargetAdapter, TargetCapabilities,
+};
+pub use resolve::{
+    resolve, resolve_diagnostic, ActiveCapability, Diagnosis, ResolveRequest, ResolvedView,
+    ResolutionHash, UnavailableReason,
+};
+pub use scope::{LayerOrigin, ScopeKind, ScopeLayer};
+pub use search::{
+    parse_query, score, DocStatus, FastPrefix, Query, RankingSignals, SearchDoc, StatusFilter,
+    UsageStats,
+};
+pub use session::{
+    compile as compile_session, Attach, BackendSpec, Direction, Lifecycle, PaneSpec, PaneStep,
+    Placement, Restart, SessionPlan, SessionSpec, Split, TaskSpec, ViewPlan, ViewSpec,
+};
+pub use trust::{TrustKey, TrustOracle, TrustState};

@@ -1,0 +1,20 @@
+---
+source: crates/aikit-tui/tests/render.rs
+expression: "frame(&state, 80, 16)"
+---
+┌ payments · session ──────────────────────────────────────────────────────────┐
+│/ > + @ :                                                                     │
+│❯  +● P deploy                   Test script deploy.                          │
+│   ·○   boundary                 Test hook boundary.                          │
+│   ·○   uses-lib                 Test script uses-lib.                        │
+│   ·○   core                     Test script core.                            │
+│   ·○   cargo-nextest            Test script cargo-nextest.                   │
+│   ·○   review                   Test skill review.                           │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│6 capabilities · writing to session S · ? for keys                            │
+└──────────────────────────────────────────────────────────────────────────────┘

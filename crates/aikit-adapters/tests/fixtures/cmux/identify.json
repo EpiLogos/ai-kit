@@ -1,0 +1,7 @@
+{
+  "workspace": { "id": "workspace:2", "title": "payments · code" },
+  "surface": { "id": "surface:7", "type": "terminal" },
+  "window": { "id": "window:1" },
+  "host": "localhost",
+  "cwd": "/work/payments"
+}

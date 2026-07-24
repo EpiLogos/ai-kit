@@ -130,7 +130,9 @@ impl FromStr for Kind {
 /// Maturity is a review decision. Usage may *suggest* a change; it never makes one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum Maturity {
+    #[default]
     Draft,
     Candidate,
     Stable,
@@ -138,11 +140,6 @@ pub enum Maturity {
     Blocked,
 }
 
-impl Default for Maturity {
-    fn default() -> Self {
-        Self::Draft
-    }
-}
 
 impl Maturity {
     pub fn as_str(self) -> &'static str {
@@ -218,8 +215,10 @@ pub struct Provenance {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum ExecMode {
     /// Hand the terminal to the child, then optionally show a compact summary.
+    #[default]
     Foreground,
     /// Keep the palette, stream stdout/stderr into a result panel.
     Capture,
@@ -233,11 +232,6 @@ pub enum ExecMode {
     Replace,
 }
 
-impl Default for ExecMode {
-    fn default() -> Self {
-        Self::Foreground
-    }
-}
 
 impl ExecMode {
     pub fn as_str(self) -> &'static str {
@@ -263,8 +257,10 @@ impl ExecMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum WorkingDir {
     /// The resolved project root for the context.
+    #[default]
     Project,
     /// Wherever the invocation happened.
     Cwd,
@@ -272,11 +268,6 @@ pub enum WorkingDir {
     Capsule,
 }
 
-impl Default for WorkingDir {
-    fn default() -> Self {
-        Self::Project
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -312,32 +303,26 @@ impl ScriptSection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum SkillFormat {
     /// An existing `SKILL.md` tree is the source of truth.
+    #[default]
     AgentSkill,
     /// AIKit metadata plus `instructions.md`, compiled per target.
     Aikit,
 }
 
-impl Default for SkillFormat {
-    fn default() -> Self {
-        Self::AgentSkill
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum SkillActivation {
     ModelOnly,
     UserOnly,
+    #[default]
     ModelOrUser,
 }
 
-impl Default for SkillActivation {
-    fn default() -> Self {
-        Self::ModelOrUser
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -361,7 +346,9 @@ fn default_payload_root() -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum HookPhase {
+    #[default]
     Gate,
     Transform,
     Verify,
@@ -370,11 +357,6 @@ pub enum HookPhase {
     Capture,
 }
 
-impl Default for HookPhase {
-    fn default() -> Self {
-        Self::Gate
-    }
-}
 
 impl HookPhase {
     pub fn as_str(self) -> &'static str {
@@ -405,8 +387,10 @@ impl HookPhase {
 /// with "the gate fell over" is how a security control quietly stops working.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum FailurePolicy {
     /// Treat failure as denial.
+    #[default]
     Closed,
     /// Treat failure as allow.
     Open,
@@ -414,11 +398,6 @@ pub enum FailurePolicy {
     Warn,
 }
 
-impl Default for FailurePolicy {
-    fn default() -> Self {
-        Self::Closed
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -1,0 +1,39 @@
+schema = 1
+id = "tool/search/bkmr"
+kind = "tool"
+name = "bkmr"
+description = "The bkmr knowledge-base binary: full-text and semantic search over a single SQLite database, bound per context rather than globally."
+maturity = "candidate"
+tags = ["bkmr", "search", "knowledge-base", "sqlite", "external"]
+platforms = ["linux", "macos"]
+
+# The floor is 6.5.0, not 7.0.0, because that is the oldest release on which
+# every *offline* capsule here works: `search --json` exists, `create-db`
+# exists, and BKMR_DB_URL is honoured. 7.0.0 is nevertheless the version you
+# want, and the semantic capsule enforces it separately, because 6.x semantic
+# search needs a network round trip and a Gemini API key while 7.x embeds
+# locally. See contrib/bkmr/UPGRADE.md.
+[tool]
+commands = ["bkmr"]
+check = ["bkmr", "--version"]
+minimum_version = "6.5.0"
+install_hint = "script/install/bkmr"
+
+# The database bkmr operates on lives outside the project (by default under
+# ~/.config/bkmr), so every use of it reads outside the project tree.
+#
+# One honest caveat the effect vocabulary cannot express: from 7.1.0 bkmr opens
+# its databases in WAL mode, which creates `<db>-wal` and `<db>-shm` beside the
+# database even for a pure read. Measured on 6.5.0, `search --json` leaves the
+# file byte-identical and creates no sidecars. `write:outside` is not declared
+# here because declaring it would mark every search as an elevated action and
+# train the user to click through the confirmation that should mean something.
+[effects]
+filesystem = ["read:outside"]
+network = false
+subprocess = true
+credentials = []
+
+[provenance]
+source = "authored"
+upstream = "https://github.com/sysid/bkmr"

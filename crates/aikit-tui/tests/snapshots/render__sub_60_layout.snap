@@ -1,0 +1,18 @@
+---
+source: crates/aikit-tui/tests/render.rs
+expression: "frame(&state, 52, 14)"
+---
+┌ payments · session ──────────────────────────────┐
+│/ > + @ :                                         │
+│❯  +● P deploy                                    │
+│   ·○   boundary                                  │
+│   ·○   uses-lib                                  │
+│   ·○   core                                      │
+│   ·○   cargo-nextest                             │
+│   ·○   review                                    │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│6 capabilities · writing to session S · ? for keys│
+└──────────────────────────────────────────────────┘

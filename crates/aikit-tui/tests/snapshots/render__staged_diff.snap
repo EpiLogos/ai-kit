@@ -1,0 +1,22 @@
+---
+source: crates/aikit-tui/tests/render.rs
+expression: "frame(&state, 120, 18)"
+---
+┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│/ uses-lib                                                                                                            │
+│Staged                                                                                                                │
+│  enable   script/app/uses-lib                                                                                        │
+│Comes with                                                                                                            │
+│  + script/lib/core                                                                                                   │
+│Clients                                                                                                               │
+│  Claude: live                                                                                                        │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│1 staged change · +1 dependency  ·  Claude: live                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
