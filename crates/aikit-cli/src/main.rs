@@ -144,6 +144,7 @@ fn emit(reply: Reply, json_mode: bool) -> i32 {
 fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
     match cli.command {
         None => open_palette(cwd, None, false),
+        Some(Command::Init(a)) => cmd_init(cwd, a),
         Some(Command::Ui(a)) => open_palette(cwd, a.query, a.fullscreen),
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
@@ -163,6 +164,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Capabilities(c)) => cmd_capabilities(cwd, c),
         Some(Command::Session(c)) => cmd_session(cwd, c),
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
+        Some(Command::Inbox(a)) => cmd_inbox(cwd, a),
         Some(Command::Shell(c)) => cmd_shell(c),
 
         // Real, but delegated to modules whose full wiring is the integration
@@ -170,6 +172,53 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         // half-working stub that pretends to have done the work.
         Some(other) => Err(not_implemented(command_name(&other))),
     }
+}
+
+/// `aikit init` — discover the foreign skill roots already on the machine and
+/// show them, read-only. It indexes what is there and reports counts (including
+/// the dead symlinks and unusable frontmatter a user cannot otherwise see); it
+/// asks nothing and writes nothing. Adoption — turning a foreign root into
+/// something AIKit owns — is a separate, explicitly confirmed Procedure.
+fn cmd_init(cwd: &std::path::Path, a: InitArgs) -> Result<Reply> {
+    use aikit_cli::foreign;
+    let service = Service::discover(cwd)?;
+
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut roots = foreign::default_roots(&home);
+    for extra in &a.roots {
+        let label = extra
+            .file_name()
+            .map(|n| format!("@{}", n.to_string_lossy()))
+            .unwrap_or_else(|| "@root".to_string());
+        roots.push((label, extra.clone()));
+    }
+
+    let found = foreign::discover(&roots);
+    let rows: Vec<Value> = found
+        .iter()
+        .map(|r| {
+            jval!({
+                "label": r.label,
+                "path": r.path.display().to_string(),
+                "skills": r.skills,
+                "dead_symlinks": r.dead_symlinks,
+                "missing_frontmatter": r.missing_frontmatter,
+                "problems": r.problems(),
+            })
+        })
+        .collect();
+    let total_skills: usize = found.iter().map(|r| r.skills).sum();
+    let total_problems: usize = found.iter().map(foreign::ForeignRoot::problems).sum();
+
+    let data = jval!({
+        "roots": rows,
+        "root_count": found.len(),
+        "total_skills": total_skills,
+        "total_problems": total_problems,
+    });
+    Ok(reply(&service, data, service.load_warnings()))
 }
 
 fn open_palette(cwd: &std::path::Path, query: Option<String>, fullscreen: bool) -> Result<Reply> {
@@ -491,6 +540,32 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
     }
 }
 
+/// `aikit inbox` — list the messages the system and agents have addressed to the
+/// user (Spec II §2). Pending by default; `--all` includes resolved items kept for
+/// audit. Speaks the JSON envelope so the broker and agents can read it.
+fn cmd_inbox(cwd: &std::path::Path, a: InboxArgs) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let items = service.inbox_items(a.all)?;
+    let rows: Vec<Value> = items
+        .iter()
+        .map(|item| {
+            jval!({
+                "id": item.id.to_string(),
+                "kind": item.kind.as_str(),
+                "title": item.title,
+                "body": item.body,
+                "state": item.state,
+                "project": item.project.as_ref().map(|p| p.to_string()),
+                "evidence": item.evidence,
+                "proposal": item.proposal.as_ref().map(|p| p.to_string()),
+                "created": item.created.to_string(),
+            })
+        })
+        .collect();
+    let data = jval!({ "items": rows, "count": items.len() });
+    Ok(reply(&service, data, vec![]))
+}
+
 fn cmd_promote(cwd: &std::path::Path, a: PromoteArgs) -> Result<Reply> {
     let mut service = Service::discover(cwd)?;
     let id = a.id.as_deref().map(CapsuleId::parse).transpose()?;
@@ -579,6 +654,7 @@ fn not_implemented(command: &str) -> AikitError {
 
 fn command_name(command: &Command) -> &'static str {
     match command {
+        Command::Init(_) => "init",
         Command::Ui(_) => "ui",
         Command::Search(_) => "search",
         Command::Status(_) => "status",

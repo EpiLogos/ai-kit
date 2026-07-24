@@ -195,6 +195,10 @@ pub struct CatalogEntry {
     pub revision: Option<Revision>,
     pub trust: TrustState,
     pub exports: Vec<String>,
+    /// Advisory "often used with…" pointers (PRIOR-ART-ACTIONS L5), surfaced by
+    /// `explain`, the palette and the tree. Never a dependency.
+    #[serde(default)]
+    pub related_skills: Vec<CapsuleId>,
 }
 
 /// The resolved graph for one context.
@@ -961,6 +965,7 @@ impl<'a> Resolver<'a> {
                             .trust
                             .state_for(c.source.as_ref(), &c.id, c.revision.as_ref()),
                         exports: c.exported_commands(),
+                        related_skills: c.related_skills.clone(),
                     },
                 )
             })

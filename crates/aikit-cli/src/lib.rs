@@ -14,6 +14,7 @@
 pub mod app;
 pub mod cli;
 pub mod discover;
+pub mod foreign;
 pub mod hook;
 pub mod json;
 pub mod multicall;

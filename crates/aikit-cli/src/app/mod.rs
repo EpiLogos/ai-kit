@@ -296,6 +296,19 @@ impl Service {
         self.index.open_bypasses(&self.descriptor.context_id)
     }
 
+    /// The inbox channel items (Spec II §2) — the messages the system and agents
+    /// have addressed to the user. Pending-only by default; `all` includes
+    /// resolved items kept for audit. This is what makes the inbox broker-readable:
+    /// `aikit inbox list --json` runs through here.
+    pub fn inbox_items(&self, all: bool) -> Result<Vec<aikit_store::InboxItem>> {
+        let channel = aikit_store::InboxChannel::new(&self.index);
+        if all {
+            channel.items()
+        } else {
+            channel.pending(aikit_store::Timestamp::now())
+        }
+    }
+
     /// The cosmetic properties (a `label`, notes) recorded on this context's
     /// current generation, if any. Read-only: it never creates the context
     /// directory, so `status` on a context that has never applied stays a no-op.

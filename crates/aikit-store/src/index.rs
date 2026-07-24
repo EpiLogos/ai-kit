@@ -182,6 +182,30 @@ CREATE TABLE promotion_queue (
     queued_ns     INTEGER NOT NULL
 );
 "#,
+),
+// The Inbox as the system's own channel (Spec II §2): drift notices, version
+// conflicts, procedure reports and agent proposals the system addresses to the
+// user. Operational — these records exist nowhere else — so it must never enter
+// DERIVED_TABLES or a reindex would silently discard the system's messages.
+(
+    "0002-inbox-items",
+    r#"
+CREATE TABLE inbox_items (
+    inbox_id     TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL,
+    project      TEXT,
+    title        TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    evidence     TEXT NOT NULL,
+    proposal     TEXT,
+    dedup_key    TEXT,
+    state_label  TEXT NOT NULL,
+    state_detail TEXT,
+    created_ns   INTEGER NOT NULL
+);
+CREATE INDEX inbox_items_by_state ON inbox_items(state_label);
+CREATE INDEX inbox_items_by_dedup ON inbox_items(dedup_key);
+"#,
 )];
 
 /// Tables `reindex` is allowed to empty.

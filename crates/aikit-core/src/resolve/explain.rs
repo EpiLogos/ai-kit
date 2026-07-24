@@ -35,6 +35,8 @@ pub struct Explanation {
     /// What "active" means for this kind.
     pub activation_meaning: &'static str,
     pub exports: Vec<String>,
+    /// Advisory "often used with…" pointers (L5). Never a dependency.
+    pub related_skills: Vec<CapsuleId>,
 }
 
 pub(super) fn explain(view: &ResolvedView, id: &CapsuleId) -> Option<Explanation> {
@@ -82,6 +84,7 @@ pub(super) fn explain(view: &ResolvedView, id: &CapsuleId) -> Option<Explanation
         targets,
         activation_meaning: entry.kind.activation_meaning(),
         exports: entry.exports.clone(),
+        related_skills: entry.related_skills.clone(),
     })
 }
 
@@ -139,6 +142,13 @@ impl Explanation {
             out.push_str("Projection:\n");
             for target in &self.targets {
                 out.push_str(&format!("  {target}\n"));
+            }
+        }
+
+        if !self.related_skills.is_empty() {
+            out.push_str("Often used with:\n");
+            for related in &self.related_skills {
+                out.push_str(&format!("  {related}\n"));
             }
         }
 

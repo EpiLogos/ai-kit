@@ -531,6 +531,11 @@ struct RawManifest {
     /// `config_merge = "replace"`.
     #[serde(default)]
     config_merge: ConfigMerge,
+    /// Capabilities often used alongside this one, surfaced in the palette and the
+    /// tree ("often used with…"). First-class metadata rather than a flat tag
+    /// (PRIOR-ART-ACTIONS L5, from Hermes' `related_skills[]`).
+    #[serde(default)]
+    related_skills: Vec<CapsuleId>,
 
     #[serde(default)]
     script: Option<ScriptSection>,
@@ -594,6 +599,10 @@ pub struct Capsule {
     /// How this capsule's `[config.*]` section combines across scope layers.
     #[serde(default)]
     pub config_merge: ConfigMerge,
+    /// Capabilities often used with this one ("often used with…"), for the palette
+    /// and the tree. Never a dependency — purely advisory (PRIOR-ART-ACTIONS L5).
+    #[serde(default)]
+    pub related_skills: Vec<CapsuleId>,
     pub payload: Payload,
 
     /// Set by the store when the capsule is loaded from disk.
@@ -748,6 +757,7 @@ impl Capsule {
             args: raw.args,
             provenance: raw.provenance,
             config_merge: raw.config_merge,
+            related_skills: raw.related_skills,
             payload,
             source: None,
             revision: None,

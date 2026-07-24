@@ -28,6 +28,7 @@ pub mod error;
 pub mod guidance;
 pub mod hooks;
 pub mod id;
+pub mod lifecycle;
 pub mod platform;
 pub mod policy;
 pub mod profile;
@@ -72,9 +73,10 @@ pub use hooks::{
     StepRecord, StepResult, StepVerdict,
 };
 pub use id::{
-    CapsuleId, ContextId, EventId, GenerationId, ProfileId, ProjectId, RegistrySource, Revision,
-    SessionId,
+    CapsuleId, ContextId, EventId, GenerationId, InboxId, ProcedureId, ProfileId, ProjectId,
+    RegistrySource, Revision, SessionId,
 };
+pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;
 pub use profile::{ConfigMerge, ConfigTable, PoolPatch, Profile};

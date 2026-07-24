@@ -45,6 +45,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod channel;
+pub mod curator;
 pub mod edit;
 pub mod events;
 pub mod generation;
@@ -59,6 +61,8 @@ pub mod trust;
 
 // The modules stay the documented home of each type; these are the names the
 // four consuming crates would otherwise import a dozen `use` lines to reach.
+pub use channel::{Evidence, InboxChannel, InboxItem, InboxKind, InboxState, NewItem};
+pub use curator::{curate, detect_drift, report_drift, CurationReport, Drift};
 pub use edit::{OverlayDocument, ProfileDocument};
 pub use events::{Event, EventAction, EventRecorder, Outcome, Timestamp};
 pub use generation::{CommittedGeneration, GenerationBuilder, GenerationMetadata, StagedGeneration};

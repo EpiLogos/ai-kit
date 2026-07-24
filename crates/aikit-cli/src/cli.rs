@@ -36,6 +36,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Discover the foreign skill roots already on this machine and show them.
+    Init(InitArgs),
     /// Open the palette (the default when no subcommand is given).
     Ui(UiArgs),
     /// Search the catalogue for capabilities.
@@ -105,6 +107,14 @@ pub enum Command {
 // ---------------------------------------------------------------------------
 // Leaf command arguments
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    /// An additional foreign skill root to index, beyond the well-known ones.
+    /// Repeatable. Discovery is always read-only.
+    #[arg(long = "root", value_name = "DIR")]
+    pub roots: Vec<std::path::PathBuf>,
+}
 
 #[derive(Debug, Args)]
 pub struct UiArgs {

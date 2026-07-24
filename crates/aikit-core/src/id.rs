@@ -306,6 +306,16 @@ prefixed_id!(
     "cnd_",
     "A capture candidate awaiting promotion."
 );
+prefixed_id!(
+    InboxId,
+    "inb_",
+    "An item in the inbox — the system's own channel to the user."
+);
+prefixed_id!(
+    ProcedureId,
+    "prc_",
+    "A planned, reviewable, reversible mutation of the world outside AIKit's state."
+);
 
 /// A content-addressed revision of a capsule's payload plus manifest.
 ///
