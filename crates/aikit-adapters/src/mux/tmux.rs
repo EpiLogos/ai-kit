@@ -273,7 +273,15 @@ impl<R: CommandRunner> Tmux<R> {
 
     /// Create a view as a new window and return its root pane id.
     fn create_window(&self, session: &str, view: &ViewPlan, plan: &SessionPlan) -> Result<String> {
-        let step = &view.steps[0];
+        // The compiler rejects a view with no panes, so this holds for any
+        // compiled plan; guard rather than index so a hand-built plan gives a
+        // clear error instead of a panic in the adapter.
+        let step = view.steps.first().ok_or_else(|| {
+            AikitError::new(
+                "session.empty_view",
+                format!("view `{}` has no panes", view.id),
+            )
+        })?;
         let name = view.name.clone().unwrap_or_else(|| view.id.clone());
         let mut args: Vec<String> = vec![
             "new-window".into(),
@@ -736,7 +744,12 @@ impl<R: CommandRunner> MuxAdapter for Tmux<R> {
             }
         } else {
             binding.created = true;
-            let root_step = &first_view.steps[0];
+            let root_step = first_view.steps.first().ok_or_else(|| {
+                AikitError::new(
+                    "session.empty_view",
+                    format!("view `{}` has no panes", first_view.id),
+                )
+            })?;
             let view_name = first_view
                 .name
                 .clone()

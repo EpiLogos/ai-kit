@@ -112,6 +112,7 @@ impl FromStr for TrustState {
     fn from_str(s: &str) -> Result<Self> {
         Ok(match s {
             "unseen" => TrustState::Unseen,
+            "dismissed" => TrustState::Dismissed,
             "quarantined" => TrustState::Quarantined,
             "reviewed" => TrustState::Reviewed,
             "trusted" => TrustState::Trusted,

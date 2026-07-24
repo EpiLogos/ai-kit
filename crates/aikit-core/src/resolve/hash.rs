@@ -34,8 +34,13 @@ impl ResolutionHash {
     }
 
     pub fn generation_id(&self) -> crate::id::GenerationId {
-        crate::id::GenerationId::parse(&format!("gen_{}", &self.0[..16]))
-            .expect("hash prefix is always a valid generation id")
+        // A `ResolutionHash` is only ever constructed from `blake3::hash(...)`
+        // rendered as 64 hex chars, so a 16-char prefix always exists and is
+        // always a valid generation id. `char_indices` keeps that true even if
+        // the length invariant were ever loosened, rather than panicking.
+        let end = self.0.char_indices().nth(16).map_or(self.0.len(), |(b, _)| b);
+        crate::id::GenerationId::parse(&format!("gen_{}", &self.0[..end]))
+            .expect("a hex hash prefix is always a valid generation id")
     }
 }
 

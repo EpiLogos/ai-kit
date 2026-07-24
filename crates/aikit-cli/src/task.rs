@@ -162,6 +162,68 @@ pub fn worktree_blockers(worktree: &Path) -> Result<Vec<String>> {
     Ok(blockers)
 }
 
+/// How a task's tree is arranged, discovered from the repository at close time.
+///
+/// Close is only given a task name, so it cannot assume the isolation the task
+/// was spawned with. Assuming a worktree — as an earlier version did — means
+/// `git worktree remove` is aimed at a path git has never heard of the moment
+/// the task was the default, shared kind. The safe thing is to look.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskTree {
+    /// No dedicated tree: the task used the session's working tree.
+    Shared,
+    /// A plain directory under `.aikit/tasks/`, not under version control.
+    Directory(PathBuf),
+    /// A registered git worktree.
+    Worktree(Worktree),
+}
+
+/// Determine how a task's tree is arranged, by asking git and the filesystem.
+pub fn detect_task(repo: &Path, name: &str) -> Result<TaskTree> {
+    let path = task_path(repo, name);
+    if !path.exists() {
+        // Nothing was created for this task, so it shared the working tree.
+        return Ok(TaskTree::Shared);
+    }
+    // A registered worktree is listed by git; a plain directory is not.
+    // git reports canonical paths (on macOS the tempdir's `/var/...` becomes
+    // `/private/var/...`), so both sides are canonicalized before comparison.
+    let listed = git(repo, &["worktree", "list", "--porcelain"])?;
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let target = canonical(&path);
+    let is_worktree = listed
+        .stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .any(|w| canonical(Path::new(w)) == target);
+    if is_worktree {
+        Ok(TaskTree::Worktree(Worktree {
+            path,
+            branch: branch_name(name),
+        }))
+    } else {
+        Ok(TaskTree::Directory(path))
+    }
+}
+
+/// Close a task by name, reckoning with the isolation it actually has.
+///
+/// Shared tasks touch nothing; directory tasks have their directory removed;
+/// worktree tasks go through the worktree teardown, refusing an unclean one
+/// unless `force`. This is the entry point the CLI uses.
+pub fn close_task(repo: &Path, name: &str, force: bool) -> Result<()> {
+    match detect_task(repo, name)? {
+        TaskTree::Shared => Ok(()),
+        TaskTree::Directory(dir) => std::fs::remove_dir_all(&dir).map_err(|e| {
+            AikitError::new(
+                "task.close_failed",
+                format!("could not remove task directory {}: {e}", dir.display()),
+            )
+        }),
+        TaskTree::Worktree(worktree) => close(repo, &worktree, force),
+    }
+}
+
 /// Close a task worktree, refusing an unclean one unless `force`.
 ///
 /// The refusal is the whole point: `git worktree remove` will itself refuse a

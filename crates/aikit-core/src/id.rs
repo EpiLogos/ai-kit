@@ -329,8 +329,15 @@ impl Revision {
     }
 
     /// The short form used in the TUI and `explain` output.
+    ///
+    /// Content revisions are blake3 hex, but `from_raw` also accepts strings read
+    /// back from the database, so this truncates on a char boundary rather than a
+    /// byte index — a corrupt multi-byte revision must not panic the palette.
     pub fn short(&self) -> &str {
-        &self.0[..self.0.len().min(6)]
+        match self.0.char_indices().nth(6) {
+            Some((byte, _)) => &self.0[..byte],
+            None => &self.0,
+        }
     }
 }
 

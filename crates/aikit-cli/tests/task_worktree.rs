@@ -107,3 +107,87 @@ fn force_discards_even_a_dirty_worktree() {
     task::close(tmp.path(), &wt, true).unwrap();
     assert!(!wt.path.exists(), "force removes the worktree regardless");
 }
+
+// ---------------------------------------------------------------------------
+// Close must reckon with the task's actual isolation, not assume a worktree.
+// The default is shared, and a shared task never created a worktree — closing
+// one must not try to drive `git worktree remove` against a path git has never
+// heard of.
+// ---------------------------------------------------------------------------
+
+fn worktree_count(repo: &Path) -> usize {
+    let out = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.starts_with("worktree "))
+        .count()
+}
+
+#[test]
+fn closing_a_shared_task_does_not_touch_git_and_succeeds() {
+    let tmp = repo_with_commit();
+    task::spawn(tmp.path(), "review", Isolation::Shared).unwrap();
+    let before = worktree_count(tmp.path());
+
+    // The default task created no worktree; closing it must be a clean no-op on
+    // git rather than an attempt to remove a worktree that never existed.
+    task::close_task(tmp.path(), "review", false).expect("closing a shared task must succeed");
+
+    assert_eq!(
+        worktree_count(tmp.path()),
+        before,
+        "closing a shared task must not change git worktrees"
+    );
+}
+
+#[test]
+fn closing_a_directory_task_removes_the_directory_without_git() {
+    let tmp = repo_with_commit();
+    let outcome = task::spawn(tmp.path(), "scratch", Isolation::Directory).unwrap();
+    assert!(outcome.directory.exists());
+    let before = worktree_count(tmp.path());
+
+    task::close_task(tmp.path(), "scratch", false).expect("closing a directory task must succeed");
+
+    assert!(
+        !outcome.directory.exists(),
+        "a directory task's directory should be gone after close"
+    );
+    assert_eq!(
+        worktree_count(tmp.path()),
+        before,
+        "a directory task is not a worktree; git must be untouched"
+    );
+}
+
+#[test]
+fn closing_a_worktree_task_removes_the_worktree() {
+    let tmp = repo_with_commit();
+    task::spawn(tmp.path(), "migration", Isolation::Worktree).unwrap();
+    let before = worktree_count(tmp.path());
+    assert_eq!(before, 2, "main + the task worktree");
+
+    task::close_task(tmp.path(), "migration", false).expect("a clean worktree closes");
+
+    assert_eq!(
+        worktree_count(tmp.path()),
+        1,
+        "only the main worktree should remain"
+    );
+}
+
+#[test]
+fn closing_a_dirty_worktree_task_is_still_refused_without_force() {
+    let tmp = repo_with_commit();
+    let outcome = task::spawn(tmp.path(), "wip", Isolation::Worktree).unwrap();
+    let wt = outcome.worktree.unwrap();
+    fs::write(wt.path.join("uncommitted.txt"), "work in progress\n").unwrap();
+
+    let err = task::close_task(tmp.path(), "wip", false).unwrap_err();
+    assert_eq!(err.code(), "task.worktree_dirty");
+    assert!(wt.path.exists(), "the dirty worktree must survive the refusal");
+}

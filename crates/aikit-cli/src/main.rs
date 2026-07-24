@@ -264,10 +264,12 @@ fn cmd_run(cwd: &std::path::Path, a: RunArgs) -> Result<Reply> {
         name: a.name,
         args: a.args,
         export: None,
-        // An explicit `aikit run` by a human is itself the confirmation an
-        // unreviewed script needs; the trust gate exists for ambient activation,
-        // not for a command the user just typed.
-        confirmed: true,
+        // The confirmation must be explicit (`--confirm`), not implied by the
+        // invocation: `aikit run` is also how the broker lets an *agent* run a
+        // capability, and how a multicall shim on the PATH dispatches. A reviewed
+        // or trusted script never trips the gate, so this only asks when the
+        // executable is genuinely unreviewed.
+        confirmed: a.confirm,
     })?;
     for line in &handle.report.output {
         println!("{line}");
@@ -283,7 +285,6 @@ fn cmd_toggle(cwd: &std::path::Path, a: ToggleArgs, enable: bool) -> Result<Repl
     let applied = service.apply(ApplyRequest {
         scope,
         toggles: vec![Toggle::new(id.clone(), enable)],
-        strict: false,
     })?;
     let data = jval!({
         "capability": id.to_string(),
@@ -295,13 +296,12 @@ fn cmd_toggle(cwd: &std::path::Path, a: ToggleArgs, enable: bool) -> Result<Repl
     Ok(reply(&service, data, applied.warnings))
 }
 
-fn cmd_apply(cwd: &std::path::Path, a: ApplyArgs) -> Result<Reply> {
+fn cmd_apply(cwd: &std::path::Path, _a: ApplyArgs) -> Result<Reply> {
     let mut service = Service::discover(cwd)?;
     let scope = service.descriptor().default_mutation_scope();
     let applied = service.apply(ApplyRequest {
         scope,
         toggles: vec![],
-        strict: a.strict,
     })?;
     let data = jval!({
         "generation": applied.id.to_string(),
@@ -375,13 +375,16 @@ fn cmd_task(cwd: &std::path::Path, c: TaskCmd) -> Result<Reply> {
             Ok(reply(&service, data, vec![]))
         }
         TaskSub::Close(a) => {
-            let path = task::task_path(&repo, &a.name);
-            let worktree = task::Worktree {
-                path,
-                branch: task::branch_name(&a.name),
+            // Close by name and let the task module detect the isolation; a
+            // shared task (the default) has no worktree to remove.
+            let tree = task::detect_task(&repo, &a.name)?;
+            task::close_task(&repo, &a.name, a.force)?;
+            let kind = match tree {
+                task::TaskTree::Shared => "shared",
+                task::TaskTree::Directory(_) => "directory",
+                task::TaskTree::Worktree(_) => "worktree",
             };
-            task::close(&repo, &worktree, a.force)?;
-            let data = jval!({ "closed": a.name, "forced": a.force });
+            let data = jval!({ "closed": a.name, "forced": a.force, "isolation": kind });
             Ok(reply(&service, data, vec![]))
         }
         TaskSub::List(_) => Err(not_implemented("task list")),

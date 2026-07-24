@@ -1449,3 +1449,81 @@ const CMUX_IDENTIFY: &str = r#"{
   "host": "localhost",
   "cwd": "/work/payments"
 }"#;
+
+// ---------------------------------------------------------------------------
+// An unreviewed executable does not run unattended, even while inactive.
+//
+// The confirmation is what STANDARDS §6 requires of an unreviewed script. The
+// dangerous case is the *inactive* one — a script run ad hoc, or reached through
+// the broker by an agent, that no scope has reviewed — so the gate must key on
+// the capsule's own trust, never on whether it happens to be active.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unreviewed_script_is_refused_without_confirmation_even_when_inactive() {
+    let fixture = fresh_home();
+    let repo = project_repo();
+
+    // `script/rust/cargo-nextest` is in the seed registry but reviewed by nobody,
+    // and no profile here enables it, so it is inactive. Running it by id must be
+    // refused before the payload is ever executed.
+    let (out, v) = run_json(&fixture, repo.path(), &[], &["run", "script/rust/cargo-nextest", "--json"]);
+    assert_eq!(v["ok"], false, "an unreviewed script must not run: {v}");
+    assert_eq!(
+        v["error"]["code"], "trust.required",
+        "the refusal must be the trust gate, not an execution error: {v}"
+    );
+    // And it must have refused *before* running anything.
+    assert!(
+        !out.status.success(),
+        "the process must exit non-zero when the gate refuses"
+    );
+}
+
+#[test]
+fn confirming_crosses_the_gate_so_the_failure_is_no_longer_about_trust() {
+    let fixture = fresh_home();
+    let repo = project_repo();
+
+    // With --confirm, the trust gate is satisfied. The payload may still fail
+    // (cargo nextest has nothing to run here), but the point is that the reason
+    // is no longer `trust.required`: the gate was crossed.
+    let out = aikit(
+        &fixture,
+        repo.path(),
+        &[],
+        &["run", "script/rust/cargo-nextest", "--confirm", "--json"],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if let Ok(v) = serde_json::from_str::<Value>(stdout.trim()) {
+        if v["ok"] == false {
+            assert_ne!(
+                v["error"]["code"], "trust.required",
+                "--confirm must cross the trust gate: {v}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_reviewed_script_needs_no_confirmation() {
+    let fixture = fresh_home();
+    let repo = project_repo();
+    trust(&fixture, &["script/rust/cargo-nextest"]);
+
+    // Reviewed: the gate does not fire, so any failure is about execution, never
+    // about trust — a human running a reviewed script is never nagged.
+    let out = aikit(
+        &fixture,
+        repo.path(),
+        &[],
+        &["run", "script/rust/cargo-nextest", "--json"],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if let Ok(v) = serde_json::from_str::<Value>(stdout.trim()) {
+        assert_ne!(
+            v["error"]["code"], "trust.required",
+            "a reviewed script must not trip the confirmation gate: {v}"
+        );
+    }
+}

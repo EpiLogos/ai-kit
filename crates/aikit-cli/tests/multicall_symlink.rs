@@ -73,7 +73,6 @@ fn a_symlink_named_after_an_export_runs_the_capsule_that_owns_it() {
         .apply(ApplyRequest {
             scope: ScopeKind::Project,
             toggles: vec![],
-            strict: false,
         })
         .expect("apply builds a generation");
 
@@ -123,7 +122,6 @@ fn an_unknown_export_name_is_reported_not_silently_ignored() {
         .apply(ApplyRequest {
             scope: ScopeKind::Project,
             toggles: vec![],
-            strict: false,
         })
         .unwrap();
 

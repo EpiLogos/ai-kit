@@ -28,6 +28,7 @@ use aikit_core::projection::{
 use aikit_core::resolve::{resolve_diagnostic, ResolveRequest as CoreResolveRequest, ResolvedView};
 use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
+use aikit_core::trust::TrustOracle;
 use aikit_core::{AikitError, Result};
 
 use aikit_store::edit::{OverlayDocument, ProfileDocument};
@@ -91,12 +92,15 @@ pub struct StageRequest {
 }
 
 /// Commit a set of toggles at a scope into a new generation.
+///
+/// There is no `strict` flag: the compare-and-swap against the base generation is
+/// unconditional and always on. It lives in the store (`generation::commit`,
+/// which returns `generation.stale_base` if `current` moved), so a flag here
+/// could only ever have toggled a guarantee that is not the caller's to weaken.
 #[derive(Debug, Clone)]
 pub struct ApplyRequest {
     pub scope: ScopeKind,
     pub toggles: Vec<Toggle>,
-    /// Refuse the commit if `current` moved under us since we resolved.
-    pub strict: bool,
 }
 
 /// The result of a successful apply.
@@ -569,14 +573,25 @@ impl AikitApplication for Service {
             .cloned()
             .ok_or_else(|| AikitError::new("run.unknown_command", format!("{id} is not loaded")))?;
 
-        // Honour trust: an unreviewed script may be exposed but must be confirmed.
-        if let Some(active) = self.view.active.get(&id) {
-            if active.requires_run_confirmation && !r.confirmed {
+        // Honour trust: an unreviewed executable must be confirmed before it
+        // runs. This must be computed from the capsule's own trust, NOT from
+        // whether it is active — a script is runnable while inactive, and the
+        // inactive, unreviewed, run-ad-hoc case is exactly the one the
+        // confirmation exists to guard. Reading it off `view.active` would skip
+        // the gate for every capsule that is not currently enabled.
+        if capsule.kind.is_executable() && !r.confirmed {
+            let trust = self.trust.state_for(
+                capsule.source.as_ref(),
+                &capsule.id,
+                capsule.revision.as_ref(),
+            );
+            if !trust.may_run_unattended() {
                 return Err(AikitError::new(
                     "trust.required",
                     format!("{id} has not been reviewed; re-run with confirmation"),
                 )
-                .with("capability", id.to_string()));
+                .with("capability", id.to_string())
+                .with("trust", trust.as_str()));
             }
         }
 
@@ -662,7 +677,6 @@ impl PaletteBackend for Service {
             ApplyRequest {
                 scope,
                 toggles: toggles.to_vec(),
-                strict: false,
             },
         )?;
         Ok(applied.id)

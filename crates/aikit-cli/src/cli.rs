@@ -164,6 +164,9 @@ pub struct RunArgs {
     /// Override the execution mode.
     #[arg(long, value_name = "MODE")]
     pub mode: Option<String>,
+    /// Confirm running an executable whose revision has not been reviewed.
+    #[arg(long)]
+    pub confirm: bool,
 }
 
 #[derive(Debug, Args)]
@@ -190,11 +193,7 @@ pub struct UseArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct ApplyArgs {
-    /// Refuse to apply if the base generation has moved under us.
-    #[arg(long)]
-    pub strict: bool,
-}
+pub struct ApplyArgs {}
 
 #[derive(Debug, Args)]
 pub struct RollbackArgs {}

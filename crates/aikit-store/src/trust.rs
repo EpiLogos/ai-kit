@@ -39,6 +39,16 @@ use aikit_core::{CapsuleId, RegistrySource, Result, Revision, TrustKey, TrustSta
 use crate::events::Timestamp;
 use crate::index::{sql_error, Index};
 
+/// The revision value under which a standing verdict (`Blocked` / `Dismissed`)
+/// is stored.
+///
+/// `*` is not valid blake3 hex, so it can never collide with a real content
+/// revision. Storing standing verdicts this way keeps the existing
+/// `(source, capsule, revision)` primary key — no migration — while giving a
+/// refusal identity-scoped keying: it applies to every revision, so an edit
+/// cannot slip past it.
+const STANDING_REVISION: &str = "*";
+
 /// One stored review.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustRecord {
@@ -63,12 +73,21 @@ impl<'a> TrustStore<'a> {
     /// Returns the keys that were superseded, so the caller can say
     /// "…and revision 7c2a9e is no longer trusted" rather than leaving the user
     /// to discover it.
+    ///
+    /// A *standing* verdict — `Blocked` or `Dismissed` — is not per-revision: it
+    /// is keyed on identity so that editing the capsule cannot clear it. Such a
+    /// record is routed to [`Self::set_standing`] regardless of the key's
+    /// revision, mirroring [`aikit_core::trust::MemoryTrust`].
     pub fn record(
         &self,
         key: &TrustKey,
         state: TrustState,
         note: Option<&str>,
     ) -> Result<Vec<TrustKey>> {
+        if state.is_standing() {
+            self.set_standing(&key.source, &key.capsule, state, note)?;
+            return Ok(Vec::new());
+        }
         let now = Timestamp::now();
         let conn = self.index.conn();
 
@@ -149,6 +168,60 @@ impl<'a> TrustStore<'a> {
         Ok(out)
     }
 
+    /// Refuse a capsule for every revision, present and future.
+    pub fn block(&self, source: &RegistrySource, capsule: &CapsuleId) -> Result<()> {
+        self.set_standing(source, capsule, TrustState::Blocked, None)
+    }
+
+    /// Stop asking about a capsule without refusing it.
+    pub fn dismiss(&self, source: &RegistrySource, capsule: &CapsuleId) -> Result<()> {
+        self.set_standing(source, capsule, TrustState::Dismissed, None)
+    }
+
+    /// Lift a standing verdict, restoring ordinary per-revision keying.
+    ///
+    /// This does not grant approval: "I no longer refuse this" and "I have
+    /// reviewed this" are different statements, and only the second activates.
+    pub fn unblock(&self, source: &RegistrySource, capsule: &CapsuleId) -> Result<()> {
+        self.index
+            .conn()
+            .execute(
+                "DELETE FROM trust WHERE source = ?1 AND capsule_id = ?2 AND revision = ?3",
+                params![source.as_str(), capsule.to_string(), STANDING_REVISION],
+            )
+            .map_err(|e| sql_error("trust.write_failed", &e))?;
+        Ok(())
+    }
+
+    /// Write a standing verdict under the identity-only sentinel revision.
+    fn set_standing(
+        &self,
+        source: &RegistrySource,
+        capsule: &CapsuleId,
+        state: TrustState,
+        note: Option<&str>,
+    ) -> Result<()> {
+        debug_assert!(state.is_standing(), "set_standing given a per-revision state");
+        self.index
+            .conn()
+            .execute(
+                "INSERT INTO trust (source, capsule_id, revision, state, note, reviewed_ns)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(source, capsule_id, revision) DO UPDATE SET
+                     state = excluded.state, note = excluded.note, reviewed_ns = excluded.reviewed_ns",
+                params![
+                    source.as_str(),
+                    capsule.to_string(),
+                    STANDING_REVISION,
+                    state.as_str(),
+                    note,
+                    Timestamp::now().as_nanos(),
+                ],
+            )
+            .map_err(|e| sql_error("trust.write_failed", &e))?;
+        Ok(())
+    }
+
     /// The recorded state, or `Unseen`. Fallible variant of [`TrustOracle::state`].
     pub fn state_of(&self, key: &TrustKey) -> Result<TrustState> {
         let mut stmt = self
@@ -182,8 +255,10 @@ impl<'a> TrustStore<'a> {
             .index
             .conn()
             .prepare(
+                // The standing sentinel is not a revision, so it is excluded
+                // from a per-revision history; it is surfaced via `standing_of`.
                 "SELECT revision, state, note, reviewed_ns FROM trust
-                 WHERE source = ?1 AND capsule_id = ?2
+                 WHERE source = ?1 AND capsule_id = ?2 AND revision != '*'
                  ORDER BY reviewed_ns DESC, revision",
             )
             .map_err(|e| sql_error("trust.query_failed", &e))?;
@@ -239,19 +314,50 @@ impl<'a> TrustStore<'a> {
             .map_err(|e| sql_error("trust.query_failed", &e))?;
 
         let mut entries = BTreeMap::new();
+        let mut standing = BTreeMap::new();
         for row in rows {
             let (source, capsule, revision, state) =
                 row.map_err(|e| sql_error("trust.query_failed", &e))?;
-            entries.insert(
-                TrustKey::new(
-                    RegistrySource::new(source),
-                    CapsuleId::parse(&capsule)?,
-                    Revision::from_raw(revision),
-                ),
-                TrustState::from_str(&state)?,
-            );
+            let source = RegistrySource::new(source);
+            let capsule = CapsuleId::parse(&capsule)?;
+            let state = TrustState::from_str(&state)?;
+            if revision == STANDING_REVISION {
+                standing.insert((source, capsule), state);
+            } else {
+                entries.insert(
+                    TrustKey::new(source, capsule, Revision::from_raw(revision)),
+                    state,
+                );
+            }
         }
-        Ok(TrustSnapshot { entries })
+        Ok(TrustSnapshot { entries, standing })
+    }
+
+    /// Read the standing verdict, if any, for a capsule.
+    fn standing_of(
+        &self,
+        source: &RegistrySource,
+        capsule: &CapsuleId,
+    ) -> Result<Option<TrustState>> {
+        let mut stmt = self
+            .index
+            .conn()
+            .prepare("SELECT state FROM trust WHERE source = ?1 AND capsule_id = ?2 AND revision = ?3")
+            .map_err(|e| sql_error("trust.query_failed", &e))?;
+        let mut rows = stmt
+            .query(params![
+                source.as_str(),
+                capsule.to_string(),
+                STANDING_REVISION
+            ])
+            .map_err(|e| sql_error("trust.query_failed", &e))?;
+        match rows.next().map_err(|e| sql_error("trust.query_failed", &e))? {
+            Some(row) => {
+                let raw: String = row.get(0).map_err(|e| sql_error("trust.query_failed", &e))?;
+                Ok(Some(TrustState::from_str(&raw)?))
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -260,12 +366,28 @@ impl TrustOracle for TrustStore<'_> {
     fn state(&self, key: &TrustKey) -> TrustState {
         self.state_of(key).unwrap_or(TrustState::Unseen)
     }
+
+    /// A block or dismissal, keyed on identity so an edit cannot clear it.
+    fn standing_verdict(
+        &self,
+        source: &RegistrySource,
+        capsule: &CapsuleId,
+    ) -> Option<TrustState> {
+        // Fail closed on a database error: `None` gives ordinary per-revision
+        // keying, which cannot resurrect a blocked capsule because the block
+        // simply is not seen — the caller then treats it as `Unseen`, which
+        // still withholds projection.
+        self.standing_of(source, capsule).unwrap_or(None)
+    }
 }
 
 /// An immutable copy of the trust table, for one resolution.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrustSnapshot {
+    /// Per-revision approvals, keyed on content.
     entries: BTreeMap<TrustKey, TrustState>,
+    /// Standing refusals, keyed on identity.
+    standing: BTreeMap<(RegistrySource, CapsuleId), TrustState>,
 }
 
 impl TrustSnapshot {
@@ -285,5 +407,15 @@ impl TrustSnapshot {
 impl TrustOracle for TrustSnapshot {
     fn state(&self, key: &TrustKey) -> TrustState {
         self.entries.get(key).copied().unwrap_or_default()
+    }
+
+    fn standing_verdict(
+        &self,
+        source: &RegistrySource,
+        capsule: &CapsuleId,
+    ) -> Option<TrustState> {
+        self.standing
+            .get(&(source.clone(), capsule.clone()))
+            .copied()
     }
 }

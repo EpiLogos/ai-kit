@@ -193,8 +193,9 @@ fn superseding_does_not_reach_across_capsules_or_across_registries() {
 
 #[test]
 fn a_block_is_not_swept_away_by_a_later_review_of_another_revision() {
-    // Supersession is bookkeeping for approvals. A refusal is a decision, and
-    // quietly converting it into "superseded" would lose the refusal.
+    // A refusal is a standing decision, keyed on identity: it is not stored per
+    // revision, so a later review of any revision cannot sweep it away. It is
+    // read through the effective `state_for`, not the raw per-revision `state`.
     let tmp = tempfile::tempdir().unwrap();
     let index = index(tmp.path());
     let trust = TrustStore::new(&index);
@@ -203,7 +204,19 @@ fn a_block_is_not_swept_away_by_a_later_review_of_another_revision() {
     trust.record(&key("ccc"), TrustState::Quarantined, None).unwrap();
     trust.record(&key("bbb"), TrustState::Trusted, None).unwrap();
 
-    assert_eq!(trust.state(&key("aaa")), TrustState::Blocked);
+    let effective = |rev: &str| {
+        trust.state_for(
+            Some(&RegistrySource::personal()),
+            &cid("hook/gate/secrets"),
+            Some(&Revision::from_raw(rev)),
+        )
+    };
+    // The block applies to every revision, including the one that was later
+    // reviewed — the whole point of keying a refusal on identity.
+    assert_eq!(effective("aaa"), TrustState::Blocked);
+    assert_eq!(effective("bbb"), TrustState::Blocked);
+    // Quarantine is per-revision (a specific captured revision is held), so it
+    // is still visible at its own revision through the raw oracle.
     assert_eq!(trust.state(&key("ccc")), TrustState::Quarantined);
 }
 
@@ -329,4 +342,162 @@ fn a_resolver_run_against_the_persistent_oracle_holds_an_unreviewed_hook_back() 
         .unwrap();
     let view = aikit_core::resolve(&load.catalog, &store.snapshot().unwrap(), &request).unwrap();
     assert!(view.is_active(&cid("hook/gate/secrets")));
+}
+
+// ---------------------------------------------------------------------------
+// Standing refusal: identity-keyed, so an edit cannot clear it
+//
+// The in-memory oracle already gets this right (aikit-core::tests::trust_keying).
+// These tests hold the *persistent* store to the same promise, against a real
+// database, because a security property that only holds in memory is not one.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_persisted_block_survives_a_content_edit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index = index(tmp.path());
+    let trust = TrustStore::new(&index);
+
+    trust
+        .block(&RegistrySource::personal(), &cid("hook/gate/secrets"))
+        .unwrap();
+
+    // The revision the block was recorded against is irrelevant: any revision,
+    // including one that did not exist when the block was made, is still blocked.
+    for revision in ["original", "edited", "a-brand-new-hash"] {
+        assert_eq!(
+            trust.state_for(
+                Some(&RegistrySource::personal()),
+                &cid("hook/gate/secrets"),
+                Some(&Revision::from_raw(revision)),
+            ),
+            TrustState::Blocked,
+            "a block that a version bump clears is not a block",
+        );
+    }
+}
+
+#[test]
+fn a_persisted_block_survives_reopening_the_database() {
+    let tmp = tempfile::tempdir().unwrap();
+    {
+        let index = index(tmp.path());
+        TrustStore::new(&index)
+            .block(&RegistrySource::personal(), &cid("hook/gate/secrets"))
+            .unwrap();
+    }
+    // A fresh process, a fresh handle to the same file.
+    let index = index(tmp.path());
+    let trust = TrustStore::new(&index);
+    assert_eq!(
+        trust.state_for(
+            Some(&RegistrySource::personal()),
+            &cid("hook/gate/secrets"),
+            Some(&Revision::from_raw("edited")),
+        ),
+        TrustState::Blocked
+    );
+}
+
+#[test]
+fn a_persisted_block_outranks_a_later_per_revision_approval() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index = index(tmp.path());
+    let trust = TrustStore::new(&index);
+
+    trust
+        .block(&RegistrySource::personal(), &cid("hook/gate/secrets"))
+        .unwrap();
+    // Something records an approval of a specific revision anyway.
+    trust
+        .record(&key("edited"), TrustState::Trusted, None)
+        .unwrap();
+
+    assert_eq!(
+        trust.state_for(
+            Some(&RegistrySource::personal()),
+            &cid("hook/gate/secrets"),
+            Some(&Revision::from_raw("edited")),
+        ),
+        TrustState::Blocked,
+        "a standing refusal must not be defeated by a per-revision yes",
+    );
+}
+
+#[test]
+fn a_standing_verdict_is_carried_by_the_resolution_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index = index(tmp.path());
+    let trust = TrustStore::new(&index);
+    trust
+        .block(&RegistrySource::personal(), &cid("hook/gate/secrets"))
+        .unwrap();
+
+    // The snapshot is what resolution actually consults; the standing verdict
+    // must survive the copy into it.
+    let snapshot = trust.snapshot().unwrap();
+    assert_eq!(
+        snapshot.state_for(
+            Some(&RegistrySource::personal()),
+            &cid("hook/gate/secrets"),
+            Some(&Revision::from_raw("anything")),
+        ),
+        TrustState::Blocked
+    );
+}
+
+#[test]
+fn unblocking_restores_per_revision_keying_without_granting_approval() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index = index(tmp.path());
+    let trust = TrustStore::new(&index);
+
+    trust
+        .block(&RegistrySource::personal(), &cid("hook/gate/secrets"))
+        .unwrap();
+    trust
+        .unblock(&RegistrySource::personal(), &cid("hook/gate/secrets"))
+        .unwrap();
+
+    assert_eq!(
+        trust.state_for(
+            Some(&RegistrySource::personal()),
+            &cid("hook/gate/secrets"),
+            Some(&Revision::from_raw("original")),
+        ),
+        TrustState::Unseen,
+        "lifting a block is not the same as approving the capsule",
+    );
+}
+
+#[test]
+fn a_dismissal_survives_an_edit_but_yields_to_a_review_of_that_revision() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index = index(tmp.path());
+    let trust = TrustStore::new(&index);
+
+    trust
+        .dismiss(&RegistrySource::personal(), &cid("hook/gate/secrets"))
+        .unwrap();
+    assert_eq!(
+        trust.state_for(
+            Some(&RegistrySource::personal()),
+            &cid("hook/gate/secrets"),
+            Some(&Revision::from_raw("edited")),
+        ),
+        TrustState::Dismissed
+    );
+
+    // Answering the question for a specific revision clears the "not now".
+    trust
+        .record(&key("edited"), TrustState::Reviewed, None)
+        .unwrap();
+    assert_eq!(
+        trust.state_for(
+            Some(&RegistrySource::personal()),
+            &cid("hook/gate/secrets"),
+            Some(&Revision::from_raw("edited")),
+        ),
+        TrustState::Reviewed
+    );
 }
