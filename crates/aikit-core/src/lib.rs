@@ -77,7 +77,7 @@ pub use id::{
 };
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;
-pub use profile::{ConfigTable, PoolPatch, Profile};
+pub use profile::{ConfigMerge, ConfigTable, PoolPatch, Profile};
 pub use projection::{
     target_label, ActivationEffect, MaterializationMode, ProjectionItem, ProjectionPlan,
     ResolvedContext, TargetAdapter, TargetCapabilities,

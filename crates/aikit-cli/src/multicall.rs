@@ -16,12 +16,14 @@
 use std::path::Path;
 
 use aikit_core::id::{ContextId, Revision};
+use aikit_core::trust::TrustOracle;
 use aikit_core::{AikitError, Result};
 
 use aikit_store::generation;
 use aikit_store::home::AikitHome;
 use aikit_store::index::Index;
 use aikit_store::state::StateStore;
+use aikit_store::trust::TrustStore;
 
 use crate::app;
 use crate::discover;
@@ -105,6 +107,34 @@ where
                 ),
             )
             .with("capability", capsule_id.to_string()));
+        }
+    }
+
+    // The multicall shim runs unattended off the PATH, so it must consult trust
+    // exactly like the interactive `aikit run` does: an unreviewed executable is
+    // refused, not silently run. A script is active-and-exported without a trust
+    // check (activation does not gate scripts), which is precisely why *running*
+    // one has to. There is no `--confirm` on this path — the shim's arguments
+    // belong to the capability — so the escape hatch is the interactive command.
+    if capsule.kind.is_executable() {
+        let index = Index::open(&home.database())?;
+        let trust = TrustStore::new(&index).snapshot()?;
+        let state = trust.state_for(
+            capsule.source.as_ref(),
+            &capsule.id,
+            capsule.revision.as_ref(),
+        );
+        if !state.may_run_unattended() {
+            return Err(AikitError::new(
+                "trust.required",
+                format!(
+                    "`{export}` is exported by {capsule_id}, which has not been reviewed; \
+                     review it, or run `aikit run {capsule_id} --confirm` to run it once"
+                ),
+            )
+            .with("capability", capsule_id.to_string())
+            .with("export", export.to_string())
+            .with("trust", state.as_str()));
         }
     }
 

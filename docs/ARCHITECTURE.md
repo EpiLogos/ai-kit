@@ -147,6 +147,33 @@ That is **not** an error; it is a different rendering. `UnavailableReason` cover
 `NotInCatalog`, `DeniedByPolicy`, `PlatformUnsupported`, `NoSupportedTarget`,
 `TrustRequired`, `Quarantined`, `Blocked`, `DependencyUnavailable`.
 
+### Config merge algebra (per `[config.*]` section)
+
+When two scopes both carry `[config."<capsule>"]`, the higher scope has to
+combine with the lower one somehow, and there are exactly two right answers
+depending on what the section *is*. AIKit makes the choice explicit rather than
+picking one silently — this is the single most common "why isn't my config
+taking effect" failure across every surveyed tool (`PRIOR-ART.md`; Claude MCP,
+mise `[tasks]` and flox all replace whole records where a naive tool deep-merges).
+
+The mode is declared by the capsule the section configures (`config_merge` in the
+manifest, `aikit_core::profile::ConfigMerge`), because whether config is a bag of
+independent keys or one replaceable record is a fact about the thing configured,
+not about who writes the section. `merge_config` (deep) and `combine_config`
+(mode-aware) are the only two functions in the algebra, and the resolver applies
+the mode in `apply_patch` as it folds layers in precedence order.
+
+| `[config.*]` section shape | Mode | `config_merge` | Rationale |
+|---|---|---|---|
+| Key/value options (a hook's `timeout`/`mode`, a script's `profile`, the bkmr `db`/`dir`/`also` block) | **deep merge** (default) | omitted, or `"deep"` | A higher scope may change one field without restating the table. |
+| A whole replaceable record — an MCP server entry, a command spec, a task definition | **whole-record replacement** | `"replace"` | The higher scope's record *is* the record; lower-scope keys it omits must not bleed through, matching Claude MCP / mise `[tasks]` / flox. |
+
+Deep merge is the default because most capsule config is key/value; a section
+that means "replace me as a unit" opts in with `config_merge = "replace"`. Both
+modes are folded into the resolution hash through the resulting effective config,
+so a section that changes mode changes the generation deliberately, not by
+accident.
+
 ---
 
 ## 5. Storage

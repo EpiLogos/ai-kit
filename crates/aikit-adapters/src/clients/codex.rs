@@ -45,6 +45,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::Kind;
+use aikit_core::context::Isolation;
 use aikit_core::id::CapsuleId;
 use aikit_core::platform::TargetId;
 use aikit_core::projection::{
@@ -75,6 +76,29 @@ const SKILLS_PREFIX: &str = ".agents/skills";
 
 /// AIKit's own dispatcher file, kept out of the user's `config.toml`.
 const INSTALL_FILE: &str = "hooks/aikit.toml";
+
+/// The markers that make a directory a project/repository root — the places
+/// Codex's own upward `.agents/skills` discovery walk stops. `.git` is the
+/// repository root; `.agents` is the agent-skills root a project may already own.
+const PROJECT_MARKERS: [&str; 2] = [".git", ".agents"];
+
+/// Walk up from `start` (inclusive) to the nearest ancestor that looks like a
+/// project/repository root. `None` if the filesystem root is reached without one.
+///
+/// This is the divider decision #3 turns on: a shared task's skills must land
+/// where every sibling in the *project* sees them (Codex walks up to the project
+/// root and reads `.agents/skills` there), not merely where the current task
+/// happens to be working.
+fn nearest_project_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(current) = dir {
+        if PROJECT_MARKERS.iter().any(|m| current.join(m).exists()) {
+            return Some(current.to_path_buf());
+        }
+        dir = current.parent();
+    }
+    None
+}
 
 // ---------------------------------------------------------------------------
 // Strategy
@@ -162,9 +186,46 @@ impl CodexAdapter {
         &self.tree
     }
 
-    /// The absolute directory Codex would discover.
+    /// The absolute directory Codex would discover for the task's own tree.
+    ///
+    /// This is the isolated answer; a shared task uses [`Self::skills_dir_for`]
+    /// with the nearest project root.
     pub fn skills_dir(&self) -> PathBuf {
         self.tree.join(SKILLS_PREFIX)
+    }
+
+    /// The tree Codex would read `.agents/skills` from under `isolation`, and — for
+    /// a shared task with no project root above it — an honest note about the
+    /// fallback.
+    ///
+    /// An isolated task owns its tree, so the root is that tree. A shared task's
+    /// skills have to land where every sibling in the same project sees them: the
+    /// nearest project root above the working directory, exactly where Codex's own
+    /// upward discovery walk stops. When there is no project root above the working
+    /// directory, the working directory itself is used and the fallback is stated
+    /// rather than hidden.
+    fn projection_tree(&self, isolation: Isolation) -> (PathBuf, Option<String>) {
+        if isolation.is_isolated() {
+            return (self.tree.clone(), None);
+        }
+        match nearest_project_root(&self.tree) {
+            Some(root) => (root, None),
+            None => (
+                self.tree.clone(),
+                Some(format!(
+                    "no project root (a `.git` or `.agents` directory) was found above {}, so the \
+                     working directory itself is used as the `.agents/skills` root",
+                    self.tree.display()
+                )),
+            ),
+        }
+    }
+
+    /// The absolute `.agents/skills` directory Codex would discover under
+    /// `isolation`: the task's own tree when isolated, the nearest project root
+    /// when shared.
+    pub fn skills_dir_for(&self, isolation: Isolation) -> PathBuf {
+        self.projection_tree(isolation).0.join(SKILLS_PREFIX)
     }
 
     fn export_name(capability: &ActiveCapability) -> String {
@@ -292,6 +353,12 @@ impl TargetAdapter for CodexAdapter {
         }
 
         // --- The task shares the session's tree ------------------------------
+        // A shared projection has to be visible to every sibling in the project,
+        // so it targets the nearest project root above the working directory, not
+        // merely where this task happens to be working (decision #3).
+        let (shared_root, root_fallback) = self.projection_tree(isolation);
+        let shared_skills = shared_root.join(SKILLS_PREFIX);
+
         let stable: Vec<&ActiveCapability> = skills
             .iter()
             .copied()
@@ -312,7 +379,7 @@ impl TargetAdapter for CodexAdapter {
                          session's working tree: writing {} would change what sibling tasks in \
                          the same tree see, without telling them. Accept the shared projection \
                          explicitly, or give the task its own tree with `--worktree`.",
-                        self.skills_dir().display()
+                        shared_skills.display()
                     ),
                 )
                 .with("isolation", isolation.as_str())
@@ -325,8 +392,11 @@ impl TargetAdapter for CodexAdapter {
                     "a shared-tree projection was explicitly accepted: every skill in this \
                      context was written to {}, and sibling tasks working in the same tree will \
                      see them too",
-                    self.skills_dir().display()
+                    shared_skills.display()
                 ));
+            if let Some(note) = &root_fallback {
+                plan = plan.with_note(note.clone());
+            }
             let items = self.items_for(context, &skills, &mut plan)?;
             return Ok(plan.with_items(items));
         }
@@ -348,11 +418,14 @@ impl TargetAdapter for CodexAdapter {
         };
 
         let mut plan = ProjectionPlan::new(self.target(), effect);
+        if let Some(note) = &root_fallback {
+            plan = plan.with_note(note.clone());
+        }
         if deltas.is_empty() {
             plan = plan.with_note(format!(
                 "this task uses the session's shared working tree; every active skill is \
                  project-stable, so {} holds exactly what every task in this tree already sees",
-                self.skills_dir().display()
+                shared_skills.display()
             ));
         } else {
             let names: Vec<String> = deltas.iter().map(|c| Self::export_name(c)).collect();

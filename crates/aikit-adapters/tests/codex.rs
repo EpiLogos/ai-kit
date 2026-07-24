@@ -446,3 +446,72 @@ fn installing_does_not_touch_the_users_own_codex_configuration() {
          comments in it is never rewritten"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Projection root: isolated own-tree vs shared nearest-project-root (decision #3)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shared_and_isolated_tasks_project_into_different_roots_in_a_nested_layout() {
+    // A nested layout: an outer project (a `.git` repository) with a package
+    // subdirectory. Codex discovers `.agents/skills` by walking UP from the cwd,
+    // so a SHARED task's projection has to land where every sibling in the project
+    // sees it — the nearest project root — while an ISOLATED task owns its tree
+    // and keeps its skills there. In a nested layout the two roots must differ.
+    let tmp = tempfile::tempdir().unwrap();
+    let outer = tmp.path().join("repo");
+    let pkg = outer.join("crates/pkg");
+    std::fs::create_dir_all(outer.join(".git")).unwrap();
+    std::fs::create_dir_all(&pkg).unwrap();
+
+    let adapter = CodexAdapter::new(&pkg);
+
+    let shared_root = adapter.skills_dir_for(Isolation::Shared);
+    let isolated_root = adapter.skills_dir_for(Isolation::Worktree);
+
+    assert_eq!(
+        shared_root,
+        outer.join(".agents/skills"),
+        "a shared task walks up to the nearest project root, not its own cwd"
+    );
+    assert_eq!(
+        isolated_root,
+        pkg.join(".agents/skills"),
+        "an isolated task projects into its own tree"
+    );
+    assert_ne!(
+        shared_root, isolated_root,
+        "the isolated and shared roots must differ in a nested layout"
+    );
+}
+
+#[test]
+fn a_shared_task_with_no_project_root_above_it_falls_back_to_the_cwd_honestly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lonely = tmp.path().join("no-project-here");
+    std::fs::create_dir_all(&lonely).unwrap();
+
+    let adapter = CodexAdapter::new(&lonely);
+    assert_eq!(
+        adapter.skills_dir_for(Isolation::Shared),
+        lonely.join(".agents/skills"),
+        "with no project root above it, the working directory itself is the root"
+    );
+
+    // Build a shared context with a project-stable skill so the fallback branch
+    // runs, and assert the honest fallback note is present.
+    let payloads = tmp.path().join("registry/review");
+    write_payload_skill(&payloads, "review", "Reviews Rust.");
+    let context = ContextBuilder::new()
+        .isolation(Isolation::Shared)
+        .project_skill("skill/rust/review", "Reviews Rust.", &payloads)
+        .build();
+
+    // Point the adapter's tree at the marker-less directory.
+    let plan = CodexAdapter::new(&lonely).plan(&context).unwrap();
+    assert!(
+        plan.notes.iter().any(|n| n.contains("no project root")),
+        "the fallback to the cwd must be stated, not hidden: {:?}",
+        plan.notes
+    );
+}

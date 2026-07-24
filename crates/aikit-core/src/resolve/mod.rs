@@ -36,7 +36,7 @@ use crate::error::AikitError;
 use crate::id::{CapsuleId, ProfileId, RegistrySource, Revision};
 use crate::platform::TargetId;
 use crate::policy::ManagedPolicy;
-use crate::profile::{merge_config, ConfigTable, PoolPatch};
+use crate::profile::{combine_config, ConfigTable, PoolPatch};
 use crate::scope::{LayerOrigin, ScopeKind, ScopeLayer};
 use crate::trust::{TrustOracle, TrustState};
 
@@ -210,6 +210,14 @@ pub struct ResolvedView {
     pub warnings: Vec<String>,
     pub hash: ResolutionHash,
     pub catalog_revision: String,
+    /// Cosmetic, human-attached metadata about the *generation* this view will be
+    /// materialised into — a label like `known-good`, a note. Serialised as the
+    /// `[properties]` table in the lock, and deliberately **excluded from both the
+    /// resolution hash and the generation's content identity**: a label edit must
+    /// never invalidate a generation (PRIOR-ART-ACTIONS #9, Guix
+    /// `manifest-entry-properties`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: BTreeMap<String, String>,
 }
 
 impl ResolvedView {
@@ -523,6 +531,9 @@ impl<'a> Resolver<'a> {
             warnings: self.warnings.clone(),
             hash,
             catalog_revision: self.catalog.catalog_revision(),
+            // Resolution produces no cosmetic properties; a label is attached to
+            // the generation afterwards, never derived from the resolution.
+            properties: BTreeMap::new(),
         })
     }
 
@@ -651,7 +662,16 @@ impl<'a> Resolver<'a> {
             });
         }
         for (id, table) in &patch.config {
-            merge_config(config.entry(id.clone()).or_default(), table);
+            // The merge mode is a property of the capsule the section configures,
+            // not of the writer: a whole-record capsule replaces, a key/value one
+            // deep-merges. A config section for an uncatalogued id (harmlessly
+            // ignored later) falls back to the deep-merge default.
+            let mode = self
+                .catalog
+                .get(id)
+                .map(|c| c.config_merge)
+                .unwrap_or_default();
+            combine_config(config.entry(id.clone()).or_default(), table, mode);
         }
     }
 

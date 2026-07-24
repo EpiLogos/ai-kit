@@ -216,12 +216,15 @@ fn cmd_status(cwd: &std::path::Path, a: StatusArgs) -> Result<Reply> {
             })
         })
         .collect();
+    let properties = service.current_generation_properties();
     let mut data = jval!({
         "active": active,
         "active_count": view.active.len(),
         "hash": view.hash.to_string(),
         "isolation": service.descriptor().isolation.as_str(),
         "bypasses": bypass_summaries(&service)?,
+        "generation_label": properties.get("label"),
+        "generation_properties": properties,
     });
     if a.all {
         let unavailable: Vec<Value> = view
@@ -285,6 +288,7 @@ fn cmd_toggle(cwd: &std::path::Path, a: ToggleArgs, enable: bool) -> Result<Repl
     let applied = service.apply(ApplyRequest {
         scope,
         toggles: vec![Toggle::new(id.clone(), enable)],
+        label: None,
     })?;
     let data = jval!({
         "capability": id.to_string(),
@@ -296,16 +300,18 @@ fn cmd_toggle(cwd: &std::path::Path, a: ToggleArgs, enable: bool) -> Result<Repl
     Ok(reply(&service, data, applied.warnings))
 }
 
-fn cmd_apply(cwd: &std::path::Path, _a: ApplyArgs) -> Result<Reply> {
+fn cmd_apply(cwd: &std::path::Path, a: ApplyArgs) -> Result<Reply> {
     let mut service = Service::discover(cwd)?;
     let scope = service.descriptor().default_mutation_scope();
     let applied = service.apply(ApplyRequest {
         scope,
         toggles: vec![],
+        label: a.label.clone(),
     })?;
     let data = jval!({
         "generation": applied.id.to_string(),
         "replaced": applied.replaced.as_ref().map(|g| g.to_string()),
+        "label": a.label,
     });
     Ok(reply(&service, data, applied.warnings))
 }

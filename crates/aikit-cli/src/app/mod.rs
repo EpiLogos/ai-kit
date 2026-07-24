@@ -101,6 +101,9 @@ pub struct StageRequest {
 pub struct ApplyRequest {
     pub scope: ScopeKind,
     pub toggles: Vec<Toggle>,
+    /// A cosmetic label to attach to the resulting generation. Excluded from the
+    /// generation's content identity, so it never forces a new one.
+    pub label: Option<String>,
 }
 
 /// The result of a successful apply.
@@ -291,6 +294,20 @@ impl Service {
     /// and `bypasses` to make visible.
     pub fn open_bypasses(&self) -> Result<Vec<aikit_store::index::BypassRecord>> {
         self.index.open_bypasses(&self.descriptor.context_id)
+    }
+
+    /// The cosmetic properties (a `label`, notes) recorded on this context's
+    /// current generation, if any. Read-only: it never creates the context
+    /// directory, so `status` on a context that has never applied stays a no-op.
+    pub fn current_generation_properties(&self) -> std::collections::BTreeMap<String, String> {
+        let context_dir = self.home.context_dir(&self.descriptor.context_id);
+        let Ok(Some(id)) = generation::current(&context_dir) else {
+            return std::collections::BTreeMap::new();
+        };
+        let dir = context_dir.join(generation::GENERATIONS).join(id.as_str());
+        generation::read_lock(&dir)
+            .map(|v| v.properties)
+            .unwrap_or_default()
     }
 
     /// Roll the context's `current` generation back to `previous`.
@@ -555,7 +572,15 @@ impl AikitApplication for Service {
         let context_dir = self.context_dir()?;
         let base = generation::current(&context_dir)?;
         let plans = vec![Self::shell_plan(&self.view)?];
-        let staged = GenerationBuilder::new().build(&context_dir, &self.view, &plans)?;
+
+        // A cosmetic label rides on the view as a `[properties]` entry. It is
+        // excluded from the generation's identity, so labelling an unchanged view
+        // updates the label in place rather than minting a new generation.
+        let mut view = self.view.clone();
+        if let Some(label) = r.label.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            view.properties.insert("label".to_string(), label.to_string());
+        }
+        let staged = GenerationBuilder::new().build(&context_dir, &view, &plans)?;
         let committed = staged.commit(base.as_ref())?;
 
         Ok(AppliedGeneration {
@@ -677,6 +702,7 @@ impl PaletteBackend for Service {
             ApplyRequest {
                 scope,
                 toggles: toggles.to_vec(),
+                label: None,
             },
         )?;
         Ok(applied.id)

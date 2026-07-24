@@ -193,7 +193,14 @@ pub struct UseArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct ApplyArgs {}
+pub struct ApplyArgs {
+    /// Attach a cosmetic label to the generation this apply produces (e.g.
+    /// `known-good`). Labels are excluded from the generation's identity, so
+    /// labelling an unchanged view updates the label in place rather than minting
+    /// a new generation.
+    #[arg(long, value_name = "TEXT")]
+    pub label: Option<String>,
+}
 
 #[derive(Debug, Args)]
 pub struct RollbackArgs {}

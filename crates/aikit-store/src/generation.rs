@@ -73,6 +73,13 @@ pub const GENERATIONS: &str = "generations";
 pub const LOCK_FILE: &str = "resolution.lock.toml";
 pub const METADATA_FILE: &str = "metadata.json";
 
+/// The on-disk generation format. Its **presence** in `metadata.json` is the test
+/// for "this directory is a generation" (PRIOR-ART-ACTIONS #8, from Guix's
+/// `%manifest-format-version` and home-manager's `gen-version`). Distinct from
+/// [`GenerationMetadata::schema`], which versions the metadata *document*: the
+/// format stamp changes only when the on-disk generation layout does.
+pub const GENERATION_FORMAT: u32 = 1;
+
 /// Staging directories are hidden so a `generations/*` listing never mistakes an
 /// in-progress build for a real generation.
 const STAGING_PREFIX: &str = ".staging-";
@@ -97,6 +104,10 @@ pub struct TargetRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerationMetadata {
     pub schema: u32,
+    /// The on-disk generation format stamp; its presence marks the directory as a
+    /// generation. See [`GENERATION_FORMAT`].
+    #[serde(default)]
+    pub generation_format: u32,
     pub generation_id: GenerationId,
     pub context_id: String,
     pub created_at: Timestamp,
@@ -110,6 +121,16 @@ pub struct GenerationMetadata {
     /// Honest notes: degradations, fallbacks and the reasons for them.
     #[serde(default)]
     pub notes: Vec<String>,
+}
+
+/// Whether `dir` is a generation, decided by the presence of the
+/// [`GENERATION_FORMAT`] stamp in a readable `metadata.json`.
+///
+/// This is deliberately the *stamp*, not "does a `metadata.json` exist": a
+/// half-written directory or a foreign tree that happens to hold a `metadata.json`
+/// is not a generation. `gc` and any future audit can trust this predicate.
+pub fn is_generation(dir: &Path) -> bool {
+    read_metadata(dir).is_ok_and(|m| m.generation_format >= 1)
 }
 
 /// Read a generation's metadata.
@@ -134,6 +155,41 @@ fn write_metadata(generation_dir: &Path, metadata: &GenerationMetadata) -> Resul
         )
     })?;
     write_file(&generation_dir.join(METADATA_FILE), encoded.as_bytes())
+}
+
+/// Attach cosmetic `[properties]` (a label, a note) to a committed generation by
+/// rewriting only that table in its lock.
+///
+/// Safe on an "immutable" generation precisely because [`hash_tree`] excludes
+/// `[properties]` from identity: the directory name still equals the content hash
+/// afterwards, `current`/`previous` are untouched, and no new generation is minted
+/// (PRIOR-ART-ACTIONS #9). A no-op when the properties are already what is asked.
+pub fn relabel(
+    generation_dir: &Path,
+    properties: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let mut view = read_lock(generation_dir)?;
+    if &view.properties == properties {
+        return Ok(());
+    }
+    view.properties = properties.clone();
+    let text = toml::to_string_pretty(&view).map_err(|e| {
+        AikitError::new(
+            "generation.lock_unserializable",
+            format!("could not re-serialize the lock to attach properties: {e}"),
+        )
+    })?;
+    write_file(&generation_dir.join(LOCK_FILE), text.as_bytes())
+}
+
+/// On an identical re-apply, carry any label the new build declared onto the
+/// generation already on disk.
+fn carry_properties(staging: &Path, final_dir: &Path) -> Result<()> {
+    let staged = read_lock(staging)?;
+    if staged.properties.is_empty() {
+        return Ok(());
+    }
+    relabel(final_dir, &staged.properties)
 }
 
 /// Read a generation's resolved view back out of its lock file.
@@ -313,6 +369,7 @@ impl GenerationBuilder {
 
         let metadata = GenerationMetadata {
             schema: 1,
+            generation_format: GENERATION_FORMAT,
             generation_id: id.clone(),
             context_id: view.context.context_id.to_string(),
             created_at: Timestamp::now(),
@@ -539,6 +596,10 @@ impl StagedGeneration {
         if final_dir.exists() {
             // The same content already exists — an identical re-apply. Keep the
             // one on disk and throw the duplicate away rather than churning it.
+            // But a cosmetic label the new apply carried is not part of the
+            // identity, so carry it onto the existing generation in place: a label
+            // edit must update, never mint (PRIOR-ART-ACTIONS #9).
+            carry_properties(&self.staging, &final_dir)?;
             self.discard_staging();
         } else {
             self.metadata.base_generation = actual.clone();
@@ -888,13 +949,36 @@ fn symlink(target: &Path, link: &Path) -> Result<()> {
 ///
 /// Symlinks are *followed*, so a link-mode and a copy-mode build of the same view
 /// are the same generation — which is the right answer, because the generation
-/// names what the view contains, not how it was placed on disk. `metadata.json`
-/// is excluded because it records the id.
+/// names what the view contains, not how it was placed on disk.
+///
+/// Two files get special treatment. `metadata.json` is excluded because it records
+/// the id. The lock (`resolution.lock.toml`) is folded not as raw bytes but as the
+/// view with its cosmetic `[properties]` cleared: a `[properties]` table is a
+/// human label on the generation, and hashing it would mint a fresh generation on
+/// every label edit — the exact thing PRIOR-ART-ACTIONS #9 forbids. Everything
+/// else the lock records (the active set, `catalog_index`, the declared and
+/// unavailable maps) still contributes, so two genuinely different resolutions
+/// remain different generations.
 fn hash_tree(staging: &Path, view: &ResolvedView) -> Result<GenerationId> {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"aikit-generation-v1\n");
+    // v2: the lock is folded semantically (properties-excluded) rather than as raw
+    // bytes, so old-format ids are recomputed rather than silently reused.
+    hasher.update(b"aikit-generation-v2\n");
     hasher.update(view.hash.to_string().as_bytes());
     hasher.update(b"\n");
+
+    // Fold the lock's semantic content with cosmetic properties removed.
+    let mut identity_view = view.clone();
+    identity_view.properties.clear();
+    let canonical_lock = toml::to_string_pretty(&identity_view).map_err(|e| {
+        AikitError::new(
+            "generation.lock_unserializable",
+            format!("the resolved view could not be canonicalized for hashing: {e}"),
+        )
+    })?;
+    hasher.update(b"lock\n");
+    hasher.update(&(canonical_lock.len() as u64).to_le_bytes());
+    hasher.update(canonical_lock.as_bytes());
 
     let mut files: BTreeMap<String, PathBuf> = BTreeMap::new();
     for entry in walkdir::WalkDir::new(staging)
@@ -911,7 +995,8 @@ fn hash_tree(staging: &Path, view: &ResolvedView) -> Result<GenerationId> {
             .unwrap_or(entry.path())
             .to_string_lossy()
             .replace('\\', "/");
-        if relative == METADATA_FILE {
+        // metadata.json records the id; the lock is folded semantically above.
+        if relative == METADATA_FILE || relative == LOCK_FILE {
             continue;
         }
         files.insert(relative, entry.path().to_path_buf());

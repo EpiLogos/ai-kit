@@ -25,6 +25,7 @@ use crate::effects::Effects;
 use crate::error::{err, AikitError, Result};
 use crate::id::{CapsuleId, RegistrySource, Revision};
 use crate::platform::{Platform, TargetId};
+use crate::profile::ConfigMerge;
 
 pub const SUPPORTED_SCHEMA: u32 = 1;
 
@@ -525,6 +526,11 @@ struct RawManifest {
     args: Vec<ArgSpec>,
     #[serde(default)]
     provenance: Provenance,
+    /// How this capsule's `[config.*]` section combines across scopes. Deep-merge
+    /// by default; a whole-record section (an MCP entry, a command spec) declares
+    /// `config_merge = "replace"`.
+    #[serde(default)]
+    config_merge: ConfigMerge,
 
     #[serde(default)]
     script: Option<ScriptSection>,
@@ -585,6 +591,9 @@ pub struct Capsule {
     pub effects: Effects,
     pub args: Vec<ArgSpec>,
     pub provenance: Provenance,
+    /// How this capsule's `[config.*]` section combines across scope layers.
+    #[serde(default)]
+    pub config_merge: ConfigMerge,
     pub payload: Payload,
 
     /// Set by the store when the capsule is loaded from disk.
@@ -738,6 +747,7 @@ impl Capsule {
             effects: raw.effects,
             args: raw.args,
             provenance: raw.provenance,
+            config_merge: raw.config_merge,
             payload,
             source: None,
             revision: None,

@@ -15,6 +15,37 @@ use crate::id::{CapsuleId, GenerationId, ProfileId, SessionId};
 /// Free-form per-capsule configuration, carried through resolution untouched.
 pub type ConfigTable = toml::value::Table;
 
+/// How a capsule's `[config.*]` section combines across scope layers.
+///
+/// This is declared by the capsule the section configures, not by each writer of
+/// the section, because whether config is a bag of independent keys or a single
+/// replaceable record is a fact about the *thing being configured* — an MCP
+/// server entry and a command spec are records; a set of hook options is a bag.
+/// Getting this explicit is the single most common "why isn't my config taking
+/// effect" fix across every surveyed tool (PRIOR-ART-ACTIONS #27): Claude MCP,
+/// mise `[tasks]` and flox all replace whole records where AIKit would otherwise
+/// deep-merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigMerge {
+    /// Recursive deep merge: a higher scope may change one nested field without
+    /// restating the rest. The correct default for key/value config.
+    #[default]
+    Deep,
+    /// Whole-record replacement: a higher scope's table *is* the record; keys the
+    /// lower scope set that the higher one omits do not bleed through.
+    Replace,
+}
+
+impl ConfigMerge {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConfigMerge::Deep => "deep",
+            ConfigMerge::Replace => "replace",
+        }
+    }
+}
+
 /// The `enable` / `disable` / `profiles` / `[config.*]` declarations of one scope.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PoolPatch {
@@ -144,10 +175,34 @@ fn one() -> u32 {
     1
 }
 
+/// Fold one capsule's `[config.*]` section from a higher scope (`overlay`) into
+/// the accumulated lower-scope value (`base`), honouring the capsule's declared
+/// [`ConfigMerge`] mode.
+///
+/// This is the one place the merge algebra lives, so `Deep` versus `Replace` is a
+/// single branch a reader can see rather than a boolean threaded through call
+/// sites — the failure mode PRIOR-ART-ACTIONS #14/#27 warn about.
+pub fn combine_config(base: &mut ConfigTable, overlay: &ConfigTable, mode: ConfigMerge) {
+    match mode {
+        ConfigMerge::Deep => merge_config(base, overlay),
+        ConfigMerge::Replace => {
+            // The higher scope's record replaces the lower one entirely; nothing
+            // the lower scope set survives into the effective view.
+            base.clear();
+            for (key, value) in overlay {
+                base.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
 /// Recursively merge `overlay` into `base`, key by key.
 ///
 /// Higher scopes win on scalars; nested tables merge rather than replace, so a
-/// session can change one hook option without restating the project's whole table.
+/// session can change one hook option without restating the project's whole
+/// table. This is the [`ConfigMerge::Deep`] behaviour and the default; a section
+/// that is a whole replaceable record uses [`combine_config`] with
+/// [`ConfigMerge::Replace`].
 pub fn merge_config(base: &mut ConfigTable, overlay: &ConfigTable) {
     for (key, value) in overlay {
         match (base.get_mut(key), value) {

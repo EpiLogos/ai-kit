@@ -216,6 +216,125 @@ fn metadata_records_the_base_the_hash_and_the_isolation_it_was_built_under() {
 }
 
 #[test]
+fn a_generation_stamps_the_generation_format_and_is_recognised_by_it() {
+    // PRIOR-ART-ACTIONS #8: `generation_format: 1` is present from the first
+    // commit, and its presence is the test for "this directory is a generation".
+    // Impossible to retrofit, so it is asserted from the ground up.
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = registry(tmp.path());
+    let resolved = resolve_fixture(&fixture, &["script/test/nt"]);
+    let ctx = context_dir(tmp.path());
+
+    let committed = GenerationBuilder::new()
+        .build(&ctx, &resolved.view, &plans(&resolved, "one"))
+        .unwrap()
+        .commit(None)
+        .unwrap();
+
+    let metadata = generation::read_metadata(&committed.path).unwrap();
+    assert_eq!(metadata.generation_format, generation::GENERATION_FORMAT);
+    assert!(
+        generation::is_generation(&committed.path),
+        "a stamped directory is recognised as a generation"
+    );
+
+    let not_a_generation = tmp.path().join("random-dir");
+    fs::create_dir_all(&not_a_generation).unwrap();
+    assert!(
+        !generation::is_generation(&not_a_generation),
+        "a directory with no generation_format stamp is not a generation"
+    );
+}
+
+#[test]
+fn a_cosmetic_property_is_excluded_from_the_generation_identity() {
+    // PRIOR-ART-ACTIONS #9: a `[properties]` table in the lock is cosmetic and
+    // excluded from equality — otherwise every label edit would invalidate every
+    // generation. Two views identical but for a property build to the SAME id, and
+    // the property still round-trips through the lock so `explain` can read it.
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = registry(tmp.path());
+    let resolved = resolve_fixture(&fixture, &["script/test/nt", "skill/rust/review"]);
+    let ctx = context_dir(tmp.path());
+    let plan_set = plans(&resolved, "same");
+
+    let plain = GenerationBuilder::new()
+        .build(&ctx, &resolved.view, &plan_set)
+        .unwrap();
+
+    let mut labelled_view = resolved.view.clone();
+    labelled_view
+        .properties
+        .insert("label".to_string(), "known-good".to_string());
+    let labelled = GenerationBuilder::new()
+        .build(&ctx, &labelled_view, &plan_set)
+        .unwrap();
+
+    assert_eq!(
+        plain.id(),
+        labelled.id(),
+        "a cosmetic property must not change the content-addressed generation id"
+    );
+
+    let lock = fs::read_to_string(labelled.path().join("resolution.lock.toml")).unwrap();
+    assert!(
+        lock.contains("known-good"),
+        "the [properties] table lives in the lock, so explain can read it back: {lock}"
+    );
+
+    let plain_lock = fs::read_to_string(plain.path().join("resolution.lock.toml")).unwrap();
+    assert!(
+        !plain_lock.contains("[properties]"),
+        "an empty properties table is not written, so existing locks are unchanged"
+    );
+}
+
+#[test]
+fn relabelling_an_identical_generation_updates_the_label_without_minting_a_new_one() {
+    // The end-to-end proof of PRIOR-ART-ACTIONS #9: re-applying an identical
+    // resolution but with a cosmetic label attaches the label to the existing
+    // generation in place — it does not create a second, near-duplicate one, and
+    // `current` does not move.
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = registry(tmp.path());
+    let resolved = resolve_fixture(&fixture, &["script/test/nt"]);
+    let ctx = context_dir(tmp.path());
+    let plan_set = plans(&resolved, "one");
+
+    let first = GenerationBuilder::new()
+        .build(&ctx, &resolved.view, &plan_set)
+        .unwrap()
+        .commit(None)
+        .unwrap();
+
+    let mut labelled = resolved.view.clone();
+    labelled
+        .properties
+        .insert("label".to_string(), "known-good".to_string());
+    let again = GenerationBuilder::new()
+        .build(&ctx, &labelled, &plan_set)
+        .unwrap()
+        .commit(Some(&first.id))
+        .unwrap();
+
+    assert_eq!(first.id, again.id, "identical content is the same generation");
+    assert_eq!(
+        generation::list(&ctx).unwrap().len(),
+        1,
+        "no duplicate generation was minted for a label change"
+    );
+    assert_eq!(generation::current(&ctx).unwrap(), Some(first.id.clone()));
+
+    let view =
+        generation::read_lock(&ctx.join("generations").join(again.id.as_str())).unwrap();
+    assert_eq!(
+        view.properties.get("label").map(String::as_str),
+        Some("known-good"),
+        "the label was written onto the existing generation's lock"
+    );
+}
+
+#[test]
 fn a_brokered_fallback_is_written_into_the_generation_rather_than_lost() {
     // §3: a shared working tree cannot give two sibling tasks different native
     // skill surfaces, and the adapter has to say so instead of pretending. The
