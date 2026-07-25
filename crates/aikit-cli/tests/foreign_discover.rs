@@ -148,3 +148,44 @@ fn an_unreadable_symlink_target_is_not_reported_as_a_dead_link() {
         "an unreadable target is not a dead link"
     );
 }
+
+#[test]
+fn a_hook_script_nothing_dispatches_is_reported_as_wired_to_nothing() {
+    // The "looks installed, never runs" case. A script sitting in a hooks
+    // directory is indistinguishable from a live one until you compare it against
+    // the settings that would dispatch it — which is the only reason this is
+    // invisible on a real machine.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let hooks = home.join(".claude/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+
+    for name in ["live.sh", "orphan-a.sh", "orphan-b.sh"] {
+        fs::write(hooks.join(name), "#!/bin/sh\nexit 0\n").unwrap();
+    }
+    // A dotfile is not a hook somebody registered.
+    fs::write(hooks.join(".DS_Store"), "").unwrap();
+
+    fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash ~/.claude/hooks/live.sh"}]}]}}"#,
+    )
+    .unwrap();
+
+    let survey = foreign::default_hook_survey(home);
+
+    assert_eq!(survey.hooks.len(), 3, "the dotfile is not counted: {survey:?}");
+    assert_eq!(survey.wired(), 1);
+
+    let orphans: Vec<&str> = survey.orphaned().iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(orphans, vec!["orphan-a.sh", "orphan-b.sh"]);
+}
+
+#[test]
+fn a_missing_hooks_directory_is_an_empty_survey_not_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let survey = foreign::default_hook_survey(tmp.path());
+    assert!(survey.hooks.is_empty());
+    assert_eq!(survey.wired(), 0);
+    assert!(survey.orphaned().is_empty());
+}

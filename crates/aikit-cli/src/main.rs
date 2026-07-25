@@ -151,6 +151,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Collate(a)) => cmd_collate(cwd, a),
         Some(Command::Z(a)) => cmd_z(cwd, a, json_mode),
         Some(Command::Set(c)) => cmd_set(cwd, c),
+        Some(Command::Tree(a)) => cmd_tree(cwd, a, json_mode),
         Some(Command::Ui(a)) => open_palette(cwd, a.query, a.fullscreen),
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
@@ -405,6 +406,69 @@ fn cmd_z(cwd: &std::path::Path, a: ZArgs, json_mode: bool) -> Result<Reply> {
             }
         }
     }
+}
+
+/// `aikit tree` — the organising view.
+///
+/// Read-only: assembling the tree touches nothing. Prints the rendered rows in
+/// human mode and the structured rows under `--json`, so an agent and a screen
+/// reader get the same one-line description a person sees.
+fn cmd_tree(cwd: &std::path::Path, a: TreeArgs, json_mode: bool) -> Result<Reply> {
+    use aikit_tui::tree::{Root, TreeGlyphs};
+
+    let service = Service::discover(cwd)?;
+    let mut state = aikit_cli::tree_build::build(&service)?;
+
+    if a.all {
+        for root in Root::ALL {
+            state.expanded.insert(root.as_str().to_string());
+        }
+    }
+    for path in &a.expand {
+        state.expanded.insert(path.clone());
+        // Expanding `a/b` is meaningless unless `a` is open too.
+        let mut prefix = String::new();
+        for segment in path.split('/') {
+            prefix = if prefix.is_empty() {
+                segment.to_string()
+            } else {
+                format!("{prefix}/{segment}")
+            };
+            state.expanded.insert(prefix.clone());
+        }
+    }
+    if let Some(filter) = &a.filter {
+        state.filter = filter.clone();
+    }
+
+    let glyphs = if a.ascii {
+        TreeGlyphs::ascii()
+    } else {
+        TreeGlyphs::for_glyphs(aikit_tui::layout::Glyphs::from_env())
+    };
+
+    if !json_mode {
+        return Ok(Reply::Text(
+            aikit_tui::tree::render_lines(&state, glyphs).join("\n"),
+        ));
+    }
+
+    let rows: Vec<Value> = state
+        .rows()
+        .iter()
+        .map(|row| {
+            jval!({
+                "path": row.path,
+                "depth": row.depth,
+                "expanded": row.expanded,
+                "expandable": row.node.expandable,
+                // The same one line a screen reader gets.
+                "summary": row.node.summary,
+            })
+        })
+        .collect();
+    let data = jval!({ "rows": rows, "count": rows.len() });
+    Ok(reply(&service, data, vec![]))
 }
 
 /// `aikit set` — skill-sets, the unit you point a harness at.

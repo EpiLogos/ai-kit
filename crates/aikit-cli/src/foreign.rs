@@ -120,3 +120,84 @@ fn scan_dir(dir: &Path, depth: usize, root: &mut ForeignRoot) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Foreign hooks: scripts on disk versus scripts actually wired
+// ---------------------------------------------------------------------------
+
+/// A hook script found on disk, and whether anything actually calls it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignHook {
+    pub name: String,
+    pub path: PathBuf,
+    /// `true` when a client's settings reference this path.
+    pub wired: bool,
+}
+
+/// What a hook survey found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HookSurvey {
+    pub hooks: Vec<ForeignHook>,
+}
+
+impl HookSurvey {
+    pub fn wired(&self) -> usize {
+        self.hooks.iter().filter(|h| h.wired).count()
+    }
+
+    /// Scripts sitting on disk that nothing dispatches. These are the ones nobody
+    /// can currently see: they look installed, they are executable, and they never
+    /// run.
+    pub fn orphaned(&self) -> Vec<&ForeignHook> {
+        self.hooks.iter().filter(|h| !h.wired).collect()
+    }
+}
+
+/// Survey a client's hook directory against the settings that would dispatch it.
+///
+/// Read-only, and deliberately generous about what counts as "wired": a settings
+/// file that mentions the script's file name anywhere is taken as a reference. An
+/// over-count here is a false negative (a script reported as wired when it is
+/// not), which is much safer than telling somebody a live hook is dead.
+pub fn survey_hooks(hooks_dir: &Path, settings: &[PathBuf]) -> HookSurvey {
+    let mut referenced = String::new();
+    for path in settings {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            referenced.push_str(&text);
+            referenced.push('\n');
+        }
+    }
+
+    let Ok(entries) = std::fs::read_dir(hooks_dir) else {
+        return HookSurvey::default();
+    };
+
+    let mut hooks = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            continue;
+        };
+        // Skip dotfiles; they are not hook scripts anybody registered.
+        if name.starts_with('.') {
+            continue;
+        }
+        // A directory can hold a hook (the `gitnexus/` shape), so it counts as an
+        // entry and is wired if anything under it is referenced.
+        let wired = referenced.contains(&name);
+        hooks.push(ForeignHook { name, path, wired });
+    }
+    hooks.sort_by(|a, b| a.name.cmp(&b.name));
+    HookSurvey { hooks }
+}
+
+/// The well-known hook directory and the settings files that could wire it.
+pub fn default_hook_survey(home: &Path) -> HookSurvey {
+    survey_hooks(
+        &home.join(".claude/hooks"),
+        &[
+            home.join(".claude/settings.json"),
+            home.join(".claude/settings.local.json"),
+        ],
+    )
+}

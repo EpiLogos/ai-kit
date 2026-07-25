@@ -44,6 +44,8 @@ pub enum Command {
     Z(ZArgs),
     /// Create, inspect and point harnesses at skill-sets.
     Set(SetCmd),
+    /// The tree: organise sets, see the resolved hook chain, inspect registries.
+    Tree(TreeArgs),
     /// Open the palette (the default when no subcommand is given).
     Ui(UiArgs),
     /// Search the catalogue for capabilities.
@@ -113,6 +115,22 @@ pub enum Command {
 // ---------------------------------------------------------------------------
 // Leaf command arguments
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct TreeArgs {
+    /// Expand these paths, e.g. `sets` or `hooks/PreToolUse`. Repeatable.
+    #[arg(long = "expand", value_name = "PATH")]
+    pub expand: Vec<String>,
+    /// Expand every root one level.
+    #[arg(long)]
+    pub all: bool,
+    /// Force the ASCII rendering, whatever the terminal claims.
+    #[arg(long)]
+    pub ascii: bool,
+    /// Only rows matching this text, with their ancestors kept.
+    #[arg(long, value_name = "TEXT")]
+    pub filter: Option<String>,
+}
 
 #[derive(Debug, Args)]
 pub struct SetCmd {

@@ -26,4 +26,5 @@ pub mod multicall;
 pub mod mux_install;
 pub mod run;
 pub mod task;
+pub mod tree_build;
 pub mod ui;
