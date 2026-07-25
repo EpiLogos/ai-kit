@@ -150,6 +150,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Init(a)) => cmd_init(cwd, a),
         Some(Command::Collate(a)) => cmd_collate(cwd, a),
         Some(Command::Z(a)) => cmd_z(cwd, a, json_mode),
+        Some(Command::Set(c)) => cmd_set(cwd, c),
         Some(Command::Ui(a)) => open_palette(cwd, a.query, a.fullscreen),
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
@@ -402,6 +403,100 @@ fn cmd_z(cwd: &std::path::Path, a: ZArgs, json_mode: bool) -> Result<Reply> {
                     Ok(Reply::Text(explanation.render()))
                 }
             }
+        }
+    }
+}
+
+/// `aikit set` — skill-sets, the unit you point a harness at.
+fn cmd_set(cwd: &std::path::Path, c: SetCmd) -> Result<Reply> {
+    use aikit_core::skillset;
+    use aikit_store::skillsets;
+
+    let service = Service::discover(cwd)?;
+    let home = service.home();
+    let view = service.resolved();
+
+    match c.command {
+        SetSub::List(_) => {
+            let sets = skillsets::load_all(home)?;
+            let rows: Vec<Value> = sets
+                .iter()
+                .map(|set| {
+                    let projection = skillset::project(set, view);
+                    jval!({
+                        "name": set.label(),
+                        "provenance": set.provenance.as_str(),
+                        "members": set.len(),
+                        "projected": projection.projected.len(),
+                        "withheld": projection.withheld.len(),
+                        "summary": projection.summarize(&format!("sets/{}", set.name)),
+                    })
+                })
+                .collect();
+            Ok(reply(&service, jval!({ "sets": rows, "count": rows.len() }), vec![]))
+        }
+        SetSub::Show(a) => {
+            let set = skillsets::load(home, &a.name)?;
+            let projection = skillset::project(&set, view);
+            // The reply to the request: what projects, and what does not, with the
+            // resolver's own reason for each withholding.
+            let data = jval!({
+                "name": set.label(),
+                "provenance": set.provenance.as_str(),
+                "description": set.description,
+                "members": set.len(),
+                "summary": projection.summarize(&format!("sets/{}", set.name)),
+                "projected": projection.projected.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                "withheld": projection.withheld.iter().map(|w| jval!({
+                    "capability": w.capsule.to_string(),
+                    "reason": w.reason.describe(),
+                })).collect::<Vec<_>>(),
+                "complete": projection.is_complete(),
+                "children": set.children.iter().map(|c| jval!({
+                    "name": c.name, "members": c.len(),
+                })).collect::<Vec<_>>(),
+                "patterns": set.patterns,
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+        SetSub::Create(a) => {
+            let mut ids: Vec<CapsuleId> = a
+                .ids
+                .iter()
+                .map(|raw| CapsuleId::parse(raw))
+                .collect::<Result<Vec<_>>>()?;
+
+            // Globs expand NOW, to explicit ids. If sets matched dynamically,
+            // syncing a registry would silently change what a harness sees —
+            // precisely the failure rule 6 exists to prevent.
+            for glob in &a.globs {
+                for id in view.catalog_index.keys() {
+                    if skillset::glob_matches(glob, &id.to_string()) && !ids.contains(id) {
+                        ids.push(id.clone());
+                    }
+                }
+            }
+            ids.sort();
+
+            let set = skillsets::create(home, &a.name, &ids, &a.globs)?;
+            let data = jval!({
+                "name": set.label(),
+                "members": set.len(),
+                "expanded_from": a.globs,
+                "path": skillsets::dir(home, &a.name).display().to_string(),
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+        SetSub::Add(a) => {
+            let ids: Vec<CapsuleId> = a.ids.iter().map(|r| CapsuleId::parse(r)).collect::<Result<_>>()?;
+            let set = skillsets::add(home, &a.name, &ids)?;
+            Ok(reply(&service, jval!({ "name": set.label(), "members": set.len() }), vec![]))
+        }
+        SetSub::Remove(a) => {
+            let ids: Vec<CapsuleId> = a.ids.iter().map(|r| CapsuleId::parse(r)).collect::<Result<_>>()?;
+            let set = skillsets::remove(home, &a.name, &ids)?;
+            // Removing from a set never deletes the capability: a set is a view.
+            Ok(reply(&service, jval!({ "name": set.label(), "members": set.len() }), vec![]))
         }
     }
 }

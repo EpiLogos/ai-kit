@@ -42,6 +42,8 @@ pub enum Command {
     Collate(CollateArgs),
     /// Jump to what you meant: act if unambiguous, else offer the candidates.
     Z(ZArgs),
+    /// Create, inspect and point harnesses at skill-sets.
+    Set(SetCmd),
     /// Open the palette (the default when no subcommand is given).
     Ui(UiArgs),
     /// Search the catalogue for capabilities.
@@ -111,6 +113,57 @@ pub enum Command {
 // ---------------------------------------------------------------------------
 // Leaf command arguments
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct SetCmd {
+    #[command(subcommand)]
+    pub command: SetSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SetSub {
+    /// List sets, their membership counts and where they project.
+    List(SetListArgs),
+    /// Show a set's members — and the members that would NOT project here, with
+    /// the reason. A set is a request; this is the reply.
+    Show(SetShowArgs),
+    /// Create a set. `mkdir` is a legitimate alternative.
+    Create(SetCreateArgs),
+    /// Add capabilities to a set.
+    Add(SetMemberArgs),
+    /// Remove capabilities from a set. Never deletes the capability.
+    Remove(SetMemberArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SetListArgs {}
+
+#[derive(Debug, Args)]
+pub struct SetShowArgs {
+    #[arg(value_name = "NAME")]
+    pub name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SetCreateArgs {
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    /// Capability ids to start with.
+    #[arg(value_name = "IDS")]
+    pub ids: Vec<String>,
+    /// Globs to expand NOW into explicit ids. The pattern is retained as
+    /// provenance; it never matches dynamically later.
+    #[arg(long = "match", value_name = "GLOB")]
+    pub globs: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SetMemberArgs {
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    #[arg(value_name = "IDS", required = true)]
+    pub ids: Vec<String>,
+}
 
 #[derive(Debug, Args)]
 pub struct ZArgs {

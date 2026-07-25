@@ -166,17 +166,62 @@ impl SkillSet {
     }
 }
 
+/// Why a set did not get a member it asked for.
+///
+/// Deliberately wider than [`UnavailableReason`]: resolution answers "could this
+/// activate", but a set also asks for things no scope selects here, and reporting
+/// that as "not present in any registry" would send a user looking for a missing
+/// file that is sitting right there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "withheld", rename_all = "kebab-case")]
+pub enum WithheldReason {
+    /// Catalogued, and perfectly fine — but no scope enables it in this context.
+    /// A set is a projection request, not an activation, so it cannot enable it
+    /// either (rule 6).
+    NotSelected,
+    /// Resolution refused it, with its own reason.
+    Unavailable(UnavailableReason),
+}
+
+impl WithheldReason {
+    pub fn describe(&self) -> String {
+        match self {
+            WithheldReason::NotSelected => {
+                "catalogued, but no scope enables it in this context".to_string()
+            }
+            WithheldReason::Unavailable(reason) => reason.describe(),
+        }
+    }
+
+    fn short(&self) -> &'static str {
+        match self {
+            WithheldReason::NotSelected => "not enabled here",
+            WithheldReason::Unavailable(reason) => short_reason(reason),
+        }
+    }
+}
+
 /// One member a set asked for and did not get.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Withheld {
     pub capsule: CapsuleId,
-    pub reason: UnavailableReason,
+    pub reason: WithheldReason,
 }
 
 impl Withheld {
     /// The sentence the palette and `aikit set show` print.
     pub fn describe(&self) -> String {
         format!("{} — {}", self.capsule, self.reason.describe())
+    }
+}
+
+/// Why one member did not project, decided from the view.
+fn withheld_reason(view: &ResolvedView, capsule: &CapsuleId) -> WithheldReason {
+    match view.unavailable_reason(capsule) {
+        Some(reason) => WithheldReason::Unavailable(reason.clone()),
+        // In the catalogue but not refused: nothing selects it here.
+        None if view.catalog_index.contains_key(capsule) => WithheldReason::NotSelected,
+        None => WithheldReason::Unavailable(UnavailableReason::NotInCatalog),
     }
 }
 
@@ -207,7 +252,7 @@ impl SetProjection {
             let mut reasons: Vec<String> = self
                 .withheld
                 .iter()
-                .map(|w| short_reason(&w.reason).to_string())
+                .map(|w| w.reason.short().to_string())
                 .collect();
             reasons.sort();
             reasons.dedup();
@@ -249,12 +294,8 @@ pub fn project(set: &SkillSet, view: &ResolvedView) -> SetProjection {
             projection.projected.push(capsule);
             continue;
         }
-        // The view already knows why, in the same words `explain` uses. An id the
-        // view has never heard of is simply not installed here.
-        let reason = view
-            .unavailable_reason(&capsule)
-            .cloned()
-            .unwrap_or(UnavailableReason::NotInCatalog);
+        // The view already knows why, in the same words `explain` uses.
+        let reason = withheld_reason(view, &capsule);
         projection.withheld.push(Withheld { capsule, reason });
     }
 
@@ -282,10 +323,7 @@ pub fn project_union(sets: &[&SkillSet], view: &ResolvedView) -> SetProjection {
         if view.is_active(&capsule) {
             projection.projected.push(capsule);
         } else {
-            let reason = view
-                .unavailable_reason(&capsule)
-                .cloned()
-                .unwrap_or(UnavailableReason::NotInCatalog);
+            let reason = withheld_reason(view, &capsule);
             projection.withheld.push(Withheld { capsule, reason });
         }
     }

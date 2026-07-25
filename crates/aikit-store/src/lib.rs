@@ -57,6 +57,7 @@ pub mod locks;
 pub mod procedure;
 pub mod registry;
 pub mod scan;
+pub mod skillsets;
 pub mod state;
 pub mod template;
 pub mod trust;
