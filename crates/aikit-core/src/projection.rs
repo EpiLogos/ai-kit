@@ -245,6 +245,14 @@ pub enum ProjectionItem {
         capsule: CapsuleId,
         export: String,
     },
+    /// An environment variable the context exports.
+    ///
+    /// This is how a tool whose only notion of scope is "which file did you point
+    /// me at" becomes context-scoped without a wrapper: two projects resolve to two
+    /// values of one variable, and there is nothing shared for them to race over.
+    /// Like [`ProjectionItem::Shim`] it has no filesystem destination, so what is
+    /// validated is the *name*.
+    Env { name: String, value: String },
 }
 
 impl ProjectionItem {
@@ -297,11 +305,38 @@ impl ProjectionItem {
     }
 
     /// The projection-root-relative path this item creates, when it has one.
+    /// An environment variable, with the name validated.
+    ///
+    /// Refused: an empty name, one containing `=` or a NUL (which no shell can
+    /// export), and one starting with a digit (which POSIX does not permit). A
+    /// variable that cannot be exported is a projection that silently does nothing.
+    pub fn env(name: impl Into<String>, value: impl Into<String>) -> Result<Self> {
+        let name = name.into();
+        let invalid = name.is_empty()
+            || name.starts_with(|c: char| c.is_ascii_digit())
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if invalid {
+            return Err(AikitError::new(
+                "projection.invalid_env_name",
+                format!("`{name}` is not a name a shell can export"),
+            )
+            .with("name", name));
+        }
+        Ok(Self::Env {
+            name,
+            value: value.into(),
+        })
+    }
+
     pub fn destination(&self) -> Option<&Path> {
         match self {
             ProjectionItem::Link { to, .. } | ProjectionItem::Copy { to, .. } => Some(to),
             ProjectionItem::Write { path, .. } => Some(path),
-            ProjectionItem::Shim { .. } => None,
+            // Neither lands a file: a shim's directory is the adapter's to choose,
+            // and an env var is not on the filesystem at all.
+            ProjectionItem::Shim { .. } | ProjectionItem::Env { .. } => None,
         }
     }
 
@@ -327,6 +362,9 @@ impl ProjectionItem {
                 capsule,
                 export,
             } => format!("shim|{name}|{capsule}|{export}"),
+            // The VALUE is part of the identity: pointing a context at a different
+            // database is a different projection, not a cosmetic relabel.
+            ProjectionItem::Env { name, value } => format!("env|{name}|{value}"),
         }
     }
 }

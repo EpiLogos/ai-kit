@@ -17,6 +17,7 @@ pub mod client;
 pub mod collate;
 pub mod discover;
 pub mod doctor;
+pub mod env;
 pub mod foreign;
 pub mod hook;
 pub mod json;

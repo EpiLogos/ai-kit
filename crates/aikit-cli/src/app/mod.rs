@@ -598,6 +598,14 @@ impl Service {
         for (name, capsule) in view.exported_commands() {
             plan = plan.with_item(ProjectionItem::shim(name.clone(), capsule.clone(), name)?);
         }
+        // The context's environment rides in the shell projection: `bin/` and the
+        // exported variables are the same surface as far as a shell is concerned.
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        for item in crate::env::project(view, &home)? {
+            plan = plan.with_item(item);
+        }
         Ok(plan)
     }
 

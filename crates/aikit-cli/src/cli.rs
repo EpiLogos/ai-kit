@@ -317,6 +317,11 @@ pub enum ContextSub {
     Bind(ContextBindArgs),
     /// Forget the binding for the current context.
     Reset(ContextResetArgs),
+    /// Print this context's environment as shell `export` lines.
+    ///
+    /// The shell integration evals this on directory change; it is what makes a
+    /// per-context `BKMR_DB_URL` (and anything like it) real.
+    Env(ContextEnvArgs),
 }
 
 #[derive(Debug, Args)]
@@ -330,6 +335,12 @@ pub struct ContextBindArgs {
 }
 #[derive(Debug, Args)]
 pub struct ContextResetArgs {}
+#[derive(Debug, Args)]
+pub struct ContextEnvArgs {
+    /// The shell whose syntax to emit: bash, zsh, fish or sh.
+    #[arg(long, default_value = "bash", value_name = "SHELL")]
+    pub shell: String,
+}
 
 // ---------------------------------------------------------------------------
 // session

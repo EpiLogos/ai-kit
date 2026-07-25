@@ -341,7 +341,10 @@ pub fn materialize(items: &[aikit_core::projection::ProjectionItem], root: &Path
                 std::fs::create_dir_all(target.parent().unwrap()).unwrap();
                 std::fs::write(&target, contents).unwrap();
             }
-            ProjectionItem::Shim { .. } => {}
+            // Neither reaches the filesystem: a shim's directory is the
+            // generation's `bin/`, and an env var is not a file at all. The real
+            // materializer in aikit-store handles both.
+            ProjectionItem::Shim { .. } | ProjectionItem::Env { .. } => {}
         }
     }
 }

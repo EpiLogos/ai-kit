@@ -658,6 +658,15 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
             });
             Ok(reply(&service, data, vec![]))
         }
+        ContextSub::Env(a) => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let items = aikit_cli::env::project(service.resolved(), &home)?;
+            // Raw shell syntax: this is eval'd by the shell integration, so it
+            // must not be wrapped in an envelope.
+            Ok(Reply::Text(aikit_cli::env::render_shell(&items, &a.shell)?))
+        }
         ContextSub::Reset(_) => {
             use aikit_store::state::StateStore;
             // Forgetting a binding is not forgetting the context: the generations,

@@ -72,6 +72,9 @@ pub const PREVIOUS: &str = "previous";
 pub const GENERATIONS: &str = "generations";
 pub const LOCK_FILE: &str = "resolution.lock.toml";
 pub const METADATA_FILE: &str = "metadata.json";
+/// The environment a context exports, one `NAME=value` per line. Read by the
+/// shell integration through the stable `AIKIT_VIEW/env` path.
+pub const ENV_FILE: &str = "env";
 
 /// The on-disk generation format. Its **presence** in `metadata.json` is the test
 /// for "this directory is a generation" (PRIOR-ART-ACTIONS #8, from Guix's
@@ -443,6 +446,16 @@ impl GenerationBuilder {
             ProjectionItem::Write { path, contents } => {
                 write_file(&root.join(path), contents.as_bytes())
             }
+            // Environment variables are not files. They are collected into the
+            // generation's `env` manifest, which the shell integration sources —
+            // `AIKIT_VIEW/env` is a stable path, so a shell can read the current
+            // context's environment without AIKit running.
+            ProjectionItem::Env { name, value } => {
+                let path = staging.join(ENV_FILE);
+                let mut existing = fs::read_to_string(&path).unwrap_or_default();
+                existing.push_str(&format!("{name}={value}\n"));
+                write_file(&path, existing.as_bytes())
+            }
             ProjectionItem::Shim {
                 name,
                 capsule,
@@ -506,6 +519,9 @@ fn validate(staging: &Path, plans: &[ProjectionPlan]) -> Result<()> {
         let root = staging.join(plan_root(&plan.target));
         for item in &plan.items {
             let path = match item {
+                // An env var lands in the generation's `env` manifest, not at a
+                // destination of its own.
+                ProjectionItem::Env { .. } => staging.join(ENV_FILE),
                 ProjectionItem::Shim { name, .. } => staging.join("bin").join(name),
                 _ => match item.destination() {
                     Some(destination) => root.join(destination),
