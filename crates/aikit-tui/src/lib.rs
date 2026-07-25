@@ -60,6 +60,7 @@ pub mod scope;
 pub mod search;
 pub mod staging;
 pub mod theme;
+pub mod tree;
 
 pub mod driver;
 
