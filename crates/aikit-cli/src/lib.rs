@@ -13,13 +13,16 @@
 
 pub mod app;
 pub mod cli;
+pub mod client;
 pub mod collate;
 pub mod discover;
+pub mod doctor;
 pub mod foreign;
 pub mod hook;
 pub mod json;
 pub mod jump;
 pub mod multicall;
+pub mod mux_install;
 pub mod run;
 pub mod task;
 pub mod ui;

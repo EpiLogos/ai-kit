@@ -139,6 +139,27 @@ pub struct SessionRequest {
     pub spec: Option<String>,
 }
 
+/// What a running session differs from its spec in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionDiffOutcome {
+    pub session: String,
+    pub mux: String,
+    pub differences: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// What a reconcile changed, and what it deliberately left alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionReconcileOutcome {
+    pub session: String,
+    pub mux: String,
+    pub actions: Vec<String>,
+    /// Panes left as they were, with the reason — a hand-split pane is somebody's
+    /// work, not drift to be corrected.
+    pub preserved: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionResult {
     pub summary: String,
@@ -239,6 +260,156 @@ impl Service {
             view,
             invocation_cwd: cwd.to_path_buf(),
         })
+    }
+
+    /// What a running session differs from its spec in.
+    ///
+    /// Read-only: it compares and reports. Changing a live session is
+    /// `reconcile`, which is a separate verb precisely so a diff can be run
+    /// without wondering whether it moved anything.
+    pub fn session_diff(&self, session: Option<&str>) -> Result<SessionDiffOutcome> {
+        use aikit_adapters::mux::{tmux::Tmux, MuxAdapter, ReconcileMode};
+        let tmux = Tmux::system();
+        let presence = tmux.detect()?;
+        let name = self.session_name(session)?;
+
+        if !presence.installed {
+            return Ok(SessionDiffOutcome {
+                session: name,
+                mux: "none".into(),
+                differences: vec![],
+                warnings: vec!["no multiplexer is installed, so there is nothing to compare against"
+                    .to_string()],
+            });
+        }
+        if !tmux.has_session(&name)? {
+            return Ok(SessionDiffOutcome {
+                session: name.clone(),
+                mux: "tmux".into(),
+                differences: vec![format!("session `{name}` is not running")],
+                warnings: vec![],
+            });
+        }
+
+        // Compare by asking for a non-destructive reconcile plan and reading what
+        // it would preserve versus change, rather than duplicating tmux's model.
+        let plan = self.session_plan(session)?;
+        let binding = tmux.ensure_session(&plan, ReconcileMode::CreateOrAttach)?;
+        Ok(SessionDiffOutcome {
+            session: name,
+            mux: "tmux".into(),
+            differences: binding.actions.clone(),
+            warnings: binding.warnings,
+        })
+    }
+
+    /// Bring a running session towards its spec.
+    pub fn session_reconcile(
+        &self,
+        session: Option<&str>,
+        destructive: bool,
+    ) -> Result<SessionReconcileOutcome> {
+        use aikit_adapters::mux::{tmux::Tmux, MuxAdapter, ReconcileMode};
+        let tmux = Tmux::system();
+        if !tmux.detect()?.installed {
+            return Err(AikitError::new(
+                "mux.none_detected",
+                "no multiplexer is installed, so there is no session to reconcile",
+            ));
+        }
+        let plan = self.session_plan(session)?;
+        // Non-destructive unless asked: the default may only ever ADD, so a
+        // reconcile can never close the pane somebody is working in.
+        let mode = if destructive {
+            ReconcileMode::Exact
+        } else {
+            ReconcileMode::CreateOrAttach
+        };
+        let binding = tmux.ensure_session(&plan, mode)?;
+        Ok(SessionReconcileOutcome {
+            session: binding.session.clone(),
+            mux: "tmux".into(),
+            actions: binding.actions,
+            preserved: binding.preserved,
+            warnings: binding.warnings,
+        })
+    }
+
+    /// The session name a command is talking about.
+    fn session_name(&self, session: Option<&str>) -> Result<String> {
+        match session {
+            Some(name) => Ok(name.to_string()),
+            None => self
+                .descriptor
+                .project_root
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .ok_or_else(|| {
+                    AikitError::new(
+                        "session.unnamed",
+                        "no session was named and the working directory is not inside a project",
+                    )
+                }),
+        }
+    }
+
+    /// The compiled topology for a session: a `session` capsule if one is active,
+    /// else a single-pane plan named for the project.
+    fn session_plan(&self, session: Option<&str>) -> Result<aikit_core::SessionPlan> {
+        use aikit_core::session::SessionSpec;
+        let name = self.session_name(session)?;
+
+        // Prefer a real session capsule when the context has one active.
+        for capability in self.view.active_of_kind(Kind::Session) {
+            if let Some(capsule) = self.catalog.get(&capability.id) {
+                if let (Some(section), Some(root)) = (capsule.session(), capsule.root.as_ref()) {
+                    let path = root.join(&section.spec);
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        return SessionSpec::from_toml_str(&text)?.compile();
+                    }
+                }
+            }
+        }
+
+        SessionSpec::from_toml_str(&format!(
+            "schema = 1\nid = \"{name}\"\nname = \"{name}\"\n\n[[views]]\nid = \"main\"\n[[views.panes]]\nid = \"shell\"\n"
+        ))?
+        .compile()
+    }
+
+    /// The AIKit home, for commands that plan Procedures or reach the inbox.
+    pub fn home(&self) -> &AikitHome {
+        &self.home
+    }
+
+    /// Where this context's client projections are materialised.
+    pub fn context_projection_root(&self) -> PathBuf {
+        self.home.context_dir(&self.descriptor.context_id)
+    }
+
+    /// Reference a profile from a scope's declaration and apply.
+    ///
+    /// Writing the reference and re-resolving are one act: a declaration that is
+    /// written but never resolved would leave `status` disagreeing with the file.
+    pub fn use_profile(
+        &mut self,
+        profile: &aikit_core::id::ProfileId,
+        scope: ScopeKind,
+    ) -> Result<AppliedGeneration> {
+        {
+            let mut writer = self.scope_document(scope)?;
+            writer.use_profile(profile);
+            writer.save()?;
+        }
+        AikitApplication::apply(
+            self,
+            ApplyRequest {
+                scope,
+                toggles: vec![],
+                label: None,
+            },
+        )
     }
 
     /// The operational index, for commands that read or write the store's own
@@ -503,6 +674,13 @@ impl ScopeWriter {
                     }
                 }
             }
+        }
+    }
+
+    fn use_profile(&mut self, profile: &aikit_core::id::ProfileId) {
+        match self {
+            ScopeWriter::Overlay(doc) => doc.use_profile(profile),
+            ScopeWriter::Profile(doc) => doc.use_profile(profile),
         }
     }
 

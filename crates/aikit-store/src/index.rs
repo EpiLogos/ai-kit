@@ -914,6 +914,33 @@ impl Index {
         Ok(out)
     }
 
+    /// Revoke an open bypass token: it is marked spent without ever having been
+    /// used.
+    ///
+    /// Deliberately the same column as spending, because the security question is
+    /// "can this token still let something through" and the answer must be no in
+    /// both cases. The distinction that matters for audit is *why* it stopped being
+    /// usable, and that lives in the event log, not in a second flag here.
+    /// Revoking an unknown or already-closed token is an error rather than a silent
+    /// success — a user who mistypes an id must not be told the bypass is gone.
+    pub fn revoke_bypass(&self, bypass_id: &str) -> Result<()> {
+        let changed = self
+            .conn()
+            .execute(
+                "UPDATE bypasses SET spent = 1 WHERE bypass_id = ?1 AND spent = 0",
+                rusqlite::params![bypass_id],
+            )
+            .map_err(|e| sql_error("bypass.write_failed", &e))?;
+        if changed == 0 {
+            return Err(AikitError::new(
+                "bypass.unknown",
+                format!("no open bypass `{bypass_id}`; it may already have been spent or revoked"),
+            )
+            .with("bypass_id", bypass_id.to_string()));
+        }
+        Ok(())
+    }
+
     pub fn spend_bypass(&self, bypass_id: &str) -> Result<()> {
         self.conn
             .execute(

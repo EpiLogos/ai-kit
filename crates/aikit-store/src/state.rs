@@ -348,6 +348,24 @@ impl<'a> StateStore<'a> {
         self.index.put_binding(binding)
     }
 
+    /// Forget a context's multiplexer binding.
+    ///
+    /// The context and its generations survive: a binding says "this context is
+    /// currently showing in that pane", and losing the pane is not losing the
+    /// context. Returns whether there was one to forget, so a caller can say
+    /// "nothing was bound" rather than implying it removed something.
+    pub fn unbind_context(&self, context: &ContextId) -> Result<bool> {
+        let changed = self
+            .index
+            .conn()
+            .execute(
+                "DELETE FROM context_bindings WHERE context_id = ?1",
+                rusqlite::params![context.as_str()],
+            )
+            .map_err(|e| crate::index::sql_error("state.write_failed", &e))?;
+        Ok(changed > 0)
+    }
+
     pub fn bindings(&self) -> Result<Vec<ContextBinding>> {
         self.index.bindings()
     }

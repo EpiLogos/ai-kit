@@ -288,3 +288,55 @@ fn git(cwd: &Path, args: &[&str]) -> Result<GitOutput> {
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     })
 }
+
+/// One task as it exists on disk right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSummary {
+    pub name: String,
+    pub isolation: Isolation,
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    /// Whether an isolated tree has uncommitted work. `false` for a shared task,
+    /// which has no tree of its own to be dirty.
+    pub dirty: bool,
+}
+
+/// Every task with a tree of its own under `repo`.
+///
+/// A **shared** task — the default — leaves no directory behind by design, so it
+/// cannot be listed from the filesystem and does not appear here. Reporting only
+/// what can actually be observed is the honest answer; inventing rows for tasks
+/// that left no trace would be worse than a short list.
+pub fn list(repo: &Path) -> Result<Vec<TaskSummary>> {
+    let root = repo.join(".aikit").join("tasks");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let isolation = if path.join(".git").exists() {
+            Isolation::Worktree
+        } else {
+            Isolation::Directory
+        };
+        let dirty = isolation == Isolation::Worktree
+            && !worktree_blockers(&path).unwrap_or_default().is_empty();
+        out.push(TaskSummary {
+            name: name.to_string(),
+            isolation,
+            path: path.clone(),
+            branch: (isolation == Isolation::Worktree).then(|| branch_name(name)),
+            dirty,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}

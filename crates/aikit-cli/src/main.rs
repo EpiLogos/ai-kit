@@ -170,12 +170,19 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Session(c)) => cmd_session(cwd, c),
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
         Some(Command::Inbox(a)) => cmd_inbox(cwd, a),
+        Some(Command::Capture(a)) => cmd_capture(cwd, a),
+        Some(Command::Diff(_)) => cmd_diff(cwd),
+        Some(Command::Doctor(a)) => cmd_doctor(cwd, a),
+        Some(Command::Use(a)) => cmd_use(cwd, a),
+        Some(Command::Recent(a)) => cmd_recent(cwd, a.limit),
+        Some(Command::Failures(a)) => cmd_failures(cwd, a.limit),
+        Some(Command::Stats(_)) => cmd_stats(cwd),
+        Some(Command::Unused(_)) => cmd_unused(cwd),
+        Some(Command::Jobs(_)) => cmd_jobs(cwd),
+        Some(Command::Log(c)) => cmd_log(cwd, c),
+        Some(Command::Client(c)) => cmd_client(cwd, c),
+        Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
-
-        // Real, but delegated to modules whose full wiring is the integration
-        // phase's job. Returning a clear, stable code is more honest than a
-        // half-working stub that pretends to have done the work.
-        Some(other) => Err(not_implemented(command_name(&other))),
     }
 }
 
@@ -580,7 +587,89 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
             });
             Ok(reply(&service, data, vec![]))
         }
-        _ => Err(not_implemented("context")),
+        ContextSub::List(_) => {
+            use aikit_store::state::StateStore;
+            let store = StateStore::new(service.index());
+            let bindings = store.bindings()?;
+            let rows: Vec<Value> = store
+                .contexts()?
+                .into_iter()
+                .map(|c| {
+                    let bound = bindings.iter().find(|b| b.context_id == c.context_id);
+                    jval!({
+                        "context_id": c.context_id.to_string(),
+                        "session_id": c.session_id.as_ref().map(|s| s.to_string()),
+                        "project_root": c.project_root.as_ref().map(|p| p.display().to_string()),
+                        "task": c.task,
+                        "isolation": c.isolation.as_str(),
+                        "current": c.context_id == service.descriptor().context_id,
+                        "bound_to": bound.map(|b| jval!({
+                            "mux": b.mux.as_str(),
+                            "mux_session": b.mux_session,
+                            "mux_surface": b.mux_surface,
+                        })),
+                    })
+                })
+                .collect();
+            Ok(reply(&service, jval!({ "contexts": rows }), vec![]))
+        }
+        ContextSub::Bind(a) => {
+            use aikit_adapters::mux::{plain::Plain, tmux::Tmux, MuxAdapter};
+            use aikit_core::context::ContextBinding;
+            use aikit_store::state::StateStore;
+
+            let descriptor = service.descriptor();
+            // Ask the real multiplexer where we are rather than accepting a claim:
+            // a binding that says "pane %7" when the pane is gone is worse than none.
+            let tmux = Tmux::system();
+            let location = if tmux.detect().map(|p| p.inside).unwrap_or(false) {
+                tmux.current_location()?
+            } else {
+                Plain::new().current_location()?
+            };
+
+            let session = match a.session.as_deref() {
+                Some(raw) => aikit_core::SessionId::parse(raw)?,
+                None => descriptor.session_id.clone().ok_or_else(|| {
+                    AikitError::new(
+                        "context.no_session",
+                        "this context has no AIKit session; pass --session to name one",
+                    )
+                })?,
+            };
+
+            let binding = ContextBinding {
+                context_id: descriptor.context_id.clone(),
+                session_id: session,
+                mux: location.kind,
+                mux_session: location.session.clone(),
+                mux_surface: location.surface.clone(),
+                project_root: descriptor.project_root.clone(),
+                isolation: descriptor.isolation,
+            };
+            StateStore::new(service.index()).bind_context(&binding)?;
+
+            let data = jval!({
+                "context_id": binding.context_id.to_string(),
+                "session_id": binding.session_id.to_string(),
+                "mux": binding.mux.as_str(),
+                "mux_session": binding.mux_session,
+                "mux_surface": binding.mux_surface,
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+        ContextSub::Reset(_) => {
+            use aikit_store::state::StateStore;
+            // Forgetting a binding is not forgetting the context: the generations,
+            // the overlay and the history all survive.
+            let forgotten =
+                StateStore::new(service.index()).unbind_context(&service.descriptor().context_id)?;
+            let data = jval!({
+                "context_id": service.descriptor().context_id.to_string(),
+                "forgot_binding": forgotten,
+            });
+            Ok(reply(&service, data, vec![]))
+        }
     }
 }
 
@@ -620,7 +709,22 @@ fn cmd_task(cwd: &std::path::Path, c: TaskCmd) -> Result<Reply> {
             let data = jval!({ "closed": a.name, "forced": a.force, "isolation": kind });
             Ok(reply(&service, data, vec![]))
         }
-        TaskSub::List(_) => Err(not_implemented("task list")),
+        TaskSub::List(_) => {
+            let tasks = task::list(&repo)?;
+            let rows: Vec<Value> = tasks
+                .iter()
+                .map(|t| {
+                    jval!({
+                        "name": t.name,
+                        "isolation": t.isolation.as_str(),
+                        "path": t.path.display().to_string(),
+                        "branch": t.branch,
+                        "dirty": t.dirty,
+                    })
+                })
+                .collect();
+            Ok(reply(&service, jval!({ "tasks": rows, "count": rows.len() }), vec![]))
+        }
     }
 }
 
@@ -644,7 +748,11 @@ fn cmd_bypass(cwd: &std::path::Path, c: BypassCmd) -> Result<Reply> {
             Ok(reply(&service, data, vec![]))
         }
         BypassSub::List(_) => cmd_bypasses(cwd),
-        BypassSub::Revoke(_) => Err(not_implemented("bypass revoke")),
+        BypassSub::Revoke(a) => {
+            service.index().revoke_bypass(&a.id)?;
+            let data = jval!({ "bypass_id": a.id, "revoked": true });
+            Ok(reply(&service, data, vec![]))
+        }
     }
 }
 
@@ -714,8 +822,88 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
             let data = jval!({ "summary": result.summary });
             Ok(reply(&service, data, result.warnings))
         }
-        _ => Err(not_implemented("session")),
+        SessionSub::List(_) => {
+            use aikit_store::state::StateStore;
+            let rows: Vec<Value> = StateStore::new(service.index())
+                .sessions()?
+                .into_iter()
+                .map(|s| {
+                    jval!({
+                        "session_id": s.session_id.to_string(),
+                        "name": s.name,
+                        "project_root": s.project_root.as_ref().map(|p| p.display().to_string()),
+                        "mux": s.mux.as_str(),
+                        "mux_session": s.mux_session,
+                        "state": s.state.as_str(),
+                        "last_seen": s.last_seen.to_string(),
+                    })
+                })
+                .collect();
+            Ok(reply(&service, jval!({ "sessions": rows, "count": rows.len() }), vec![]))
+        }
+        SessionSub::Attach(a) => {
+            let (argv, mux) = session_argv(&service, &a.session, "attach")?;
+            let data = jval!({ "session": a.session, "mux": mux, "command": argv });
+            Ok(reply(&service, data, vec![]))
+        }
+        SessionSub::Diff(a) => {
+            let outcome = service.session_diff(a.session.as_deref())?;
+            let data = jval!({
+                "session": outcome.session,
+                "mux": outcome.mux,
+                "matches_spec": outcome.differences.is_empty(),
+                "differences": outcome.differences,
+            });
+            Ok(reply(&service, data, outcome.warnings))
+        }
+        SessionSub::Reconcile(a) => {
+            let outcome = service.session_reconcile(a.session.as_deref(), a.destructive)?;
+            let data = jval!({
+                "session": outcome.session,
+                "mux": outcome.mux,
+                "destructive": a.destructive,
+                "actions": outcome.actions,
+                "preserved": outcome.preserved,
+            });
+            Ok(reply(&service, data, outcome.warnings))
+        }
+        SessionSub::Down(a) => {
+            let (argv, mux) = session_argv(&service, &a.session, "kill")?;
+            let data = jval!({
+                "session": a.session,
+                "mux": mux,
+                "command": argv,
+                "note": "AIKit prints the teardown command rather than running it: closing a \
+                         session can discard work in a pane AIKit never started",
+            });
+            Ok(reply(&service, data, vec![]))
+        }
     }
+}
+
+/// The argv that attaches to or tears down a session in whichever multiplexer is
+/// actually present.
+///
+/// AIKit prints these rather than running them: attaching replaces the current
+/// process, and tearing down can discard work in a pane AIKit never started.
+/// Handing the user the exact command keeps both decisions theirs.
+fn session_argv(service: &Service, session: &str, verb: &str) -> Result<(Vec<String>, String)> {
+    use aikit_adapters::mux::{tmux::Tmux, MuxAdapter};
+    let tmux = Tmux::system();
+    let present = tmux.detect().map(|p| p.installed).unwrap_or(false);
+    if !present {
+        return Err(AikitError::new(
+            "mux.none_detected",
+            format!("no multiplexer is available to {verb} `{session}`"),
+        )
+        .with("session", session.to_string()));
+    }
+    let _ = service;
+    let argv = match verb {
+        "attach" => vec!["tmux".into(), "attach-session".into(), "-t".into(), session.to_string()],
+        _ => vec!["tmux".into(), "kill-session".into(), "-t".into(), session.to_string()],
+    };
+    Ok((argv, "tmux".to_string()))
 }
 
 /// `aikit inbox` — list the messages the system and agents have addressed to the
@@ -757,6 +945,389 @@ fn cmd_promote(cwd: &std::path::Path, a: PromoteArgs) -> Result<Reply> {
         "manifest": promoted.manifest_path.display().to_string(),
     });
     Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit capture` — put something observed into the inbox, scanned first.
+fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
+    use aikit_store::inbox::{Capture, Inbox};
+    let service = Service::discover(cwd)?;
+
+    let body = match a.body {
+        Some(text) => text,
+        None => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                AikitError::new("cli.stdin_unreadable", format!("could not read stdin: {e}"))
+            })?;
+            buf
+        }
+    };
+    if body.trim().is_empty() {
+        return Err(AikitError::new(
+            "cli.usage",
+            "nothing to capture; pass --body or pipe the text in",
+        ));
+    }
+
+    let inbox = Inbox::new(service.home(), service.index());
+    let capture = Capture {
+        title: a.title,
+        body,
+        suggested_kind: None,
+        exports: vec![],
+        project_root: service.descriptor().project_root.clone(),
+        session: service.descriptor().session_id.clone(),
+    };
+    // Scanned before storage, never before display: a secret must not reach a file.
+    let outcome = inbox.capture_against(capture, service.snapshot())?;
+
+    let data = jval!({
+        "candidate": outcome.candidate.id,
+        "kind": outcome.candidate.kind.as_str(),
+        "state": outcome.candidate.state.as_str(),
+        "quarantined": outcome.candidate.state == aikit_store::inbox::CandidateState::Quarantined,
+        "findings": outcome.candidate.findings.iter().map(|f| jval!({
+            "rule": f.rule, "preview": f.preview,
+        })).collect::<Vec<_>>(),
+        "duplicate_of": outcome.duplicate_of,
+        "similar": outcome.similar.iter().map(|s| jval!({
+            "other": s.other, "percentage": s.percentage, "summary": s.summary,
+        })).collect::<Vec<_>>(),
+    });
+    Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit diff` — what applying the current declarations would change.
+///
+/// Diff before write, always (STANDARDS §5). This is the same staging path the
+/// palette previews with, so the two can never disagree.
+fn cmd_diff(cwd: &std::path::Path) -> Result<Reply> {
+    use aikit_cli::app::StageRequest;
+    let service = Service::discover(cwd)?;
+    let scope = service.descriptor().default_mutation_scope();
+    let staged = service.stage(StageRequest { scope, toggles: vec![] })?;
+
+    let clean = staged.added_dependencies.is_empty()
+        && staged.dropped_dependencies.is_empty()
+        && staged.still_unavailable.is_empty();
+    let data = jval!({
+        "scope": scope.as_str(),
+        "clean": clean,
+        // Dependencies that would come or go without being asked for: the part of
+        // an apply a user does not see coming, so it leads.
+        "would_add": staged.added_dependencies.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+        "would_drop": staged.dropped_dependencies.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+        "still_unavailable": staged.still_unavailable.iter().map(|(c, why)| jval!({
+            "capability": c.to_string(),
+            "reason": why,
+        })).collect::<Vec<_>>(),
+        "effects": staged.client_effects.iter().map(|e| jval!({
+            "target": e.target.as_str(),
+            "effect": e.effect.describe(),
+        })).collect::<Vec<_>>(),
+        "active_after": staged.projected.active.len(),
+    });
+    Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit doctor` — the health checks, and with `--fix`, a diff-first Procedure.
+fn cmd_doctor(cwd: &std::path::Path, a: DoctorArgs) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let findings = aikit_cli::doctor::run(&service)?;
+
+    let rows: Vec<Value> = findings
+        .iter()
+        .map(|f| {
+            jval!({
+                "check": f.check,
+                "severity": f.severity.as_str(),
+                "summary": f.summary,
+                "detail": f.detail,
+                "fixable": f.fix.is_some(),
+            })
+        })
+        .collect();
+
+    if !a.fix {
+        let data = jval!({
+            "findings": rows,
+            "count": findings.len(),
+            "fixable": findings.iter().filter(|f| f.fix.is_some()).count(),
+        });
+        return Ok(reply(&service, data, vec![]));
+    }
+
+    // --fix is diff-first: the plan is shown before anything is written, and the
+    // confirmation is explicit. `--yes` answers it in advance for a non-interactive
+    // caller; it does not skip the plan.
+    let plan = aikit_cli::doctor::plan_fixes(&service, &findings)?;
+    let Some(procedure) = plan else {
+        let data = jval!({ "findings": rows, "fixed": 0, "note": "nothing here is automatically fixable" });
+        return Ok(reply(&service, data, vec![]));
+    };
+
+    let runner = aikit_store::procedure::ProcedureRunner::new(service.home());
+    let diff = runner.diff(&procedure)?;
+    if !a.yes {
+        let data = jval!({
+            "findings": rows,
+            "would_fix": diff.edits.len(),
+            "diff": diff.render(),
+            "applied": false,
+            "note": "re-run with --yes to apply this plan",
+        });
+        return Ok(reply(&service, data, vec![]));
+    }
+
+    let outcome = runner.run(&procedure)?;
+    let data = jval!({
+        "findings": rows,
+        "procedure": procedure.id.to_string(),
+        "applied": true,
+        "edits": outcome.applied,
+        "undo": format!("aikit procedure undo {}", procedure.id),
+    });
+    Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit use <profile>` — reference a profile from a scope's declaration.
+fn cmd_use(cwd: &std::path::Path, a: UseArgs) -> Result<Reply> {
+    use aikit_core::id::ProfileId;
+    let mut service = Service::discover(cwd)?;
+    let profile = ProfileId::parse(&a.profile)?;
+    let scope = resolve_scope(&service, a.scope.as_deref())?;
+
+    // Refuse a profile that does not exist rather than writing a declaration that
+    // will fail to resolve on the next command.
+    if aikit_core::catalog::Catalog::profile(service.snapshot(), &profile).is_none() {
+        return Err(AikitError::new(
+            "resolution.unknown_profile",
+            format!("{profile} is not in any registry"),
+        )
+        .with("profile", profile.to_string()));
+    }
+
+    let applied = service.use_profile(&profile, scope)?;
+    let data = jval!({
+        "profile": profile.to_string(),
+        "scope": scope.as_str(),
+        "generation": applied.id.to_string(),
+        "replaced": applied.replaced.as_ref().map(|g| g.to_string()),
+    });
+    Ok(reply(&service, data, applied.warnings))
+}
+
+/// `aikit recent` — recently run invocations, newest first.
+fn cmd_recent(cwd: &std::path::Path, limit: u32) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let rows: Vec<Value> = service
+        .index()
+        .recent_events(limit)?
+        .into_iter()
+        .map(event_json)
+        .collect();
+    Ok(reply(&service, jval!({ "events": rows, "count": rows.len() }), vec![]))
+}
+
+/// `aikit failures` — recent hook and run failures, and denials.
+///
+/// A system failure and a policy denial are never conflated (ARCHITECTURE §8), so
+/// each row says which it was.
+fn cmd_failures(cwd: &std::path::Path, limit: u32) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    // Over-fetch, then keep the ones that went wrong: the event log is a single
+    // stream and failures are the minority.
+    let rows: Vec<Value> = service
+        .index()
+        .recent_events(limit.saturating_mul(10).max(limit))?
+        .into_iter()
+        .filter(|e| !e.outcome.is_success())
+        .take(limit as usize)
+        .map(event_json)
+        .collect();
+    Ok(reply(&service, jval!({ "failures": rows, "count": rows.len() }), vec![]))
+}
+
+fn event_json(e: aikit_store::index::EventSummary) -> Value {
+    jval!({
+        "event_id": e.event_id,
+        "at": e.timestamp.to_string(),
+        "action": e.action.as_str(),
+        "capability": e.capsule.as_ref().map(|c| c.to_string()),
+        "outcome": e.outcome.label(),
+        "detail": e.outcome.detail(),
+        "bypass_reason": e.bypass_reason,
+    })
+}
+
+/// `aikit stats` — what is catalogued, and what actually gets used.
+fn cmd_stats(cwd: &std::path::Path) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let index = service.index();
+    let facets = index.facets()?;
+    let view = service.resolved();
+
+    let mut used = 0usize;
+    let mut runs = 0u32;
+    for row in index.capsules()? {
+        let usage = index.usage(&row.id)?;
+        if usage.successful_runs > 0 {
+            used += 1;
+        }
+        runs += usage.successful_runs;
+    }
+
+    let data = jval!({
+        "catalogued": view.catalog_index.len(),
+        "active": view.active.len(),
+        "unavailable": view.unavailable.len(),
+        "ever_used": used,
+        "successful_runs": runs,
+        "events": index.event_count()?,
+        "by_kind": facets.kinds.iter().map(|(k, n)| jval!({ "kind": k.as_str(), "count": n })).collect::<Vec<_>>(),
+        "by_source": facets.sources.iter().map(|(s, n)| jval!({ "source": s, "count": n })).collect::<Vec<_>>(),
+    });
+    Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit unused` — catalogued but never successfully used.
+///
+/// Usage suggests; it never promotes and never archives. This is a list to read,
+/// not a list something acts on.
+fn cmd_unused(cwd: &std::path::Path) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let index = service.index();
+    let mut rows: Vec<Value> = Vec::new();
+    for row in index.capsules()? {
+        let usage = index.usage(&row.id)?;
+        if usage.successful_runs == 0 {
+            rows.push(jval!({
+                "capability": row.id.to_string(),
+                "kind": row.kind.as_str(),
+                "name": row.name,
+                "failed_runs": usage.failed_runs,
+                "active": service.resolved().is_active(&row.id),
+            }));
+        }
+    }
+    Ok(reply(&service, jval!({ "unused": rows, "count": rows.len() }), vec![]))
+}
+
+/// `aikit jobs` — background invocations AIKit started and has not seen finish.
+///
+/// There is no daemon, so a "job" is a recorded background run with no completion
+/// event. Reporting that honestly beats inventing a process table.
+fn cmd_jobs(cwd: &std::path::Path) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let rows: Vec<Value> = service
+        .index()
+        .recent_events(200)?
+        .into_iter()
+        .filter(|e| matches!(e.outcome, aikit_store::events::Outcome::Skipped { .. }))
+        .map(event_json)
+        .collect();
+    let data = jval!({
+        "jobs": rows,
+        "count": rows.len(),
+        "note": "AIKit runs no daemon; a job is a recorded background run awaiting its completion event",
+    });
+    Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit log export` — the event log as JSON lines.
+fn cmd_log(cwd: &std::path::Path, c: LogCmd) -> Result<Reply> {
+    let LogSub::Export(a) = c.command;
+    let service = Service::discover(cwd)?;
+    // The envelope is the contract for `--json` on every substantive command
+    // (STANDARDS §5), so the events ride inside it rather than bypassing it as
+    // bare JSON lines. Anything wanting raw JSONL pipes `.data.events[]` out.
+    let events: Vec<Value> = service
+        .index()
+        .recent_events(a.limit)?
+        .into_iter()
+        .map(event_json)
+        .collect();
+    let data = jval!({ "events": events, "count": events.len(), "limit": a.limit });
+    Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit client install|launch|status`.
+fn cmd_client(cwd: &std::path::Path, c: ClientCmd) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    match c.command {
+        ClientSub::Install(a) => {
+            // Installing a client's dispatcher entries writes outside AIKit's own
+            // state, so it is a Procedure: planned, diffed, reversible.
+            let procedure = aikit_cli::client::plan_install(&service, &a.client)?;
+            let runner = aikit_store::procedure::ProcedureRunner::new(service.home());
+            let diff = runner.diff(&procedure)?;
+            let outcome = runner.run(&procedure)?;
+            let data = jval!({
+                "client": a.client,
+                "procedure": procedure.id.to_string(),
+                "edits": outcome.applied,
+                "diff": diff.render(),
+                "undo": format!("aikit procedure undo {}", procedure.id),
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+        ClientSub::Launch(a) => {
+            let argv = aikit_cli::client::launch_command(&service, &a.client)?;
+            let data = jval!({ "client": a.client, "command": argv });
+            Ok(reply(&service, data, vec![]))
+        }
+        ClientSub::Status(a) => {
+            let rows = aikit_cli::client::status(&service, a.client.as_deref())?;
+            Ok(reply(&service, jval!({ "clients": rows }), vec![]))
+        }
+    }
+}
+
+/// `aikit mux install|detect`.
+fn cmd_mux(cwd: &std::path::Path, c: MuxCmd) -> Result<Reply> {
+    use aikit_adapters::mux::{cmux::Cmux, plain::Plain, tmux::Tmux, MuxAdapter};
+    let service = Service::discover(cwd)?;
+    match c.command {
+        MuxSub::Detect(_) => {
+            let mut rows = Vec::new();
+            for presence in [
+                Tmux::system().detect(),
+                Cmux::system().detect(),
+                Plain::new().detect(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                rows.push(jval!({
+                    "mux": presence.kind.as_str(),
+                    "installed": presence.installed,
+                    "version": presence.version,
+                    "server_running": presence.server_running,
+                    "inside": presence.inside,
+                    "detail": presence.detail,
+                }));
+            }
+            let data = jval!({
+                "detected": rows,
+                "active": service.descriptor().mux.map(|m| m.as_str()),
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+        MuxSub::Install(a) => {
+            let procedure = aikit_cli::mux_install::plan(&service, a.mux.as_deref())?;
+            let runner = aikit_store::procedure::ProcedureRunner::new(service.home());
+            let diff = runner.diff(&procedure)?;
+            let outcome = runner.run(&procedure)?;
+            let data = jval!({
+                "procedure": procedure.id.to_string(),
+                "edits": outcome.applied,
+                "diff": diff.render(),
+                "undo": format!("aikit procedure undo {}", procedure.id),
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+    }
 }
 
 fn cmd_shell(c: ShellCmd) -> Result<Reply> {
@@ -822,50 +1393,3 @@ fn read_stdin_json() -> Value {
     }
 }
 
-fn not_implemented(command: &str) -> AikitError {
-    AikitError::new(
-        "command.not_implemented",
-        format!("`{command}` is recognised but not wired up in this build"),
-    )
-    .with("command", command.to_string())
-}
-
-fn command_name(command: &Command) -> &'static str {
-    match command {
-        Command::Init(_) => "init",
-        Command::Collate(_) => "collate",
-        Command::Z(_) => "z",
-        Command::Ui(_) => "ui",
-        Command::Search(_) => "search",
-        Command::Status(_) => "status",
-        Command::Explain(_) => "explain",
-        Command::Diff(_) => "diff",
-        Command::Doctor(_) => "doctor",
-        Command::Run(_) => "run",
-        Command::Enable(_) => "enable",
-        Command::Disable(_) => "disable",
-        Command::Use(_) => "use",
-        Command::Apply(_) => "apply",
-        Command::Rollback(_) => "rollback",
-        Command::Context(_) => "context",
-        Command::Session(_) => "session",
-        Command::Task(_) => "task",
-        Command::Inbox(_) => "inbox",
-        Command::Capture(_) => "capture",
-        Command::Promote(_) => "promote",
-        Command::Prune(_) => "prune",
-        Command::Bypass(_) => "bypass",
-        Command::Client(_) => "client",
-        Command::Mux(_) => "mux",
-        Command::Hook(_) => "hook",
-        Command::Capabilities(_) => "capabilities",
-        Command::Jobs(_) => "jobs",
-        Command::Recent(_) => "recent",
-        Command::Stats(_) => "stats",
-        Command::Log(_) => "log",
-        Command::Shell(_) => "shell",
-        Command::Unused(_) => "unused",
-        Command::Failures(_) => "failures",
-        Command::Bypasses(_) => "bypasses",
-    }
-}

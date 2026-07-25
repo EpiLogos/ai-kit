@@ -98,6 +98,19 @@ impl MutationIsolation {
 pub struct BlobId(String);
 
 impl BlobId {
+    /// A blob whose identity the **runner** assigns when it actually backs the
+    /// file up.
+    ///
+    /// A planner cannot know this: whether a `WriteFile` overwrites something, and
+    /// therefore what has to be preserved, is a fact about the filesystem at stage
+    /// time, not at plan time. `ProcedureRunner` inspects the target and records
+    /// the real `UndoStep` — `Recreate` for a symlink, `Remove` for a new file,
+    /// `Restore` with a freshly-written blob for an overwrite. Declaring this makes
+    /// the deferral explicit instead of leaving a placeholder that reads as a bug.
+    pub fn deferred() -> Self {
+        Self("deferred".to_string())
+    }
+
     pub fn new(raw: impl Into<String>) -> Self {
         Self(raw.into())
     }
