@@ -38,6 +38,8 @@ pub struct Cli {
 pub enum Command {
     /// Discover the foreign skill roots already on this machine and show them.
     Init(InitArgs),
+    /// Survey the skill trees on this machine: which version is running, where.
+    Collate(CollateArgs),
     /// Open the palette (the default when no subcommand is given).
     Ui(UiArgs),
     /// Search the catalogue for capabilities.
@@ -107,6 +109,16 @@ pub enum Command {
 // ---------------------------------------------------------------------------
 // Leaf command arguments
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct CollateArgs {
+    /// An additional skill root to survey, beyond the well-known ones. Repeatable.
+    #[arg(long = "root", value_name = "DIR")]
+    pub roots: Vec<std::path::PathBuf>,
+    /// Show every name, not only the ones needing a decision.
+    #[arg(long)]
+    pub all: bool,
+}
 
 #[derive(Debug, Args)]
 pub struct InitArgs {

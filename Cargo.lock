@@ -34,6 +34,7 @@ dependencies = [
  "aikit-store",
  "aikit-tui",
  "assert_cmd",
+ "blake3",
  "clap",
  "jiff",
  "predicates",
@@ -44,6 +45,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "toml",
+ "walkdir",
 ]
 
 [[package]]

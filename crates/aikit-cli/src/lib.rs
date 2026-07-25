@@ -13,6 +13,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod collate;
 pub mod discover;
 pub mod foreign;
 pub mod hook;

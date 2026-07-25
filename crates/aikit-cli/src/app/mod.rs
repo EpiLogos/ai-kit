@@ -241,6 +241,12 @@ impl Service {
         })
     }
 
+    /// The operational index, for commands that read or write the store's own
+    /// records (the inbox channel, collate's conflict reports).
+    pub fn index(&self) -> &Index {
+        &self.index
+    }
+
     pub fn descriptor(&self) -> &ContextDescriptor {
         &self.descriptor
     }

@@ -145,6 +145,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
     match cli.command {
         None => open_palette(cwd, None, false),
         Some(Command::Init(a)) => cmd_init(cwd, a),
+        Some(Command::Collate(a)) => cmd_collate(cwd, a),
         Some(Command::Ui(a)) => open_palette(cwd, a.query, a.fullscreen),
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
@@ -217,6 +218,83 @@ fn cmd_init(cwd: &std::path::Path, a: InitArgs) -> Result<Reply> {
         "root_count": found.len(),
         "total_skills": total_skills,
         "total_problems": total_problems,
+    });
+    Ok(reply(&service, data, service.load_warnings()))
+}
+
+/// `aikit collate` — survey every skill root on this machine and report which
+/// version of each skill is actually running and where. Read-only: foreign roots
+/// are indexed, never edited. Genuine ambiguities are filed to the inbox as
+/// `VersionConflict` items; byte-identical duplicates are counted, not filed,
+/// because a dedup is not a decision.
+fn cmd_collate(cwd: &std::path::Path, a: CollateArgs) -> Result<Reply> {
+    use aikit_cli::{collate, foreign};
+    let service = Service::discover(cwd)?;
+
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let mut roots: Vec<collate::ForeignRootRef> = foreign::default_roots(&home)
+        .into_iter()
+        .filter(|(_, path)| path.exists())
+        .map(|(label, path)| collate::ForeignRootRef { label, path })
+        .collect();
+    for extra in &a.roots {
+        roots.push(collate::ForeignRootRef {
+            label: extra.file_name().map(|n| format!("@{}", n.to_string_lossy())).unwrap_or_else(|| "@root".into()),
+            path: extra.clone(),
+        });
+    }
+
+    let (report, clusters) = collate::collate(service.index(), &roots)?;
+
+    // Plugin caches keep `<plugin>/<version>/` side by side, which is where the
+    // version conflicts that matter actually live. Surveyed separately because a
+    // plugin declares its own name and version in a manifest (PRIOR-ART #33),
+    // rather than being inferred from a skill's frontmatter.
+    let plugin_roots: Vec<PathBuf> = [".claude/plugins", ".codex/plugins", ".codex", ".agents", ".hermes"]
+        .iter()
+        .map(|r| home.join(r))
+        .filter(|p| p.exists())
+        .collect();
+    let plugins = collate::survey_plugins(&plugin_roots, 6);
+    let plugin_conflicts = collate::plugin_conflicts(plugins.clone());
+    collate::report_plugin_conflicts(service.index(), &plugin_conflicts)?;
+    let interesting: Vec<Value> = clusters
+        .iter()
+        .filter(|c| a.all || c.is_conflict() || c.is_duplicate())
+        .map(|c| {
+            jval!({
+                "name": c.name,
+                "copies": c.observations.len(),
+                "distinct_contents": c.distinct_contents(),
+                "versions": c.versions(),
+                "conflict": c.is_conflict(),
+                "duplicate": c.is_duplicate(),
+                "where": c.observations.iter().map(|o| jval!({
+                    "root": o.root_label,
+                    "path": o.path.display().to_string(),
+                    "version": o.version,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
+    let data = jval!({
+        "roots": report.roots,
+        "skills": report.skills,
+        "names": report.names,
+        "conflicts": report.conflicts,
+        "duplicates": report.duplicates,
+        "clusters": interesting,
+        "plugins": plugins.len(),
+        "plugin_conflicts": plugin_conflicts.iter().map(|c| jval!({
+            "name": c.name,
+            "versions": c.versions(),
+            "installations": c.installations.iter().map(|i| jval!({
+                "version": i.version,
+                "path": i.path.display().to_string(),
+                "skills": i.skills,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
     });
     Ok(reply(&service, data, service.load_warnings()))
 }
@@ -655,6 +733,7 @@ fn not_implemented(command: &str) -> AikitError {
 fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Init(_) => "init",
+        Command::Collate(_) => "collate",
         Command::Ui(_) => "ui",
         Command::Search(_) => "search",
         Command::Status(_) => "status",

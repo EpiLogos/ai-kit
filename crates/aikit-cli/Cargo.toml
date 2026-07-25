@@ -23,6 +23,8 @@ clap = { workspace = true }
 jiff = { workspace = true }
 shell-words = { workspace = true }
 similar = { workspace = true }
+walkdir = { workspace = true }
+blake3 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
