@@ -273,6 +273,42 @@ impl ResolvedView {
         self.active.values().filter(|c| c.kind == kind).collect()
     }
 
+    /// The capabilities related to `id` — "often used with…" — walked from both
+    /// ends and restricted to what is actually catalogued.
+    ///
+    /// The edge is **declared** by an author (never inferred from usage, which
+    /// would make the graph drift and would smuggle back the "usage promotes"
+    /// failure the design refuses), **directed** in the manifest so one author
+    /// states one relationship once, and **surfaced symmetrically** because a user
+    /// asking "what goes with this?" wants an answer at whichever end they are
+    /// standing. An edge pointing at something absent is dropped rather than
+    /// reported: `related` is advisory, so a dangling one is not an error the way a
+    /// dangling `requires` is.
+    ///
+    /// Sorted and deduplicated: the palette and the tree render this directly, and
+    /// a list that reordered between keystrokes would read as a broken UI.
+    pub fn related_to(&self, id: &CapsuleId) -> Vec<CapsuleId> {
+        let mut out: BTreeSet<CapsuleId> = BTreeSet::new();
+
+        // Forward: what this capsule declares.
+        if let Some(entry) = self.catalog_index.get(id) {
+            for related in &entry.related_skills {
+                if related != id && self.catalog_index.contains_key(related) {
+                    out.insert(related.clone());
+                }
+            }
+        }
+
+        // Reverse: what declares this capsule.
+        for (other, entry) in &self.catalog_index {
+            if other != id && entry.related_skills.contains(id) {
+                out.insert(other.clone());
+            }
+        }
+
+        out.into_iter().collect()
+    }
+
     pub fn explain(&self, id: &CapsuleId) -> Option<Explanation> {
         explain::explain(self, id)
     }

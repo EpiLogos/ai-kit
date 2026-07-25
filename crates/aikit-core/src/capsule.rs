@@ -159,6 +159,135 @@ impl Maturity {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Facets: `[metadata.aikit]`
+// ---------------------------------------------------------------------------
+
+/// Who consumes a capability's deliverable.
+///
+/// The classification is by **consumer**, not by whether the user is spoken to:
+/// a grilling interview talks to the user constantly but sharpens the agent's
+/// plan, so it is internal; a chart is for the user to look at, so it is external.
+/// That distinction is worth naming because it is a real mechanical difference —
+/// internal output flows back into the agent's context, external output has to
+/// reach a screen (see [`Surface`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Facing {
+    /// The deliverable feeds the agent's own continued work. The default, because
+    /// most capabilities are of this shape and a manifest should not have to say so.
+    #[default]
+    Internal,
+    /// The deliverable is for the user to look at.
+    External,
+    /// Faces both ways. Shared language is the case this exists for: it aligns the
+    /// agent *and* teaches the user.
+    Both,
+}
+
+impl Facing {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Facing::Internal => "internal",
+            Facing::External => "external",
+            Facing::Both => "both",
+        }
+    }
+
+    /// Whether output from this capability has to reach the user's screen.
+    pub fn shows_the_user(self) -> bool {
+        matches!(self, Facing::External | Facing::Both)
+    }
+}
+
+/// Where an external-facing capability's output lands.
+///
+/// Declared rather than guessed because it genuinely varies, and because the
+/// headless case must report honestly instead of pretending it showed something
+/// (STANDARDS §1: no silent degradation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Surface {
+    /// Renders in a marimo/Jupyter session — the reactive, native home.
+    Notebook,
+    /// Opens a browser tab.
+    Browser,
+    /// Writes a self-contained artifact and reports its path.
+    ArtifactPath,
+}
+
+impl Surface {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Surface::Notebook => "notebook",
+            Surface::Browser => "browser",
+            Surface::ArtifactPath => "artifact-path",
+        }
+    }
+}
+
+/// What kind of shared language a `guidance` capsule carries.
+///
+/// Shared language is the alignment contract between the agent's work and the
+/// user's understanding, so it is worth being able to search and dedup by which
+/// scale it operates at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LanguageFacet {
+    /// Portable across codebases: a glossary, a vocabulary.
+    Vocabulary,
+    /// Per-module, project-scoped: what a caller must know to use this module.
+    ModuleInterface,
+    /// "How I do neo4j" — a portable approach to a subject.
+    Approach,
+}
+
+impl LanguageFacet {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LanguageFacet::Vocabulary => "vocabulary",
+            LanguageFacet::ModuleInterface => "module-interface",
+            LanguageFacet::Approach => "approach",
+        }
+    }
+}
+
+/// The `[metadata.aikit]` facets.
+///
+/// **Facets describe; they never select.** They drive search, presentation,
+/// dedup discipline and surfacing. Part I rule 6 stands unchanged: nothing becomes
+/// active because it carries a facet, exactly as nothing becomes active because it
+/// matches a tag.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Facets {
+    #[serde(default)]
+    pub facing: Facing,
+    #[serde(default)]
+    pub surface: Option<Surface>,
+    #[serde(default)]
+    pub language: Option<LanguageFacet>,
+}
+
+impl Facets {
+    /// Reject the combinations that are contradictions rather than configurations.
+    fn validate(&self, id: &CapsuleId) -> Result<()> {
+        if self.surface.is_some() && !self.facing.shows_the_user() {
+            return Err(AikitError::new(
+                "manifest.invalid_facet",
+                format!(
+                    "`{id}` declares `surface` but is `facing = \"{}\"`: a surface says where \
+                     output reaches the user, which is only meaningful for a capability whose \
+                     deliverable the user looks at",
+                    self.facing.as_str()
+                ),
+            )
+            .with("id", id.to_string()));
+        }
+        Ok(())
+    }
+}
+
 /// A declared dependency on another capsule.
 ///
 /// Deliberately an exact capsule id rather than a virtual provider: a
@@ -488,12 +617,27 @@ pub struct AliasSection {
     pub shells: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A whole instantiable unit of code — "define once, instantiate anywhere".
+///
+/// `destination` and every payload path and body may carry `{{param}}`
+/// placeholders, substituted at instantiation from [`TemplateSection::params`].
+/// The parameter type is [`ArgSpec`], the same one scripts and profiles already
+/// use: a second parameter system would be a second set of validation rules to
+/// keep in step, and there is nothing about a template parameter that a command
+/// argument is not already.
+// Not `Eq`: parameters are `ArgSpec`s, which carry `f64` bounds. `Payload` is
+// likewise `PartialEq` only, so nothing downstream loses anything.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TemplateSection {
     pub root: String,
+    /// Where the instance lands, relative to the project root. May carry
+    /// `{{param}}` placeholders. Absent means the project root itself.
     #[serde(default)]
     pub destination: Option<String>,
+    /// Typed parameters, reusing the manifest's existing argument specs.
+    #[serde(default)]
+    pub params: Vec<ArgSpec>,
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +680,11 @@ struct RawManifest {
     /// (PRIOR-ART-ACTIONS L5, from Hermes' `related_skills[]`).
     #[serde(default)]
     related_skills: Vec<CapsuleId>,
+    /// `[metadata.*]`. AIKit's own facets live under `metadata.aikit`; every other
+    /// namespace is carried verbatim, because dropping a neighbour's keys silently
+    /// degrades every skill AIKit touches (PRIOR-ART-ACTIONS #30).
+    #[serde(default)]
+    metadata: BTreeMap<String, toml::Value>,
 
     #[serde(default)]
     script: Option<ScriptSection>,
@@ -603,6 +752,13 @@ pub struct Capsule {
     /// and the tree. Never a dependency — purely advisory (PRIOR-ART-ACTIONS L5).
     #[serde(default)]
     pub related_skills: Vec<CapsuleId>,
+    /// The `[metadata.aikit]` facets, parsed. Describes; never selects.
+    #[serde(default)]
+    pub facets: Facets,
+    /// Every `[metadata.*]` namespace verbatim, including `aikit`, so unknown keys
+    /// survive a round trip.
+    #[serde(default)]
+    pub metadata: BTreeMap<String, toml::Value>,
     pub payload: Payload,
 
     /// Set by the store when the capsule is loaded from disk.
@@ -716,6 +872,22 @@ impl Capsule {
             }
         }
 
+        // `[metadata.aikit]` is parsed into typed facets; every other namespace is
+        // carried verbatim. A misspelled facet value is refused rather than
+        // silently read as the default — quietly doing less and reporting success
+        // is the failure STANDARDS §1 names.
+        let facets = match raw.metadata.get("aikit") {
+            Some(value) => Facets::deserialize(value.clone()).map_err(|e| {
+                AikitError::new(
+                    "manifest.invalid_facet",
+                    format!("`{id}` has an unusable [metadata.aikit] table: {e}"),
+                )
+                .with("id", id.to_string())
+            })?,
+            None => Facets::default(),
+        };
+        facets.validate(&id)?;
+
         for arg in &raw.args {
             arg.validate_spec()?;
         }
@@ -758,6 +930,8 @@ impl Capsule {
             provenance: raw.provenance,
             config_merge: raw.config_merge,
             related_skills: raw.related_skills,
+            facets,
+            metadata: raw.metadata,
             payload,
             source: None,
             revision: None,

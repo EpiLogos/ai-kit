@@ -38,6 +38,7 @@ pub mod resolve;
 pub mod scope;
 pub mod search;
 pub mod session;
+pub mod surfacing;
 pub mod trust;
 
 // ---------------------------------------------------------------------------
@@ -58,7 +59,8 @@ pub mod trust;
 pub use error::{AikitError, Result};
 
 pub use capsule::{
-    BypassPolicy, Capsule, FailurePolicy, HookPhase, Kind, Maturity, Payload, Requirement,
+    BypassPolicy, Capsule, Facets, Facing, FailurePolicy, HookPhase, Kind, LanguageFacet, Maturity,
+    Payload, Requirement, Surface,
 };
 pub use catalog::{Catalog, MemoryCatalog};
 pub use context::{ContextBinding, ContextDescriptor, Isolation};
@@ -103,4 +105,5 @@ pub use session::{
     compile as compile_session, Attach, BackendSpec, Direction, Lifecycle, PaneSpec, PaneStep,
     Placement, Restart, SessionPlan, SessionSpec, Split, TaskSpec, ViewPlan, ViewSpec,
 };
+pub use surfacing::{plan_surfacing, DisplayContext, SurfacingPlan};
 pub use trust::{TrustKey, TrustOracle, TrustState};
