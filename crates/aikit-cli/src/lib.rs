@@ -18,6 +18,7 @@ pub mod discover;
 pub mod foreign;
 pub mod hook;
 pub mod json;
+pub mod jump;
 pub mod multicall;
 pub mod run;
 pub mod task;

@@ -187,6 +187,12 @@ pub fn compare(a: &Candidate, b: &Candidate, half_life: std::time::Duration) -> 
 pub fn match_quality(query: &str, id: &CapsuleId) -> f32 {
     const EXACT_LEAF: f32 = 1.0;
     const LEAF_PREFIX: f32 = EXACT_LEAF * 0.9;
+    // Matching the END of the leaf is tighter than matching its middle: typing
+    // `nextest` means `cargo-nextest`, not `cargo-nextest-helper`. This is the
+    // same "match on the tail first" instinct as preferring the leaf over the
+    // group, applied one level further in — and it is what lets `z` decide
+    // instead of asking.
+    const LEAF_SUFFIX: f32 = EXACT_LEAF * 0.8;
     const LEAF_SUBSTRING: f32 = EXACT_LEAF * 0.7;
     // Matching away from the tail is worth meaningfully less than matching it.
     const OTHER_SEGMENT: f32 = LEAF_SUBSTRING * 0.5;
@@ -204,6 +210,9 @@ pub fn match_quality(query: &str, id: &CapsuleId) -> f32 {
     }
     if leaf.starts_with(&query) {
         return LEAF_PREFIX;
+    }
+    if leaf.ends_with(&query) {
+        return LEAF_SUFFIX;
     }
     if leaf.contains(&query) {
         return LEAF_SUBSTRING;

@@ -142,10 +142,14 @@ fn emit(reply: Reply, json_mode: bool) -> i32 {
 // ---------------------------------------------------------------------------
 
 fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
+    // `--json` implies a dry run for `z`: a machine reading candidates is deciding,
+    // not delegating the decision.
+    let json_mode = cli.json;
     match cli.command {
         None => open_palette(cwd, None, false),
         Some(Command::Init(a)) => cmd_init(cwd, a),
         Some(Command::Collate(a)) => cmd_collate(cwd, a),
+        Some(Command::Z(a)) => cmd_z(cwd, a, json_mode),
         Some(Command::Ui(a)) => open_palette(cwd, a.query, a.fullscreen),
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
@@ -297,6 +301,102 @@ fn cmd_collate(cwd: &std::path::Path, a: CollateArgs) -> Result<Reply> {
         })).collect::<Vec<_>>(),
     });
     Ok(reply(&service, data, service.load_warnings()))
+}
+
+/// `aikit z <words…>` — the single verb.
+///
+/// Acts on one clear winner, opens the palette pre-filtered when the top is
+/// contested, and reports nothing rather than guessing. It NEVER activates: the
+/// action for a script is to run it, for a skill to show it. Making something
+/// active is a different act, and a fuzzy match is not consent to it.
+fn cmd_z(cwd: &std::path::Path, a: ZArgs, json_mode: bool) -> Result<Reply> {
+    use aikit_cli::jump::{self, JumpAction};
+    use aikit_core::frecency::Jump;
+
+    let mut service = Service::discover(cwd)?;
+    let query = a.words.join(" ");
+    let plan = jump::plan(&service, &query)?;
+    let dry_run = a.dry_run || json_mode;
+
+    let candidates: Vec<Value> = plan
+        .ranked
+        .iter()
+        .take(20)
+        .map(|c| {
+            jval!({
+                "capability": c.id.to_string(),
+                "score": c.score,
+                "exact_export_name": c.exact_export_name,
+                "active": c.active_in_context,
+                "in_current_project": c.in_current_project,
+                "successful_runs": c.usage.successful_runs,
+            })
+        })
+        .collect();
+
+    match &plan.jump {
+        Jump::Nothing => {
+            let data = jval!({
+                "query": plan.query,
+                "decision": "nothing",
+                "candidates": candidates,
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+        Jump::Disambiguate { candidates: ids } => {
+            let data = jval!({
+                "query": plan.query,
+                "decision": "disambiguate",
+                "candidates": candidates,
+                "tied": ids.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+            });
+            if dry_run {
+                return Ok(reply(&service, data, vec![]));
+            }
+            // Ambiguity is the interactive case, not an error: open the palette
+            // pre-filtered to what was meant.
+            ui::run(&mut service, Some(plan.query.clone()), false)?;
+            Ok(Reply::Silent)
+        }
+        Jump::Act { capsule } => {
+            let action = plan.action(&service).expect("an Act decision has an action");
+            let data = jval!({
+                "query": plan.query,
+                "decision": "act",
+                "action": action.as_str(),
+                "capability": capsule.to_string(),
+                "candidates": candidates,
+                "activated": false,
+            });
+            if dry_run {
+                return Ok(reply(&service, data, vec![]));
+            }
+            match action {
+                JumpAction::Run { capsule } => {
+                    let handle = service.run(RunRequest {
+                        name: capsule.to_string(),
+                        args: vec![],
+                        export: None,
+                        confirmed: false,
+                    })?;
+                    for line in &handle.report.output {
+                        println!("{line}");
+                    }
+                    Ok(Reply::Status(handle.report.status))
+                }
+                // Showing a capability is reading it, never enabling it.
+                JumpAction::Open { capsule } | JumpAction::Session { capsule } => {
+                    let explanation = service.resolved().explain(&capsule).ok_or_else(|| {
+                        AikitError::new(
+                            "resolution.unknown_capability",
+                            format!("{capsule} is not in the catalogue for this context"),
+                        )
+                    })?;
+                    Ok(Reply::Text(explanation.render()))
+                }
+            }
+        }
+    }
 }
 
 fn open_palette(cwd: &std::path::Path, query: Option<String>, fullscreen: bool) -> Result<Reply> {
@@ -734,6 +834,7 @@ fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Init(_) => "init",
         Command::Collate(_) => "collate",
+        Command::Z(_) => "z",
         Command::Ui(_) => "ui",
         Command::Search(_) => "search",
         Command::Status(_) => "status",

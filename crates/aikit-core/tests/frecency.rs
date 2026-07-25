@@ -118,6 +118,16 @@ fn matching_prefers_the_tail_of_the_id() {
         "an exact leaf match ({leaf}) must beat a group match ({group})"
     );
 
+    // Matching the END of the leaf is tighter than matching its middle: typing
+    // `nextest` means `cargo-nextest`, not `cargo-nextest-helper`. Without this,
+    // `z nextest` cannot decide between them and has to ask.
+    let suffix = frecency::match_quality("nextest", &cid("script/test/cargo-nextest"));
+    let middle = frecency::match_quality("nextest", &cid("script/test/cargo-nextest-helper"));
+    assert!(
+        suffix > middle,
+        "a tail match ({suffix}) must beat a mid-leaf match ({middle})"
+    );
+
     assert_eq!(frecency::match_quality("nextest", &cid("script/test/nextest")), 1.0);
     assert!(frecency::match_quality("next", &cid("script/test/nextest")) > 0.0);
     assert_eq!(

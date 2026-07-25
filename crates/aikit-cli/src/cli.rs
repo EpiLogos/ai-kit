@@ -40,6 +40,8 @@ pub enum Command {
     Init(InitArgs),
     /// Survey the skill trees on this machine: which version is running, where.
     Collate(CollateArgs),
+    /// Jump to what you meant: act if unambiguous, else offer the candidates.
+    Z(ZArgs),
     /// Open the palette (the default when no subcommand is given).
     Ui(UiArgs),
     /// Search the catalogue for capabilities.
@@ -109,6 +111,16 @@ pub enum Command {
 // ---------------------------------------------------------------------------
 // Leaf command arguments
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct ZArgs {
+    /// The words you remember. Matched against ids and exported command names.
+    #[arg(value_name = "WORDS", required = true)]
+    pub words: Vec<String>,
+    /// Report what would happen without doing it. Implied by `--json`.
+    #[arg(long)]
+    pub dry_run: bool,
+}
 
 #[derive(Debug, Args)]
 pub struct CollateArgs {
