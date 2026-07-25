@@ -25,6 +25,7 @@ pub mod context;
 pub mod duration;
 pub mod effects;
 pub mod error;
+pub mod frecency;
 pub mod guidance;
 pub mod hooks;
 pub mod id;
@@ -38,6 +39,7 @@ pub mod resolve;
 pub mod scope;
 pub mod search;
 pub mod session;
+pub mod skillset;
 pub mod surfacing;
 pub mod trust;
 
@@ -66,6 +68,7 @@ pub use catalog::{Catalog, MemoryCatalog};
 pub use context::{ContextBinding, ContextDescriptor, Isolation};
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
+pub use frecency::{Candidate, Jump, Tiebreak};
 pub use guidance::{
     compose, estimate_tokens, Composition, CompositionEntry, CompositionRequest, FragmentStatus,
     GuidanceFragment,
@@ -105,5 +108,6 @@ pub use session::{
     compile as compile_session, Attach, BackendSpec, Direction, Lifecycle, PaneSpec, PaneStep,
     Placement, Restart, SessionPlan, SessionSpec, Split, TaskSpec, ViewPlan, ViewSpec,
 };
+pub use skillset::{SetMembership, SetProjection, SetProvenance, SkillSet, Withheld};
 pub use surfacing::{plan_surfacing, DisplayContext, SurfacingPlan};
 pub use trust::{TrustKey, TrustOracle, TrustState};
