@@ -179,7 +179,23 @@ pub fn relabel(
             format!("could not re-serialize the lock to attach properties: {e}"),
         )
     })?;
-    write_file(&generation_dir.join(LOCK_FILE), text.as_bytes())
+
+    // This is the one write that lands *inside* an already-committed generation,
+    // so it has to honour the same no-window discipline as every other write to
+    // committed state (see the module header). A bare `fs::write` truncates first:
+    // a crash between the truncate and the write would leave the lock of an
+    // immutable generation empty, `read_lock` would fail forever, and — because
+    // the lock is excluded from `hash_tree` — the directory name would still match
+    // its content hash, so nothing could even detect the corruption. Write beside
+    // it and rename over: `rename(2)` is atomic, so a reader sees the old lock or
+    // the new one, never a truncated one.
+    let final_path = generation_dir.join(LOCK_FILE);
+    let temporary = generation_dir.join(format!("{LOCK_FILE}.tmp"));
+    write_file(&temporary, text.as_bytes())?;
+    fs::rename(&temporary, &final_path).map_err(|e| {
+        let _ = fs::remove_file(&temporary);
+        io_error("generation.write_failed", &final_path, &e)
+    })
 }
 
 /// On an identical re-apply, carry any label the new build declared onto the

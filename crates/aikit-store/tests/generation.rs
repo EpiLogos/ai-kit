@@ -335,6 +335,48 @@ fn relabelling_an_identical_generation_updates_the_label_without_minting_a_new_o
 }
 
 #[test]
+fn relabelling_replaces_the_lock_atomically_and_leaves_no_temp_file() {
+    // `relabel` is the only write that lands inside an already-committed
+    // generation. A truncate-then-write would leave a window in which the lock of
+    // an immutable generation is empty — unreadable forever, and undetectable
+    // because the lock is excluded from the content hash. It must therefore write
+    // beside the lock and rename over it, leaving nothing behind.
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = registry(tmp.path());
+    let resolved = resolve_fixture(&fixture, &["script/test/nt"]);
+    let ctx = context_dir(tmp.path());
+
+    let committed = build_and_commit(&ctx, &resolved, "one", None);
+    let dir = ctx.join("generations").join(committed.as_str());
+
+    let mut properties = std::collections::BTreeMap::new();
+    properties.insert("label".to_string(), "known-good".to_string());
+    generation::relabel(&dir, &properties).unwrap();
+
+    // The lock is complete and re-readable, and the label is there.
+    let view = generation::read_lock(&dir).unwrap();
+    assert_eq!(view.properties.get("label").map(String::as_str), Some("known-good"));
+    assert_eq!(
+        view.active.len(),
+        resolved.view.active.len(),
+        "the rest of the lock survived the rewrite"
+    );
+
+    // No `.tmp` sibling is left in the generation directory.
+    let strays: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(strays.is_empty(), "a temp file was left behind: {strays:?}");
+
+    // Re-labelling with the same properties is a no-op that still leaves it valid.
+    generation::relabel(&dir, &properties).unwrap();
+    assert!(generation::read_lock(&dir).is_ok());
+}
+
+#[test]
 fn a_brokered_fallback_is_written_into_the_generation_rather_than_lost() {
     // §3: a shared working tree cannot give two sibling tasks different native
     // skill surfaces, and the adapter has to say so instead of pretending. The

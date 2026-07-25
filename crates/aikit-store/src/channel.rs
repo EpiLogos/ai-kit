@@ -264,6 +264,11 @@ impl<'a> InboxChannel<'a> {
             }
         }
 
+        // Redaction is unconditional and therefore exhaustive: this match names
+        // every variant rather than falling through, so adding an `Evidence`
+        // variant fails to compile until its redaction is decided. A path or a
+        // label is as capable of carrying a token as a summary is — the earlier
+        // catch-all `other => other.clone()` let exactly that through.
         let redacted_evidence: Vec<Evidence> = item
             .evidence
             .iter()
@@ -271,7 +276,13 @@ impl<'a> InboxChannel<'a> {
                 Evidence::Summary { text } => Evidence::Summary {
                     text: self.scanner.redact(text),
                 },
-                other => other.clone(),
+                Evidence::File { path } => Evidence::File {
+                    path: self.scanner.redact(path),
+                },
+                Evidence::Hash { label, value } => Evidence::Hash {
+                    label: self.scanner.redact(label),
+                    value: self.scanner.redact(value),
+                },
             })
             .collect();
 

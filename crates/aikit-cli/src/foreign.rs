@@ -87,11 +87,19 @@ fn scan_dir(dir: &Path, depth: usize, root: &mut ForeignRoot) {
     for entry in entries.flatten() {
         let path = entry.path();
 
-        // A dead symlink: a symlink whose target does not resolve. Checked before
-        // `is_dir` (which follows the link and would report false for a dead one).
-        if path.is_symlink() && std::fs::metadata(&path).is_err() {
-            root.dead_symlinks += 1;
-            continue;
+        // A dead symlink is one whose target *does not exist*. Checked before
+        // `is_dir` (which follows the link and reports false for a dead one), and
+        // narrowed to `NotFound`: a target behind a permission-denied component or
+        // on an unmounted filesystem resolves fine for whoever can read it, and
+        // counting it as rotted would inflate the problem count and send a user
+        // hunting for a link that is not broken.
+        if path.is_symlink() {
+            if let Err(error) = std::fs::metadata(&path) {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    root.dead_symlinks += 1;
+                }
+                continue;
+            }
         }
         if !path.is_dir() {
             continue;
@@ -102,8 +110,12 @@ fn scan_dir(dir: &Path, depth: usize, root: &mut ForeignRoot) {
                 Ok(_) => root.skills += 1,
                 Err(_) => root.missing_frontmatter += 1,
             }
-        } else if depth == 0 {
-            // A category container in the two-level layout: recurse exactly once.
+        }
+
+        // Recurse independently of whether this directory is itself a skill: a
+        // directory can be both a skill and a container of skills, and hanging the
+        // recursion off the `else` silently swallowed the whole subtree.
+        if depth == 0 {
             scan_dir(&path, depth + 1, root);
         }
     }

@@ -107,3 +107,44 @@ fn config_merge_defaults_to_deep_and_parses_replace_from_the_manifest() {
     let replace = script_with("script/test/mcp", "config_merge = \"replace\"");
     assert_eq!(replace.config_merge, ConfigMerge::Replace);
 }
+
+// ---------------------------------------------------------------------------
+// Canonicalisation must be injective (adversarial review, confirmed defect)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn two_different_configs_never_canonicalize_to_the_same_string() {
+    use aikit_core::profile::canonical_config;
+
+    // The separators the canonical form uses (`=`, `;`, `"`) are legal characters
+    // INSIDE a TOML string value. Without escaping, a single key whose value
+    // embeds them renders identically to two separate keys — and since the
+    // canonical string feeds the resolution hash, two different effective configs
+    // would share a generation identity and a stale generation would be reused.
+    let mut two_keys = toml::value::Table::new();
+    two_keys.insert("a".into(), toml::Value::String("x".into()));
+    two_keys.insert("b".into(), toml::Value::String("y".into()));
+
+    let mut one_key = toml::value::Table::new();
+    one_key.insert("a".into(), toml::Value::String("x\";b=\"y".into()));
+
+    assert_ne!(
+        canonical_config(&two_keys),
+        canonical_config(&one_key),
+        "a value containing the separators must not impersonate another table"
+    );
+}
+
+#[test]
+fn a_key_containing_a_separator_cannot_impersonate_another_key() {
+    use aikit_core::profile::canonical_config;
+
+    let mut injected = toml::value::Table::new();
+    injected.insert("a=1;b".into(), toml::Value::Integer(2));
+
+    let mut plain = toml::value::Table::new();
+    plain.insert("a".into(), toml::Value::Integer(1));
+    plain.insert("b".into(), toml::Value::Integer(2));
+
+    assert_ne!(canonical_config(&injected), canonical_config(&plain));
+}

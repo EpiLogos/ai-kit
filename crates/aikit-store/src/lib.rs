@@ -54,6 +54,7 @@ pub mod home;
 pub mod inbox;
 pub mod index;
 pub mod locks;
+pub mod procedure;
 pub mod registry;
 pub mod scan;
 pub mod state;
@@ -70,6 +71,9 @@ pub use home::AikitHome;
 pub use inbox::{Candidate, CandidateState, Capture, Inbox, PromotionEdits, Similarity};
 pub use index::{CapsuleFilter, CapsuleRow, Facets, Index, ReindexReport};
 pub use locks::{ContextLock, LockOptions};
+pub use procedure::{
+    plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner,
+};
 pub use registry::{load_project_local, load_registry, RegistryLoad, RegistryProblem, Snapshot};
 pub use scan::{Finding, Scanner};
 pub use state::{ContextRecord, SessionRecord, SessionState, StateStore};

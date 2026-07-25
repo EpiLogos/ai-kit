@@ -221,11 +221,31 @@ pub fn merge_config(base: &mut ConfigTable, overlay: &ConfigTable) {
 /// Written by hand rather than via a serializer because the hash is a stable
 /// public artefact: it must not move when a dependency changes its key ordering.
 pub fn canonical_config(table: &ConfigTable) -> String {
+    /// Escape the characters the canonical form uses as structure.
+    ///
+    /// `"`, `;` and `=` are all legal *inside* a TOML string, so without this a
+    /// single key whose value embedded them would render byte-for-byte identically
+    /// to two separate keys — and because this string feeds the resolution hash,
+    /// two genuinely different effective configs would share one generation
+    /// identity and a stale generation would be silently reused. Escaping the
+    /// backslash first keeps the mapping injective.
+    fn escape(raw: &str, out: &mut String) {
+        for c in raw.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                ';' => out.push_str("\\;"),
+                '=' => out.push_str("\\="),
+                other => out.push(other),
+            }
+        }
+    }
+
     fn write_value(out: &mut String, value: &toml::Value) {
         match value {
             toml::Value::String(s) => {
                 out.push('"');
-                out.push_str(s);
+                escape(s, out);
                 out.push('"');
             }
             toml::Value::Integer(i) => out.push_str(&i.to_string()),
@@ -250,7 +270,7 @@ pub fn canonical_config(table: &ConfigTable) -> String {
                     if i > 0 {
                         out.push(',');
                     }
-                    out.push_str(key);
+                    escape(key, out);
                     out.push('=');
                     write_value(out, &t[*key]);
                 }
@@ -263,7 +283,7 @@ pub fn canonical_config(table: &ConfigTable) -> String {
     let mut keys: Vec<&String> = table.keys().collect();
     keys.sort();
     for key in keys {
-        out.push_str(key);
+        escape(key, &mut out);
         out.push('=');
         write_value(&mut out, &table[key]);
         out.push(';');

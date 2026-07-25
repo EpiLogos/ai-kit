@@ -112,3 +112,44 @@ fn a_deferred_item_returns_to_pending_once_its_time_passes() {
         "a deferral that has elapsed is pending again"
     );
 }
+
+#[test]
+fn every_evidence_variant_is_redacted_not_just_the_summary() {
+    // Redaction is UNCONDITIONAL (Spec II §2, STANDARDS §6). The channel is
+    // agent-writable and brokered out through `aikit inbox list --json`, so a
+    // secret reaching ANY stored field would reach a preview. Summary was
+    // redacted; File{path} and Hash{value} were not — this pins all three.
+    use aikit_store::channel::Evidence;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let index = index(tmp.path());
+
+    let token = "ghp_0123456789012345678901234567890123";
+    let item = InboxChannel::new(&index)
+        .publish(
+            NewItem::new(InboxKind::AgentProposal, "proposal", "body").with_evidence(vec![
+                Evidence::Summary {
+                    text: format!("summary holding {token}"),
+                },
+                Evidence::File {
+                    path: format!("/tmp/{token}/notes.md"),
+                },
+                Evidence::Hash {
+                    label: format!("label {token}"),
+                    value: token.to_string(),
+                },
+            ]),
+        )
+        .unwrap();
+
+    let rendered = serde_json::to_string(&item.evidence).unwrap();
+    assert!(
+        !rendered.contains(token),
+        "no evidence variant may carry a secret into storage: {rendered}"
+    );
+
+    // And it is redacted at rest, not merely on the way out.
+    let reread = InboxChannel::new(&index).get(&item.id).unwrap().unwrap();
+    let stored = serde_json::to_string(&reread.evidence).unwrap();
+    assert!(!stored.contains(token), "the stored bytes still hold a secret: {stored}");
+}

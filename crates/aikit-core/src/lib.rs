@@ -31,6 +31,7 @@ pub mod id;
 pub mod lifecycle;
 pub mod platform;
 pub mod policy;
+pub mod procedure;
 pub mod profile;
 pub mod projection;
 pub mod resolve;
@@ -79,6 +80,11 @@ pub use id::{
 pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;
+pub use procedure::{
+    absent_fields, render_marked_block, select_isolation, splice_marked_block, FieldOrigin,
+    FieldOrigins, Fidelity, Inverse, MutationIsolation, Plan, PlanDigest, Procedure, ProcedureKind,
+    RegistryOwnership, UndoRecord, UndoStep, WorldEdit,
+};
 pub use profile::{ConfigMerge, ConfigTable, PoolPatch, Profile};
 pub use projection::{
     target_label, ActivationEffect, MaterializationMode, ProjectionItem, ProjectionPlan,
