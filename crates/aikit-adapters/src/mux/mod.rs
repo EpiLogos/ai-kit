@@ -359,7 +359,9 @@ impl SessionBinding {
     }
 
     pub fn surface_of(&self, view: &str, pane: &str) -> Option<&str> {
-        self.surfaces.get(&format!("{view}/{pane}")).map(String::as_str)
+        self.surfaces
+            .get(&format!("{view}/{pane}"))
+            .map(String::as_str)
     }
 
     pub fn record(&mut self, action: impl Into<String>) {
@@ -424,6 +426,20 @@ impl SpawnRequest {
         self.target = Some(target);
         self
     }
+
+    /// The exact argv to hand to a multiplexer command surface. Multiplexers do
+    /// not inherit the palette process's per-capsule environment, so carry it
+    /// explicitly through the portable `env KEY=VALUE ... command` form.
+    pub fn command_with_env(&self) -> Vec<String> {
+        if self.command.is_empty() || self.env.is_empty() {
+            return self.command.clone();
+        }
+        let mut command = Vec::with_capacity(self.command.len() + self.env.len() + 1);
+        command.push("env".to_string());
+        command.extend(self.env.iter().map(|(key, value)| format!("{key}={value}")));
+        command.extend(self.command.clone());
+        command
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -477,12 +493,18 @@ impl PaletteRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiHost {
     /// A real overlay. Only tmux claims this.
-    TruePopup { target: String },
+    TruePopup {
+        target: String,
+    },
     /// A modal drawn in the terminal the user is already looking at.
     InlineCurrentTerminal,
     /// A surface created for the palette and closed afterwards.
-    TemporarySurface { id: String },
-    Unsupported { reason: String },
+    TemporarySurface {
+        id: String,
+    },
+    Unsupported {
+        reason: String,
+    },
 }
 
 impl UiHost {

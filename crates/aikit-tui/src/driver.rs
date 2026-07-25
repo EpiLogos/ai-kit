@@ -229,6 +229,18 @@ where
     let (state, effects) = AppState::open(backend, &request)?;
     let mut runtime = Runtime::new();
     let mut state = runtime.settle(backend, state, effects);
+    if request.activate_initial {
+        if let Some(target) = request.activation_target.as_ref() {
+            if let Some(index) = state
+                .rows
+                .iter()
+                .position(|row| &row.doc.id == target)
+            {
+                state.cursor = index;
+                state = runtime.step(backend, state, Action::Enter);
+            }
+        }
+    }
 
     loop {
         if let Some(outcome) = state.outcome.clone() {

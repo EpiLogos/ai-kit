@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{err, Result};
+use crate::arg::{ArgSpec, ArgType, ArgValue, Literal, PathKind};
+use crate::error::{err, AikitError, Result};
 use crate::id::{CapsuleId, GenerationId, ProfileId, SessionId};
 
 /// Free-form per-capsule configuration, carried through resolution untouched.
@@ -51,6 +52,11 @@ impl ConfigMerge {
 pub struct PoolPatch {
     #[serde(default)]
     pub profiles: Vec<ProfileId>,
+    /// Parameterized profile references (`[[use]]`). Kept beside the original
+    /// string array so existing profile files remain valid and simple profiles
+    /// pay no syntax cost.
+    #[serde(default, rename = "use")]
+    pub uses: Vec<ProfileUse>,
     #[serde(default)]
     pub enable: Vec<CapsuleId>,
     #[serde(default)]
@@ -62,6 +68,7 @@ pub struct PoolPatch {
 impl PoolPatch {
     pub fn is_empty(&self) -> bool {
         self.profiles.is_empty()
+            && self.uses.is_empty()
             && self.enable.is_empty()
             && self.disable.is_empty()
             && self.config.is_empty()
@@ -102,6 +109,123 @@ impl PoolPatch {
     }
 }
 
+/// One profile reference with explicit, committed parameter bindings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileUse {
+    pub profile: ProfileId,
+    #[serde(default)]
+    pub params: BTreeMap<String, Literal>,
+}
+
+/// A typed profile parameter. It deliberately reuses the manifest argument
+/// types and coercion rules; profile bindings are configuration, not a second
+/// little type system.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileParam {
+    #[serde(rename = "type")]
+    pub ty: ArgType,
+    #[serde(default)]
+    pub default: Option<Literal>,
+    #[serde(default)]
+    pub choices: Vec<String>,
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    #[serde(default)]
+    pub pattern: Option<String>,
+}
+
+impl ProfileParam {
+    fn as_arg(&self, name: &str) -> ArgSpec {
+        ArgSpec {
+            name: name.to_string(),
+            label: None,
+            help: None,
+            ty: self.ty,
+            position: None,
+            flag: None,
+            required: Some(self.default.is_none()),
+            default: self.default.clone(),
+            default_from: None,
+            choices: self.choices.clone(),
+            must_exist: false,
+            path_kind: PathKind::Any,
+            min: self.min,
+            max: self.max,
+            pattern: self.pattern.clone(),
+            repeatable: false,
+            secret: false,
+        }
+    }
+
+    fn validate(&self, profile: &ProfileId, name: &str) -> Result<()> {
+        if self.ty == ArgType::Secret {
+            return Err(AikitError::new(
+                "profile.secret_parameter_forbidden",
+                format!(
+                    "{profile} parameter `{name}` cannot be secret because profile bindings are committed configuration"
+                ),
+            )
+            .with("profile", profile.to_string())
+            .with("parameter", name.to_string()));
+        }
+        self.as_arg(name).validate_spec().map_err(|error| {
+            AikitError::new(
+                "profile.invalid_parameter",
+                format!(
+                    "{profile} parameter `{name}` is invalid: {}",
+                    error.message()
+                ),
+            )
+            .with("profile", profile.to_string())
+            .with("parameter", name.to_string())
+        })
+    }
+
+    /// Coerce a CLI-style textual binding into the typed TOML literal that a
+    /// committed profile reference must retain.
+    pub fn coerce_binding(&self, name: &str, raw: &str) -> Result<Literal> {
+        let value = self.as_arg(name).coerce(raw)?;
+        Ok(match value {
+            ArgValue::Bool(value) => Literal::Bool(value),
+            ArgValue::Integer(value) => Literal::Integer(value),
+            ArgValue::Float(value) => Literal::Float(value),
+            ArgValue::List(value) => Literal::List(value),
+            ArgValue::String(value) | ArgValue::Secret(value) => Literal::String(value),
+            ArgValue::Duration(value) => Literal::String(value.to_string()),
+            ArgValue::KeyValue(value) => Literal::String(
+                value
+                    .into_iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        })
+    }
+}
+
+/// The profile patch before parameter substitution.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileTemplate {
+    #[serde(default)]
+    pub profiles: Vec<String>,
+    #[serde(default)]
+    pub enable: Vec<String>,
+    #[serde(default)]
+    pub disable: Vec<String>,
+    #[serde(default)]
+    pub config: BTreeMap<String, ConfigTable>,
+}
+
+#[derive(Debug, Clone)]
+struct BoundValue {
+    text: String,
+    typed: toml::Value,
+}
+
 /// A reusable declarative patch identified by a profile id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
@@ -110,8 +234,108 @@ pub struct Profile {
     pub description: String,
     #[serde(default)]
     pub extends: Vec<ProfileId>,
+    /// Parameterized parent profiles. This is separate from the compact string
+    /// `extends` form so ordinary inheritance remains terse while a fork can
+    /// durably record the values with which its base was reviewed.
+    #[serde(default, rename = "extends_use")]
+    pub extends_uses: Vec<ProfileUse>,
+    #[serde(default)]
+    pub params: BTreeMap<String, ProfileParam>,
+    #[serde(default)]
+    pub template: ProfileTemplate,
     #[serde(flatten)]
     pub patch: PoolPatch,
+}
+
+impl Profile {
+    /// Bind and validate parameters, then turn every placeholder into ordinary,
+    /// explicit ids before the resolver layers anything.
+    pub fn resolve_patch(&self, supplied: &BTreeMap<String, Literal>) -> Result<PoolPatch> {
+        // Programmatically constructed profiles predate templates and already
+        // carry their explicit patch. Keeping this path also makes the template
+        // representation an on-disk concern rather than a tax on callers.
+        if self.params.is_empty()
+            && self.template.profiles.is_empty()
+            && self.template.enable.is_empty()
+            && self.template.disable.is_empty()
+            && self.template.config.is_empty()
+        {
+            return Ok(self.patch.clone());
+        }
+        for (name, declaration) in &self.params {
+            declaration.validate(&self.id, name)?;
+        }
+        for name in supplied.keys() {
+            if !self.params.contains_key(name) {
+                return Err(AikitError::new(
+                    "profile.unknown_parameter",
+                    format!("{} declares no parameter `{name}`", self.id),
+                )
+                .with("profile", self.id.to_string())
+                .with("parameter", name.clone()));
+            }
+        }
+
+        let mut values: BTreeMap<String, BoundValue> = BTreeMap::new();
+        for (name, declaration) in &self.params {
+            let raw = supplied
+                .get(name)
+                .or(declaration.default.as_ref())
+                .ok_or_else(|| {
+                    AikitError::new(
+                        "profile.missing_parameter",
+                        format!("{} requires a value for `{name}`", self.id),
+                    )
+                    .with("profile", self.id.to_string())
+                    .with("parameter", name.clone())
+                })?
+                .to_string();
+            let argument = declaration.as_arg(name);
+            let value = argument.coerce(&raw).map_err(|error| {
+                AikitError::new(
+                    "profile.invalid_parameter",
+                    format!(
+                        "{} parameter `{name}` is invalid: {}",
+                        self.id,
+                        error.message()
+                    ),
+                )
+                .with("profile", self.id.to_string())
+                .with("parameter", name.clone())
+                .with("value", raw.clone())
+            })?;
+            values.insert(
+                name.clone(),
+                BoundValue {
+                    text: value.to_argv_string(),
+                    typed: argument_value_to_toml(value),
+                },
+            );
+        }
+
+        let mut patch = PoolPatch::default();
+        for raw in &self.template.profiles {
+            patch
+                .profiles
+                .push(ProfileId::parse(&substitute(raw, &values))?);
+        }
+        for raw in &self.template.enable {
+            patch
+                .enable
+                .push(CapsuleId::parse(&substitute(raw, &values))?);
+        }
+        for raw in &self.template.disable {
+            patch
+                .disable
+                .push(CapsuleId::parse(&substitute(raw, &values))?);
+        }
+        for (raw_id, table) in &self.template.config {
+            let id = CapsuleId::parse(&substitute(raw_id, &values))?;
+            patch.config.insert(id, substitute_table(table, &values));
+        }
+        patch.validate()?;
+        Ok(patch)
+    }
 }
 
 /// The on-disk form of a profile: `~/.aikit/profiles/<group>/<name>.toml`.
@@ -124,8 +348,18 @@ pub struct ProfileFile {
     pub description: String,
     #[serde(default)]
     pub extends: Vec<ProfileId>,
-    #[serde(flatten)]
-    pub patch: PoolPatch,
+    #[serde(default, rename = "extends_use")]
+    pub extends_uses: Vec<ProfileUse>,
+    #[serde(default)]
+    pub params: BTreeMap<String, ProfileParam>,
+    #[serde(default)]
+    pub profiles: Vec<String>,
+    #[serde(default)]
+    pub enable: Vec<String>,
+    #[serde(default)]
+    pub disable: Vec<String>,
+    #[serde(default)]
+    pub config: BTreeMap<String, ConfigTable>,
 }
 
 impl ProfileFile {
@@ -136,13 +370,39 @@ impl ProfileFile {
                 format!("profile schema {} is not supported", self.schema),
             );
         }
-        self.patch.validate()?;
-        Ok(Profile {
+        let template = ProfileTemplate {
+            profiles: self.profiles,
+            enable: self.enable,
+            disable: self.disable,
+            config: self.config,
+        };
+        let mut profile = Profile {
             id: self.id,
             description: self.description,
             extends: self.extends,
-            patch: self.patch,
-        })
+            extends_uses: self.extends_uses,
+            params: self.params,
+            template,
+            patch: PoolPatch::default(),
+        };
+        profile.patch = match profile.resolve_patch(&BTreeMap::new()) {
+            Ok(patch) => patch,
+            // A parameterized template is catalogued before a project supplies
+            // its bindings. The resolver reports these declaration errors when
+            // the profile is actually referenced, preserving the specific
+            // profile-domain code instead of degrading it to
+            // `resolution.unknown_profile`.
+            Err(error)
+                if matches!(
+                    error.code(),
+                    "profile.missing_parameter" | "profile.secret_parameter_forbidden"
+                ) =>
+            {
+                PoolPatch::default()
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(profile)
     }
 }
 
@@ -173,6 +433,64 @@ pub struct SessionOverlayFile {
 
 fn one() -> u32 {
     1
+}
+
+fn substitute(input: &str, values: &BTreeMap<String, BoundValue>) -> String {
+    let mut output = input.to_string();
+    for (name, value) in values {
+        output = output.replace(&format!("{{{{{name}}}}}"), &value.text);
+    }
+    output
+}
+
+fn substitute_table(table: &ConfigTable, values: &BTreeMap<String, BoundValue>) -> ConfigTable {
+    table
+        .iter()
+        .map(|(key, value)| (substitute(key, values), substitute_value(value, values)))
+        .collect()
+}
+
+fn substitute_value(value: &toml::Value, values: &BTreeMap<String, BoundValue>) -> toml::Value {
+    match value {
+        toml::Value::String(text) => {
+            if let Some(name) = text
+                .strip_prefix("{{")
+                .and_then(|rest| rest.strip_suffix("}}"))
+            {
+                if let Some(bound) = values.get(name) {
+                    return bound.typed.clone();
+                }
+            }
+            toml::Value::String(substitute(text, values))
+        }
+        toml::Value::Array(items) => toml::Value::Array(
+            items
+                .iter()
+                .map(|item| substitute_value(item, values))
+                .collect(),
+        ),
+        toml::Value::Table(table) => toml::Value::Table(substitute_table(table, values)),
+        other => other.clone(),
+    }
+}
+
+fn argument_value_to_toml(value: ArgValue) -> toml::Value {
+    match value {
+        ArgValue::String(value) | ArgValue::Secret(value) => toml::Value::String(value),
+        ArgValue::Integer(value) => toml::Value::Integer(value),
+        ArgValue::Float(value) => toml::Value::Float(value),
+        ArgValue::Bool(value) => toml::Value::Boolean(value),
+        ArgValue::Duration(value) => toml::Value::String(value.to_string()),
+        ArgValue::List(values) => {
+            toml::Value::Array(values.into_iter().map(toml::Value::String).collect())
+        }
+        ArgValue::KeyValue(values) => toml::Value::Table(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, toml::Value::String(value)))
+                .collect(),
+        ),
+    }
 }
 
 /// Fold one capsule's `[config.*]` section from a higher scope (`overlay`) into
@@ -389,6 +707,39 @@ disable = [
     }
 
     #[test]
+    fn exact_parameter_placeholders_keep_their_toml_types() {
+        let file: ProfileFile = toml::from_str(
+            r#"schema = 1
+id = "profile/test/typed"
+enable = ["script/test/tool"]
+
+[params.retries]
+type = "integer"
+
+[params.strict]
+type = "bool"
+
+[config."script/test/tool"]
+retries = "{{retries}}"
+strict = "{{strict}}"
+label = "strict={{strict}}"
+"#,
+        )
+        .unwrap();
+        let profile = file.into_profile().unwrap();
+        let bindings = BTreeMap::from([
+            ("retries".into(), Literal::Integer(3)),
+            ("strict".into(), Literal::Bool(true)),
+        ]);
+
+        let patch = profile.resolve_patch(&bindings).unwrap();
+        let config = &patch.config[&CapsuleId::parse("script/test/tool").unwrap()];
+        assert_eq!(config["retries"], toml::Value::Integer(3));
+        assert_eq!(config["strict"], toml::Value::Boolean(true));
+        assert_eq!(config["label"].as_str(), Some("strict=true"));
+    }
+
+    #[test]
     fn a_session_overlay_file_carries_its_base_generation() {
         let src = r#"
 schema = 1
@@ -400,7 +751,10 @@ enable = ["guidance/mode/research"]
 profile = "ci"
 "#;
         let file: SessionOverlayFile = toml::from_str(src).unwrap();
-        assert_eq!(file.base_generation.unwrap().as_str(), "gen_b71f2fdeadbeef01");
+        assert_eq!(
+            file.base_generation.unwrap().as_str(),
+            "gen_b71f2fdeadbeef01"
+        );
         assert_eq!(file.patch.enable.len(), 1);
         assert_eq!(file.patch.config.len(), 1);
     }

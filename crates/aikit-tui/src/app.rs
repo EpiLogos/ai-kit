@@ -104,6 +104,8 @@ pub enum Action {
     CtrlO,
     /// Repeat the most recent run.
     CtrlR,
+    /// Hand the restored terminal to the organising tree.
+    Tree,
     Esc,
     Help,
 
@@ -518,6 +520,10 @@ pub fn reduce(mut state: AppState, action: Action) -> Reduction {
         }
         Action::Resized(cols, rows) => {
             state.area = (cols, rows);
+            return Reduction::plain(state);
+        }
+        Action::Tree => {
+            state.outcome = Some(PaletteOutcome::Tree);
             return Reduction::plain(state);
         }
         _ => {}

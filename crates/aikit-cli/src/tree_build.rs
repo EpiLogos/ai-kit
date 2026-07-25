@@ -33,7 +33,7 @@ pub fn build(service: &Service) -> Result<TreeState> {
         kinds_root(service),
         hooks_root(service),
         contexts_root(service)?,
-        registries_root(service),
+        registries_root(service)?,
         inbox_root(service)?,
     ];
     Ok(TreeState::new(roots))
@@ -267,8 +267,13 @@ fn contexts_root(service: &Service) -> Result<Node> {
 }
 
 /// `registries/` — where things came from, with each root's problems counted.
-fn registries_root(service: &Service) -> Node {
+fn registries_root(service: &Service) -> Result<Node> {
     let mut children = Vec::new();
+    let adopted: BTreeMap<std::path::PathBuf, crate::adopt::AdoptionRecord> =
+        crate::adopt::records(service.home())?
+            .into_iter()
+            .map(|record| (record.source.clone(), record))
+            .collect();
 
     // AIKit's own registries, from the catalogue.
     let mut owned: BTreeMap<String, usize> = BTreeMap::new();
@@ -294,7 +299,14 @@ fn registries_root(service: &Service) -> Node {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     for root in foreign::discover(&foreign::default_roots(&home)) {
-        let mut summary = format!("foreign · {} skills", root.skills);
+        let canonical_root = std::fs::canonicalize(&root.path).unwrap_or_else(|_| root.path.clone());
+        let mut summary = match adopted.get(&canonical_root) {
+            Some(record) => format!(
+                "adopted · {} skills · procedure {}",
+                root.skills, record.procedure
+            ),
+            None => format!("foreign · {} skills", root.skills),
+        };
         if root.problems() > 0 {
             summary.push_str(&format!(
                 " · ⚠ {} dead symlink{}, {} missing frontmatter",
@@ -312,11 +324,11 @@ fn registries_root(service: &Service) -> Node {
         ));
     }
 
-    Node::branch(
+    Ok(Node::branch(
         NodeKind::Root(Root::Registries),
         format!("{} registr{}", children.len(), if children.len() == 1 { "y" } else { "ies" }),
         children,
-    )
+    ))
 }
 
 /// `inbox/` — what needs you.

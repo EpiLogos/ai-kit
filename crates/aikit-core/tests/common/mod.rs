@@ -148,8 +148,12 @@ pub fn profile(id: &str, enable: &[&str], disable: &[&str]) -> Profile {
         id: pid(id),
         description: format!("Test profile {id}"),
         extends: vec![],
+        extends_uses: vec![],
+        params: Default::default(),
+        template: Default::default(),
         patch: PoolPatch {
             profiles: vec![],
+            uses: vec![],
             enable: enable.iter().map(|s| cid(s)).collect(),
             disable: disable.iter().map(|s| cid(s)).collect(),
             config: Default::default(),
@@ -164,6 +168,7 @@ pub fn layer(kind: ScopeKind, enable: &[&str], disable: &[&str]) -> ScopeLayer {
         origin: LayerOrigin::new(format!("test:{}", kind.as_str())),
         patch: PoolPatch {
             profiles: vec![],
+            uses: vec![],
             enable: enable.iter().map(|s| cid(s)).collect(),
             disable: disable.iter().map(|s| cid(s)).collect(),
             config: Default::default(),
@@ -178,6 +183,7 @@ pub fn layer_using(kind: ScopeKind, profiles: &[&str]) -> ScopeLayer {
         origin: LayerOrigin::new(format!("test:{}", kind.as_str())),
         patch: PoolPatch {
             profiles: profiles.iter().map(|s| pid(s)).collect(),
+            uses: vec![],
             enable: vec![],
             disable: vec![],
             config: Default::default(),

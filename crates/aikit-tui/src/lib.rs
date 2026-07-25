@@ -61,6 +61,7 @@ pub mod search;
 pub mod staging;
 pub mod theme;
 pub mod tree;
+pub mod tree_driver;
 
 pub mod driver;
 
@@ -84,6 +85,14 @@ pub use theme::Theme;
 pub struct PaletteRequest {
     pub host: UiHost,
     pub initial_query: Option<String>,
+    /// Open the first exact result as soon as the initial search settles. The
+    /// tree uses this to hand a leaf directly to its natural palette action
+    /// (details, form, or run) without requiring a redundant second Enter.
+    pub activate_initial: bool,
+    /// Exact capsule the tree handed to the palette. The visible query uses its
+    /// searchable path, while this typed identity prevents a fuzzy neighbour
+    /// from being activated by mistake.
+    pub activation_target: Option<aikit_core::CapsuleId>,
     /// Override the mutation scope the palette starts on. `None` means the
     /// context's own default (see [`aikit_core::ContextDescriptor::default_mutation_scope`]).
     pub scope: Option<ScopeKind>,
@@ -94,6 +103,8 @@ impl PaletteRequest {
         Self {
             host,
             initial_query: None,
+            activate_initial: false,
+            activation_target: None,
             scope: None,
         }
     }
@@ -101,6 +112,18 @@ impl PaletteRequest {
     #[must_use]
     pub fn with_query(mut self, query: impl Into<String>) -> Self {
         self.initial_query = Some(query.into());
+        self
+    }
+
+    #[must_use]
+    pub fn activating_initial(mut self) -> Self {
+        if let Some(query) = self.initial_query.as_deref() {
+            if let Ok(target) = query.parse::<aikit_core::CapsuleId>() {
+                self.initial_query = Some(target.path().to_string());
+                self.activation_target = Some(target);
+                self.activate_initial = true;
+            }
+        }
         self
     }
 
@@ -120,9 +143,19 @@ impl PaletteRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaletteOutcome {
     Closed,
+    Tree,
     Run(RunIntent),
     Applied(GenerationId),
     Promoted(CapsuleId),
+}
+
+/// Open the interactive organising tree and return the operation selected after
+/// the terminal has been restored.
+pub fn run_tree(
+    state: tree::TreeState,
+    request: tree_driver::TreeRequest,
+) -> aikit_core::Result<tree_driver::TreeOutcome> {
+    tree_driver::run_on_terminal(state, request)
 }
 
 /// Open the palette, run it to completion, and return what it did.

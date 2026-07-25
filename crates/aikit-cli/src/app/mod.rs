@@ -221,6 +221,80 @@ impl Service {
         Self::open(home, cwd, |k| std::env::var(k).ok())
     }
 
+    /// Resolve a palette outcome without discarding any of the reviewed intent.
+    ///
+    /// The capsule supplies the executable entry point. The intent supplies the
+    /// selected mode, working-directory policy and environment, including
+    /// interactive overrides such as Alt+Enter. Re-planning from only capsule
+    /// id and argv would silently replace those choices with manifest defaults.
+    pub fn plan_run_intent(&self, intent: &RunIntent) -> Result<run::ScriptCommand> {
+        if intent.context != self.descriptor.context_id {
+            return Err(AikitError::new(
+                "run.stale_context",
+                format!(
+                    "the invocation was prepared for context {}, but the active context is {}",
+                    intent.context, self.descriptor.context_id
+                ),
+            )
+            .with("expected_context", intent.context.to_string())
+            .with("actual_context", self.descriptor.context_id.to_string()));
+        }
+        let capsule = self.catalog.get(&intent.capsule).ok_or_else(|| {
+            AikitError::new(
+                "run.unknown_command",
+                format!("{} is not loaded", intent.capsule),
+            )
+        })?;
+        let args = intent.argv()?;
+        let project_root = self.descriptor.project_root.as_deref();
+        let mut command = run::plan_script(capsule, &args, project_root, &self.invocation_cwd)?;
+        command.mode = intent.mode;
+        command.cwd = match intent.cwd {
+            aikit_core::capsule::WorkingDir::Project => {
+                project_root.unwrap_or(&self.invocation_cwd).to_path_buf()
+            }
+            aikit_core::capsule::WorkingDir::Cwd => self.invocation_cwd.clone(),
+            aikit_core::capsule::WorkingDir::Capsule => capsule.root.clone().ok_or_else(|| {
+                AikitError::new(
+                    "run.source_missing",
+                    format!("{} has no payload on this machine", capsule.id),
+                )
+            })?,
+        };
+        command.env = intent.env.clone();
+        Ok(command)
+    }
+
+    /// The on-disk declaration that supplied a loaded profile, following the
+    /// same registry ordering as catalogue loading.
+    pub fn profile_source(&self, id: &aikit_core::ProfileId) -> Option<PathBuf> {
+        let relative = PathBuf::from("profiles")
+            .join(id.path())
+            .with_extension("toml");
+        let mut found = None;
+        if let Ok(entries) = std::fs::read_dir(self.home.registries()) {
+            let mut names: Vec<String> = entries
+                .flatten()
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .collect();
+            names.sort();
+            for name in names {
+                let candidate = self.home.registry(&name).join(&relative);
+                if candidate.is_file() {
+                    found = Some(candidate);
+                }
+            }
+        }
+        if let Some(root) = self.descriptor.project_root.as_ref() {
+            let candidate = root.join(".aikit").join(relative);
+            if candidate.is_file() {
+                found = Some(candidate);
+            }
+        }
+        found
+    }
+
     /// The injectable form: an explicit home and environment lookup, so tests run
     /// against a real temp home without touching the process environment.
     pub fn open<F>(home: AikitHome, cwd: &Path, env: F) -> Result<Self>
@@ -278,8 +352,10 @@ impl Service {
                 session: name,
                 mux: "none".into(),
                 differences: vec![],
-                warnings: vec!["no multiplexer is installed, so there is nothing to compare against"
-                    .to_string()],
+                warnings: vec![
+                    "no multiplexer is installed, so there is nothing to compare against"
+                        .to_string(),
+                ],
             });
         }
         if !tmux.has_session(&name)? {
@@ -443,12 +519,20 @@ impl Service {
         let chains = build_chains(&self.view, &self.catalog)?;
         let chain = match chains.get(event.kind.as_str()) {
             Some(chain) => chain.clone(),
-            None => {
-                HookChain::plan(event.kind.clone(), Vec::new(), &std::collections::BTreeMap::new())?
-            }
+            None => HookChain::plan(
+                event.kind.clone(),
+                Vec::new(),
+                &std::collections::BTreeMap::new(),
+            )?,
         };
         let roots = self.catalog.capsule_roots();
-        crate::hook::dispatch(&self.index, &self.descriptor.context_id, &chain, event, &roots)
+        crate::hook::dispatch(
+            &self.index,
+            &self.descriptor.context_id,
+            &chain,
+            event,
+            &roots,
+        )
     }
 
     /// Issue a bypass token for this context.
@@ -551,10 +635,11 @@ impl Service {
                 return Ok(id);
             }
         }
-        Err(
-            AikitError::new("run.unknown_command", format!("no capability exports `{name}`"))
-                .with("name", name.to_string()),
+        Err(AikitError::new(
+            "run.unknown_command",
+            format!("no capability exports `{name}`"),
         )
+        .with("name", name.to_string()))
     }
 
     /// The honest per-client effects of applying `view`, computed by the real
@@ -636,7 +721,8 @@ impl Service {
                 let file = if scope == ScopeKind::Project {
                     root.join(discover::MARKER).join(discover::PROFILE_FILE)
                 } else {
-                    root.join(discover::MARKER).join(discover::PROFILE_LOCAL_FILE)
+                    root.join(discover::MARKER)
+                        .join(discover::PROFILE_LOCAL_FILE)
                 };
                 if let Some(parent) = file.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| {
@@ -650,7 +736,10 @@ impl Service {
             }
             other => Err(AikitError::new(
                 "scope.unwritable",
-                format!("writing to the {} scope is not supported here", other.as_str()),
+                format!(
+                    "writing to the {} scope is not supported here",
+                    other.as_str()
+                ),
             )
             .with("scope", other.as_str())),
         }
@@ -783,7 +872,8 @@ impl AikitApplication for Service {
         // updates the label in place rather than minting a new generation.
         let mut view = self.view.clone();
         if let Some(label) = r.label.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            view.properties.insert("label".to_string(), label.to_string());
+            view.properties
+                .insert("label".to_string(), label.to_string());
         }
         let staged = GenerationBuilder::new().build(&context_dir, &view, &plans)?;
         let committed = staged.commit(base.as_ref())?;
@@ -797,11 +887,10 @@ impl AikitApplication for Service {
 
     fn run(&mut self, r: RunRequest) -> Result<RunHandle> {
         let id = self.find_runnable(&r.name, &self.view)?;
-        let capsule = self
-            .catalog
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| AikitError::new("run.unknown_command", format!("{id} is not loaded")))?;
+        let capsule =
+            self.catalog.get(&id).cloned().ok_or_else(|| {
+                AikitError::new("run.unknown_command", format!("{id} is not loaded"))
+            })?;
 
         // Honour trust: an unreviewed executable must be confirmed before it
         // runs. This must be computed from the capsule's own trust, NOT from
@@ -828,7 +917,10 @@ impl AikitApplication for Service {
         let project_root = self.descriptor.project_root.as_deref();
         let plan = run::plan_script(&capsule, &r.args, project_root, &self.invocation_cwd)?;
         let report = run::execute(&plan)?;
-        Ok(RunHandle { capsule: id, report })
+        Ok(RunHandle {
+            capsule: id,
+            report,
+        })
     }
 
     fn session_up(&mut self, _r: SessionRequest) -> Result<SessionResult> {
@@ -915,7 +1007,10 @@ impl PaletteBackend for Service {
 
     fn start(&mut self, intent: &RunIntent) -> Result<JobOutput> {
         let capsule = self.catalog.get(&intent.capsule).cloned().ok_or_else(|| {
-            AikitError::new("run.unknown_command", format!("{} is not loaded", intent.capsule))
+            AikitError::new(
+                "run.unknown_command",
+                format!("{} is not loaded", intent.capsule),
+            )
         })?;
         let args = intent.argv().unwrap_or_default();
         let project_root = self.descriptor.project_root.as_deref();

@@ -40,6 +40,12 @@ pub enum Command {
     Init(InitArgs),
     /// Survey the skill trees on this machine: which version is running, where.
     Collate(CollateArgs),
+    /// Move a foreign skill root into AIKit ownership through a reversible Procedure.
+    Adopt(AdoptArgs),
+    /// Inspect and undo recorded Procedures.
+    Procedure(ProcedureCmd),
+    /// Create and inspect project-specific profile lenses.
+    Profile(ProfileCmd),
     /// Jump to what you meant: act if unambiguous, else offer the candidates.
     Z(ZArgs),
     /// Create, inspect and point harnesses at skill-sets.
@@ -117,6 +123,142 @@ pub enum Command {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Args)]
+pub struct AdoptArgs {
+    /// Foreign Agent Skills root to adopt.
+    #[arg(value_name = "ROOT")]
+    pub root: std::path::PathBuf,
+    /// Capsule namespace under `skill/` (for example `claude`).
+    #[arg(long, value_name = "NAME")]
+    pub namespace: Option<String>,
+    /// Apply the reviewed plan. Without this flag adoption only prints its diff.
+    #[arg(long)]
+    pub yes: bool,
+    /// Digest printed by the preview. Binds confirmation to the exact surveyed
+    /// source bytes, paths, links and modes.
+    #[arg(long, value_name = "DIGEST", requires = "yes")]
+    pub expect_digest: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ProcedureCmd {
+    #[command(subcommand)]
+    pub command: ProcedureSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProcedureSub {
+    /// Create and persist a reviewable Procedure without applying it.
+    Plan(ProcedurePlanArgs),
+    /// Render the durable before/after diff for a planned Procedure.
+    Diff(ProcedureDiffArgs),
+    /// Apply one exact persisted Procedure after checking its digest.
+    Run(ProcedureRunArgs),
+    /// Undo a committed Procedure using its recorded inverse journal.
+    Undo(ProcedureUndoArgs),
+    /// List Procedures that have an undo record.
+    List(ProcedureListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProcedureUndoArgs {
+    #[arg(value_name = "PROCEDURE")]
+    pub procedure: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ProcedureListArgs {}
+
+#[derive(Debug, Args)]
+pub struct ProcedurePlanArgs {
+    #[command(subcommand)]
+    pub command: ProcedurePlanSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProcedurePlanSub {
+    /// Plan adoption of a foreign Agent Skills root.
+    Adopt(ProcedurePlanAdoptArgs),
+    /// Plan a project-local profile fork.
+    ProfileFork(ProcedurePlanProfileForkArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProcedurePlanAdoptArgs {
+    #[arg(value_name = "ROOT")]
+    pub root: std::path::PathBuf,
+    #[arg(long, value_name = "NAME")]
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ProcedurePlanProfileForkArgs {
+    #[arg(value_name = "BASE")]
+    pub base: String,
+    #[arg(long, value_name = "PROFILE")]
+    pub name: Option<String>,
+    #[arg(long, default_value = "project", value_name = "SCOPE")]
+    pub scope: String,
+    #[arg(long = "param", value_name = "KEY=VALUE")]
+    pub params: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ProcedureDiffArgs {
+    #[arg(value_name = "PROCEDURE")]
+    pub procedure: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ProcedureRunArgs {
+    #[arg(value_name = "PROCEDURE")]
+    pub procedure: String,
+    /// Digest printed by `procedure plan` or `procedure diff`.
+    #[arg(long, value_name = "DIGEST")]
+    pub expect_digest: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ProfileCmd {
+    #[command(subcommand)]
+    pub command: ProfileSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProfileSub {
+    /// Create a project-local delta that extends a base profile.
+    Fork(ProfileForkArgs),
+    /// Show only what a project fork changes relative to its base.
+    Diff(ProfileDiffArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProfileForkArgs {
+    #[arg(value_name = "BASE")]
+    pub base: String,
+    /// Id for the project-local fork. Defaults to `profile/project/<base-name>`.
+    #[arg(long, value_name = "PROFILE")]
+    pub name: Option<String>,
+    /// Forks are project lenses; `project` is currently the only writable scope.
+    #[arg(long, default_value = "project", value_name = "SCOPE")]
+    pub scope: String,
+    /// Bind a parameter required by the base profile. Repeat for multiple values.
+    #[arg(long = "param", value_name = "KEY=VALUE")]
+    pub params: Vec<String>,
+    /// Apply the reviewed plan. Without this flag only the diff is returned.
+    #[arg(long)]
+    pub yes: bool,
+    /// Review digest printed by the preview. Required together with `--yes`.
+    #[arg(long, value_name = "DIGEST", requires = "yes")]
+    pub expect_digest: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ProfileDiffArgs {
+    #[arg(value_name = "PROFILE")]
+    pub profile: String,
+}
+
+#[derive(Debug, Args)]
 pub struct TreeArgs {
     /// Expand these paths, e.g. `sets` or `hooks/PreToolUse`. Repeatable.
     #[arg(long = "expand", value_name = "PATH")]
@@ -151,6 +293,10 @@ pub enum SetSub {
     Add(SetMemberArgs),
     /// Remove capabilities from a set. Never deletes the capability.
     Remove(SetMemberArgs),
+    /// Rename a writable set through a reversible Procedure.
+    Rename(SetRenameArgs),
+    /// Move a writable set into Procedure-owned recovery storage.
+    Delete(SetDeleteArgs),
 }
 
 #[derive(Debug, Args)]
@@ -181,6 +327,20 @@ pub struct SetMemberArgs {
     pub name: String,
     #[arg(value_name = "IDS", required = true)]
     pub ids: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SetRenameArgs {
+    #[arg(value_name = "FROM")]
+    pub from: String,
+    #[arg(value_name = "TO")]
+    pub to: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SetDeleteArgs {
+    #[arg(value_name = "NAME")]
+    pub name: String,
 }
 
 #[derive(Debug, Args)]
@@ -216,6 +376,9 @@ pub struct UiArgs {
     /// Force the fullscreen host even when a popup would fit.
     #[arg(long)]
     pub fullscreen: bool,
+    /// Open the organising tree instead of the invocation palette.
+    #[arg(long, conflicts_with = "query")]
+    pub tree: bool,
     /// Seed the palette's search box.
     #[arg(value_name = "QUERY")]
     pub query: Option<String>,
@@ -264,7 +427,11 @@ pub struct RunArgs {
     #[arg(value_name = "NAME")]
     pub name: String,
     /// Arguments passed through to the capability.
-    #[arg(value_name = "ARGS", trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(
+        value_name = "ARGS",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
     pub args: Vec<String>,
     /// Override the execution mode.
     #[arg(long, value_name = "MODE")]

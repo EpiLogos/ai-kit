@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod adopt;
 pub mod cli;
 pub mod client;
 pub mod collate;
@@ -24,6 +25,7 @@ pub mod json;
 pub mod jump;
 pub mod multicall;
 pub mod mux_install;
+pub mod profile_ops;
 pub mod run;
 pub mod task;
 pub mod tree_build;

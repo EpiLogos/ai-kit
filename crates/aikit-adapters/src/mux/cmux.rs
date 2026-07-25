@@ -457,12 +457,7 @@ impl<R: CommandRunner> Cmux<R> {
     // -----------------------------------------------------------------------
 
     /// Send something to one of cmux's native surfaces.
-    pub fn post(
-        &self,
-        surface: SidebarSurface,
-        workspace: &str,
-        message: &str,
-    ) -> Result<Posted> {
+    pub fn post(&self, surface: SidebarSurface, workspace: &str, message: &str) -> Result<Posted> {
         let probe = self.probe_or_empty();
         if !probe.has_command(surface.command()) {
             return Ok(Posted {
@@ -521,7 +516,8 @@ impl<R: CommandRunner> Cmux<R> {
     // -----------------------------------------------------------------------
 
     fn create_workspace(&self, title: &str, plan: &SessionPlan, view: &ViewPlan) -> Result<String> {
-        let mut args: Vec<String> = vec!["new-workspace".into(), "--name".into(), title.to_string()];
+        let mut args: Vec<String> =
+            vec!["new-workspace".into(), "--name".into(), title.to_string()];
         let root = view.steps[0].cwd.as_deref().or(plan.root.as_deref());
         if let Some(cwd) = root {
             args.push("--cwd".into());
@@ -535,12 +531,7 @@ impl<R: CommandRunner> Cmux<R> {
         extract_id(out.line(), "workspace")
     }
 
-    fn split_surface(
-        &self,
-        workspace: &str,
-        origin: &str,
-        direction: Direction,
-    ) -> Result<String> {
+    fn split_surface(&self, workspace: &str, origin: &str, direction: Direction) -> Result<String> {
         let out = self.must(&[
             "new-split",
             direction.as_str(),
@@ -598,7 +589,11 @@ fn extract_id(stdout: &str, key: &str) -> Result<String> {
 }
 
 fn first_line(stderr: &str, stdout: &str) -> String {
-    let source = if stderr.trim().is_empty() { stdout } else { stderr };
+    let source = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
     source.lines().next().unwrap_or("").trim().to_string()
 }
 
@@ -835,6 +830,7 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
 
     fn spawn(&self, request: SpawnRequest) -> Result<SpawnedTarget> {
         let capabilities = self.capabilities();
+        let command = request.command_with_env();
         let target = request
             .target
             .clone()
@@ -849,7 +845,7 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
                         "running in the current surface needs a surface, and none was given",
                     ));
                 }
-                if let Some(command) = self.contextual_command(&request.command) {
+                if let Some(command) = self.contextual_command(&command) {
                     let workspace = target.session.clone().unwrap_or_default();
                     self.run_in_surface(&workspace, &surface, &command)?;
                 }
@@ -869,7 +865,7 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
                 let workspace = target.session.clone().unwrap_or_default();
                 let origin = target.surface.clone().unwrap_or_default();
                 let surface = self.split_surface(&workspace, &origin, request.direction)?;
-                if let Some(command) = self.contextual_command(&request.command) {
+                if let Some(command) = self.contextual_command(&command) {
                     self.run_in_surface(&workspace, &surface, &command)?;
                 }
                 Ok(SpawnedTarget {
@@ -890,7 +886,7 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
                     args.push("--cwd".into());
                     args.push(cwd.display().to_string());
                 }
-                if let Some(command) = self.contextual_command(&request.command) {
+                if let Some(command) = self.contextual_command(&command) {
                     args.push("--command".into());
                     args.push(command);
                 }

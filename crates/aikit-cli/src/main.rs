@@ -17,7 +17,7 @@ use aikit_cli::app::{
 };
 use aikit_cli::cli::*;
 use aikit_cli::json::{self, EnvelopeContext};
-use aikit_cli::{hook, multicall, ui};
+use aikit_cli::{hook, multicall, run, ui};
 
 use aikit_core::hooks::HookEvent;
 use aikit_core::id::CapsuleId;
@@ -63,7 +63,11 @@ fn run_cli() -> i32 {
             // clap renders help and usage errors itself; honour its intended
             // stream and status but keep our usage exit code.
             let _ = e.print();
-            return if e.use_stderr() { json::EXIT_USAGE } else { json::EXIT_OK };
+            return if e.use_stderr() {
+                json::EXIT_USAGE
+            } else {
+                json::EXIT_OK
+            };
         }
     };
 
@@ -149,10 +153,19 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         None => open_palette(cwd, None, false),
         Some(Command::Init(a)) => cmd_init(cwd, a),
         Some(Command::Collate(a)) => cmd_collate(cwd, a),
+        Some(Command::Adopt(a)) => cmd_adopt(cwd, a),
+        Some(Command::Procedure(c)) => cmd_procedure(cwd, c),
+        Some(Command::Profile(c)) => cmd_profile(cwd, c),
         Some(Command::Z(a)) => cmd_z(cwd, a, json_mode),
         Some(Command::Set(c)) => cmd_set(cwd, c),
         Some(Command::Tree(a)) => cmd_tree(cwd, a, json_mode),
-        Some(Command::Ui(a)) => open_palette(cwd, a.query, a.fullscreen),
+        Some(Command::Ui(a)) => {
+            if a.tree {
+                open_tree(cwd, a.fullscreen)
+            } else {
+                open_palette(cwd, a.query, a.fullscreen)
+            }
+        }
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
         Some(Command::Status(a)) => cmd_status(cwd, a),
@@ -185,6 +198,256 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Client(c)) => cmd_client(cwd, c),
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
+    }
+}
+
+/// `aikit profile` — project lenses over reusable base profiles.
+fn cmd_profile(cwd: &std::path::Path, c: ProfileCmd) -> Result<Reply> {
+    use aikit_core::ProfileId;
+
+    let service = Service::discover(cwd)?;
+    match c.command {
+        ProfileSub::Fork(a) => {
+            let base = ProfileId::parse(&a.base)?;
+            let fork = aikit_cli::profile_ops::plan_fork(
+                &service,
+                &base,
+                a.name.as_deref(),
+                &a.scope,
+                &a.params,
+            )?;
+            let runner = aikit_store::procedure::ProcedureRunner::new(service.home());
+            let diff = runner.diff(&fork.procedure)?;
+            if !a.yes {
+                runner.save(&fork.procedure)?;
+                return Ok(reply(
+                    &service,
+                    jval!({
+                        "base": fork.base.to_string(),
+                        "fork": fork.fork.to_string(),
+                        "path": fork.path.display().to_string(),
+                        "diff": diff.render(),
+                        "review_digest": fork.review_digest.as_str(),
+                        "procedure": fork.procedure.id.to_string(),
+                        "digest": fork.procedure.digest.as_str(),
+                        "applied": false,
+                        "note": format!(
+                            "run the exact saved plan with `aikit procedure run {} --expect-digest {}`",
+                            fork.procedure.id, fork.procedure.digest
+                        ),
+                    }),
+                    vec![],
+                ));
+            }
+            let expected = a.expect_digest.as_deref().ok_or_else(|| {
+                AikitError::new(
+                    "procedure.review_required",
+                    "profile fork requires the review digest printed by the preview",
+                )
+                .with("actual", fork.review_digest.as_str())
+            })?;
+            if expected != fork.review_digest.as_str() {
+                return Err(AikitError::new(
+                    "procedure.review_mismatch",
+                    "the base profile or project declaration changed since it was reviewed; preview it again",
+                )
+                .with("expected", expected)
+                .with("actual", fork.review_digest.as_str()));
+            }
+            let outcome = runner.run(&fork.procedure)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "base": fork.base.to_string(),
+                    "fork": fork.fork.to_string(),
+                    "path": fork.path.display().to_string(),
+                    "procedure": fork.procedure.id.to_string(),
+                    "applied": true,
+                    "edits": outcome.applied,
+                    "undo": format!("aikit procedure undo {}", fork.procedure.id),
+                }),
+                vec![],
+            ))
+        }
+        ProfileSub::Diff(a) => {
+            let profile = ProfileId::parse(&a.profile)?;
+            let data = aikit_cli::profile_ops::diff(&service, &profile)?;
+            Ok(reply(&service, data, vec![]))
+        }
+    }
+}
+
+/// `aikit adopt` — move a foreign Agent Skills tree into AIKit ownership.
+fn cmd_adopt(cwd: &std::path::Path, a: AdoptArgs) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let adoption = aikit_cli::adopt::plan(service.home(), &a.root, a.namespace.as_deref())?;
+    let runner = aikit_store::procedure::ProcedureRunner::new(service.home());
+    let diff = runner.diff(&adoption.procedure)?;
+
+    if !a.yes {
+        runner.save(&adoption.procedure)?;
+        return Ok(reply(
+            &service,
+            jval!({
+                "source": adoption.source.display().to_string(),
+                "namespace": adoption.namespace,
+                "skills": adoption.capsules.len(),
+                "capsules": adoption.capsules.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "diff": diff.render(),
+                "review_digest": adoption.review_digest.as_str(),
+                "procedure": adoption.procedure.id.to_string(),
+                "digest": adoption.procedure.digest.as_str(),
+                "applied": false,
+                "note": format!(
+                    "run the exact saved plan with `aikit procedure run {} --expect-digest {}`",
+                    adoption.procedure.id, adoption.procedure.digest
+                ),
+            }),
+            vec![],
+        ));
+    }
+
+    let expected = a.expect_digest.as_deref().ok_or_else(|| {
+        AikitError::new(
+            "procedure.review_required",
+            "adoption requires the review digest printed by the preview",
+        )
+        .with("actual", adoption.review_digest.as_str())
+    })?;
+    if expected != adoption.review_digest.as_str() {
+        return Err(AikitError::new(
+            "procedure.review_mismatch",
+            "the foreign root changed since it was reviewed; preview it again",
+        )
+        .with("expected", expected)
+        .with("actual", adoption.review_digest.as_str()));
+    }
+
+    let outcome = runner.run(&adoption.procedure)?;
+    Ok(reply(
+        &service,
+        jval!({
+            "source": adoption.source.display().to_string(),
+            "namespace": adoption.namespace,
+            "skills": adoption.capsules.len(),
+            "capsules": adoption.capsules.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "procedure": adoption.procedure.id.to_string(),
+            "ownership": "adopted",
+            "applied": true,
+            "edits": outcome.applied,
+            "undo": format!("aikit procedure undo {}", adoption.procedure.id),
+        }),
+        vec![],
+    ))
+}
+
+/// `aikit procedure` — read and apply the inverse records produced by Procedures.
+fn cmd_procedure(cwd: &std::path::Path, c: ProcedureCmd) -> Result<Reply> {
+    use aikit_core::ProcedureId;
+
+    let service = Service::discover(cwd)?;
+    let runner = aikit_store::procedure::ProcedureRunner::new(service.home());
+    match c.command {
+        ProcedureSub::Plan(a) => {
+            let (procedure, review_digest) = match a.command {
+                ProcedurePlanSub::Adopt(args) => {
+                    let adoption = aikit_cli::adopt::plan(
+                        service.home(),
+                        &args.root,
+                        args.namespace.as_deref(),
+                    )?;
+                    (adoption.procedure, Some(adoption.review_digest))
+                }
+                ProcedurePlanSub::ProfileFork(args) => {
+                    let base = aikit_core::ProfileId::parse(&args.base)?;
+                    let fork = aikit_cli::profile_ops::plan_fork(
+                        &service,
+                        &base,
+                        args.name.as_deref(),
+                        &args.scope,
+                        &args.params,
+                    )?;
+                    (fork.procedure, Some(fork.review_digest))
+                }
+            };
+            runner.save(&procedure)?;
+            let diff = runner.diff(&procedure)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "procedure": procedure.id.to_string(),
+                    "kind": procedure.kind.as_str(),
+                    "digest": procedure.digest.as_str(),
+                    "review_digest": review_digest.map(|digest| digest.as_str().to_string()),
+                    "diff": diff.render(),
+                    "applied": false,
+                    "run": format!(
+                        "aikit procedure run {} --expect-digest {}",
+                        procedure.id, procedure.digest
+                    ),
+                }),
+                vec![],
+            ))
+        }
+        ProcedureSub::Diff(a) => {
+            let id = ProcedureId::parse(&a.procedure)?;
+            let procedure = runner.load(&id)?;
+            let diff = runner.diff(&procedure)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "procedure": id.to_string(),
+                    "kind": procedure.kind.as_str(),
+                    "digest": procedure.digest.as_str(),
+                    "diff": diff.render(),
+                }),
+                vec![],
+            ))
+        }
+        ProcedureSub::Run(a) => {
+            let id = ProcedureId::parse(&a.procedure)?;
+            let procedure = runner.load(&id)?;
+            if a.expect_digest != procedure.digest.as_str() {
+                return Err(AikitError::new(
+                    "procedure.review_mismatch",
+                    "the expected digest does not identify this persisted Procedure",
+                )
+                .with("expected", a.expect_digest)
+                .with("actual", procedure.digest.as_str()));
+            }
+            let outcome = runner.run(&procedure)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "procedure": id.to_string(),
+                    "digest": procedure.digest.as_str(),
+                    "applied": outcome.applied,
+                    "already_satisfied": outcome.already_satisfied,
+                    "undo": format!("aikit procedure undo {id}"),
+                }),
+                vec![],
+            ))
+        }
+        ProcedureSub::Undo(a) => {
+            let id = ProcedureId::parse(&a.procedure)?;
+            let undone = runner.undo(&id)?;
+            Ok(reply(
+                &service,
+                jval!({ "procedure": id.to_string(), "undone": undone }),
+                vec![],
+            ))
+        }
+        ProcedureSub::List(_) => {
+            let procedures = runner.list()?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "procedures": procedures.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    "count": procedures.len(),
+                }),
+                vec![],
+            ))
+        }
     }
 }
 
@@ -244,7 +507,9 @@ fn cmd_collate(cwd: &std::path::Path, a: CollateArgs) -> Result<Reply> {
     use aikit_cli::{collate, foreign};
     let service = Service::discover(cwd)?;
 
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     let mut roots: Vec<collate::ForeignRootRef> = foreign::default_roots(&home)
         .into_iter()
         .filter(|(_, path)| path.exists())
@@ -252,7 +517,10 @@ fn cmd_collate(cwd: &std::path::Path, a: CollateArgs) -> Result<Reply> {
         .collect();
     for extra in &a.roots {
         roots.push(collate::ForeignRootRef {
-            label: extra.file_name().map(|n| format!("@{}", n.to_string_lossy())).unwrap_or_else(|| "@root".into()),
+            label: extra
+                .file_name()
+                .map(|n| format!("@{}", n.to_string_lossy()))
+                .unwrap_or_else(|| "@root".into()),
             path: extra.clone(),
         });
     }
@@ -263,11 +531,17 @@ fn cmd_collate(cwd: &std::path::Path, a: CollateArgs) -> Result<Reply> {
     // version conflicts that matter actually live. Surveyed separately because a
     // plugin declares its own name and version in a manifest (PRIOR-ART #33),
     // rather than being inferred from a skill's frontmatter.
-    let plugin_roots: Vec<PathBuf> = [".claude/plugins", ".codex/plugins", ".codex", ".agents", ".hermes"]
-        .iter()
-        .map(|r| home.join(r))
-        .filter(|p| p.exists())
-        .collect();
+    let plugin_roots: Vec<PathBuf> = [
+        ".claude/plugins",
+        ".codex/plugins",
+        ".codex",
+        ".agents",
+        ".hermes",
+    ]
+    .iter()
+    .map(|r| home.join(r))
+    .filter(|p| p.exists())
+    .collect();
     let plugins = collate::survey_plugins(&plugin_roots, 6);
     let plugin_conflicts = collate::plugin_conflicts(plugins.clone());
     collate::report_plugin_conflicts(service.index(), &plugin_conflicts)?;
@@ -368,7 +642,9 @@ fn cmd_z(cwd: &std::path::Path, a: ZArgs, json_mode: bool) -> Result<Reply> {
             Ok(Reply::Silent)
         }
         Jump::Act { capsule } => {
-            let action = plan.action(&service).expect("an Act decision has an action");
+            let action = plan
+                .action(&service)
+                .expect("an Act decision has an action");
             let data = jval!({
                 "query": plan.query,
                 "decision": "act",
@@ -497,7 +773,11 @@ fn cmd_set(cwd: &std::path::Path, c: SetCmd) -> Result<Reply> {
                     })
                 })
                 .collect();
-            Ok(reply(&service, jval!({ "sets": rows, "count": rows.len() }), vec![]))
+            Ok(reply(
+                &service,
+                jval!({ "sets": rows, "count": rows.len() }),
+                vec![],
+            ))
         }
         SetSub::Show(a) => {
             let set = skillsets::load(home, &a.name)?;
@@ -542,33 +822,234 @@ fn cmd_set(cwd: &std::path::Path, c: SetCmd) -> Result<Reply> {
             }
             ids.sort();
 
-            let set = skillsets::create(home, &a.name, &ids, &a.globs)?;
+            let procedure = skillsets::plan_create(home, &a.name, &ids, &a.globs)?;
+            let runner = aikit_store::procedure::ProcedureRunner::new(home);
+            let diff = runner.diff(&procedure)?;
+            let outcome = runner.run(&procedure)?;
+            let set = skillsets::load(home, &a.name)?;
             let data = jval!({
                 "name": set.label(),
                 "members": set.len(),
                 "expanded_from": a.globs,
                 "path": skillsets::dir(home, &a.name).display().to_string(),
+                "procedure": procedure.id.to_string(),
+                "edits": outcome.applied,
+                "diff": diff.render(),
+                "undo": format!("aikit procedure undo {}", procedure.id),
             });
             Ok(reply(&service, data, vec![]))
         }
         SetSub::Add(a) => {
-            let ids: Vec<CapsuleId> = a.ids.iter().map(|r| CapsuleId::parse(r)).collect::<Result<_>>()?;
-            let set = skillsets::add(home, &a.name, &ids)?;
-            Ok(reply(&service, jval!({ "name": set.label(), "members": set.len() }), vec![]))
+            let ids: Vec<CapsuleId> = a
+                .ids
+                .iter()
+                .map(|r| CapsuleId::parse(r))
+                .collect::<Result<_>>()?;
+            let procedure = skillsets::plan_add(home, &a.name, &ids)?;
+            let runner = aikit_store::procedure::ProcedureRunner::new(home);
+            let outcome = runner.run(&procedure)?;
+            let set = skillsets::load(home, &a.name)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "name": set.label(),
+                    "members": set.len(),
+                    "procedure": procedure.id.to_string(),
+                    "edits": outcome.applied,
+                    "undo": format!("aikit procedure undo {}", procedure.id),
+                }),
+                vec![],
+            ))
         }
         SetSub::Remove(a) => {
-            let ids: Vec<CapsuleId> = a.ids.iter().map(|r| CapsuleId::parse(r)).collect::<Result<_>>()?;
-            let set = skillsets::remove(home, &a.name, &ids)?;
+            let ids: Vec<CapsuleId> = a
+                .ids
+                .iter()
+                .map(|r| CapsuleId::parse(r))
+                .collect::<Result<_>>()?;
+            let procedure = skillsets::plan_remove(home, &a.name, &ids)?;
+            let runner = aikit_store::procedure::ProcedureRunner::new(home);
+            let outcome = runner.run(&procedure)?;
+            let set = skillsets::load(home, &a.name)?;
             // Removing from a set never deletes the capability: a set is a view.
-            Ok(reply(&service, jval!({ "name": set.label(), "members": set.len() }), vec![]))
+            Ok(reply(
+                &service,
+                jval!({
+                    "name": set.label(),
+                    "members": set.len(),
+                    "procedure": procedure.id.to_string(),
+                    "edits": outcome.applied,
+                    "undo": format!("aikit procedure undo {}", procedure.id),
+                }),
+                vec![],
+            ))
+        }
+        SetSub::Rename(a) => {
+            let procedure = skillsets::plan_rename(home, &a.from, &a.to)?;
+            let outcome = aikit_store::procedure::ProcedureRunner::new(home).run(&procedure)?;
+            let set = skillsets::load(home, &a.to)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "name": set.label(),
+                    "members": set.len(),
+                    "procedure": procedure.id.to_string(),
+                    "edits": outcome.applied,
+                    "undo": format!("aikit procedure undo {}", procedure.id),
+                }),
+                vec![],
+            ))
+        }
+        SetSub::Delete(a) => {
+            let (procedure, recovery) = skillsets::plan_delete(home, &a.name)?;
+            let outcome = aikit_store::procedure::ProcedureRunner::new(home).run(&procedure)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "name": a.name,
+                    "deleted": true,
+                    "recovery": recovery.display().to_string(),
+                    "procedure": procedure.id.to_string(),
+                    "edits": outcome.applied,
+                    "undo": format!("aikit procedure undo {}", procedure.id),
+                }),
+                vec![],
+            ))
         }
     }
 }
 
 fn open_palette(cwd: &std::path::Path, query: Option<String>, fullscreen: bool) -> Result<Reply> {
+    open_palette_inner(cwd, query, fullscreen, false)
+}
+
+fn open_palette_inner(
+    cwd: &std::path::Path,
+    query: Option<String>,
+    fullscreen: bool,
+    activate_initial: bool,
+) -> Result<Reply> {
     let mut service = Service::discover(cwd)?;
-    ui::run(&mut service, query, fullscreen)?;
-    Ok(Reply::Silent)
+    let outcome = match (activate_initial, query) {
+        (true, Some(query)) => ui::run_activation(&mut service, query, fullscreen)?,
+        (_, query) => ui::run(&mut service, query, fullscreen)?,
+    };
+    match outcome {
+        aikit_tui::PaletteOutcome::Tree => open_tree(cwd, fullscreen),
+        aikit_tui::PaletteOutcome::Run(intent) => {
+            let command = service.plan_run_intent(&intent)?;
+            if command.mode.needs_mux() {
+                spawn_palette_command(&command)?;
+                return Ok(Reply::Status(0));
+            }
+            #[cfg(unix)]
+            if command.mode == aikit_core::capsule::ExecMode::Replace {
+                return Err(run::exec_replace(&command));
+            }
+            let report = run::execute(&command)?;
+            for line in &report.output {
+                println!("{line}");
+            }
+            Ok(Reply::Status(report.status))
+        }
+        _ => Ok(Reply::Silent),
+    }
+}
+
+fn spawn_palette_command(command: &run::ScriptCommand) -> Result<()> {
+    use aikit_adapters::mux::{
+        cmux::Cmux, plain::Plain, stack::MuxStack, tmux::Tmux, SpawnRequest,
+    };
+    use aikit_core::capsule::ExecMode;
+    use aikit_core::session::Placement;
+
+    let placement = match command.mode {
+        ExecMode::NewPane => Placement::NewPane,
+        ExecMode::NewView => Placement::NewView,
+        _ => {
+            return Err(AikitError::new(
+                "run.invalid_mux_mode",
+                format!(
+                    "{} is not a multiplexer execution mode",
+                    command.mode.as_str()
+                ),
+            ))
+        }
+    };
+    let mut argv = vec![command.program.clone()];
+    argv.extend(command.argv.clone());
+    let mut request = SpawnRequest::new(placement, argv).in_dir(command.cwd.clone());
+    request.env = command.env.clone();
+    let stack = MuxStack::detect(
+        vec![
+            Box::new(Plain::new()),
+            Box::new(Cmux::system()),
+            Box::new(Tmux::system()),
+        ],
+        None,
+    )?;
+    request.target = Some(stack.current_location()?.target());
+    stack.spawn(request)?;
+    Ok(())
+}
+
+fn open_tree(cwd: &std::path::Path, fullscreen: bool) -> Result<Reply> {
+    use aikit_tui::tree::TreeEffect;
+    use aikit_tui::tree_driver::TreeOutcome;
+    use aikit_tui::{PaletteBackend, Toggle};
+
+    let mut service = Service::discover(cwd)?;
+    loop {
+        match ui::run_tree(&service, fullscreen)? {
+            TreeOutcome::Closed => return Ok(Reply::Silent),
+            TreeOutcome::Apply(capsules) => {
+                let toggles: Vec<Toggle> = capsules
+                    .into_iter()
+                    .map(|capsule| {
+                        let enable = !service.resolved().is_active(&capsule);
+                        Toggle::new(capsule, enable)
+                    })
+                    .collect();
+                let scope = service.descriptor().default_mutation_scope();
+                PaletteBackend::apply(&mut service, scope, &toggles)?;
+                return Ok(Reply::Silent);
+            }
+            TreeOutcome::Effect(TreeEffect::CreateSet { set }) => {
+                let procedure =
+                    aikit_store::skillsets::plan_create(service.home(), &set, &[], &[])?;
+                aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure)?;
+                service = Service::discover(cwd)?;
+            }
+            TreeOutcome::Effect(TreeEffect::RenameSet { from, to }) => {
+                let procedure = aikit_store::skillsets::plan_rename(service.home(), &from, &to)?;
+                aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure)?;
+                service = Service::discover(cwd)?;
+            }
+            TreeOutcome::Effect(TreeEffect::DeleteSet { set }) => {
+                let (procedure, _recovery) =
+                    aikit_store::skillsets::plan_delete(service.home(), &set)?;
+                aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure)?;
+                service = Service::discover(cwd)?;
+            }
+            TreeOutcome::Effect(TreeEffect::AddToSet { set, capsule }) => {
+                let procedure = aikit_store::skillsets::plan_add(service.home(), &set, &[capsule])?;
+                aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure)?;
+                service = Service::discover(cwd)?;
+            }
+            TreeOutcome::Effect(TreeEffect::RemoveFromSet { set, capsule }) => {
+                let procedure =
+                    aikit_store::skillsets::plan_remove(service.home(), &set, &[capsule])?;
+                aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure)?;
+                service = Service::discover(cwd)?;
+            }
+            TreeOutcome::Effect(TreeEffect::Activate { capsule }) => {
+                // The palette already owns argument forms, trust confirmation,
+                // and opening non-runnable skills. Re-enter it with the exact id
+                // instead of bypassing those gates with an empty-argument run.
+                return open_palette_inner(cwd, Some(capsule.to_string()), fullscreen, true);
+            }
+        }
+    }
 }
 
 fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
@@ -830,8 +1311,8 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
             use aikit_store::state::StateStore;
             // Forgetting a binding is not forgetting the context: the generations,
             // the overlay and the history all survive.
-            let forgotten =
-                StateStore::new(service.index()).unbind_context(&service.descriptor().context_id)?;
+            let forgotten = StateStore::new(service.index())
+                .unbind_context(&service.descriptor().context_id)?;
             let data = jval!({
                 "context_id": service.descriptor().context_id.to_string(),
                 "forgot_binding": forgotten,
@@ -891,7 +1372,11 @@ fn cmd_task(cwd: &std::path::Path, c: TaskCmd) -> Result<Reply> {
                     })
                 })
                 .collect();
-            Ok(reply(&service, jval!({ "tasks": rows, "count": rows.len() }), vec![]))
+            Ok(reply(
+                &service,
+                jval!({ "tasks": rows, "count": rows.len() }),
+                vec![],
+            ))
         }
     }
 }
@@ -906,7 +1391,8 @@ fn cmd_bypass(cwd: &std::path::Path, c: BypassCmd) -> Result<Reply> {
                     "a bypass must carry a reason; pass --reason",
                 ));
             }
-            let id = service.issue_bypass(&a.scope, a.reason.as_deref(), a.capability.as_deref())?;
+            let id =
+                service.issue_bypass(&a.scope, a.reason.as_deref(), a.capability.as_deref())?;
             let data = jval!({
                 "bypass_id": id,
                 "scope": a.scope,
@@ -926,7 +1412,11 @@ fn cmd_bypass(cwd: &std::path::Path, c: BypassCmd) -> Result<Reply> {
 
 fn cmd_bypasses(cwd: &std::path::Path) -> Result<Reply> {
     let service = Service::discover(cwd)?;
-    Ok(reply(&service, jval!({ "bypasses": bypass_summaries(&service)? }), vec![]))
+    Ok(reply(
+        &service,
+        jval!({ "bypasses": bypass_summaries(&service)? }),
+        vec![],
+    ))
 }
 
 fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
@@ -1007,7 +1497,11 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
                     })
                 })
                 .collect();
-            Ok(reply(&service, jval!({ "sessions": rows, "count": rows.len() }), vec![]))
+            Ok(reply(
+                &service,
+                jval!({ "sessions": rows, "count": rows.len() }),
+                vec![],
+            ))
         }
         SessionSub::Attach(a) => {
             let (argv, mux) = session_argv(&service, &a.session, "attach")?;
@@ -1068,8 +1562,18 @@ fn session_argv(service: &Service, session: &str, verb: &str) -> Result<(Vec<Str
     }
     let _ = service;
     let argv = match verb {
-        "attach" => vec!["tmux".into(), "attach-session".into(), "-t".into(), session.to_string()],
-        _ => vec!["tmux".into(), "kill-session".into(), "-t".into(), session.to_string()],
+        "attach" => vec![
+            "tmux".into(),
+            "attach-session".into(),
+            "-t".into(),
+            session.to_string(),
+        ],
+        _ => vec![
+            "tmux".into(),
+            "kill-session".into(),
+            "-t".into(),
+            session.to_string(),
+        ],
     };
     Ok((argv, "tmux".to_string()))
 }
@@ -1174,7 +1678,10 @@ fn cmd_diff(cwd: &std::path::Path) -> Result<Reply> {
     use aikit_cli::app::StageRequest;
     let service = Service::discover(cwd)?;
     let scope = service.descriptor().default_mutation_scope();
-    let staged = service.stage(StageRequest { scope, toggles: vec![] })?;
+    let staged = service.stage(StageRequest {
+        scope,
+        toggles: vec![],
+    })?;
 
     let clean = staged.added_dependencies.is_empty()
         && staged.dropped_dependencies.is_empty()
@@ -1295,7 +1802,11 @@ fn cmd_recent(cwd: &std::path::Path, limit: u32) -> Result<Reply> {
         .into_iter()
         .map(event_json)
         .collect();
-    Ok(reply(&service, jval!({ "events": rows, "count": rows.len() }), vec![]))
+    Ok(reply(
+        &service,
+        jval!({ "events": rows, "count": rows.len() }),
+        vec![],
+    ))
 }
 
 /// `aikit failures` — recent hook and run failures, and denials.
@@ -1314,7 +1825,11 @@ fn cmd_failures(cwd: &std::path::Path, limit: u32) -> Result<Reply> {
         .take(limit as usize)
         .map(event_json)
         .collect();
-    Ok(reply(&service, jval!({ "failures": rows, "count": rows.len() }), vec![]))
+    Ok(reply(
+        &service,
+        jval!({ "failures": rows, "count": rows.len() }),
+        vec![],
+    ))
 }
 
 fn event_json(e: aikit_store::index::EventSummary) -> Value {
@@ -1379,7 +1894,11 @@ fn cmd_unused(cwd: &std::path::Path) -> Result<Reply> {
             }));
         }
     }
-    Ok(reply(&service, jval!({ "unused": rows, "count": rows.len() }), vec![]))
+    Ok(reply(
+        &service,
+        jval!({ "unused": rows, "count": rows.len() }),
+        vec![],
+    ))
 }
 
 /// `aikit jobs` — background invocations AIKit started and has not seen finish.
@@ -1560,4 +2079,3 @@ fn read_stdin_json() -> Value {
         Value::Null
     }
 }
-

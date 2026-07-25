@@ -128,6 +128,7 @@ pub fn layer(kind: ScopeKind, enable: &[&str], disable: &[&str]) -> ScopeLayer {
         origin: LayerOrigin::new(format!("test:{}", kind.as_str())),
         patch: PoolPatch {
             profiles: vec![],
+            uses: vec![],
             enable: enable.iter().map(|s| cid(s)).collect(),
             disable: disable.iter().map(|s| cid(s)).collect(),
             config: Default::default(),

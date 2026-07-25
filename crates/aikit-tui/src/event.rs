@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll, read,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, poll, read,
 };
 
 use aikit_core::error::AikitError;
@@ -31,6 +31,7 @@ use crate::app::{Action, AppState, Mode};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteEvent {
     Key(KeyEvent),
+    Mouse(MouseEvent),
     Resize(u16, u16),
     /// No input arrived within the poll interval. Lets a caller redraw a running
     /// job without blocking on a key.
@@ -70,9 +71,9 @@ impl EventSource for CrosstermEvents {
         }
         Ok(match read().map_err(io)? {
             Event::Key(key) => Some(PaletteEvent::Key(key)),
+            Event::Mouse(mouse) => Some(PaletteEvent::Mouse(mouse)),
             Event::Resize(cols, rows) => Some(PaletteEvent::Resize(cols, rows)),
-            // Mouse, focus and paste events are not bound to anything; ignoring
-            // them keeps a stray scroll from being read as a keystroke.
+            // Focus and paste events are not bound to anything.
             _ => Some(PaletteEvent::Idle),
         })
     }
@@ -116,6 +117,9 @@ impl EventSource for ScriptedEvents {
 pub fn action_for(event: &PaletteEvent, state: &AppState) -> Option<Action> {
     match event {
         PaletteEvent::Resize(cols, rows) => Some(Action::Resized(*cols, *rows)),
+        // The palette remains deliberately keyboard-first. Mouse input is kept
+        // intact because the tree binds it to the same actions as its keys.
+        PaletteEvent::Mouse(_) => None,
         PaletteEvent::Idle => None,
         PaletteEvent::Key(key) => key_action(*key, state),
     }
@@ -156,6 +160,7 @@ fn key_action(key: KeyEvent, state: &AppState) -> Option<Action> {
         KeyCode::Char('n') if ctrl => Action::AltEnter,
         KeyCode::Char('o') if ctrl => Action::CtrlO,
         KeyCode::Char('r') if ctrl => Action::CtrlR,
+        KeyCode::Char('t') if ctrl => Action::Tree,
         KeyCode::Char('k') if ctrl => Action::MoveUp,
         KeyCode::Char('j') if ctrl => Action::MoveDown,
 

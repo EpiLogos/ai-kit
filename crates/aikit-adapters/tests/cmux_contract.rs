@@ -109,7 +109,11 @@ fn capabilities_are_probed_from_the_running_cmux_rather_than_assumed() {
     assert!(caps.remote_control);
 
     assert!(
-        adapter.runner().call_lines().iter().any(|l| l.contains("capabilities")),
+        adapter
+            .runner()
+            .call_lines()
+            .iter()
+            .any(|l| l.contains("capabilities")),
         "the capabilities have to come from the binary, not from this source file"
     );
 }
@@ -161,7 +165,11 @@ fn a_cmux_that_is_not_running_reports_absence_with_the_socket_error_as_the_reaso
     assert!(presence.installed, "the binary is on PATH");
     assert!(!presence.server_running);
     assert!(
-        presence.detail.as_deref().unwrap_or("").contains("Socket not found"),
+        presence
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("Socket not found"),
         "the user is owed the actual reason, got {:?}",
         presence.detail
     );
@@ -206,7 +214,10 @@ fn the_probe_is_made_once_and_reused() {
         .iter()
         .filter(|l| l.contains("capabilities"))
         .count();
-    assert_eq!(probes, 1, "a palette that reprobes on every keystroke is slow");
+    assert_eq!(
+        probes, 1,
+        "a palette that reprobes on every keystroke is slow"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +259,10 @@ fn a_multi_view_session_becomes_a_group_with_one_workspace_per_view() {
         .unwrap();
 
     let lines = adapter.runner().call_lines();
-    assert!(lines.iter().any(|l| l.contains("new-window")), "got: {lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("new-window")),
+        "got: {lines:?}"
+    );
     assert!(lines
         .iter()
         .any(|l| l.contains("new-workspace --name payments · code --cwd /work/payments")));
@@ -264,7 +278,10 @@ fn a_multi_view_session_becomes_a_group_with_one_workspace_per_view() {
         "each view's workspace joins the group: {lines:?}"
     );
 
-    assert_eq!(binding.session, "window:2", "the group is the session handle");
+    assert_eq!(
+        binding.session, "window:2",
+        "the group is the session handle"
+    );
     assert_eq!(binding.views.len(), 2);
 }
 
@@ -330,7 +347,9 @@ id = "watch"
 "#,
     );
     let adapter = cmux(full_runner()).with_grouping(Grouping::Always);
-    adapter.ensure_session(&plan, ReconcileMode::default()).unwrap();
+    adapter
+        .ensure_session(&plan, ReconcileMode::default())
+        .unwrap();
 
     assert!(
         !adapter
@@ -349,7 +368,10 @@ fn a_cmux_without_grouping_support_degrades_to_loose_workspaces_with_a_reason() 
         .on("list-workspaces", &fixture("list-workspaces-empty.json"))
         .sequence(
             "new-workspace",
-            &[&fixture("new-workspace.json"), &fixture("new-workspace.json")],
+            &[
+                &fixture("new-workspace.json"),
+                &fixture("new-workspace.json"),
+            ],
         )
         .on("new-split", &fixture("new-split.json"))
         .on("select-workspace", &fixture("ok.json"));
@@ -421,7 +443,9 @@ id = "editor"
 command = ["claude"]
 "#,
     );
-    adapter.ensure_session(&plan, ReconcileMode::default()).unwrap();
+    adapter
+        .ensure_session(&plan, ReconcileMode::default())
+        .unwrap();
 
     let lines = adapter.runner().call_lines();
     let command_line = lines
@@ -468,8 +492,14 @@ fn an_existing_session_is_rebound_by_title_when_cmux_hands_back_new_ids() {
         .unwrap();
 
     assert!(!binding.created, "the workspaces were already there");
-    assert_eq!(binding.views.get("code").map(String::as_str), Some("workspace:9"));
-    assert_eq!(binding.views.get("ops").map(String::as_str), Some("workspace:11"));
+    assert_eq!(
+        binding.views.get("code").map(String::as_str),
+        Some("workspace:9")
+    );
+    assert_eq!(
+        binding.views.get("ops").map(String::as_str),
+        Some("workspace:11")
+    );
     assert_eq!(
         binding.session, "window:4",
         "the group is whichever window those workspaces are in now"
@@ -551,8 +581,10 @@ fn a_temporary_surface_palette_is_available_when_it_is_asked_for() {
 
 #[test]
 fn a_temporary_surface_palette_falls_back_to_inline_when_splitting_is_unavailable() {
-    let runner = ScriptedRunner::new()
-        .on("capabilities", r#"{"version":"0.1.0","commands":["list-workspaces"]}"#);
+    let runner = ScriptedRunner::new().on(
+        "capabilities",
+        r#"{"version":"0.1.0","commands":["list-workspaces"]}"#,
+    );
     let adapter = cmux(runner);
 
     assert_eq!(
@@ -716,20 +748,27 @@ fn outside_cmux_the_location_is_empty_rather_than_invented() {
 #[test]
 fn spawning_a_new_pane_splits_a_surface_and_a_new_view_creates_a_workspace() {
     let adapter = cmux(full_runner());
-    let pane = adapter
-        .spawn(
-            SpawnRequest::new(Placement::NewPane, vec!["claude".into()])
-                .splitting(aikit_core::session::Direction::Right, None)
-                .from_target(MuxTarget::surface(MuxKind::Cmux, "surface:2")),
-        )
-        .unwrap();
+    let mut request = SpawnRequest::new(Placement::NewPane, vec!["claude".into()])
+        .splitting(aikit_core::session::Direction::Right, None)
+        .from_target(MuxTarget::surface(MuxKind::Cmux, "surface:2"));
+    request
+        .env
+        .insert("AIKIT_PROMPT".to_string(), "review carefully".to_string());
+    let pane = adapter.spawn(request).unwrap();
     assert_eq!(pane.target.surface.as_deref(), Some("surface:5"));
+    assert!(
+        adapter
+            .runner()
+            .call_lines()
+            .iter()
+            .any(|line| line.contains("env 'AIKIT_PROMPT=review carefully' claude")),
+        "the per-run environment must reach the actual cmux command: {:?}",
+        adapter.runner().call_lines()
+    );
 
     let view = cmux(full_runner());
-    view.spawn(
-        SpawnRequest::new(Placement::NewView, vec!["claude".into()]).named("review"),
-    )
-    .unwrap();
+    view.spawn(SpawnRequest::new(Placement::NewView, vec!["claude".into()]).named("review"))
+        .unwrap();
     assert!(view
         .runner()
         .call_lines()
@@ -803,7 +842,10 @@ fn full_runner_with_workspaces(listing: &str) -> ScriptedRunner {
         .on("new-window", &fixture("new-window.json"))
         .sequence(
             "new-workspace",
-            &[&fixture("new-workspace.json"), &fixture("new-workspace.json")],
+            &[
+                &fixture("new-workspace.json"),
+                &fixture("new-workspace.json"),
+            ],
         )
         .sequence(
             "new-split",

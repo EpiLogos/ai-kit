@@ -83,6 +83,20 @@ fn no_subcommand_means_open_the_palette() {
 }
 
 #[test]
+fn ui_tree_selects_the_interactive_tree_host() {
+    let cli = parse(&["aikit", "ui", "--tree", "--fullscreen"]);
+    let Some(Command::Ui(ui)) = cli.command else {
+        panic!("expected the ui command");
+    };
+    assert!(ui.tree);
+    assert!(ui.fullscreen);
+    assert!(
+        ui.query.is_none(),
+        "a tree invocation does not smuggle a palette query"
+    );
+}
+
+#[test]
 fn the_nested_command_groups_all_parse() {
     let cli = parse(&["aikit", "context", "reset"]);
     assert!(matches!(cli.command, Some(Command::Context(c)) if matches!(c.command, ContextSub::Reset(_))));

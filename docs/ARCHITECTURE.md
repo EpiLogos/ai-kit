@@ -50,6 +50,7 @@ The product is therefore **the resolver and the contextual lifecycle**.
 | **Effective view** | The resolved graph after layering, dependency expansion, compatibility, policy, conflict and trust checks. |
 | **Projection** | A target-specific representation of an effective view. |
 | **Generation** | An immutable, content-addressed materialization of an effective view. |
+| **Procedure** | An immutable, reviewable, forward-checked and reversible mutation outside a generation. Planned Procedures remain addressable by id for separate diff/run/undo invocations. |
 | **Session space** | An AIKit concept bound to a tmux session, a cmux workspace/group, or a plain terminal. |
 
 *Available*, *enabled* and *loaded* are three different things and are rendered
@@ -398,3 +399,14 @@ tmux have identical UI primitives.
 10. A captured secret never enters the ordinary registry.
 11. Promotion can be completed without hand-writing a manifest.
 12. The entire CLI works without a running daemon.
+13. Adoption is diff-first, moves authority into an owned registry, and its
+    recorded Procedure restores the foreign tree.
+14. Typed profile bindings resolve to explicit capsule ids, while a project fork
+    stores only its delta and continues to inherit the evolving base.
+15. The interactive tree accepts keyboard and mouse navigation through the same
+    reducer and hands the exact staged set to the shared apply path.
+16. A saved Procedure can be diffed and run by exact id/digest; source drift,
+    post-apply drift and unrelated adoption journals are refused without
+    overwriting newer work.
+17. Every writable skill-set mutation, including rename and recoverable delete,
+    has a durable Procedure id and a working undo path.

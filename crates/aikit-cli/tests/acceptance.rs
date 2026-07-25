@@ -33,7 +33,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -132,6 +132,52 @@ fn make_executable(path: &Path) {
     let mut perms = fs::metadata(path).unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions(path, perms).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_pty_ui(
+    child: &mut std::process::Child,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    let mut stdout = child.stdout.take().expect("PTY stdout is captured");
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let mut announced = false;
+        while let Ok(read) = stdout.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            output.extend_from_slice(&buffer[..read]);
+            if !announced
+                && output
+                    .windows(b"\x1b[?1000h".len())
+                    .any(|window| window == b"\x1b[?1000h")
+            {
+                announced = true;
+                let _ = ready_tx.send(());
+            }
+        }
+        output
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the PTY UI enables mouse capture after entering raw mode");
+    reader
+}
+
+#[cfg(target_os = "macos")]
+fn finish_pty(
+    mut child: std::process::Child,
+    stdout_reader: std::thread::JoinHandle<Vec<u8>>,
+) -> (std::process::ExitStatus, Vec<u8>, Vec<u8>) {
+    let status = child.wait().expect("the PTY child exits");
+    let stdout = stdout_reader.join().expect("the PTY output reader exits");
+    let mut stderr = Vec::new();
+    if let Some(mut stream) = child.stderr.take() {
+        stream.read_to_end(&mut stderr).unwrap();
+    }
+    (status, stdout, stderr)
 }
 
 /// Record a deliberate human trust review for the given capsules, keyed on the
@@ -1526,4 +1572,515 @@ fn a_reviewed_script_needs_no_confirmation() {
             "a reviewed script must not trip the confirmation gate: {v}"
         );
     }
+}
+
+// ===========================================================================
+// Phase E: authority, parameterised lenses, and the interactive tree
+// ===========================================================================
+
+#[cfg(unix)]
+#[test]
+fn adoption_moves_authority_and_its_recorded_procedure_restores_it() {
+    let home = fresh_home();
+    let project = project_repo();
+    let foreign = TempDir::new().unwrap();
+    let skill = foreign.path().join("incident-review");
+    fs::create_dir_all(skill.join("references")).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: incident-review\ndescription: Review an incident end to end.\n---\n\nRead the evidence.\n",
+    )
+    .unwrap();
+    fs::write(skill.join("references/checklist.md"), "# Evidence\n").unwrap();
+    let original = fs::read(skill.join("SKILL.md")).unwrap();
+
+    let source = foreign.path().to_str().unwrap();
+    let (preview_out, preview) = run_json(
+        &home,
+        project.path(),
+        &[],
+        &["adopt", source, "--namespace", "acceptance", "--json"],
+    );
+    expect_ok(&preview_out, &preview, "preview adoption");
+    assert_eq!(preview["data"]["applied"], false);
+    assert!(!skill.join("SKILL.md").is_symlink());
+    let digest = preview["data"]["review_digest"].as_str().unwrap();
+
+    let (apply_out, applied) = run_json(
+        &home,
+        project.path(),
+        &[],
+        &[
+            "adopt",
+            source,
+            "--namespace",
+            "acceptance",
+            "--yes",
+            "--expect-digest",
+            digest,
+            "--json",
+        ],
+    );
+    expect_ok(&apply_out, &applied, "apply adoption");
+    let procedure = applied["data"]["procedure"].as_str().unwrap();
+    let owned = home
+        .home
+        .registry("personal")
+        .join("capsules/skill/acceptance/incident-review");
+    assert_eq!(fs::read(owned.join("payload/SKILL.md")).unwrap(), original);
+    assert!(
+        skill.join("SKILL.md").is_symlink(),
+        "the former authority is now a projection"
+    );
+
+    let (undo_out, undone) = run_json(
+        &home,
+        project.path(),
+        &[],
+        &["procedure", "undo", procedure, "--json"],
+    );
+    expect_ok(&undo_out, &undone, "undo adoption");
+    assert!(!skill.join("SKILL.md").is_symlink());
+    assert_eq!(fs::read(skill.join("SKILL.md")).unwrap(), original);
+    assert!(
+        !owned.join("manifest.toml").exists(),
+        "undo removes the owned copy created by that Procedure"
+    );
+}
+
+#[test]
+fn typed_profile_bindings_and_project_forks_remain_live_lenses() {
+    let home = fresh_home();
+    let personal = home.home.registry("personal");
+    for name in ["cargo-test", "cargo-nextest", "project-extra"] {
+        let capsule = personal.join(format!("capsules/script/acceptance/{name}"));
+        fs::create_dir_all(capsule.join("payload")).unwrap();
+        fs::write(
+            capsule.join("manifest.toml"),
+            format!(
+                "schema = 1\nid = \"script/acceptance/{name}\"\nkind = \"script\"\n\
+                 name = \"{name}\"\ndescription = \"Acceptance script.\"\n\n\
+                 [script]\nentry = \"payload/run.sh\"\n"
+            ),
+        )
+        .unwrap();
+        fs::write(capsule.join("payload/run.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    }
+    let base = personal.join("profiles/acceptance/rust.toml");
+    fs::create_dir_all(base.parent().unwrap()).unwrap();
+    fs::write(
+        &base,
+        r#"schema = 1
+id = "profile/acceptance/rust"
+enable = ["script/acceptance/{{runner}}"]
+
+[params.runner]
+type = "enum"
+choices = ["cargo-test", "cargo-nextest"]
+default = "cargo-nextest"
+"#,
+    )
+    .unwrap();
+
+    let bound = project_repo();
+    fs::write(
+        bound.path().join(".aikit/profile.toml"),
+        r#"schema = 1
+
+[[use]]
+profile = "profile/acceptance/rust"
+params = { runner = "cargo-test" }
+"#,
+    )
+    .unwrap();
+    let (bound_out, bound_status) =
+        run_json(&home, bound.path(), &[], &["status", "--json"]);
+    expect_ok(&bound_out, &bound_status, "resolve a typed profile binding");
+    let bound_ids: Vec<&str> = bound_status["data"]["active"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(bound_ids, vec!["script/acceptance/cargo-test"]);
+
+    let forked = project_repo();
+    let (preview_out, preview) = run_json(
+        &home,
+        forked.path(),
+        &[],
+        &[
+            "profile",
+            "fork",
+            "profile/acceptance/rust",
+            "--name",
+            "profile/project/acceptance-rust",
+            "--scope",
+            "project",
+            "--json",
+        ],
+    );
+    expect_ok(&preview_out, &preview, "preview a project fork");
+    let digest = preview["data"]["review_digest"].as_str().unwrap();
+    let (fork_out, fork) = run_json(
+        &home,
+        forked.path(),
+        &[],
+        &[
+            "profile",
+            "fork",
+            "profile/acceptance/rust",
+            "--name",
+            "profile/project/acceptance-rust",
+            "--scope",
+            "project",
+            "--yes",
+            "--expect-digest",
+            digest,
+            "--json",
+        ],
+    );
+    expect_ok(&fork_out, &fork, "create a project fork");
+    let fork_path = forked
+        .path()
+        .join(".aikit/profiles/project/acceptance-rust.toml");
+    let created = fs::read_to_string(&fork_path).unwrap();
+    assert!(created.contains("extends = [\"profile/acceptance/rust\"]"));
+    assert!(
+        !created.contains("script/acceptance/cargo-nextest"),
+        "the base is referenced, not copied"
+    );
+
+    fs::write(
+        &fork_path,
+        r#"schema = 1
+id = "profile/project/acceptance-rust"
+description = "Project-only check."
+extends = ["profile/acceptance/rust"]
+enable = ["script/acceptance/project-extra"]
+"#,
+    )
+    .unwrap();
+    // The fork is a live lens: changing the base after fork creation must flow
+    // through without copying or regenerating the project delta.
+    fs::write(
+        &base,
+        r#"schema = 1
+id = "profile/acceptance/rust"
+enable = ["script/acceptance/cargo-test"]
+"#,
+    )
+    .unwrap();
+    let (status_out, status) =
+        run_json(&home, forked.path(), &[], &["status", "--json"]);
+    expect_ok(&status_out, &status, "resolve an inherited project fork");
+    let mut ids: Vec<&str> = status["data"]["active"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            "script/acceptance/cargo-test",
+            "script/acceptance/project-extra"
+        ],
+        "the live base default and the project delta both resolve"
+    );
+}
+
+#[test]
+fn the_interactive_tree_host_accepts_mouse_navigation_and_applies_staged_ids() {
+    use aikit_tui::event::{PaletteEvent, ScriptedEvents};
+    use aikit_tui::host::UiHost;
+    use aikit_tui::tree::{Node, NodeKind, Root, TreeState};
+    use aikit_tui::tree_driver::{event_loop, TreeOutcome, TreeRequest};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let capability = CapsuleId::parse("skill/acceptance/tree").unwrap();
+    let state = TreeState::new(vec![Node::branch(
+        NodeKind::Root(Root::Kinds),
+        "one capability",
+        vec![Node::leaf(
+            NodeKind::Capability {
+                id: capability.clone(),
+            },
+            "interactive acceptance",
+        )],
+    )]);
+    let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+    let mut events = ScriptedEvents::new([
+        PaletteEvent::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+        PaletteEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }),
+        PaletteEvent::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
+        PaletteEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
+    ]);
+
+    let outcome = event_loop(
+        &mut terminal,
+        &mut events,
+        state,
+        TreeRequest::new(UiHost::Fullscreen),
+    )
+    .unwrap();
+
+    assert_eq!(outcome, TreeOutcome::Apply(vec![capability]));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_real_binary_tree_applies_a_keyboard_staged_capability_through_a_pty() {
+    let home = fresh_home();
+    let project = project_repo();
+    let mut child = Command::new("/usr/bin/script")
+        .args(["-q", "/dev/null"])
+        .arg("env")
+        .arg(format!("AIKIT_HOME={}", home.path.display()))
+        .arg(format!("HOME={}", home.path.display()))
+        .arg("TERM=xterm-256color")
+        .arg(cargo_bin("aikit"))
+        .args(["ui", "--tree", "--fullscreen"])
+        .current_dir(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the real binary starts under a pseudo-terminal");
+
+    // Synchronise on mouse capture: it is emitted only after raw mode is active.
+    // `S` remains the printable apply fallback for PTY bridges that reserve
+    // Ctrl-S as terminal flow control.
+    let stdout_reader = wait_for_pty_ui(&mut child);
+    // kinds/ → first kind → first capability; stage, apply. The trailing q is a
+    // fail-safe that closes the tree if the preceding navigation did not stage.
+    let mut input = child.stdin.take().unwrap();
+    for key in [b"j".as_slice(), b"l", b"j", b"l", b"j", b" ", b"S"] {
+        input.write_all(key).unwrap();
+        input.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(75));
+    }
+    // If apply did not close the process, close the UI deterministically.
+    std::thread::sleep(Duration::from_millis(250));
+    let _ = input.write_all(b"q");
+    drop(input);
+    let (pty_status, pty_stdout, pty_stderr) = finish_pty(child, stdout_reader);
+    assert!(
+        pty_status.success(),
+        "PTY driver failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&pty_stdout),
+        String::from_utf8_lossy(&pty_stderr)
+    );
+
+    let local = project.path().join(".aikit/profile.local.toml");
+    let authored = fs::read_to_string(&local).unwrap_or_else(|error| {
+        panic!(
+            "the real event loop did not apply its staged capability ({error}); terminal output={:?}",
+            String::from_utf8_lossy(&pty_stdout)
+        )
+    });
+    assert!(
+        authored.contains("enable"),
+        "the PTY interaction must produce a real project-local declaration: {authored}"
+    );
+    let document: toml::Value = toml::from_str(&authored).unwrap();
+    let enabled = document["enable"]
+        .as_array()
+        .and_then(|values| values.first())
+        .and_then(toml::Value::as_str)
+        .expect("the PTY-authored profile names the staged capability");
+    assert_eq!(
+        enabled, "skill/rust/rust-review",
+        "the paced keys have one deterministic target; accepting whichever id appeared would not test navigation"
+    );
+
+    let (status_out, status) =
+        run_json(&home, project.path(), &[], &["status", "--all", "--json"]);
+    expect_ok(&status_out, &status, "resolve the PTY-authored declaration");
+    assert!(
+        status["data"]["active"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == enabled)
+            || status["data"]["unavailable"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == enabled),
+        "the resolver sees the exact PTY-authored capability even when its trust policy keeps it unavailable: {status}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_real_binary_tree_applies_an_exact_mouse_staged_capability_through_a_pty() {
+    let home = fresh_home();
+    let project = project_repo();
+    let mut child = Command::new("/usr/bin/script")
+        .args([
+            "-q",
+            "/dev/null",
+            "/bin/sh",
+            "-c",
+            "stty rows 24 cols 80; exec \"$@\"",
+            "sh",
+            "env",
+        ])
+        .arg(format!("AIKIT_HOME={}", home.path.display()))
+        .arg(format!("HOME={}", home.path.display()))
+        .arg("TERM=xterm-256color")
+        .arg(cargo_bin("aikit"))
+        .args(["ui", "--tree", "--fullscreen"])
+        .current_dir(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the real binary starts under a sized pseudo-terminal");
+
+    let stdout_reader = wait_for_pty_ui(&mut child);
+    let mut input = child.stdin.take().unwrap();
+    // SGR mouse coordinates are one-based. Expand kinds/, expand its first
+    // (Skill) group, click rust-review's rendered checkbox, then click [apply].
+    for event in [
+        b"\x1b[<0;2;3M\x1b[<0;2;3m".as_slice(),
+        b"\x1b[<0;4;4M\x1b[<0;4;4m",
+        b"\x1b[<0;8;5M\x1b[<0;8;5m",
+        b"\x1b[<0;5;22M\x1b[<0;5;22m",
+    ] {
+        input.write_all(event).unwrap();
+        input.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::thread::sleep(Duration::from_millis(250));
+    let _ = input.write_all(b"q");
+    drop(input);
+    let (status, stdout, stderr) = finish_pty(child, stdout_reader);
+    assert!(
+        status.success(),
+        "mouse PTY driver failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+
+    let authored = fs::read_to_string(project.path().join(".aikit/profile.local.toml"))
+        .unwrap_or_else(|error| {
+            panic!(
+                "the real mouse event loop did not apply its staged capability ({error}); terminal output={:?}",
+                String::from_utf8_lossy(&stdout)
+            )
+        });
+    let document: toml::Value = toml::from_str(&authored).unwrap();
+    let enabled = document["enable"]
+        .as_array()
+        .and_then(|values| values.first())
+        .and_then(toml::Value::as_str);
+    assert_eq!(
+        enabled,
+        Some("skill/rust/rust-review"),
+        "the mouse coordinates must stage the exact rendered checkbox: {authored}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_palette_run_outcome_executes_the_real_script_after_the_terminal_is_restored() {
+    let home = fresh_home();
+    let project = project_repo();
+    let capsule = home
+        .home
+        .registry("personal")
+        .join("capsules/script/acceptance/palette-run");
+    fs::create_dir_all(capsule.join("payload")).unwrap();
+    fs::write(
+        capsule.join("manifest.toml"),
+        "schema = 1\nid = \"script/acceptance/palette-run\"\nkind = \"script\"\n\
+         name = \"palette-run\"\ndescription = \"Prove the palette executes its returned run.\"\n\n\
+         [script]\nentry = \"payload/run.sh\"\n",
+    )
+    .unwrap();
+    fs::write(
+        capsule.join("payload/run.sh"),
+        "#!/bin/sh\nprintf 'ran\\n' > .palette-ran\n",
+    )
+    .unwrap();
+    make_executable(&capsule.join("payload/run.sh"));
+    let index = Index::open(&home.home.database()).unwrap();
+    let source = RegistrySource::personal();
+    let load = load_registry(&home.home.registry("personal"), source.clone()).unwrap();
+    let id = CapsuleId::parse("script/acceptance/palette-run").unwrap();
+    let revision = load
+        .catalog
+        .get(&id)
+        .and_then(|capsule| capsule.revision.clone())
+        .expect("the real registry loader computes the script revision");
+    TrustStore::new(&index)
+        .record(
+            &TrustKey::new(source, id, revision),
+            TrustState::Trusted,
+            None,
+        )
+        .unwrap();
+    drop(index);
+
+    let mut child = Command::new("/usr/bin/script")
+        .args([
+            "-q",
+            "/dev/null",
+            "/bin/sh",
+            "-c",
+            "stty rows 24 cols 80; exec \"$@\"",
+            "sh",
+            "env",
+        ])
+        .arg(format!("AIKIT_HOME={}", home.path.display()))
+        .arg(format!("HOME={}", home.path.display()))
+        .arg("TERM=xterm-256color")
+        .arg(cargo_bin("aikit"))
+        .args(["ui", "--tree", "--fullscreen"])
+        .current_dir(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the palette starts under a real pseudo-terminal");
+
+    let stdout_reader = wait_for_pty_ui(&mut child);
+    let mut input = child.stdin.take().unwrap();
+    // kinds/ -> Script -> the first (acceptance) script -> activate. The tree
+    // hands the exact id to the palette, which must open its natural action and
+    // then the CLI must execute the returned Run outcome.
+    for key in [b"j".as_slice(), b"l", b"j", b"j", b"l", b"j", b"\r"] {
+        input.write_all(key).unwrap();
+        input.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(75));
+    }
+    std::thread::sleep(Duration::from_millis(250));
+    let _ = input.write_all(b"q");
+    drop(input);
+    let (status, stdout, stderr) = finish_pty(child, stdout_reader);
+    assert!(
+        status.success(),
+        "palette PTY driver failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    let marker = fs::read_to_string(project.path().join(".palette-ran")).unwrap_or_else(|error| {
+        panic!(
+            "returning PaletteOutcome::Run is not enough; the CLI must execute it ({error}); terminal output={:?}",
+            String::from_utf8_lossy(&stdout)
+        )
+    });
+    assert_eq!(marker, "ran\n");
 }

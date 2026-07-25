@@ -107,14 +107,26 @@ fn a_plain_tmux_session_is_a_stack_of_one() {
 fn nothing_detected_falls_back_to_a_plain_terminal_rather_than_to_nothing() {
     let cmux = Cmux::new(Arc::clone(&cmux_runner()));
     let tmux = Tmux::new(Arc::clone(&tmux_runner()));
-    let stack = MuxStack::detect(vec![Box::new(cmux), Box::new(tmux), Box::new(Plain::new())], None)
-        .unwrap();
+    let stack = MuxStack::detect(
+        vec![Box::new(cmux), Box::new(tmux), Box::new(Plain::new())],
+        None,
+    )
+    .unwrap();
 
     assert_eq!(
         stack.topology_kind(),
         MuxKind::Plain,
         "neither multiplexer said we were inside it"
     );
+}
+
+#[test]
+fn plain_remains_a_fallback_when_a_real_multiplexer_is_active() {
+    let tmux = Tmux::new(Arc::clone(&tmux_runner())).with_env_var("TMUX", "/tmp/tmux.sock,1,0");
+    let stack = MuxStack::detect(vec![Box::new(Plain::new()), Box::new(tmux)], None).unwrap();
+
+    assert_eq!(stack.topology_kind(), MuxKind::Tmux);
+    assert_eq!(stack.presentation_kind(), Some(MuxKind::Plain));
 }
 
 #[test]
@@ -125,7 +137,8 @@ fn the_mux_override_wins_over_detection() {
     let cmux = Cmux::new(Arc::clone(&cmux_calls)).with_env_var("CMUX_WORKSPACE_ID", "workspace:2");
     let tmux = Tmux::new(Arc::clone(&tmux_runner())).with_env_var("TMUX", "/tmp/t");
 
-    let stack = MuxStack::detect(vec![Box::new(cmux), Box::new(tmux)], Some(MuxKind::Cmux)).unwrap();
+    let stack =
+        MuxStack::detect(vec![Box::new(cmux), Box::new(tmux)], Some(MuxKind::Cmux)).unwrap();
 
     assert_eq!(stack.topology_kind(), MuxKind::Cmux);
     assert!(
@@ -173,7 +186,10 @@ fn open_in_new_pane_inside_a_tmux_inside_cmux_splits_the_tmux_pane() {
         tmux_calls.call_lines()
     );
     assert!(
-        !cmux_calls.call_lines().iter().any(|l| l.contains("new-split")),
+        !cmux_calls
+            .call_lines()
+            .iter()
+            .any(|l| l.contains("new-split")),
         "cmux must not be asked to split anything: {:?}",
         cmux_calls.call_lines()
     );
@@ -185,7 +201,10 @@ fn the_topology_adapter_is_the_one_reached_for_focus_and_close_too() {
     let _ = stack.close(&MuxTarget::surface(MuxKind::Tmux, "%9"));
 
     assert!(
-        !cmux_calls.call_lines().iter().any(|l| l.contains("close-surface")),
+        !cmux_calls
+            .call_lines()
+            .iter()
+            .any(|l| l.contains("close-surface")),
         "closing a tmux pane is not a cmux operation"
     );
     // The tmux runner has no recorded `kill-pane`, which is itself the proof that
@@ -216,14 +235,18 @@ fn the_palette_uses_the_tmux_popup_when_a_tmux_is_anywhere_in_the_stack() {
         .iter()
         .any(|l| l.contains("display-popup -E -w 82% -h 70% -T AIKit")));
     assert!(
-        !cmux_calls.call_lines().iter().any(|l| l.contains("new-split")),
+        !cmux_calls
+            .call_lines()
+            .iter()
+            .any(|l| l.contains("new-split")),
         "a cmux surface must not be created when a real popup is available"
     );
 }
 
 #[test]
 fn a_cmux_only_stack_hosts_the_palette_inline() {
-    let cmux = Cmux::new(Arc::clone(&cmux_runner())).with_env_var("CMUX_WORKSPACE_ID", "workspace:2");
+    let cmux =
+        Cmux::new(Arc::clone(&cmux_runner())).with_env_var("CMUX_WORKSPACE_ID", "workspace:2");
     let stack = MuxStack::detect(vec![Box::new(cmux)], None).unwrap();
 
     assert_eq!(
@@ -242,10 +265,7 @@ fn a_cmux_only_stack_hosts_the_palette_inline() {
 fn status_reaches_both_the_inner_and_the_outer_host() {
     let (stack, cmux_calls, tmux_calls) = hybrid();
     let deliveries = stack
-        .set_status(
-            StatusUpdate::for_session("payments")
-                .with("profile", "rust-review"),
-        )
+        .set_status(StatusUpdate::for_session("payments").with("profile", "rust-review"))
         .unwrap();
 
     assert_eq!(deliveries.len(), 2);
@@ -299,7 +319,10 @@ fn a_remote_inner_mux_renders_the_host_in_the_location_line() {
 #[test]
 fn a_local_hybrid_stack_still_names_the_presentation_host() {
     let (stack, _, _) = hybrid();
-    assert_eq!(stack.describe_location(), "payments · tmux · presented by cmux");
+    assert_eq!(
+        stack.describe_location(),
+        "payments · tmux · presented by cmux"
+    );
 }
 
 #[test]
@@ -325,7 +348,10 @@ fn the_effective_registry_across_a_remote_boundary_is_the_remote_one() {
         }
     );
     assert!(remote.effective_registry().is_remote());
-    assert!(remote.effective_registry().describe().contains("staging-box"));
+    assert!(remote
+        .effective_registry()
+        .describe()
+        .contains("staging-box"));
 }
 
 #[test]

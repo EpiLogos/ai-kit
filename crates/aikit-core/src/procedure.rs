@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::error::err;
-use crate::id::{CapsuleId, ProcedureId};
+use crate::id::{CapsuleId, ProcedureId, ProfileId};
 use crate::platform::{MuxKind, TargetId};
 use crate::{AikitError, Result};
 
@@ -155,9 +155,24 @@ impl Inverse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "edit", rename_all = "kebab-case")]
 pub enum WorldEdit {
+    CreateDir {
+        path: PathBuf,
+        inverse: Inverse,
+    },
+    MovePath {
+        from: PathBuf,
+        to: PathBuf,
+    },
     WriteFile {
         path: PathBuf,
         contents: Vec<u8>,
+        inverse: Inverse,
+    },
+    /// A byte-for-byte file whose Unix permission bits are part of its fidelity.
+    WriteFileMode {
+        path: PathBuf,
+        contents: Vec<u8>,
+        mode: u32,
         inverse: Inverse,
     },
     DeleteFile {
@@ -183,15 +198,80 @@ pub enum WorldEdit {
     },
 }
 
+/// The exact state a planner observed at a path before any mutation.
+///
+/// These are forward preconditions, not undo data. They close the interval
+/// between review and apply: the runner checks the relevant path again
+/// immediately before its first edit and refuses to overwrite concurrent work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum WorldPrecondition {
+    Absent {
+        path: PathBuf,
+    },
+    File {
+        path: PathBuf,
+        hash: String,
+        mode: u32,
+    },
+    Link {
+        path: PathBuf,
+        target: PathBuf,
+    },
+    Directory {
+        path: PathBuf,
+        hash: String,
+        mode: u32,
+    },
+}
+
+impl WorldPrecondition {
+    pub fn path(&self) -> &PathBuf {
+        match self {
+            Self::Absent { path }
+            | Self::File { path, .. }
+            | Self::Link { path, .. }
+            | Self::Directory { path, .. } => path,
+        }
+    }
+
+    pub fn digest_line(&self) -> String {
+        match self {
+            Self::Absent { path } => format!("absent|{}", path.display()),
+            Self::File { path, hash, mode } => {
+                format!("file|{}|{hash}|{mode:04o}", path.display())
+            }
+            Self::Link { path, target } => {
+                format!("link-state|{}|{}", path.display(), target.display())
+            }
+            Self::Directory { path, hash, mode } => {
+                format!("directory|{}|{hash}|{mode:04o}", path.display())
+            }
+        }
+    }
+}
+
 impl WorldEdit {
     /// The path this edit touches, when it touches one.
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            WorldEdit::WriteFile { path, .. }
+            WorldEdit::CreateDir { path, .. }
+            | WorldEdit::WriteFile { path, .. }
+            | WorldEdit::WriteFileMode { path, .. }
             | WorldEdit::DeleteFile { path, .. }
             | WorldEdit::CreateLink { path, .. }
             | WorldEdit::MarkedBlock { path, .. } => Some(path),
+            WorldEdit::MovePath { from, .. } => Some(from),
             WorldEdit::RunCommand { .. } => None,
+        }
+    }
+
+    /// All paths whose state this edit can change.
+    pub fn paths(&self) -> Vec<&PathBuf> {
+        match self {
+            Self::MovePath { from, to } => vec![from, to],
+            Self::RunCommand { .. } => Vec::new(),
+            _ => self.path().into_iter().collect(),
         }
     }
 
@@ -199,10 +279,14 @@ impl WorldEdit {
     /// construction and a command carries its own optional undo.
     pub fn inverse(&self) -> Option<&Inverse> {
         match self {
-            WorldEdit::WriteFile { inverse, .. }
+            WorldEdit::CreateDir { inverse, .. }
+            | WorldEdit::WriteFile { inverse, .. }
+            | WorldEdit::WriteFileMode { inverse, .. }
             | WorldEdit::DeleteFile { inverse, .. }
             | WorldEdit::CreateLink { inverse, .. } => Some(inverse),
-            WorldEdit::MarkedBlock { .. } | WorldEdit::RunCommand { .. } => None,
+            WorldEdit::MovePath { .. }
+            | WorldEdit::MarkedBlock { .. }
+            | WorldEdit::RunCommand { .. } => None,
         }
     }
 
@@ -212,6 +296,7 @@ impl WorldEdit {
     /// qualifies only when it declares an undo.
     pub fn is_provably_reversible(&self) -> bool {
         match self {
+            WorldEdit::MovePath { .. } => true,
             WorldEdit::MarkedBlock { .. } => true,
             WorldEdit::RunCommand { undo, .. } => undo.is_some(),
             other => matches!(
@@ -223,9 +308,24 @@ impl WorldEdit {
 
     pub fn describe(&self) -> String {
         match self {
+            WorldEdit::CreateDir { path, .. } => format!("create directory {}", path.display()),
+            WorldEdit::MovePath { from, to } => {
+                format!("move {} to {}", from.display(), to.display())
+            }
             WorldEdit::WriteFile { path, contents, .. } => {
                 format!("write {} ({} bytes)", path.display(), contents.len())
             }
+            WorldEdit::WriteFileMode {
+                path,
+                contents,
+                mode,
+                ..
+            } => format!(
+                "write {} ({} bytes, mode {:04o})",
+                path.display(),
+                contents.len(),
+                mode
+            ),
             WorldEdit::DeleteFile { path, .. } => format!("delete {}", path.display()),
             WorldEdit::CreateLink { path, target, .. } => {
                 format!("link {} -> {}", path.display(), target.display())
@@ -242,10 +342,25 @@ impl WorldEdit {
     /// A stable line for the plan digest.
     fn digest_line(&self) -> String {
         match self {
+            WorldEdit::CreateDir { path, .. } => format!("mkdir|{}", path.display()),
+            WorldEdit::MovePath { from, to } => {
+                format!("move|{}|{}", from.display(), to.display())
+            }
             WorldEdit::WriteFile { path, contents, .. } => format!(
                 "write|{}|{}",
                 path.display(),
                 blake3::hash(contents).to_hex()
+            ),
+            WorldEdit::WriteFileMode {
+                path,
+                contents,
+                mode,
+                ..
+            } => format!(
+                "write-mode|{}|{}|{:04o}",
+                path.display(),
+                blake3::hash(contents).to_hex(),
+                mode
             ),
             WorldEdit::DeleteFile { path, .. } => format!("delete|{}", path.display()),
             WorldEdit::CreateLink { path, target, .. } => {
@@ -340,7 +455,11 @@ impl PlanDigest {
         &self.0
     }
     pub fn short(&self) -> &str {
-        let end = self.0.char_indices().nth(12).map_or(self.0.len(), |(b, _)| b);
+        let end = self
+            .0
+            .char_indices()
+            .nth(12)
+            .map_or(self.0.len(), |(b, _)| b);
         &self.0[..end]
     }
 }
@@ -357,17 +476,50 @@ impl std::fmt::Display for PlanDigest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ProcedureKind {
-    Import { source: String },
-    Collate { sources: Vec<String> },
-    Adopt { capsules: Vec<CapsuleId> },
-    Promote { candidate: String },
-    Supersede { winner: CapsuleId, losers: Vec<CapsuleId> },
-    ClientInstall { client: TargetId },
-    MuxInstall { mux: MuxKind },
-    DoctorFix { checks: Vec<String> },
-    IntegrationSetup { integration: String },
-    DependencyInstall { tool: CapsuleId },
-    Custom { capsule: CapsuleId },
+    Import {
+        source: String,
+    },
+    Collate {
+        sources: Vec<String>,
+    },
+    Adopt {
+        source: PathBuf,
+        namespace: String,
+        capsules: Vec<CapsuleId>,
+    },
+    Promote {
+        candidate: String,
+    },
+    Supersede {
+        winner: CapsuleId,
+        losers: Vec<CapsuleId>,
+    },
+    ClientInstall {
+        client: TargetId,
+    },
+    MuxInstall {
+        mux: MuxKind,
+    },
+    DoctorFix {
+        checks: Vec<String>,
+    },
+    IntegrationSetup {
+        integration: String,
+    },
+    DependencyInstall {
+        tool: CapsuleId,
+    },
+    ProfileFork {
+        base: ProfileId,
+        fork: ProfileId,
+    },
+    SkillSet {
+        operation: String,
+        set: String,
+    },
+    Custom {
+        capsule: CapsuleId,
+    },
 }
 
 impl ProcedureKind {
@@ -383,6 +535,8 @@ impl ProcedureKind {
             ProcedureKind::DoctorFix { .. } => "doctor-fix",
             ProcedureKind::IntegrationSetup { .. } => "integration-setup",
             ProcedureKind::DependencyInstall { .. } => "dependency-install",
+            ProcedureKind::ProfileFork { .. } => "profile-fork",
+            ProcedureKind::SkillSet { .. } => "skill-set",
             ProcedureKind::Custom { .. } => "custom",
         }
     }
@@ -392,6 +546,9 @@ impl ProcedureKind {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub edits: Vec<WorldEdit>,
+    /// Filesystem state observed during planning and rechecked at apply time.
+    #[serde(default)]
+    pub preconditions: Vec<WorldPrecondition>,
     /// Human-readable notes: what was surveyed, what was skipped and why.
     #[serde(default)]
     pub notes: Vec<String>,
@@ -420,23 +577,53 @@ impl Plan {
 
     /// Every path this plan would touch, deduplicated and sorted.
     pub fn touched_paths(&self) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = self.edits.iter().filter_map(|e| e.path().cloned()).collect();
+        let mut paths: Vec<PathBuf> = self
+            .edits
+            .iter()
+            .flat_map(WorldEdit::paths)
+            .cloned()
+            .collect();
         paths.sort();
         paths.dedup();
         paths
     }
 
-    /// The content digest: order-independent, content-sensitive. Notes are
+    /// The content digest: execution-order- and content-sensitive. Notes are
     /// excluded — they are commentary, and a reworded note must not change the
-    /// identity of a plan that does the same thing.
+    /// identity of a plan that does the same thing. Preconditions are sorted
+    /// because their verification order has no effect; edits are deliberately
+    /// not sorted because two writes to one path are not commutative.
     pub fn digest(&self) -> PlanDigest {
-        let mut lines: Vec<String> = self.edits.iter().map(WorldEdit::digest_line).collect();
-        lines.sort();
+        let mut preconditions: Vec<String> = self
+            .preconditions
+            .iter()
+            .map(WorldPrecondition::digest_line)
+            .collect();
+        preconditions.sort();
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"aikit-procedure-plan-v1\n");
-        for line in lines {
+        hasher.update(b"aikit-procedure-plan-v2\n");
+        for line in self.edits.iter().map(WorldEdit::digest_line) {
             hasher.update(&(line.len() as u64).to_le_bytes());
             hasher.update(line.as_bytes());
+        }
+        for line in preconditions {
+            hasher.update(&(line.len() as u64).to_le_bytes());
+            hasher.update(line.as_bytes());
+        }
+        PlanDigest(hasher.finalize().to_hex().to_string())
+    }
+
+    /// Bind a human review to source facts that are preconditions rather than
+    /// forward edits (for example, the original target of a foreign symlink).
+    pub fn review_digest(&self, facts: &[String]) -> PlanDigest {
+        let mut facts = facts.to_vec();
+        facts.sort();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"aikit-procedure-review-v1\n");
+        hasher.update(self.digest().as_str().as_bytes());
+        for fact in facts {
+            hasher.update(&(fact.len() as u64).to_le_bytes());
+            hasher.update(fact.as_bytes());
         }
         PlanDigest(hasher.finalize().to_hex().to_string())
     }
@@ -482,10 +669,36 @@ impl Procedure {
     /// Assemble a procedure, computing its digest and refusing a plan its isolation
     /// cannot safely carry.
     pub fn new(kind: ProcedureKind, plan: Plan, isolation: MutationIsolation) -> Result<Self> {
+        Self::with_id(ProcedureId::generate(), kind, plan, isolation)
+    }
+
+    /// Assemble a procedure whose id has already been allocated.
+    ///
+    /// Most procedures can mint their id after planning. Adoption cannot: the
+    /// durable ownership record written by its own plan names the procedure that
+    /// moved authority, so the id is part of the planned bytes.
+    pub fn with_id(
+        id: ProcedureId,
+        kind: ProcedureKind,
+        plan: Plan,
+        isolation: MutationIsolation,
+    ) -> Result<Self> {
+        // A content digest is deliberately stable, but a Git branch is a
+        // workspace resource and must be unique per execution. Otherwise
+        // apply → undo → apply of the same plan collides with the first branch.
+        let id_text = id.to_string();
+        let suffix = &id_text[id_text.len().saturating_sub(8)..];
+        let isolation = match isolation {
+            MutationIsolation::GitBranch { repo, branch } => MutationIsolation::GitBranch {
+                repo,
+                branch: format!("{branch}-{suffix}"),
+            },
+            other => other,
+        };
         plan.validate(&isolation)?;
         let digest = plan.digest();
         Ok(Self {
-            id: ProcedureId::generate(),
+            id,
             kind,
             plan,
             isolation,
@@ -506,7 +719,11 @@ impl Procedure {
 ///
 /// `repo_of` is injected rather than discovered here because this crate does no
 /// I/O: the store passes a closure that runs the real repository lookup.
-pub fn select_isolation<F>(plan: &Plan, shadow_root: &std::path::Path, repo_of: F) -> MutationIsolation
+pub fn select_isolation<F>(
+    plan: &Plan,
+    shadow_root: &std::path::Path,
+    repo_of: F,
+) -> MutationIsolation
 where
     F: Fn(&std::path::Path) -> Option<PathBuf>,
 {
@@ -546,6 +763,18 @@ pub struct UndoRecord {
 pub struct UndoStep {
     pub path: Option<PathBuf>,
     pub inverse: Inverse,
+    /// Exact command declared by a `RunCommand` edit, executed in reverse order.
+    #[serde(default)]
+    pub undo_command: Option<Vec<String>>,
+    #[serde(default)]
+    pub undo_cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub original_mode: Option<u32>,
+    /// A path move is undone by moving the destination back to the source.
+    #[serde(default)]
+    pub move_from: Option<PathBuf>,
+    #[serde(default)]
+    pub move_to: Option<PathBuf>,
     /// What the forward edit was, so the undo report reads as prose.
     pub description: String,
 }
@@ -555,6 +784,41 @@ impl UndoStep {
         Self {
             path,
             inverse,
+            undo_command: None,
+            undo_cwd: None,
+            original_mode: None,
+            move_from: None,
+            move_to: None,
+            description: description.into(),
+        }
+    }
+
+    pub fn command(
+        undo_command: Option<Vec<String>>,
+        cwd: PathBuf,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: None,
+            inverse: Inverse::None,
+            undo_command,
+            undo_cwd: Some(cwd),
+            original_mode: None,
+            move_from: None,
+            move_to: None,
+            description: description.into(),
+        }
+    }
+
+    pub fn move_path(from: PathBuf, to: PathBuf, description: impl Into<String>) -> Self {
+        Self {
+            path: None,
+            inverse: Inverse::None,
+            undo_command: None,
+            undo_cwd: None,
+            original_mode: None,
+            move_from: Some(from),
+            move_to: Some(to),
             description: description.into(),
         }
     }
@@ -772,25 +1036,30 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_digest_is_order_independent_but_content_sensitive() {
-        let a = WorldEdit::WriteFile {
-            path: PathBuf::from("/a"),
+    fn a_plan_digest_is_edit_order_and_content_sensitive() {
+        let first = WorldEdit::WriteFile {
+            path: PathBuf::from("/same"),
             contents: b"one".to_vec(),
             inverse: Inverse::Remove,
         };
-        let b = WorldEdit::DeleteFile {
-            path: PathBuf::from("/b"),
-            inverse: Inverse::Restore {
-                blob: BlobId::new("blob1"),
-            },
+        let second = WorldEdit::WriteFile {
+            path: PathBuf::from("/same"),
+            contents: b"two".to_vec(),
+            inverse: Inverse::Remove,
         };
-        let forward = Plan::new().with_edit(a.clone()).with_edit(b.clone());
-        let backward = Plan::new().with_edit(b).with_edit(a);
-        assert_eq!(forward.digest(), backward.digest(), "order must not matter");
+        let forward = Plan::new()
+            .with_edit(first.clone())
+            .with_edit(second.clone());
+        let backward = Plan::new().with_edit(second).with_edit(first);
+        assert_ne!(
+            forward.digest(),
+            backward.digest(),
+            "execution order changes the resulting world and must change the digest"
+        );
 
         let different = Plan::new().with_edit(WorldEdit::WriteFile {
             path: PathBuf::from("/a"),
-            contents: b"two".to_vec(),
+            contents: b"three".to_vec(),
             inverse: Inverse::Remove,
         });
         assert_ne!(forward.digest(), different.digest(), "content must matter");
@@ -824,7 +1093,11 @@ mod tests {
 
         // Spanning two repositories cannot be one branch, so it stages.
         let staged = select_isolation(&plan, std::path::Path::new("/shadow"), |p| {
-            Some(PathBuf::from(if p.ends_with("a") { "/repo1" } else { "/repo2" }))
+            Some(PathBuf::from(if p.ends_with("a") {
+                "/repo1"
+            } else {
+                "/repo2"
+            }))
         });
         assert!(matches!(staged, MutationIsolation::Staged { .. }));
 

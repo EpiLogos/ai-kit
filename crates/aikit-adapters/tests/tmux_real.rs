@@ -123,7 +123,11 @@ fn socket_path(socket: &str) -> Option<PathBuf> {
             .stdout,
     )
     .ok()?;
-    Some(PathBuf::from(base).join(format!("tmux-{}", uid.trim())).join(socket))
+    Some(
+        PathBuf::from(base)
+            .join(format!("tmux-{}", uid.trim()))
+            .join(socket),
+    )
 }
 
 fn identity() -> SessionIdentity {
@@ -346,7 +350,11 @@ fn the_aikit_user_options_are_written_and_can_be_read_back() {
 
     let pane = server.raw(&["list-panes", "-t", "opts:main", "-F", "#{pane_id}"]);
     assert_eq!(
-        server.tmux().pane_option(&pane, PANE_TAG).unwrap().as_deref(),
+        server
+            .tmux()
+            .pane_option(&pane, PANE_TAG)
+            .unwrap()
+            .as_deref(),
         Some("main/shell"),
         "the pane tag is what makes a later reconcile non-destructive"
     );
@@ -514,7 +522,10 @@ fn a_view_the_plan_gained_since_the_session_was_built_is_added_without_disturbin
 
     server
         .tmux()
-        .ensure_session(&ticking_plan("growing", dir.path()), ReconcileMode::default())
+        .ensure_session(
+            &ticking_plan("growing", dir.path()),
+            ReconcileMode::default(),
+        )
         .unwrap();
     wait_for_file(&dir.path().join("top.log"));
 
@@ -578,7 +589,10 @@ fn the_layout_can_be_read_back_and_changes_when_the_user_moves_a_pane() {
     let dir = tempfile::tempdir().unwrap();
     server
         .tmux()
-        .ensure_session(&three_pane_plan("drift", dir.path()), ReconcileMode::default())
+        .ensure_session(
+            &three_pane_plan("drift", dir.path()),
+            ReconcileMode::default(),
+        )
         .unwrap();
 
     let before = server.tmux().layout_of("drift:code").unwrap();
@@ -613,7 +627,10 @@ fn detection_finds_the_real_tmux_and_notices_whether_a_server_is_up() {
         "expected a 3.x version, got {:?}",
         before.version
     );
-    assert!(!before.server_running, "nothing has started this server yet");
+    assert!(
+        !before.server_running,
+        "nothing has started this server yet"
+    );
     assert!(!before.inside, "the test process is not inside this server");
 
     server
@@ -660,7 +677,9 @@ fn spawning_a_new_pane_and_closing_it_really_changes_the_session() {
     assert!(spawned.created);
     let panes = server.raw(&["list-panes", "-t", "spawning:main", "-F", "#{pane_id}"]);
     assert_eq!(panes.lines().count(), 2);
-    assert!(panes.lines().any(|p| Some(p) == spawned.target.surface.as_deref()));
+    assert!(panes
+        .lines()
+        .any(|p| Some(p) == spawned.target.surface.as_deref()));
 
     server.tmux().close(&spawned.target).unwrap();
     assert_eq!(
@@ -670,6 +689,33 @@ fn spawning_a_new_pane_and_closing_it_really_changes_the_session() {
             .count(),
         1
     );
+}
+
+#[test]
+fn spawning_a_real_pane_applies_the_requested_environment() {
+    require_tmux!("spawning_a_real_pane_applies_the_requested_environment");
+    let server = PrivateServer::start(identity());
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("palette-env");
+    let binding = server
+        .tmux()
+        .ensure_session(&single_pane_plan("spawn-env"), ReconcileMode::default())
+        .unwrap();
+    let root = binding.surface_of("main", "shell").unwrap().to_string();
+    let script = format!(
+        "printf '%s' \"$AIKIT_PALETTE_VALUE\" > {}; sleep 300",
+        shell_words::quote(marker.to_string_lossy().as_ref())
+    );
+    let mut request = SpawnRequest::new(Placement::NewPane, vec!["sh".into(), "-c".into(), script])
+        .from_target(MuxTarget::surface(MuxKind::Tmux, root));
+    request.env.insert(
+        "AIKIT_PALETTE_VALUE".to_string(),
+        "from-the-run-intent".to_string(),
+    );
+
+    let spawned = server.tmux().spawn(request).unwrap();
+    assert_eq!(wait_for_file(&marker), "from-the-run-intent");
+    server.tmux().close(&spawned.target).unwrap();
 }
 
 #[test]

@@ -70,7 +70,11 @@ fn every_command_carries_the_private_socket_when_one_is_configured() {
     for call in &calls {
         assert_eq!(
             &call[..3],
-            &["tmux".to_string(), "-L".to_string(), "aikit-argv".to_string()],
+            &[
+                "tmux".to_string(),
+                "-L".to_string(),
+                "aikit-argv".to_string()
+            ],
             "a command that forgets the socket would touch the user's real server: {call:?}"
         );
     }
@@ -111,7 +115,10 @@ fn the_context_environment_is_set_before_any_pane_runs_a_command() {
     let adapter = tmux(creating_runner());
     let root = std::path::PathBuf::from("/work/payments");
     adapter
-        .ensure_session(&three_pane_plan("payments", &root), ReconcileMode::default())
+        .ensure_session(
+            &three_pane_plan("payments", &root),
+            ReconcileMode::default(),
+        )
         .unwrap();
 
     let lines = adapter.runner().call_lines();
@@ -161,7 +168,10 @@ fn a_split_maps_a_compass_direction_and_a_ratio_onto_tmux_flags() {
     let adapter = tmux(creating_runner());
     let root = std::path::PathBuf::from("/work/payments");
     adapter
-        .ensure_session(&three_pane_plan("payments", &root), ReconcileMode::default())
+        .ensure_session(
+            &three_pane_plan("payments", &root),
+            ReconcileMode::default(),
+        )
         .unwrap();
 
     let lines = adapter.runner().call_lines();
@@ -205,7 +215,9 @@ split_from = "a"
 direction = "up"
 "#,
     );
-    adapter.ensure_session(&plan, ReconcileMode::default()).unwrap();
+    adapter
+        .ensure_session(&plan, ReconcileMode::default())
+        .unwrap();
 
     let lines = adapter.runner().call_lines();
     assert!(lines.iter().any(|l| l.contains("split-window -t %0 -h -b")));
@@ -246,11 +258,15 @@ id = "a"
 command = ["htop", "-d", "10"]
 "#,
     );
-    adapter.ensure_session(&plan, ReconcileMode::default()).unwrap();
+    adapter
+        .ensure_session(&plan, ReconcileMode::default())
+        .unwrap();
 
     let lines = adapter.runner().call_lines();
     assert!(
-        lines.iter().any(|l| l.contains("respawn-pane -k -t %0 htop -d 10")),
+        lines
+            .iter()
+            .any(|l| l.contains("respawn-pane -k -t %0 htop -d 10")),
         "got: {lines:?}"
     );
 }
@@ -260,14 +276,17 @@ fn a_second_view_becomes_a_window_rather_than_a_second_session() {
     let adapter = tmux(creating_runner());
     let root = std::path::PathBuf::from("/work/payments");
     adapter
-        .ensure_session(&three_pane_plan("payments", &root), ReconcileMode::default())
+        .ensure_session(
+            &three_pane_plan("payments", &root),
+            ReconcileMode::default(),
+        )
         .unwrap();
 
     let lines = adapter.runner().call_lines();
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("new-window -t payments: -n ops -c /work/payments -P -F #{pane_id}")),
+        lines.iter().any(
+            |l| l.contains("new-window -t payments: -n ops -c /work/payments -P -F #{pane_id}")
+        ),
         "got: {lines:?}"
     );
 }
@@ -315,21 +334,21 @@ fn a_palette_with_no_command_still_reports_the_popup_host_without_opening_one() 
 fn spawning_a_new_pane_splits_the_target_pane() {
     let runner = ScriptedRunner::new().on("split-window", "%7");
     let adapter = tmux(runner);
+    let mut request = SpawnRequest::new(Placement::NewPane, vec!["claude".into()])
+        .in_dir("/work/payments")
+        .splitting(Direction::Right, Some(0.45))
+        .from_target(MuxTarget::surface(MuxKind::Tmux, "%3"));
+    request
+        .env
+        .insert("AIKIT_PROMPT".to_string(), "review carefully".to_string());
 
-    let spawned = adapter
-        .spawn(
-            SpawnRequest::new(Placement::NewPane, vec!["claude".into()])
-                .in_dir("/work/payments")
-                .splitting(Direction::Right, Some(0.45))
-                .from_target(MuxTarget::surface(MuxKind::Tmux, "%3")),
-        )
-        .unwrap();
+    let spawned = adapter.spawn(request).unwrap();
 
     assert_eq!(spawned.target.surface.as_deref(), Some("%7"));
     assert!(spawned.created);
     assert_eq!(
         adapter.runner().call_lines(),
-        vec!["tmux -L aikit-argv split-window -t %3 -h -l 45% -c /work/payments -P -F #{pane_id} claude"
+        vec!["tmux -L aikit-argv split-window -t %3 -h -l 45% -c /work/payments -P -F #{pane_id} env 'AIKIT_PROMPT=review carefully' claude"
             .to_string()]
     );
 }
@@ -395,7 +414,11 @@ fn spawning_into_the_current_pane_runs_the_command_there_rather_than_splitting()
 
 #[test]
 fn focusing_a_pane_selects_the_pane_and_its_window() {
-    let adapter = tmux(ScriptedRunner::new().on("select-pane", "").on("select-window", ""));
+    let adapter = tmux(
+        ScriptedRunner::new()
+            .on("select-pane", "")
+            .on("select-window", ""),
+    );
     adapter
         .focus(&MuxTarget::surface(MuxKind::Tmux, "%4"))
         .unwrap();
@@ -411,7 +434,9 @@ fn focusing_a_pane_selects_the_pane_and_its_window() {
 #[test]
 fn closing_a_target_kills_the_smallest_thing_it_names() {
     let panes = tmux(ScriptedRunner::new().on("kill-pane", ""));
-    panes.close(&MuxTarget::surface(MuxKind::Tmux, "%4")).unwrap();
+    panes
+        .close(&MuxTarget::surface(MuxKind::Tmux, "%4"))
+        .unwrap();
     assert!(panes
         .runner()
         .call_lines()

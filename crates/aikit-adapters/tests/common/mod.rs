@@ -145,7 +145,11 @@ pub fn descriptor(isolation: Isolation) -> ContextDescriptor {
         task: Some("migration-review".into()),
         isolation,
         platform: Platform::Macos,
-        targets: vec![TargetId::shell(), TargetId::claude_code(), TargetId::codex()],
+        targets: vec![
+            TargetId::shell(),
+            TargetId::claude_code(),
+            TargetId::codex(),
+        ],
         mux: None,
         host: "test-host".into(),
     }
@@ -158,6 +162,7 @@ fn layer(kind: ScopeKind, enable: &[&str]) -> ScopeLayer {
         origin: LayerOrigin::new(format!("test:{}", kind.as_str())),
         patch: PoolPatch {
             profiles: vec![],
+            uses: vec![],
             enable: enable.iter().map(|s| cid(s)).collect(),
             disable: vec![],
             config: Default::default(),
@@ -286,7 +291,11 @@ pub fn write_agent_skill(base: &Path, name: &str, description: &str) -> PathBuf 
     )
     .unwrap();
     std::fs::write(root.join("scripts/check.sh"), "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::write(root.join("references/deep.md"), "AIKIT-PAYLOAD-BODY-MARKER\n").unwrap();
+    std::fs::write(
+        root.join("references/deep.md"),
+        "AIKIT-PAYLOAD-BODY-MARKER\n",
+    )
+    .unwrap();
     root
 }
 

@@ -166,10 +166,7 @@ impl MuxStack {
     ///
     /// `forced` is `--mux`. It collapses the stack to the named layer, which is
     /// the point of the flag: the user is saying which one they mean.
-    pub fn detect(
-        candidates: Vec<Box<dyn MuxAdapter>>,
-        forced: Option<MuxKind>,
-    ) -> Result<Self> {
+    pub fn detect(candidates: Vec<Box<dyn MuxAdapter>>, forced: Option<MuxKind>) -> Result<Self> {
         let mut inside: Vec<StackLayer> = Vec::new();
         let mut available: Vec<StackLayer> = Vec::new();
 
@@ -344,7 +341,11 @@ impl MuxStack {
     // Topology goes inwards
     // -----------------------------------------------------------------------
 
-    pub fn ensure_session(&self, plan: &SessionPlan, mode: ReconcileMode) -> Result<SessionBinding> {
+    pub fn ensure_session(
+        &self,
+        plan: &SessionPlan,
+        mode: ReconcileMode,
+    ) -> Result<SessionBinding> {
         let mut binding = self.topology().ensure_session(plan, mode)?;
         binding.warnings.extend(self.warnings());
         Ok(binding)

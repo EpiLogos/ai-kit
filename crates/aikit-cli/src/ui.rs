@@ -15,6 +15,7 @@ use aikit_core::platform::MuxKind;
 use aikit_core::Result;
 
 use aikit_tui::host::{TerminalProfile, UiHost};
+use aikit_tui::tree_driver::{TreeOutcome, TreeRequest};
 use aikit_tui::{PaletteOutcome, PaletteRequest};
 
 use crate::app::Service;
@@ -74,4 +75,44 @@ pub fn run(
         request = request.with_query(query);
     }
     aikit_tui::run(service, request)
+}
+
+/// Open the exact palette row and immediately hand it to its natural action.
+pub fn run_activation(
+    service: &mut Service,
+    query: String,
+    fullscreen: bool,
+) -> Result<PaletteOutcome> {
+    let profile = terminal_profile(|k| std::env::var(k).ok(), fullscreen);
+    let host = UiHost::choose(&profile);
+    aikit_tui::run(
+        service,
+        PaletteRequest::new(host)
+            .with_query(query)
+            .activating_initial(),
+    )
+}
+
+/// Open the organising tree over the same live service as the palette.
+pub fn run_tree(service: &Service, fullscreen: bool) -> Result<TreeOutcome> {
+    let profile = terminal_profile(|k| std::env::var(k).ok(), fullscreen);
+    let host = UiHost::choose(&profile);
+    let state = crate::tree_build::build(service)?;
+    let scope = service.descriptor().default_mutation_scope();
+    let mut request = TreeRequest::new(host);
+    if scope.requires_confirmation_to_write() {
+        request = request.with_apply_confirmation(
+            format!("Write staged changes to the {scope} profile?"),
+            match scope {
+                aikit_core::scope::ScopeKind::Global => {
+                    "~/.aikit/profiles applies to every project on this machine."
+                }
+                aikit_core::scope::ScopeKind::Project => {
+                    "<repo>/.aikit/profile.toml is committed and affects every collaborator."
+                }
+                _ => "This change is durable.",
+            },
+        );
+    }
+    aikit_tui::run_tree(state, request)
 }

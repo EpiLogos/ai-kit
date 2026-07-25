@@ -35,7 +35,10 @@ impl Plain {
 
     /// Status values the caller still has to render itself.
     pub fn pending_status(&self) -> Vec<(String, String)> {
-        self.status.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn pending_notifications(&self) -> Vec<Notification> {
@@ -107,7 +110,9 @@ impl MuxAdapter for Plain {
         binding.warnings.extend(plan.warnings.clone());
 
         let root = &first_view.steps[0];
-        binding.views.insert(first_view.id.clone(), first_view.id.clone());
+        binding
+            .views
+            .insert(first_view.id.clone(), first_view.id.clone());
         binding.surfaces.insert(
             format!("{}/{}", first_view.id, root.pane),
             CURRENT_TERMINAL.to_string(),

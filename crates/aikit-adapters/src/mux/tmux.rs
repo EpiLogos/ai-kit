@@ -305,7 +305,10 @@ impl<R: CommandRunner> Tmux<R> {
         let split = step.split.as_ref().ok_or_else(|| {
             AikitError::new(
                 "mux.tmux_failed",
-                format!("pane `{}` is a view root and cannot be split off", step.pane),
+                format!(
+                    "pane `{}` is a view root and cannot be split off",
+                    step.pane
+                ),
             )
         })?;
         let mut args: Vec<String> = vec!["split-window".into(), "-t".into(), from_pane.to_string()];
@@ -414,7 +417,9 @@ impl<R: CommandRunner> Tmux<R> {
             for (tag, pane) in &by_tag {
                 if !planned.contains(tag) {
                     self.must(&["kill-pane", "-t", pane])?;
-                    binding.record(format!("closed pane {tag}, which the plan no longer declares"));
+                    binding.record(format!(
+                        "closed pane {tag}, which the plan no longer declares"
+                    ));
                 }
             }
             for pane in &untagged {
@@ -620,7 +625,12 @@ fn split_field(line: &str) -> (&str, &str) {
 /// uses compass directions, because "horizontal split" means opposite things in
 /// different multiplexers.
 fn direction_flags(direction: Direction) -> Vec<String> {
-    let mut flags = vec![if direction.is_horizontal() { "-h" } else { "-v" }.to_string()];
+    let mut flags = vec![if direction.is_horizontal() {
+        "-h"
+    } else {
+        "-v"
+    }
+    .to_string()];
     if matches!(direction, Direction::Left | Direction::Up) {
         flags.push("-b".to_string());
     }
@@ -784,9 +794,10 @@ impl<R: CommandRunner> MuxAdapter for Tmux<R> {
                 ])?;
             }
             binding.views.insert(first_view.id.clone(), view_name);
-            binding
-                .surfaces
-                .insert(format!("{}/{}", first_view.id, root_step.pane), root.clone());
+            binding.surfaces.insert(
+                format!("{}/{}", first_view.id, root_step.pane),
+                root.clone(),
+            );
             binding.record(format!("created session {name}"));
 
             let mut panes = BTreeMap::new();
@@ -826,6 +837,7 @@ impl<R: CommandRunner> MuxAdapter for Tmux<R> {
     }
 
     fn spawn(&self, request: SpawnRequest) -> Result<SpawnedTarget> {
+        let command = request.command_with_env();
         let target = request
             .target
             .clone()
@@ -840,13 +852,13 @@ impl<R: CommandRunner> MuxAdapter for Tmux<R> {
                         "running in the current pane needs a pane to run in, and none was given",
                     ));
                 }
-                if !request.command.is_empty() {
+                if !command.is_empty() {
                     self.must(&[
                         "respawn-pane",
                         "-k",
                         "-t",
                         &selector,
-                        &shell_words::join(&request.command),
+                        &shell_words::join(&command),
                     ])?;
                 }
                 Ok(SpawnedTarget {
@@ -874,8 +886,8 @@ impl<R: CommandRunner> MuxAdapter for Tmux<R> {
                     args.push(cwd.display().to_string());
                 }
                 args.extend(["-P".into(), "-F".into(), "#{pane_id}".into()]);
-                if !request.command.is_empty() {
-                    args.push(shell_words::join(&request.command));
+                if !command.is_empty() {
+                    args.push(shell_words::join(&command));
                 }
                 Ok(SpawnedTarget {
                     target: MuxTarget::surface(
@@ -915,8 +927,8 @@ impl<R: CommandRunner> MuxAdapter for Tmux<R> {
                     args.push(cwd.display().to_string());
                 }
                 args.extend(["-P".into(), "-F".into(), "#{pane_id}".into()]);
-                if !request.command.is_empty() {
-                    args.push(shell_words::join(&request.command));
+                if !command.is_empty() {
+                    args.push(shell_words::join(&command));
                 }
                 Ok(SpawnedTarget {
                     target: MuxTarget::surface(

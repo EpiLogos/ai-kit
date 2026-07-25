@@ -288,6 +288,12 @@ pub enum TreeAction {
 /// these rather than being done inline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeEffect {
+    /// Create a new writable set.
+    CreateSet { set: String },
+    /// Rename a writable set.
+    RenameSet { from: String, to: String },
+    /// Recoverably delete a writable set after confirmation.
+    DeleteSet { set: String },
     /// Add `capsule` to the set at `set`.
     AddToSet { set: String, capsule: CapsuleId },
     /// Remove `capsule` from the set at `set`.
@@ -412,9 +418,12 @@ fn enclosing_set(rows: &[Row], index: usize, row: &Row) -> Option<String> {
     if let NodeKind::Set { name, .. } = &row.node.kind {
         return Some(name.clone());
     }
-    rows[..=index].iter().rev().find_map(|r| match &r.node.kind {
-        NodeKind::Set { name, .. } => Some(name.clone()),
-        _ => None,
+    rows[..=index].iter().rev().find_map(|candidate| {
+        let is_ancestor = row.path.starts_with(&format!("{}/", candidate.path));
+        match &candidate.node.kind {
+            NodeKind::Set { name, .. } if is_ancestor => Some(name.clone()),
+            _ => None,
+        }
     })
 }
 

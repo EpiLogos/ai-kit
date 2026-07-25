@@ -31,6 +31,7 @@ fn config_layer(kind: ScopeKind, id: &str, body: &str) -> ScopeLayer {
         origin: LayerOrigin::new(format!("test:{}", kind.as_str())),
         patch: PoolPatch {
             profiles: vec![],
+            uses: vec![],
             enable: vec![cid(id)],
             disable: vec![],
             config,

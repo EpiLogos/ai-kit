@@ -18,8 +18,11 @@ use aikit_core::trust::TrustState;
 use aikit_tui::app::{Action, AppState, ConfirmKind, Effect, Level, Mode};
 use aikit_tui::backend::JobOutput;
 use aikit_tui::driver::step;
+use aikit_tui::event::ScriptedEvents;
 use aikit_tui::host::UiHost;
 use aikit_tui::{reduce, PaletteOutcome, PaletteRequest};
+use ratatui::backend::TestBackend;
+use ratatui::Terminal;
 
 fn request() -> PaletteRequest {
     PaletteRequest::new(UiHost::Inline(16))
@@ -81,6 +84,28 @@ fn an_initial_query_is_applied_before_the_first_frame() {
 
     assert_eq!(state.query, "deploy");
     assert_eq!(selected(&state), "script/ops/deploy");
+}
+
+#[test]
+fn an_activating_initial_query_opens_the_exact_result_without_a_second_enter() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fixture = Fixture::new(dir.path(), catalog());
+    let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+    let mut events = ScriptedEvents::new([]);
+    let outcome = aikit_tui::driver::event_loop(
+        &mut terminal,
+        &mut events,
+        &mut fixture,
+        request()
+            .with_query("script/ops/deploy")
+            .activating_initial(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        &outcome,
+        PaletteOutcome::Run(intent) if intent.capsule == cid("script/ops/deploy")
+    ), "unexpected activation outcome: {outcome:?}");
 }
 
 #[test]
@@ -586,6 +611,17 @@ fn esc_clears_a_query_before_it_closes_the_palette() {
 
     state = step(&mut fixture, state, Action::Esc);
     assert_eq!(state.outcome, Some(PaletteOutcome::Closed));
+}
+
+#[test]
+fn ctrl_t_hands_the_terminal_to_the_tree_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fixture = Fixture::new(dir.path(), catalog());
+    let state = open(&mut fixture);
+
+    let state = step(&mut fixture, state, Action::Tree);
+
+    assert_eq!(state.outcome, Some(PaletteOutcome::Tree));
 }
 
 #[test]

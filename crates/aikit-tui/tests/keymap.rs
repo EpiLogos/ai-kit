@@ -153,6 +153,10 @@ fn the_documented_single_key_bindings_all_resolve() {
             Action::CtrlR,
         ),
         (
+            press(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            Action::Tree,
+        ),
+        (
             press(KeyCode::Char('c'), KeyModifiers::CONTROL),
             Action::Esc,
         ),

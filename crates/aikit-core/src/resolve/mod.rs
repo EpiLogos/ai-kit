@@ -592,12 +592,31 @@ impl<'a> Resolver<'a> {
                 continue;
             }
             // Profiles first, in declaration order, each expanded depth-first.
-            let mut expanded: BTreeSet<ProfileId> = BTreeSet::new();
+            let mut expanded: BTreeSet<String> = BTreeSet::new();
             for profile_id in &layer.patch.profiles {
                 let mut stack: Vec<ProfileId> = Vec::new();
                 if self
                     .expand_profile(
                         profile_id,
+                        &BTreeMap::new(),
+                        layer,
+                        &mut ops,
+                        &mut config,
+                        &mut expanded,
+                        &mut stack,
+                    )
+                    .is_none()
+                {
+                    // The problem has already been recorded; keep going so the
+                    // diagnosis is complete.
+                }
+            }
+            for profile_use in &layer.patch.uses {
+                let mut stack: Vec<ProfileId> = Vec::new();
+                if self
+                    .expand_profile(
+                        &profile_use.profile,
+                        &profile_use.params,
                         layer,
                         &mut ops,
                         &mut config,
@@ -616,13 +635,18 @@ impl<'a> Resolver<'a> {
         Some((ops, config))
     }
 
+    // The traversal carries the layer plus four independently-mutated resolver
+    // accumulators. Bundling them solely to satisfy an argument-count heuristic
+    // would obscure which state recursion is allowed to change.
+    #[allow(clippy::too_many_arguments)]
     fn expand_profile(
         &mut self,
         profile_id: &ProfileId,
+        bindings: &BTreeMap<String, crate::arg::Literal>,
         layer: &ScopeLayer,
         ops: &mut Vec<SelectionOp>,
         config: &mut BTreeMap<CapsuleId, ConfigTable>,
-        expanded: &mut BTreeSet<ProfileId>,
+        expanded: &mut BTreeSet<String>,
         stack: &mut Vec<ProfileId>,
     ) -> Option<()> {
         if stack.contains(profile_id) {
@@ -637,11 +661,12 @@ impl<'a> Resolver<'a> {
             );
             return None;
         }
-        if expanded.contains(profile_id) {
+        let instance = profile_instance_key(profile_id, bindings);
+        if expanded.contains(&instance) {
             return Some(());
         }
 
-        let Some(profile) = self.catalog.profile(profile_id) else {
+        let Some(profile) = self.catalog.profile(profile_id).cloned() else {
             self.fail(
                 AikitError::new(
                     "resolution.unknown_profile",
@@ -658,19 +683,64 @@ impl<'a> Resolver<'a> {
         };
 
         let extends = profile.extends.clone();
-        let patch = profile.patch.clone();
+        let extends_uses = profile.extends_uses.clone();
+        let patch = match profile.resolve_patch(bindings) {
+            Ok(patch) => patch,
+            Err(error) => {
+                self.fail(error);
+                return None;
+            }
+        };
 
         stack.push(profile_id.clone());
         for parent in &extends {
-            self.expand_profile(parent, layer, ops, config, expanded, stack);
+            self.expand_profile(
+                parent,
+                &BTreeMap::new(),
+                layer,
+                ops,
+                config,
+                expanded,
+                stack,
+            );
+        }
+        for parent in &extends_uses {
+            self.expand_profile(
+                &parent.profile,
+                &parent.params,
+                layer,
+                ops,
+                config,
+                expanded,
+                stack,
+            );
         }
         // Nested `profiles = [...]` inside a profile behave like `extends`.
         for nested in &patch.profiles {
-            self.expand_profile(nested, layer, ops, config, expanded, stack);
+            self.expand_profile(
+                nested,
+                &BTreeMap::new(),
+                layer,
+                ops,
+                config,
+                expanded,
+                stack,
+            );
+        }
+        for nested in &patch.uses {
+            self.expand_profile(
+                &nested.profile,
+                &nested.params,
+                layer,
+                ops,
+                config,
+                expanded,
+                stack,
+            );
         }
         stack.pop();
 
-        expanded.insert(profile_id.clone());
+        expanded.insert(instance);
         self.apply_patch(&patch, layer, Some(profile_id), ops, config);
         Some(())
     }
@@ -1007,6 +1077,25 @@ impl<'a> Resolver<'a> {
             })
             .collect()
     }
+}
+
+fn profile_instance_key(
+    profile: &ProfileId,
+    bindings: &BTreeMap<String, crate::arg::Literal>,
+) -> String {
+    let mut key = profile.to_string();
+    for (name, value) in bindings {
+        let rendered = value.to_string();
+        key.push('|');
+        key.push_str(&name.len().to_string());
+        key.push(':');
+        key.push_str(name);
+        key.push('=');
+        key.push_str(&rendered.len().to_string());
+        key.push(':');
+        key.push_str(&rendered);
+    }
+    key
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

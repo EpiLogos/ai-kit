@@ -346,6 +346,36 @@ fn put_outside_a_set_is_a_no_op_rather_than_inventing_a_destination() {
 }
 
 #[test]
+fn a_kinds_capability_cannot_fall_into_the_last_visible_set() {
+    let mut state = fixture();
+    let kinds = state
+        .roots
+        .iter_mut()
+        .find(|node| matches!(node.kind, NodeKind::Root(Root::Kinds)))
+        .unwrap();
+    kinds
+        .children
+        .push(capability("skill/rust/review", "same capsule, kinds view"));
+    // Open sets/rust-review, then open kinds and stand on a capability there.
+    state.expanded.insert("sets".into());
+    state.expanded.insert("sets/rust-review".into());
+    state.expanded.insert("kinds".into());
+    let rows = state.rows();
+    state.selected = rows
+        .iter()
+        .position(|row| row.path.starts_with("kinds/") && matches!(row.node.kind, NodeKind::Capability { .. }))
+        .expect("fixture has a capability under kinds");
+    state.yanked = Some(cid("skill/rust/review"));
+
+    let effects = tree::reduce(&mut state, TreeAction::Put);
+
+    assert!(
+        effects.is_empty(),
+        "a set must be a path ancestor, not merely an earlier visible row: {effects:?}"
+    );
+}
+
+#[test]
 fn staging_toggles_rather_than_only_setting() {
     let mut state = fixture();
     state.expanded.insert("sets".into());
