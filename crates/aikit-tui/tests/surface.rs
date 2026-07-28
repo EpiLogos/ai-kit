@@ -302,6 +302,10 @@ fn applying_from_the_tree_uses_the_palette_gate_and_keeps_the_surface_open() {
     assert_eq!(surface.mode(), SurfaceMode::Palette);
     assert_eq!(backend.applied.len(), 1);
     assert!(surface.palette().state().staged.is_empty());
+    assert!(
+        surface.tree().state().staged.is_empty(),
+        "a successful apply must clear the shared staged graph in both modes"
+    );
     assert!(surface
         .palette()
         .state()

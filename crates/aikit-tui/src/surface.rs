@@ -271,6 +271,7 @@ impl SurfaceController {
         )?;
         self.palette.state_mut().status = Some(crate::app::Status::info(message));
         self.replace_tree(backend.surface_tree()?);
+        self.sync_palette_to_tree();
         Ok(())
     }
 
