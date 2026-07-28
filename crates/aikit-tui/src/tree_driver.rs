@@ -121,116 +121,152 @@ struct DrawMode<'a> {
     confirmation: Option<&'a ApplyConfirmation>,
 }
 
-/// Drive an interactive tree on any ratatui backend and event source.
-pub fn event_loop<B, E>(
-    terminal: &mut Terminal<B>,
-    events: &mut E,
-    mut state: TreeState,
+/// One event's result inside the reusable tree controller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreeStep {
+    Continue,
+    Palette,
+    Apply(Vec<CapsuleId>),
+    Effect(TreeEffect),
+}
+
+/// The tree's complete interaction state, reusable inside a larger surface.
+///
+/// The original standalone tree loop kept these values as stack locals. Making
+/// them explicit lets the unified popup leave the tree, use the palette, and
+/// return without losing a filter, selection, pending confirmation, or drag.
+pub struct TreeController {
+    state: TreeState,
     request: TreeRequest,
-) -> Result<TreeOutcome>
-where
-    B: Backend,
-    B::Error: std::fmt::Display,
-    E: EventSource + ?Sized,
-{
-    let mut filtering = false;
-    let mut confirming = false;
-    let mut editing: Option<EditPrompt> = None;
-    let mut help = false;
-    let mut pending_g = false;
-    let mut pending_z = false;
-    let mut last_clicked = None;
-    let mut dragging = None;
-    let mut centered_on = None;
+    filtering: bool,
+    confirming: bool,
+    editing: Option<EditPrompt>,
+    help: bool,
+    pending_g: bool,
+    pending_z: bool,
+    last_clicked: Option<(usize, Instant)>,
+    dragging: Option<DragState>,
+    centered_on: Option<usize>,
+    viewport: ViewportState,
+}
 
-    loop {
-        let size = terminal
-            .size()
-            .map_err(|e| draw_error("could not measure the terminal", e))?;
-        let viewport = viewport(size.into(), &state, centered_on);
-        terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    &state,
-                    request.glyphs,
-                    DrawMode {
-                        filtering,
-                        confirming,
-                        editing: editing.as_ref(),
-                        help,
-                        confirmation: request.apply_confirmation.as_ref(),
-                    },
-                    viewport,
-                )
-            })
-            .map_err(|e| draw_error("could not draw the tree", e))?;
+impl TreeController {
+    pub fn new(state: TreeState, request: TreeRequest) -> Self {
+        Self {
+            state,
+            request,
+            filtering: false,
+            confirming: false,
+            editing: None,
+            help: false,
+            pending_g: false,
+            pending_z: false,
+            last_clicked: None,
+            dragging: None,
+            centered_on: None,
+            viewport: ViewportState {
+                list: Rect::default(),
+                scroll: 0,
+            },
+        }
+    }
 
-        let Some(event) = events.next()? else {
-            return Ok(TreeOutcome::Closed);
-        };
+    pub fn state(&self) -> &TreeState {
+        &self.state
+    }
 
-        if confirming {
-            match event {
+    pub fn state_mut(&mut self) -> &mut TreeState {
+        &mut self.state
+    }
+
+    pub fn draw(&mut self, frame: &mut Frame) {
+        self.viewport = viewport(frame.area(), &self.state, self.centered_on);
+        draw(
+            frame,
+            &self.state,
+            self.request.glyphs,
+            DrawMode {
+                filtering: self.filtering,
+                confirming: self.confirming,
+                editing: self.editing.as_ref(),
+                help: self.help,
+                confirmation: self.request.apply_confirmation.as_ref(),
+            },
+            self.viewport,
+        );
+    }
+
+    pub fn handle(&mut self, event: PaletteEvent) -> Result<TreeStep> {
+        if self.confirming {
+            return Ok(match event {
                 PaletteEvent::Key(key)
                     if key.kind != KeyEventKind::Release && key.code == KeyCode::Enter =>
                 {
-                    return Ok(TreeOutcome::Apply(state.staged.iter().cloned().collect()));
+                    TreeStep::Apply(self.state.staged.iter().cloned().collect())
                 }
                 PaletteEvent::Key(key)
                     if key.kind != KeyEventKind::Release && key.code == KeyCode::Esc =>
                 {
-                    confirming = false;
-                    continue;
+                    self.confirming = false;
+                    TreeStep::Continue
                 }
                 PaletteEvent::Mouse(mouse)
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                        && mouse.row == viewport.list.bottom() =>
+                        && mouse.row == self.viewport.list.bottom() =>
                 {
-                    match modal_control(mouse.column, viewport.list.x) {
+                    match modal_control(mouse.column, self.viewport.list.x) {
                         Some(ModalControl::Confirm) => {
-                            return Ok(TreeOutcome::Apply(state.staged.iter().cloned().collect()));
+                            TreeStep::Apply(self.state.staged.iter().cloned().collect())
                         }
-                        Some(ModalControl::Cancel) => confirming = false,
-                        None => {}
+                        Some(ModalControl::Cancel) => {
+                            self.confirming = false;
+                            TreeStep::Continue
+                        }
+                        None => TreeStep::Continue,
                     }
-                    continue;
                 }
-                _ => continue,
-            }
+                _ => TreeStep::Continue,
+            });
         }
 
-        if let Some(prompt) = &mut editing {
+        if let Some(prompt) = &mut self.editing {
             if let PaletteEvent::Mouse(mouse) = event {
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                    && mouse.row == viewport.list.bottom()
+                    && mouse.row == self.viewport.list.bottom()
                 {
-                    match modal_control(mouse.column, viewport.list.x) {
-                        Some(ModalControl::Confirm) => {
-                            if let Some(effect) = edit_effect(prompt) {
-                                return Ok(TreeOutcome::Effect(effect));
-                            }
+                    return Ok(match modal_control(mouse.column, self.viewport.list.x) {
+                        Some(ModalControl::Confirm) => edit_effect(prompt)
+                            .map(TreeStep::Effect)
+                            .unwrap_or(TreeStep::Continue),
+                        Some(ModalControl::Cancel) => {
+                            self.editing = None;
+                            TreeStep::Continue
                         }
-                        Some(ModalControl::Cancel) => editing = None,
-                        None => {}
-                    }
+                        None => TreeStep::Continue,
+                    });
                 }
-                continue;
+                return Ok(TreeStep::Continue);
             }
             let PaletteEvent::Key(key) = event else {
-                continue;
+                return Ok(TreeStep::Continue);
             };
             if key.kind == KeyEventKind::Release {
-                continue;
+                return Ok(TreeStep::Continue);
             }
-            match key.code {
-                KeyCode::Esc => editing = None,
-                KeyCode::Backspace => match prompt {
-                    EditPrompt::Create(input) | EditPrompt::Rename { input, .. } => {
-                        input.pop();
+            return Ok(match key.code {
+                KeyCode::Esc => {
+                    self.editing = None;
+                    TreeStep::Continue
+                }
+                KeyCode::Backspace => {
+                    match prompt {
+                        EditPrompt::Create(input) | EditPrompt::Rename { input, .. } => {
+                            input.pop();
+                        }
+                        EditPrompt::Delete { .. } => {}
                     }
-                    EditPrompt::Delete { .. } => {}
-                },
+                    TreeStep::Continue
+                }
                 KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     match prompt {
                         EditPrompt::Create(input) | EditPrompt::Rename { input, .. } => {
@@ -238,152 +274,198 @@ where
                         }
                         EditPrompt::Delete { .. } => {}
                     }
+                    TreeStep::Continue
                 }
-                KeyCode::Enter => {
-                    if let Some(effect) = edit_effect(prompt) {
-                        return Ok(TreeOutcome::Effect(effect));
-                    }
-                }
-                _ => {}
-            }
-            continue;
+                KeyCode::Enter => edit_effect(prompt)
+                    .map(TreeStep::Effect)
+                    .unwrap_or(TreeStep::Continue),
+                _ => TreeStep::Continue,
+            });
         }
 
-        if help {
+        if self.help {
             match &event {
                 PaletteEvent::Key(key)
                     if key.kind != KeyEventKind::Release
                         && matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) =>
                 {
-                    help = false
+                    self.help = false
                 }
                 PaletteEvent::Mouse(mouse)
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                        && mouse.row == viewport.list.bottom()
-                        && modal_control(mouse.column, viewport.list.x).is_some() =>
+                        && mouse.row == self.viewport.list.bottom()
+                        && modal_control(mouse.column, self.viewport.list.x).is_some() =>
                 {
-                    help = false
+                    self.help = false
                 }
                 _ => {}
             }
-            continue;
+            return Ok(TreeStep::Continue);
         }
 
         if let PaletteEvent::Key(key) = &event {
             if key.kind != KeyEventKind::Release {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+                    return Ok(TreeStep::Palette);
+                }
                 match key.code {
                     KeyCode::Char('a') => {
-                        editing = Some(EditPrompt::Create(String::new()));
-                        continue;
+                        self.editing = Some(EditPrompt::Create(String::new()));
+                        return Ok(TreeStep::Continue);
                     }
                     KeyCode::Char('r') => {
-                        if let Some(set) = selected_writable_set(&state) {
-                            editing = Some(EditPrompt::Rename {
+                        if let Some(set) = selected_writable_set(&self.state) {
+                            self.editing = Some(EditPrompt::Rename {
                                 input: set.clone(),
                                 from: set,
                             });
                         }
-                        continue;
+                        return Ok(TreeStep::Continue);
                     }
                     KeyCode::Char('D') => {
-                        if let Some(set) = selected_writable_set(&state) {
-                            editing = Some(EditPrompt::Delete { set });
+                        if let Some(set) = selected_writable_set(&self.state) {
+                            self.editing = Some(EditPrompt::Delete { set });
                         }
-                        continue;
+                        return Ok(TreeStep::Continue);
                     }
                     KeyCode::Char('?') => {
-                        help = true;
-                        continue;
+                        self.help = true;
+                        return Ok(TreeStep::Continue);
                     }
-                    KeyCode::Char('z') if pending_z => {
-                        pending_z = false;
-                        centered_on = Some(state.selected);
-                        continue;
+                    KeyCode::Char('z') if self.pending_z => {
+                        self.pending_z = false;
+                        self.centered_on = Some(self.state.selected);
+                        return Ok(TreeStep::Continue);
                     }
                     KeyCode::Char('z') => {
-                        pending_z = true;
-                        continue;
+                        self.pending_z = true;
+                        return Ok(TreeStep::Continue);
                     }
-                    _ => pending_z = false,
+                    _ => self.pending_z = false,
                 }
             }
         }
 
         if let PaletteEvent::Mouse(mouse) = &event {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                && mouse.row == viewport.list.bottom()
+                && mouse.row == self.viewport.list.bottom()
             {
-                match footer_control_at(mouse.column, viewport.list.x, &state) {
-                    Some(FooterControl::Apply) if !state.staged.is_empty() => {
-                        if request.apply_confirmation.is_some() {
-                            confirming = true;
-                        } else {
-                            return Ok(TreeOutcome::Apply(state.staged.iter().cloned().collect()));
+                return Ok(
+                    match footer_control_at(mouse.column, self.viewport.list.x, &self.state) {
+                        Some(FooterControl::Apply) if !self.state.staged.is_empty() => {
+                            if self.request.apply_confirmation.is_some() {
+                                self.confirming = true;
+                                TreeStep::Continue
+                            } else {
+                                TreeStep::Apply(self.state.staged.iter().cloned().collect())
+                            }
                         }
-                    }
-                    Some(FooterControl::Add) => {
-                        editing = Some(EditPrompt::Create(String::new()));
-                    }
-                    Some(FooterControl::Rename) => {
-                        if let Some(set) = selected_writable_set(&state) {
-                            editing = Some(EditPrompt::Rename {
-                                input: set.clone(),
-                                from: set,
-                            });
+                        Some(FooterControl::Add) => {
+                            self.editing = Some(EditPrompt::Create(String::new()));
+                            TreeStep::Continue
                         }
-                    }
-                    Some(FooterControl::Delete) => {
-                        if let Some(set) = selected_writable_set(&state) {
-                            editing = Some(EditPrompt::Delete { set });
+                        Some(FooterControl::Rename) => {
+                            if let Some(set) = selected_writable_set(&self.state) {
+                                self.editing = Some(EditPrompt::Rename {
+                                    input: set.clone(),
+                                    from: set,
+                                });
+                            }
+                            TreeStep::Continue
                         }
-                    }
-                    Some(FooterControl::Remove) => {
-                        let effects = tree::reduce(&mut state, TreeAction::RemoveFromSet);
-                        if let Some(effect) = effects.into_iter().next() {
-                            return Ok(TreeOutcome::Effect(effect));
+                        Some(FooterControl::Delete) => {
+                            if let Some(set) = selected_writable_set(&self.state) {
+                                self.editing = Some(EditPrompt::Delete { set });
+                            }
+                            TreeStep::Continue
                         }
-                    }
-                    Some(FooterControl::Center) => centered_on = Some(state.selected),
-                    Some(FooterControl::Help) => help = true,
-                    Some(FooterControl::Close) => return Ok(TreeOutcome::Closed),
-                    Some(FooterControl::Apply) | None => {}
-                }
-                continue;
+                        Some(FooterControl::Remove) => {
+                            let effects = tree::reduce(&mut self.state, TreeAction::RemoveFromSet);
+                            effects
+                                .into_iter()
+                                .next()
+                                .map(TreeStep::Effect)
+                                .unwrap_or(TreeStep::Continue)
+                        }
+                        Some(FooterControl::Center) => {
+                            self.centered_on = Some(self.state.selected);
+                            TreeStep::Continue
+                        }
+                        Some(FooterControl::Help) => {
+                            self.help = true;
+                            TreeStep::Continue
+                        }
+                        Some(FooterControl::Close) => TreeStep::Palette,
+                        Some(FooterControl::Apply) | None => TreeStep::Continue,
+                    },
+                );
             }
         }
 
         let actions = actions_for(
             &event,
-            &state,
-            viewport,
-            &mut filtering,
-            &mut pending_g,
-            &mut last_clicked,
-            &mut dragging,
+            &self.state,
+            self.viewport,
+            &mut self.filtering,
+            &mut self.pending_g,
+            &mut self.last_clicked,
+            &mut self.dragging,
         );
         for command in actions {
             match command {
                 TreeCommand::Action(action) => {
-                    let previously_selected = state.selected;
-                    let effects = tree::reduce(&mut state, action);
-                    if state.selected != previously_selected {
-                        centered_on = None;
+                    let previously_selected = self.state.selected;
+                    let effects = tree::reduce(&mut self.state, action);
+                    if self.state.selected != previously_selected {
+                        self.centered_on = None;
                     }
                     if let Some(effect) = effects.into_iter().next() {
-                        return Ok(TreeOutcome::Effect(effect));
+                        return Ok(TreeStep::Effect(effect));
                     }
                 }
                 TreeCommand::Apply => {
-                    if !state.staged.is_empty() {
-                        if request.apply_confirmation.is_some() {
-                            confirming = true;
-                            continue;
+                    if !self.state.staged.is_empty() {
+                        if self.request.apply_confirmation.is_some() {
+                            self.confirming = true;
+                        } else {
+                            return Ok(TreeStep::Apply(
+                                self.state.staged.iter().cloned().collect(),
+                            ));
                         }
-                        return Ok(TreeOutcome::Apply(state.staged.iter().cloned().collect()));
                     }
                 }
-                TreeCommand::Close => return Ok(TreeOutcome::Closed),
+                TreeCommand::Close => return Ok(TreeStep::Palette),
             }
+        }
+        Ok(TreeStep::Continue)
+    }
+}
+
+/// Drive an interactive tree on any ratatui backend and event source.
+pub fn event_loop<B, E>(
+    terminal: &mut Terminal<B>,
+    events: &mut E,
+    state: TreeState,
+    request: TreeRequest,
+) -> Result<TreeOutcome>
+where
+    B: Backend,
+    B::Error: std::fmt::Display,
+    E: EventSource + ?Sized,
+{
+    let mut controller = TreeController::new(state, request);
+    loop {
+        terminal
+            .draw(|frame| controller.draw(frame))
+            .map_err(|e| draw_error("could not draw the tree", e))?;
+        let Some(event) = events.next()? else {
+            return Ok(TreeOutcome::Closed);
+        };
+        match controller.handle(event)? {
+            TreeStep::Continue => {}
+            TreeStep::Palette => return Ok(TreeOutcome::Closed),
+            TreeStep::Apply(ids) => return Ok(TreeOutcome::Apply(ids)),
+            TreeStep::Effect(effect) => return Ok(TreeOutcome::Effect(effect)),
         }
     }
 }

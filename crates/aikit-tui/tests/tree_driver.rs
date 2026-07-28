@@ -8,7 +8,7 @@ use aikit_tui::event::{PaletteEvent, ScriptedEvents};
 use aikit_tui::host::UiHost;
 use aikit_tui::layout::Glyphs;
 use aikit_tui::tree::{Node, NodeKind, Root, TreeState};
-use aikit_tui::tree_driver::{event_loop, TreeOutcome, TreeRequest};
+use aikit_tui::tree_driver::{event_loop, TreeController, TreeOutcome, TreeRequest, TreeStep};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -55,6 +55,71 @@ fn set_state() -> TreeState {
 
 fn request() -> TreeRequest {
     TreeRequest::new(UiHost::Fullscreen)
+}
+
+#[test]
+fn tree_controller_returns_to_the_palette_without_losing_navigation_state() {
+    let mut controller = TreeController::new(state(), request());
+
+    assert_eq!(
+        controller
+            .handle(PaletteEvent::Key(KeyEvent::new(
+                KeyCode::Right,
+                KeyModifiers::NONE,
+            )))
+            .unwrap(),
+        TreeStep::Continue
+    );
+    controller
+        .handle(PaletteEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+    let selected = controller.state().selected;
+
+    assert_eq!(
+        controller
+            .handle(PaletteEvent::Key(KeyEvent::new(
+                KeyCode::Char('t'),
+                KeyModifiers::CONTROL,
+            )))
+            .unwrap(),
+        TreeStep::Palette
+    );
+    assert_eq!(controller.state().selected, selected);
+}
+
+#[test]
+fn tree_controller_dismisses_a_local_prompt_before_returning_to_the_palette() {
+    let mut controller = TreeController::new(set_state(), request());
+
+    controller
+        .handle(PaletteEvent::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+    assert_eq!(
+        controller
+            .handle(PaletteEvent::Key(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )))
+            .unwrap(),
+        TreeStep::Continue,
+        "the first Escape dismisses the create-set prompt"
+    );
+    assert_eq!(
+        controller
+            .handle(PaletteEvent::Key(KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )))
+            .unwrap(),
+        TreeStep::Palette,
+        "only a resting tree returns to the palette"
+    );
 }
 
 #[test]
