@@ -31,6 +31,7 @@ use aikit_core::Result;
 
 use crate::app::{reduce, Action, AppState, Effect, Opened, OpenedForm, Status};
 use crate::backend::PaletteBackend;
+use crate::backend::Toggle;
 use crate::event::{action_for, CrosstermEvents, EventSource};
 use crate::form::ArgForm;
 use crate::host::UiHost;
@@ -154,12 +155,81 @@ pub fn step(backend: &mut dyn PaletteBackend, state: AppState, action: Action) -
 }
 
 /// Settle a list of effects with a fresh runtime.
-pub fn settle(
-    backend: &mut dyn PaletteBackend,
-    state: AppState,
-    effects: Vec<Effect>,
-) -> AppState {
+pub fn settle(backend: &mut dyn PaletteBackend, state: AppState, effects: Vec<Effect>) -> AppState {
     Runtime::new().settle(backend, state, effects)
+}
+
+/// One event's result inside the reusable palette controller.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaletteStep {
+    Continue,
+    Tree,
+    Outcome(PaletteOutcome),
+}
+
+/// The palette's complete reducer and effect state, reusable inside a surface.
+pub struct PaletteController {
+    state: AppState,
+    runtime: Runtime,
+}
+
+impl PaletteController {
+    pub fn new(backend: &mut dyn PaletteBackend, request: PaletteRequest) -> Result<Self> {
+        let (state, effects) = AppState::open(backend, &request)?;
+        let mut runtime = Runtime::new();
+        let mut state = runtime.settle(backend, state, effects);
+        if request.activate_initial {
+            if let Some(target) = request.activation_target.as_ref() {
+                if let Some(index) = state.rows.iter().position(|row| &row.doc.id == target) {
+                    state.cursor = index;
+                    state = runtime.step(backend, state, Action::Enter);
+                }
+            }
+        }
+        Ok(Self { state, runtime })
+    }
+
+    pub fn state(&self) -> &AppState {
+        &self.state
+    }
+
+    pub fn state_mut(&mut self) -> &mut AppState {
+        &mut self.state
+    }
+
+    pub fn draw(&mut self, frame: &mut ratatui::Frame) {
+        let area = frame.area();
+        self.state.area = (area.width, area.height);
+        render::draw(frame, &self.state);
+    }
+
+    pub fn handle(
+        &mut self,
+        backend: &mut dyn PaletteBackend,
+        event: crate::event::PaletteEvent,
+    ) -> Result<PaletteStep> {
+        let Some(action) = action_for(&event, &self.state) else {
+            return Ok(PaletteStep::Continue);
+        };
+        self.state = self.runtime.step(backend, self.state.clone(), action);
+        match self.state.outcome.clone() {
+            Some(PaletteOutcome::Tree) => {
+                self.state.outcome = None;
+                Ok(PaletteStep::Tree)
+            }
+            Some(outcome) => Ok(PaletteStep::Outcome(outcome)),
+            None => Ok(PaletteStep::Continue),
+        }
+    }
+
+    /// Import staging from another view and resolve its real consequences.
+    pub fn replace_staged(&mut self, backend: &mut dyn PaletteBackend, toggles: Vec<Toggle>) {
+        self.state.staged.replace(toggles);
+        self.state.staged_outcome = None;
+        self.state = self
+            .runtime
+            .settle(backend, self.state.clone(), vec![Effect::Stage]);
+    }
 }
 
 /// What opening a row turns out to mean.
@@ -226,32 +296,13 @@ where
     B::Error: std::fmt::Display,
     E: EventSource + ?Sized,
 {
-    let (state, effects) = AppState::open(backend, &request)?;
-    let mut runtime = Runtime::new();
-    let mut state = runtime.settle(backend, state, effects);
-    if request.activate_initial {
-        if let Some(target) = request.activation_target.as_ref() {
-            if let Some(index) = state
-                .rows
-                .iter()
-                .position(|row| &row.doc.id == target)
-            {
-                state.cursor = index;
-                state = runtime.step(backend, state, Action::Enter);
-            }
-        }
-    }
-
+    let mut controller = PaletteController::new(backend, request)?;
     loop {
-        if let Some(outcome) = state.outcome.clone() {
+        if let Some(outcome) = controller.state().outcome.clone() {
             return Ok(outcome);
         }
-        let area = terminal
-            .size()
-            .map_err(|e| draw_error("could not measure the terminal", e))?;
-        state.area = (area.width, area.height);
         terminal
-            .draw(|frame| render::draw(frame, &state))
+            .draw(|frame| controller.draw(frame))
             .map_err(|e| draw_error("could not draw the palette", e))?;
 
         let Some(event) = events.next()? else {
@@ -259,8 +310,10 @@ where
             // the user cancelled is at least not pretending they confirmed.
             return Ok(PaletteOutcome::Closed);
         };
-        if let Some(action) = action_for(&event, &state) {
-            state = runtime.step(backend, state, action);
+        match controller.handle(backend, event)? {
+            PaletteStep::Continue => {}
+            PaletteStep::Tree => return Ok(PaletteOutcome::Tree),
+            PaletteStep::Outcome(outcome) => return Ok(outcome),
         }
     }
 }

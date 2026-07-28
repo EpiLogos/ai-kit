@@ -69,6 +69,19 @@ impl StagedSet {
         self.toggles.clear();
     }
 
+    /// Replace the staged graph with an explicitly typed set of toggles.
+    ///
+    /// The unified surface uses this when the organising tree hands control back
+    /// to the palette. Accepting [`Toggle`] rather than bare ids preserves the
+    /// requested direction and prevents the receiving view from guessing from a
+    /// potentially different rendered state.
+    pub fn replace(&mut self, toggles: impl IntoIterator<Item = Toggle>) {
+        self.toggles = toggles
+            .into_iter()
+            .map(|toggle| (toggle.capsule, toggle.enable))
+            .collect();
+    }
+
     pub fn state_of(&self, id: &CapsuleId) -> Option<bool> {
         self.toggles.get(id).copied()
     }
@@ -199,7 +212,12 @@ impl StagedProblem {
     /// structured precisely so a UI can render them, and message wording is
     /// explicitly not stable.
     pub fn from_error(error: AikitError) -> Self {
-        let detail = |key: &str| error.details().get(key).and_then(|v| CapsuleId::parse(v).ok());
+        let detail = |key: &str| {
+            error
+                .details()
+                .get(key)
+                .and_then(|v| CapsuleId::parse(v).ok())
+        };
         let kind = match error.code() {
             "resolution.conflict" => match (detail("capability"), detail("conflicts_with")) {
                 (Some(left), Some(right)) => ProblemKind::Conflict { left, right },
@@ -271,11 +289,7 @@ pub fn is_on(view: &ResolvedView, id: &CapsuleId) -> bool {
 // cold path, never in a loop; boxing it would only obscure the ergonomic
 // `StagedOutcome` alias for no measurable gain.
 #[allow(clippy::result_large_err)]
-pub fn stage(
-    backend: &dyn PaletteBackend,
-    scope: ScopeKind,
-    staged: &StagedSet,
-) -> StagedOutcome {
+pub fn stage(backend: &dyn PaletteBackend, scope: ScopeKind, staged: &StagedSet) -> StagedOutcome {
     let toggles = staged.toggles();
     let projected = backend
         .preview(scope, &toggles)

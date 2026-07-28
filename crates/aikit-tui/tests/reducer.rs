@@ -16,11 +16,12 @@ use aikit_core::capsule::ExecMode;
 use aikit_core::scope::ScopeKind;
 use aikit_core::trust::TrustState;
 use aikit_tui::app::{Action, AppState, ConfirmKind, Effect, Level, Mode};
-use aikit_tui::backend::JobOutput;
-use aikit_tui::driver::step;
-use aikit_tui::event::ScriptedEvents;
+use aikit_tui::backend::{JobOutput, Toggle};
+use aikit_tui::driver::{step, PaletteController, PaletteStep};
+use aikit_tui::event::{PaletteEvent, ScriptedEvents};
 use aikit_tui::host::UiHost;
 use aikit_tui::{reduce, PaletteOutcome, PaletteRequest};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -70,9 +71,53 @@ fn a_freshly_opened_palette_is_searching_with_the_contexts_own_scope() {
 
     assert_eq!(state.mode, Mode::Search);
     assert_eq!(state.scope.current(), ScopeKind::Session);
-    assert!(!state.rows.is_empty(), "the list is populated before the first keystroke");
+    assert!(
+        !state.rows.is_empty(),
+        "the list is populated before the first keystroke"
+    );
     assert_eq!(state.cursor, 0);
     assert!(state.outcome.is_none());
+}
+
+#[test]
+fn palette_controller_yields_to_the_tree_without_losing_search_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fixture = Fixture::new(dir.path(), catalog());
+    let mut controller =
+        PaletteController::new(&mut fixture, request().with_query("deploy")).unwrap();
+    let selected_before = selected(controller.state());
+
+    assert_eq!(
+        controller
+            .handle(
+                &mut fixture,
+                PaletteEvent::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL,)),
+            )
+            .unwrap(),
+        PaletteStep::Tree
+    );
+    assert_eq!(controller.state().query, "deploy");
+    assert_eq!(selected(controller.state()), selected_before);
+    assert!(
+        controller.state().outcome.is_none(),
+        "switching modes must not finish the palette"
+    );
+}
+
+#[test]
+fn palette_controller_imports_tree_staging_through_the_real_stage_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fixture = Fixture::new(dir.path(), catalog());
+    let mut controller = PaletteController::new(&mut fixture, request()).unwrap();
+    let capsule = cid("skill/rust/review");
+
+    controller.replace_staged(&mut fixture, vec![Toggle::new(capsule.clone(), true)]);
+
+    assert_eq!(controller.state().staged.state_of(&capsule), Some(true));
+    assert!(
+        controller.state().staged_outcome.is_some(),
+        "imported staging must be resolved, not copied as a display-only mark"
+    );
 }
 
 #[test]
@@ -102,23 +147,27 @@ fn an_activating_initial_query_opens_the_exact_result_without_a_second_enter() {
     )
     .unwrap();
 
-    assert!(matches!(
-        &outcome,
-        PaletteOutcome::Run(intent) if intent.capsule == cid("script/ops/deploy")
-    ), "unexpected activation outcome: {outcome:?}");
+    assert!(
+        matches!(
+            &outcome,
+            PaletteOutcome::Run(intent) if intent.capsule == cid("script/ops/deploy")
+        ),
+        "unexpected activation outcome: {outcome:?}"
+    );
 }
 
 #[test]
 fn a_requested_scope_the_context_cannot_offer_refuses_to_open() {
     let dir = tempfile::tempdir().unwrap();
-    let fixture = Fixture::new(dir.path(), catalog())
-        .with_descriptor(aikit_core::context::ContextDescriptor {
+    let fixture = Fixture::new(dir.path(), catalog()).with_descriptor(
+        aikit_core::context::ContextDescriptor {
             project_root: None,
             session_id: None,
             task: None,
             host: String::new(),
             ..descriptor()
-        });
+        },
+    );
     let error = AppState::open(&fixture, &request().with_scope(ScopeKind::Project)).unwrap_err();
     assert_eq!(error.code(), "scope.unavailable_in_context");
 }
@@ -136,7 +185,10 @@ fn input_extends_the_query_and_asks_for_a_new_ranking() {
     let reduction = reduce(state, Action::Input('d'));
     assert_eq!(reduction.state.query, "d");
     assert!(
-        reduction.effects.iter().any(|e| matches!(e, Effect::Search { .. })),
+        reduction
+            .effects
+            .iter()
+            .any(|e| matches!(e, Effect::Search { .. })),
         "matching must be requested as an effect, not done in the reducer"
     );
 }
@@ -167,7 +219,10 @@ fn narrowing_the_query_puts_the_cursor_back_on_a_row_that_exists() {
     assert_eq!(state.cursor, 2);
 
     state = type_query(&mut fixture, state, "cargo-nextest");
-    assert!(state.cursor < state.rows.len(), "the cursor is off the end of the list");
+    assert!(
+        state.cursor < state.rows.len(),
+        "the cursor is off the end of the list"
+    );
     assert_eq!(selected(&state), "script/test/cargo-nextest");
 }
 
@@ -259,21 +314,28 @@ fn a_second_space_on_the_same_row_removes_the_staging() {
     state = step(&mut fixture, state, Action::Space);
     state = step(&mut fixture, state, Action::Space);
     assert!(state.staged.is_empty());
-    assert!(state.staged_outcome.is_none(), "nothing staged means nothing to report");
+    assert!(
+        state.staged_outcome.is_none(),
+        "nothing staged means nothing to report"
+    );
 }
 
 #[test]
 fn a_staged_set_that_cannot_resolve_is_reported_without_being_applied() {
     let dir = tempfile::tempdir().unwrap();
-    let mut fixture = Fixture::new(dir.path(), catalog())
-        .enable(ScopeKind::Project, &["script/app/uses-lib"]);
+    let mut fixture =
+        Fixture::new(dir.path(), catalog()).enable(ScopeKind::Project, &["script/app/uses-lib"]);
     let mut state = open(&mut fixture);
     state = type_query(&mut fixture, state, "lib/core");
     state = step(&mut fixture, state, Action::Space);
 
     let problem = state.staged_problem().expect("this cannot resolve");
     assert_eq!(problem.code(), "resolution.required_capability_disabled");
-    assert_eq!(state.mode, Mode::StagedDiff, "a refusal must be shown, not buried");
+    assert_eq!(
+        state.mode,
+        Mode::StagedDiff,
+        "a refusal must be shown, not buried"
+    );
     assert!(fixture.applied.is_empty());
 }
 
@@ -358,8 +420,15 @@ fn escaping_a_scope_confirmation_keeps_the_staged_set_for_a_second_try() {
     state = step(&mut fixture, state, Action::Esc);
 
     assert_ne!(state.mode, Mode::Confirm);
-    assert_eq!(state.staged.len(), 1, "escaping a confirmation must not discard work");
-    assert!(state.outcome.is_none(), "Esc out of a dialog does not close the palette");
+    assert_eq!(
+        state.staged.len(),
+        1,
+        "escaping a confirmation must not discard work"
+    );
+    assert!(
+        state.outcome.is_none(),
+        "Esc out of a dialog does not close the palette"
+    );
 }
 
 #[test]
@@ -380,7 +449,10 @@ fn an_apply_that_fails_leaves_the_staged_set_and_names_the_error_code() {
     let status = reduction.state.status.expect("a failure must be shown");
     assert_eq!(status.level, Level::Error);
     assert_eq!(status.code, Some("generation.stale_base"));
-    assert!(reduction.state.outcome.is_none(), "a failed apply does not close the palette");
+    assert!(
+        reduction.state.outcome.is_none(),
+        "a failed apply does not close the palette"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -423,7 +495,10 @@ fn enter_on_a_script_with_arguments_opens_the_form_rather_than_running_it() {
 
     assert_eq!(state.mode, Mode::ArgForm);
     assert_eq!(state.form.as_ref().map(|f| f.fields().len()), Some(1));
-    assert!(state.outcome.is_none(), "opening a form does not run anything");
+    assert!(
+        state.outcome.is_none(),
+        "opening a form does not run anything"
+    );
 }
 
 #[test]
@@ -449,7 +524,10 @@ fn a_captured_run_stays_in_the_palette_and_shows_its_output() {
     state = step(&mut fixture, state, Action::Enter);
 
     assert_eq!(state.mode, Mode::JobOutput);
-    assert!(state.outcome.is_none(), "a captured run does not close the palette");
+    assert!(
+        state.outcome.is_none(),
+        "a captured run does not close the palette"
+    );
     assert_eq!(
         state.job.as_ref().map(|j| j.lines.clone()),
         Some(vec!["all good".to_string()])
@@ -474,8 +552,8 @@ fn enter_on_a_capability_that_cannot_be_run_explains_it_instead() {
 #[test]
 fn running_an_unreviewed_script_stops_at_a_trust_confirmation_first() {
     let dir = tempfile::tempdir().unwrap();
-    let mut fixture = Fixture::new(dir.path(), catalog())
-        .set_trust("script/ops/deploy", TrustState::Unseen);
+    let mut fixture =
+        Fixture::new(dir.path(), catalog()).set_trust("script/ops/deploy", TrustState::Unseen);
     let mut state = open(&mut fixture);
     state = type_query(&mut fixture, state, "deploy");
     state = step(&mut fixture, state, Action::Enter);
@@ -485,7 +563,10 @@ fn running_an_unreviewed_script_stops_at_a_trust_confirmation_first() {
         state.confirm.as_ref().map(|c| c.kind.clone()),
         Some(ConfirmKind::RunUnreviewed(_))
     ));
-    assert!(state.outcome.is_none(), "an unreviewed script does not just run");
+    assert!(
+        state.outcome.is_none(),
+        "an unreviewed script does not just run"
+    );
 
     state = step(&mut fixture, state, Action::Enter);
     assert!(matches!(state.outcome, Some(PaletteOutcome::Run(_))));
@@ -536,7 +617,10 @@ fn ctrl_r_repeats_the_most_recent_run_without_replaying_a_secret() {
         "\n[[args]]\nname = \"target\"\ntype = \"string\"\nposition = 1\n",
         "entry = \"payload/run.sh\"",
     );
-    let form = aikit_tui::form::ArgForm::new(&capsule, &aikit_tui::form::FormContext::from_descriptor(&descriptor()));
+    let form = aikit_tui::form::ArgForm::new(
+        &capsule,
+        &aikit_tui::form::FormContext::from_descriptor(&descriptor()),
+    );
     let mut form = form;
     form.set_input(0, "production");
     let intent = form.intent(&capsule, &descriptor()).unwrap();
@@ -569,7 +653,11 @@ fn shift_enter_shows_the_staged_set_when_there_is_one_and_the_row_otherwise() {
     let mut state = open(&mut fixture);
 
     state = step(&mut fixture, state, Action::ShiftEnter);
-    assert_eq!(state.mode, Mode::Preview, "with nothing staged, explain the row");
+    assert_eq!(
+        state.mode,
+        Mode::Preview,
+        "with nothing staged, explain the row"
+    );
 
     state = step(&mut fixture, state, Action::Esc);
     state = type_query(&mut fixture, state, "deploy");
@@ -637,7 +725,11 @@ fn help_opens_over_whatever_was_there_and_returns_to_it() {
     state = step(&mut fixture, state, Action::Help);
     assert_eq!(state.mode, Mode::Help);
     state = step(&mut fixture, state, Action::Esc);
-    assert_eq!(state.mode, Mode::StagedDiff, "help must not lose the user's place");
+    assert_eq!(
+        state.mode,
+        Mode::StagedDiff,
+        "help must not lose the user's place"
+    );
     assert_eq!(state.staged.len(), 1);
 }
 
@@ -726,7 +818,10 @@ fn space_in_a_form_activates_the_field_instead_of_staging_a_capability() {
     state = step(&mut fixture, state, Action::Space);
 
     assert_eq!(state.form.as_ref().unwrap().fields()[0].input(), "true");
-    assert!(state.staged.is_empty(), "Space in a form must not stage a capability");
+    assert!(
+        state.staged.is_empty(),
+        "Space in a form must not stage a capability"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -741,7 +836,10 @@ fn the_manage_lane_offers_the_captures_waiting_for_review() {
     state = type_query(&mut fixture, state, ":");
 
     assert!(
-        state.manage_rows().iter().any(|a| a.label().contains("capture")),
+        state
+            .manage_rows()
+            .iter()
+            .any(|a| a.label().contains("capture")),
         "the manage lane must offer the inbox"
     );
 }
@@ -777,7 +875,11 @@ fn a_quarantined_capture_is_refused_and_its_body_never_reaches_the_screen() {
     );
 
     state = step(&mut fixture, state, Action::Enter);
-    assert_ne!(state.mode, Mode::Confirm, "a quarantined capture is not promotable");
+    assert_ne!(
+        state.mode,
+        Mode::Confirm,
+        "a quarantined capture is not promotable"
+    );
     assert_eq!(state.status.as_ref().map(|s| s.level), Some(Level::Error));
     assert!(fixture.promoted.is_empty());
 }
