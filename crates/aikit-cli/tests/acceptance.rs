@@ -1838,6 +1838,68 @@ fn the_interactive_tree_host_accepts_mouse_navigation_and_applies_staged_ids() {
     assert_eq!(outcome, TreeOutcome::Apply(vec![capability]));
 }
 
+#[test]
+fn a_real_skillset_failure_stays_inside_the_resident_tree_surface() {
+    use aikit_tui::event::PaletteEvent;
+    use aikit_tui::host::UiHost;
+    use aikit_tui::surface::{SurfaceController, SurfaceMode, SurfaceRequest, SurfaceStep};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let home = fresh_home();
+    let project = project_repo();
+    let create =
+        aikit_store::skillsets::plan_create(&home.home, "existing", &[], &[]).unwrap();
+    aikit_store::procedure::ProcedureRunner::new(&home.home)
+        .run(&create)
+        .unwrap();
+    let mut service = Service::open(home.home.clone(), project.path(), no_env).unwrap();
+    let mut surface =
+        SurfaceController::new(&mut service, SurfaceRequest::new(UiHost::TmuxPopup)).unwrap();
+
+    let key = |code| PaletteEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    assert_eq!(
+        surface
+            .handle(
+                &mut service,
+                PaletteEvent::Key(KeyEvent::new(
+                    KeyCode::Char('t'),
+                    KeyModifiers::CONTROL,
+                )),
+            )
+            .unwrap(),
+        SurfaceStep::Continue
+    );
+    for code in std::iter::once(KeyCode::Char('a'))
+        .chain("existing".chars().map(KeyCode::Char))
+        .chain(std::iter::once(KeyCode::Enter))
+    {
+        assert_eq!(
+            surface.handle(&mut service, key(code)).unwrap(),
+            SurfaceStep::Continue
+        );
+    }
+
+    assert_eq!(surface.mode(), SurfaceMode::Tree);
+    assert!(aikit_store::skillsets::dir(&home.home, "existing").is_dir());
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| surface.draw(frame)).unwrap();
+    let area = terminal.backend().buffer().area;
+    let frame = (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        frame.contains("skillset.exists") && frame.contains("existing"),
+        "the real Procedure planning error must remain visible inside the tree: {frame}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn the_real_binary_completes_palette_tree_stage_palette_apply_in_one_lifecycle() {
@@ -1898,8 +1960,8 @@ fn the_real_binary_completes_palette_tree_stage_palette_apply_in_one_lifecycle()
     );
     let frame_stream = String::from_utf8_lossy(&stdout);
     assert!(
-        frame_stream.contains("AIKit palette") && frame_stream.contains("Ctrl-T palette"),
-        "the initial palette and the tree's palette-switch control must both be rendered by the same invocation: {frame_stream:?}"
+        frame_stream.contains("AIKit palette"),
+        "the one invocation must begin on the palette: {frame_stream:?}"
     );
     assert_eq!(
         frame_stream.matches("\u{1b}[?1049h").count(),

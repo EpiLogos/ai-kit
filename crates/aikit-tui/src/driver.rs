@@ -271,7 +271,7 @@ fn open(backend: &dyn PaletteBackend, state: &AppState, id: &aikit_core::Capsule
     // "Runnable" is the resolved view's answer, not a kind lookup: a blocked or
     // quarantined script is not something you can run.
     if !state.view.can_run(id) {
-        return Opened::Details;
+        return Opened::Details(id.clone());
     }
 
     // An unreviewed executable may be exposed, but running it is a decision.

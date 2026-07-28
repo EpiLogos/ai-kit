@@ -355,6 +355,24 @@ fn prefix_and_named_table_bindings_do_not_collide_with_the_global_hotkey() {
 }
 
 #[test]
+fn compact_root_table_syntax_still_conflicts_with_the_global_hotkey() {
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        home.path().join(".tmux.conf"),
+        "bind-key -Troot M-a split-window\n",
+    )
+    .unwrap();
+
+    let output = run(
+        home.path(),
+        &socket(),
+        &["--json", "mux", "install", "tmux"],
+    );
+    assert!(!output.status.success());
+    assert_eq!(json(&output)["error"]["code"], "mux.key_conflict");
+}
+
+#[test]
 fn a_running_private_server_is_reloaded_and_the_live_binding_is_verified() {
     let server = Server::start();
     let home = tempfile::tempdir().unwrap();

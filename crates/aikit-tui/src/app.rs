@@ -129,7 +129,7 @@ pub enum Opened {
     /// It does not, and this is the invocation.
     Ready(Box<RunIntent>),
     /// It is not something you run.
-    Details,
+    Details(CapsuleId),
     Failed(AikitError),
 }
 
@@ -307,6 +307,7 @@ pub struct AppState {
     manage: Vec<ManageAction>,
     form_capsule: Option<Capsule>,
     form_requires_confirmation: bool,
+    preview_capsule: Option<CapsuleId>,
     /// Set by `Alt+Enter` before the open effect runs, so a form completed later
     /// still lands in the pane the user asked for.
     pub(crate) form_mode_override: Option<ExecMode>,
@@ -350,6 +351,7 @@ impl AppState {
             drafts: backend.promotion_drafts(),
             form_capsule: None,
             form_requires_confirmation: false,
+            preview_capsule: None,
             form_mode_override: None,
             help_from: Mode::Search,
         };
@@ -385,9 +387,19 @@ impl AppState {
         self.staged_outcome.as_ref().and_then(|o| o.as_ref().err())
     }
 
-    /// Why the selected row is in the state it is in, from the resolved view.
+    /// Why the active preview target is in the state it is in.
     pub fn explanation(&self) -> Option<Explanation> {
-        self.view.explain(&self.selected_row()?.doc.id)
+        self.view.explain(self.preview_id()?)
+    }
+
+    pub fn preview_id(&self) -> Option<&CapsuleId> {
+        if self.mode == Mode::Preview {
+            self.preview_capsule
+                .as_ref()
+                .or_else(|| self.selected_row().map(|row| &row.doc.id))
+        } else {
+            self.selected_row().map(|row| &row.doc.id)
+        }
     }
 
     pub fn promotion_draft(&self) -> Option<&PromotionDraft> {
@@ -583,6 +595,7 @@ fn searching(mut state: AppState, action: Action) -> Reduction {
         Action::AltEnter => enter(state, Some(ExecMode::NewPane)),
         Action::ShiftEnter => {
             state.mode = if state.staged.is_empty() {
+                state.preview_capsule = state.selected_row().map(|row| row.doc.id.clone());
                 Mode::Preview
             } else {
                 Mode::StagedDiff
@@ -775,7 +788,8 @@ fn opened_reduction(mut state: AppState, opened: Opened) -> Reduction {
             Reduction::plain(state)
         }
         Opened::Ready(intent) => launch(state, *intent),
-        Opened::Details => {
+        Opened::Details(capsule) => {
+            state.preview_capsule = Some(capsule);
             state.mode = Mode::Preview;
             Reduction::plain(state)
         }

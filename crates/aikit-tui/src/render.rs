@@ -386,19 +386,25 @@ fn truncate(text: &str, width: usize) -> String {
 /// the same decision two different ways, and the cheapest guarantee of that is to
 /// print the same string.
 fn preview_pane<'a>(state: &AppState, theme: &Theme) -> Paragraph<'a> {
-    let Some(row) = state.selected_row() else {
+    let Some(id) = state.preview_id() else {
         return Paragraph::new(Line::from(Span::styled("nothing selected", theme.dim())));
     };
     let mut lines: Vec<Line> = Vec::new();
-    match state.view.explain(&row.doc.id) {
+    match state.view.explain(id) {
         Some(explanation) => {
             for line in explanation.render().lines() {
                 lines.push(Line::from(Span::raw(line.to_string())));
             }
         }
         None => {
+            let status = state
+                .rows
+                .iter()
+                .find(|row| &row.doc.id == id)
+                .map(|row| row.doc.status)
+                .unwrap_or(DocStatus::Inactive);
             lines.push(Line::from(Span::styled(
-                state_note(row.doc.status, None),
+                state_note(status, None),
                 theme.dim(),
             )));
         }

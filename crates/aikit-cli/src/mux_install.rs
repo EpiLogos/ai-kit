@@ -128,6 +128,10 @@ fn parsed_binding(tokens: &[String]) -> Option<ParsedBinding<'_>> {
                 table = tokens.get(index + 1).map(String::as_str);
                 index += 2;
             }
+            token if token.starts_with("-T") && token.len() > 2 => {
+                table = Some(&token[2..]);
+                index += 1;
+            }
             "-N" => index += 2,
             "-n" => {
                 no_prefix = true;

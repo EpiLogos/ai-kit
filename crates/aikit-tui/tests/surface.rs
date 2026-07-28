@@ -15,7 +15,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
-struct SurfaceFixture(Fixture, bool);
+struct SurfaceFixture(Fixture);
 
 impl std::ops::Deref for SurfaceFixture {
     type Target = Fixture;
@@ -100,27 +100,17 @@ impl SurfaceBackend for SurfaceFixture {
     }
 
     fn apply_tree_effect(&mut self, _effect: TreeEffect) -> Result<()> {
-        if self.1 {
-            Err(aikit_core::error::AikitError::new(
-                "skillset.already_exists",
-                "set already exists",
-            ))
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 }
 
 fn fixture() -> SurfaceFixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.keep();
-    SurfaceFixture(
-        Fixture::new(
-            &root,
-            vec![script("script/ops/deploy"), skill("skill/rust/review")],
-        ),
-        false,
-    )
+    SurfaceFixture(Fixture::new(
+        &root,
+        vec![script("script/ops/deploy"), skill("skill/rust/review")],
+    ))
 }
 
 fn request(query: &str) -> SurfaceRequest {
@@ -218,42 +208,23 @@ fn activating_a_tree_leaf_preserves_the_palette_and_shared_staging() {
         .state()
         .staged
         .contains(&cid("skill/rust/review")));
-}
-
-#[test]
-fn tree_management_errors_stay_inside_the_tree_without_losing_state() {
-    let mut backend = fixture();
-    backend.1 = true;
-    let mut surface = SurfaceController::new(&mut backend, request("")).unwrap();
-
-    for event in [
-        key(KeyCode::Char('t'), KeyModifiers::CONTROL),
-        key(KeyCode::Right, KeyModifiers::NONE),
-        key(KeyCode::Down, KeyModifiers::NONE),
-        key(KeyCode::Char(' '), KeyModifiers::NONE),
-        key(KeyCode::Char('a'), KeyModifiers::NONE),
-        key(KeyCode::Char('x'), KeyModifiers::NONE),
-        key(KeyCode::Enter, KeyModifiers::NONE),
-    ] {
-        assert_eq!(
-            surface.handle(&mut backend, event).unwrap(),
-            SurfaceStep::Continue
-        );
-    }
-
-    assert_eq!(surface.mode(), SurfaceMode::Tree);
-    assert!(surface
-        .tree()
-        .state()
-        .staged
-        .contains(&cid("skill/rust/review")));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| surface.draw(frame)).unwrap();
     let frame = buffer_text(terminal.backend());
     assert!(
-        frame.contains("set already exists") && frame.contains("skillset.already_exists"),
-        "the domain message and stable code must be visible in place: {frame}"
+        frame.contains("skill/rust/review"),
+        "the preview must explain the activated tree capsule, not the palette cursor: {frame}"
+    );
+
+    surface
+        .handle(&mut backend, key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    terminal.draw(|frame| surface.draw(frame)).unwrap();
+    let frame = buffer_text(terminal.backend());
+    assert!(
+        frame.contains("Test script deploy") && !frame.contains("skill/rust/review"),
+        "leaving the explicit preview must restore the resident palette cursor: {frame}"
     );
 }
 
