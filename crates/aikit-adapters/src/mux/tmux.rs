@@ -554,7 +554,8 @@ pub fn config_block(key: &str) -> String {
         "{BLOCK_START}\n\
          # Managed by AIKit. Everything between these markers is regenerated;\n\
          # edit the key with `aikit install tmux --key <key>` rather than by hand.\n\
-         bind-key -n {key} display-popup -E -w {w}% -h {h}% -T {title} 'aikit ui'\n\
+         bind-key -n {key} display-popup -E -w {w}% -h {h}% \
+         -d '#{{pane_current_path}}' -T {title} 'aikit ui'\n\
          set-option -g @aikit_installed 1\n\
          {BLOCK_END}",
         w = request.width_percent,

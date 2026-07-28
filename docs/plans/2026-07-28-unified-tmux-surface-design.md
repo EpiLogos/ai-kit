@@ -59,7 +59,7 @@ after restoration.
 binds the selected key (default `M-a`) to:
 
 ```tmux
-display-popup -E -w 82% -h 70% -T AIKit 'aikit ui'
+display-popup -E -w 82% -h 70% -d '#{pane_current_path}' -T AIKit 'aikit ui'
 ```
 
 Installation is planned, reviewable, reversible, and idempotent. Before apply,

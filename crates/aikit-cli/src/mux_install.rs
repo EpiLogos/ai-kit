@@ -75,7 +75,9 @@ fn validate_key(key: &str) -> Result<&str> {
 }
 
 fn popup_binding(key: &str) -> String {
-    format!("bind-key -n {key} display-popup -E -w 82% -h 70% -T AIKit 'aikit ui'")
+    format!(
+        "bind-key -n {key} display-popup -E -w 82% -h 70% -d '#{{pane_current_path}}' -T AIKit 'aikit ui'"
+    )
 }
 
 fn configured_binding_outside_aikit(contents: &str, key: &str) -> Option<String> {

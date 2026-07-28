@@ -121,7 +121,10 @@ fn custom_key_is_written_and_a_missing_server_is_reported_honestly() {
         "no running server must be an explicit degraded verification: {reply}"
     );
     let config = fs::read_to_string(home.path().join(".tmux.conf")).unwrap();
-    assert!(config.contains("bind-key -n M-k display-popup -E -w 82% -h 70% -T AIKit 'aikit ui'"));
+    assert!(config.contains(
+        "bind-key -n M-k display-popup -E -w 82% -h 70% \
+         -d '#{pane_current_path}' -T AIKit 'aikit ui'"
+    ));
 }
 
 #[test]
@@ -271,6 +274,22 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
 
     let binary = cargo_bin("aikit");
     let binary_directory = binary.parent().unwrap();
+    let source_project = home.path().join("source-project");
+    fs::create_dir_all(source_project.join(".aikit")).unwrap();
+    let source = server.command(&[
+        "respawn-pane",
+        "-k",
+        "-t",
+        "install-test:0.0",
+        "-c",
+        source_project.to_str().unwrap(),
+        "sleep 60",
+    ]);
+    assert!(
+        source.status.success(),
+        "could not prepare the popup's source pane: {}",
+        String::from_utf8_lossy(&source.stderr)
+    );
     let path = format!(
         "{}:{}",
         binary_directory.display(),
@@ -391,6 +410,10 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
     assert!(
         String::from_utf8_lossy(&rendered).contains("AIKit tree"),
         "the real popup never rendered tree mode"
+    );
+    assert!(
+        String::from_utf8_lossy(&rendered).contains("source-project"),
+        "the popup did not inherit and resolve the source pane's working directory"
     );
 
     let panes = server.command(&["list-panes", "-t", "install-test", "-F", "#{pane_id}"]);

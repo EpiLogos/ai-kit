@@ -30,7 +30,7 @@ fn installing_into_a_missing_config_creates_it_with_one_marked_block() {
     assert_eq!(occurrences(&contents, BLOCK_START), 1);
     assert_eq!(occurrences(&contents, BLOCK_END), 1);
     assert!(
-        contents.contains("display-popup -E -w 82% -h 70% -T AIKit"),
+        contents.contains("display-popup -E -w 82% -h 70% -d '#{pane_current_path}' -T AIKit"),
         "the block has to actually bind the palette: {contents}"
     );
 }
