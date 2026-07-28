@@ -119,6 +119,22 @@ impl SurfaceController {
         }
     }
 
+    /// Draw one production frame through a caller-owned terminal.
+    ///
+    /// Keeping this seam on the controller makes the release performance gate
+    /// measure the same draw path as the event loop rather than a test-only
+    /// rendering approximation.
+    pub fn draw_terminal<T>(&mut self, terminal: &mut Terminal<T>) -> Result<()>
+    where
+        T: Backend,
+        T::Error: std::fmt::Display,
+    {
+        terminal
+            .draw(|frame| self.draw(frame))
+            .map(|_| ())
+            .map_err(|error| draw_error("could not draw the surface", error))
+    }
+
     pub fn handle<B: SurfaceBackend>(
         &mut self,
         backend: &mut B,
@@ -288,9 +304,7 @@ where
 {
     let mut controller = SurfaceController::new(backend, request)?;
     loop {
-        terminal
-            .draw(|frame| controller.draw(frame))
-            .map_err(|e| draw_error("could not draw the surface", e))?;
+        controller.draw_terminal(terminal)?;
         let Some(event) = events.next()? else {
             return Ok(PaletteOutcome::Closed);
         };

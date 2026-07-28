@@ -371,6 +371,11 @@ Supported by: SQLite index instead of payload scans, lazy previews, in-process
 fuzzy matching, resolver cache keyed by context + catalog revision, immutable
 `current`, no daemon handshake, no git on ordinary search.
 
+The popup's cold and warm first-frame budgets and its 5,000-document search
+budget are executable release gates in `crates/aikit-tui/tests/performance.rs`.
+They measure the production controller, matcher, and Ratatui draw path; catalog
+discovery and fixture construction are deliberately reported separately.
+
 ---
 
 ## 14. Explicitly not built
