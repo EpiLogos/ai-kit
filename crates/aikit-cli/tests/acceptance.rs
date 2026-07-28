@@ -1840,7 +1840,7 @@ fn the_interactive_tree_host_accepts_mouse_navigation_and_applies_staged_ids() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn the_real_binary_switches_tree_and_palette_inside_one_terminal_lifecycle() {
+fn the_real_binary_completes_palette_tree_stage_palette_apply_in_one_lifecycle() {
     let home = fresh_home();
     let project = project_repo();
     let mut child = Command::new("/usr/bin/script")
@@ -1857,7 +1857,7 @@ fn the_real_binary_switches_tree_and_palette_inside_one_terminal_lifecycle() {
         .arg(format!("HOME={}", home.path.display()))
         .arg("TERM=xterm-256color")
         .arg(cargo_bin("aikit"))
-        .args(["ui", "--tree", "--fullscreen"])
+        .args(["ui", "--fullscreen"])
         .current_dir(project.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1867,10 +1867,26 @@ fn the_real_binary_switches_tree_and_palette_inside_one_terminal_lifecycle() {
 
     let stdout_reader = wait_for_pty_ui(&mut child);
     let mut input = child.stdin.take().unwrap();
-    input.write_all(b"\x14").unwrap(); // Ctrl-T: tree -> palette.
-    input.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(200));
-    input.write_all(b"\x1b").unwrap(); // Resting palette -> close.
+    // Palette -> tree; kinds/ -> first kind -> first capability; stage; tree
+    // -> palette; review the exact staged diff; apply it.
+    for bytes in [
+        b"\x14".as_slice(),
+        b"j",
+        b"l",
+        b"j",
+        b"l",
+        b"j",
+        b" ",
+        b"\x14",
+        b"\x05", // Ctrl-E opens the staged diff without applying.
+        b"\r",   // Enter applies only from that review screen.
+    ] {
+        input.write_all(bytes).unwrap();
+        input.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(75));
+    }
+    std::thread::sleep(Duration::from_millis(250));
+    input.write_all(b"\x1b").unwrap(); // Successful apply returns to resting palette.
     drop(input);
 
     let (status, stdout, stderr) = finish_pty(child, stdout_reader);
@@ -1882,8 +1898,8 @@ fn the_real_binary_switches_tree_and_palette_inside_one_terminal_lifecycle() {
     );
     let frame_stream = String::from_utf8_lossy(&stdout);
     assert!(
-        frame_stream.contains("AIKit tree") && frame_stream.contains("Ctrl-T tree"),
-        "both modes must be rendered by the same invocation: {frame_stream:?}"
+        frame_stream.contains("AIKit palette") && frame_stream.contains("Ctrl-T palette"),
+        "the initial palette and the tree's palette-switch control must both be rendered by the same invocation: {frame_stream:?}"
     );
     assert_eq!(
         frame_stream.matches("\u{1b}[?1049h").count(),
@@ -1894,6 +1910,23 @@ fn the_real_binary_switches_tree_and_palette_inside_one_terminal_lifecycle() {
         frame_stream.matches("\u{1b}[?1049l").count(),
         1,
         "the one alternate screen must be restored exactly once: {frame_stream:?}"
+    );
+
+    let authored = fs::read_to_string(project.path().join(".aikit/profile.local.toml"))
+        .unwrap_or_else(|error| {
+            panic!(
+                "the one real process did not apply its staged capability ({error}); terminal output={frame_stream:?}"
+            )
+        });
+    let document: toml::Value = toml::from_str(&authored).unwrap();
+    let enabled = document["enable"]
+        .as_array()
+        .and_then(|values| values.first())
+        .and_then(toml::Value::as_str);
+    assert_eq!(
+        enabled,
+        Some("skill/rust/rust-review"),
+        "the complete cross-mode journey must apply its deterministic target: {authored}"
     );
 }
 

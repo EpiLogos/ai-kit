@@ -119,6 +119,13 @@ struct DrawMode<'a> {
     editing: Option<&'a EditPrompt>,
     help: bool,
     confirmation: Option<&'a ApplyConfirmation>,
+    feedback: Option<&'a TreeFeedback>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TreeFeedback {
+    message: String,
+    code: &'static str,
 }
 
 /// One event's result inside the reusable tree controller.
@@ -148,6 +155,7 @@ pub struct TreeController {
     dragging: Option<DragState>,
     centered_on: Option<usize>,
     viewport: ViewportState,
+    feedback: Option<TreeFeedback>,
 }
 
 impl TreeController {
@@ -168,6 +176,7 @@ impl TreeController {
                 list: Rect::default(),
                 scroll: 0,
             },
+            feedback: None,
         }
     }
 
@@ -191,12 +200,28 @@ impl TreeController {
                 editing: self.editing.as_ref(),
                 help: self.help,
                 confirmation: self.request.apply_confirmation.as_ref(),
+                feedback: self.feedback.as_ref(),
             },
             self.viewport,
         );
     }
 
+    /// Keep a failed tree mutation inside the resident controller.
+    pub fn report_error(&mut self, error: &AikitError) {
+        self.editing = None;
+        self.confirming = false;
+        self.feedback = Some(TreeFeedback {
+            message: error.message().to_string(),
+            code: error.code(),
+        });
+    }
+
     pub fn handle(&mut self, event: PaletteEvent) -> Result<TreeStep> {
+        let is_release =
+            matches!(&event, PaletteEvent::Key(key) if key.kind == KeyEventKind::Release);
+        if !is_release {
+            self.feedback = None;
+        }
         if self.confirming {
             return Ok(match event {
                 PaletteEvent::Key(key)
@@ -873,7 +898,15 @@ fn draw(
         height: 1,
         ..viewport.list
     };
-    if let Some(prompt) = mode.editing {
+    if let Some(feedback) = mode.feedback {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                fold_text(glyphs, &format!("{} [{}]", feedback.message, feedback.code)),
+                theme.error(),
+            ))),
+            footer,
+        );
+    } else if let Some(prompt) = mode.editing {
         let text = match prompt {
             EditPrompt::Create(input) => format!("new set: {input}"),
             EditPrompt::Rename { from, input } => format!("rename {from}: {input}"),
@@ -933,7 +966,9 @@ fn draw(
         ..viewport.list
     };
     let prefix = if mode.filtering { "/ " } else { "filter /  " };
-    let filter_text = if mode.editing.is_some() || mode.help {
+    let filter_text = if mode.feedback.is_some() {
+        "The tree is unchanged; press any key to continue".to_string()
+    } else if mode.editing.is_some() || mode.help {
         "Esc returns to the tree".to_string()
     } else if mode.confirming {
         mode.confirmation

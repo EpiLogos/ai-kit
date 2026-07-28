@@ -97,6 +97,86 @@ impl Drop for Server {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn process_table() -> Vec<(u32, u32, String)> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+        .expect("inspect the real popup process");
+    assert!(output.status.success(), "ps must inspect the popup process");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let ppid = fields.next()?.parse().ok()?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            Some((pid, ppid, command))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn is_descendant(table: &[(u32, u32, String)], mut pid: u32, ancestor: u32) -> bool {
+    for _ in 0..64 {
+        if pid == ancestor {
+            return true;
+        }
+        let Some((_, parent, _)) = table.iter().find(|(candidate, _, _)| *candidate == pid) else {
+            return false;
+        };
+        if *parent == pid || *parent == 0 {
+            return false;
+        }
+        pid = *parent;
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn popup_process(server_pid: u32) -> Option<u32> {
+    let table = process_table();
+    table
+        .iter()
+        .find(|(pid, _, command)| {
+            command.contains("aikit ui") && is_descendant(&table, *pid, server_pid)
+        })
+        .map(|(pid, _, _)| *pid)
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_popup_process(server_pid: u32) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(pid) = popup_process(server_pid) {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the popup rendered but its real aikit ui process was not found"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_process_exit(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if !process_table()
+            .iter()
+            .any(|(candidate, _, _)| *candidate == pid)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "closing the popup left its aikit ui process {pid} running"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 #[test]
 fn custom_key_is_written_and_a_missing_server_is_reported_honestly() {
     let home = tempfile::tempdir().unwrap();
@@ -441,6 +521,23 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
         "could not prepare the popup's source pane: {}",
         String::from_utf8_lossy(&source.stderr)
     );
+    let source_pane = server.command(&[
+        "display-message",
+        "-p",
+        "-t",
+        "install-test:0.0",
+        "#{pane_id}",
+    ]);
+    assert!(source_pane.status.success());
+    let source_pane = String::from_utf8_lossy(&source_pane.stdout)
+        .trim()
+        .to_string();
+    let server_pid = server.command(&["display-message", "-p", "#{pid}"]);
+    assert!(server_pid.status.success());
+    let server_pid: u32 = String::from_utf8_lossy(&server_pid.stdout)
+        .trim()
+        .parse()
+        .expect("private tmux reports its server pid");
     let path = format!(
         "{}:{}",
         binary_directory.display(),
@@ -532,6 +629,7 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
         "palette",
         "Alt-A must open the palette mode of the real AIKit binary"
     );
+    let popup_pid = wait_for_popup_process(server_pid);
 
     input.write_all(b"\x14").unwrap();
     input.flush().unwrap();
@@ -540,13 +638,35 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
         "tree",
         "Ctrl-T must switch the same popup into tree mode"
     );
+    assert_eq!(
+        popup_process(server_pid),
+        Some(popup_pid),
+        "Ctrl-T must preserve the exact aikit ui process, not launch another terminal lifecycle"
+    );
 
     input.write_all(b"\x1b").unwrap();
     input.flush().unwrap();
     std::thread::sleep(Duration::from_millis(75));
     input.write_all(b"\x1b").unwrap();
     input.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(75));
+    wait_for_process_exit(popup_pid);
+
+    let panes = server.command(&["list-panes", "-t", "install-test", "-F", "#{pane_id}"]);
+    assert!(
+        panes.status.success(),
+        "closing the popup must leave its source session alive: {}",
+        String::from_utf8_lossy(&panes.stderr)
+    );
+    let pane_ids = String::from_utf8_lossy(&panes.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pane_ids,
+        vec![source_pane],
+        "popup close must restore the exact source pane while its client is still attached"
+    );
+
     let detached = server.command(&["detach-client", "-t", &client_name]);
     assert!(detached.status.success());
     drop(input);
@@ -565,17 +685,5 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
     assert!(
         String::from_utf8_lossy(&rendered).contains("source-project"),
         "the popup did not inherit and resolve the source pane's working directory"
-    );
-
-    let panes = server.command(&["list-panes", "-t", "install-test", "-F", "#{pane_id}"]);
-    assert!(
-        panes.status.success(),
-        "closing the popup must leave its source session alive: {}",
-        String::from_utf8_lossy(&panes.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&panes.stdout).lines().count(),
-        1,
-        "a popup must not create or destroy source panes"
     );
 }

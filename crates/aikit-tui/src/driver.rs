@@ -216,6 +216,25 @@ impl PaletteController {
 
     pub fn dispatch(&mut self, backend: &mut dyn PaletteBackend, action: Action) -> PaletteStep {
         self.state = self.runtime.step(backend, self.state.clone(), action);
+        self.step_result()
+    }
+
+    /// Open one exact capsule without replacing the resident palette state.
+    ///
+    /// Tree activation comes through this seam so the palette's query, cursor,
+    /// scope, staged graph, and effect runtime all remain the same objects.
+    pub fn activate(
+        &mut self,
+        backend: &mut dyn PaletteBackend,
+        capsule: aikit_core::CapsuleId,
+    ) -> PaletteStep {
+        self.state = self
+            .runtime
+            .settle(backend, self.state.clone(), vec![Effect::Open(capsule)]);
+        self.step_result()
+    }
+
+    fn step_result(&mut self) -> PaletteStep {
         match self.state.outcome.clone() {
             Some(PaletteOutcome::Tree) => {
                 self.state.outcome = None;

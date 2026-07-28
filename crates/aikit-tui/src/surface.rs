@@ -199,24 +199,19 @@ impl SurfaceController {
             }
             TreeStep::Effect(TreeEffect::Activate { capsule }) => {
                 self.sync_tree_to_palette(backend);
-                let scope = self.palette.state().scope.current();
-                self.palette = PaletteController::new(
-                    backend,
-                    PaletteRequest::new(self.host)
-                        .with_query(capsule.to_string())
-                        .activating_initial()
-                        .with_scope(scope),
-                )?;
                 self.mode = SurfaceMode::Palette;
-                if let Some(outcome) = self.palette.state().outcome.clone() {
-                    self.handle_palette_step(backend, PaletteStep::Outcome(outcome))
-                } else {
-                    Ok(SurfaceStep::Continue)
-                }
+                let step = self.palette.activate(backend, capsule);
+                self.handle_palette_step(backend, step)
             }
             TreeStep::Effect(effect) => {
-                backend.apply_tree_effect(effect)?;
-                self.replace_tree(backend.surface_tree()?);
+                if let Err(error) = backend.apply_tree_effect(effect) {
+                    self.tree.report_error(&error);
+                    return Ok(SurfaceStep::Continue);
+                }
+                match backend.surface_tree() {
+                    Ok(tree) => self.replace_tree(tree),
+                    Err(error) => self.tree.report_error(&error),
+                }
                 Ok(SurfaceStep::Continue)
             }
         }
@@ -320,27 +315,63 @@ pub fn run_on_terminal<B: SurfaceBackend>(
     request: SurfaceRequest,
 ) -> Result<PaletteOutcome> {
     let host = request.host;
-    let io_error = |what: &str, error: io::Error| {
-        AikitError::new("tui.terminal_setup_failed", format!("{what}: {error}"))
-    };
-    crossterm::terminal::enable_raw_mode()
-        .map_err(|error| io_error("could not enter raw mode", error))?;
     let fullscreen = host == UiHost::Fullscreen;
-    if fullscreen {
-        crossterm::execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen)
-            .map_err(|error| io_error("could not enter the alternate screen", error))?;
-    }
-    crossterm::execute!(io::stdout(), EnableMouseCapture)
-        .map_err(|error| io_error("could not enable mouse capture", error))?;
+    let _session = TerminalSession::enter(fullscreen)?;
+    run_inner(backend, request, host)
+}
 
-    let outcome = run_inner(backend, request, host);
+/// Owns every terminal mode as soon as it is acquired.
+///
+/// Setup can fail between raw mode, the alternate screen, and mouse capture.
+/// Keeping acquisition flags in a guard makes those partial paths use the same
+/// reversal as ordinary exits and render errors.
+struct TerminalSession {
+    raw: bool,
+    alternate: bool,
+    mouse: bool,
+}
 
-    let _ = crossterm::execute!(io::stdout(), DisableMouseCapture);
-    if fullscreen {
-        let _ = crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+impl TerminalSession {
+    fn enter(fullscreen: bool) -> Result<Self> {
+        let mut session = Self {
+            raw: false,
+            alternate: false,
+            mouse: false,
+        };
+        crossterm::terminal::enable_raw_mode()
+            .map_err(|error| terminal_setup_error("could not enter raw mode", error))?;
+        session.raw = true;
+
+        if fullscreen {
+            crossterm::execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen).map_err(
+                |error| terminal_setup_error("could not enter the alternate screen", error),
+            )?;
+            session.alternate = true;
+        }
+
+        crossterm::execute!(io::stdout(), EnableMouseCapture)
+            .map_err(|error| terminal_setup_error("could not enable mouse capture", error))?;
+        session.mouse = true;
+        Ok(session)
     }
-    let _ = crossterm::terminal::disable_raw_mode();
-    outcome
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        if self.mouse {
+            let _ = crossterm::execute!(io::stdout(), DisableMouseCapture);
+        }
+        if self.alternate {
+            let _ = crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+        }
+        if self.raw {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+}
+
+fn terminal_setup_error(what: &str, error: io::Error) -> AikitError {
+    AikitError::new("tui.terminal_setup_failed", format!("{what}: {error}"))
 }
 
 fn run_inner<B: SurfaceBackend>(
