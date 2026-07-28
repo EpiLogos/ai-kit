@@ -159,13 +159,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Z(a)) => cmd_z(cwd, a, json_mode),
         Some(Command::Set(c)) => cmd_set(cwd, c),
         Some(Command::Tree(a)) => cmd_tree(cwd, a, json_mode),
-        Some(Command::Ui(a)) => {
-            if a.tree {
-                open_tree(cwd, a.fullscreen)
-            } else {
-                open_palette(cwd, a.query, a.fullscreen)
-            }
-        }
+        Some(Command::Ui(a)) => open_surface(cwd, a.query, a.fullscreen, a.tree),
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
         Some(Command::Status(a)) => cmd_status(cwd, a),
@@ -920,22 +914,18 @@ fn cmd_set(cwd: &std::path::Path, c: SetCmd) -> Result<Reply> {
 }
 
 fn open_palette(cwd: &std::path::Path, query: Option<String>, fullscreen: bool) -> Result<Reply> {
-    open_palette_inner(cwd, query, fullscreen, false)
+    open_surface(cwd, query, fullscreen, false)
 }
 
-fn open_palette_inner(
+fn open_surface(
     cwd: &std::path::Path,
     query: Option<String>,
     fullscreen: bool,
-    activate_initial: bool,
+    opening_tree: bool,
 ) -> Result<Reply> {
     let mut service = Service::discover(cwd)?;
-    let outcome = match (activate_initial, query) {
-        (true, Some(query)) => ui::run_activation(&mut service, query, fullscreen)?,
-        (_, query) => ui::run(&mut service, query, fullscreen)?,
-    };
+    let outcome = ui::run_surface(&mut service, query, fullscreen, opening_tree)?;
     match outcome {
-        aikit_tui::PaletteOutcome::Tree => open_tree(cwd, fullscreen),
         aikit_tui::PaletteOutcome::Run(intent) => {
             let command = service.plan_run_intent(&intent)?;
             if command.mode.needs_mux() {
@@ -952,7 +942,10 @@ fn open_palette_inner(
             }
             Ok(Reply::Status(report.status))
         }
-        _ => Ok(Reply::Silent),
+        aikit_tui::PaletteOutcome::Closed
+        | aikit_tui::PaletteOutcome::Tree
+        | aikit_tui::PaletteOutcome::Applied(_)
+        | aikit_tui::PaletteOutcome::Promoted(_) => Ok(Reply::Silent),
     }
 }
 
@@ -991,65 +984,6 @@ fn spawn_palette_command(command: &run::ScriptCommand) -> Result<()> {
     request.target = Some(stack.current_location()?.target());
     stack.spawn(request)?;
     Ok(())
-}
-
-fn open_tree(cwd: &std::path::Path, fullscreen: bool) -> Result<Reply> {
-    use aikit_tui::tree::TreeEffect;
-    use aikit_tui::tree_driver::TreeOutcome;
-    use aikit_tui::{PaletteBackend, Toggle};
-
-    let mut service = Service::discover(cwd)?;
-    loop {
-        match ui::run_tree(&service, fullscreen)? {
-            TreeOutcome::Closed => return Ok(Reply::Silent),
-            TreeOutcome::Apply(capsules) => {
-                let toggles: Vec<Toggle> = capsules
-                    .into_iter()
-                    .map(|capsule| {
-                        let enable = !service.resolved().is_active(&capsule);
-                        Toggle::new(capsule, enable)
-                    })
-                    .collect();
-                let scope = service.descriptor().default_mutation_scope();
-                PaletteBackend::apply(&mut service, scope, &toggles)?;
-                return Ok(Reply::Silent);
-            }
-            TreeOutcome::Effect(TreeEffect::CreateSet { set }) => {
-                let procedure =
-                    aikit_store::skillsets::plan_create(service.home(), &set, &[], &[])?;
-                aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure)?;
-                service = Service::discover(cwd)?;
-            }
-            TreeOutcome::Effect(TreeEffect::RenameSet { from, to }) => {
-                let procedure = aikit_store::skillsets::plan_rename(service.home(), &from, &to)?;
-                aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure)?;
-                service = Service::discover(cwd)?;
-            }
-            TreeOutcome::Effect(TreeEffect::DeleteSet { set }) => {
-                let (procedure, _recovery) =
-                    aikit_store::skillsets::plan_delete(service.home(), &set)?;
-                aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure)?;
-                service = Service::discover(cwd)?;
-            }
-            TreeOutcome::Effect(TreeEffect::AddToSet { set, capsule }) => {
-                let procedure = aikit_store::skillsets::plan_add(service.home(), &set, &[capsule])?;
-                aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure)?;
-                service = Service::discover(cwd)?;
-            }
-            TreeOutcome::Effect(TreeEffect::RemoveFromSet { set, capsule }) => {
-                let procedure =
-                    aikit_store::skillsets::plan_remove(service.home(), &set, &[capsule])?;
-                aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure)?;
-                service = Service::discover(cwd)?;
-            }
-            TreeOutcome::Effect(TreeEffect::Activate { capsule }) => {
-                // The palette already owns argument forms, trust confirmation,
-                // and opening non-runnable skills. Re-enter it with the exact id
-                // instead of bypassing those gates with an empty-argument run.
-                return open_palette_inner(cwd, Some(capsule.to_string()), fullscreen, true);
-            }
-        }
-    }
 }
 
 fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {

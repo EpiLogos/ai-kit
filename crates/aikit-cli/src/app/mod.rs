@@ -459,6 +459,29 @@ impl Service {
         &self.home
     }
 
+    /// Reload catalogue, trust, layers, and resolution without changing context.
+    ///
+    /// The unified surface keeps one service allocation alive while tree
+    /// Procedures change files underneath it. Re-discovering through process
+    /// environment would lose injected homes in tests; refreshing from the
+    /// service's own roots keeps that identity stable.
+    pub fn refresh(&mut self) -> Result<()> {
+        let project_root = self.descriptor.project_root.as_deref();
+        let load = load_catalog(&self.home, project_root)?;
+        self.catalog = load.catalog;
+        self.problems = load.problems;
+        self.trust = TrustStore::new(&self.index).snapshot()?;
+        self.layers = assemble_layers(&self.home, &self.descriptor, self.project.as_ref())?;
+        self.view = resolve_or_explain(
+            &self.catalog,
+            &self.trust,
+            &self.descriptor,
+            &self.layers,
+            &self.policy,
+        )?;
+        Ok(())
+    }
+
     /// Where this context's client projections are materialised.
     pub fn context_projection_root(&self) -> PathBuf {
         self.home.context_dir(&self.descriptor.context_id)

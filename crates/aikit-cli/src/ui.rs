@@ -15,10 +15,48 @@ use aikit_core::platform::MuxKind;
 use aikit_core::Result;
 
 use aikit_tui::host::{TerminalProfile, UiHost};
+use aikit_tui::surface::{SurfaceBackend, SurfaceRequest};
+use aikit_tui::tree::TreeEffect;
 use aikit_tui::tree_driver::{TreeOutcome, TreeRequest};
 use aikit_tui::{PaletteOutcome, PaletteRequest};
 
 use crate::app::Service;
+
+impl SurfaceBackend for Service {
+    fn surface_tree(&self) -> Result<aikit_tui::tree::TreeState> {
+        crate::tree_build::build(self)
+    }
+
+    fn apply_tree_effect(&mut self, effect: TreeEffect) -> Result<()> {
+        let procedure = match effect {
+            TreeEffect::CreateSet { set } => {
+                aikit_store::skillsets::plan_create(self.home(), &set, &[], &[])?
+            }
+            TreeEffect::RenameSet { from, to } => {
+                aikit_store::skillsets::plan_rename(self.home(), &from, &to)?
+            }
+            TreeEffect::DeleteSet { set } => {
+                let (procedure, _recovery) =
+                    aikit_store::skillsets::plan_delete(self.home(), &set)?;
+                procedure
+            }
+            TreeEffect::AddToSet { set, capsule } => {
+                aikit_store::skillsets::plan_add(self.home(), &set, &[capsule])?
+            }
+            TreeEffect::RemoveFromSet { set, capsule } => {
+                aikit_store::skillsets::plan_remove(self.home(), &set, &[capsule])?
+            }
+            TreeEffect::Activate { .. } => {
+                return Err(aikit_core::AikitError::new(
+                    "tui.invalid_tree_effect",
+                    "activation must be routed into the palette inside the unified surface",
+                ))
+            }
+        };
+        aikit_store::procedure::ProcedureRunner::new(self.home()).run(&procedure)?;
+        self.refresh()
+    }
+}
 
 /// Build a terminal profile from an environment lookup and the `--fullscreen`
 /// flag.
@@ -60,6 +98,25 @@ where
             .unwrap_or(default)
     };
     (parse("COLUMNS", 80), parse("LINES", 24))
+}
+
+/// Open the one continuous palette/tree surface over a single live service.
+pub fn run_surface(
+    service: &mut Service,
+    query: Option<String>,
+    fullscreen: bool,
+    opening_tree: bool,
+) -> Result<PaletteOutcome> {
+    let profile = terminal_profile(|key| std::env::var(key).ok(), fullscreen);
+    let host = UiHost::choose(&profile);
+    let mut request = SurfaceRequest::new(host);
+    if let Some(query) = query {
+        request = request.with_query(query);
+    }
+    if opening_tree {
+        request = request.opening_tree();
+    }
+    aikit_tui::surface::run_on_terminal(service, request)
 }
 
 /// Open the palette over the service and run it to completion.

@@ -1840,6 +1840,65 @@ fn the_interactive_tree_host_accepts_mouse_navigation_and_applies_staged_ids() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn the_real_binary_switches_tree_and_palette_inside_one_terminal_lifecycle() {
+    let home = fresh_home();
+    let project = project_repo();
+    let mut child = Command::new("/usr/bin/script")
+        .args([
+            "-q",
+            "/dev/null",
+            "/bin/sh",
+            "-c",
+            "stty rows 24 cols 100; exec \"$@\"",
+            "sh",
+            "env",
+        ])
+        .arg(format!("AIKIT_HOME={}", home.path.display()))
+        .arg(format!("HOME={}", home.path.display()))
+        .arg("TERM=xterm-256color")
+        .arg(cargo_bin("aikit"))
+        .args(["ui", "--tree", "--fullscreen"])
+        .current_dir(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the real unified surface starts under a pseudo-terminal");
+
+    let stdout_reader = wait_for_pty_ui(&mut child);
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"\x14").unwrap(); // Ctrl-T: tree -> palette.
+    input.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    input.write_all(b"\x1b").unwrap(); // Resting palette -> close.
+    drop(input);
+
+    let (status, stdout, stderr) = finish_pty(child, stdout_reader);
+    assert!(
+        status.success(),
+        "unified surface failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    let frame_stream = String::from_utf8_lossy(&stdout);
+    assert!(
+        frame_stream.contains("AIKit tree") && frame_stream.contains("Ctrl-T tree"),
+        "both modes must be rendered by the same invocation: {frame_stream:?}"
+    );
+    assert_eq!(
+        frame_stream.matches("\u{1b}[?1049h").count(),
+        1,
+        "Ctrl-T must not tear down and recreate the alternate screen: {frame_stream:?}"
+    );
+    assert_eq!(
+        frame_stream.matches("\u{1b}[?1049l").count(),
+        1,
+        "the one alternate screen must be restored exactly once: {frame_stream:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn the_real_binary_tree_applies_a_keyboard_staged_capability_through_a_pty() {
     let home = fresh_home();
     let project = project_repo();
@@ -1862,17 +1921,19 @@ fn the_real_binary_tree_applies_a_keyboard_staged_capability_through_a_pty() {
     // `S` remains the printable apply fallback for PTY bridges that reserve
     // Ctrl-S as terminal flow control.
     let stdout_reader = wait_for_pty_ui(&mut child);
-    // kinds/ → first kind → first capability; stage, apply. The trailing q is a
-    // fail-safe that closes the tree if the preceding navigation did not stage.
+    // kinds/ → first kind → first capability; stage, apply.
     let mut input = child.stdin.take().unwrap();
     for key in [b"j".as_slice(), b"l", b"j", b"l", b"j", b" ", b"S"] {
         input.write_all(key).unwrap();
         input.flush().unwrap();
         std::thread::sleep(Duration::from_millis(75));
     }
-    // If apply did not close the process, close the UI deterministically.
+    // Apply now keeps the unified popup open on its palette result. Two Escapes
+    // also close deterministically if navigation failed and left us in the tree.
     std::thread::sleep(Duration::from_millis(250));
-    let _ = input.write_all(b"q");
+    let _ = input.write_all(b"\x1b");
+    std::thread::sleep(Duration::from_millis(75));
+    let _ = input.write_all(b"\x1b");
     drop(input);
     let (pty_status, pty_stdout, pty_stderr) = finish_pty(child, stdout_reader);
     assert!(
@@ -1964,7 +2025,9 @@ fn the_real_binary_tree_applies_an_exact_mouse_staged_capability_through_a_pty()
         std::thread::sleep(Duration::from_millis(100));
     }
     std::thread::sleep(Duration::from_millis(250));
-    let _ = input.write_all(b"q");
+    let _ = input.write_all(b"\x1b");
+    std::thread::sleep(Duration::from_millis(75));
+    let _ = input.write_all(b"\x1b");
     drop(input);
     let (status, stdout, stderr) = finish_pty(child, stdout_reader);
     assert!(
