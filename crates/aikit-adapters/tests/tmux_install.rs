@@ -83,10 +83,10 @@ fn the_key_is_the_users_choice_because_a_default_would_collide() {
     tmux::install(&config, "C-Space").unwrap();
     let contents = read(&config);
     assert!(
-        contents.contains("bind-key C-Space display-popup"),
+        contents.contains("bind-key -n C-Space display-popup"),
         "got: {contents}"
     );
-    assert!(!contents.contains("bind-key a "));
+    assert!(!contents.contains("bind-key -n a "));
 }
 
 #[test]
@@ -102,11 +102,20 @@ fn changing_the_key_rewrites_the_block_in_place_rather_than_adding_another() {
 
     let contents = read(&config);
     assert_eq!(occurrences(&contents, BLOCK_START), 1);
-    assert!(contents.contains("bind-key k display-popup"));
+    assert!(contents.contains("bind-key -n k display-popup"));
     assert!(
-        !contents.contains("bind-key a display-popup"),
+        !contents.contains("bind-key -n a display-popup"),
         "the old binding has to go, or the user ends up with two palettes: {contents}"
     );
+}
+
+#[test]
+fn the_managed_binding_opens_the_unified_surface() {
+    let block = tmux::config_block("M-a");
+
+    assert!(block.contains("bind-key -n M-a display-popup"));
+    assert!(block.contains("'aikit ui'"));
+    assert!(!block.contains("aikit palette"));
 }
 
 #[test]

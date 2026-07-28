@@ -75,6 +75,11 @@ impl Tmux<SystemRunner> {
                 adapter.env.insert(key.to_string(), value);
             }
         }
+        if let Ok(socket) = std::env::var("AIKIT_TMUX_SOCKET") {
+            if !socket.trim().is_empty() {
+                adapter.socket = Some(socket);
+            }
+        }
         adapter
     }
 }
@@ -239,6 +244,36 @@ impl<R: CommandRunner> Tmux<R> {
     /// Kill the whole server. Integration tests call this from a drop guard.
     pub fn kill_server(&self) -> Result<()> {
         self.run(&["kill-server"]).map(|_| ())
+    }
+
+    /// The effective root-table binding for a key on the running server.
+    pub fn root_binding(&self, key: &str) -> Result<Option<String>> {
+        let output = self.run(&["list-keys", "-T", "root", key])?;
+        if output.ok() {
+            let line = output.line().trim().to_string();
+            return Ok((!line.is_empty()).then_some(line));
+        }
+        if output.stderr.contains("unknown key")
+            || output.stderr.contains("no key")
+            || output.stderr.contains("not bound")
+        {
+            return Ok(None);
+        }
+        Err(AikitError::new(
+            "mux.binding_query_failed",
+            format!(
+                "could not inspect tmux root binding `{key}`: {}",
+                output.stderr.trim()
+            ),
+        )
+        .with("key", key.to_string())
+        .with("status", output.status.to_string()))
+    }
+
+    /// Reload a configuration file into this adapter's running server.
+    pub fn reload_config(&self, path: &Path) -> Result<()> {
+        self.must(&["source-file", &path.display().to_string()])?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -508,19 +543,18 @@ pub struct InstallOutcome {
     pub changed: bool,
 }
 
-/// Render the managed block for a chosen prefix key.
+/// Render the managed block for a chosen global key.
 ///
-/// The key is a parameter with no default on purpose. tmux users bind their own
-/// prefix table heavily, and a tool that picked its own key would silently
-/// shadow somebody's binding — the kind of intrusion that is only noticed weeks
-/// later, when the old binding is missed.
+/// The adapter keeps the key explicit because callers must collision-check the
+/// live root table before writing it. `-n` makes the binding available without
+/// the tmux prefix, which is the contract of AIKit's popup surface.
 pub fn config_block(key: &str) -> String {
     let request = PaletteRequest::default();
     format!(
         "{BLOCK_START}\n\
          # Managed by AIKit. Everything between these markers is regenerated;\n\
          # edit the key with `aikit install tmux --key <key>` rather than by hand.\n\
-         bind-key {key} display-popup -E -w {w}% -h {h}% -T {title} 'aikit palette'\n\
+         bind-key -n {key} display-popup -E -w {w}% -h {h}% -T {title} 'aikit ui'\n\
          set-option -g @aikit_installed 1\n\
          {BLOCK_END}",
         w = request.width_percent,

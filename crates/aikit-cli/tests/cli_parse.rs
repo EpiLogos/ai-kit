@@ -4,7 +4,7 @@
 //! `task spawn` must default to a **shared** working tree, with `--worktree` the
 //! only thing that asks for a git worktree.
 
-use aikit_cli::cli::{BypassSub, Cli, Command, ContextSub, HookSub, Isolation, TaskSub};
+use aikit_cli::cli::{BypassSub, Cli, Command, ContextSub, HookSub, Isolation, MuxSub, TaskSub};
 use clap::Parser;
 
 fn parse(args: &[&str]) -> Cli {
@@ -44,20 +44,31 @@ fn task_spawn_worktree_is_opt_in() {
 #[test]
 fn task_spawn_directory_and_shared_select_their_isolation() {
     let dir = parse(&["aikit", "task", "spawn", "x", "--directory"]);
-    let Some(Command::Task(t)) = dir.command else { unreachable!() };
-    let TaskSub::Spawn(s) = t.command else { unreachable!() };
+    let Some(Command::Task(t)) = dir.command else {
+        unreachable!()
+    };
+    let TaskSub::Spawn(s) = t.command else {
+        unreachable!()
+    };
     assert_eq!(s.isolation(), Isolation::Directory);
 
     let shared = parse(&["aikit", "task", "spawn", "x", "--shared"]);
-    let Some(Command::Task(t)) = shared.command else { unreachable!() };
-    let TaskSub::Spawn(s) = t.command else { unreachable!() };
+    let Some(Command::Task(t)) = shared.command else {
+        unreachable!()
+    };
+    let TaskSub::Spawn(s) = t.command else {
+        unreachable!()
+    };
     assert_eq!(s.isolation(), Isolation::Shared);
 }
 
 #[test]
 fn conflicting_isolation_flags_are_a_usage_error() {
     let result = Cli::try_parse_from(["aikit", "task", "spawn", "x", "--worktree", "--directory"]);
-    assert!(result.is_err(), "two isolation modes at once must be rejected");
+    assert!(
+        result.is_err(),
+        "two isolation modes at once must be rejected"
+    );
 }
 
 #[test]
@@ -97,17 +108,56 @@ fn ui_tree_selects_the_interactive_tree_host() {
 }
 
 #[test]
+fn tmux_popup_install_has_a_safe_default_and_an_explicit_replacement_gate() {
+    let cli = parse(&["aikit", "mux", "install", "tmux"]);
+    let Some(Command::Mux(mux)) = cli.command else {
+        panic!("expected the mux command");
+    };
+    let MuxSub::Install(install) = mux.command else {
+        panic!("expected mux install");
+    };
+    assert_eq!(install.key, "M-a");
+    assert!(!install.replace_key);
+
+    let cli = parse(&[
+        "aikit",
+        "mux",
+        "install",
+        "tmux",
+        "--key",
+        "M-k",
+        "--replace-key",
+    ]);
+    let Some(Command::Mux(mux)) = cli.command else {
+        unreachable!()
+    };
+    let MuxSub::Install(install) = mux.command else {
+        unreachable!()
+    };
+    assert_eq!(install.key, "M-k");
+    assert!(install.replace_key);
+}
+
+#[test]
 fn the_nested_command_groups_all_parse() {
     let cli = parse(&["aikit", "context", "reset"]);
-    assert!(matches!(cli.command, Some(Command::Context(c)) if matches!(c.command, ContextSub::Reset(_))));
+    assert!(
+        matches!(cli.command, Some(Command::Context(c)) if matches!(c.command, ContextSub::Reset(_)))
+    );
 
     let cli = parse(&["aikit", "bypass", "issue", "--reason", "debugging a flake"]);
-    let Some(Command::Bypass(b)) = cli.command else { unreachable!() };
-    let BypassSub::Issue(issue) = b.command else { unreachable!() };
+    let Some(Command::Bypass(b)) = cli.command else {
+        unreachable!()
+    };
+    let BypassSub::Issue(issue) = b.command else {
+        unreachable!()
+    };
     assert_eq!(issue.reason.as_deref(), Some("debugging a flake"));
 
     let cli = parse(&["aikit", "hook", "dispatch", "claude", "PreToolUse"]);
-    let Some(Command::Hook(h)) = cli.command else { unreachable!() };
+    let Some(Command::Hook(h)) = cli.command else {
+        unreachable!()
+    };
     let HookSub::Dispatch(d) = h.command;
     assert_eq!(d.client, "claude");
     assert_eq!(d.event, "PreToolUse");

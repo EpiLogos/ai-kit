@@ -301,15 +301,13 @@ fn the_palette_popup_argv_is_exactly_the_documented_geometry() {
     let adapter = tmux(runner);
 
     let host = adapter
-        .open_palette(PaletteRequest::default().running(vec!["aikit".into(), "palette".into()]))
+        .open_palette(PaletteRequest::default().running(vec!["aikit".into(), "ui".into()]))
         .unwrap();
     assert!(matches!(host, UiHost::TruePopup { .. }));
 
     assert_eq!(
         adapter.runner().call_lines(),
-        vec![
-            "tmux -L aikit-argv display-popup -E -w 82% -h 70% -T AIKit aikit palette".to_string()
-        ]
+        vec!["tmux -L aikit-argv display-popup -E -w 82% -h 70% -T AIKit aikit ui".to_string()]
     );
 }
 

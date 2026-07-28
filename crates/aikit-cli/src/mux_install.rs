@@ -23,10 +23,18 @@ fn choose(named: Option<&str>) -> Result<MuxKind> {
     if let Some(raw) = named {
         return raw.parse::<MuxKind>();
     }
-    if Tmux::system().detect().map(|p| p.installed).unwrap_or(false) {
+    if Tmux::system()
+        .detect()
+        .map(|p| p.installed)
+        .unwrap_or(false)
+    {
         return Ok(MuxKind::Tmux);
     }
-    if Cmux::system().detect().map(|p| p.installed).unwrap_or(false) {
+    if Cmux::system()
+        .detect()
+        .map(|p| p.installed)
+        .unwrap_or(false)
+    {
         return Ok(MuxKind::Cmux);
     }
     Err(AikitError::new(
@@ -35,9 +43,107 @@ fn choose(named: Option<&str>) -> Result<MuxKind> {
     ))
 }
 
+pub struct MuxInstallPlan {
+    pub procedure: Procedure,
+    pub mux: MuxKind,
+    pub key: String,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallVerification {
+    pub live: bool,
+    pub verified: bool,
+    pub binding: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+fn validate_key(key: &str) -> Result<&str> {
+    let key = key.trim();
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err(AikitError::new(
+            "mux.invalid_key",
+            "a tmux key must be one token containing only letters, numbers, `-`, or `_`",
+        )
+        .with("key", key.to_string()));
+    }
+    Ok(key)
+}
+
+fn popup_binding(key: &str) -> String {
+    format!("bind-key -n {key} display-popup -E -w 82% -h 70% -T AIKit 'aikit ui'")
+}
+
+fn configured_binding_outside_aikit(contents: &str, key: &str) -> Option<String> {
+    let mut managed = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains(aikit_core::procedure::MARKER_BEGIN) {
+            managed = true;
+            continue;
+        }
+        if trimmed.contains(aikit_core::procedure::MARKER_END) {
+            managed = false;
+            continue;
+        }
+        if managed || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Ok(tokens) = shell_words::split(trimmed) else {
+            continue;
+        };
+        if binding_key(&tokens).is_some_and(|bound| bound == key) {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn binding_key(tokens: &[String]) -> Option<&str> {
+    if !matches!(
+        tokens.first().map(String::as_str),
+        Some("bind" | "bind-key")
+    ) {
+        return None;
+    }
+    let mut index = 1;
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "-T" | "-N" => index += 2,
+            "-n" | "-r" => index += 1,
+            token if token.starts_with('-') => index += 1,
+            token => return Some(token),
+        }
+    }
+    None
+}
+
+fn conflict(key: &str, binding: &str) -> AikitError {
+    AikitError::new(
+        "mux.key_conflict",
+        format!("tmux root key `{key}` is already bound; AIKit did not replace it"),
+    )
+    .with("key", key.to_string())
+    .with("binding", binding.to_string())
+    .with(
+        "resolution",
+        format!("choose another key with `--key`, or review and pass `--replace-key`"),
+    )
+}
+
 /// Plan the multiplexer integration edit.
-pub fn plan(service: &Service, named: Option<&str>) -> Result<Procedure> {
+pub fn plan(
+    service: &Service,
+    named: Option<&str>,
+    key: &str,
+    replace_key: bool,
+) -> Result<MuxInstallPlan> {
     let mux = choose(named)?;
+    let key = validate_key(key)?.to_string();
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -45,10 +151,11 @@ pub fn plan(service: &Service, named: Option<&str>) -> Result<Procedure> {
     let (path, body) = match mux {
         MuxKind::Tmux => (
             home.join(".tmux.conf"),
-            "# Open the AIKit palette in a real popup.\n\
-             bind-key -n M-a display-popup -E -w 82% -h 70% -T AIKit 'aikit ui'\n\
-             set -g @aikit_installed 1\n"
-                .to_string(),
+            format!(
+                "# Open AIKit's unified palette/tree surface in a real popup.\n{}\n\
+                 set -g @aikit_installed 1\n",
+                popup_binding(&key)
+            ),
         ),
         MuxKind::Cmux => (
             home.join(".config/cmux/config.toml"),
@@ -65,36 +172,134 @@ pub fn plan(service: &Service, named: Option<&str>) -> Result<Procedure> {
     };
 
     let existing = std::fs::read_to_string(&path).ok();
+    if mux == MuxKind::Tmux && !replace_key {
+        if let Some(binding) = existing
+            .as_deref()
+            .and_then(|contents| configured_binding_outside_aikit(contents, &key))
+        {
+            return Err(conflict(&key, &binding));
+        }
+        let tmux = Tmux::system();
+        let presence = tmux.detect()?;
+        if presence.server_running {
+            if let Some(binding) = tmux.root_binding(&key)? {
+                let owned = binding.contains("display-popup") && binding.contains("aikit ui");
+                if !owned {
+                    return Err(conflict(&key, &binding));
+                }
+            }
+        }
+    }
     // The comment leader comes from the file type, so a `#`-commented tmux config
     // and a `//`-commented one both get markers their own parser ignores.
     let leader = aikit_store::procedure::comment_leader(&path);
     let updated = splice_marked_block(existing.as_deref().unwrap_or(""), leader, &body);
 
-    if existing.as_deref() == Some(updated.as_str()) {
-        return Err(AikitError::new(
-            "mux.already_installed",
-            format!("{} already carries AIKit's block, unchanged", path.display()),
-        )
-        .with("path", path.display().to_string()));
-    }
-
     let inverse = if existing.is_some() {
-        Inverse::Restore { blob: aikit_core::procedure::BlobId::deferred() }
+        Inverse::Restore {
+            blob: aikit_core::procedure::BlobId::deferred(),
+        }
     } else {
         Inverse::Remove
     };
 
-    let plan = Plan::new()
-        .with_note(format!(
-            "add AIKit's managed block to {} ({})",
-            path.display(),
-            mux.as_str()
-        ))
-        .with_edit(WorldEdit::WriteFile {
+    let mut plan = Plan::new().with_note(format!(
+        "add AIKit's managed block to {} ({})",
+        path.display(),
+        mux.as_str()
+    ));
+    if existing.as_deref() != Some(updated.as_str()) {
+        plan = plan.with_edit(WorldEdit::WriteFile {
             path,
             contents: updated.into_bytes(),
             inverse,
         });
+    }
 
-    aikit_store::procedure::plan_procedure(service.home(), ProcedureKind::MuxInstall { mux }, plan)
+    let path = match mux {
+        MuxKind::Tmux => home.join(".tmux.conf"),
+        MuxKind::Cmux => home.join(".config/cmux/config.toml"),
+        MuxKind::Plain => unreachable!("plain returned before planning"),
+    };
+    let procedure = aikit_store::procedure::plan_procedure(
+        service.home(),
+        ProcedureKind::MuxInstall { mux },
+        plan,
+    )?;
+    Ok(MuxInstallPlan {
+        procedure,
+        mux,
+        key,
+        path,
+    })
+}
+
+pub fn activate(plan: &MuxInstallPlan) -> Result<InstallVerification> {
+    let contents = std::fs::read_to_string(&plan.path).map_err(|error| {
+        AikitError::new(
+            "mux.config_unreadable",
+            format!("could not verify {}: {error}", plan.path.display()),
+        )
+    })?;
+    if plan.mux == MuxKind::Tmux && !contents.contains(&popup_binding(&plan.key)) {
+        return Err(AikitError::new(
+            "mux.binding_verification_failed",
+            "the written tmux configuration does not contain the reviewed popup binding",
+        )
+        .with("path", plan.path.display().to_string())
+        .with("key", plan.key.clone()));
+    }
+
+    if plan.mux != MuxKind::Tmux {
+        return Ok(InstallVerification {
+            live: false,
+            verified: true,
+            binding: None,
+            warnings: vec![
+                "cmux configuration was verified on disk; reload behavior is owned by cmux"
+                    .to_string(),
+            ],
+        });
+    }
+
+    let tmux = Tmux::system();
+    let presence = tmux.detect()?;
+    if !presence.server_running {
+        return Ok(InstallVerification {
+            live: false,
+            verified: true,
+            binding: None,
+            warnings: vec![
+                "tmux is not running; the binding is verified on disk and will load with the next server"
+                    .to_string(),
+            ],
+        });
+    }
+
+    tmux.reload_config(&plan.path)?;
+    let binding = tmux.root_binding(&plan.key)?.ok_or_else(|| {
+        AikitError::new(
+            "mux.binding_verification_failed",
+            format!("tmux reloaded but root key `{}` is not bound", plan.key),
+        )
+        .with("key", plan.key.clone())
+    })?;
+    let verified = binding.contains("display-popup")
+        && binding.contains("82%")
+        && binding.contains("70%")
+        && binding.contains("aikit ui");
+    if !verified {
+        return Err(AikitError::new(
+            "mux.binding_verification_failed",
+            "tmux reloaded a different command than the reviewed AIKit popup binding",
+        )
+        .with("key", plan.key.clone())
+        .with("binding", binding));
+    }
+    Ok(InstallVerification {
+        live: true,
+        verified: true,
+        binding: Some(binding),
+        warnings: vec![],
+    })
 }

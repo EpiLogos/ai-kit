@@ -1936,17 +1936,25 @@ fn cmd_mux(cwd: &std::path::Path, c: MuxCmd) -> Result<Reply> {
             Ok(reply(&service, data, vec![]))
         }
         MuxSub::Install(a) => {
-            let procedure = aikit_cli::mux_install::plan(&service, a.mux.as_deref())?;
+            let planned =
+                aikit_cli::mux_install::plan(&service, a.mux.as_deref(), &a.key, a.replace_key)?;
             let runner = aikit_store::procedure::ProcedureRunner::new(service.home());
-            let diff = runner.diff(&procedure)?;
-            let outcome = runner.run(&procedure)?;
+            let diff = runner.diff(&planned.procedure)?;
+            let outcome = runner.run(&planned.procedure)?;
+            let verification = aikit_cli::mux_install::activate(&planned)?;
             let data = jval!({
-                "procedure": procedure.id.to_string(),
+                "procedure": planned.procedure.id.to_string(),
                 "edits": outcome.applied,
                 "diff": diff.render(),
-                "undo": format!("aikit procedure undo {}", procedure.id),
+                "undo": format!("aikit procedure undo {}", planned.procedure.id),
+                "mux": planned.mux.as_str(),
+                "key": planned.key,
+                "path": planned.path.display().to_string(),
+                "live": verification.live,
+                "verified": verification.verified,
+                "binding": verification.binding,
             });
-            Ok(reply(&service, data, vec![]))
+            Ok(reply(&service, data, verification.warnings))
         }
     }
 }

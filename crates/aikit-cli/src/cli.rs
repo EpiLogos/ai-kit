@@ -807,6 +807,12 @@ pub enum MuxSub {
 pub struct MuxInstallArgs {
     #[arg(value_name = "MUX")]
     pub mux: Option<String>,
+    /// Root-table key that opens the AIKit popup.
+    #[arg(long, default_value = "M-a", value_name = "KEY")]
+    pub key: String,
+    /// Deliberately replace an effective binding already using this key.
+    #[arg(long)]
+    pub replace_key: bool,
 }
 #[derive(Debug, Args)]
 pub struct MuxDetectArgs {}
