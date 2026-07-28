@@ -276,6 +276,12 @@ impl<R: CommandRunner> Tmux<R> {
         Ok(())
     }
 
+    /// Remove one key from the global root table.
+    pub fn unbind_root(&self, key: &str) -> Result<()> {
+        self.must(&["unbind-key", "-n", key])?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Building
     // -----------------------------------------------------------------------

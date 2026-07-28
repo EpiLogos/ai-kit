@@ -47,6 +47,7 @@ pub struct MuxInstallPlan {
     pub procedure: Procedure,
     pub mux: MuxKind,
     pub key: String,
+    pub previous_key: Option<String>,
     pub path: PathBuf,
 }
 
@@ -98,30 +99,138 @@ fn configured_binding_outside_aikit(contents: &str, key: &str) -> Option<String>
         let Ok(tokens) = shell_words::split(trimmed) else {
             continue;
         };
-        if binding_key(&tokens).is_some_and(|bound| bound == key) {
+        if parsed_binding(&tokens).is_some_and(|binding| binding.root && binding.key == key) {
             return Some(trimmed.to_string());
         }
     }
     None
 }
 
-fn binding_key(tokens: &[String]) -> Option<&str> {
+struct ParsedBinding<'a> {
+    key: &'a str,
+    root: bool,
+    command: &'a [String],
+}
+
+fn parsed_binding(tokens: &[String]) -> Option<ParsedBinding<'_>> {
     if !matches!(
         tokens.first().map(String::as_str),
         Some("bind" | "bind-key")
     ) {
         return None;
     }
+    let mut table: Option<&str> = None;
+    let mut no_prefix = false;
     let mut index = 1;
     while index < tokens.len() {
         match tokens[index].as_str() {
-            "-T" | "-N" => index += 2,
-            "-n" | "-r" => index += 1,
+            "-T" => {
+                table = tokens.get(index + 1).map(String::as_str);
+                index += 2;
+            }
+            "-N" => index += 2,
+            "-n" => {
+                no_prefix = true;
+                index += 1;
+            }
+            "-r" => index += 1,
             token if token.starts_with('-') => index += 1,
-            token => return Some(token),
+            token => {
+                return Some(ParsedBinding {
+                    key: token,
+                    root: table == Some("root") || (table.is_none() && no_prefix),
+                    command: &tokens[index + 1..],
+                })
+            }
         }
     }
     None
+}
+
+fn managed_config_key(contents: &str) -> Option<String> {
+    let mut managed = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains(aikit_core::procedure::MARKER_BEGIN) {
+            managed = true;
+            continue;
+        }
+        if trimmed.contains(aikit_core::procedure::MARKER_END) {
+            managed = false;
+            continue;
+        }
+        if !managed {
+            continue;
+        }
+        let Ok(tokens) = shell_words::split(trimmed) else {
+            continue;
+        };
+        let Some(binding) = parsed_binding(&tokens) else {
+            continue;
+        };
+        if binding.root
+            && binding.command.first().map(String::as_str) == Some("display-popup")
+            && binding.command.last().map(String::as_str) == Some("aikit ui")
+        {
+            return Some(binding.key.to_string());
+        }
+    }
+    None
+}
+
+fn is_managed_live_binding(binding: &str, key: &str) -> bool {
+    let Ok(tokens) = shell_words::split(binding) else {
+        return false;
+    };
+    let Some(binding) = parsed_binding(&tokens) else {
+        return false;
+    };
+    if !binding.root
+        || binding.key != key
+        || binding.command.first().map(String::as_str) != Some("display-popup")
+    {
+        return false;
+    }
+
+    let mut auto_close = false;
+    let mut width = None;
+    let mut height = None;
+    let mut directory = None;
+    let mut title = None;
+    let mut index = 1;
+    while index < binding.command.len() {
+        match binding.command[index].as_str() {
+            "-E" if !auto_close => {
+                auto_close = true;
+                index += 1;
+            }
+            "-w" if width.is_none() => {
+                width = binding.command.get(index + 1).map(String::as_str);
+                index += 2;
+            }
+            "-h" if height.is_none() => {
+                height = binding.command.get(index + 1).map(String::as_str);
+                index += 2;
+            }
+            "-d" if directory.is_none() => {
+                directory = binding.command.get(index + 1).map(String::as_str);
+                index += 2;
+            }
+            "-T" if title.is_none() => {
+                title = binding.command.get(index + 1).map(String::as_str);
+                index += 2;
+            }
+            "aikit ui" if index + 1 == binding.command.len() => {
+                return auto_close
+                    && width == Some("82%")
+                    && height == Some("70%")
+                    && directory == Some("#{pane_current_path}")
+                    && title == Some("AIKit");
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn conflict(key: &str, binding: &str) -> AikitError {
@@ -174,6 +283,9 @@ pub fn plan(
     };
 
     let existing = std::fs::read_to_string(&path).ok();
+    let previous_key = (mux == MuxKind::Tmux)
+        .then(|| existing.as_deref().and_then(managed_config_key))
+        .flatten();
     if mux == MuxKind::Tmux && !replace_key {
         if let Some(binding) = existing
             .as_deref()
@@ -185,7 +297,7 @@ pub fn plan(
         let presence = tmux.detect()?;
         if presence.server_running {
             if let Some(binding) = tmux.root_binding(&key)? {
-                let owned = binding.contains("display-popup") && binding.contains("aikit ui");
+                let owned = is_managed_live_binding(&binding, &key);
                 if !owned {
                     return Err(conflict(&key, &binding));
                 }
@@ -232,6 +344,7 @@ pub fn plan(
         procedure,
         mux,
         key,
+        previous_key,
         path,
     })
 }
@@ -286,10 +399,7 @@ pub fn activate(plan: &MuxInstallPlan) -> Result<InstallVerification> {
         )
         .with("key", plan.key.clone())
     })?;
-    let verified = binding.contains("display-popup")
-        && binding.contains("82%")
-        && binding.contains("70%")
-        && binding.contains("aikit ui");
+    let verified = is_managed_live_binding(&binding, &plan.key);
     if !verified {
         return Err(AikitError::new(
             "mux.binding_verification_failed",
@@ -298,10 +408,91 @@ pub fn activate(plan: &MuxInstallPlan) -> Result<InstallVerification> {
         .with("key", plan.key.clone())
         .with("binding", binding));
     }
+    if let Some(previous) = plan
+        .previous_key
+        .as_deref()
+        .filter(|previous| *previous != plan.key)
+    {
+        if let Some(old_binding) = tmux.root_binding(previous)? {
+            if is_managed_live_binding(&old_binding, previous) {
+                tmux.unbind_root(previous)?;
+            }
+        }
+        if tmux
+            .root_binding(previous)?
+            .is_some_and(|old_binding| is_managed_live_binding(&old_binding, previous))
+        {
+            return Err(AikitError::new(
+                "mux.binding_verification_failed",
+                format!("the previous AIKit root key `{previous}` remained live after replacement"),
+            )
+            .with("key", previous.to_string()));
+        }
+    }
     Ok(InstallVerification {
         live: true,
         verified: true,
         binding: Some(binding),
         warnings: vec![],
     })
+}
+
+fn planned_tmux_binding(procedure: &Procedure) -> Option<(PathBuf, String)> {
+    if !matches!(
+        procedure.kind,
+        ProcedureKind::MuxInstall { mux: MuxKind::Tmux }
+    ) {
+        return None;
+    }
+    procedure.plan.edits.iter().find_map(|edit| {
+        let WorldEdit::WriteFile { path, contents, .. } = edit else {
+            return None;
+        };
+        let rendered = std::str::from_utf8(contents).ok()?;
+        managed_config_key(rendered).map(|key| (path.clone(), key))
+    })
+}
+
+/// Reconcile a running tmux server after a committed mux Procedure is undone.
+pub fn activate_undo(procedure: &Procedure) -> Result<Vec<String>> {
+    let Some((path, key)) = planned_tmux_binding(procedure) else {
+        return Ok(vec![]);
+    };
+    let tmux = Tmux::system();
+    let presence = tmux.detect()?;
+    if !presence.server_running {
+        return Ok(vec![
+            "tmux is not running; the integration was restored on disk and no live key exists to reconcile"
+                .to_string(),
+        ]);
+    }
+
+    let restored = std::fs::read_to_string(&path).ok();
+    if path.exists() {
+        tmux.reload_config(&path)?;
+    }
+    let restored_owns_key = restored
+        .as_deref()
+        .and_then(managed_config_key)
+        .is_some_and(|restored_key| restored_key == key);
+    if !restored_owns_key {
+        if let Some(binding) = tmux.root_binding(&key)? {
+            if is_managed_live_binding(&binding, &key) {
+                tmux.unbind_root(&key)?;
+            }
+        }
+        if tmux
+            .root_binding(&key)?
+            .is_some_and(|binding| is_managed_live_binding(&binding, &key))
+        {
+            return Err(AikitError::new(
+                "mux.binding_verification_failed",
+                format!(
+                    "tmux undo restored the config but root key `{key}` remained bound to AIKit"
+                ),
+            )
+            .with("key", key));
+        }
+    }
+    Ok(vec![])
 }

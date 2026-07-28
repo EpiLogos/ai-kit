@@ -223,6 +223,58 @@ fn an_effective_live_binding_is_a_conflict_even_when_the_config_is_empty() {
 }
 
 #[test]
+fn a_live_binding_that_only_mentions_aikit_words_is_not_mistaken_for_ownership() {
+    let server = Server::start();
+    let bound = Command::new("tmux")
+        .args([
+            "-L",
+            &server.socket,
+            "bind-key",
+            "-n",
+            "M-a",
+            "run-shell",
+            "printf 'display-popup aikit ui'",
+        ])
+        .output()
+        .unwrap();
+    assert!(bound.status.success());
+    let home = tempfile::tempdir().unwrap();
+
+    let output = run(
+        home.path(),
+        &server.socket,
+        &["--json", "mux", "install", "tmux"],
+    );
+    assert!(!output.status.success());
+    assert_eq!(json(&output)["error"]["code"], "mux.key_conflict");
+    assert!(!home.path().join(".tmux.conf").exists());
+}
+
+#[test]
+fn prefix_and_named_table_bindings_do_not_collide_with_the_global_hotkey() {
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".tmux.conf");
+    fs::write(
+        &config,
+        "bind-key M-a last-window\n\
+         bind-key -T copy-mode M-a send-keys -X begin-selection\n",
+    )
+    .unwrap();
+
+    let output = run(
+        home.path(),
+        &socket(),
+        &["--json", "mux", "install", "tmux"],
+    );
+    assert!(
+        output.status.success(),
+        "non-root bindings were falsely rejected: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn a_running_private_server_is_reloaded_and_the_live_binding_is_verified() {
     let server = Server::start();
     let home = tempfile::tempdir().unwrap();
@@ -253,6 +305,105 @@ fn a_running_private_server_is_reloaded_and_the_live_binding_is_verified() {
     assert!(line.contains("82%"));
     assert!(line.contains("70%"));
     assert!(line.contains("aikit ui"));
+}
+
+#[test]
+fn changing_the_managed_key_removes_the_old_live_binding() {
+    let server = Server::start();
+    let home = tempfile::tempdir().unwrap();
+    let first = run(
+        home.path(),
+        &server.socket,
+        &["--json", "mux", "install", "tmux"],
+    );
+    assert!(first.status.success());
+    assert!(server.list_key("M-a").status.success());
+
+    let changed = run(
+        home.path(),
+        &server.socket,
+        &["--json", "mux", "install", "tmux", "--key", "M-k"],
+    );
+    assert!(
+        changed.status.success(),
+        "key change failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&changed.stdout),
+        String::from_utf8_lossy(&changed.stderr)
+    );
+    assert!(server.list_key("M-k").status.success());
+    assert!(
+        !server.list_key("M-a").status.success(),
+        "changing the managed key left the previous AIKit key live"
+    );
+}
+
+#[test]
+fn procedure_undo_restores_both_the_config_and_the_live_key_table() {
+    let server = Server::start();
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".tmux.conf");
+    let original = "set -g status off\n";
+    fs::write(&config, original).unwrap();
+
+    let installed = run(
+        home.path(),
+        &server.socket,
+        &["--json", "mux", "install", "tmux"],
+    );
+    assert!(installed.status.success());
+    let installed_reply = json(&installed);
+    let procedure = installed_reply["data"]["procedure"].as_str().unwrap();
+    assert!(server.list_key("M-a").status.success());
+
+    let undone = run(
+        home.path(),
+        &server.socket,
+        &["--json", "procedure", "undo", procedure],
+    );
+    assert!(
+        undone.status.success(),
+        "undo failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&undone.stdout),
+        String::from_utf8_lossy(&undone.stderr)
+    );
+    assert_eq!(fs::read_to_string(config).unwrap(), original);
+    assert!(
+        !server.list_key("M-a").status.success(),
+        "undo removed the block on disk but left Alt-A live in tmux"
+    );
+}
+
+#[test]
+fn undo_restores_a_user_binding_that_was_explicitly_replaced() {
+    let server = Server::start();
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".tmux.conf");
+    fs::write(&config, "bind-key -n M-a split-window\n").unwrap();
+    let seeded = server.command(&["source-file", config.to_str().unwrap()]);
+    assert!(seeded.status.success());
+
+    let installed = run(
+        home.path(),
+        &server.socket,
+        &["--json", "mux", "install", "tmux", "--replace-key"],
+    );
+    assert!(installed.status.success());
+    let procedure = json(&installed)["data"]["procedure"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let undone = run(
+        home.path(),
+        &server.socket,
+        &["--json", "procedure", "undo", &procedure],
+    );
+    assert!(undone.status.success());
+    let binding = server.list_key("M-a");
+    assert!(binding.status.success());
+    let rendered = String::from_utf8_lossy(&binding.stdout);
+    assert!(rendered.contains("split-window"));
+    assert!(!rendered.contains("aikit ui"));
 }
 
 #[cfg(target_os = "macos")]

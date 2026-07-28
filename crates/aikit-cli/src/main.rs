@@ -424,11 +424,13 @@ fn cmd_procedure(cwd: &std::path::Path, c: ProcedureCmd) -> Result<Reply> {
         }
         ProcedureSub::Undo(a) => {
             let id = ProcedureId::parse(&a.procedure)?;
+            let procedure = runner.load(&id)?;
             let undone = runner.undo(&id)?;
+            let warnings = aikit_cli::mux_install::activate_undo(&procedure)?;
             Ok(reply(
                 &service,
                 jval!({ "procedure": id.to_string(), "undone": undone }),
-                vec![],
+                warnings,
             ))
         }
         ProcedureSub::List(_) => {
