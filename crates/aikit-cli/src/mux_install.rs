@@ -131,7 +131,7 @@ fn conflict(key: &str, binding: &str) -> AikitError {
     .with("binding", binding.to_string())
     .with(
         "resolution",
-        format!("choose another key with `--key`, or review and pass `--replace-key`"),
+        "choose another key with `--key`, or review and pass `--replace-key`".to_string(),
     )
 }
 

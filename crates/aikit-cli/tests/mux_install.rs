@@ -1,8 +1,14 @@
 //! The real `mux install` command owns the binding all the way to live tmux.
 
 use std::fs;
+#[cfg(target_os = "macos")]
+use std::io::{Read, Write};
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(target_os = "macos")]
+use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
 use serde_json::Value;
@@ -71,6 +77,15 @@ impl Server {
             .args(["-L", &self.socket, "list-keys", "-T", "root", key])
             .output()
             .expect("list the private server's binding")
+    }
+
+    fn command(&self, args: &[&str]) -> Output {
+        let mut argv = vec!["-L", self.socket.as_str()];
+        argv.extend_from_slice(args);
+        Command::new("tmux")
+            .args(argv)
+            .output()
+            .expect("run a command on the private tmux server")
     }
 }
 
@@ -235,4 +250,158 @@ fn a_running_private_server_is_reloaded_and_the_live_binding_is_verified() {
     assert!(line.contains("82%"));
     assert!(line.contains("70%"));
     assert!(line.contains("aikit ui"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
+    let server = Server::start();
+    let home = tempfile::tempdir().unwrap();
+    let installed = run(
+        home.path(),
+        &server.socket,
+        &["--json", "mux", "install", "tmux"],
+    );
+    assert!(
+        installed.status.success(),
+        "install failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&installed.stdout),
+        String::from_utf8_lossy(&installed.stderr)
+    );
+
+    let binary = cargo_bin("aikit");
+    let binary_directory = binary.parent().unwrap();
+    let path = format!(
+        "{}:{}",
+        binary_directory.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    for (key, value) in [
+        ("PATH", path.as_str()),
+        ("AIKIT_HOME", home.path().to_str().unwrap()),
+        ("HOME", home.path().to_str().unwrap()),
+    ] {
+        let output = server.command(&["set-environment", "-g", key, value]);
+        assert!(
+            output.status.success(),
+            "could not set {key} on private tmux: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let mut client = Command::new("/usr/bin/script")
+        .args([
+            "-q",
+            "/dev/null",
+            "tmux",
+            "-L",
+            &server.socket,
+            "attach-session",
+            "-t",
+            "install-test",
+        ])
+        .env("TERM", "xterm-256color")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("attach a real pseudo-terminal client");
+    let mut input = client.stdin.take().unwrap();
+    let mut output = client.stdout.take().unwrap();
+    let (signal_tx, signal_rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut all = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let mut palette_seen = false;
+        let mut tree_seen = false;
+        while let Ok(read) = output.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            all.extend_from_slice(&buffer[..read]);
+            if !palette_seen
+                && all
+                    .windows(b"Ctrl-T tree".len())
+                    .any(|window| window == b"Ctrl-T tree")
+            {
+                palette_seen = true;
+                let _ = signal_tx.send("palette");
+            }
+            if !tree_seen
+                && all
+                    .windows(b"AIKit tree".len())
+                    .any(|window| window == b"AIKit tree")
+            {
+                tree_seen = true;
+                let _ = signal_tx.send("tree");
+            }
+        }
+        all
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let client_name = loop {
+        let listed = server.command(&["list-clients", "-F", "#{client_name}"]);
+        if listed.status.success() {
+            let name = String::from_utf8_lossy(&listed.stdout).trim().to_string();
+            if !name.is_empty() {
+                break name;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the real tmux client did not attach in time"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    input.write_all(b"\x1ba").unwrap();
+    input.flush().unwrap();
+    assert_eq!(
+        signal_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+        "palette",
+        "Alt-A must open the palette mode of the real AIKit binary"
+    );
+
+    input.write_all(b"\x14").unwrap();
+    input.flush().unwrap();
+    assert_eq!(
+        signal_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+        "tree",
+        "Ctrl-T must switch the same popup into tree mode"
+    );
+
+    input.write_all(b"\x1b").unwrap();
+    input.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(75));
+    input.write_all(b"\x1b").unwrap();
+    input.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(75));
+    let detached = server.command(&["detach-client", "-t", &client_name]);
+    assert!(detached.status.success());
+    drop(input);
+
+    let status = client.wait().expect("the attached client exits");
+    let rendered = reader.join().expect("the output reader exits");
+    assert!(
+        status.success(),
+        "the PTY client failed; output={}",
+        String::from_utf8_lossy(&rendered)
+    );
+    assert!(
+        String::from_utf8_lossy(&rendered).contains("AIKit tree"),
+        "the real popup never rendered tree mode"
+    );
+
+    let panes = server.command(&["list-panes", "-t", "install-test", "-F", "#{pane_id}"]);
+    assert!(
+        panes.status.success(),
+        "closing the popup must leave its source session alive: {}",
+        String::from_utf8_lossy(&panes.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&panes.stdout).lines().count(),
+        1,
+        "a popup must not create or destroy source panes"
+    );
 }
