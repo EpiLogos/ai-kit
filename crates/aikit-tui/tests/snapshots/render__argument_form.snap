@@ -2,7 +2,7 @@
 source: crates/aikit-tui/tests/render.rs
 expression: "frame(&state, 120, 18)"
 ---
-┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+┌ AIKit palette · payments · session ──────────────────────────────────────────────────────────────────────────────────┐
 │/ > run a script or tool   + manage capabilities   @ sessions and tasks   : AIKit actions                             │
 │ * target           staging                   staging/production       Command           release                      │
 │❯  token            •••••••                   secret                   Arguments         staging --token ••••••       │

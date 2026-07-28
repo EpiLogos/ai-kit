@@ -846,7 +846,7 @@ fn draw(
             border::PLAIN
         })
         .border_style(theme.border())
-        .title(" AIKit tree ")
+        .title(fold_text(glyphs, " AIKit tree · Ctrl-T palette "))
         .title_alignment(Alignment::Left);
     frame.render_widget(block, area);
 

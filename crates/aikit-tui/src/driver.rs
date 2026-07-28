@@ -211,14 +211,18 @@ impl PaletteController {
         let Some(action) = action_for(&event, &self.state) else {
             return Ok(PaletteStep::Continue);
         };
+        Ok(self.dispatch(backend, action))
+    }
+
+    pub fn dispatch(&mut self, backend: &mut dyn PaletteBackend, action: Action) -> PaletteStep {
         self.state = self.runtime.step(backend, self.state.clone(), action);
         match self.state.outcome.clone() {
             Some(PaletteOutcome::Tree) => {
                 self.state.outcome = None;
-                Ok(PaletteStep::Tree)
+                PaletteStep::Tree
             }
-            Some(outcome) => Ok(PaletteStep::Outcome(outcome)),
-            None => Ok(PaletteStep::Continue),
+            Some(outcome) => PaletteStep::Outcome(outcome),
+            None => PaletteStep::Continue,
         }
     }
 

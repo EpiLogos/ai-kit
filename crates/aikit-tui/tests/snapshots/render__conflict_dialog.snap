@@ -2,7 +2,7 @@
 source: crates/aikit-tui/tests/render.rs
 expression: "frame(&state, 120, 18)"
 ---
-┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+┌ AIKit palette · payments · session ──────────────────────────────────────────────────────────────────────────────────┐
 │/ beta                                                                                                                │
 │script/fmt/alpha conflicts with script/fmt/beta                                                                       │
 │code: resolution.conflict                                                                                             │

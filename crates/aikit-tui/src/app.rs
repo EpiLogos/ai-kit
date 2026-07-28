@@ -1060,7 +1060,7 @@ pub fn key_map(mode: Mode) -> Vec<(&'static str, &'static str)> {
             ("Ctrl+Enter", "apply everything staged"),
             ("Alt+Enter", "run in a new pane"),
             ("Ctrl+O", "reveal the source"),
-            ("Ctrl+R", "repeat the last run"),
+            ("Ctrl+R / ^T", "repeat the last run / switch to the tree"),
             ("Esc", "clear, then discard, then close"),
         ],
     };

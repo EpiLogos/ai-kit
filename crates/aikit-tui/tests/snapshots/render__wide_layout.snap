@@ -2,7 +2,7 @@
 source: crates/aikit-tui/tests/render.rs
 expression: "frame(&state, 120, 18)"
 ---
-┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+┌ AIKit palette · payments · session ──────────────────────────────────────────────────────────────────────────────────┐
 │/ > run a script or tool   + manage capabilities   @ sessions and tasks   : AIKit actions                             │
 │❯  +● P deploy                   Test script depl… script    reviewed  script/ops/deploy@rev-sc                       │
 │   ·○   boundary                 Test hook bounda… hook      reviewed  State: active                                  │
@@ -18,5 +18,5 @@ expression: "frame(&state, 120, 18)"
 │                                                                         shell                                        │
 │                                                                         claude-code                                  │
 │                                                                       Activation means: exported into the contextual │
-│6 capabilities · writing to session S · ? for keys                                                                    │
+│6 capabilities · writing to session S · Ctrl-T tree · ? for keys                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

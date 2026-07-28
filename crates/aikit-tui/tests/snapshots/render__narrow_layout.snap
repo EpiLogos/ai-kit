@@ -2,7 +2,7 @@
 source: crates/aikit-tui/tests/render.rs
 expression: "frame(&state, 80, 16)"
 ---
-┌ payments · session ──────────────────────────────────────────────────────────┐
+┌ AIKit palette · payments · session ──────────────────────────────────────────┐
 │/ > + @ :                                                                     │
 │❯  +● P deploy                   Test script deploy.                          │
 │   ·○   boundary                 Test hook boundary.                          │
@@ -16,5 +16,5 @@ expression: "frame(&state, 80, 16)"
 │                                                                              │
 │                                                                              │
 │                                                                              │
-│6 capabilities · writing to session S · ? for keys                            │
+│6 capabilities · writing to session S · Ctrl-T tree · ? for keys              │
 └──────────────────────────────────────────────────────────────────────────────┘

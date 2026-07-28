@@ -2,7 +2,7 @@
 source: crates/aikit-tui/tests/render.rs
 expression: drawn
 ---
-┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+┌ AIKit palette · payments · session ──────────────────────────────────────────────────────────────────────────────────┐
 │/ :                                                                                                                   │
 │Deploy with the release token                                                                                         │
 │would become  script/ops/deploy-token                                                                                 │

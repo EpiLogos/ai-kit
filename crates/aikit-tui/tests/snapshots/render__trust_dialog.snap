@@ -2,7 +2,7 @@
 source: crates/aikit-tui/tests/render.rs
 expression: "frame(&state, 120, 18)"
 ---
-┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+┌ AIKit palette · payments · session ──────────────────────────────────────────────────────────────────────────────────┐
 │/ deploy                                                                                                              │
 │❯  ·○   deploy                   Test script depl… script    unseen    script/ops/deploy@rev-sc                       │
 │                                                                       State: inactive                                │
@@ -18,5 +18,5 @@ expression: "frame(&state, 120, 18)"
 │                                                                       command path and boosted in search             │
 │                                                                                                                      │
 │                                                                                                                      │
-│1 capability · writing to session S · ? for keys                                                                      │
+│1 capability · writing to session S · Ctrl-T tree · ? for keys                                                        │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

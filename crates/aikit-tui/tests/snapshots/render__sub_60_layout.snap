@@ -2,7 +2,7 @@
 source: crates/aikit-tui/tests/render.rs
 expression: "frame(&state, 52, 14)"
 ---
-┌ payments · session ──────────────────────────────┐
+┌ AIKit palette · payments · session ──────────────┐
 │/ > + @ :                                         │
 │❯  +● P deploy                                    │
 │   ·○   boundary                                  │
@@ -14,5 +14,5 @@ expression: "frame(&state, 52, 14)"
 │                                                  │
 │                                                  │
 │                                                  │
-│6 capabilities · writing to session S · ? for keys│
+│6 capabilities · writing to session S · Ctrl-T tre│
 └──────────────────────────────────────────────────┘

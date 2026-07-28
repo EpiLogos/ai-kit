@@ -102,10 +102,9 @@ fn merge(list: Rect, preview: Option<Rect>) -> Rect {
 // ---------------------------------------------------------------------------
 
 fn title(state: &AppState) -> String {
-    // The context, and nothing else. Where a change would be written is a
-    // footer fact: it changes with Tab, and a title that moved under the user
-    // would be worse than one that says less.
-    format!(" {} ", state.descriptor.label())
+    // Mode and context are stable for the whole frame. Scope remains a footer
+    // fact because it changes with Tab.
+    format!(" AIKit palette · {} ", state.descriptor.label())
 }
 
 /// The query box. `/` rather than a chevron, because the chevron is the row
@@ -174,7 +173,7 @@ fn footer<'a>(state: &'a AppState, theme: &Theme) -> Paragraph<'a> {
         Mode::JobOutput => "Enter or Esc returns to the list".to_string(),
         Mode::Help => "Esc returns".to_string(),
         _ => format!(
-            "{} {} · writing to {} {} · ? for keys",
+            "{} {} · writing to {} {} · Ctrl-T tree · ? for keys",
             state.rows.len(),
             if state.rows.len() == 1 {
                 "capability"

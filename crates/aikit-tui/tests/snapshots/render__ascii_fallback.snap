@@ -2,7 +2,7 @@
 source: crates/aikit-tui/tests/render.rs
 expression: ascii.clone()
 ---
-┌ payments · session ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+┌ AIKit palette · payments · session ──────────────────────────────────────────────────────────────────────────────────┐
 │/ o                                                                                                                   │
 │>  +* P deploy                   Test script depl… script    reviewed  script/ops/deploy@rev-sc                       │
 │   .-   boundary                 Test hook bounda… hook      unseen    State: active                                  │
@@ -18,5 +18,5 @@ expression: ascii.clone()
 │                                                                         shell                                        │
 │                                                                         claude-code                                  │
 │                                                                       Activation means: exported into the contextual │
-│4 capabilities · writing to session S · ? for keys                                                                    │
+│4 capabilities · writing to session S · Ctrl-T tree · ? for keys                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

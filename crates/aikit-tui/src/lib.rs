@@ -59,6 +59,7 @@ pub mod render;
 pub mod scope;
 pub mod search;
 pub mod staging;
+pub mod surface;
 pub mod theme;
 pub mod tree;
 pub mod tree_driver;
