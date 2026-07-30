@@ -248,15 +248,17 @@ impl<R: CommandRunner> Tmux<R> {
 
     /// The effective root-table binding for a key on the running server.
     pub fn root_binding(&self, key: &str) -> Result<Option<String>> {
-        let output = self.run(&["list-keys", "-T", "root", key])?;
+        // tmux 3.7b accepts the positional key filter but returns an empty
+        // successful result for meta keys such as M-a. Read the full table and
+        // match its canonical bind-key commands ourselves. This also works on
+        // tmux 3.6, whose list-keys does not support the newer -F flag.
+        let output = self.run(&["list-keys", "-T", "root"])?;
         if output.ok() {
-            let line = output.line().trim().to_string();
-            return Ok((!line.is_empty()).then_some(line));
-        }
-        if output.stderr.contains("unknown key")
-            || output.stderr.contains("no key")
-            || output.stderr.contains("not bound")
-        {
+            for line in output.line().lines() {
+                if tmux_binding_matches_key(line, key) {
+                    return Ok(Some(line.to_string()));
+                }
+            }
             return Ok(None);
         }
         Err(AikitError::new(
@@ -660,6 +662,25 @@ fn split_field(line: &str) -> (&str, &str) {
         Some((id, rest)) => (id.trim(), rest.trim()),
         None => (line.trim(), ""),
     }
+}
+
+fn tmux_binding_matches_key(line: &str, key: &str) -> bool {
+    let Ok(tokens) = shell_words::split(line) else {
+        return false;
+    };
+    if tokens.first().map(String::as_str) != Some("bind-key") {
+        return false;
+    }
+    let mut index = 1;
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "-T" | "-N" => index += 2,
+            "-r" => index += 1,
+            token if token.starts_with('-') => index += 1,
+            candidate => return candidate == key,
+        }
+    }
+    false
 }
 
 /// tmux expresses a split as an axis plus a "before" flag; the portable format

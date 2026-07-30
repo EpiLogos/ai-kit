@@ -102,11 +102,31 @@ impl Server {
         Self { socket }
     }
 
-    fn list_key(&self, key: &str) -> Output {
-        Command::new("tmux")
-            .args(["-L", &self.socket, "list-keys", "-T", "root", key])
+    fn binding(&self, key: &str) -> Option<String> {
+        let output = Command::new("tmux")
+            .args(["-L", &self.socket, "list-keys", "-T", "root"])
             .output()
-            .expect("list the private server's binding")
+            .expect("list the private server's bindings");
+        assert!(
+            output.status.success(),
+            "list the private server's bindings: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| {
+                let tokens = shell_words::split(line).ok()?;
+                let mut index = 1;
+                while index < tokens.len() {
+                    match tokens[index].as_str() {
+                        "-T" | "-N" => index += 2,
+                        "-r" => index += 1,
+                        token if token.starts_with('-') => index += 1,
+                        candidate => return (candidate == key).then(|| line.to_string()),
+                    }
+                }
+                None
+            })
     }
 
     fn command(&self, args: &[&str]) -> Output {
@@ -422,13 +442,7 @@ fn a_running_private_server_is_reloaded_and_the_live_binding_is_verified() {
     assert_eq!(reply["data"]["live"], true);
     assert_eq!(reply["data"]["verified"], true);
 
-    let binding = server.list_key("M-a");
-    assert!(
-        binding.status.success(),
-        "binding was not live: {}",
-        String::from_utf8_lossy(&binding.stderr)
-    );
-    let line = String::from_utf8_lossy(&binding.stdout);
+    let line = server.binding("M-a").expect("binding was not live");
     assert!(line.contains("display-popup"));
     assert!(line.contains("82%"));
     assert!(line.contains("70%"));
@@ -445,7 +459,7 @@ fn changing_the_managed_key_removes_the_old_live_binding() {
         &["--json", "mux", "install", "tmux"],
     );
     assert!(first.status.success());
-    assert!(server.list_key("M-a").status.success());
+    assert!(server.binding("M-a").is_some());
 
     let changed = run(
         home.path(),
@@ -458,9 +472,9 @@ fn changing_the_managed_key_removes_the_old_live_binding() {
         String::from_utf8_lossy(&changed.stdout),
         String::from_utf8_lossy(&changed.stderr)
     );
-    assert!(server.list_key("M-k").status.success());
+    assert!(server.binding("M-k").is_some());
     assert!(
-        !server.list_key("M-a").status.success(),
+        server.binding("M-a").is_none(),
         "changing the managed key left the previous AIKit key live"
     );
 }
@@ -481,7 +495,7 @@ fn procedure_undo_restores_both_the_config_and_the_live_key_table() {
     assert!(installed.status.success());
     let installed_reply = json(&installed);
     let procedure = installed_reply["data"]["procedure"].as_str().unwrap();
-    assert!(server.list_key("M-a").status.success());
+    assert!(server.binding("M-a").is_some());
 
     let undone = run(
         home.path(),
@@ -496,7 +510,7 @@ fn procedure_undo_restores_both_the_config_and_the_live_key_table() {
     );
     assert_eq!(fs::read_to_string(config).unwrap(), original);
     assert!(
-        !server.list_key("M-a").status.success(),
+        server.binding("M-a").is_none(),
         "undo removed the block on disk but left Alt-A live in tmux"
     );
 }
@@ -527,9 +541,9 @@ fn undo_restores_a_user_binding_that_was_explicitly_replaced() {
         &["--json", "procedure", "undo", &procedure],
     );
     assert!(undone.status.success());
-    let binding = server.list_key("M-a");
-    assert!(binding.status.success());
-    let rendered = String::from_utf8_lossy(&binding.stdout);
+    let rendered = server
+        .binding("M-a")
+        .expect("the user binding was not restored");
     assert!(rendered.contains("split-window"));
     assert!(!rendered.contains("aikit ui"));
 }
