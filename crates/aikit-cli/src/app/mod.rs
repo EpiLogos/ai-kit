@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use aikit_core::capsule::{Capsule, Kind};
 use aikit_core::catalog::Catalog;
 use aikit_core::context::ContextDescriptor;
-use aikit_core::id::{CapsuleId, GenerationId};
+use aikit_core::id::{CapsuleId, GenerationId, SessionId};
 use aikit_core::platform::TargetId;
 use aikit_core::policy::ManagedPolicy;
 use aikit_core::projection::{
@@ -162,6 +162,11 @@ pub struct SessionReconcileOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionResult {
+    pub session: String,
+    pub mux: String,
+    pub created: bool,
+    pub actions: Vec<String>,
+    pub preserved: Vec<String>,
     pub summary: String,
     pub warnings: Vec<String>,
 }
@@ -302,7 +307,12 @@ impl Service {
         F: Fn(&str) -> Option<String>,
     {
         home.ensure_layout()?;
-        let project = discover::discover_project(cwd);
+        let default_store = env("HOME").map(|path| PathBuf::from(path).join(".aikit"));
+        let mut excluded_stores = vec![home.root()];
+        if let Some(default_store) = default_store.as_deref() {
+            excluded_stores.push(default_store);
+        }
+        let project = discover::discover_project_excluding_many(cwd, &excluded_stores);
         let project_root = project.as_ref().map(|p| p.root.clone());
 
         let descriptor = match &project_root {
@@ -341,39 +351,22 @@ impl Service {
     /// Read-only: it compares and reports. Changing a live session is
     /// `reconcile`, which is a separate verb precisely so a diff can be run
     /// without wondering whether it moved anything.
-    pub fn session_diff(&self, session: Option<&str>) -> Result<SessionDiffOutcome> {
-        use aikit_adapters::mux::{tmux::Tmux, MuxAdapter, ReconcileMode};
-        let tmux = Tmux::system();
-        let presence = tmux.detect()?;
-        let name = self.session_name(session)?;
-
-        if !presence.installed {
-            return Ok(SessionDiffOutcome {
-                session: name,
-                mux: "none".into(),
-                differences: vec![],
-                warnings: vec![
-                    "no multiplexer is installed, so there is nothing to compare against"
-                        .to_string(),
-                ],
-            });
-        }
-        if !tmux.has_session(&name)? {
+    pub fn session_diff(&self, requested: Option<&str>) -> Result<SessionDiffOutcome> {
+        let plan = self.diff_or_reconcile_plan(requested)?;
+        let name = plan.name.clone();
+        let (stack, _) = self.session_stack(&plan)?;
+        if !stack.session_exists(&plan)? {
             return Ok(SessionDiffOutcome {
                 session: name.clone(),
-                mux: "tmux".into(),
+                mux: stack.topology_kind().as_str().into(),
                 differences: vec![format!("session `{name}` is not running")],
-                warnings: vec![],
+                warnings: stack.warnings(),
             });
         }
-
-        // Compare by asking for a non-destructive reconcile plan and reading what
-        // it would preserve versus change, rather than duplicating tmux's model.
-        let plan = self.session_plan(session)?;
-        let binding = tmux.ensure_session(&plan, ReconcileMode::CreateOrAttach)?;
+        let binding = stack.inspect_session(&plan)?;
         Ok(SessionDiffOutcome {
             session: name,
-            mux: "tmux".into(),
+            mux: stack.topology_kind().as_str().into(),
             differences: binding.actions.clone(),
             warnings: binding.warnings,
         })
@@ -382,18 +375,13 @@ impl Service {
     /// Bring a running session towards its spec.
     pub fn session_reconcile(
         &self,
-        session: Option<&str>,
+        requested: Option<&str>,
         destructive: bool,
     ) -> Result<SessionReconcileOutcome> {
-        use aikit_adapters::mux::{tmux::Tmux, MuxAdapter, ReconcileMode};
-        let tmux = Tmux::system();
-        if !tmux.detect()?.installed {
-            return Err(AikitError::new(
-                "mux.none_detected",
-                "no multiplexer is installed, so there is no session to reconcile",
-            ));
-        }
-        let plan = self.session_plan(session)?;
+        use aikit_adapters::mux::ReconcileMode;
+        let plan = self.diff_or_reconcile_plan(requested)?;
+        let name = plan.name.clone();
+        let (stack, _) = self.session_stack(&plan)?;
         // Non-destructive unless asked: the default may only ever ADD, so a
         // reconcile can never close the pane somebody is working in.
         let mode = if destructive {
@@ -401,10 +389,10 @@ impl Service {
         } else {
             ReconcileMode::CreateOrAttach
         };
-        let binding = tmux.ensure_session(&plan, mode)?;
+        let binding = stack.ensure_session(&plan, mode)?;
         Ok(SessionReconcileOutcome {
-            session: binding.session.clone(),
-            mux: "tmux".into(),
+            session: name,
+            mux: stack.topology_kind().as_str().into(),
             actions: binding.actions,
             preserved: binding.preserved,
             warnings: binding.warnings,
@@ -454,6 +442,134 @@ impl Service {
         .compile()
     }
 
+    fn requested_session_plan(&self, requested: Option<&str>) -> Result<aikit_core::SessionPlan> {
+        use aikit_core::session::SessionSpec;
+
+        let Some(requested) = requested else {
+            return self.session_plan(None);
+        };
+        let candidate = PathBuf::from(requested);
+        let candidate = if candidate.is_absolute() {
+            candidate
+        } else {
+            self.invocation_cwd.join(candidate)
+        };
+        if candidate.is_file() {
+            let text = std::fs::read_to_string(&candidate).map_err(|error| {
+                AikitError::new(
+                    "session.spec_unreadable",
+                    format!("could not read {}: {error}", candidate.display()),
+                )
+                .with("path", candidate.display().to_string())
+            })?;
+            return SessionSpec::from_toml_str(&text)?.compile();
+        }
+
+        let id = CapsuleId::parse(requested).map_err(|_| {
+            AikitError::new(
+                "session.unknown_spec",
+                format!("`{requested}` is neither a readable session spec nor a capsule id"),
+            )
+            .with("spec", requested.to_string())
+        })?;
+        let capsule = self.catalog.get(&id).ok_or_else(|| {
+            AikitError::new(
+                "session.unknown_spec",
+                format!("session capsule `{id}` is not loaded"),
+            )
+            .with("spec", requested.to_string())
+        })?;
+        let section = capsule.session().ok_or_else(|| {
+            AikitError::new(
+                "session.wrong_kind",
+                format!("`{id}` is not a session capsule"),
+            )
+        })?;
+        let root = capsule.root.as_ref().ok_or_else(|| {
+            AikitError::new(
+                "session.spec_unreadable",
+                format!("session capsule `{id}` has no payload root"),
+            )
+        })?;
+        let path = root.join(&section.spec);
+        let text = std::fs::read_to_string(&path).map_err(|error| {
+            AikitError::new(
+                "session.spec_unreadable",
+                format!("could not read {}: {error}", path.display()),
+            )
+            .with("path", path.display().to_string())
+        })?;
+        SessionSpec::from_toml_str(&text)?.compile()
+    }
+
+    /// Diff and reconcile historically accepted a bare human session name while
+    /// `up` accepted a spec path or session capsule. Preserve the useful named
+    /// fallback, but resolve anything that is actually a path or capsule through
+    /// the same compiler as `session up`.
+    fn diff_or_reconcile_plan(&self, requested: Option<&str>) -> Result<aikit_core::SessionPlan> {
+        let Some(requested) = requested else {
+            return self.session_plan(None);
+        };
+        let path = PathBuf::from(requested);
+        let candidate = if path.is_absolute() {
+            path.clone()
+        } else {
+            self.invocation_cwd.join(&path)
+        };
+        let looks_like_path =
+            candidate.is_file() || path.extension().is_some() || path.components().count() > 1;
+        if looks_like_path || CapsuleId::parse(requested).is_ok() {
+            self.requested_session_plan(Some(requested))
+        } else {
+            self.session_plan(Some(requested))
+        }
+    }
+
+    fn session_stack(
+        &self,
+        plan: &aikit_core::SessionPlan,
+    ) -> Result<(aikit_adapters::mux::stack::MuxStack, SessionId)> {
+        use aikit_adapters::mux::{
+            cmux::Cmux, plain::Plain, stack::MuxStack, tmux::Tmux, SessionIdentity,
+        };
+        use aikit_store::state::StateStore;
+
+        let mux = match plan.mux.or(self.descriptor.mux) {
+            Some(kind) => kind,
+            None => crate::mux_install::choose_installed(None)?,
+        };
+        let state = StateStore::new(&self.index);
+        let existing = state.sessions()?.into_iter().rev().find(|record| {
+            record.name == plan.name
+                && record.mux == mux
+                && record.project_marker.as_ref() == self.descriptor.project_id.as_ref()
+                && record.state != aikit_store::state::SessionState::Closed
+        });
+        let session_id = self
+            .descriptor
+            .session_id
+            .clone()
+            .or_else(|| existing.map(|record| record.session_id))
+            .unwrap_or_else(SessionId::generate);
+        let identity = SessionIdentity {
+            session_id: Some(session_id.clone()),
+            context_id: Some(self.descriptor.context_id.clone()),
+            project_root: self.descriptor.project_root.clone(),
+            view_root: Some(self.context_projection_root().join("current")),
+            profile: None,
+            isolation: self.descriptor.isolation,
+        };
+        let stack = MuxStack::detect(
+            vec![
+                Box::new(Cmux::system().with_identity(identity.clone())),
+                Box::new(Tmux::system().with_identity(identity)),
+                Box::new(Plain::new()),
+            ],
+            Some(mux),
+        )?;
+        Ok((stack, session_id))
+    }
+
     /// The AIKit home, for commands that plan Procedures or reach the inbox.
     pub fn home(&self) -> &AikitHome {
         &self.home
@@ -485,6 +601,10 @@ impl Service {
     /// Where this context's client projections are materialised.
     pub fn context_projection_root(&self) -> PathBuf {
         self.home.context_dir(&self.descriptor.context_id)
+    }
+
+    pub fn invocation_cwd(&self) -> &Path {
+        &self.invocation_cwd
     }
 
     /// Reference a profile from a scope's declaration and apply.
@@ -946,19 +1066,50 @@ impl AikitApplication for Service {
         })
     }
 
-    fn session_up(&mut self, _r: SessionRequest) -> Result<SessionResult> {
-        // Session topology orchestration is delegated to the mux adapters in
-        // `aikit-adapters`; wiring the portable session spec through them is left
-        // for the integration phase. What is honest to report now is the detected
-        // stack and that no topology was changed.
-        let mux = self
-            .descriptor
-            .mux
-            .map(|m| m.as_str().to_string())
-            .unwrap_or_else(|| "plain".to_string());
+    fn session_up(&mut self, r: SessionRequest) -> Result<SessionResult> {
+        use aikit_adapters::mux::ReconcileMode;
+        use aikit_store::events::Timestamp;
+        use aikit_store::state::{SessionRecord, SessionState, StateStore};
+
+        let plan = self.requested_session_plan(r.spec.as_deref())?;
+        let (stack, session_id) = self.session_stack(&plan)?;
+        let binding = stack.ensure_session(&plan, ReconcileMode::CreateOrAttach)?;
+        let mux = stack.topology_kind();
+        let now = Timestamp::now();
+        let state = StateStore::new(&self.index);
+        let created_at = state
+            .session(&session_id)?
+            .map(|record| record.created_at)
+            .unwrap_or(now);
+        state.put_session(&SessionRecord {
+            session_id,
+            name: plan.name.clone(),
+            project_root: self.descriptor.project_root.clone(),
+            project_marker: self.descriptor.project_id.clone(),
+            mux,
+            mux_session: Some(binding.session.clone()),
+            state: SessionState::Live,
+            created_at,
+            last_seen: now,
+        })?;
+        let summary = if binding.created {
+            format!(
+                "created {} session `{}` with {} view(s)",
+                mux,
+                plan.name,
+                binding.views.len()
+            )
+        } else {
+            format!("reconciled {} session `{}`", mux, plan.name)
+        };
         Ok(SessionResult {
-            summary: format!("no session change; multiplexer is {mux}"),
-            warnings: vec!["session topology orchestration is not wired in this build".to_string()],
+            session: plan.name,
+            mux: mux.as_str().to_string(),
+            created: binding.created,
+            actions: binding.actions,
+            preserved: binding.preserved,
+            summary,
+            warnings: binding.warnings,
         })
     }
 

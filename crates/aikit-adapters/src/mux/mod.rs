@@ -605,6 +605,15 @@ pub trait MuxAdapter {
 
     fn current_location(&self) -> Result<MuxLocation>;
 
+    /// Read-only existence check using the same durable identity that
+    /// `ensure_session` would rebind. Implementations must not create anything.
+    fn session_exists(&self, plan: &SessionPlan) -> Result<bool>;
+
+    /// Read the live topology and describe its differences from `plan`.
+    /// Implementations must not create, close, rename, focus, or reconfigure
+    /// anything.
+    fn inspect_session(&self, plan: &SessionPlan) -> Result<SessionBinding>;
+
     /// Make the plan's session exist. Non-destructive unless `mode` says
     /// otherwise.
     fn ensure_session(&self, plan: &SessionPlan, mode: ReconcileMode) -> Result<SessionBinding>;

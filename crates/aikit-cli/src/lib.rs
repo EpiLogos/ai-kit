@@ -11,10 +11,11 @@
 
 #![forbid(unsafe_code)]
 
-pub mod app;
 pub mod adopt;
+pub mod app;
 pub mod cli;
 pub mod client;
+mod cmux_config;
 pub mod collate;
 pub mod discover;
 pub mod doctor;

@@ -3,14 +3,14 @@
     {
       "id": "workspace:9",
       "uuid": "1D0F6C2E-0000-4000-8000-000000000009",
-      "title": "payments · code",
+      "title": "payments · code · ses_CMUXSESSION000000000000",
       "window": "window:4",
       "cwd": "/work/payments"
     },
     {
       "id": "workspace:11",
       "uuid": "1D0F6C2E-0000-4000-8000-000000000011",
-      "title": "payments · ops",
+      "title": "payments · ops · ses_CMUXSESSION000000000000",
       "window": "window:4",
       "cwd": "/work/payments"
     },

@@ -71,13 +71,17 @@ where
 
     // Find the export in the *applied* view, and the exact revision it was
     // applied at.
-    let capsule_id = view.exported_commands().get(export).cloned().ok_or_else(|| {
-        AikitError::new(
-            "multicall.unknown_export",
-            format!("the current generation exports no command named `{export}`"),
-        )
-        .with("export", export.to_string())
-    })?;
+    let capsule_id = view
+        .exported_commands()
+        .get(export)
+        .cloned()
+        .ok_or_else(|| {
+            AikitError::new(
+                "multicall.unknown_export",
+                format!("the current generation exports no command named `{export}`"),
+            )
+            .with("export", export.to_string())
+        })?;
     let applied_revision: Option<Revision> = view
         .active
         .get(&capsule_id)
@@ -158,12 +162,18 @@ where
         return Ok(home.context_dir(&context));
     }
 
-    let project = discover::discover_project(cwd).ok_or_else(|| {
-        AikitError::new(
-            "context.unknown",
-            "no AIKIT_CONTEXT_ID is set and the working directory is not inside a project",
-        )
-    })?;
+    let default_store = env("HOME").map(|path| std::path::PathBuf::from(path).join(".aikit"));
+    let mut excluded_stores = vec![home.root()];
+    if let Some(default_store) = default_store.as_deref() {
+        excluded_stores.push(default_store);
+    }
+    let project =
+        discover::discover_project_excluding_many(cwd, &excluded_stores).ok_or_else(|| {
+            AikitError::new(
+                "context.unknown",
+                "no AIKIT_CONTEXT_ID is set and the working directory is not inside a project",
+            )
+        })?;
 
     let index = Index::open(&home.database())?;
     let state = StateStore::new(&index);

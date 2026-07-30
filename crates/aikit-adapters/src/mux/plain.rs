@@ -95,6 +95,14 @@ impl MuxAdapter for Plain {
         })
     }
 
+    fn session_exists(&self, _plan: &SessionPlan) -> Result<bool> {
+        Ok(true)
+    }
+
+    fn inspect_session(&self, plan: &SessionPlan) -> Result<SessionBinding> {
+        self.ensure_session(plan, ReconcileMode::CreateOrAttach)
+    }
+
     fn ensure_session(&self, plan: &SessionPlan, _mode: ReconcileMode) -> Result<SessionBinding> {
         let Some(first_view) = plan.views.first() else {
             return Err(AikitError::new(

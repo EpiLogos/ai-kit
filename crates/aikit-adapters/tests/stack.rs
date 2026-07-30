@@ -126,7 +126,12 @@ fn plain_remains_a_fallback_when_a_real_multiplexer_is_active() {
     let stack = MuxStack::detect(vec![Box::new(Plain::new()), Box::new(tmux)], None).unwrap();
 
     assert_eq!(stack.topology_kind(), MuxKind::Tmux);
-    assert_eq!(stack.presentation_kind(), Some(MuxKind::Plain));
+    assert_eq!(
+        stack.presentation_kind(),
+        None,
+        "plain is a fallback, never a presentation layer around a real mux"
+    );
+    assert_eq!(stack.kinds(), vec![MuxKind::Tmux]);
 }
 
 #[test]
@@ -284,7 +289,7 @@ fn status_reaches_both_the_inner_and_the_outer_host() {
 }
 
 #[test]
-fn a_layer_with_no_status_surface_is_reported_as_undelivered_rather_than_skipped() {
+fn the_plain_fallback_is_not_reported_as_a_fake_status_layer_inside_tmux() {
     let tmux = Tmux::new(Arc::clone(&tmux_runner())).with_env_var("TMUX", "/tmp/t");
     let plain = Plain::new();
     let stack = MuxStack::detect(vec![Box::new(plain), Box::new(tmux)], None).unwrap();
@@ -293,12 +298,14 @@ fn a_layer_with_no_status_surface_is_reported_as_undelivered_rather_than_skipped
         .set_status(StatusUpdate::for_session("payments").with("profile", "rust-review"))
         .unwrap();
 
-    let plain_delivery = deliveries
-        .iter()
-        .find(|d| d.kind == MuxKind::Plain)
-        .expect("every layer is accounted for");
-    assert!(!plain_delivery.delivered);
-    assert!(plain_delivery.note.is_some());
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].kind, MuxKind::Tmux);
+    assert!(
+        deliveries
+            .iter()
+            .all(|delivery| delivery.kind != MuxKind::Plain),
+        "plain is a fallback host, not a real outer layer once tmux is active"
+    );
 }
 
 // ---------------------------------------------------------------------------

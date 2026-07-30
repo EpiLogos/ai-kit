@@ -772,6 +772,59 @@ impl<R: CommandRunner> MuxAdapter for Tmux<R> {
         })
     }
 
+    fn session_exists(&self, plan: &SessionPlan) -> Result<bool> {
+        Tmux::has_session(self, &plan.id)
+    }
+
+    fn inspect_session(&self, plan: &SessionPlan) -> Result<SessionBinding> {
+        let mut binding = SessionBinding::new(MuxKind::Tmux, &plan.id);
+        binding.warnings.extend(plan.warnings.clone());
+        if !self.has_session(&plan.id)? {
+            binding.record(format!("session `{}` is not running", plan.id));
+            return Ok(binding);
+        }
+
+        let windows = self.windows_of(&plan.id)?;
+        for view in &plan.views {
+            let name = view.name.clone().unwrap_or_else(|| view.id.clone());
+            let Some(window) = windows.get(&name) else {
+                binding.record(format!("view `{}` is missing", view.id));
+                continue;
+            };
+            binding.views.insert(view.id.clone(), name);
+
+            let mut by_tag = BTreeMap::new();
+            let mut untagged = Vec::new();
+            for (pane, tag) in self.panes_of(window)? {
+                if tag.is_empty() {
+                    untagged.push(pane);
+                } else {
+                    by_tag.insert(tag, pane);
+                }
+            }
+            let planned: BTreeSet<String> = view
+                .steps
+                .iter()
+                .map(|step| format!("{}/{}", view.id, step.pane))
+                .collect();
+            for step in &view.steps {
+                let tag = format!("{}/{}", view.id, step.pane);
+                if let Some(pane) = by_tag.get(&tag) {
+                    binding.surfaces.insert(tag, pane.clone());
+                } else {
+                    binding.record(format!("pane `{tag}` is missing"));
+                }
+            }
+            for tag in by_tag.keys().filter(|tag| !planned.contains(*tag)) {
+                binding.record(format!("AIKit pane `{tag}` is no longer declared"));
+            }
+            for pane in untagged {
+                binding.preserve(format!("hand-created pane `{pane}` is outside the plan"));
+            }
+        }
+        Ok(binding)
+    }
+
     fn ensure_session(&self, plan: &SessionPlan, mode: ReconcileMode) -> Result<SessionBinding> {
         let Some(first_view) = plan.views.first() else {
             return Err(AikitError::new(

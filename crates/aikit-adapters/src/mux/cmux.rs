@@ -42,7 +42,7 @@ use std::sync::Mutex;
 use aikit_core::platform::MuxKind;
 use aikit_core::profile::ConfigTable;
 use aikit_core::session::{Direction, Placement, SessionPlan, ViewPlan};
-use aikit_core::{AikitError, Result};
+use aikit_core::{AikitError, Result, SessionId};
 
 use crate::runner::{CommandRunner, Output, SystemRunner};
 
@@ -303,12 +303,31 @@ impl<R: CommandRunner> Cmux<R> {
         out
     }
 
+    /// cmux defaults several query and mutation commands to human-readable
+    /// output. Anything AIKit parses must request the global JSON mode
+    /// explicitly; accepting whichever format happened to be printed is not a
+    /// protocol.
+    fn argv_json(&self, args: &[&str]) -> Vec<String> {
+        let mut out = vec![self.binary.clone(), "--json".to_string()];
+        out.extend(args.iter().map(|a| a.to_string()));
+        out
+    }
+
     fn run(&self, args: &[&str]) -> Result<Output> {
         self.runner.run(&self.argv(args))
     }
 
     fn must(&self, args: &[&str]) -> Result<Output> {
         let argv = self.argv(args);
+        self.runner.run(&argv)?.require(&argv, "mux.cmux_failed")
+    }
+
+    fn run_json(&self, args: &[&str]) -> Result<Output> {
+        self.runner.run(&self.argv_json(args))
+    }
+
+    fn must_json(&self, args: &[&str]) -> Result<Output> {
+        let argv = self.argv_json(args);
         self.runner.run(&argv)?.require(&argv, "mux.cmux_failed")
     }
 
@@ -369,12 +388,24 @@ impl<R: CommandRunner> Cmux<R> {
     ///
     /// cmux ids are handles, not identity — a restored app hands the same
     /// workspace a new id — so the title is what `ensure_session` rebinds by.
-    pub fn workspace_title(plan_id: &str, view: &ViewPlan, grouped: bool) -> String {
-        if grouped {
-            format!("{plan_id} · {}", view.name.as_deref().unwrap_or(&view.id))
-        } else {
-            plan_id.to_string()
-        }
+    fn ownership_scope(&self) -> Result<String> {
+        self.identity
+            .session_id
+            .as_ref()
+            .map(ToString::to_string)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "mux.cmux_identity_missing",
+                    "cmux ownership requires AIKit's durable session id",
+                )
+            })
+    }
+
+    pub fn workspace_title(&self, plan: &SessionPlan, view: &ViewPlan) -> Result<String> {
+        // The view component is always present. `name` is presentation text and
+        // may repeat, whereas the compiler requires unique view ids.
+        let base = format!("{} · {}", plan.id, view.id);
+        Ok(format!("{base} · {}", self.ownership_scope()?))
     }
 
     /// Prefix a pane command with the AIKit context, since cmux has no session
@@ -418,9 +449,9 @@ impl<R: CommandRunner> Cmux<R> {
 
     /// Every workspace cmux currently has, as `(title, workspace)`.
     pub fn workspaces(&self) -> Result<Vec<Workspace>> {
-        let out = self.run(&["list-workspaces"])?;
+        let out = self.run_json(&["list-workspaces"])?;
         if !out.ok() {
-            return Ok(Vec::new());
+            return Err(cmux_unreachable(&out));
         }
         let value: serde_json::Value = serde_json::from_str(out.line()).map_err(|e| {
             AikitError::new(
@@ -437,19 +468,120 @@ impl<R: CommandRunner> Cmux<R> {
             .iter()
             .filter_map(|item| {
                 Some(Workspace {
-                    id: item.get("id")?.as_str()?.to_string(),
+                    id: object_handle(item)?,
                     title: item
                         .get("title")
                         .and_then(|t| t.as_str())
                         .unwrap_or_default()
                         .to_string(),
-                    window: item
-                        .get("window")
-                        .and_then(|w| w.as_str())
-                        .map(str::to_string),
+                    window: related_handle(item, "window"),
                 })
             })
             .collect())
+    }
+
+    /// All surfaces in one workspace, discovered from cmux itself. A workspace
+    /// handle does not imply a root-surface handle, and fabricating one makes the
+    /// very first split fail on a real installation.
+    fn surfaces(&self, workspace: &str) -> Result<Vec<Surface>> {
+        let panes = self.must_json(&["list-panes", "--workspace", workspace])?;
+        let value: serde_json::Value = serde_json::from_str(panes.line()).map_err(|e| {
+            AikitError::new(
+                "mux.cmux_protocol",
+                format!("could not read the pane listing for `{workspace}`: {e}"),
+            )
+        })?;
+        let pane_handles: Vec<String> = value
+            .get("panes")
+            .and_then(|p| p.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(object_handle)
+            .collect();
+
+        let mut found = BTreeMap::<String, Surface>::new();
+        for pane in pane_handles {
+            let out = self.must_json(&[
+                "list-pane-surfaces",
+                "--workspace",
+                workspace,
+                "--pane",
+                &pane,
+            ])?;
+            let value: serde_json::Value = serde_json::from_str(out.line()).map_err(|e| {
+                AikitError::new(
+                    "mux.cmux_protocol",
+                    format!("could not read surfaces in pane `{pane}`: {e}"),
+                )
+            })?;
+            for item in value
+                .get("surfaces")
+                .and_then(|s| s.as_array())
+                .into_iter()
+                .flatten()
+            {
+                if let Some(id) = object_handle(item) {
+                    found.insert(
+                        id.clone(),
+                        Surface {
+                            id,
+                            title: item
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                        },
+                    );
+                }
+            }
+        }
+        Ok(found.into_values().collect())
+    }
+
+    /// Resolve the current cmux handles for an AIKit session from its durable
+    /// surface markers. Stored cmux refs are bindings and may change after an app
+    /// restart, so attach/down must call this instead of trusting the database's
+    /// last-seen handle.
+    pub fn session_targets(&self, session_id: &SessionId) -> Result<CmuxSessionTargets> {
+        let marker = format!("AIKit · {session_id}/");
+        let mut workspaces = Vec::new();
+        let mut windows = BTreeSet::new();
+        let mut window_workspace_counts = BTreeMap::<String, usize>::new();
+        let mut owned_window_counts = BTreeMap::<String, usize>::new();
+        let mut workspace_without_window = false;
+        for workspace in self.workspaces()? {
+            if let Some(window) = &workspace.window {
+                *window_workspace_counts.entry(window.clone()).or_default() += 1;
+            }
+            let owned = self
+                .surfaces(&workspace.id)?
+                .iter()
+                .any(|surface| surface.title.starts_with(&marker));
+            if owned {
+                if let Some(window) = &workspace.window {
+                    windows.insert(window.clone());
+                    *owned_window_counts.entry(window.clone()).or_default() += 1;
+                } else {
+                    workspace_without_window = true;
+                }
+                workspaces.push(workspace.id);
+            }
+        }
+        workspaces.sort();
+        let common_window = (!workspace_without_window && windows.len() == 1)
+            .then(|| windows.into_iter().next())
+            .flatten();
+        let exclusive_window = common_window
+            .as_ref()
+            .filter(|window| {
+                window_workspace_counts.get(*window) == owned_window_counts.get(*window)
+            })
+            .cloned();
+        Ok(CmuxSessionTargets {
+            workspaces,
+            common_window,
+            exclusive_window,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -532,7 +664,7 @@ impl<R: CommandRunner> Cmux<R> {
     }
 
     fn split_surface(&self, workspace: &str, origin: &str, direction: Direction) -> Result<String> {
-        let out = self.must(&[
+        let out = self.must_json(&[
             "new-split",
             direction.as_str(),
             "--workspace",
@@ -541,6 +673,38 @@ impl<R: CommandRunner> Cmux<R> {
             origin,
         ])?;
         extract_id(out.line(), "surface")
+    }
+
+    fn ownership_title(&self, plan: &SessionPlan, view: &ViewPlan, pane: &str) -> Result<String> {
+        Ok(format!(
+            "AIKit · {}/{}/{}/{}",
+            self.ownership_scope()?,
+            plan.id,
+            view.id,
+            pane
+        ))
+    }
+
+    fn ownership_prefix(&self, plan: &SessionPlan, view: &ViewPlan) -> Result<String> {
+        Ok(format!(
+            "AIKit · {}/{}/{}/",
+            self.ownership_scope()?,
+            plan.id,
+            view.id
+        ))
+    }
+
+    fn rename_owned_surface(&self, workspace: &str, surface: &str, title: &str) -> Result<()> {
+        self.must_json(&[
+            "rename-tab",
+            "--workspace",
+            workspace,
+            "--surface",
+            surface,
+            "--title",
+            title,
+        ])?;
+        Ok(())
     }
 
     fn run_in_surface(&self, workspace: &str, surface: &str, command: &str) -> Result<()> {
@@ -565,27 +729,97 @@ pub struct Workspace {
     pub window: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmuxSessionTargets {
+    pub workspaces: Vec<String>,
+    pub common_window: Option<String>,
+    /// Present only when every workspace in the window is owned by this
+    /// SessionId. Teardown may close this window without taking unrelated work
+    /// with it; otherwise callers close the owned workspaces individually.
+    pub exclusive_window: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Surface {
+    id: String,
+    title: String,
+}
+
 /// Pull an id out of a cmux response, tolerating both `{"x":{"id":..}}` and
 /// `{"id":..}`.
 fn extract_id(stdout: &str, key: &str) -> Result<String> {
-    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|e| {
-        AikitError::new(
-            "mux.cmux_protocol",
-            format!("could not read the `{key}` response: {e}"),
-        )
-    })?;
-    let candidate = value
-        .get(key)
-        .and_then(|inner| inner.get("id"))
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) {
+        let candidate = value
+            .get(key)
+            .and_then(object_handle)
+            .or_else(|| related_handle(&value, key))
+            .or_else(|| object_handle(&value));
+        if let Some(candidate) = candidate {
+            return Ok(candidate);
+        }
+    }
+
+    let prefix = format!("{key}:");
+    if let Some(candidate) = stdout
+        .split_whitespace()
+        .map(|part| part.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':' && c != '-'))
+        .find(|part| part.starts_with(&prefix))
+    {
+        return Ok(candidate.to_string());
+    }
+
+    Err(AikitError::new(
+        "mux.cmux_protocol",
+        format!("the `{key}` response carried no id"),
+    )
+    .with("response", stdout.chars().take(200).collect::<String>()))
+}
+
+fn object_handle(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("ref")
         .or_else(|| value.get("id"))
-        .and_then(|id| id.as_str());
-    candidate.map(str::to_string).ok_or_else(|| {
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn related_handle(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(format!("{key}_ref"))
+        .or_else(|| value.get(format!("{key}_id")))
+        .or_else(|| value.get(key).filter(|v| v.is_string()))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn cmux_unreachable(out: &Output) -> AikitError {
+    let detail = first_line(&out.stderr, &out.stdout);
+    cmux_probe_error(&detail)
+}
+
+fn is_access_denied(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("failed to write to socket")
+        || detail.contains("not authorized")
+        || detail.contains("permission")
+        || detail.contains("not permitted")
+}
+
+fn cmux_probe_error(detail: &str) -> AikitError {
+    let access_denied = is_access_denied(detail);
+    if access_denied {
         AikitError::new(
-            "mux.cmux_protocol",
-            format!("the `{key}` response carried no id"),
+            "mux.cmux_access_denied",
+            "cmux is running but rejected this process; run AIKit inside cmux or allow the intended automation access in cmux Settings",
         )
-        .with("response", stdout.chars().take(200).collect::<String>())
-    })
+        .with("detail", detail.to_string())
+    } else {
+        AikitError::new(
+            "mux.cmux_unreachable",
+            "cmux did not answer its control socket",
+        )
+        .with("detail", detail.to_string())
+    }
 }
 
 fn first_line(stderr: &str, stdout: &str) -> String {
@@ -621,13 +855,24 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
         };
 
         let probe = self.probe()?;
+        let access_denied = probe.note.as_deref().is_some_and(is_access_denied);
+        let detail = if access_denied {
+            Some(
+                "cmux is running but this process is outside its allowed automation scope; run AIKit inside cmux or adjust cmux Settings intentionally"
+                    .to_string(),
+            )
+        } else {
+            probe.note.clone()
+        };
         Ok(MuxPresence {
             kind: MuxKind::Cmux,
             installed: version.is_some(),
             version,
-            server_running: probe.reachable,
+            // A successful connect followed by a rejected write is evidence of a
+            // live, access-controlled server—not evidence that the app is down.
+            server_running: probe.reachable || access_denied,
             inside: self.env.contains_key("CMUX_WORKSPACE_ID"),
-            detail: probe.note.clone(),
+            detail,
         })
     }
 
@@ -635,19 +880,23 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
         if !self.env.contains_key("CMUX_WORKSPACE_ID") {
             return Ok(MuxLocation::nowhere(MuxKind::Cmux));
         }
-        let out = self.must(&["identify"])?;
+        let out = self.must_json(&["identify"])?;
         let value: serde_json::Value = serde_json::from_str(out.line()).map_err(|e| {
             AikitError::new(
                 "mux.cmux_protocol",
                 format!("could not read the `identify` response: {e}"),
             )
         })?;
-        let nested = |key: &str| {
-            value
-                .get(key)
-                .and_then(|v| v.get("id"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
+        // 0.63 returns `caller`/`focused` objects with `*_ref` keys. Retain the
+        // earlier nested-object shape as a backwards-compatible read path.
+        let location = value
+            .get("caller")
+            .filter(|v| v.is_object())
+            .or_else(|| value.get("focused").filter(|v| v.is_object()));
+        let handle = |key: &str| {
+            location
+                .and_then(|v| related_handle(v, key))
+                .or_else(|| value.get(key).and_then(object_handle))
         };
         Ok(MuxLocation {
             kind: MuxKind::Cmux,
@@ -663,10 +912,116 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
                 .as_ref()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().to_string()),
-            session: nested("workspace"),
-            view: nested("window"),
-            surface: nested("surface"),
+            session: handle("workspace"),
+            view: handle("window"),
+            surface: handle("surface"),
         })
+    }
+
+    fn session_exists(&self, plan: &SessionPlan) -> Result<bool> {
+        let existing = self.workspaces()?;
+        for view in &plan.views {
+            let title = self.workspace_title(plan, view)?;
+            let Some(workspace) = existing.iter().find(|workspace| workspace.title == title) else {
+                continue;
+            };
+            let prefix = self.ownership_prefix(plan, view)?;
+            if self
+                .surfaces(&workspace.id)?
+                .iter()
+                .any(|surface| surface.title.starts_with(&prefix))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn inspect_session(&self, plan: &SessionPlan) -> Result<SessionBinding> {
+        let mut binding = SessionBinding {
+            kind: Some(MuxKind::Cmux),
+            warnings: plan.warnings.clone(),
+            ..SessionBinding::default()
+        };
+        let existing = self.workspaces()?;
+        let requested = self.grouping_for(plan)?;
+        let grouped =
+            requested.wants_group(plan.views.len()) && self.capabilities().workspace_groups;
+
+        for view in &plan.views {
+            let title = self.workspace_title(plan, view)?;
+            let Some(workspace) = existing.iter().find(|workspace| workspace.title == title) else {
+                binding.record(format!("workspace `{title}` is missing"));
+                continue;
+            };
+            let discovered = self.surfaces(&workspace.id)?;
+            let prefix = self.ownership_prefix(plan, view)?;
+            let owned: BTreeMap<String, String> = discovered
+                .iter()
+                .filter_map(|surface| {
+                    surface
+                        .title
+                        .strip_prefix(&prefix)
+                        .filter(|pane| !pane.is_empty())
+                        .map(|pane| (pane.to_string(), surface.id.clone()))
+                })
+                .collect();
+            if owned.is_empty() {
+                return Err(AikitError::new(
+                    "mux.cmux_ownership_ambiguous",
+                    format!(
+                        "workspace `{title}` exists but carries no marker for this AIKit session"
+                    ),
+                )
+                .with("workspace", &workspace.id));
+            }
+
+            binding.views.insert(view.id.clone(), workspace.id.clone());
+            if binding.session.is_empty() {
+                binding.session = if grouped {
+                    workspace
+                        .window
+                        .clone()
+                        .unwrap_or_else(|| workspace.id.clone())
+                } else {
+                    workspace.id.clone()
+                };
+            }
+            let declared: BTreeSet<&str> =
+                view.steps.iter().map(|step| step.pane.as_str()).collect();
+            for step in &view.steps {
+                if let Some(surface) = owned.get(&step.pane) {
+                    binding
+                        .surfaces
+                        .insert(format!("{}/{}", view.id, step.pane), surface.clone());
+                } else {
+                    binding.record(format!("pane `{}/{}` is missing", view.id, step.pane));
+                }
+            }
+            for pane in owned
+                .keys()
+                .filter(|pane| !declared.contains(pane.as_str()))
+            {
+                binding.record(format!(
+                    "AIKit pane `{}/{pane}` is no longer declared",
+                    view.id
+                ));
+            }
+            for surface in discovered
+                .iter()
+                .filter(|surface| !surface.title.starts_with(&prefix))
+            {
+                binding.preserve(format!(
+                    "unowned surface `{}` is outside the plan",
+                    if surface.title.is_empty() {
+                        &surface.id
+                    } else {
+                        &surface.title
+                    }
+                ));
+            }
+        }
+        Ok(binding)
     }
 
     fn ensure_session(&self, plan: &SessionPlan, mode: ReconcileMode) -> Result<SessionBinding> {
@@ -677,12 +1032,32 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
             ));
         }
 
-        let capabilities = self.capabilities();
+        let probe = self.probe()?;
+        if !probe.reachable {
+            return Err(cmux_probe_error(
+                probe.note.as_deref().unwrap_or("cmux did not answer"),
+            ));
+        }
+        let capabilities = probe.capabilities();
         let mut binding = SessionBinding {
             kind: Some(MuxKind::Cmux),
             ..SessionBinding::default()
         };
         binding.warnings.extend(plan.warnings.clone());
+        if !capabilities.panes
+            || !probe.has_command("list-panes")
+            || !probe.has_command("list-pane-surfaces")
+            || !probe.has_command("rename-tab")
+        {
+            return Err(AikitError::new(
+                "mux.cmux_topology_unsupported",
+                "this cmux cannot expose and label split surfaces, so AIKit cannot reconcile it safely",
+            )
+            .with(
+                "required",
+                "new-split,list-panes,list-pane-surfaces,rename-tab",
+            ));
+        }
 
         let requested = self.grouping_for(plan)?;
         let mut grouped = requested.wants_group(plan.views.len());
@@ -711,8 +1086,39 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
         let wanted: Vec<(String, &ViewPlan)> = plan
             .views
             .iter()
-            .map(|view| (Self::workspace_title(&plan.id, view, grouped), view))
-            .collect();
+            .map(|view| Ok((self.workspace_title(plan, view)?, view)))
+            .collect::<Result<_>>()?;
+
+        // Validate every title collision before creating a group, workspace, or
+        // pane. Otherwise a later foreign workspace could make us refuse the
+        // plan only after earlier missing views had already been created.
+        let mut known_surfaces = BTreeMap::<String, Vec<Surface>>::new();
+        for (title, view) in &wanted {
+            let Some(existing) = by_title.get(title.as_str()) else {
+                continue;
+            };
+            let discovered = self.surfaces(&existing.id)?;
+            let owned_prefix = self.ownership_prefix(plan, view)?;
+            if !discovered
+                .iter()
+                .any(|surface| surface.title.starts_with(&owned_prefix))
+            {
+                return Err(AikitError::new(
+                    "mux.cmux_ownership_ambiguous",
+                    format!(
+                        "workspace `{title}` has {} unowned surface{}; its title alone does not prove AIKit owns it",
+                        discovered.len(),
+                        if discovered.len() == 1 { "" } else { "s" }
+                    ),
+                )
+                .with("workspace", &existing.id)
+                .with(
+                    "resolution",
+                    "rename the workspace or create a fresh AIKit session",
+                ));
+            }
+            known_surfaces.insert(existing.id.clone(), discovered);
+        }
 
         let already_bound: Vec<&Workspace> = wanted
             .iter()
@@ -730,14 +1136,14 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
         }
 
         for (title, view) in &wanted {
-            let workspace = match by_title.get(title.as_str()) {
+            let (workspace, workspace_created) = match by_title.get(title.as_str()) {
                 Some(existing) => {
                     binding.preserve(format!(
                         "workspace `{title}` was already open as {}; rebound rather than \
                          recreated",
                         existing.id
                     ));
-                    existing.id.clone()
+                    (existing.id.clone(), false)
                 }
                 None => {
                     let id = self.create_workspace(title, plan, view)?;
@@ -752,36 +1158,145 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
                         ])?;
                     }
 
-                    // Splits, in the plan's own order, each from a surface an
-                    // earlier step created.
-                    let root_surface = format!("{id}:root");
-                    let mut surfaces: BTreeMap<String, String> = BTreeMap::new();
-                    surfaces.insert(view.steps[0].pane.clone(), root_surface.clone());
-                    binding
-                        .surfaces
-                        .insert(format!("{}/{}", view.id, view.steps[0].pane), root_surface);
-
-                    for step in view.steps.iter().skip(1) {
-                        let Some(split) = &step.split else { continue };
-                        let Some(origin) = surfaces.get(&split.from).cloned() else {
-                            binding.warnings.push(format!(
-                                "pane `{}` splits from `{}`, which was not created; it was skipped",
-                                step.pane, split.from
-                            ));
-                            continue;
-                        };
-                        let surface = self.split_surface(&id, &origin, split.direction)?;
-                        if let Some(command) = self.contextual_command(&step.command) {
-                            self.run_in_surface(&id, &surface, &command)?;
-                        }
-                        surfaces.insert(step.pane.clone(), surface.clone());
-                        binding
-                            .surfaces
-                            .insert(format!("{}/{}", view.id, step.pane), surface);
-                    }
-                    id
+                    (id, true)
                 }
             };
+
+            let discovered = if workspace_created {
+                self.surfaces(&workspace)?
+            } else {
+                known_surfaces.remove(&workspace).ok_or_else(|| {
+                    AikitError::new(
+                        "mux.cmux_protocol",
+                        format!("preflight topology for workspace `{workspace}` was lost"),
+                    )
+                })?
+            };
+            if discovered.is_empty() {
+                return Err(AikitError::new(
+                    "mux.cmux_protocol",
+                    format!(
+                        "cmux reported no surface for workspace `{workspace}`; refusing to invent one"
+                    ),
+                ));
+            }
+
+            let owned_prefix = self.ownership_prefix(plan, view)?;
+            let mut surfaces: BTreeMap<String, String> = discovered
+                .iter()
+                .filter_map(|surface| {
+                    surface
+                        .title
+                        .strip_prefix(&owned_prefix)
+                        .filter(|pane| !pane.is_empty())
+                        .map(|pane| (pane.to_string(), surface.id.clone()))
+                })
+                .collect();
+
+            // A newly created workspace has exactly one initial surface. An
+            // existing same-named workspace is not evidence of ownership: it may
+            // be the user's. Without an AIKit marker, even a single surface is
+            // ambiguous and must remain untouched.
+            if surfaces.is_empty() {
+                if !workspace_created {
+                    return Err(AikitError::new(
+                        "mux.cmux_ownership_ambiguous",
+                        format!(
+                            "workspace `{title}` has {} unowned surface{}; its title alone does not prove AIKit owns it",
+                            discovered.len()
+                            ,
+                            if discovered.len() == 1 { "" } else { "s" }
+                        ),
+                    )
+                    .with("workspace", &workspace)
+                    .with("resolution", "rename the workspace or create a fresh AIKit session"));
+                }
+                let root = &discovered[0];
+                let root_pane = &view.steps[0].pane;
+                self.rename_owned_surface(
+                    &workspace,
+                    &root.id,
+                    &self.ownership_title(plan, view, root_pane)?,
+                )?;
+                surfaces.insert(root_pane.clone(), root.id.clone());
+            }
+
+            for step in &view.steps {
+                if let Some(surface) = surfaces.get(&step.pane) {
+                    binding
+                        .surfaces
+                        .insert(format!("{}/{}", view.id, step.pane), surface.clone());
+                    continue;
+                }
+                let Some(split) = &step.split else {
+                    return Err(AikitError::new(
+                        "mux.cmux_missing_root",
+                        format!(
+                            "workspace `{title}` has no owned surface for root pane `{}`",
+                            step.pane
+                        ),
+                    ));
+                };
+                let Some(origin) = surfaces.get(&split.from).cloned() else {
+                    return Err(AikitError::new(
+                        "mux.cmux_invalid_topology",
+                        format!(
+                            "pane `{}` splits from missing pane `{}`",
+                            step.pane, split.from
+                        ),
+                    ));
+                };
+                let surface = self.split_surface(&workspace, &origin, split.direction)?;
+                self.rename_owned_surface(
+                    &workspace,
+                    &surface,
+                    &self.ownership_title(plan, view, &step.pane)?,
+                )?;
+                if let Some(command) = self.contextual_command(&step.command) {
+                    self.run_in_surface(&workspace, &surface, &command)?;
+                }
+                binding.record(format!(
+                    "created pane `{}` in workspace `{title}`",
+                    step.pane
+                ));
+                surfaces.insert(step.pane.clone(), surface.clone());
+                binding
+                    .surfaces
+                    .insert(format!("{}/{}", view.id, step.pane), surface);
+            }
+
+            let declared: BTreeSet<&str> =
+                view.steps.iter().map(|step| step.pane.as_str()).collect();
+            for surface in &discovered {
+                let Some(pane) = surface.title.strip_prefix(&owned_prefix) else {
+                    if !surface.title.is_empty() {
+                        binding.preserve(format!(
+                            "left unowned cmux surface `{}` unchanged",
+                            surface.title
+                        ));
+                    }
+                    continue;
+                };
+                if declared.contains(pane) {
+                    continue;
+                }
+                if mode.may_close_panes() {
+                    self.must_json(&[
+                        "close-surface",
+                        "--workspace",
+                        &workspace,
+                        "--surface",
+                        &surface.id,
+                    ])?;
+                    binding.record(format!(
+                        "closed AIKit-owned pane `{pane}`, which the plan no longer declares"
+                    ));
+                } else {
+                    binding.preserve(format!(
+                        "AIKit-owned pane `{pane}` is no longer declared but exact reconciliation was not requested"
+                    ));
+                }
+            }
             binding.views.insert(view.id.clone(), workspace);
         }
 
@@ -803,10 +1318,24 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
 
         if mode.may_close_panes() {
             let keep: BTreeSet<&str> = wanted.iter().map(|(t, _)| t.as_str()).collect();
-            let prefix = format!("{} · ", plan.id);
+            let scope = self.ownership_scope()?;
+            let title_suffix = format!(" · {scope}");
+            let ownership_prefix = format!("AIKit · {scope}/{}/", plan.id);
             for workspace in &existing {
-                let ours = workspace.title == plan.id || workspace.title.starts_with(&prefix);
-                if ours && !keep.contains(workspace.title.as_str()) {
+                if workspace.title.ends_with(&title_suffix)
+                    && !keep.contains(workspace.title.as_str())
+                {
+                    let proven = self
+                        .surfaces(&workspace.id)?
+                        .iter()
+                        .any(|surface| surface.title.starts_with(&ownership_prefix));
+                    if !proven {
+                        binding.preserve(format!(
+                            "left same-named workspace `{}` unchanged because it has no AIKit ownership marker",
+                            workspace.title
+                        ));
+                        continue;
+                    }
                     self.must(&["close-workspace", "--workspace", &workspace.id])?;
                     binding.record(format!(
                         "closed workspace `{}`, which the plan no longer declares",

@@ -44,6 +44,36 @@ fn socket() -> String {
     )
 }
 
+fn installed(command: &str) -> bool {
+    Command::new(command)
+        .arg(if command == "tmux" { "-V" } else { "--version" })
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[test]
+fn unnamed_install_refuses_to_guess_when_both_real_muxes_are_installed() {
+    if !installed("tmux") || !installed("cmux") {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let output = run(home.path(), &socket(), &["--json", "mux", "install"]);
+
+    assert!(
+        !output.status.success(),
+        "both muxes are installed, so an unnamed install must not silently choose one: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let reply = json(&output);
+    assert_eq!(reply["error"]["code"], "mux.ambiguous");
+    assert_eq!(reply["error"]["details"]["installed"], "tmux,cmux");
+    assert!(
+        !home.path().join(".tmux.conf").exists()
+            && !home.path().join(".config/cmux/cmux.json").exists(),
+        "an ambiguous install must write nothing"
+    );
+}
+
 struct Server {
     socket: String,
 }

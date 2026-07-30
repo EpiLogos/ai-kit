@@ -206,6 +206,14 @@ impl MuxStack {
             });
         }
 
+        // Plain is the fallback terminal we are already in, not a real layer
+        // wrapped around tmux/cmux. Keeping it beside an active mux makes it look
+        // like a presentation host and fans status into a terminal that owns no
+        // such surface.
+        if inside.iter().any(|layer| layer.kind() != MuxKind::Plain) {
+            inside.retain(|layer| layer.kind() != MuxKind::Plain);
+        }
+
         if inside.is_empty() {
             // Nothing said we were inside it. A plain terminal is the honest
             // answer, and a caller that supplied one gets it.
@@ -335,6 +343,16 @@ impl MuxStack {
             location.remote = true;
         }
         Ok(location)
+    }
+
+    pub fn session_exists(&self, plan: &SessionPlan) -> Result<bool> {
+        self.topology().session_exists(plan)
+    }
+
+    pub fn inspect_session(&self, plan: &SessionPlan) -> Result<SessionBinding> {
+        let mut binding = self.topology().inspect_session(plan)?;
+        binding.warnings.extend(self.warnings());
+        Ok(binding)
     }
 
     // -----------------------------------------------------------------------
