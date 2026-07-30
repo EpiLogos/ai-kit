@@ -643,6 +643,8 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
         let mut buffer = [0_u8; 4096];
         let mut palette_seen = false;
         let mut tree_seen = false;
+        let mut tree_marker_end = None;
+        let mut palette_return_seen = false;
         while let Ok(read) = output.read(&mut buffer) {
             if read == 0 {
                 break;
@@ -662,7 +664,21 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
                     .any(|window| window == b"AIKit tree")
             {
                 tree_seen = true;
+                tree_marker_end = all
+                    .windows(b"AIKit tree".len())
+                    .position(|window| window == b"AIKit tree")
+                    .map(|start| start + b"AIKit tree".len());
                 let _ = signal_tx.send("tree");
+            }
+            if tree_seen && !palette_return_seen {
+                let start = tree_marker_end.expect("the tree marker has an end");
+                if all[start..]
+                    .windows(b"Ctrl-T tree".len())
+                    .any(|window| window == b"Ctrl-T tree")
+                {
+                    palette_return_seen = true;
+                    let _ = signal_tx.send("palette-return");
+                }
             }
         }
         all
@@ -708,7 +724,11 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
 
     input.write_all(b"\x1b").unwrap();
     input.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(75));
+    assert_eq!(
+        signal_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+        "palette-return",
+        "Esc from tree must return the same popup to palette before it is closed"
+    );
     input.write_all(b"\x1b").unwrap();
     input.flush().unwrap();
     wait_for_process_exit(popup_pid);
