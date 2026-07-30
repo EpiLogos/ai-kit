@@ -191,14 +191,14 @@ impl ArgSpec {
                 let n: i64 = raw
                     .parse()
                     .map_err(|_| invalid(format!("`{raw}` is not an integer")))?;
-                self.check_range(n as f64).map_err(&invalid)?;
+                self.check_range(n as f64).map_err(invalid)?;
                 ArgValue::Integer(n)
             }
             ArgType::Float => {
                 let n: f64 = raw
                     .parse()
                     .map_err(|_| invalid(format!("`{raw}` is not a number")))?;
-                self.check_range(n).map_err(&invalid)?;
+                self.check_range(n).map_err(invalid)?;
                 ArgValue::Float(n)
             }
             ArgType::Duration => {
