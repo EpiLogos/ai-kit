@@ -58,14 +58,8 @@ fn full_runner() -> ScriptedRunner {
         .on("capabilities", &fixture("capabilities-full.json"))
         .on("version", "cmux 0.63.1 (78) [45090d23d]")
         .on("list-workspaces", &fixture("list-workspaces-empty.json"))
-        .on("new-window", &fixture("new-window.json"))
-        .sequence(
-            "new-workspace",
-            &[
-                &fixture("new-workspace.json"),
-                &fixture("new-workspace.json").replace("workspace:3", "workspace:4"),
-            ],
-        )
+        .on("new-window", "OK window:2")
+        .sequence("new-workspace", &["OK workspace:3", "OK workspace:4"])
         .sequence(
             "new-split",
             &[
@@ -84,6 +78,12 @@ fn full_runner() -> ScriptedRunner {
         .on("close-workspace", &fixture("ok.json"))
         .on("close-surface", &fixture("ok.json"))
         .on("rename-workspace", &fixture("ok.json"))
+        .on("rename-tab", &fixture("ok.json"))
+        .on("list-panes", &fixture("list-panes-one.json"))
+        .on(
+            "list-pane-surfaces",
+            &fixture("list-pane-surfaces-root.json"),
+        )
 }
 
 fn cmux(runner: ScriptedRunner) -> Cmux<ScriptedRunner> {
@@ -182,6 +182,40 @@ fn a_cmux_that_is_not_running_reports_absence_with_the_socket_error_as_the_reaso
 }
 
 #[test]
+fn an_access_control_rejection_is_not_misreported_as_cmux_being_stopped() {
+    let runner = ScriptedRunner::new()
+        .on("version", "cmux 0.63.1 (78) [45090d23d]")
+        .failing(
+            "capabilities",
+            1,
+            "Error: connect failed: Operation not permitted, errno 1",
+        );
+    let presence = cmux(runner).detect().unwrap();
+
+    assert!(presence.installed);
+    assert!(
+        presence.server_running,
+        "the CLI connected before the server rejected the write"
+    );
+    assert!(presence
+        .detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("allowed automation scope")));
+}
+
+#[test]
+fn session_up_reports_cmux_access_control_instead_of_claiming_missing_features() {
+    let runner = ScriptedRunner::new()
+        .on("version", "cmux 0.63.1 (78) [45090d23d]")
+        .failing("capabilities", 1, "Error: Failed to write to socket");
+    let error = cmux(runner)
+        .ensure_session(&single_pane_plan("payments"), ReconcileMode::default())
+        .unwrap_err();
+    assert_eq!(error.code(), "mux.cmux_access_denied");
+    assert!(error.message().contains("inside cmux"));
+}
+
+#[test]
 fn an_unparseable_capabilities_response_degrades_instead_of_guessing() {
     let runner = ScriptedRunner::new()
         .on("version", "cmux 99.0.0")
@@ -246,6 +280,71 @@ fn a_single_view_session_becomes_one_workspace_with_no_group() {
         "grouping = auto must not wrap a single view in a group: {lines:?}"
     );
     assert_eq!(binding.surfaces.len(), 1);
+    assert_eq!(
+        binding.surface_of("main", "shell"),
+        Some("surface:1"),
+        "the binding must use the surface cmux reported, not a synthetic handle"
+    );
+    assert!(
+        adapter
+            .runner()
+            .call_lines()
+            .iter()
+            .all(|line| !line.contains("workspace:3:root")),
+        "cmux has no documented workspace:root handle"
+    );
+}
+
+#[test]
+fn every_machine_read_that_is_parsed_as_json_requests_json_from_cmux() {
+    let adapter = cmux(full_runner()).with_env_var("CMUX_WORKSPACE_ID", "workspace:2");
+    adapter.workspaces().unwrap();
+    adapter.current_location().unwrap();
+    adapter
+        .ensure_session(&single_pane_plan("payments"), ReconcileMode::default())
+        .unwrap();
+
+    let calls = adapter.runner().calls();
+    for command in [
+        "list-workspaces",
+        "identify",
+        "list-panes",
+        "list-pane-surfaces",
+    ] {
+        let argv = calls
+            .iter()
+            .find(|argv| argv.iter().any(|arg| arg == command))
+            .unwrap_or_else(|| panic!("expected {command} call in {calls:?}"));
+        assert_eq!(
+            argv.get(1).map(String::as_str),
+            Some("--json"),
+            "{command} output is parsed as JSON, so the global --json flag is mandatory: {argv:?}"
+        );
+    }
+}
+
+#[test]
+fn current_cmux_ref_shaped_responses_and_plain_creation_handles_are_supported() {
+    let runner = ScriptedRunner::new()
+        .on("capabilities", &fixture("capabilities-full.json"))
+        .on("version", "cmux 0.63.1 (78) [45090d23d]")
+        .on(
+            "list-workspaces",
+            r#"{"workspaces":[{"ref":"workspace:9","title":"payments · main · ses_CMUXSESSION000000000000","window_ref":"window:4"}]}"#,
+        )
+        .on(
+            "identify",
+            r#"{"focused":{"workspace_ref":"workspace:9","window_ref":"window:4","surface_ref":"surface:7"},"caller":null}"#,
+        );
+    let adapter = cmux(runner).with_env_var("CMUX_WORKSPACE_ID", "workspace:9");
+
+    let workspaces = adapter.workspaces().unwrap();
+    assert_eq!(workspaces[0].id, "workspace:9");
+    assert_eq!(workspaces[0].window.as_deref(), Some("window:4"));
+    let location = adapter.current_location().unwrap();
+    assert_eq!(location.session.as_deref(), Some("workspace:9"));
+    assert_eq!(location.view.as_deref(), Some("window:4"));
+    assert_eq!(location.surface.as_deref(), Some("surface:7"));
 }
 
 #[test]
@@ -263,12 +362,12 @@ fn a_multi_view_session_becomes_a_group_with_one_workspace_per_view() {
         lines.iter().any(|l| l.contains("new-window")),
         "got: {lines:?}"
     );
-    assert!(lines
-        .iter()
-        .any(|l| l.contains("new-workspace --name payments · code --cwd /work/payments")));
-    assert!(lines
-        .iter()
-        .any(|l| l.contains("new-workspace --name payments · ops --cwd /work/payments")));
+    assert!(lines.iter().any(|l| l.contains(
+        "new-workspace --name payments · code · ses_CMUXSESSION000000000000 --cwd /work/payments"
+    )));
+    assert!(lines.iter().any(|l| l.contains(
+        "new-workspace --name payments · ops · ses_CMUXSESSION000000000000 --cwd /work/payments"
+    )));
     assert!(
         lines
             .iter()
@@ -283,6 +382,50 @@ fn a_multi_view_session_becomes_a_group_with_one_workspace_per_view() {
         "the group is the session handle"
     );
     assert_eq!(binding.views.len(), 2);
+}
+
+#[test]
+fn common_plan_names_in_different_sessions_cannot_claim_the_same_workspace() {
+    let plan = single_pane_plan("dev");
+    let first = cmux(full_runner());
+    let mut other_identity = identity();
+    other_identity.session_id = Some(SessionId::generate());
+    let second = Cmux::new(full_runner()).with_identity(other_identity);
+
+    let first_title = first.workspace_title(&plan, &plan.views[0]).unwrap();
+    let second_title = second.workspace_title(&plan, &plan.views[0]).unwrap();
+    assert_ne!(first_title, second_title);
+    assert!(first_title.contains("ses_CMUXSESSION000000000000"));
+}
+
+#[test]
+fn duplicate_human_view_names_still_have_distinct_workspace_identities() {
+    let plan = plan_from(
+        r#"
+schema = 1
+id = "dev"
+name = "dev"
+
+[[views]]
+id = "frontend"
+name = "work"
+[[views.panes]]
+id = "shell"
+
+[[views]]
+id = "backend"
+name = "work"
+[[views.panes]]
+id = "shell"
+"#,
+    );
+    let adapter = cmux(full_runner());
+
+    let first = adapter.workspace_title(&plan, &plan.views[0]).unwrap();
+    let second = adapter.workspace_title(&plan, &plan.views[1]).unwrap();
+    assert_ne!(first, second);
+    assert!(first.contains("frontend"));
+    assert!(second.contains("backend"));
 }
 
 #[test]
@@ -302,6 +445,43 @@ fn grouping_never_keeps_the_views_as_loose_workspaces_and_says_so() {
         binding.warnings.iter().any(|w| w.contains("grouping")),
         "a session split across ungrouped workspaces is worth mentioning: {:?}",
         binding.warnings
+    );
+}
+
+#[test]
+fn grouping_never_rebinds_each_view_to_its_own_identity_scoped_workspace() {
+    let listing = r#"{"workspaces":[
+      {"ref":"workspace:9","title":"payments · code · ses_CMUXSESSION000000000000"},
+      {"ref":"workspace:11","title":"payments · ops · ses_CMUXSESSION000000000000"}
+    ]}"#;
+    let runner = full_runner_with_workspaces(listing).sequence(
+        "list-pane-surfaces",
+        &[
+            r#"{"surfaces":[{"ref":"surface:20","title":"AIKit · ses_CMUXSESSION000000000000/payments/code/editor"},{"ref":"surface:21","title":"AIKit · ses_CMUXSESSION000000000000/payments/code/tests"},{"ref":"surface:22","title":"AIKit · ses_CMUXSESSION000000000000/payments/code/logs"}]}"#,
+            r#"{"surfaces":[{"ref":"surface:30","title":"AIKit · ses_CMUXSESSION000000000000/payments/ops/watch"}]}"#,
+        ],
+    );
+    let adapter = cmux(runner).with_grouping(Grouping::Never);
+
+    let binding = adapter
+        .ensure_session(
+            &three_pane_plan("payments", &PathBuf::from("/work/payments")),
+            ReconcileMode::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        binding.views.get("code").map(String::as_str),
+        Some("workspace:9")
+    );
+    assert_eq!(
+        binding.views.get("ops").map(String::as_str),
+        Some("workspace:11")
+    );
+    let lines = adapter.runner().call_lines();
+    assert!(
+        !lines.iter().any(|line| line.contains("new-workspace")),
+        "a second up must rebind, not duplicate: {lines:?}"
     );
 }
 
@@ -362,7 +542,7 @@ id = "watch"
 }
 
 #[test]
-fn a_cmux_without_grouping_support_degrades_to_loose_workspaces_with_a_reason() {
+fn a_cmux_without_surface_introspection_refuses_unsafe_topology_changes() {
     let runner = ScriptedRunner::new()
         .on("capabilities", &fixture("capabilities-minimal.json"))
         .on("list-workspaces", &fixture("list-workspaces-empty.json"))
@@ -377,20 +557,21 @@ fn a_cmux_without_grouping_support_degrades_to_loose_workspaces_with_a_reason() 
         .on("select-workspace", &fixture("ok.json"));
     let adapter = cmux(runner).with_grouping(Grouping::Always);
 
-    let binding = adapter
+    let error = adapter
         .ensure_session(
             &three_pane_plan("payments", &PathBuf::from("/work/payments")),
             ReconcileMode::default(),
         )
-        .unwrap();
+        .unwrap_err();
 
+    assert_eq!(error.code(), "mux.cmux_topology_unsupported");
     assert!(
-        binding
-            .warnings
+        !adapter
+            .runner()
+            .call_lines()
             .iter()
-            .any(|w| w.contains("grouping") && w.contains("this cmux")),
-        "asking for a group from a cmux that has none must say so: {:?}",
-        binding.warnings
+            .any(|line| line.contains("new-workspace")),
+        "AIKit must fail before creating topology it cannot safely read back"
     );
 }
 
@@ -481,7 +662,13 @@ fn an_existing_session_is_rebound_by_title_when_cmux_hands_back_new_ids() {
     // cmux ids are bindings, not identity: a restored app gives the same
     // human-meaningful workspace a different id. Rebinding by title is what stops
     // `session up` from building a duplicate session after a restart.
-    let runner = full_runner_with_workspaces(&fixture("list-workspaces-rebound.json"));
+    let runner = full_runner_with_workspaces(&fixture("list-workspaces-rebound.json")).sequence(
+        "list-pane-surfaces",
+        &[
+            r#"{"surfaces":[{"ref":"surface:20","title":"AIKit · ses_CMUXSESSION000000000000/payments/code/editor"}]}"#,
+            r#"{"surfaces":[{"ref":"surface:21","title":"AIKit · ses_CMUXSESSION000000000000/payments/ops/watch"}]}"#,
+        ],
+    );
     let adapter = cmux(runner);
 
     let binding = adapter
@@ -517,8 +704,266 @@ fn an_existing_session_is_rebound_by_title_when_cmux_hands_back_new_ids() {
 }
 
 #[test]
+fn durable_session_markers_resolve_the_current_workspace_and_window_handles() {
+    let runner = full_runner_with_workspaces(&fixture("list-workspaces-rebound.json")).sequence(
+        "list-pane-surfaces",
+        &[
+            r#"{"surfaces":[{"ref":"surface:20","title":"AIKit · ses_CMUXSESSION000000000000/payments/code/editor"}]}"#,
+            r#"{"surfaces":[{"ref":"surface:21","title":"AIKit · ses_CMUXSESSION000000000000/payments/ops/watch"}]}"#,
+            r#"{"surfaces":[{"ref":"surface:22","title":"manual scratch"}]}"#,
+        ],
+    );
+    let adapter = cmux(runner);
+    let targets = adapter
+        .session_targets(&SessionId::parse("ses_CMUXSESSION000000000000").unwrap())
+        .unwrap();
+
+    assert_eq!(targets.workspaces, ["workspace:11", "workspace:9"]);
+    assert_eq!(targets.common_window.as_deref(), Some("window:4"));
+    assert_eq!(targets.exclusive_window.as_deref(), Some("window:4"));
+    let lines = adapter.runner().call_lines();
+    assert!(
+        !lines.iter().any(|line| {
+            line.contains("new-")
+                || line.contains("close-")
+                || line.contains("rename-")
+                || line.contains("move-")
+        }),
+        "live rebinding must only inspect cmux: {lines:?}"
+    );
+}
+
+#[test]
+fn a_group_window_with_a_foreign_workspace_is_not_exclusive_to_aikit() {
+    let listing = fixture("list-workspaces-rebound.json")
+        .replace(r#""window": "window:1""#, r#""window": "window:4""#);
+    let runner = full_runner_with_workspaces(&listing).sequence(
+        "list-pane-surfaces",
+        &[
+            r#"{"surfaces":[{"ref":"surface:20","title":"AIKit · ses_CMUXSESSION000000000000/payments/code/editor"}]}"#,
+            r#"{"surfaces":[{"ref":"surface:21","title":"AIKit · ses_CMUXSESSION000000000000/payments/ops/watch"}]}"#,
+            r#"{"surfaces":[{"ref":"surface:22","title":"manual scratch"}]}"#,
+        ],
+    );
+    let adapter = cmux(runner);
+    let targets = adapter
+        .session_targets(&SessionId::parse("ses_CMUXSESSION000000000000").unwrap())
+        .unwrap();
+
+    assert_eq!(targets.common_window.as_deref(), Some("window:4"));
+    assert_eq!(
+        targets.exclusive_window, None,
+        "closing window:4 would discard the manual scratch workspace"
+    );
+}
+
+#[test]
+fn a_same_named_untagged_workspace_is_not_adopted_by_title_alone() {
+    let runner = full_runner_with_workspaces(
+        r#"{"workspaces":[{"ref":"workspace:9","title":"payments · main · ses_CMUXSESSION000000000000","window_ref":"window:4"}]}"#,
+    );
+    let adapter = cmux(runner);
+
+    let error = adapter
+        .ensure_session(&single_pane_plan("payments"), ReconcileMode::default())
+        .unwrap_err();
+    assert_eq!(error.code(), "mux.cmux_ownership_ambiguous");
+    let lines = adapter.runner().call_lines();
+    assert!(
+        !lines.iter().any(|line| {
+            line.contains("rename-tab")
+                || line.contains("new-split")
+                || line.contains("close-surface")
+        }),
+        "the foreign workspace must remain untouched: {lines:?}"
+    );
+}
+
+#[test]
+fn every_existing_workspace_is_preflighted_before_any_missing_view_is_created() {
+    // `code` is missing, but the later `ops` title belongs to the user. A
+    // one-pass reconciler would create `code` and only then refuse `ops`, leaving
+    // a partial session behind.
+    let runner = full_runner_with_workspaces(
+        r#"{"workspaces":[{"ref":"workspace:11","title":"payments · ops · ses_CMUXSESSION000000000000","window_ref":"window:4"}]}"#,
+    );
+    let adapter = cmux(runner);
+
+    let error = adapter
+        .ensure_session(
+            &three_pane_plan("payments", &PathBuf::from("/work/payments")),
+            ReconcileMode::default(),
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "mux.cmux_ownership_ambiguous");
+
+    let lines = adapter.runner().call_lines();
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("new-window") || line.contains("new-workspace")),
+        "ownership ambiguity must be discovered before the first mutation: {lines:?}"
+    );
+}
+
+#[test]
+fn an_existing_owned_workspace_gets_missing_panes_without_touching_manual_surfaces() {
+    let listing = r#"{"workspaces":[{"ref":"workspace:9","title":"payments · code · ses_CMUXSESSION000000000000","window_ref":"window:4"},{"ref":"workspace:11","title":"payments · ops · ses_CMUXSESSION000000000000","window_ref":"window:4"}]}"#;
+    let tagged = r#"{"surfaces":[{"ref":"surface:20","pane_ref":"pane:1","title":"AIKit · ses_CMUXSESSION000000000000/payments/code/editor"},{"ref":"surface:21","pane_ref":"pane:2","title":"my manual shell"}]}"#;
+    let runner = full_runner_with_workspaces(listing)
+        .sequence(
+            "list-pane-surfaces",
+            &[
+                tagged,
+                r#"{"surfaces":[{"ref":"surface:40","title":"AIKit · ses_CMUXSESSION000000000000/payments/ops/watch"}]}"#,
+            ],
+        )
+        .sequence(
+            "new-split",
+            &[
+                r#"{"surface_ref":"surface:30","pane_ref":"pane:3"}"#,
+                r#"{"surface_ref":"surface:31","pane_ref":"pane:4"}"#,
+            ],
+        );
+    let adapter = cmux(runner);
+
+    let binding = adapter
+        .ensure_session(
+            &three_pane_plan("payments", &PathBuf::from("/work/payments")),
+            ReconcileMode::default(),
+        )
+        .unwrap();
+
+    assert_eq!(binding.surface_of("code", "editor"), Some("surface:20"));
+    assert_eq!(binding.surface_of("code", "tests"), Some("surface:30"));
+    assert_eq!(binding.surface_of("code", "logs"), Some("surface:31"));
+    let lines = adapter.runner().call_lines();
+    assert!(
+        lines.iter().any(|line| {
+            line.contains("--json new-split right") && line.contains("--surface surface:20")
+        }),
+        "missing declared panes must be added from their declared origin: {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("close-surface") && line.contains("surface:21")),
+        "an untagged user surface is never AIKit's to close: {lines:?}"
+    );
+}
+
+#[test]
+fn exact_reconcile_closes_only_surplus_surfaces_with_aikit_ownership_tags() {
+    let listing = r#"{"workspaces":[{"ref":"workspace:9","title":"payments · main · ses_CMUXSESSION000000000000","window_ref":"window:4"}]}"#;
+    let surfaces = r#"{"surfaces":[
+        {"ref":"surface:20","pane_ref":"pane:1","title":"AIKit · ses_CMUXSESSION000000000000/payments/main/shell"},
+        {"ref":"surface:22","pane_ref":"pane:2","title":"AIKit · ses_CMUXSESSION000000000000/payments/main/removed"},
+        {"ref":"surface:23","pane_ref":"pane:3","title":"user notes"}
+    ]}"#;
+    let runner = full_runner_with_workspaces(listing).on("list-pane-surfaces", surfaces);
+    let adapter = cmux(runner);
+
+    adapter
+        .ensure_session(&single_pane_plan("payments"), ReconcileMode::Exact)
+        .unwrap();
+
+    let lines = adapter.runner().call_lines();
+    assert!(lines.iter().any(|line| {
+        line.contains("close-surface")
+            && line.contains("surface:22")
+            && line.contains("--workspace workspace:9")
+    }));
+    assert!(!lines
+        .iter()
+        .any(|line| { line.contains("close-surface") && line.contains("surface:23") }));
+}
+
+#[test]
+fn session_existence_is_read_only_and_uses_the_same_stable_titles_as_rebind() {
+    let runner = full_runner_with_workspaces(
+        r#"{"workspaces":[{"id":"workspace:88","title":"payments · main · ses_CMUXSESSION000000000000","window":"window:4"}]}"#,
+    )
+    .on(
+        "list-pane-surfaces",
+        r#"{"surfaces":[{"ref":"surface:20","title":"AIKit · ses_CMUXSESSION000000000000/payments/main/shell"}]}"#,
+    );
+    let adapter = cmux(runner);
+    let plan = single_pane_plan("payments");
+
+    assert!(adapter.session_exists(&plan).unwrap());
+    assert!(
+        !adapter
+            .runner()
+            .call_lines()
+            .iter()
+            .any(|line| line.contains("new-workspace") || line.contains("new-window")),
+        "a diff/existence query must never create topology"
+    );
+}
+
+#[test]
+fn inspecting_cmux_drift_reports_missing_panes_without_reconciling_or_focusing() {
+    let listing = r#"{"workspaces":[
+      {"ref":"workspace:9","title":"payments · code · ses_CMUXSESSION000000000000","window_ref":"window:4"},
+      {"ref":"workspace:11","title":"payments · ops · ses_CMUXSESSION000000000000","window_ref":"window:4"}
+    ]}"#;
+    let runner = full_runner_with_workspaces(listing).sequence(
+        "list-pane-surfaces",
+        &[
+            r#"{"surfaces":[{"ref":"surface:20","title":"AIKit · ses_CMUXSESSION000000000000/payments/code/editor"}]}"#,
+            r#"{"surfaces":[{"ref":"surface:30","title":"AIKit · ses_CMUXSESSION000000000000/payments/ops/watch"}]}"#,
+        ],
+    );
+    let adapter = cmux(runner);
+    let binding = adapter
+        .inspect_session(&three_pane_plan(
+            "payments",
+            &PathBuf::from("/work/payments"),
+        ))
+        .unwrap();
+
+    assert!(binding
+        .actions
+        .iter()
+        .any(|action| action.contains("code/tests")));
+    let lines = adapter.runner().call_lines();
+    assert!(
+        !lines.iter().any(|line| {
+            line.contains("new-")
+                || line.contains("rename-")
+                || line.contains("close-")
+                || line.contains("select-workspace")
+                || line.contains("focus-")
+        }),
+        "inspection must be physically read-only: {lines:?}"
+    );
+}
+
+#[test]
+fn a_matching_workspace_title_without_this_sessions_marker_does_not_exist() {
+    let runner = full_runner_with_workspaces(
+        r#"{"workspaces":[{"id":"workspace:88","title":"payments · main · ses_CMUXSESSION000000000000","window":"window:4"}]}"#,
+    )
+    .on(
+        "list-pane-surfaces",
+        r#"{"surfaces":[{"ref":"surface:20","title":"AIKit · ses_SOMEONEELSE000000000000/payments/main/shell"}]}"#,
+    );
+    let adapter = cmux(runner);
+
+    assert!(!adapter
+        .session_exists(&single_pane_plan("payments"))
+        .unwrap());
+}
+
+#[test]
 fn an_exact_reconcile_closes_workspaces_the_plan_no_longer_declares() {
-    let runner = full_runner_with_workspaces(&fixture("list-workspaces-rebound.json"));
+    let runner = full_runner_with_workspaces(&fixture("list-workspaces-rebound.json")).sequence(
+        "list-pane-surfaces",
+        &[
+            r#"{"surfaces":[{"ref":"surface:20","title":"AIKit · ses_CMUXSESSION000000000000/payments/code/editor"}]}"#,
+            r#"{"surfaces":[{"ref":"surface:21","title":"AIKit · ses_CMUXSESSION000000000000/payments/ops/watch"}]}"#,
+        ],
+    );
     let adapter = cmux(runner);
 
     // The plan lost its `ops` view.
@@ -839,14 +1284,8 @@ fn full_runner_with_workspaces(listing: &str) -> ScriptedRunner {
         .on("capabilities", &fixture("capabilities-full.json"))
         .on("version", "cmux 0.63.1 (78) [45090d23d]")
         .on("list-workspaces", listing)
-        .on("new-window", &fixture("new-window.json"))
-        .sequence(
-            "new-workspace",
-            &[
-                &fixture("new-workspace.json"),
-                &fixture("new-workspace.json"),
-            ],
-        )
+        .on("new-window", "OK window:2")
+        .sequence("new-workspace", &["OK workspace:3", "OK workspace:4"])
         .sequence(
             "new-split",
             &[&fixture("new-split.json"), &fixture("new-split.json")],
@@ -857,5 +1296,10 @@ fn full_runner_with_workspaces(listing: &str) -> ScriptedRunner {
         .on("select-workspace", &fixture("ok.json"))
         .on("close-workspace", &fixture("ok.json"))
         .on("close-surface", &fixture("ok.json"))
-        .on("list-panes", r#"{"panes":[]}"#)
+        .on("rename-tab", &fixture("ok.json"))
+        .on("list-panes", &fixture("list-panes-one.json"))
+        .on(
+            "list-pane-surfaces",
+            &fixture("list-pane-surfaces-root.json"),
+        )
 }

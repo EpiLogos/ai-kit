@@ -67,10 +67,39 @@ pub struct DiscoveredProject {
 /// contents — parsing the profiles is the store's job, done later and only for
 /// the layers that exist.
 pub fn discover_project(start: &Path) -> Option<DiscoveredProject> {
+    discover_project_excluding(start, None)
+}
+
+/// Discover project markers while excluding the operational AIKit home.
+///
+/// The default store is `~/.aikit`, which has the same basename as a project
+/// marker. Treating that store as a marker makes every directory below `$HOME`
+/// one enormous project. Production callers know the resolved store path and
+/// pass it here; the simpler [`discover_project`] remains useful for pure
+/// filesystem callers and tests.
+pub fn discover_project_excluding(
+    start: &Path,
+    excluded_marker: Option<&Path>,
+) -> Option<DiscoveredProject> {
+    let excluded = excluded_marker.into_iter().collect::<Vec<_>>();
+    discover_project_excluding_many(start, &excluded)
+}
+
+/// The multi-store form used when an explicit `AIKIT_HOME` coexists with the
+/// default store under `$HOME`.
+pub fn discover_project_excluding_many(
+    start: &Path,
+    excluded_markers: &[&Path],
+) -> Option<DiscoveredProject> {
     let mut markers: Vec<PathBuf> = Vec::new();
     let mut cursor = Some(start);
     while let Some(dir) = cursor {
-        if dir.join(MARKER).is_dir() {
+        let marker = dir.join(MARKER);
+        if marker.is_dir()
+            && !excluded_markers
+                .iter()
+                .any(|excluded| same_location(&marker, excluded))
+        {
             markers.push(dir.to_path_buf());
         }
         cursor = dir.parent();
@@ -90,6 +119,14 @@ pub fn discover_project(start: &Path) -> Option<DiscoveredProject> {
         })
         .collect();
     Some(DiscoveredProject { root, chain })
+}
+
+fn same_location(left: &Path, right: &Path) -> bool {
+    left == right
+        || matches!(
+            (std::fs::canonicalize(left), std::fs::canonicalize(right)),
+            (Ok(left), Ok(right)) if left == right
+        )
 }
 
 /// Build a [`ContextDescriptor`] from a project root and an environment lookup.

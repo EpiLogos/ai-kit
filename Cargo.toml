@@ -11,9 +11,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/aikit/aikit"
+repository = "https://github.com/EpiLogos/ai-kit"
 
 [workspace.dependencies]
 aikit-core = { path = "crates/aikit-core" }
@@ -31,6 +31,8 @@ ulid = "3"
 jiff = "0.2"
 regex = "1"
 walkdir = "2"
+sha1 = "0.10"
+sha2 = "0.10"
 globset = "0.4"
 shell-words = "1"
 similar = "3"

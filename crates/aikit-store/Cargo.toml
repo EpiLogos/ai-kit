@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "AIKit persistence: registries, catalog index, context generations, trust, events, capture inbox."
 
 [dependencies]

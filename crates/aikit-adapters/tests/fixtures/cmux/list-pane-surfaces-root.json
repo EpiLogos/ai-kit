@@ -1,0 +1,12 @@
+{
+  "surfaces": [
+    {
+      "ref": "surface:1",
+      "pane_ref": "pane:1",
+      "index": 0,
+      "title": "",
+      "type": "terminal",
+      "selected": true
+    }
+  ]
+}
