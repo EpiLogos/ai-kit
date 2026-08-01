@@ -19,13 +19,13 @@
 //! design exists to avoid — and it would do so invisibly, since both directories
 //! keep working afterwards.
 //!
-//! ## Why the effect is `LiveReloadExpected` and not `Immediate`
+//! ## Why a changed generation requires `RestartClient`
 //!
-//! Claude watches the directory during a session, so a changed projection is
-//! picked up without a restart — but "expected" is doing real work in that name.
-//! AIKit writes files; it does not observe the client loading them. When the
-//! projection has *not* changed, there is nothing to reload and the honest answer
-//! is `Immediate`, which is what the palette then prints.
+//! Claude can watch changes inside one fixed extra directory, but AIKit publishes
+//! immutable generations by replacing the stable `current` pointer. AIKit does
+//! not observe Claude retargeting that pointer, so a changed plan requires a
+//! restart against the new `--add-dir`. When the projection has not changed,
+//! there is nothing to reload and the honest answer is `Immediate`.
 
 use std::path::{Path, PathBuf};
 
@@ -142,7 +142,8 @@ impl TargetAdapter for ClaudeAdapter {
 
     fn plan(&self, context: &ResolvedContext) -> Result<ProjectionPlan> {
         let mode = self.materialization.resolve_for(&self.capabilities());
-        let mut plan = ProjectionPlan::new(self.target(), ActivationEffect::LiveReloadExpected);
+        let mut plan =
+            ProjectionPlan::new(self.target(), ActivationEffect::restart_client("Claude"));
 
         if self.materialization.degrades_for(&self.capabilities()) {
             plan = plan.with_note(
@@ -188,7 +189,7 @@ impl TargetAdapter for ClaudeAdapter {
             // would put a "live" badge next to a toggle that did nothing.
             ActivationEffect::immediate("already projected")
         } else {
-            ActivationEffect::LiveReloadExpected
+            ActivationEffect::restart_client("Claude")
         }
     }
 }

@@ -24,8 +24,8 @@ use std::path::Path;
 use aikit_adapters::clients::codex::{CodexAdapter, SharedTreeStrategy};
 use aikit_adapters::clients::ClientAdapter;
 use aikit_core::context::Isolation;
-use aikit_core::projection::{ActivationEffect, ResolvedContext, TargetAdapter};
 use aikit_core::platform::TargetId;
+use aikit_core::projection::{ActivationEffect, ResolvedContext, TargetAdapter};
 
 /// A context with one project-stable skill and one session-only delta.
 fn context(registry: &Path, isolation: Isolation) -> ResolvedContext {
@@ -78,7 +78,10 @@ fn an_isolated_task_gets_a_real_per_task_agents_skills_directory() {
         vec![".agents/skills/code-review", ".agents/skills/perf"],
         "an isolated task gets everything, deltas included"
     );
-    assert_eq!(plan.effect, ActivationEffect::LiveReloadExpected);
+    assert!(matches!(
+        plan.effect,
+        ActivationEffect::NextSessionOnly { .. }
+    ));
     assert!(
         plan.notes.iter().any(|n| n.contains("own working tree")),
         "the palette prints these verbatim: {:?}",
@@ -94,7 +97,10 @@ fn a_dedicated_directory_counts_as_isolation_even_without_a_git_worktree() {
 
     let plan = CodexAdapter::new(tree.path()).plan(&context).unwrap();
     assert_eq!(plan.items.len(), 2);
-    assert_eq!(plan.effect, ActivationEffect::LiveReloadExpected);
+    assert!(matches!(
+        plan.effect,
+        ActivationEffect::NextSessionOnly { .. }
+    ));
 }
 
 #[test]
@@ -183,19 +189,19 @@ fn the_undeliverable_deltas_make_the_effect_brokered() {
 }
 
 #[test]
-fn a_shared_task_with_nothing_session_only_is_simply_in_effect() {
-    // No delta, no dishonesty: the project-stable skills are the tree's normal
-    // contents and every sibling task sees the same ones anyway.
+fn a_changed_shared_project_stable_tree_is_visible_to_the_next_codex_task() {
+    // The tree is safe to share, but a running plain Codex process is not proven
+    // to rescan it. Adapter-level no-op comparison is what later reports immediate.
     let registry = tempfile::tempdir().unwrap();
     let tree = tempfile::tempdir().unwrap();
     let context = stable_only_context(registry.path(), Isolation::Shared);
 
     let plan = CodexAdapter::new(tree.path()).plan(&context).unwrap();
     assert_eq!(destinations(&plan), vec![".agents/skills/code-review"]);
-    match &plan.effect {
-        ActivationEffect::Immediate { via } => assert!(via.contains("project")),
-        other => panic!("expected an immediate effect, got {other:?}"),
-    }
+    assert!(matches!(
+        plan.effect,
+        ActivationEffect::NextSessionOnly { .. }
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +291,10 @@ fn an_accepted_shared_projection_writes_everything_and_says_who_asked_for_it() {
         notes.contains("sibling") || notes.contains("other tasks"),
         "an accepted risk is still a risk worth restating: {notes}"
     );
-    assert_eq!(plan.effect, ActivationEffect::LiveReloadExpected);
+    assert!(matches!(
+        plan.effect,
+        ActivationEffect::NextSessionOnly { .. }
+    ));
 }
 
 #[test]
@@ -323,7 +332,10 @@ fn no_synthetic_home_is_ever_invented_for_the_client() {
         assert!(!rendered.contains("HOME"), "got: {rendered}");
     }
     assert!(
-        !adapter.launch_command(&context).iter().any(|a| a.contains("HOME")),
+        !adapter
+            .launch_command(&context)
+            .iter()
+            .any(|a| a.contains("HOME")),
         "got: {:?}",
         adapter.launch_command(&context)
     );
@@ -435,7 +447,9 @@ fn installing_does_not_touch_the_users_own_codex_configuration() {
     std::fs::write(config.path().join("config.toml"), own).unwrap();
 
     materialize(
-        &CodexAdapter::new(tree.path()).install(config.path()).unwrap(),
+        &CodexAdapter::new(tree.path())
+            .install(config.path())
+            .unwrap(),
         config.path(),
     );
 

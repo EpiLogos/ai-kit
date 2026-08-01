@@ -157,14 +157,14 @@ fn each_projection_item_kind_lands_as_the_thing_it_says_it_is() {
         .unwrap();
     let root = staged.path();
 
-    let linked = root.join("projections/claude-code/.claude/skills/review");
+    let linked = root.join("projections/claude/.claude/skills/review");
     assert!(
         fs::symlink_metadata(&linked).unwrap().file_type().is_symlink(),
         "a Link item should be a symlink in link mode"
     );
     assert!(linked.join("SKILL.md").is_file(), "the link must resolve");
 
-    let written = root.join("projections/claude-code/.claude/settings.json");
+    let written = root.join("projections/claude/.claude/settings.json");
     assert_eq!(fs::read_to_string(&written).unwrap(), "{\"marker\":\"one\"}");
 
     let copied = root.join("hooks/10-gate-secrets");
@@ -709,8 +709,8 @@ fn link_mode_and_copy_mode_produce_the_same_logical_projection() {
     );
 
     // …and they really were materialized differently.
-    let link_target = linked.path.join("projections/claude-code/.claude/skills/review");
-    let copy_target = copied.path.join("projections/claude-code/.claude/skills/review");
+    let link_target = linked.path.join("projections/claude/.claude/skills/review");
+    let copy_target = copied.path.join("projections/claude/.claude/skills/review");
     assert!(fs::symlink_metadata(&link_target).unwrap().file_type().is_symlink());
     assert!(!fs::symlink_metadata(&copy_target).unwrap().file_type().is_symlink());
 }
@@ -730,7 +730,7 @@ fn a_platform_without_symlinks_degrades_to_copies_and_says_so_in_the_metadata() 
         .commit(None)
         .unwrap();
 
-    let target = committed.path.join("projections/claude-code/.claude/skills/review");
+    let target = committed.path.join("projections/claude/.claude/skills/review");
     assert!(!fs::symlink_metadata(&target).unwrap().file_type().is_symlink());
 
     let metadata = generation::read_metadata(&committed.path).unwrap();

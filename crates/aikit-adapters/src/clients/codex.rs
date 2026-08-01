@@ -339,15 +339,18 @@ impl TargetAdapter for CodexAdapter {
 
         // --- The task has its own tree ---------------------------------------
         if isolation.is_isolated() {
-            let mut plan =
-                ProjectionPlan::new(self.target(), ActivationEffect::LiveReloadExpected).with_note(
-                    format!(
-                        "this task has its own working tree ({}), so its skills are written to \
+            let mut plan = ProjectionPlan::new(
+                self.target(),
+                ActivationEffect::next_session_only(
+                    "plain Codex discovers project skills at task start",
+                ),
+            )
+            .with_note(format!(
+                "this task has its own working tree ({}), so its skills are written to \
                          {} and no sibling task can see them",
-                        isolation.as_str(),
-                        self.skills_dir().display()
-                    ),
-                );
+                isolation.as_str(),
+                self.skills_dir().display()
+            ));
             let items = self.items_for(context, &skills, &mut plan)?;
             return Ok(plan.with_items(items));
         }
@@ -387,13 +390,18 @@ impl TargetAdapter for CodexAdapter {
                 .with("target", TargetId::CODEX));
             }
 
-            let mut plan = ProjectionPlan::new(self.target(), ActivationEffect::LiveReloadExpected)
-                .with_note(format!(
-                    "a shared-tree projection was explicitly accepted: every skill in this \
+            let mut plan = ProjectionPlan::new(
+                self.target(),
+                ActivationEffect::next_session_only(
+                    "plain Codex discovers project skills at task start",
+                ),
+            )
+            .with_note(format!(
+                "a shared-tree projection was explicitly accepted: every skill in this \
                      context was written to {}, and sibling tasks working in the same tree will \
                      see them too",
-                    shared_skills.display()
-                ));
+                shared_skills.display()
+            ));
             if let Some(note) = &root_fallback {
                 plan = plan.with_note(note.clone());
             }
@@ -403,7 +411,9 @@ impl TargetAdapter for CodexAdapter {
 
         // Fallback 1: project-stable only.
         let effect = if deltas.is_empty() {
-            ActivationEffect::immediate("project-stable .agents/skills")
+            ActivationEffect::next_session_only(
+                "plain Codex discovers project-stable skills at task start",
+            )
         } else {
             ActivationEffect::brokered(format!(
                 "this task uses the session's shared working tree, so {} session-only {} not \
@@ -459,9 +469,7 @@ impl TargetAdapter for CodexAdapter {
         // the opposite.
         if matches!(
             new.effect,
-            ActivationEffect::Brokered { .. }
-                | ActivationEffect::Unsupported { .. }
-                | ActivationEffect::NextSessionOnly { .. }
+            ActivationEffect::Brokered { .. } | ActivationEffect::Unsupported { .. }
         ) {
             return new.effect.clone();
         }

@@ -56,6 +56,10 @@ pub struct DiscoveredProject {
     pub root: PathBuf,
     /// Markers from the root down to the cwd, depth increasing.
     pub chain: Vec<ProjectLayer>,
+    /// Stable reusable specification, when discovery came from an external binding.
+    pub specification: Option<String>,
+    /// Ordered skill sets selected by that specification.
+    pub skill_sets: Vec<String>,
 }
 
 /// Walk up from `start` collecting every ancestor that carries a `.aikit/`
@@ -67,10 +71,18 @@ pub struct DiscoveredProject {
 /// contents — parsing the profiles is the store's job, done later and only for
 /// the layers that exist.
 pub fn discover_project(start: &Path) -> Option<DiscoveredProject> {
+    discover_project_ignoring(start, None)
+}
+
+fn discover_project_ignoring(
+    start: &Path,
+    ignored_marker: Option<&Path>,
+) -> Option<DiscoveredProject> {
     let mut markers: Vec<PathBuf> = Vec::new();
     let mut cursor = Some(start);
     while let Some(dir) = cursor {
-        if dir.join(MARKER).is_dir() {
+        let marker = dir.join(MARKER);
+        if marker.is_dir() && !ignored_marker.is_some_and(|ignored| same_path(&marker, ignored)) {
             markers.push(dir.to_path_buf());
         }
         cursor = dir.parent();
@@ -89,7 +101,67 @@ pub fn discover_project(start: &Path) -> Option<DiscoveredProject> {
             depth: depth as u32,
         })
         .collect();
-    Some(DiscoveredProject { root, chain })
+    Some(DiscoveredProject {
+        root,
+        chain,
+        specification: None,
+        skill_sets: Vec::new(),
+    })
+}
+
+/// Discover an explicit reusable Project Specification before falling back to
+/// in-repository `.aikit` markers.
+pub fn discover_project_with_home(
+    home: &aikit_store::home::AikitHome,
+    start: &Path,
+) -> aikit_core::Result<Option<DiscoveredProject>> {
+    let Some(matched) = crate::projects::resolve(home, start)? else {
+        return Ok(discover_project_ignoring(start, Some(home.root())));
+    };
+    let canonical_start = std::fs::canonicalize(start).map_err(|error| {
+        aikit_core::AikitError::new(
+            "project.directory_unreadable",
+            format!("could not resolve {}: {error}", start.display()),
+        )
+    })?;
+    let mut dirs = vec![matched.root.clone()];
+    let mut cursor = canonical_start.as_path();
+    let mut nested = Vec::new();
+    while cursor.starts_with(&matched.root) && cursor != matched.root {
+        let marker = cursor.join(MARKER);
+        if marker.is_dir() && !same_path(&marker, home.root()) {
+            nested.push(cursor.to_path_buf());
+        }
+        let Some(parent) = cursor.parent() else { break };
+        cursor = parent;
+    }
+    nested.reverse();
+    for dir in nested {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    let chain = dirs
+        .into_iter()
+        .enumerate()
+        .map(|(depth, dir)| ProjectLayer {
+            dir,
+            depth: depth as u32,
+        })
+        .collect();
+    Ok(Some(DiscoveredProject {
+        root: matched.root,
+        chain,
+        specification: Some(matched.spec.id),
+        skill_sets: matched.spec.skill_sets,
+    }))
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 /// Build a [`ContextDescriptor`] from a project root and an environment lookup.

@@ -28,7 +28,10 @@ fn a_capsule_is_loaded_from_its_manifest_and_stamped_with_registry_facts() {
 
     let capsule = load.catalog.get(&cid("script/test/cargo-nextest")).unwrap();
     assert_eq!(capsule.kind, Kind::Script);
-    assert_eq!(capsule.source.as_ref().unwrap(), &RegistrySource::personal());
+    assert_eq!(
+        capsule.source.as_ref().unwrap(),
+        &RegistrySource::personal()
+    );
     assert_eq!(capsule.root.as_deref(), Some(dir.as_path()));
     assert!(capsule.revision.is_some());
 }
@@ -68,7 +71,10 @@ fn a_capsule_nested_deeper_than_group_slash_name_is_still_found() {
     fixture.script("script/team/payments/reconcile");
 
     let load = load_registry(fixture.root(), RegistrySource::personal()).unwrap();
-    assert!(load.catalog.get(&cid("script/team/payments/reconcile")).is_some());
+    assert!(load
+        .catalog
+        .get(&cid("script/team/payments/reconcile"))
+        .is_some());
 }
 
 #[test]
@@ -85,7 +91,11 @@ fn a_registry_directory_that_does_not_exist_yet_is_not_an_error() {
     // A fresh install has no registries. Refusing to start would be worse than
     // reporting an empty catalog.
     let tmp = tempfile::tempdir().unwrap();
-    let load = load_registry(&tmp.path().join("never-created"), RegistrySource::personal()).unwrap();
+    let load = load_registry(
+        &tmp.path().join("never-created"),
+        RegistrySource::personal(),
+    )
+    .unwrap();
     assert!(load.catalog.is_empty());
 }
 
@@ -108,7 +118,11 @@ fn editing_a_payload_file_changes_the_revision() {
         .clone()
         .unwrap();
 
-    fixture.write_payload("script/test/nt", "payload/run.sh", "#!/bin/sh\necho pwned\n");
+    fixture.write_payload(
+        "script/test/nt",
+        "payload/run.sh",
+        "#!/bin/sh\necho pwned\n",
+    );
 
     let after = load_registry(fixture.root(), RegistrySource::personal())
         .unwrap()
@@ -150,6 +164,27 @@ fn moving_a_payload_file_changes_the_revision_even_when_the_bytes_are_the_same()
     assert_ne!(before, revision_of(&fixture, "script/test/nt"));
 }
 
+#[cfg(unix)]
+#[test]
+fn changing_executable_permissions_changes_the_trust_revision() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = RegistryFixture::at(tmp.path());
+    fixture.script("script/test/nt");
+    let before = revision_of(&fixture, "script/test/nt");
+    let script = fixture.capsule_dir("script/test/nt").join("payload/run.sh");
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(permissions.mode() ^ 0o100);
+    std::fs::set_permissions(&script, permissions).unwrap();
+
+    assert_ne!(
+        before,
+        revision_of(&fixture, "script/test/nt"),
+        "permission-only executable changes must require a new trust decision"
+    );
+}
+
 #[test]
 fn editing_the_manifest_changes_the_revision() {
     let tmp = tempfile::tempdir().unwrap();
@@ -175,7 +210,10 @@ fn an_unchanged_capsule_has_a_stable_revision_across_loads_and_across_registries
     one.script("script/test/nt");
     two.script("script/test/nt");
 
-    assert_eq!(revision_of(&one, "script/test/nt"), revision_of(&one, "script/test/nt"));
+    assert_eq!(
+        revision_of(&one, "script/test/nt"),
+        revision_of(&one, "script/test/nt")
+    );
     assert_eq!(
         revision_of(&one, "script/test/nt"),
         revision_of(&two, "script/test/nt"),
@@ -204,7 +242,10 @@ fn one_unparseable_manifest_does_not_blind_the_rest_of_the_registry() {
     let tmp = tempfile::tempdir().unwrap();
     let fixture = RegistryFixture::at(tmp.path());
     fixture.script("script/test/good");
-    fixture.raw_capsule("script/test/broken", "schema = 1\nid = \"script/test/broken\"\nthis is not toml");
+    fixture.raw_capsule(
+        "script/test/broken",
+        "schema = 1\nid = \"script/test/broken\"\nthis is not toml",
+    );
 
     let load = load_registry(fixture.root(), RegistrySource::personal()).unwrap();
 
@@ -299,7 +340,11 @@ fn a_broken_profile_does_not_stop_a_good_one_loading() {
     let fixture = RegistryFixture::at(tmp.path());
     fixture.profile("profile/code/rust", "enable = [\"script/test/nt\"]");
     let bad = tmp.path().join("profiles/code/broken.toml");
-    std::fs::write(&bad, "schema = 1\nid = \"profile/code/broken\"\nenable = 3\n").unwrap();
+    std::fs::write(
+        &bad,
+        "schema = 1\nid = \"profile/code/broken\"\nenable = 3\n",
+    )
+    .unwrap();
 
     let load = load_registry(fixture.root(), RegistrySource::personal()).unwrap();
     assert!(load.catalog.profile(&pid("profile/code/rust")).is_some());
@@ -398,7 +443,10 @@ fn merging_layers_a_project_registry_over_a_personal_one_and_records_the_shadow(
         &RegistrySource::project_local(),
         "the nearer registry wins"
     );
-    assert!(load.catalog.get(&cid("script/test/only-personal")).is_some());
+    assert!(load
+        .catalog
+        .get(&cid("script/test/only-personal"))
+        .is_some());
     assert_eq!(shadowed, vec![cid("script/test/nt")]);
 }
 

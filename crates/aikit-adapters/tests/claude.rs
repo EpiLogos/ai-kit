@@ -18,10 +18,10 @@ use std::path::{Path, PathBuf};
 use aikit_adapters::clients::claude::ClaudeAdapter;
 use aikit_adapters::clients::ClientAdapter;
 use aikit_core::context::Isolation;
+use aikit_core::platform::TargetId;
 use aikit_core::projection::{
     ActivationEffect, MaterializationMode, ProjectionItem, TargetAdapter,
 };
-use aikit_core::platform::TargetId;
 
 fn adapter(generation: &Path) -> ClaudeAdapter {
     ClaudeAdapter::new(generation)
@@ -37,7 +37,11 @@ fn context_with_skills(registry: &Path) -> aikit_core::projection::ResolvedConte
     ContextBuilder::new()
         .project_skill("skill/rust/code-review", "Reviews Rust.", &review)
         .project_skill("skill/rust/perf", "Finds hot loops.", &perf)
-        .project_script("script/test/cargo-nextest", "Runs tests.", registry.join("script"))
+        .project_script(
+            "script/test/cargo-nextest",
+            "Runs tests.",
+            registry.join("script"),
+        )
         .build()
 }
 
@@ -183,7 +187,10 @@ fn no_item_ever_reaches_the_users_home_or_the_projects_own_skill_directory() {
                 .unwrap_or_default();
             // Destinations are root-relative by construction; the danger is a
             // *resolved* destination landing outside the generation.
-            let resolved = generation.path().join("projections/claude").join(&destination);
+            let resolved = generation
+                .path()
+                .join("projections/claude")
+                .join(&destination);
             assert!(
                 resolved.starts_with(generation.path()),
                 "{resolved:?} is outside the generation"
@@ -225,17 +232,17 @@ fn the_launch_command_points_claude_at_the_generations_projection() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_changed_projection_is_live_because_claude_watches_the_directory() {
+fn a_changed_generation_requires_claude_to_restart_against_the_new_current_target() {
     let registry = tempfile::tempdir().unwrap();
     let generation = tempfile::tempdir().unwrap();
     let context = context_with_skills(registry.path());
     let claude = adapter(generation.path());
 
     let plan = claude.plan(&context).unwrap();
-    assert_eq!(plan.effect, ActivationEffect::LiveReloadExpected);
+    assert_eq!(plan.effect, ActivationEffect::restart_client("Claude"));
     assert_eq!(
         claude.activation_effect(None, &plan),
-        ActivationEffect::LiveReloadExpected,
+        ActivationEffect::restart_client("Claude"),
         "a first apply has something to load"
     );
 }
@@ -333,7 +340,9 @@ fn only_the_tool_events_carry_a_matcher() {
     let settings = settings_after_install(config.path());
     assert_eq!(settings["hooks"]["PreToolUse"][0]["matcher"], "*");
     assert!(
-        settings["hooks"]["SessionStart"][0].get("matcher").is_none(),
+        settings["hooks"]["SessionStart"][0]
+            .get("matcher")
+            .is_none(),
         "a matcher on an event with no tool name is noise"
     );
 }
@@ -437,7 +446,9 @@ fn a_settings_file_that_is_not_json_is_refused_rather_than_overwritten() {
     let config = tempfile::tempdir().unwrap();
     std::fs::write(config.path().join("settings.json"), "{ this is not json").unwrap();
 
-    let error = adapter(generation.path()).install(config.path()).unwrap_err();
+    let error = adapter(generation.path())
+        .install(config.path())
+        .unwrap_err();
     assert_eq!(error.code(), "client.settings_unreadable");
     assert_eq!(
         std::fs::read_to_string(config.path().join("settings.json")).unwrap(),

@@ -11,6 +11,7 @@ use std::fs;
 
 use aikit_cli::discover;
 use aikit_core::context::Isolation;
+use aikit_store::home::AikitHome;
 use tempfile::TempDir;
 
 fn touch_aikit(dir: &std::path::Path) {
@@ -62,6 +63,23 @@ fn no_marker_means_no_project() {
 }
 
 #[test]
+fn the_global_aikit_home_is_not_a_project_marker() {
+    let tmp = TempDir::new().unwrap();
+    let user_home = tmp.path().join("user");
+    let aikit_home = user_home.join(".aikit");
+    let project = user_home.join("Documents/project-without-a-marker");
+    fs::create_dir_all(&aikit_home).unwrap();
+    fs::create_dir_all(&project).unwrap();
+
+    let discovered = discover::discover_project_with_home(&AikitHome::at(aikit_home), &project)
+        .expect("discovery should succeed");
+    assert!(
+        discovered.is_none(),
+        "the global state directory must not turn every descendant of HOME into one project"
+    );
+}
+
+#[test]
 fn the_descriptor_defaults_isolation_to_shared() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("repo");
@@ -85,7 +103,10 @@ fn the_descriptor_honours_aikit_environment_variables() {
     touch_aikit(&root);
 
     let mut env: BTreeMap<String, String> = BTreeMap::new();
-    env.insert("AIKIT_SESSION_ID".into(), "ses_01HZYSESSION0000000000000".into());
+    env.insert(
+        "AIKIT_SESSION_ID".into(),
+        "ses_01HZYSESSION0000000000000".into(),
+    );
     env.insert("AIKIT_TASK".into(), "migration-review".into());
     env.insert("AIKIT_ISOLATION".into(), "worktree".into());
 

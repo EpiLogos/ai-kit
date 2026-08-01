@@ -795,7 +795,7 @@ fn a_failed_projection_leaves_the_previous_generation_active() {
 // ===========================================================================
 
 #[test]
-fn a_claude_session_receives_a_live_session_specific_skill_projection() {
+fn a_claude_session_receives_a_session_specific_skill_projection_after_restart() {
     let home = fresh_home();
     trust(&home, &["skill/rust/rust-review"]);
     let project = project_repo();
@@ -813,7 +813,8 @@ fn a_claude_session_receives_a_live_session_specific_skill_projection() {
     );
     assert_eq!(active, vec!["skill/rust/rust-review"]);
 
-    // The Claude projection for the session: live, and it contains the skill.
+    // The Claude projection contains the skill; the immutable-generation pointer
+    // swap requires a client restart before a running process can claim it.
     let svc = Service::open(
         home.home.clone(),
         project.path(),
@@ -828,8 +829,8 @@ fn a_claude_session_receives_a_live_session_specific_skill_projection() {
     let plan = claude.plan(&resolved_context(&view, &roots)).unwrap();
     assert_eq!(
         claude.activation_effect(None, &plan),
-        ActivationEffect::LiveReloadExpected,
-        "Claude picks up a session projection live"
+        ActivationEffect::restart_client("Claude"),
+        "Claude must restart against the new current generation"
     );
     assert!(
         plan.items.iter().any(|i| item_targets(i, "rust-review")),
@@ -930,7 +931,10 @@ fn an_isolated_codex_task_gets_an_isolated_projection_and_a_shared_task_falls_ba
             &svc_iso.snapshot().capsule_roots(),
         ))
         .unwrap();
-    assert_eq!(plan_iso.effect, ActivationEffect::LiveReloadExpected);
+    assert!(matches!(
+        plan_iso.effect,
+        ActivationEffect::NextSessionOnly { .. }
+    ));
     assert!(
         plan_iso.items.iter().any(|i| item_targets(i, "rust-review")),
         "an isolated task writes its skill natively"
@@ -1342,7 +1346,10 @@ fn the_codex_projection_differs_between_a_shared_and_a_worktree_task_and_says_wh
             &svc_wt.snapshot().capsule_roots(),
         ))
         .unwrap();
-    assert_eq!(plan_wt.effect, ActivationEffect::LiveReloadExpected);
+    assert!(matches!(
+        plan_wt.effect,
+        ActivationEffect::NextSessionOnly { .. }
+    ));
     assert!(plan_wt.items.iter().any(|i| item_targets(i, "rust-review")));
 
     // The shared task uses the session's tree: Codex falls back and says why,

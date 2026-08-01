@@ -36,6 +36,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Manage pinned Git and machine-local Agent Skill sources.
+    Source(SourceCmd),
+    /// Bind directories and repositories to reusable project skill sets.
+    Project(ProjectCmd),
     /// Discover the foreign skill roots already on this machine and show them.
     Init(InitArgs),
     /// Survey the skill trees on this machine: which version is running, where.
@@ -116,6 +120,115 @@ pub enum Command {
     Failures(FailuresArgs),
     /// List bypasses issued and spent.
     Bypasses(BypassesArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectCmd {
+    #[command(subcommand)]
+    pub command: ProjectSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProjectSub {
+    /// Create or replace a reusable Project Specification.
+    Bind(ProjectBindArgs),
+    /// Show the Project Specification matching the current directory.
+    Show(ProjectShowArgs),
+    /// Configure the Skill Sets inherited by Project Specifications by default.
+    Defaults(ProjectDefaultsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectBindArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+    #[arg(long = "directory", value_name = "DIR")]
+    pub directories: Vec<std::path::PathBuf>,
+    #[arg(long = "repository", value_name = "IDENTITY")]
+    pub repositories: Vec<String>,
+    #[arg(long = "set", value_name = "SKILL_SET")]
+    pub skill_sets: Vec<String>,
+    #[arg(long)]
+    pub no_default_skill_sets: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectShowArgs {}
+
+#[derive(Debug, Args)]
+pub struct ProjectDefaultsArgs {
+    #[arg(long = "set", value_name = "SKILL_SET", required = true)]
+    pub skill_sets: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SourceCmd {
+    #[command(subcommand)]
+    pub command: SourceSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SourceSub {
+    /// Register a machine-local skill directory without making it active.
+    AddDirectory(SourceAddDirectoryArgs),
+    /// Register a Git repository and exact revision without fetching it yet.
+    AddGit(SourceAddGitArgs),
+    /// Move an existing Git source to a new exact revision without syncing it.
+    SetRevision(SourceSetRevisionArgs),
+    /// Copy the source into a new immutable candidate snapshot.
+    Sync(SourceNameArgs),
+    /// Inspect source, candidate, active and rollback state.
+    Show(SourceNameArgs),
+    /// Promote the candidate snapshot; trust requires an explicit flag.
+    Promote(SourcePromoteArgs),
+    /// Return to the previous promoted snapshot.
+    Rollback(SourceNameArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SourceAddDirectoryArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+    #[arg(value_name = "DIR")]
+    pub directory: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct SourceAddGitArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+    #[arg(value_name = "REPOSITORY")]
+    pub repository: String,
+    #[arg(long, value_name = "REVISION")]
+    pub revision: String,
+    #[arg(long, default_value = ".", value_name = "DIR")]
+    pub root: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct SourceSetRevisionArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+    #[arg(value_name = "REVISION")]
+    pub revision: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SourceNameArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SourcePromoteArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// Record explicit per-revision trust for every skill in this snapshot.
+    #[arg(long)]
+    pub trust: bool,
+    /// Record trust for one selected skill revision. Repeat for more skills.
+    #[arg(long = "trust-skill", value_name = "CAPSULE", conflicts_with = "trust")]
+    pub trust_skills: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

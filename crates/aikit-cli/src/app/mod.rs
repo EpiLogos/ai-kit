@@ -302,7 +302,7 @@ impl Service {
         F: Fn(&str) -> Option<String>,
     {
         home.ensure_layout()?;
-        let project = discover::discover_project(cwd);
+        let project = discover::discover_project_with_home(&home, cwd)?;
         let project_root = project.as_ref().map(|p| p.root.clone());
 
         let descriptor = match &project_root {
@@ -484,7 +484,9 @@ impl Service {
 
     /// Where this context's client projections are materialised.
     pub fn context_projection_root(&self) -> PathBuf {
-        self.home.context_dir(&self.descriptor.context_id)
+        self.home
+            .context_dir(&self.descriptor.context_id)
+            .join("current")
     }
 
     /// Reference a profile from a scope's declaration and apply.
@@ -519,6 +521,124 @@ impl Service {
 
     pub fn descriptor(&self) -> &ContextDescriptor {
         &self.descriptor
+    }
+
+    pub fn project_specification(&self) -> Option<&str> {
+        self.project.as_ref()?.specification.as_deref()
+    }
+
+    pub fn project_skill_sets(&self) -> &[String] {
+        self.project
+            .as_ref()
+            .map(|project| project.skill_sets.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn projection_context_for(&self, source_view: &ResolvedView) -> Result<ResolvedContext> {
+        let mut view = source_view.clone();
+        let selected = self.project_skill_sets();
+        if self.has_project_skill_routing() {
+            let mut sets = Vec::new();
+            for name in selected {
+                sets.push(aikit_store::skillsets::load(&self.home, name)?);
+            }
+            let references: Vec<&aikit_core::SkillSet> = sets.iter().collect();
+            let projection = aikit_core::skillset::project_union(&references, &view);
+            let projected: std::collections::BTreeSet<CapsuleId> =
+                projection.projected.into_iter().collect();
+            view.active
+                .retain(|id, capability| capability.kind != Kind::Skill || projected.contains(id));
+            for withheld in projection.withheld {
+                view.warnings.push(format!(
+                    "{} was selected by a skill set but withheld: {}",
+                    withheld.capsule,
+                    withheld.reason.describe()
+                ));
+            }
+        }
+        Ok(ResolvedContext {
+            view,
+            capsule_roots: self.catalog.capsule_roots(),
+        })
+    }
+
+    pub(crate) fn projection_context(&self) -> Result<ResolvedContext> {
+        self.projection_context_for(&self.view)
+    }
+
+    fn has_project_skill_routing(&self) -> bool {
+        self.project_specification().is_some()
+    }
+
+    /// Publish the generation-backed Codex projection at Codex's native project
+    /// discovery path. The link targets the stable `current` pointer, so future
+    /// generation swaps are hot without rewriting the project tree.
+    fn prepare_codex_project_link(&self, context_dir: &Path) -> Result<()> {
+        if !self.has_project_skill_routing() {
+            return Ok(());
+        }
+        let Some(project_root) = self.descriptor.project_root.as_ref() else {
+            return Ok(());
+        };
+        let target = context_dir.join("current/projections/codex/.agents/skills");
+        let parent = project_root.join(".agents");
+        let link = parent.join("skills");
+        std::fs::create_dir_all(&parent).map_err(|error| {
+            AikitError::new(
+                "projection.codex_link_failed",
+                format!("could not create {}: {error}", parent.display()),
+            )
+        })?;
+
+        if let Ok(metadata) = std::fs::symlink_metadata(&link) {
+            if !metadata.file_type().is_symlink() {
+                return Err(AikitError::new(
+                    "projection.codex_tree_owned",
+                    format!(
+                        "refusing to replace user-owned Codex skill tree {}",
+                        link.display()
+                    ),
+                )
+                .with("path", link.display().to_string()));
+            }
+            let existing = std::fs::read_link(&link).map_err(|error| {
+                AikitError::new(
+                    "projection.codex_link_failed",
+                    format!("could not inspect {}: {error}", link.display()),
+                )
+            })?;
+            if existing == target {
+                return Ok(());
+            }
+            if !existing.starts_with(self.home.contexts()) {
+                return Err(AikitError::new(
+                    "projection.codex_tree_owned",
+                    format!(
+                        "refusing to replace non-AIKit Codex skill link {}",
+                        link.display()
+                    ),
+                )
+                .with("path", link.display().to_string()));
+            }
+        }
+
+        let temporary = parent.join("skills.aikit-tmp");
+        if std::fs::symlink_metadata(&temporary).is_ok() {
+            std::fs::remove_file(&temporary).map_err(|error| {
+                AikitError::new(
+                    "projection.codex_link_failed",
+                    format!("could not clear {}: {error}", temporary.display()),
+                )
+            })?;
+        }
+        create_directory_link(&target, &temporary)?;
+        std::fs::rename(&temporary, &link).map_err(|error| {
+            let _ = std::fs::remove_file(&temporary);
+            AikitError::new(
+                "projection.codex_link_failed",
+                format!("could not publish {}: {error}", link.display()),
+            )
+        })
     }
 
     pub fn resolved(&self) -> &ResolvedView {
@@ -669,9 +789,8 @@ impl Service {
     /// adapters. Any adapter that cannot plan for this context is skipped rather
     /// than guessed at, so a preview never fabricates a projection outcome.
     fn client_effects(&self, view: &ResolvedView) -> Vec<ClientEffect> {
-        let rc = ResolvedContext {
-            view: view.clone(),
-            capsule_roots: self.catalog.capsule_roots(),
+        let Ok(rc) = self.projection_context_for(view) else {
+            return Vec::new();
         };
         let ctx_dir = self.home.context_dir(&self.descriptor.context_id);
         let tree = self
@@ -888,7 +1007,17 @@ impl AikitApplication for Service {
         //    compare-and-swap against the base we resolved from.
         let context_dir = self.context_dir()?;
         let base = generation::current(&context_dir)?;
-        let plans = vec![Self::shell_plan(&self.view)?];
+        let projection_context = self.projection_context()?;
+        let tree = self
+            .descriptor
+            .project_root
+            .clone()
+            .unwrap_or_else(|| self.invocation_cwd.clone());
+        let plans = vec![
+            Self::shell_plan(&self.view)?,
+            ClaudeAdapter::new(context_dir.join("projections/claude")).plan(&projection_context)?,
+            CodexAdapter::new(tree).plan(&projection_context)?,
+        ];
 
         // A cosmetic label rides on the view as a `[properties]` entry. It is
         // excluded from the generation's identity, so labelling an unchanged view
@@ -899,6 +1028,7 @@ impl AikitApplication for Service {
                 .insert("label".to_string(), label.to_string());
         }
         let staged = GenerationBuilder::new().build(&context_dir, &view, &plans)?;
+        self.prepare_codex_project_link(&context_dir)?;
         let committed = staged.commit(base.as_ref())?;
 
         Ok(AppliedGeneration {
@@ -979,6 +1109,34 @@ impl AikitApplication for Service {
         let registry_root = self.home.registry("personal");
         inbox.promote(&r.candidate, &edits, &registry_root)
     }
+}
+
+#[cfg(unix)]
+fn create_directory_link(target: &Path, link: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(target, link).map_err(|error| {
+        AikitError::new(
+            "projection.codex_link_failed",
+            format!(
+                "could not link {} to {}: {error}",
+                link.display(),
+                target.display()
+            ),
+        )
+    })
+}
+
+#[cfg(windows)]
+fn create_directory_link(target: &Path, link: &Path) -> Result<()> {
+    std::os::windows::fs::symlink_dir(target, link).map_err(|error| {
+        AikitError::new(
+            "projection.codex_link_failed",
+            format!(
+                "could not link {} to {}: {error}",
+                link.display(),
+                target.display()
+            ),
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,6 +1270,11 @@ pub fn load_catalog(
             let one = load_registry(&root, RegistrySource::new(name))?;
             load.merge(one);
         }
+    }
+
+    for (name, root) in crate::skill_sources::active_registries(home)? {
+        let one = load_registry(&root, RegistrySource::new(name))?;
+        load.merge(one);
     }
 
     if let Some(root) = project_root {

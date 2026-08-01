@@ -11,8 +11,8 @@
 
 #![forbid(unsafe_code)]
 
-pub mod app;
 pub mod adopt;
+pub mod app;
 pub mod cli;
 pub mod client;
 pub mod collate;
@@ -26,7 +26,9 @@ pub mod jump;
 pub mod multicall;
 pub mod mux_install;
 pub mod profile_ops;
+pub mod projects;
 pub mod run;
+pub mod skill_sources;
 pub mod task;
 pub mod tree_build;
 pub mod ui;

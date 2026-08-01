@@ -1,0 +1,2 @@
+schema = 1
+enable = ["skill/mattpocock/engineering/wayfinder", "skill/mattpocock/engineering/setup-matt-pocock-skills", "skill/mattpocock/productivity/grilling", "skill/mattpocock/engineering/domain-modeling", "skill/mattpocock/engineering/prototype", "skill/mattpocock/engineering/research", "skill/writing-guidance-tools/writing-guidance-tools"]

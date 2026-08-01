@@ -1,5 +1,6 @@
 /target
 /.worktrees/
+/.agents/
 **/*.rs.bk
 .DS_Store
 *.pending-snap

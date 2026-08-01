@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use aikit_core::procedure::{Inverse, Plan, Procedure, ProcedureKind, WorldEdit};
-use aikit_core::projection::{ProjectionItem, ResolvedContext};
+use aikit_core::projection::ProjectionItem;
 use aikit_core::{AikitError, Result};
 
 use aikit_adapters::clients::{broker::BrokerAdapter, claude::ClaudeAdapter, codex::CodexAdapter, ClientAdapter};
@@ -99,10 +99,7 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
 /// The argv that starts a client against this context's projection.
 pub fn launch_command(service: &Service, client: &str) -> Result<Vec<String>> {
     let (adapter, _) = adapter_for(service, client)?;
-    let rc = ResolvedContext {
-        view: service.resolved().clone(),
-        capsule_roots: service.snapshot().capsule_roots(),
-    };
+    let rc = service.projection_context()?;
     let argv = adapter.launch_command(&rc);
     if argv.is_empty() {
         return Err(AikitError::new(
@@ -116,10 +113,7 @@ pub fn launch_command(service: &Service, client: &str) -> Result<Vec<String>> {
 
 /// What each client's projection would be, and whether it is installed.
 pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::Value>> {
-    let rc = ResolvedContext {
-        view: service.resolved().clone(),
-        capsule_roots: service.snapshot().capsule_roots(),
-    };
+    let rc = service.projection_context()?;
     let mut rows = Vec::new();
     for client in ["claude", "codex", "broker"] {
         if only.is_some_and(|o| o != client && !(o == "claude-code" && client == "claude")) {

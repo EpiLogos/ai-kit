@@ -183,6 +183,9 @@ accident.
 ~/.aikit/
   config.toml
   registries/<name>/capsules/<kind>/<group>/<name>/{manifest.toml,payload/}
+  sources/<name>/{source.toml,state.toml,snapshots/<digest>/}
+  projects/<name>.toml
+  skillsets/<group>/<name>/members
   profiles/<group>/<name>.toml
   inbox/{ready,quarantine,rejected}/
   state/
@@ -231,6 +234,13 @@ pointer replacement.
 
 `AIKIT_VIEW=$HOME/.aikit/state/contexts/<ctx>/current` is stable across
 generation swaps.
+
+Managed skill sources and project routing are specified in ADR 0002. Every
+generation carries both Codex and Claude Code native projections. A bound,
+isolated project may expose the Codex projection through an AIKit-owned
+`.agents/skills` link; publication never overwrites a user-owned skill tree.
+Filesystem publication is hot, while in-process harness catalogue reload remains
+harness-dependent.
 
 ---
 

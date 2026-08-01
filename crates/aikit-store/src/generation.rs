@@ -490,6 +490,7 @@ pub fn plan_root(target: &TargetId) -> PathBuf {
         TargetId::HOOKS => PathBuf::from("hooks"),
         TargetId::GUIDANCE => PathBuf::from("guidance"),
         TargetId::SHELL => PathBuf::from("bin"),
+        TargetId::CLAUDE_CODE => PathBuf::from("projections/claude"),
         other => PathBuf::from("projections").join(other),
     }
 }

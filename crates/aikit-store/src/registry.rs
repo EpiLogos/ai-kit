@@ -302,16 +302,17 @@ fn load_profile(profiles_root: &Path, path: &Path) -> Result<Profile> {
 // The content revision
 // ---------------------------------------------------------------------------
 
-/// Hash the manifest plus every other file in the capsule directory.
+/// Hash the manifest plus every other file and its relevant permissions in the capsule directory.
 ///
 /// Paths are included alongside contents so that moving a file — same bytes, new
 /// name — is a new revision, and lengths are included so that concatenation
 /// cannot be made ambiguous by a crafted filename.
 pub fn compute_revision(dir: &Path, manifest_bytes: &[u8]) -> Result<Revision> {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"aikit-capsule-revision-v1\n");
+    hasher.update(b"aikit-capsule-revision-v2\n");
     hasher.update(&(manifest_bytes.len() as u64).to_le_bytes());
     hasher.update(manifest_bytes);
+    hasher.update(&file_mode(&dir.join(MANIFEST_FILE))?.to_le_bytes());
 
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     for entry in walkdir::WalkDir::new(dir)
@@ -340,9 +341,26 @@ pub fn compute_revision(dir: &Path, manifest_bytes: &[u8]) -> Result<Revision> {
             std::fs::read(&path).map_err(|e| io_error("registry.read_failed", &path, &e))?;
         hasher.update(&(relative.len() as u64).to_le_bytes());
         hasher.update(relative.as_bytes());
+        hasher.update(&file_mode(&path)?.to_le_bytes());
         hasher.update(&(contents.len() as u64).to_le_bytes());
         hasher.update(&contents);
     }
 
     Ok(Revision::from_hash(hasher.finalize()))
+}
+
+#[cfg(unix)]
+fn file_mode(path: &Path) -> Result<u32> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o7777)
+        .map_err(|error| io_error("registry.read_failed", path, &error))
+}
+
+#[cfg(not(unix))]
+fn file_mode(path: &Path) -> Result<u32> {
+    std::fs::metadata(path)
+        .map(|metadata| u32::from(metadata.permissions().readonly()))
+        .map_err(|error| io_error("registry.read_failed", path, &error))
 }

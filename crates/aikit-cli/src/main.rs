@@ -150,6 +150,8 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
     // not delegating the decision.
     let json_mode = cli.json;
     match cli.command {
+        Some(Command::Source(c)) => cmd_source(cwd, c),
+        Some(Command::Project(c)) => cmd_project(cwd, c),
         None => open_palette(cwd, None, false),
         Some(Command::Init(a)) => cmd_init(cwd, a),
         Some(Command::Collate(a)) => cmd_collate(cwd, a),
@@ -192,6 +194,179 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Client(c)) => cmd_client(cwd, c),
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
+    }
+}
+
+fn cmd_project(cwd: &std::path::Path, command: ProjectCmd) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    match command.command {
+        ProjectSub::Bind(args) => {
+            let spec = aikit_cli::projects::bind(
+                service.home(),
+                &args.id,
+                &args.directories,
+                &args.repositories,
+                &args.skill_sets,
+                !args.no_default_skill_sets,
+            )?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "project": spec.id,
+                    "directories": spec.directories.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+                    "repositories": spec.repositories,
+                    "skill_sets": spec.skill_sets,
+                    "inherit_default_skill_sets": spec.inherit_default_skill_sets,
+                }),
+                vec![],
+            ))
+        }
+        ProjectSub::Show(_) => {
+            let matched = aikit_cli::projects::resolve(service.home(), cwd)?.ok_or_else(|| {
+                AikitError::new(
+                    "project.not_matched",
+                    format!("{} is not matched by a Project Specification", cwd.display()),
+                )
+            })?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "project": matched.spec.id,
+                    "root": matched.root.display().to_string(),
+                    "matched_by": matched.matched_by,
+                    "skill_sets": matched.spec.skill_sets,
+                    "inherit_default_skill_sets": matched.spec.inherit_default_skill_sets,
+                }),
+                vec![],
+            ))
+        }
+        ProjectSub::Defaults(args) => {
+            let defaults = aikit_cli::projects::set_defaults(service.home(), &args.skill_sets)?;
+            Ok(reply(
+                &service,
+                jval!({ "default_skill_sets": defaults.default_skill_sets }),
+                vec![],
+            ))
+        }
+    }
+}
+
+fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
+    use aikit_cli::skill_sources;
+
+    let service = Service::discover(cwd)?;
+    let home = service.home();
+    match command.command {
+        SourceSub::AddDirectory(args) => {
+            let spec = skill_sources::add_directory(home, &args.id, &args.directory)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "id": spec.id,
+                    "kind": spec.kind.label(),
+                    "portable": spec.kind.portable(),
+                }),
+                vec![],
+            ))
+        }
+        SourceSub::AddGit(args) => {
+            let spec = skill_sources::add_git(
+                home,
+                &args.id,
+                &args.repository,
+                &args.revision,
+                &args.root,
+            )?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "id": spec.id,
+                    "kind": spec.kind.label(),
+                    "portable": spec.kind.portable(),
+                }),
+                vec![],
+            ))
+        }
+        SourceSub::SetRevision(args) => {
+            let spec = skill_sources::set_revision(home, &args.id, &args.revision)?;
+            let revision = match spec.kind {
+                skill_sources::SourceKind::Git { revision, .. } => revision,
+                skill_sources::SourceKind::Directory { .. } => unreachable!(),
+            };
+            Ok(reply(
+                &service,
+                jval!({
+                    "id": spec.id,
+                    "revision": revision,
+                    "candidate_snapshot": null,
+                }),
+                vec![],
+            ))
+        }
+        SourceSub::Sync(args) => {
+            let snapshot = skill_sources::sync(home, &args.id)?;
+            let status = skill_sources::status(home, &args.id)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "id": args.id,
+                    "candidate_snapshot": snapshot.digest,
+                    "active_snapshot": status.state.active_snapshot,
+                    "git_commit": snapshot.git_commit,
+                    "skills": snapshot.skills.len(),
+                }),
+                vec![],
+            ))
+        }
+        SourceSub::Show(args) => {
+            let status = skill_sources::status(home, &args.id)?;
+            let active_registry = skill_sources::active_registry(home, &args.id)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "id": status.spec.id,
+                    "kind": status.spec.kind.label(),
+                    "portable": status.spec.kind.portable(),
+                    "candidate_snapshot": status.state.candidate_snapshot,
+                    "active_snapshot": status.state.active_snapshot,
+                    "active_registry": active_registry.map(|path| path.display().to_string()),
+                    "candidate_skills": status.candidate.as_ref().map(|record| record.skills.len()),
+                    "active_skills": status.active.as_ref().map(|record| record.skills.len()),
+                    "rollback_points": status.state.history,
+                }),
+                vec![],
+            ))
+        }
+        SourceSub::Promote(args) => {
+            let (snapshot, trusted) = skill_sources::promote(
+                home,
+                &args.id,
+                args.trust,
+                &args.trust_skills,
+            )?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "id": args.id,
+                    "active_snapshot": snapshot.digest,
+                    "skills": snapshot.skills.len(),
+                    "trusted_skills": trusted,
+                }),
+                vec![],
+            ))
+        }
+        SourceSub::Rollback(args) => {
+            let snapshot = skill_sources::rollback(home, &args.id)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "id": args.id,
+                    "active_snapshot": snapshot.digest,
+                    "skills": snapshot.skills.len(),
+                }),
+                vec![],
+            ))
+        }
     }
 }
 
