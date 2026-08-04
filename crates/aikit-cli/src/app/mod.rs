@@ -838,6 +838,9 @@ impl Service {
 
     fn scope_document(&self, scope: ScopeKind) -> Result<ScopeWriter> {
         match scope {
+            ScopeKind::Global => Ok(ScopeWriter::Profile(ProfileDocument::open(
+                &self.home.global_profile(),
+            )?)),
             ScopeKind::Session => {
                 let session = self.descriptor.session_id.clone().ok_or_else(|| {
                     AikitError::new(
@@ -1294,6 +1297,18 @@ fn assemble_layers(
     project: Option<&DiscoveredProject>,
 ) -> Result<Vec<ScopeLayer>> {
     let mut layers = Vec::new();
+
+    let global = home.global_profile();
+    if global.exists() {
+        let patch = ProfileDocument::open(&global)?.patch()?;
+        if !patch.is_empty() {
+            layers.push(ScopeLayer::new(
+                ScopeKind::Global,
+                LayerOrigin::new(global.display().to_string()),
+                patch,
+            ));
+        }
+    }
 
     if let Some(project) = project {
         for layer in &project.chain {

@@ -12,6 +12,7 @@
 //! ```text
 //! <home>/
 //!   config.toml
+//!   scopes/global/profile.toml
 //!   registries/<name>/capsules/... profiles/...
 //!   profiles/<group>/<name>.toml
 //!   inbox/{ready,quarantine,rejected}/
@@ -84,6 +85,15 @@ impl AikitHome {
     /// own `profiles/` directory.
     pub fn profiles(&self) -> PathBuf {
         self.root.join("profiles")
+    }
+
+    /// The active, lowest-precedence User Baseline Profile.
+    ///
+    /// This is deliberately outside `profiles/`: that tree contains reusable
+    /// named profile definitions, while this file is a scope declaration that
+    /// is resolved in every context.
+    pub fn global_profile(&self) -> PathBuf {
+        self.root.join("scopes/global/profile.toml")
     }
 
     pub fn inbox(&self) -> PathBuf {

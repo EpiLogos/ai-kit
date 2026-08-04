@@ -2182,7 +2182,9 @@ fn resolve_scope(service: &Service, scope: Option<&str>) -> Result<ScopeKind> {
 fn parse_scope(raw: &str) -> Result<ScopeKind> {
     ScopeKind::ALL
         .into_iter()
-        .find(|s| s.as_str() == raw)
+        .find(|scope| {
+            scope.as_str() == raw || (*scope == ScopeKind::Global && raw == "user")
+        })
         .ok_or_else(|| {
             AikitError::new("cli.usage", format!("`{raw}` is not a scope"))
                 .with("scope", raw.to_string())

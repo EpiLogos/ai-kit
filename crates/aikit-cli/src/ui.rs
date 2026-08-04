@@ -162,7 +162,7 @@ pub fn run_tree(service: &Service, fullscreen: bool) -> Result<TreeOutcome> {
             format!("Write staged changes to the {scope} profile?"),
             match scope {
                 aikit_core::scope::ScopeKind::Global => {
-                    "~/.aikit/profiles applies to every project on this machine."
+                    "The User Baseline Profile applies at lowest precedence in every AIKit context."
                 }
                 aikit_core::scope::ScopeKind::Project => {
                     "<repo>/.aikit/profile.toml is committed and affects every collaborator."
