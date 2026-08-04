@@ -12,7 +12,7 @@ use crate::id::{CapsuleId, Revision};
 use crate::platform::TargetId;
 use crate::trust::TrustState;
 
-use super::{ResolvedView, UnavailableReason};
+use super::{AppliedSkillUsageOverlay, ResolvedView, UnavailableReason};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Explanation {
@@ -37,6 +37,7 @@ pub struct Explanation {
     pub exports: Vec<String>,
     /// Advisory "often used with…" pointers (L5). Never a dependency.
     pub related_skills: Vec<CapsuleId>,
+    pub skill_usage_overlays: Vec<AppliedSkillUsageOverlay>,
 }
 
 pub(super) fn explain(view: &ResolvedView, id: &CapsuleId) -> Option<Explanation> {
@@ -85,6 +86,11 @@ pub(super) fn explain(view: &ResolvedView, id: &CapsuleId) -> Option<Explanation
         activation_meaning: entry.kind.activation_meaning(),
         exports: entry.exports.clone(),
         related_skills: entry.related_skills.clone(),
+        skill_usage_overlays: view
+            .skill_usage_overlays
+            .get(id)
+            .cloned()
+            .unwrap_or_default(),
     })
 }
 
@@ -149,6 +155,13 @@ impl Explanation {
             out.push_str("Often used with:\n");
             for related in &self.related_skills {
                 out.push_str(&format!("  {related}\n"));
+            }
+        }
+
+        if !self.skill_usage_overlays.is_empty() {
+            out.push_str("Skill Usage Overlays:\n");
+            for overlay in &self.skill_usage_overlays {
+                out.push_str(&format!("  {} {}\n", overlay.scope, overlay.origin));
             }
         }
 

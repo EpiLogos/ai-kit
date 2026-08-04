@@ -173,7 +173,17 @@ impl TargetAdapter for ClaudeAdapter {
                 name: Self::export_name(capability),
                 ..skill
             };
-            plan = plan.with_items(exported.project(Path::new(SKILLS_PREFIX), mode)?);
+            let overlays = context
+                .view
+                .skill_usage_overlays
+                .get(&capability.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            plan = plan.with_items(exported.project_effective(
+                Path::new(SKILLS_PREFIX),
+                mode,
+                overlays,
+            )?);
         }
 
         Ok(plan)

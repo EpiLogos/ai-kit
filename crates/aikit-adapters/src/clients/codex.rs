@@ -271,7 +271,17 @@ impl CodexAdapter {
                 name: Self::export_name(capability),
                 ..skill
             };
-            items.extend(exported.project(Path::new(SKILLS_PREFIX), mode)?);
+            let overlays = context
+                .view
+                .skill_usage_overlays
+                .get(&capability.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            items.extend(exported.project_effective(
+                Path::new(SKILLS_PREFIX),
+                mode,
+                overlays,
+            )?);
         }
         Ok(items)
     }

@@ -16,6 +16,73 @@ use crate::id::{CapsuleId, GenerationId, ProfileId, SessionId};
 /// Free-form per-capsule configuration, carried through resolution untouched.
 pub type ConfigTable = toml::value::Table;
 
+/// Additive, scoped guidance for how an immutable Agent Skill is selected and
+/// applied. The source skill remains authoritative and untouched; this patch is
+/// compiled into the harness-facing Effective Skill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillUsageOverlayPatch {
+    /// Whether lower-scope orientation remains in force. `false` starts again
+    /// from the upstream skill before adding this scope's guidance.
+    #[serde(default = "yes")]
+    pub inherit: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub guidance: Option<String>,
+    #[serde(default)]
+    pub reviewed_against: Option<crate::id::Revision>,
+}
+
+impl SkillUsageOverlayPatch {
+    pub fn has_content(&self) -> bool {
+        self.description.as_ref().is_some_and(|v| !v.trim().is_empty())
+            || self.guidance.as_ref().is_some_and(|v| !v.trim().is_empty())
+    }
+
+    pub fn validate(&self, id: &CapsuleId) -> Result<()> {
+        for (field, value) in [
+            ("description", self.description.as_deref()),
+            ("guidance", self.guidance.as_deref()),
+        ] {
+            if value.is_some_and(|text| text.contains('\0')) {
+                return Err(AikitError::new(
+                    "skill_overlay.invalid_text",
+                    format!("{id} overlay {field} contains a NUL byte"),
+                ));
+            }
+        }
+        if self.inherit && !self.has_content() && self.reviewed_against.is_none() {
+            return Err(AikitError::new(
+                "skill_overlay.empty",
+                format!("{id} has an empty Skill Usage Overlay"),
+            ));
+        }
+        if let Some(revision) = &self.reviewed_against {
+            let raw = revision.as_str();
+            if raw.len() != 64
+                || !raw
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(AikitError::new(
+                    "skill_overlay.invalid_revision",
+                    format!(
+                        "{id} reviewed_against must be an exact 64-character lowercase content digest"
+                    ),
+                )
+                .with("capability", id.to_string())
+                .with("revision", raw.to_string()));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
 /// How a capsule's `[config.*]` section combines across scope layers.
 ///
 /// This is declared by the capsule the section configures, not by each writer of
@@ -63,6 +130,8 @@ pub struct PoolPatch {
     pub disable: Vec<CapsuleId>,
     #[serde(default)]
     pub config: BTreeMap<CapsuleId, ConfigTable>,
+    #[serde(default, rename = "skill-overlays")]
+    pub skill_overlays: BTreeMap<CapsuleId, SkillUsageOverlayPatch>,
 }
 
 impl PoolPatch {
@@ -72,6 +141,7 @@ impl PoolPatch {
             && self.enable.is_empty()
             && self.disable.is_empty()
             && self.config.is_empty()
+            && self.skill_overlays.is_empty()
     }
 
     /// Declaring the same capsule in both lists is a contradiction rather than a
@@ -84,6 +154,9 @@ impl PoolPatch {
                     format!("`{id}` is both enabled and disabled in the same scope"),
                 );
             }
+        }
+        for (id, overlay) in &self.skill_overlays {
+            overlay.validate(id)?;
         }
         Ok(())
     }
@@ -106,6 +179,7 @@ impl PoolPatch {
         self.enable.retain(|c| c != id);
         self.disable.retain(|c| c != id);
         self.config.remove(id);
+        self.skill_overlays.remove(id);
     }
 }
 
@@ -218,6 +292,8 @@ pub struct ProfileTemplate {
     pub disable: Vec<String>,
     #[serde(default)]
     pub config: BTreeMap<String, ConfigTable>,
+    #[serde(default, rename = "skill-overlays")]
+    pub skill_overlays: BTreeMap<String, SkillUsageOverlayPatch>,
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +335,7 @@ impl Profile {
             && self.template.enable.is_empty()
             && self.template.disable.is_empty()
             && self.template.config.is_empty()
+            && self.template.skill_overlays.is_empty()
         {
             return Ok(self.patch.clone());
         }
@@ -333,6 +410,19 @@ impl Profile {
             let id = CapsuleId::parse(&substitute(raw_id, &values))?;
             patch.config.insert(id, substitute_table(table, &values));
         }
+        for (raw_id, overlay) in &self.template.skill_overlays {
+            let id = CapsuleId::parse(&substitute(raw_id, &values))?;
+            let mut resolved = overlay.clone();
+            resolved.description = resolved
+                .description
+                .as_deref()
+                .map(|text| substitute(text, &values));
+            resolved.guidance = resolved
+                .guidance
+                .as_deref()
+                .map(|text| substitute(text, &values));
+            patch.skill_overlays.insert(id, resolved);
+        }
         patch.validate()?;
         Ok(patch)
     }
@@ -360,6 +450,8 @@ pub struct ProfileFile {
     pub disable: Vec<String>,
     #[serde(default)]
     pub config: BTreeMap<String, ConfigTable>,
+    #[serde(default, rename = "skill-overlays")]
+    pub skill_overlays: BTreeMap<String, SkillUsageOverlayPatch>,
 }
 
 impl ProfileFile {
@@ -375,6 +467,7 @@ impl ProfileFile {
             enable: self.enable,
             disable: self.disable,
             config: self.config,
+            skill_overlays: self.skill_overlays,
         };
         let mut profile = Profile {
             id: self.id,
@@ -737,6 +830,37 @@ label = "strict={{strict}}"
         assert_eq!(config["retries"], toml::Value::Integer(3));
         assert_eq!(config["strict"], toml::Value::Boolean(true));
         assert_eq!(config["label"].as_str(), Some("strict=true"));
+    }
+
+    #[test]
+    fn named_profiles_can_parameterize_skill_usage_overlays() {
+        let file: ProfileFile = toml::from_str(
+            r#"schema = 1
+id = "profile/test/wayfinder"
+
+[params.owner]
+type = "string"
+
+[skill-overlays."skill/{{owner}}/wayfinder"]
+description = "Prefer for {{owner}} work spanning agent sessions."
+guidance = "Use the {{owner}} issue tracker as the shared map."
+"#,
+        )
+        .unwrap();
+        let profile = file.into_profile().unwrap();
+        let bindings = BTreeMap::from([("owner".into(), Literal::String("team".into()))]);
+
+        let patch = profile.resolve_patch(&bindings).unwrap();
+        let overlay = &patch.skill_overlays
+            [&CapsuleId::parse("skill/team/wayfinder").unwrap()];
+        assert_eq!(
+            overlay.description.as_deref(),
+            Some("Prefer for team work spanning agent sessions.")
+        );
+        assert_eq!(
+            overlay.guidance.as_deref(),
+            Some("Use the team issue tracker as the shared map.")
+        );
     }
 
     #[test]

@@ -46,6 +46,9 @@ The product is therefore **the resolver and the contextual lifecycle**.
 | **Capsule** | The packaging unit: a directory with `manifest.toml` and a payload. |
 | **Capability** | A capsule that has entered the catalog and is eligible for selection. User-facing term. |
 | **Profile** | A reusable declarative patch naming capabilities to enable/disable. *Not* a capsule. |
+| **User Baseline Profile** | The persistent, machine-local `global` scope applied to every context before project/session/task layers. `user` is its CLI alias. |
+| **Skill Usage Overlay** | Scoped, additive user orientation for one immutable upstream skill: optional routing description plus body guidance with provenance. |
+| **Effective Skill** | The upstream `SKILL.md` plus the ordered Skill Usage Overlays that survive scope inheritance. |
 | **Pool patch** | The `profiles`/`enable`/`disable`/`[config.*]` declarations attached to one scope. |
 | **Effective view** | The resolved graph after layering, dependency expansion, compatibility, policy, conflict and trust checks. |
 | **Projection** | A target-specific representation of an effective view. |
@@ -60,8 +63,10 @@ differently everywhere.
 
 ## 2. The central decision
 
-There is **no global mutable active set**. The primary state is an *effective
-capability view resolved per context*, where a context is
+There is **no global mutable live set** shared by already-running agents. There
+is a persistent User Baseline Profile, but it is declarative input to each
+context's resolution and may be overridden by more specific scopes. The primary
+state is an *effective capability view resolved per context*, where a context is
 
 ```
 user + host + project scope chain + session space + task + target client
@@ -124,6 +129,7 @@ managed policy constraints          (not a normal layer; immutable)
 
 Files:
 
+* `~/.aikit/scopes/global/profile.toml` — persistent User Baseline Profile.
 * `<repo>/.aikit/profile.toml` — committed.
 * `<repo>/.aikit/profile.local.toml` — ignored.
 * `~/.aikit/state/sessions/<session-id>/overlay.toml` — session overlay, carries
@@ -140,6 +146,25 @@ Files:
 5. Conflicts (and export-name collisions) fail visibly by default.
 6. Nothing becomes active merely because it matches a tag. Tags are for search.
 7. Every final decision is explainable (`aikit explain`).
+
+### Skill Usage Overlays
+
+`[skill-overlays."<skill-id>"]` is a scoped orientation layer, not a fork of a
+skill. Each record may append a routing `description`, body `guidance`, and an
+exact `reviewed_against` content revision. Lower-scope overlays accumulate in
+precedence order. `inherit = false` discards lower-scope augmentations for that
+skill before adding the current scope's text.
+
+The generated Effective Skill labels this section as user-authoritative
+orienting augmentation. More-specific contextual direction governs where it
+conflicts with more-general orientation, but the overlay cannot change capsule
+identity, source revision, trust, permissions, or the upstream skill's invocation
+policy. A stale `reviewed_against` pin warns without silently discarding the
+user's guidance. An overlay on a non-skill capability is a resolution error.
+
+Overlays participate in the effective-view hash, while the immutable source
+revision and trust tuple remain unchanged. Codex and Claude receive the same
+rendered Effective Skill, and broker reads return those same instructions.
 
 ### Declared vs effective
 
@@ -182,6 +207,7 @@ accident.
 ```
 ~/.aikit/
   config.toml
+  scopes/global/profile.toml
   registries/<name>/capsules/<kind>/<group>/<name>/{manifest.toml,payload/}
   sources/<name>/{source.toml,state.toml,snapshots/<digest>/}
   projects/<name>.toml

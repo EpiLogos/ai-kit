@@ -37,6 +37,19 @@ aikit set create mattpocock/wayfinder-foundation \
 aikit project defaults --set mattpocock/wayfinder-foundation
 ```
 
+Project defaults choose reusable Skill Sets when a Project Specification is
+created. They are not the persistent user scope. Put capabilities or profiles
+that should resolve in every context in the User Baseline Profile instead:
+
+```sh
+aikit enable skill/mattpocock/engineering/wayfinder --scope user
+aikit use <profile-id> --scope user
+```
+
+`user` and `global` name the same lowest-precedence scope, stored at
+`~/.aikit/scopes/global/profile.toml`. Project, session, and task declarations
+remain free to override it.
+
 Bind by one or more canonical directories, Git repository identities, or both:
 
 ```sh
@@ -61,11 +74,33 @@ aikit project show
 aikit status --all
 ```
 
+Add user-specific orientation without modifying or copying the upstream skill:
+
+```sh
+aikit skill overlay set skill/mattpocock/engineering/wayfinder \
+  --scope user \
+  --description "Prefer for work spanning agent sessions." \
+  --guidance-file /absolute/path/to/wayfinder-orientation.md \
+  --reviewed-against <exact-64-character-source-revision>
+
+aikit skill overlay show skill/mattpocock/engineering/wayfinder
+```
+
+More-specific project/session/task overlays append after the user orientation.
+Use `--no-inherit` when a scope must discard lower-scope orientation, and
+`aikit skill overlay clear <skill-id> --scope <scope>` to return that scope to
+inheritance. The emitted section explicitly identifies itself as
+user-authoritative orienting augmentation; it never changes trust, permissions,
+payload identity, or upstream invocation policy.
+
 AIKit publishes immutable Codex and Claude Code projections together. Codex
 also receives a project-native `.agents/skills` link when the context is
 isolated. Preserve `AIKIT_CONTEXT_ID` across mux panes and child processes so
-they resolve the same generation. After changing the selected skill catalogue,
-start a new harness task unless that harness explicitly confirms live reload.
+they resolve the same generation. After changing the selected skill catalogue
+or changing Skill Usage Overlays, start a new harness task unless that harness
+explicitly confirms live reload. A generation swap updates the filesystem
+immediately; it cannot force an already-running harness to forget its cached
+skill catalogue or prompt.
 
 The full Matt Pocock pack is catalogued, but this workflow trusts only the six
 selected Matt skills. Additional pack members remain unavailable until they are

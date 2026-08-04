@@ -18,6 +18,8 @@ use std::path::Path;
 
 use aikit_adapters::clients::agent_skills::{self, AgentSkill};
 use aikit_core::projection::MaterializationMode;
+use aikit_core::resolve::AppliedSkillUsageOverlay;
+use aikit_core::scope::{LayerOrigin, ScopeKind};
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -201,6 +203,65 @@ fn a_linked_projection_is_one_item_because_the_directory_goes_across_whole() {
         items[0].destination().unwrap(),
         Path::new(".claude/skills/code-review")
     );
+}
+
+#[test]
+fn an_effective_skill_adds_framed_orientation_without_mutating_source_or_policy() {
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let root = source.path().join("wayfinder");
+    let upstream = "---\nname: wayfinder\ndescription: Plans huge work.\ndisable-model-invocation: true\nallowed-tools: [Read, Grep]\n---\n\n# Wayfinder\n\nUpstream instructions.\n";
+    write(&root.join("SKILL.md"), upstream);
+    write(&root.join("references/tracker.md"), "Tracker operations.\n");
+    write(&root.join("scripts/check.sh"), "#!/bin/sh\nexit 0\n");
+    let skill = agent_skills::validate(&root).unwrap();
+    let overlays = vec![AppliedSkillUsageOverlay {
+        description: Some("Prefer it for work spanning agent sessions.".into()),
+        guidance: Some("A map may carry execution when its Notes explicitly say so.".into()),
+        reviewed_against: None,
+        scope: ScopeKind::Global,
+        origin: LayerOrigin::new("user baseline"),
+        via_profile: None,
+    }];
+
+    let items = skill
+        .project_effective(
+            Path::new(".claude/skills"),
+            MaterializationMode::Link,
+            &overlays,
+        )
+        .unwrap();
+    materialize(&items, target.path());
+
+    let rendered = std::fs::read_to_string(
+        target.path().join(".claude/skills/wayfinder/SKILL.md"),
+    )
+    .unwrap();
+    let frontmatter: serde_yaml::Value =
+        serde_yaml::from_str(rendered.split("---").nth(1).unwrap()).unwrap();
+    assert_eq!(frontmatter["disable-model-invocation"].as_bool(), Some(true));
+    assert_eq!(frontmatter["allowed-tools"][0].as_str(), Some("Read"));
+    assert_eq!(frontmatter["allowed-tools"][1].as_str(), Some("Grep"));
+    assert!(frontmatter["description"]
+        .as_str()
+        .unwrap()
+        .contains("Prefer it for work spanning agent sessions."));
+    assert!(rendered.contains("## AIKit Skill Usage Overlay"));
+    assert!(rendered.contains("authoritative orienting augmentation"));
+    assert!(rendered.contains("more specific guidance governs"));
+    assert!(rendered.contains("Scope: global"));
+    assert!(rendered.contains("Source: user baseline"));
+    assert!(rendered.contains("A map may carry execution"));
+    assert_eq!(
+        std::fs::read_to_string(
+            target
+                .path()
+                .join(".claude/skills/wayfinder/references/tracker.md")
+        )
+        .unwrap(),
+        "Tracker operations.\n"
+    );
+    assert_eq!(std::fs::read_to_string(root.join("SKILL.md")).unwrap(), upstream);
 }
 
 #[test]

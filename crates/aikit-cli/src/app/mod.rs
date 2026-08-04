@@ -25,6 +25,7 @@ use aikit_core::policy::ManagedPolicy;
 use aikit_core::projection::{
     ActivationEffect, ProjectionItem, ProjectionPlan, ResolvedContext, TargetAdapter,
 };
+use aikit_core::profile::SkillUsageOverlayPatch;
 use aikit_core::resolve::{resolve_diagnostic, ResolveRequest as CoreResolveRequest, ResolvedView};
 use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
@@ -39,6 +40,7 @@ use aikit_store::registry::{load_project_local, load_registry, RegistryProblem, 
 use aikit_store::trust::{TrustSnapshot, TrustStore};
 
 use aikit_adapters::clients::broker::BrokerAdapter;
+use aikit_adapters::clients::agent_skills;
 use aikit_adapters::clients::claude::ClaudeAdapter;
 use aikit_adapters::clients::codex::CodexAdapter;
 
@@ -513,6 +515,47 @@ impl Service {
         )
     }
 
+    pub fn set_skill_usage_overlay(
+        &mut self,
+        id: &CapsuleId,
+        scope: ScopeKind,
+        overlay: &SkillUsageOverlayPatch,
+    ) -> Result<AppliedGeneration> {
+        {
+            let mut writer = self.scope_document(scope)?;
+            writer.set_skill_overlay(id, overlay);
+            writer.save()?;
+        }
+        AikitApplication::apply(
+            self,
+            ApplyRequest {
+                scope,
+                toggles: vec![],
+                label: None,
+            },
+        )
+    }
+
+    pub fn clear_skill_usage_overlay(
+        &mut self,
+        id: &CapsuleId,
+        scope: ScopeKind,
+    ) -> Result<AppliedGeneration> {
+        {
+            let mut writer = self.scope_document(scope)?;
+            writer.clear_skill_overlay(id);
+            writer.save()?;
+        }
+        AikitApplication::apply(
+            self,
+            ApplyRequest {
+                scope,
+                toggles: vec![],
+                label: None,
+            },
+        )
+    }
+
     /// The operational index, for commands that read or write the store's own
     /// records (the inbox channel, collate's conflict reports).
     pub fn index(&self) -> &Index {
@@ -649,6 +692,48 @@ impl Service {
     /// chain builder, capability previews).
     pub fn snapshot(&self) -> &Snapshot {
         &self.catalog
+    }
+
+    /// The exact instructions a brokered harness should read for an active
+    /// Skill, including the same scoped augmentation native adapters project.
+    pub fn effective_skill_markdown(&self, id: &CapsuleId) -> Result<String> {
+        let capability = self.view.active.get(id).ok_or_else(|| {
+            AikitError::new(
+                "capabilities.not_active",
+                format!("{id} is not active in this context"),
+            )
+            .with("capability", id.to_string())
+        })?;
+        if capability.kind != Kind::Skill {
+            return Err(AikitError::new(
+                "capabilities.not_a_skill",
+                format!("{id} is {}, not a skill", capability.kind.as_str()),
+            ));
+        }
+        let root = self
+            .catalog
+            .capsule_roots()
+            .remove(id)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "run.source_missing",
+                    format!("{id} has no payload on this machine"),
+                )
+            })?;
+        let payload_root = capability
+            .config
+            .get("root")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("payload");
+        let skill = agent_skills::validate(&root.join(payload_root))?;
+        let overlays = self
+            .view
+            .skill_usage_overlays
+            .get(id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        skill.effective_markdown(overlays)
     }
 
     /// Dispatch a client hook event through the immutable chain for this context,
@@ -923,6 +1008,20 @@ impl ScopeWriter {
         match self {
             ScopeWriter::Overlay(doc) => doc.use_profile(profile),
             ScopeWriter::Profile(doc) => doc.use_profile(profile),
+        }
+    }
+
+    fn set_skill_overlay(&mut self, id: &CapsuleId, overlay: &SkillUsageOverlayPatch) {
+        match self {
+            ScopeWriter::Overlay(doc) => doc.set_skill_overlay(id, overlay),
+            ScopeWriter::Profile(doc) => doc.set_skill_overlay(id, overlay),
+        }
+    }
+
+    fn clear_skill_overlay(&mut self, id: &CapsuleId) {
+        match self {
+            ScopeWriter::Overlay(doc) => doc.clear_skill_overlay(id),
+            ScopeWriter::Profile(doc) => doc.clear_skill_overlay(id),
         }
     }
 

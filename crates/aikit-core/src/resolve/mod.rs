@@ -182,6 +182,19 @@ pub struct ActiveCapability {
     pub required_by: Vec<CapsuleId>,
 }
 
+/// One scope's user-authoritative orienting augmentation of an immutable Skill.
+/// Records stay ordered by resolution precedence so projection can explain and
+/// render the effective guidance without losing provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedSkillUsageOverlay {
+    pub description: Option<String>,
+    pub guidance: Option<String>,
+    pub reviewed_against: Option<Revision>,
+    pub scope: ScopeKind,
+    pub origin: LayerOrigin,
+    pub via_profile: Option<ProfileId>,
+}
+
 /// A compact record of a catalogued capsule, kept so the view can explain and
 /// rank capabilities that are *not* active without reaching back to the catalog.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -211,6 +224,8 @@ pub struct ResolvedView {
     pub unavailable: BTreeMap<CapsuleId, UnavailableReason>,
     pub selection_log: Vec<SelectionOp>,
     pub catalog_index: BTreeMap<CapsuleId, CatalogEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub skill_usage_overlays: BTreeMap<CapsuleId, Vec<AppliedSkillUsageOverlay>>,
     pub warnings: Vec<String>,
     pub hash: ResolutionHash,
     pub catalog_revision: String,
@@ -402,6 +417,12 @@ struct Resolver<'a> {
     warnings: Vec<String>,
 }
 
+type FoldedLayers = (
+    Vec<SelectionOp>,
+    BTreeMap<CapsuleId, ConfigTable>,
+    BTreeMap<CapsuleId, Vec<AppliedSkillUsageOverlay>>,
+);
+
 impl<'a> Resolver<'a> {
     fn fail(&mut self, error: AikitError) {
         self.problems.push(Problem::fatal(error));
@@ -413,7 +434,7 @@ impl<'a> Resolver<'a> {
 
     fn run(&mut self) -> Option<ResolvedView> {
         // 1. Fold the scope chain into an ordered operation log.
-        let (ops, config) = self.fold_layers()?;
+        let (ops, config, skill_usage_overlays) = self.fold_layers()?;
 
         // 2. Last operation wins per capsule.
         let mut declared: BTreeMap<CapsuleId, DeclaredState> = BTreeMap::new();
@@ -558,7 +579,12 @@ impl<'a> Resolver<'a> {
         }
 
         let catalog_index = self.build_catalog_index();
-        let hash = hash::resolution_hash(&self.request.context, policy, &active);
+        let hash = hash::resolution_hash(
+            &self.request.context,
+            policy,
+            &active,
+            &skill_usage_overlays,
+        );
 
         Some(ResolvedView {
             context: self.request.context.clone(),
@@ -568,6 +594,7 @@ impl<'a> Resolver<'a> {
             unavailable,
             selection_log: ops,
             catalog_index,
+            skill_usage_overlays,
             warnings: self.warnings.clone(),
             hash,
             catalog_revision: self.catalog.catalog_revision(),
@@ -578,13 +605,14 @@ impl<'a> Resolver<'a> {
     }
 
     /// Sort layers by precedence and expand their profiles into a flat op log.
-    fn fold_layers(&mut self) -> Option<(Vec<SelectionOp>, BTreeMap<CapsuleId, ConfigTable>)> {
+    fn fold_layers(&mut self) -> Option<FoldedLayers> {
         let mut indexed: Vec<(usize, &ScopeLayer)> =
             self.request.layers.iter().enumerate().collect();
         indexed.sort_by_key(|(i, layer)| layer.precedence_key(*i));
 
         let mut ops: Vec<SelectionOp> = Vec::new();
         let mut config: BTreeMap<CapsuleId, ConfigTable> = BTreeMap::new();
+        let mut skill_usage_overlays = BTreeMap::new();
 
         for (_, layer) in indexed {
             if let Err(e) = layer.patch.validate() {
@@ -602,6 +630,7 @@ impl<'a> Resolver<'a> {
                         layer,
                         &mut ops,
                         &mut config,
+                        &mut skill_usage_overlays,
                         &mut expanded,
                         &mut stack,
                     )
@@ -620,6 +649,7 @@ impl<'a> Resolver<'a> {
                         layer,
                         &mut ops,
                         &mut config,
+                        &mut skill_usage_overlays,
                         &mut expanded,
                         &mut stack,
                     )
@@ -629,10 +659,17 @@ impl<'a> Resolver<'a> {
                     // diagnosis is complete.
                 }
             }
-            self.apply_patch(&layer.patch, layer, None, &mut ops, &mut config);
+            self.apply_patch(
+                &layer.patch,
+                layer,
+                None,
+                &mut ops,
+                &mut config,
+                &mut skill_usage_overlays,
+            );
         }
 
-        Some((ops, config))
+        Some((ops, config, skill_usage_overlays))
     }
 
     // The traversal carries the layer plus four independently-mutated resolver
@@ -646,6 +683,7 @@ impl<'a> Resolver<'a> {
         layer: &ScopeLayer,
         ops: &mut Vec<SelectionOp>,
         config: &mut BTreeMap<CapsuleId, ConfigTable>,
+        skill_usage_overlays: &mut BTreeMap<CapsuleId, Vec<AppliedSkillUsageOverlay>>,
         expanded: &mut BTreeSet<String>,
         stack: &mut Vec<ProfileId>,
     ) -> Option<()> {
@@ -700,6 +738,7 @@ impl<'a> Resolver<'a> {
                 layer,
                 ops,
                 config,
+                skill_usage_overlays,
                 expanded,
                 stack,
             );
@@ -711,6 +750,7 @@ impl<'a> Resolver<'a> {
                 layer,
                 ops,
                 config,
+                skill_usage_overlays,
                 expanded,
                 stack,
             );
@@ -723,6 +763,7 @@ impl<'a> Resolver<'a> {
                 layer,
                 ops,
                 config,
+                skill_usage_overlays,
                 expanded,
                 stack,
             );
@@ -734,6 +775,7 @@ impl<'a> Resolver<'a> {
                 layer,
                 ops,
                 config,
+                skill_usage_overlays,
                 expanded,
                 stack,
             );
@@ -741,7 +783,14 @@ impl<'a> Resolver<'a> {
         stack.pop();
 
         expanded.insert(instance);
-        self.apply_patch(&patch, layer, Some(profile_id), ops, config);
+        self.apply_patch(
+            &patch,
+            layer,
+            Some(profile_id),
+            ops,
+            config,
+            skill_usage_overlays,
+        );
         Some(())
     }
 
@@ -752,6 +801,7 @@ impl<'a> Resolver<'a> {
         via_profile: Option<&ProfileId>,
         ops: &mut Vec<SelectionOp>,
         config: &mut BTreeMap<CapsuleId, ConfigTable>,
+        skill_usage_overlays: &mut BTreeMap<CapsuleId, Vec<AppliedSkillUsageOverlay>>,
     ) {
         for id in &patch.enable {
             ops.push(SelectionOp {
@@ -782,6 +832,57 @@ impl<'a> Resolver<'a> {
                 .map(|c| c.config_merge)
                 .unwrap_or_default();
             combine_config(config.entry(id.clone()).or_default(), table, mode);
+        }
+        for (id, overlay) in &patch.skill_overlays {
+            let Some(capsule) = self.catalog.get(id) else {
+                self.fail(
+                    AikitError::new(
+                        "skill_overlay.unknown_skill",
+                        format!("{id} has a Skill Usage Overlay but is not in the catalogue"),
+                    )
+                    .with("capability", id.to_string()),
+                );
+                continue;
+            };
+            if capsule.kind != Kind::Skill {
+                self.fail(
+                    AikitError::new(
+                        "skill_overlay.not_a_skill",
+                        format!("{id} is {}, not a skill", capsule.kind.as_str()),
+                    )
+                    .with("capability", id.to_string()),
+                );
+                continue;
+            }
+            if !overlay.inherit {
+                skill_usage_overlays.remove(id);
+            }
+            if let (Some(expected), Some(actual)) =
+                (overlay.reviewed_against.as_ref(), capsule.revision.as_ref())
+            {
+                if expected != actual {
+                    self.warn(format!(
+                        "{id} Skill Usage Overlay from {} {} was reviewed against {}, but the active skill is {}; review the augmentation against the updated source",
+                        layer.kind,
+                        layer.origin,
+                        expected.short(),
+                        actual.short()
+                    ));
+                }
+            }
+            if overlay.has_content() {
+                skill_usage_overlays
+                    .entry(id.clone())
+                    .or_default()
+                    .push(AppliedSkillUsageOverlay {
+                        description: overlay.description.clone(),
+                        guidance: overlay.guidance.clone(),
+                        reviewed_against: overlay.reviewed_against.clone(),
+                        scope: layer.kind,
+                        origin: layer.origin.clone(),
+                        via_profile: via_profile.cloned(),
+                    });
+            }
         }
     }
 

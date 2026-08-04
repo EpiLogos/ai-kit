@@ -14,11 +14,11 @@ use crate::id::CapsuleId;
 use crate::policy::ManagedPolicy;
 use crate::profile::canonical_config;
 
-use super::ActiveCapability;
+use super::{ActiveCapability, AppliedSkillUsageOverlay};
 
 /// Bumped whenever the canonical encoding below changes, so that old generations
 /// are recognised as stale rather than silently reused.
-const HASH_DOMAIN: &str = "aikit-resolution-v1";
+const HASH_DOMAIN: &str = "aikit-resolution-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -60,6 +60,10 @@ pub fn resolution_hash(
     context: &ContextDescriptor,
     policy: &ManagedPolicy,
     active: &std::collections::BTreeMap<CapsuleId, ActiveCapability>,
+    skill_usage_overlays: &std::collections::BTreeMap<
+        CapsuleId,
+        Vec<AppliedSkillUsageOverlay>,
+    >,
 ) -> ResolutionHash {
     let mut canonical = String::with_capacity(256 + active.len() * 128);
     canonical.push_str(HASH_DOMAIN);
@@ -104,6 +108,24 @@ pub fn resolution_hash(
         canonical.push('\n');
     }
 
+    for (id, overlays) in skill_usage_overlays {
+        for overlay in overlays {
+            canonical.push_str("skill-overlay=");
+            canonical.push_str(&id.to_string());
+            canonical.push('|');
+            canonical.push_str(
+                &serde_json::to_string(&overlay.description)
+                    .expect("an optional string always serializes"),
+            );
+            canonical.push('|');
+            canonical.push_str(
+                &serde_json::to_string(&overlay.guidance)
+                    .expect("an optional string always serializes"),
+            );
+            canonical.push('\n');
+        }
+    }
+
     ResolutionHash(blake3::hash(canonical.as_bytes()).to_hex().to_string())
 }
 
@@ -119,16 +141,36 @@ mod tests {
 
     #[test]
     fn an_empty_view_still_hashes_to_something_stable() {
-        let a = resolution_hash(&ctx(), &ManagedPolicy::default(), &BTreeMap::new());
-        let b = resolution_hash(&ctx(), &ManagedPolicy::default(), &BTreeMap::new());
+        let a = resolution_hash(
+            &ctx(),
+            &ManagedPolicy::default(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        let b = resolution_hash(
+            &ctx(),
+            &ManagedPolicy::default(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
         assert_eq!(a, b);
         assert!(!a.as_str().is_empty());
     }
 
     #[test]
     fn the_context_id_does_not_affect_the_hash() {
-        let a = resolution_hash(&ctx(), &ManagedPolicy::default(), &BTreeMap::new());
-        let b = resolution_hash(&ctx(), &ManagedPolicy::default(), &BTreeMap::new());
+        let a = resolution_hash(
+            &ctx(),
+            &ManagedPolicy::default(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        let b = resolution_hash(
+            &ctx(),
+            &ManagedPolicy::default(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
         // Two `for_project` calls generate different context ids.
         assert_eq!(a, b);
     }
@@ -138,14 +180,29 @@ mod tests {
         let mut isolated = ctx();
         isolated.isolation = Isolation::Worktree;
         assert_ne!(
-            resolution_hash(&ctx(), &ManagedPolicy::default(), &BTreeMap::new()),
-            resolution_hash(&isolated, &ManagedPolicy::default(), &BTreeMap::new())
+            resolution_hash(
+                &ctx(),
+                &ManagedPolicy::default(),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            ),
+            resolution_hash(
+                &isolated,
+                &ManagedPolicy::default(),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            )
         );
     }
 
     #[test]
     fn a_generation_id_can_be_derived_from_any_hash() {
-        let h = resolution_hash(&ctx(), &ManagedPolicy::default(), &BTreeMap::new());
+        let h = resolution_hash(
+            &ctx(),
+            &ManagedPolicy::default(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
         let gen = h.generation_id();
         assert!(gen.as_str().starts_with("gen_"));
         assert_eq!(gen.as_str().len(), 20);

@@ -35,6 +35,7 @@ fn config_layer(kind: ScopeKind, id: &str, body: &str) -> ScopeLayer {
             enable: vec![cid(id)],
             disable: vec![],
             config,
+            skill_overlays: Default::default(),
         },
     }
 }

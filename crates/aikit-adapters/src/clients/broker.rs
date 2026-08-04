@@ -167,13 +167,23 @@ impl BrokerAdapter {
 
         for (id, capability) in &context.view.active {
             let entry = context.view.catalog_index.get(id);
-            let description = entry.map(|e| e.description.as_str()).unwrap_or("");
+            let mut description = entry.map(|e| e.description.clone()).unwrap_or_default();
+            if let Some(overlays) = context.view.skill_usage_overlays.get(id) {
+                for addition in overlays.iter().filter_map(|overlay| overlay.description.as_ref()) {
+                    if !addition.trim().is_empty() {
+                        if !description.is_empty() {
+                            description.push(' ');
+                        }
+                        description.push_str(addition.trim());
+                    }
+                }
+            }
             let tags = entry.map(|e| e.tags.as_slice()).unwrap_or(&[]);
 
             let line = format!(
                 "- `{id}` — {}: {}{}\n",
                 capability.name,
-                truncate(&first_sentence(description), self.budget.max_description_chars),
+                truncate(&first_sentence(&description), self.budget.max_description_chars),
                 if tags.is_empty() {
                     String::new()
                 } else {

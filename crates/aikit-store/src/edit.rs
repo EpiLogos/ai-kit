@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 use toml_edit::{Array, DocumentMut, Item, Value};
 
 use aikit_core::error::err;
-use aikit_core::profile::{PoolPatch, ProjectProfileFile, SessionOverlayFile};
+use aikit_core::profile::{
+    PoolPatch, ProjectProfileFile, SessionOverlayFile, SkillUsageOverlayPatch,
+};
 use aikit_core::{AikitError, CapsuleId, GenerationId, ProfileId, Result, SessionId};
 
 use crate::home::{create_dir_all, io_error};
@@ -32,6 +34,7 @@ const ENABLE: &str = "enable";
 const DISABLE: &str = "disable";
 const PROFILES: &str = "profiles";
 const CONFIG: &str = "config";
+const SKILL_OVERLAYS: &str = "skill-overlays";
 
 // ---------------------------------------------------------------------------
 // Profile documents
@@ -117,6 +120,53 @@ impl ProfileDocument {
             self.doc[CONFIG] = Item::Table(table);
         }
         self.doc[CONFIG][&id.to_string()][key] = value;
+    }
+
+    /// Replace this scope's additive guidance for one skill while leaving every
+    /// unrelated token and comment in the hand-written profile untouched.
+    pub fn set_skill_overlay(&mut self, id: &CapsuleId, overlay: &SkillUsageOverlayPatch) {
+        if self.doc.get(SKILL_OVERLAYS).is_none() {
+            let mut table = toml_edit::Table::new();
+            table.set_implicit(true);
+            self.doc[SKILL_OVERLAYS] = Item::Table(table);
+        }
+        let rendered = id.to_string();
+        if let Some(overlays) = self
+            .doc
+            .get_mut(SKILL_OVERLAYS)
+            .and_then(Item::as_table_like_mut)
+        {
+            overlays.remove(&rendered);
+        }
+        self.doc[SKILL_OVERLAYS][&rendered]["inherit"] = toml_edit::value(overlay.inherit);
+        if let Some(description) = &overlay.description {
+            self.doc[SKILL_OVERLAYS][&rendered]["description"] =
+                toml_edit::value(description.clone());
+        }
+        if let Some(guidance) = &overlay.guidance {
+            self.doc[SKILL_OVERLAYS][&rendered]["guidance"] =
+                toml_edit::value(guidance.clone());
+        }
+        if let Some(revision) = &overlay.reviewed_against {
+            self.doc[SKILL_OVERLAYS][&rendered]["reviewed_against"] =
+                toml_edit::value(revision.as_str());
+        }
+    }
+
+    pub fn clear_skill_overlay(&mut self, id: &CapsuleId) {
+        let rendered = id.to_string();
+        let empty = self
+            .doc
+            .get_mut(SKILL_OVERLAYS)
+            .and_then(Item::as_table_like_mut)
+            .map(|overlays| {
+                overlays.remove(&rendered);
+                overlays.is_empty()
+            })
+            .unwrap_or(false);
+        if empty {
+            self.doc.remove(SKILL_OVERLAYS);
+        }
     }
 
     /// The declarations as the resolver would read them.
@@ -266,6 +316,14 @@ impl OverlayDocument {
 
     pub fn set_config(&mut self, id: &CapsuleId, key: &str, value: Item) {
         self.inner.set_config(id, key, value);
+    }
+
+    pub fn set_skill_overlay(&mut self, id: &CapsuleId, overlay: &SkillUsageOverlayPatch) {
+        self.inner.set_skill_overlay(id, overlay);
+    }
+
+    pub fn clear_skill_overlay(&mut self, id: &CapsuleId) {
+        self.inner.clear_skill_overlay(id);
     }
 
     /// The declarations as the resolver would read them.

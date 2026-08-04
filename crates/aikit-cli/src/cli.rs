@@ -38,6 +38,8 @@ pub struct Cli {
 pub enum Command {
     /// Manage pinned Git and machine-local Agent Skill sources.
     Source(SourceCmd),
+    /// Author scoped, additive guidance for Agent Skills.
+    Skill(SkillCmd),
     /// Bind directories and repositories to reusable project skill sets.
     Project(ProjectCmd),
     /// Discover the foreign skill roots already on this machine and show them.
@@ -120,6 +122,71 @@ pub enum Command {
     Failures(FailuresArgs),
     /// List bypasses issued and spent.
     Bypasses(BypassesArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SkillCmd {
+    #[command(subcommand)]
+    pub command: SkillSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillSub {
+    /// Manage additive Skill Usage Overlays.
+    Overlay(SkillOverlayCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct SkillOverlayCmd {
+    #[command(subcommand)]
+    pub command: SkillOverlaySub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillOverlaySub {
+    /// Replace this scope's orienting augmentation for a skill.
+    Set(SkillOverlaySetArgs),
+    /// Show the effective ordered augmentations for a skill.
+    Show(SkillOverlayShowArgs),
+    /// Remove this scope's augmentation for a skill.
+    Clear(SkillOverlayClearArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SkillOverlaySetArgs {
+    #[arg(value_name = "CAPABILITY")]
+    pub capability: String,
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+    /// Additional routing text appended to the skill's description.
+    #[arg(long, value_name = "TEXT")]
+    pub description: Option<String>,
+    /// User-authoritative contextual instructions appended to the skill body.
+    #[arg(long, value_name = "TEXT", conflicts_with = "guidance_file")]
+    pub guidance: Option<String>,
+    /// Read contextual instructions from a UTF-8 Markdown file.
+    #[arg(long, value_name = "FILE", conflicts_with = "guidance")]
+    pub guidance_file: Option<std::path::PathBuf>,
+    /// Start from the upstream skill rather than inheriting lower-scope overlays.
+    #[arg(long)]
+    pub no_inherit: bool,
+    /// Source revision against which this augmentation was reviewed.
+    #[arg(long, value_name = "REVISION")]
+    pub reviewed_against: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SkillOverlayShowArgs {
+    #[arg(value_name = "CAPABILITY")]
+    pub capability: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SkillOverlayClearArgs {
+    #[arg(value_name = "CAPABILITY")]
+    pub capability: String,
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Args)]

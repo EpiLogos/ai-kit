@@ -166,6 +166,7 @@ fn layer(kind: ScopeKind, enable: &[&str]) -> ScopeLayer {
             enable: enable.iter().map(|s| cid(s)).collect(),
             disable: vec![],
             config: Default::default(),
+            skill_overlays: Default::default(),
         },
     }
 }

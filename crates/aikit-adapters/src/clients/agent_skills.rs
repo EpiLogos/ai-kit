@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use aikit_core::projection::{MaterializationMode, ProjectionItem};
+use aikit_core::resolve::AppliedSkillUsageOverlay;
 use aikit_core::{AikitError, Result};
 
 /// The subdirectories the Agent Skills form defines, in the order they are
@@ -76,10 +77,171 @@ impl AgentSkill {
         }
     }
 
+    /// Project the immutable source plus ordered, additive orientation. Skills
+    /// with no overlay keep the one-link fast path; an Effective Skill writes
+    /// only its generated `SKILL.md` and links/copies every companion file.
+    pub fn project_effective(
+        &self,
+        prefix: &Path,
+        mode: MaterializationMode,
+        overlays: &[AppliedSkillUsageOverlay],
+    ) -> Result<Vec<ProjectionItem>> {
+        if overlays.is_empty() {
+            return self.project(prefix, mode);
+        }
+
+        let destination = prefix.join(&self.name);
+        let source = std::fs::read_to_string(self.root.join(SKILL_FILE)).map_err(|error| {
+            AikitError::new(
+                "skill.unreadable",
+                format!("could not read {}: {error}", self.root.join(SKILL_FILE).display()),
+            )
+        })?;
+        let rendered = render_effective_skill(&source, overlays)?;
+        let mut items = vec![ProjectionItem::write(
+            destination.join(SKILL_FILE),
+            rendered,
+        )?];
+        for relative in self.files.iter().filter(|path| path.as_str() != SKILL_FILE) {
+            let from = self.root.join(relative);
+            let to = destination.join(relative);
+            items.push(match mode {
+                MaterializationMode::Copy => ProjectionItem::copy(from, to)?,
+                MaterializationMode::Auto | MaterializationMode::Link => {
+                    ProjectionItem::link(from, to)?
+                }
+            });
+        }
+        items.sort_by(|left, right| left.destination().cmp(&right.destination()));
+        Ok(items)
+    }
+
+    pub fn effective_markdown(
+        &self,
+        overlays: &[AppliedSkillUsageOverlay],
+    ) -> Result<String> {
+        let source = std::fs::read_to_string(self.root.join(SKILL_FILE)).map_err(|error| {
+            AikitError::new(
+                "skill.unreadable",
+                format!("could not read {}: {error}", self.root.join(SKILL_FILE).display()),
+            )
+        })?;
+        if overlays.is_empty() {
+            Ok(source)
+        } else {
+            render_effective_skill(&source, overlays)
+        }
+    }
+
     /// The one-line index entry a broker skill lists this under.
     pub fn summary(&self) -> String {
         format!("{}: {}", self.name, first_sentence(&self.description))
     }
+}
+
+fn render_effective_skill(
+    source: &str,
+    overlays: &[AppliedSkillUsageOverlay],
+) -> Result<String> {
+    let (frontmatter, body) = split_frontmatter(source)?;
+    let mut yaml: serde_yaml::Mapping = serde_yaml::from_str(frontmatter).map_err(|error| {
+        AikitError::new(
+            "skill.invalid",
+            format!("could not parse {SKILL_FILE} frontmatter as YAML: {error}"),
+        )
+    })?;
+    let description_key = serde_yaml::Value::String("description".into());
+    let description = yaml
+        .get(&description_key)
+        .and_then(serde_yaml::Value::as_str)
+        .ok_or_else(|| {
+            AikitError::new(
+                "skill.invalid",
+                format!("{SKILL_FILE} description is not a YAML string"),
+            )
+        })?;
+    let additions: Vec<&str> = overlays
+        .iter()
+        .filter_map(|overlay| overlay.description.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect();
+    if !additions.is_empty() {
+        yaml.insert(
+            description_key,
+            serde_yaml::Value::String(format!("{} {}", description.trim(), additions.join(" "))),
+        );
+    }
+    let mut encoded = serde_yaml::to_string(&yaml).map_err(|error| {
+        AikitError::new(
+            "skill.invalid",
+            format!("could not render effective {SKILL_FILE} frontmatter: {error}"),
+        )
+    })?;
+    if let Some(without_marker) = encoded.strip_prefix("---\n") {
+        encoded = without_marker.to_string();
+    }
+
+    let mut rendered = format!("---\n{}---\n{}", encoded, body);
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    rendered.push_str(
+        "\n## AIKit Skill Usage Overlay\n\n\
+         > The following is user-authoritative orienting augmentation for this context. \
+         It is additive to the immutable upstream skill: when it gives more specific \
+         contextual direction, the more specific guidance governs. It does not change \
+         invocation policy, permissions, trust, or payload identity.\n",
+    );
+    for overlay in overlays {
+        rendered.push_str(&format!(
+            "\n### {} augmentation\n\n- Scope: {}\n- Source: {}\n",
+            overlay.scope.as_str(),
+            overlay.scope.as_str(),
+            overlay.origin
+        ));
+        if let Some(profile) = &overlay.via_profile {
+            rendered.push_str(&format!("- Via profile: {profile}\n"));
+        }
+        if let Some(revision) = &overlay.reviewed_against {
+            rendered.push_str(&format!("- Reviewed against: {revision}\n"));
+        }
+        if let Some(description) = &overlay.description {
+            rendered.push_str(&format!("\n**Routing orientation:** {}\n", description.trim()));
+        }
+        if let Some(guidance) = &overlay.guidance {
+            rendered.push('\n');
+            rendered.push_str(guidance.trim());
+            rendered.push('\n');
+        }
+    }
+    Ok(rendered)
+}
+
+fn split_frontmatter(source: &str) -> Result<(&str, &str)> {
+    let mut offset = 0usize;
+    let mut lines = source.split_inclusive('\n');
+    let first = lines.next().unwrap_or("");
+    if first.trim_end_matches(['\r', '\n']).trim() != "---" {
+        return Err(AikitError::new(
+            "skill.invalid",
+            format!("this {SKILL_FILE} has no frontmatter"),
+        ));
+    }
+    offset += first.len();
+    let content_start = offset;
+    for line in lines {
+        if line.trim_end_matches(['\r', '\n']).trim() == "---" {
+            let frontmatter = &source[content_start..offset];
+            let body = &source[offset + line.len()..];
+            return Ok((frontmatter, body));
+        }
+        offset += line.len();
+    }
+    Err(AikitError::new(
+        "skill.invalid",
+        format!("this {SKILL_FILE}'s frontmatter is never closed"),
+    ))
 }
 
 // ---------------------------------------------------------------------------

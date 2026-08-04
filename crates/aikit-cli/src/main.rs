@@ -20,7 +20,8 @@ use aikit_cli::json::{self, EnvelopeContext};
 use aikit_cli::{hook, multicall, run, ui};
 
 use aikit_core::hooks::HookEvent;
-use aikit_core::id::CapsuleId;
+use aikit_core::id::{CapsuleId, Revision};
+use aikit_core::profile::SkillUsageOverlayPatch;
 use aikit_core::scope::ScopeKind;
 use aikit_core::{AikitError, Result};
 
@@ -151,6 +152,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
     let json_mode = cli.json;
     match cli.command {
         Some(Command::Source(c)) => cmd_source(cwd, c),
+        Some(Command::Skill(c)) => cmd_skill(cwd, c),
         Some(Command::Project(c)) => cmd_project(cwd, c),
         None => open_palette(cwd, None, false),
         Some(Command::Init(a)) => cmd_init(cwd, a),
@@ -195,6 +197,113 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
     }
+}
+
+fn cmd_skill(cwd: &std::path::Path, command: SkillCmd) -> Result<Reply> {
+    let SkillSub::Overlay(overlay) = command.command;
+    match overlay.command {
+        SkillOverlaySub::Set(args) => {
+            let mut service = Service::discover(cwd)?;
+            let id = CapsuleId::parse(&args.capability)?;
+            require_agent_skill(&service, &id)?;
+            let scope = resolve_scope(&service, args.scope.as_deref())?;
+            let guidance = match (args.guidance, args.guidance_file) {
+                (Some(text), None) => Some(text),
+                (None, Some(path)) => Some(std::fs::read_to_string(&path).map_err(|error| {
+                    AikitError::new(
+                        "skill_overlay.guidance_unreadable",
+                        format!("could not read {}: {error}", path.display()),
+                    )
+                    .with("path", path.display().to_string())
+                })?),
+                (None, None) => None,
+                (Some(_), Some(_)) => unreachable!("clap rejects conflicting guidance inputs"),
+            };
+            let overlay = SkillUsageOverlayPatch {
+                inherit: !args.no_inherit,
+                description: args.description,
+                guidance,
+                reviewed_against: args
+                    .reviewed_against
+                    .map(Revision::from_raw),
+            };
+            overlay.validate(&id)?;
+            let applied = service.set_skill_usage_overlay(&id, scope, &overlay)?;
+            let effective = service
+                .resolved()
+                .skill_usage_overlays
+                .get(&id)
+                .cloned()
+                .unwrap_or_default();
+            Ok(reply(
+                &service,
+                jval!({
+                    "capability": id.to_string(),
+                    "scope": scope.as_str(),
+                    "generation": applied.id.to_string(),
+                    "overlays": effective,
+                }),
+                applied.warnings,
+            ))
+        }
+        SkillOverlaySub::Show(args) => {
+            let service = Service::discover(cwd)?;
+            let id = CapsuleId::parse(&args.capability)?;
+            require_agent_skill(&service, &id)?;
+            let effective = service
+                .resolved()
+                .skill_usage_overlays
+                .get(&id)
+                .cloned()
+                .unwrap_or_default();
+            Ok(reply(
+                &service,
+                jval!({ "capability": id.to_string(), "overlays": effective }),
+                vec![],
+            ))
+        }
+        SkillOverlaySub::Clear(args) => {
+            let mut service = Service::discover(cwd)?;
+            let id = CapsuleId::parse(&args.capability)?;
+            require_agent_skill(&service, &id)?;
+            let scope = resolve_scope(&service, args.scope.as_deref())?;
+            let applied = service.clear_skill_usage_overlay(&id, scope)?;
+            let effective = service
+                .resolved()
+                .skill_usage_overlays
+                .get(&id)
+                .cloned()
+                .unwrap_or_default();
+            Ok(reply(
+                &service,
+                jval!({
+                    "capability": id.to_string(),
+                    "scope": scope.as_str(),
+                    "generation": applied.id.to_string(),
+                    "overlays": effective,
+                }),
+                applied.warnings,
+            ))
+        }
+    }
+}
+
+fn require_agent_skill(service: &Service, id: &CapsuleId) -> Result<()> {
+    let capsule = aikit_core::catalog::Catalog::get(service.snapshot(), id).ok_or_else(|| {
+        AikitError::new(
+            "skill_overlay.unknown_skill",
+            format!("{id} is not in the catalogue"),
+        )
+        .with("capability", id.to_string())
+    })?;
+    if capsule.kind != aikit_core::capsule::Kind::Skill {
+        return Err(AikitError::new(
+            "skill_overlay.not_a_skill",
+            format!("{id} is {}, not a skill", capsule.kind.as_str()),
+        )
+        .with("capability", id.to_string()));
+    }
+    Ok(())
 }
 
 fn cmd_project(cwd: &std::path::Path, command: ProjectCmd) -> Result<Reply> {
@@ -1240,6 +1349,7 @@ fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {
         "required_by": explanation.required_by,
         "dependencies": explanation.dependencies,
         "exports": explanation.exports,
+        "skill_usage_overlays": explanation.skill_usage_overlays,
         "unavailable": explanation.unavailable.as_ref().map(|r| r.describe()),
         "render": explanation.render(),
     });
@@ -1571,12 +1681,18 @@ fn cmd_capabilities(cwd: &std::path::Path, c: CapabilitiesCmd) -> Result<Reply> 
                     format!("{id} is not in the catalogue"),
                 )
             })?;
+            let instructions = if cap.kind == aikit_core::capsule::Kind::Skill {
+                Some(service.effective_skill_markdown(&id)?)
+            } else {
+                None
+            };
             let data = jval!({
                 "id": id.to_string(),
                 "name": cap.name,
                 "description": cap.description,
                 "kind": cap.kind.as_str(),
                 "tags": cap.tags,
+                "instructions": instructions,
             });
             Ok(reply(&service, data, vec![]))
         }

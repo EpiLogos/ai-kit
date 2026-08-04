@@ -9,11 +9,148 @@ use common::*;
 use aikit_core::capsule::Kind;
 use aikit_core::context::Isolation;
 use aikit_core::effects::EffectClass;
+use aikit_core::id::Revision;
 use aikit_core::platform::{Platform, TargetId};
 use aikit_core::policy::ManagedPolicy;
+use aikit_core::profile::SkillUsageOverlayPatch;
 use aikit_core::resolve::{SelectionOrigin, UnavailableReason};
 use aikit_core::scope::ScopeKind;
 use aikit_core::trust::TrustState;
+
+// ---------------------------------------------------------------------------
+// Skill Usage Overlays — additive orientation with scoped provenance
+// ---------------------------------------------------------------------------
+
+#[test]
+fn skill_usage_overlays_accumulate_in_scope_order_and_change_the_view_hash() {
+    let id = cid("skill/test/wayfinder");
+    let mut global = layer(ScopeKind::Global, &["skill/test/wayfinder"], &[]);
+    global.patch.skill_overlays.insert(
+        id.clone(),
+        SkillUsageOverlayPatch {
+            inherit: true,
+            description: Some("Prefer for work crossing agent sessions.".into()),
+            guidance: Some("Use the user's issue tracker as the shared map.".into()),
+            reviewed_against: None,
+        },
+    );
+    let mut project = layer(ScopeKind::Project, &[], &[]);
+    project.patch.skill_overlays.insert(
+        id.clone(),
+        SkillUsageOverlayPatch {
+            inherit: true,
+            description: None,
+            guidance: Some("This project's maps may carry execution when Notes say so.".into()),
+            reviewed_against: None,
+        },
+    );
+
+    let base = Fixture::new(vec![skill("skill/test/wayfinder")])
+        .with_layers(vec![layer(
+            ScopeKind::Global,
+            &["skill/test/wayfinder"],
+            &[],
+        )])
+        .resolve()
+        .unwrap();
+    let augmented = Fixture::new(vec![skill("skill/test/wayfinder")])
+        .with_layers(vec![project, global])
+        .resolve()
+        .unwrap();
+
+    let overlays = augmented.skill_usage_overlays.get(&id).unwrap();
+    assert_eq!(overlays.len(), 2);
+    assert_eq!(overlays[0].scope, ScopeKind::Global);
+    assert_eq!(overlays[1].scope, ScopeKind::Project);
+    assert_eq!(overlays[0].origin.to_string(), "test:global");
+    assert_ne!(augmented.hash, base.hash);
+    assert_eq!(augmented.active[&id].revision, base.active[&id].revision);
+    assert_eq!(augmented.active[&id].trust, base.active[&id].trust);
+}
+
+#[test]
+fn a_more_specific_overlay_can_reset_inherited_orientation_without_forking_the_skill() {
+    let id = cid("skill/test/wayfinder");
+    let mut global = layer(ScopeKind::Global, &["skill/test/wayfinder"], &[]);
+    global.patch.skill_overlays.insert(
+        id.clone(),
+        SkillUsageOverlayPatch {
+            inherit: true,
+            description: None,
+            guidance: Some("Personal orientation.".into()),
+            reviewed_against: None,
+        },
+    );
+    let mut project = layer(ScopeKind::Project, &[], &[]);
+    project.patch.skill_overlays.insert(
+        id.clone(),
+        SkillUsageOverlayPatch {
+            inherit: false,
+            description: Some("Use only for this project's long-running maps.".into()),
+            guidance: Some("Shared project orientation.".into()),
+            reviewed_against: None,
+        },
+    );
+
+    let view = Fixture::new(vec![skill("skill/test/wayfinder")])
+        .with_layers(vec![global, project])
+        .resolve()
+        .unwrap();
+    let overlays = &view.skill_usage_overlays[&id];
+    assert_eq!(overlays.len(), 1);
+    assert_eq!(overlays[0].scope, ScopeKind::Project);
+    assert_eq!(overlays[0].guidance.as_deref(), Some("Shared project orientation."));
+}
+
+#[test]
+fn an_overlay_reviewed_against_an_older_revision_is_retained_with_a_warning() {
+    let id = cid("skill/test/wayfinder");
+    let reviewed = Revision::from_hash(blake3::hash(b"an older upstream skill"));
+    let mut global = layer(ScopeKind::Global, &["skill/test/wayfinder"], &[]);
+    global.patch.skill_overlays.insert(
+        id.clone(),
+        SkillUsageOverlayPatch {
+            inherit: true,
+            description: None,
+            guidance: Some("User orientation that now needs re-review.".into()),
+            reviewed_against: Some(reviewed.clone()),
+        },
+    );
+
+    let view = Fixture::new(vec![skill("skill/test/wayfinder")])
+        .with_layers(vec![global])
+        .resolve()
+        .unwrap();
+
+    assert_eq!(view.skill_usage_overlays[&id][0].reviewed_against, Some(reviewed));
+    assert!(view.warnings.iter().any(|warning| {
+        warning.contains("review the augmentation against the updated source")
+    }));
+}
+
+#[test]
+fn skill_usage_overlays_reject_non_skill_capabilities() {
+    let id = cid("script/test/wayfinder");
+    let mut global = layer(ScopeKind::Global, &["script/test/wayfinder"], &[]);
+    global.patch.skill_overlays.insert(
+        id,
+        SkillUsageOverlayPatch {
+            inherit: true,
+            description: None,
+            guidance: Some("This must never be applied to a script.".into()),
+            reviewed_against: None,
+        },
+    );
+
+    let diagnosis = Fixture::new(vec![script("script/test/wayfinder")])
+        .with_layers(vec![global])
+        .diagnose();
+    assert!(diagnosis
+        .problems
+        .iter()
+        .any(|problem| problem.code() == "skill_overlay.not_a_skill"));
+    assert!(diagnosis.view.is_none());
+}
 
 // ---------------------------------------------------------------------------
 // Rule 1 — later layers may undo earlier ordinary enable/disable operations
