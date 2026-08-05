@@ -44,6 +44,36 @@ fn socket() -> String {
     )
 }
 
+fn installed(command: &str) -> bool {
+    Command::new(command)
+        .arg(if command == "tmux" { "-V" } else { "--version" })
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[test]
+fn unnamed_install_refuses_to_guess_when_both_real_muxes_are_installed() {
+    if !installed("tmux") || !installed("cmux") {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let output = run(home.path(), &socket(), &["--json", "mux", "install"]);
+
+    assert!(
+        !output.status.success(),
+        "both muxes are installed, so an unnamed install must not silently choose one: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let reply = json(&output);
+    assert_eq!(reply["error"]["code"], "mux.ambiguous");
+    assert_eq!(reply["error"]["details"]["installed"], "tmux,cmux");
+    assert!(
+        !home.path().join(".tmux.conf").exists()
+            && !home.path().join(".config/cmux/cmux.json").exists(),
+        "an ambiguous install must write nothing"
+    );
+}
+
 struct Server {
     socket: String,
 }
@@ -72,11 +102,31 @@ impl Server {
         Self { socket }
     }
 
-    fn list_key(&self, key: &str) -> Output {
-        Command::new("tmux")
-            .args(["-L", &self.socket, "list-keys", "-T", "root", key])
+    fn binding(&self, key: &str) -> Option<String> {
+        let output = Command::new("tmux")
+            .args(["-L", &self.socket, "list-keys", "-T", "root"])
             .output()
-            .expect("list the private server's binding")
+            .expect("list the private server's bindings");
+        assert!(
+            output.status.success(),
+            "list the private server's bindings: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| {
+                let tokens = shell_words::split(line).ok()?;
+                let mut index = 1;
+                while index < tokens.len() {
+                    match tokens[index].as_str() {
+                        "-T" | "-N" => index += 2,
+                        "-r" => index += 1,
+                        token if token.starts_with('-') => index += 1,
+                        candidate => return (candidate == key).then(|| line.to_string()),
+                    }
+                }
+                None
+            })
     }
 
     fn command(&self, args: &[&str]) -> Output {
@@ -392,13 +442,7 @@ fn a_running_private_server_is_reloaded_and_the_live_binding_is_verified() {
     assert_eq!(reply["data"]["live"], true);
     assert_eq!(reply["data"]["verified"], true);
 
-    let binding = server.list_key("M-a");
-    assert!(
-        binding.status.success(),
-        "binding was not live: {}",
-        String::from_utf8_lossy(&binding.stderr)
-    );
-    let line = String::from_utf8_lossy(&binding.stdout);
+    let line = server.binding("M-a").expect("binding was not live");
     assert!(line.contains("display-popup"));
     assert!(line.contains("82%"));
     assert!(line.contains("70%"));
@@ -415,7 +459,7 @@ fn changing_the_managed_key_removes_the_old_live_binding() {
         &["--json", "mux", "install", "tmux"],
     );
     assert!(first.status.success());
-    assert!(server.list_key("M-a").status.success());
+    assert!(server.binding("M-a").is_some());
 
     let changed = run(
         home.path(),
@@ -428,9 +472,9 @@ fn changing_the_managed_key_removes_the_old_live_binding() {
         String::from_utf8_lossy(&changed.stdout),
         String::from_utf8_lossy(&changed.stderr)
     );
-    assert!(server.list_key("M-k").status.success());
+    assert!(server.binding("M-k").is_some());
     assert!(
-        !server.list_key("M-a").status.success(),
+        server.binding("M-a").is_none(),
         "changing the managed key left the previous AIKit key live"
     );
 }
@@ -451,7 +495,7 @@ fn procedure_undo_restores_both_the_config_and_the_live_key_table() {
     assert!(installed.status.success());
     let installed_reply = json(&installed);
     let procedure = installed_reply["data"]["procedure"].as_str().unwrap();
-    assert!(server.list_key("M-a").status.success());
+    assert!(server.binding("M-a").is_some());
 
     let undone = run(
         home.path(),
@@ -466,7 +510,7 @@ fn procedure_undo_restores_both_the_config_and_the_live_key_table() {
     );
     assert_eq!(fs::read_to_string(config).unwrap(), original);
     assert!(
-        !server.list_key("M-a").status.success(),
+        server.binding("M-a").is_none(),
         "undo removed the block on disk but left Alt-A live in tmux"
     );
 }
@@ -497,9 +541,9 @@ fn undo_restores_a_user_binding_that_was_explicitly_replaced() {
         &["--json", "procedure", "undo", &procedure],
     );
     assert!(undone.status.success());
-    let binding = server.list_key("M-a");
-    assert!(binding.status.success());
-    let rendered = String::from_utf8_lossy(&binding.stdout);
+    let rendered = server
+        .binding("M-a")
+        .expect("the user binding was not restored");
     assert!(rendered.contains("split-window"));
     assert!(!rendered.contains("aikit ui"));
 }
@@ -599,6 +643,8 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
         let mut buffer = [0_u8; 4096];
         let mut palette_seen = false;
         let mut tree_seen = false;
+        let mut tree_marker_end = None;
+        let mut palette_return_seen = false;
         while let Ok(read) = output.read(&mut buffer) {
             if read == 0 {
                 break;
@@ -618,7 +664,21 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
                     .any(|window| window == b"AIKit tree")
             {
                 tree_seen = true;
+                tree_marker_end = all
+                    .windows(b"AIKit tree".len())
+                    .position(|window| window == b"AIKit tree")
+                    .map(|start| start + b"AIKit tree".len());
                 let _ = signal_tx.send("tree");
+            }
+            if tree_seen && !palette_return_seen {
+                let start = tree_marker_end.expect("the tree marker has an end");
+                if all[start..]
+                    .windows(b"Ctrl-T tree".len())
+                    .any(|window| window == b"Ctrl-T tree")
+                {
+                    palette_return_seen = true;
+                    let _ = signal_tx.send("palette-return");
+                }
             }
         }
         all
@@ -664,7 +724,11 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
 
     input.write_all(b"\x1b").unwrap();
     input.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(75));
+    assert_eq!(
+        signal_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+        "palette-return",
+        "Esc from tree must return the same popup to palette before it is closed"
+    );
     input.write_all(b"\x1b").unwrap();
     input.flush().unwrap();
     wait_for_process_exit(popup_pid);

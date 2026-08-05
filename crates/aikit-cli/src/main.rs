@@ -757,7 +757,7 @@ fn cmd_init(cwd: &std::path::Path, a: InitArgs) -> Result<Reply> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    let mut roots = foreign::default_roots(&home);
+    let mut roots = foreign::roots_for(&home, cwd);
     for extra in &a.roots {
         let label = extra
             .file_name()
@@ -782,12 +782,53 @@ fn cmd_init(cwd: &std::path::Path, a: InitArgs) -> Result<Reply> {
         .collect();
     let total_skills: usize = found.iter().map(|r| r.skills).sum();
     let total_problems: usize = found.iter().map(foreign::ForeignRoot::problems).sum();
+    let npx = foreign::survey_npx_skills(&home, cwd);
+    let npx_locks: Vec<Value> = npx
+        .locks
+        .iter()
+        .map(|lock| {
+            let entries: Vec<Value> = lock
+                .entries
+                .iter()
+                .map(|entry| {
+                    jval!({
+                        "name": entry.name,
+                        "source": entry.source,
+                        "source_type": entry.source_type,
+                        "source_url": entry.source_url,
+                        "ref": entry.reference,
+                        "skill_path": entry.skill_path,
+                        "expected_hash": entry.expected_hash,
+                        "actual_hash": entry.actual_hash,
+                        "hash_matches": entry.hash_matches,
+                        "installed_path": entry.installed_path.as_ref().map(|path| path.display().to_string()),
+                        "installed": entry.installed,
+                    })
+                })
+                .collect();
+            jval!({
+                "scope": lock.scope.as_str(),
+                "path": lock.path.display().to_string(),
+                "version": lock.version,
+                "supported": lock.supported,
+                "entries": entries,
+                "entry_count": lock.entries.len(),
+                "note": lock.note,
+            })
+        })
+        .collect();
 
     let data = jval!({
         "roots": rows,
         "root_count": found.len(),
         "total_skills": total_skills,
         "total_problems": total_problems,
+        "npx_skills": {
+            "locks": npx_locks,
+            "lock_count": npx.locks.len(),
+            "entry_count": npx.entries(),
+            "authority": "foreign-read-only",
+        },
     });
     Ok(reply(&service, data, service.load_warnings()))
 }
@@ -804,7 +845,7 @@ fn cmd_collate(cwd: &std::path::Path, a: CollateArgs) -> Result<Reply> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    let mut roots: Vec<collate::ForeignRootRef> = foreign::default_roots(&home)
+    let mut roots: Vec<collate::ForeignRootRef> = foreign::roots_for(&home, cwd)
         .into_iter()
         .filter(|(_, path)| path.exists())
         .map(|(label, path)| collate::ForeignRootRef { label, path })
@@ -1250,9 +1291,7 @@ fn open_surface(
 }
 
 fn spawn_palette_command(command: &run::ScriptCommand) -> Result<()> {
-    use aikit_adapters::mux::{
-        cmux::Cmux, plain::Plain, stack::MuxStack, tmux::Tmux, SpawnRequest,
-    };
+    use aikit_adapters::mux::SpawnRequest;
     use aikit_core::capsule::ExecMode;
     use aikit_core::session::Placement;
 
@@ -1273,17 +1312,37 @@ fn spawn_palette_command(command: &run::ScriptCommand) -> Result<()> {
     argv.extend(command.argv.clone());
     let mut request = SpawnRequest::new(placement, argv).in_dir(command.cwd.clone());
     request.env = command.env.clone();
-    let stack = MuxStack::detect(
-        vec![
-            Box::new(Plain::new()),
-            Box::new(Cmux::system()),
-            Box::new(Tmux::system()),
-        ],
-        None,
-    )?;
+    let stack = detected_system_stack(None)?;
     request.target = Some(stack.current_location()?.target());
     stack.spawn(request)?;
     Ok(())
+}
+
+fn detected_system_stack(
+    forced: Option<aikit_core::MuxKind>,
+) -> Result<aikit_adapters::mux::stack::MuxStack> {
+    use aikit_adapters::mux::{cmux::Cmux, plain::Plain, stack::MuxStack, tmux::Tmux};
+    MuxStack::detect(
+        vec![
+            Box::new(Cmux::system()),
+            Box::new(Tmux::system()),
+            Box::new(Plain::new()),
+        ],
+        forced,
+    )
+}
+
+fn executable_path(name: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| {
+            std::fs::canonicalize(&candidate)
+                .unwrap_or(candidate)
+                .display()
+                .to_string()
+        })
 }
 
 fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
@@ -1490,19 +1549,13 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
             Ok(reply(&service, jval!({ "contexts": rows }), vec![]))
         }
         ContextSub::Bind(a) => {
-            use aikit_adapters::mux::{plain::Plain, tmux::Tmux, MuxAdapter};
             use aikit_core::context::ContextBinding;
             use aikit_store::state::StateStore;
 
             let descriptor = service.descriptor();
             // Ask the real multiplexer where we are rather than accepting a claim:
             // a binding that says "pane %7" when the pane is gone is worse than none.
-            let tmux = Tmux::system();
-            let location = if tmux.detect().map(|p| p.inside).unwrap_or(false) {
-                tmux.current_location()?
-            } else {
-                Plain::new().current_location()?
-            };
+            let location = detected_system_stack(None)?.current_location()?;
 
             let session = match a.session.as_deref() {
                 Some(raw) => aikit_core::SessionId::parse(raw)?,
@@ -1719,7 +1772,14 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
     match c.command {
         SessionSub::Up(a) => {
             let result = service.session_up(SessionRequest { spec: a.spec })?;
-            let data = jval!({ "summary": result.summary });
+            let data = jval!({
+                "session": result.session,
+                "mux": result.mux,
+                "created": result.created,
+                "actions": result.actions,
+                "preserved": result.preserved,
+                "summary": result.summary,
+            });
             Ok(reply(&service, data, result.warnings))
         }
         SessionSub::List(_) => {
@@ -1746,12 +1806,17 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
             ))
         }
         SessionSub::Attach(a) => {
-            let (argv, mux) = session_argv(&service, &a.session, "attach")?;
-            let data = jval!({ "session": a.session, "mux": mux, "command": argv });
+            let (commands, mux) = session_commands(&service, &a.session, "attach")?;
+            let data = jval!({
+                "session": a.session,
+                "mux": mux,
+                "command": commands.first(),
+                "commands": commands,
+            });
             Ok(reply(&service, data, vec![]))
         }
         SessionSub::Diff(a) => {
-            let outcome = service.session_diff(a.session.as_deref())?;
+            let outcome = service.session_diff(a.spec.as_deref())?;
             let data = jval!({
                 "session": outcome.session,
                 "mux": outcome.mux,
@@ -1761,7 +1826,7 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
             Ok(reply(&service, data, outcome.warnings))
         }
         SessionSub::Reconcile(a) => {
-            let outcome = service.session_reconcile(a.session.as_deref(), a.destructive)?;
+            let outcome = service.session_reconcile(a.spec.as_deref(), a.destructive)?;
             let data = jval!({
                 "session": outcome.session,
                 "mux": outcome.mux,
@@ -1772,11 +1837,12 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
             Ok(reply(&service, data, outcome.warnings))
         }
         SessionSub::Down(a) => {
-            let (argv, mux) = session_argv(&service, &a.session, "kill")?;
+            let (commands, mux) = session_commands(&service, &a.session, "kill")?;
             let data = jval!({
                 "session": a.session,
                 "mux": mux,
-                "command": argv,
+                "command": commands.first(),
+                "commands": commands,
                 "note": "AIKit prints the teardown command rather than running it: closing a \
                          session can discard work in a pane AIKit never started",
             });
@@ -1791,33 +1857,225 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
 /// AIKit prints these rather than running them: attaching replaces the current
 /// process, and tearing down can discard work in a pane AIKit never started.
 /// Handing the user the exact command keeps both decisions theirs.
-fn session_argv(service: &Service, session: &str, verb: &str) -> Result<(Vec<String>, String)> {
-    use aikit_adapters::mux::{tmux::Tmux, MuxAdapter};
-    let tmux = Tmux::system();
-    let present = tmux.detect().map(|p| p.installed).unwrap_or(false);
-    if !present {
+fn session_commands(
+    service: &Service,
+    session: &str,
+    verb: &str,
+) -> Result<(Vec<Vec<String>>, String)> {
+    use aikit_core::MuxKind;
+    use aikit_store::state::StateStore;
+
+    let records = StateStore::new(service.index()).sessions()?;
+    let matches: Vec<_> = records
+        .iter()
+        .filter(|record| session_record_is_in_scope(service, record, session))
+        .collect();
+    if matches.len() > 1 {
         return Err(AikitError::new(
-            "mux.none_detected",
-            format!("no multiplexer is available to {verb} `{session}`"),
+            "session.ambiguous",
+            format!("more than one live AIKit session is named `{session}`"),
         )
         .with("session", session.to_string()));
     }
-    let _ = service;
-    let argv = match verb {
-        "attach" => vec![
-            "tmux".into(),
-            "attach-session".into(),
-            "-t".into(),
-            session.to_string(),
-        ],
-        _ => vec![
-            "tmux".into(),
-            "kill-session".into(),
-            "-t".into(),
-            session.to_string(),
-        ],
+
+    let Some(record) = matches.first() else {
+        let mux = aikit_cli::mux_install::choose_installed(service.descriptor().mux)?;
+        if mux == MuxKind::Cmux {
+            return Err(AikitError::new(
+                "session.cmux_binding_missing",
+                format!(
+                    "AIKit has no durable cmux binding for session `{session}`; run `aikit \
+                     session up` inside cmux first"
+                ),
+            )
+            .with("session", session.to_string()));
+        }
+        let command = mux_session_command(mux, session.to_string(), verb)?;
+        return Ok((vec![command], mux.as_str().to_string()));
     };
-    Ok((argv, "tmux".to_string()))
+
+    let commands = if record.mux == MuxKind::Cmux {
+        let targets =
+            aikit_adapters::mux::cmux::Cmux::system().session_targets(&record.session_id)?;
+        cmux_session_commands(record, targets, verb)?
+    } else {
+        let target = record
+            .mux_session
+            .clone()
+            .unwrap_or_else(|| session.to_string());
+        vec![mux_session_command(record.mux, target, verb)?]
+    };
+    Ok((commands, record.mux.as_str().to_string()))
+}
+
+fn session_record_is_in_scope(
+    service: &Service,
+    record: &aikit_store::state::SessionRecord,
+    session: &str,
+) -> bool {
+    let descriptor = service.descriptor();
+    session_record_matches(
+        record,
+        session,
+        descriptor.project_id.as_ref(),
+        descriptor.project_root.as_deref(),
+        descriptor.mux,
+    )
+}
+
+fn session_record_matches(
+    record: &aikit_store::state::SessionRecord,
+    session: &str,
+    project_id: Option<&aikit_core::ProjectId>,
+    project_root: Option<&std::path::Path>,
+    declared_mux: Option<aikit_core::MuxKind>,
+) -> bool {
+    let project_matches = match project_id {
+        Some(project_id) => record.project_marker.as_ref() == Some(project_id),
+        None => {
+            record.project_marker.is_none()
+                && match (record.project_root.as_deref(), project_root) {
+                    (Some(record_root), Some(active_root)) => {
+                        same_filesystem_location(record_root, active_root)
+                    }
+                    (None, None) => true,
+                    _ => false,
+                }
+        }
+    };
+    record.name == session
+        && record.state.can_go_stale()
+        && project_matches
+        && declared_mux.is_none_or(|mux| record.mux == mux)
+}
+
+fn same_filesystem_location(left: &std::path::Path, right: &std::path::Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn cmux_session_commands(
+    record: &aikit_store::state::SessionRecord,
+    targets: aikit_adapters::mux::cmux::CmuxSessionTargets,
+    verb: &str,
+) -> Result<Vec<Vec<String>>> {
+    let grouped = record
+        .mux_session
+        .as_deref()
+        .is_some_and(|target| target.starts_with("window:"));
+    if grouped {
+        if verb != "attach" && targets.exclusive_window.is_none() {
+            if targets.workspaces.is_empty() {
+                return Err(AikitError::new(
+                    "session.cmux_binding_missing",
+                    format!("cmux has no owned workspaces for session `{}`", record.name),
+                )
+                .with("session_id", record.session_id.to_string()));
+            }
+            return targets
+                .workspaces
+                .into_iter()
+                .map(|workspace| mux_session_command(aikit_core::MuxKind::Cmux, workspace, verb))
+                .collect();
+        }
+        let window = if verb == "attach" {
+            targets.common_window
+        } else {
+            targets.exclusive_window
+        }
+        .ok_or_else(|| {
+            AikitError::new(
+                "session.cmux_binding_ambiguous",
+                format!(
+                    "cmux no longer has one owned window for session `{}`",
+                    record.name
+                ),
+            )
+            .with("session_id", record.session_id.to_string())
+        })?;
+        return Ok(vec![mux_session_command(
+            aikit_core::MuxKind::Cmux,
+            window,
+            verb,
+        )?]);
+    }
+
+    if targets.workspaces.is_empty() {
+        return Err(AikitError::new(
+            "session.cmux_binding_missing",
+            format!("cmux has no owned workspaces for session `{}`", record.name),
+        )
+        .with("session_id", record.session_id.to_string()));
+    }
+
+    let workspaces: Vec<_> = if verb == "attach" {
+        targets.workspaces.into_iter().take(1).collect()
+    } else {
+        targets.workspaces
+    };
+    workspaces
+        .into_iter()
+        .map(|workspace| mux_session_command(aikit_core::MuxKind::Cmux, workspace, verb))
+        .collect()
+}
+
+fn mux_session_command(
+    mux: aikit_core::MuxKind,
+    target: String,
+    verb: &str,
+) -> Result<Vec<String>> {
+    let argv = match (mux, verb) {
+        (aikit_core::MuxKind::Tmux, "attach") => {
+            vec!["tmux".into(), "attach-session".into(), "-t".into(), target]
+        }
+        (aikit_core::MuxKind::Tmux, _) => {
+            vec!["tmux".into(), "kill-session".into(), "-t".into(), target]
+        }
+        (aikit_core::MuxKind::Cmux, "attach") if target.starts_with("window:") => {
+            vec![
+                "cmux".into(),
+                "focus-window".into(),
+                "--window".into(),
+                target,
+            ]
+        }
+        (aikit_core::MuxKind::Cmux, _) if target.starts_with("window:") => {
+            vec![
+                "cmux".into(),
+                "close-window".into(),
+                "--window".into(),
+                target,
+            ]
+        }
+        (aikit_core::MuxKind::Cmux, "attach") => {
+            vec![
+                "cmux".into(),
+                "select-workspace".into(),
+                "--workspace".into(),
+                target,
+            ]
+        }
+        (aikit_core::MuxKind::Cmux, _) => {
+            vec![
+                "cmux".into(),
+                "close-workspace".into(),
+                "--workspace".into(),
+                target,
+            ]
+        }
+        (aikit_core::MuxKind::Plain, _) => {
+            return Err(AikitError::new(
+                "mux.none_detected",
+                format!("a plain terminal cannot {verb} a named session"),
+            ))
+        }
+    };
+    Ok(argv)
 }
 
 /// `aikit inbox` — list the messages the system and agents have addressed to the
@@ -2230,6 +2488,11 @@ fn cmd_mux(cwd: &std::path::Path, c: MuxCmd) -> Result<Reply> {
             {
                 rows.push(jval!({
                     "mux": presence.kind.as_str(),
+                    "binary": match presence.kind {
+                        aikit_core::MuxKind::Tmux => executable_path("tmux"),
+                        aikit_core::MuxKind::Cmux => executable_path("cmux"),
+                        aikit_core::MuxKind::Plain => None,
+                    },
                     "installed": presence.installed,
                     "version": presence.version,
                     "server_running": presence.server_running,
@@ -2237,9 +2500,17 @@ fn cmd_mux(cwd: &std::path::Path, c: MuxCmd) -> Result<Reply> {
                     "detail": presence.detail,
                 }));
             }
+            let stack = detected_system_stack(None)?;
+            let active_stack = stack
+                .kinds()
+                .into_iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>();
             let data = jval!({
                 "detected": rows,
-                "active": service.descriptor().mux.map(|m| m.as_str()),
+                "active": stack.topology_kind().as_str(),
+                "active_stack": active_stack,
+                "declared": service.descriptor().mux.map(|m| m.as_str()),
             });
             Ok(reply(&service, data, vec![]))
         }
@@ -2329,5 +2600,162 @@ fn read_stdin_json() -> Value {
         serde_json::from_str(&buf).unwrap_or(Value::Null)
     } else {
         Value::Null
+    }
+}
+
+#[cfg(test)]
+mod session_command_tests {
+    use super::{cmux_session_commands, mux_session_command, session_record_matches};
+    use aikit_adapters::mux::cmux::CmuxSessionTargets;
+    use aikit_core::{MuxKind, ProjectId, SessionId};
+    use aikit_store::events::Timestamp;
+    use aikit_store::state::{SessionRecord, SessionState};
+
+    fn record(
+        root: &str,
+        project: Option<ProjectId>,
+        mux: MuxKind,
+        binding: &str,
+    ) -> SessionRecord {
+        SessionRecord {
+            session_id: SessionId::generate(),
+            name: "dev".into(),
+            project_root: Some(root.into()),
+            project_marker: project,
+            mux,
+            mux_session: Some(binding.into()),
+            state: SessionState::Live,
+            created_at: Timestamp::now(),
+            last_seen: Timestamp::now(),
+        }
+    }
+
+    #[test]
+    fn grouped_cmux_sessions_use_window_lifecycle_commands() {
+        assert_eq!(
+            mux_session_command(MuxKind::Cmux, "window:7".into(), "attach").unwrap(),
+            ["cmux", "focus-window", "--window", "window:7"]
+        );
+        assert_eq!(
+            mux_session_command(MuxKind::Cmux, "window:7".into(), "kill").unwrap(),
+            ["cmux", "close-window", "--window", "window:7"]
+        );
+    }
+
+    #[test]
+    fn ungrouped_cmux_sessions_keep_workspace_lifecycle_commands() {
+        assert_eq!(
+            mux_session_command(MuxKind::Cmux, "workspace:9".into(), "attach").unwrap(),
+            ["cmux", "select-workspace", "--workspace", "workspace:9"]
+        );
+    }
+
+    #[test]
+    fn session_lookup_is_scoped_by_project_and_declared_mux() {
+        let project_a = ProjectId::generate();
+        let project_b = ProjectId::generate();
+        let in_scope = record(
+            "/work/a",
+            Some(project_a.clone()),
+            MuxKind::Cmux,
+            "workspace:old",
+        );
+        let wrong_project = record("/work/b", Some(project_b), MuxKind::Cmux, "workspace:other");
+
+        assert!(session_record_matches(
+            &in_scope,
+            "dev",
+            Some(&project_a),
+            Some(std::path::Path::new("/work/a")),
+            Some(MuxKind::Cmux),
+        ));
+        assert!(!session_record_matches(
+            &wrong_project,
+            "dev",
+            Some(&project_a),
+            Some(std::path::Path::new("/work/a")),
+            Some(MuxKind::Cmux),
+        ));
+        assert!(!session_record_matches(
+            &in_scope,
+            "dev",
+            Some(&project_a),
+            Some(std::path::Path::new("/work/a")),
+            Some(MuxKind::Tmux),
+        ));
+    }
+
+    #[test]
+    fn a_project_without_a_marker_falls_back_to_its_exact_root() {
+        let in_scope = record("/work/a", None, MuxKind::Tmux, "dev");
+        let other_root = record("/work/b", None, MuxKind::Tmux, "dev");
+        assert!(session_record_matches(
+            &in_scope,
+            "dev",
+            None,
+            Some(std::path::Path::new("/work/a")),
+            None,
+        ));
+        assert!(!session_record_matches(
+            &other_root,
+            "dev",
+            None,
+            Some(std::path::Path::new("/work/a")),
+            None,
+        ));
+    }
+
+    #[test]
+    fn cmux_commands_rebind_to_live_handles_and_close_every_owned_workspace() {
+        let grouped = record("/work/a", None, MuxKind::Cmux, "window:stale");
+        assert_eq!(
+            cmux_session_commands(
+                &grouped,
+                CmuxSessionTargets {
+                    workspaces: vec!["workspace:20".into(), "workspace:21".into()],
+                    common_window: Some("window:live".into()),
+                    exclusive_window: Some("window:live".into()),
+                },
+                "attach",
+            )
+            .unwrap(),
+            [vec!["cmux", "focus-window", "--window", "window:live"]]
+        );
+
+        let ungrouped = record("/work/a", None, MuxKind::Cmux, "workspace:stale");
+        assert_eq!(
+            cmux_session_commands(
+                &ungrouped,
+                CmuxSessionTargets {
+                    workspaces: vec!["workspace:20".into(), "workspace:21".into()],
+                    common_window: None,
+                    exclusive_window: None,
+                },
+                "kill",
+            )
+            .unwrap(),
+            [
+                vec!["cmux", "close-workspace", "--workspace", "workspace:20"],
+                vec!["cmux", "close-workspace", "--workspace", "workspace:21"],
+            ]
+        );
+
+        assert_eq!(
+            cmux_session_commands(
+                &grouped,
+                CmuxSessionTargets {
+                    workspaces: vec!["workspace:20".into(), "workspace:21".into()],
+                    common_window: Some("window:live".into()),
+                    exclusive_window: None,
+                },
+                "kill",
+            )
+            .unwrap(),
+            [
+                vec!["cmux", "close-workspace", "--workspace", "workspace:20"],
+                vec!["cmux", "close-workspace", "--workspace", "workspace:21"],
+            ],
+            "a foreign workspace in the grouped window forces ownership-bounded teardown"
+        );
     }
 }

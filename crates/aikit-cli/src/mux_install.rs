@@ -20,22 +20,57 @@ use crate::app::Service;
 /// present. Detection beats assumption — installing tmux integration on a machine
 /// without tmux writes a file nothing will ever read.
 fn choose(named: Option<&str>) -> Result<MuxKind> {
-    if let Some(raw) = named {
-        return raw.parse::<MuxKind>();
+    let named = named.map(str::parse).transpose()?;
+    choose_installed(named)
+}
+
+/// Select one real installed mux without using check order as policy.
+///
+/// An explicit kind remains explicit; availability is then verified by the
+/// adapter that performs the operation. Without one, a uniquely active mux wins,
+/// then a uniquely installed mux. Every other case is an actionable error.
+pub fn choose_installed(named: Option<MuxKind>) -> Result<MuxKind> {
+    if let Some(kind) = named {
+        return Ok(kind);
     }
-    if Tmux::system()
-        .detect()
-        .map(|p| p.installed)
-        .unwrap_or(false)
-    {
-        return Ok(MuxKind::Tmux);
+    let detected = [Tmux::system().detect()?, Cmux::system().detect()?];
+    let installed: Vec<_> = detected
+        .iter()
+        .filter(|presence| presence.installed)
+        .map(|presence| presence.kind)
+        .collect();
+    let active: Vec<_> = detected
+        .iter()
+        .filter(|presence| presence.installed && presence.inside)
+        .map(|presence| presence.kind)
+        .collect();
+    if active.len() == 1 {
+        return Ok(active[0]);
     }
-    if Cmux::system()
-        .detect()
-        .map(|p| p.installed)
-        .unwrap_or(false)
-    {
-        return Ok(MuxKind::Cmux);
+    if installed.len() == 1 {
+        return Ok(installed[0]);
+    }
+    if installed.len() > 1 {
+        let installed = installed
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let active = active
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        return Err(AikitError::new(
+            "mux.ambiguous",
+            "more than one multiplexer is installed; name `tmux` or `cmux` explicitly",
+        )
+        .with("installed", installed)
+        .with("active", active)
+        .with(
+            "resolution",
+            "run `aikit mux install tmux` or `aikit mux install cmux`".to_string(),
+        ));
     }
     Err(AikitError::new(
         "mux.none_detected",
@@ -263,21 +298,9 @@ pub fn plan(
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let (path, body) = match mux {
-        MuxKind::Tmux => (
-            home.join(".tmux.conf"),
-            format!(
-                "# Open AIKit's unified palette/tree surface in a real popup.\n{}\n\
-                 set -g @aikit_installed 1\n",
-                popup_binding(&key)
-            ),
-        ),
-        MuxKind::Cmux => (
-            home.join(".config/cmux/config.toml"),
-            "# AIKit renders its palette inline in the focused terminal.\n\
-             [keys]\nalt-a = \"aikit ui\"\n"
-                .to_string(),
-        ),
+    let path = match mux {
+        MuxKind::Tmux => home.join(".tmux.conf"),
+        MuxKind::Cmux => home.join(".config/cmux/cmux.json"),
         MuxKind::Plain => {
             return Err(AikitError::new(
                 "mux.nothing_to_install",
@@ -285,33 +308,41 @@ pub fn plan(
             ))
         }
     };
-
     let existing = std::fs::read_to_string(&path).ok();
     let previous_key = (mux == MuxKind::Tmux)
         .then(|| existing.as_deref().and_then(managed_config_key))
         .flatten();
-    if mux == MuxKind::Tmux && !replace_key {
-        if let Some(binding) = existing
-            .as_deref()
-            .and_then(|contents| configured_binding_outside_aikit(contents, &key))
-        {
-            return Err(conflict(&key, &binding));
-        }
-        let tmux = Tmux::system();
-        let presence = tmux.detect()?;
-        if presence.server_running {
-            if let Some(binding) = tmux.root_binding(&key)? {
-                let owned = is_managed_live_binding(&binding, &key);
-                if !owned {
+    let updated = match mux {
+        MuxKind::Tmux => {
+            let body = format!(
+                "# Open AIKit's unified palette/tree surface in a real popup.\n{}\n\
+                 set -g @aikit_installed 1\n",
+                popup_binding(&key)
+            );
+            if !replace_key {
+                if let Some(binding) = existing
+                    .as_deref()
+                    .and_then(|contents| configured_binding_outside_aikit(contents, &key))
+                {
                     return Err(conflict(&key, &binding));
                 }
+                let tmux = Tmux::system();
+                let presence = tmux.detect()?;
+                if presence.server_running {
+                    if let Some(binding) = tmux.root_binding(&key)? {
+                        let owned = is_managed_live_binding(&binding, &key);
+                        if !owned {
+                            return Err(conflict(&key, &binding));
+                        }
+                    }
+                }
             }
+            let leader = aikit_store::procedure::comment_leader(&path);
+            splice_marked_block(existing.as_deref().unwrap_or(""), leader, &body)
         }
-    }
-    // The comment leader comes from the file type, so a `#`-commented tmux config
-    // and a `//`-commented one both get markers their own parser ignores.
-    let leader = aikit_store::procedure::comment_leader(&path);
-    let updated = splice_marked_block(existing.as_deref().unwrap_or(""), leader, &body);
+        MuxKind::Cmux => crate::cmux_config::merge_command(existing.as_deref(), replace_key)?,
+        MuxKind::Plain => unreachable!("plain returned before planning"),
+    };
 
     let inverse = if existing.is_some() {
         Inverse::Restore {
@@ -328,17 +359,12 @@ pub fn plan(
     ));
     if existing.as_deref() != Some(updated.as_str()) {
         plan = plan.with_edit(WorldEdit::WriteFile {
-            path,
+            path: path.clone(),
             contents: updated.into_bytes(),
             inverse,
         });
     }
 
-    let path = match mux {
-        MuxKind::Tmux => home.join(".tmux.conf"),
-        MuxKind::Cmux => home.join(".config/cmux/config.toml"),
-        MuxKind::Plain => unreachable!("plain returned before planning"),
-    };
     let procedure = aikit_store::procedure::plan_procedure(
         service.home(),
         ProcedureKind::MuxInstall { mux },
@@ -369,15 +395,35 @@ pub fn activate(plan: &MuxInstallPlan) -> Result<InstallVerification> {
         .with("key", plan.key.clone()));
     }
 
-    if plan.mux != MuxKind::Tmux {
-        return Ok(InstallVerification {
-            live: false,
-            verified: true,
-            binding: None,
-            warnings: vec![
-                "cmux configuration was verified on disk; reload behavior is owned by cmux"
+    if plan.mux == MuxKind::Cmux {
+        if !crate::cmux_config::verify_command(&contents)? {
+            return Err(AikitError::new(
+                "mux.binding_verification_failed",
+                "the written cmux configuration does not contain AIKit's executable command",
+            )
+            .with("path", plan.path.display().to_string()));
+        }
+        let presence = Cmux::system().detect()?;
+        let mut warnings = vec![
+            "this cmux exposes AIKit through its native Command Palette; this installed version does not expose an arbitrary-command global hotkey"
+                .to_string(),
+        ];
+        if presence.server_running {
+            warnings.push(
+                "cmux is running and watches the global command file; its CLI cannot read back Command Palette entries, so verification is exact on disk"
                     .to_string(),
-            ],
+            );
+        } else {
+            warnings.push(
+                "cmux is not running; the command is verified on disk and will load when cmux starts"
+                    .to_string(),
+            );
+        }
+        return Ok(InstallVerification {
+            live: presence.server_running,
+            verified: true,
+            binding: Some("command-palette:AIKit".to_string()),
+            warnings,
         });
     }
 

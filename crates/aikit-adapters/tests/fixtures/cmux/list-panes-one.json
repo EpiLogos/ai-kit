@@ -1,0 +1,11 @@
+{
+  "panes": [
+    {
+      "ref": "pane:1",
+      "index": 0,
+      "focused": true,
+      "surface_refs": ["surface:1"],
+      "surface_count": 1
+    }
+  ]
+}

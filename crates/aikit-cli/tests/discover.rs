@@ -80,6 +80,37 @@ fn the_global_aikit_home_is_not_a_project_marker() {
 }
 
 #[test]
+fn the_global_aikit_store_is_not_a_project_marker() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let project = home.join("work/project");
+    fs::create_dir_all(home.join(".aikit/state")).unwrap();
+    let custom_store = tmp.path().join("custom-aikit-home");
+    fs::create_dir_all(&custom_store).unwrap();
+    fs::create_dir_all(project.join(".aikit")).unwrap();
+
+    let default_store = home.join(".aikit");
+    let discovered = discover::discover_project_excluding_many(
+        &project,
+        &[custom_store.as_path(), default_store.as_path()],
+    )
+    .unwrap();
+    assert_eq!(discovered.root, project);
+    assert_eq!(discovered.chain.len(), 1);
+
+    let unrelated = home.join("Documents/unrelated");
+    fs::create_dir_all(&unrelated).unwrap();
+    assert!(
+        discover::discover_project_excluding_many(
+            &unrelated,
+            &[custom_store.as_path(), default_store.as_path()],
+        )
+        .is_none(),
+        "the operational store must not turn the whole home directory into one project"
+    );
+}
+
+#[test]
 fn the_descriptor_defaults_isolation_to_shared() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("repo");

@@ -1454,9 +1454,18 @@ fn cmux_full_runner() -> ScriptedRunner {
         .on("capabilities", CMUX_CAPABILITIES)
         .on("version", "cmux 0.63.1 (78) [45090d23d]")
         .on("list-workspaces", r#"{ "workspaces": [] }"#)
-        .on("new-window", CMUX_NEW_WINDOW)
+        .on("new-window", "OK window:2")
         .sequence("new-workspace", &[CMUX_NEW_WORKSPACE_3, CMUX_NEW_WORKSPACE_4])
         .sequence("new-split", &[CMUX_NEW_SPLIT_5, CMUX_NEW_SPLIT_6])
+        .on(
+            "list-panes",
+            r#"{"panes":[{"ref":"pane:1","surface_refs":["surface:1"],"surface_count":1}]}"#,
+        )
+        .on(
+            "list-pane-surfaces",
+            r#"{"surfaces":[{"ref":"surface:1","pane_ref":"pane:1","title":"","type":"terminal"}]}"#,
+        )
+        .on("rename-tab", OK)
         .on("move-workspace-to-window", OK)
         .on("respawn-pane", OK)
         .on("workspace-action", OK)
@@ -1478,7 +1487,7 @@ const CMUX_CAPABILITIES: &str = r#"{
     "focus-pane", "focus-window", "identify", "list-pane-surfaces", "list-panes",
     "list-windows", "list-workspaces", "markdown", "move-workspace-to-window", "new-pane",
     "new-split", "new-surface", "new-window", "new-workspace", "notify", "ping",
-    "rename-workspace", "respawn-pane", "select-workspace", "version", "workspace-action"
+    "rename-tab", "rename-workspace", "respawn-pane", "select-workspace", "version", "workspace-action"
   ],
   "features": {
     "workspaces": true, "workspace_groups": true, "windows": true, "panes": true,
@@ -1486,15 +1495,12 @@ const CMUX_CAPABILITIES: &str = r#"{
   }
 }"#;
 
-const CMUX_NEW_WINDOW: &str = r#"{ "window": { "id": "window:2", "title": "rust-dev" } }"#;
-const CMUX_NEW_WORKSPACE_3: &str =
-    r#"{ "workspace": { "id": "workspace:3", "title": "rust-dev · code" } }"#;
-const CMUX_NEW_WORKSPACE_4: &str =
-    r#"{ "workspace": { "id": "workspace:4", "title": "rust-dev · agent" } }"#;
+const CMUX_NEW_WORKSPACE_3: &str = "OK workspace:3";
+const CMUX_NEW_WORKSPACE_4: &str = "OK workspace:4";
 const CMUX_NEW_SPLIT_5: &str =
-    r#"{ "surface": { "id": "surface:5", "pane": "pane:4", "type": "terminal" } }"#;
+    r#"{ "surface_ref": "surface:5", "pane_ref": "pane:4", "type": "terminal" }"#;
 const CMUX_NEW_SPLIT_6: &str =
-    r#"{ "surface": { "id": "surface:6", "pane": "pane:5", "type": "terminal" } }"#;
+    r#"{ "surface_ref": "surface:6", "pane_ref": "pane:5", "type": "terminal" }"#;
 const CMUX_IDENTIFY: &str = r#"{
   "workspace": { "id": "workspace:2", "title": "rust-dev · code" },
   "surface": { "id": "surface:7", "type": "terminal" },

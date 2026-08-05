@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "AIKit adapters: multiplexers (tmux, cmux, plain), agent clients (Claude Code, Codex, broker), shells."
 
 [dependencies]

@@ -801,13 +801,15 @@ pub struct SessionAttachArgs {
 pub struct SessionListArgs {}
 #[derive(Debug, Args)]
 pub struct SessionDiffArgs {
-    #[arg(value_name = "SESSION")]
-    pub session: Option<String>,
+    /// A session name, session capsule, or portable session spec.
+    #[arg(value_name = "SESSION_OR_SPEC")]
+    pub spec: Option<String>,
 }
 #[derive(Debug, Args)]
 pub struct SessionReconcileArgs {
-    #[arg(value_name = "SESSION")]
-    pub session: Option<String>,
+    /// A session name, session capsule, or portable session spec.
+    #[arg(value_name = "SESSION_OR_SPEC")]
+    pub spec: Option<String>,
     /// Allow reconciliation to close panes that are not in the spec.
     #[arg(long)]
     pub destructive: bool,

@@ -94,7 +94,7 @@ impl Theme {
     /// place motion carries information — that something is still happening —
     /// and everything else is static on purpose.
     pub fn tick(self, frame: u64) -> &'static str {
-        if frame % 2 == 0 {
+        if frame.is_multiple_of(2) {
             "·"
         } else {
             " "

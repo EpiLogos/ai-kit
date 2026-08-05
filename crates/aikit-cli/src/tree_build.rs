@@ -298,7 +298,7 @@ fn registries_root(service: &Service) -> Result<Node> {
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    for root in foreign::discover(&foreign::default_roots(&home)) {
+    for root in foreign::discover(&foreign::roots_for(&home, service.invocation_cwd())) {
         let canonical_root = std::fs::canonicalize(&root.path).unwrap_or_else(|_| root.path.clone());
         let mut summary = match adopted.get(&canonical_root) {
             Some(record) => format!(
@@ -319,6 +319,39 @@ fn registries_root(service: &Service) -> Result<Node> {
             NodeKind::Entry {
                 label: root.label.clone(),
                 detail: root.path.display().to_string(),
+            },
+            summary,
+        ));
+    }
+    let npx = foreign::survey_npx_skills(&home, service.invocation_cwd());
+    for lock in npx.locks {
+        let summary = if lock.supported {
+            let drifted = lock
+                .entries
+                .iter()
+                .filter(|entry| entry.hash_matches == Some(false))
+                .count();
+            let missing = lock.entries.iter().filter(|entry| !entry.installed).count();
+            let mut summary = format!(
+                "foreign npx lock v{} · {} entr{} · read-only",
+                lock.version.unwrap_or_default(),
+                lock.entries.len(),
+                if lock.entries.len() == 1 { "y" } else { "ies" }
+            );
+            if drifted > 0 || missing > 0 {
+                summary.push_str(&format!(" · ⚠ {drifted} drifted, {missing} missing"));
+            }
+            summary
+        } else {
+            format!(
+                "foreign npx lock · ⚠ {}",
+                lock.note.as_deref().unwrap_or("unsupported")
+            )
+        };
+        children.push(Node::leaf(
+            NodeKind::Entry {
+                label: format!("@npx-{}", lock.scope.as_str()),
+                detail: lock.path.display().to_string(),
             },
             summary,
         ));

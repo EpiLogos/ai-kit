@@ -208,7 +208,7 @@ fn a_long_hex_commit_sha_in_a_url_does_not_trip_the_entropy_rule() {
     // Hex cannot carry more than four bits per character, and the threshold sits
     // above that on purpose — so no commit sha, blob id or checksum can ever
     // reach it, whatever its length.
-    let text = "See https://github.com/aikit/aikit/commit/9f2b7c1e4a6d8035bf19ce27a4d0e5b83c716d92 \
+    let text = "See https://github.com/EpiLogos/ai-kit/commit/9f2b7c1e4a6d8035bf19ce27a4d0e5b83c716d92 \
                 for the fix.\nsha256 = \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"";
     assert!(!finds(text), "{:#?}", scan(text));
 }
@@ -280,7 +280,7 @@ fn an_invalid_custom_pattern_is_refused_with_a_stable_code() {
 fn a_finding_never_carries_the_secret_it_found() {
     let secret = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
     let findings = scan(&format!("token: {secret}"));
-    let rendered = format!("{:?}", findings);
+    let rendered = format!("{findings:?}");
     assert!(
         !rendered.contains(secret),
         "a finding is passed around and logged; it must not be a copy of the secret"
