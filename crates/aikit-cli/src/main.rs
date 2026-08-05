@@ -116,6 +116,12 @@ fn reply(service: &Service, data: Value, warnings: Vec<String>) -> Reply {
     }
 }
 
+fn diagnostic_warnings(service: &Service) -> Vec<String> {
+    let mut warnings = service.load_warnings();
+    warnings.extend(service.resolved().warnings.clone());
+    warnings
+}
+
 fn emit(reply: Reply, json_mode: bool) -> i32 {
     match reply {
         Reply::Data {
@@ -242,6 +248,10 @@ fn cmd_skill(cwd: &std::path::Path, command: SkillCmd) -> Result<Reply> {
                     "scope": scope.as_str(),
                     "generation": applied.id.to_string(),
                     "overlays": effective,
+                    "effects": applied.effects.iter().map(|effect| jval!({
+                        "target": effect.target.as_str(),
+                        "effect": effect.effect.describe(),
+                    })).collect::<Vec<_>>(),
                 }),
                 applied.warnings,
             ))
@@ -259,7 +269,7 @@ fn cmd_skill(cwd: &std::path::Path, command: SkillCmd) -> Result<Reply> {
             Ok(reply(
                 &service,
                 jval!({ "capability": id.to_string(), "overlays": effective }),
-                vec![],
+                diagnostic_warnings(&service),
             ))
         }
         SkillOverlaySub::Clear(args) => {
@@ -281,6 +291,10 @@ fn cmd_skill(cwd: &std::path::Path, command: SkillCmd) -> Result<Reply> {
                     "scope": scope.as_str(),
                     "generation": applied.id.to_string(),
                     "overlays": effective,
+                    "effects": applied.effects.iter().map(|effect| jval!({
+                        "target": effect.target.as_str(),
+                        "effect": effect.effect.describe(),
+                    })).collect::<Vec<_>>(),
                 }),
                 applied.warnings,
             ))
@@ -1328,7 +1342,7 @@ fn cmd_status(cwd: &std::path::Path, a: StatusArgs) -> Result<Reply> {
             .collect();
         data["unavailable"] = jval!(unavailable);
     }
-    Ok(reply(&service, data, service.load_warnings()))
+    Ok(reply(&service, data, diagnostic_warnings(&service)))
 }
 
 fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {
@@ -1343,6 +1357,7 @@ fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {
     })?;
     let data = jval!({
         "id": explanation.id.to_string(),
+        "revision": explanation.revision.as_ref().map(|revision| revision.as_str()),
         "active": explanation.active,
         "declared_enabled": explanation.declared_enabled,
         "selected_by": explanation.selected_by,

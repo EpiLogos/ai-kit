@@ -121,3 +121,20 @@ fn a_named_profile_can_be_used_from_the_user_baseline() {
     assert!(used.status.success(), "global profile use failed: {reply}");
     assert!(active(&home, &first));
 }
+
+#[test]
+fn malformed_user_baseline_is_reported_without_being_replaced() {
+    let temp = tempfile::tempdir().unwrap();
+    let (home, first, _) = scene(temp.path());
+    let path = home.join("scopes/global/profile.toml");
+    let malformed = "schema = 1\nenable = [\"unterminated\n";
+    write(&path, malformed);
+
+    let (output, reply) = run(
+        &home,
+        &first,
+        &["enable", CAPABILITY, "--scope", "user"],
+    );
+    assert!(!output.status.success(), "malformed input was accepted: {reply}");
+    assert_eq!(fs::read_to_string(path).unwrap(), malformed);
+}

@@ -167,7 +167,9 @@ impl BrokerAdapter {
 
         for (id, capability) in &context.view.active {
             let entry = context.view.catalog_index.get(id);
-            let mut description = entry.map(|e| e.description.clone()).unwrap_or_default();
+            let mut description = entry
+                .map(|entry| first_sentence(&entry.description))
+                .unwrap_or_default();
             if let Some(overlays) = context.view.skill_usage_overlays.get(id) {
                 for addition in overlays.iter().filter_map(|overlay| overlay.description.as_ref()) {
                     if !addition.trim().is_empty() {
@@ -183,7 +185,7 @@ impl BrokerAdapter {
             let line = format!(
                 "- `{id}` — {}: {}{}\n",
                 capability.name,
-                truncate(&first_sentence(&description), self.budget.max_description_chars),
+                truncate(&description, self.budget.max_description_chars),
                 if tags.is_empty() {
                     String::new()
                 } else {

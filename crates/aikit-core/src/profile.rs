@@ -52,7 +52,7 @@ impl SkillUsageOverlayPatch {
                 ));
             }
         }
-        if self.inherit && !self.has_content() && self.reviewed_against.is_none() {
+        if !self.has_content() && (self.inherit || self.reviewed_against.is_some()) {
             return Err(AikitError::new(
                 "skill_overlay.empty",
                 format!("{id} has an empty Skill Usage Overlay"),

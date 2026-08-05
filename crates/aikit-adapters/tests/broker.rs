@@ -17,6 +17,8 @@ use aikit_adapters::clients::broker::{BrokerAdapter, IndexBudget};
 use aikit_adapters::clients::ClientAdapter;
 use aikit_core::context::Isolation;
 use aikit_core::projection::{ProjectionItem, ResolvedContext, TargetAdapter};
+use aikit_core::resolve::AppliedSkillUsageOverlay;
+use aikit_core::scope::{LayerOrigin, ScopeKind};
 
 /// A context whose skill payloads contain a marker no index may ever carry.
 fn context(registry: &Path, skills: usize) -> ResolvedContext {
@@ -153,6 +155,39 @@ fn a_multi_sentence_description_is_reduced_to_its_first_sentence() {
         !index.contains("great many other things"),
         "the rest is what `aikit capabilities read` is for:\n{index}"
     );
+}
+
+#[test]
+fn skill_routing_orientation_survives_upstream_first_sentence_compaction() {
+    let registry = tempfile::tempdir().unwrap();
+    let root = registry.path().join("skill/rust/wayfinder");
+    write_payload_skill(&root, "wayfinder", "Plans long work.");
+    let mut context = ContextBuilder::new()
+        .project_skill(
+            "skill/rust/wayfinder",
+            "Plans long work. The remaining upstream detail belongs in the full read.",
+            &root,
+        )
+        .build();
+    context.view.skill_usage_overlays.insert(
+        cid("skill/rust/wayfinder"),
+        vec![AppliedSkillUsageOverlay {
+            description: Some("Prefer for work spanning agent sessions.".into()),
+            guidance: None,
+            reviewed_against: None,
+            scope: ScopeKind::Global,
+            origin: LayerOrigin::new("test:user-baseline"),
+            via_profile: None,
+        }],
+    );
+
+    let index = index_of(&context);
+    assert!(index.contains("Plans long work."), "got:\n{index}");
+    assert!(
+        index.contains("Prefer for work spanning agent sessions."),
+        "the routing augmentation must remain in the compact broker index:\n{index}"
+    );
+    assert!(!index.contains("remaining upstream detail"), "got:\n{index}");
 }
 
 #[test]

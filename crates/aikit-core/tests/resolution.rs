@@ -69,6 +69,39 @@ fn skill_usage_overlays_accumulate_in_scope_order_and_change_the_view_hash() {
 }
 
 #[test]
+fn every_rendered_overlay_identity_field_changes_the_view_hash() {
+    let id = cid("skill/test/wayfinder");
+    let revision = Revision::from_hash(blake3::hash(id.to_string().as_bytes()));
+    let overlay = |reviewed_against| SkillUsageOverlayPatch {
+        inherit: true,
+        description: Some("Prefer for cross-session work.".into()),
+        guidance: Some("Use the shared issue map.".into()),
+        reviewed_against,
+    };
+    let resolved = |scope, origin: &str, reviewed_against| {
+        let mut scope_layer = layer(scope, &["skill/test/wayfinder"], &[]);
+        scope_layer.origin = aikit_core::scope::LayerOrigin::new(origin);
+        scope_layer
+            .patch
+            .skill_overlays
+            .insert(id.clone(), overlay(reviewed_against));
+        Fixture::new(vec![skill("skill/test/wayfinder")])
+            .with_layers(vec![scope_layer])
+            .resolve()
+            .unwrap()
+            .hash
+    };
+
+    let base = resolved(ScopeKind::Global, "test:user-a", None);
+    assert_ne!(base, resolved(ScopeKind::Global, "test:user-b", None));
+    assert_ne!(
+        base,
+        resolved(ScopeKind::Global, "test:user-a", Some(revision))
+    );
+    assert_ne!(base, resolved(ScopeKind::Project, "test:user-a", None));
+}
+
+#[test]
 fn a_more_specific_overlay_can_reset_inherited_orientation_without_forking_the_skill() {
     let id = cid("skill/test/wayfinder");
     let mut global = layer(ScopeKind::Global, &["skill/test/wayfinder"], &[]);

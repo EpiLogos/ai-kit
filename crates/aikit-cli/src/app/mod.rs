@@ -114,6 +114,7 @@ pub struct AppliedGeneration {
     pub id: GenerationId,
     pub replaced: Option<GenerationId>,
     pub warnings: Vec<String>,
+    pub effects: Vec<ClientEffect>,
 }
 
 /// Run an exported command name or a capability id once.
@@ -1132,11 +1133,13 @@ impl AikitApplication for Service {
         let staged = GenerationBuilder::new().build(&context_dir, &view, &plans)?;
         self.prepare_codex_project_link(&context_dir)?;
         let committed = staged.commit(base.as_ref())?;
+        let effects = self.client_effects(&self.view);
 
         Ok(AppliedGeneration {
             id: committed.id,
             replaced: committed.replaced,
             warnings: self.view.warnings.clone(),
+            effects,
         })
     }
 

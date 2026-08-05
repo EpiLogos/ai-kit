@@ -18,7 +18,7 @@ use super::{ActiveCapability, AppliedSkillUsageOverlay};
 
 /// Bumped whenever the canonical encoding below changes, so that old generations
 /// are recognised as stale rather than silently reused.
-const HASH_DOMAIN: &str = "aikit-resolution-v2";
+const HASH_DOMAIN: &str = "aikit-resolution-v3";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -52,10 +52,12 @@ impl fmt::Display for ResolutionHash {
 
 /// Build the canonical byte string, then hash it.
 ///
-/// Deliberately excluded: context id, session id, layer origins, warnings, and
-/// the order anything was declared in. Deliberately included: the platform, the
-/// target list, the isolation mode (it changes which projections are possible),
-/// the policy digest, and every active capsule's revision and effective config.
+/// Deliberately excluded: context id, session id, selection/config layer origins,
+/// warnings, and the order anything was declared in. Skill-overlay provenance is
+/// included because it is rendered into the Effective Skill. Also included: the
+/// platform, target list, isolation mode (it changes which projections are
+/// possible), policy digest, and every active capsule's revision and effective
+/// config.
 pub fn resolution_hash(
     context: &ContextDescriptor,
     policy: &ManagedPolicy,
@@ -114,13 +116,8 @@ pub fn resolution_hash(
             canonical.push_str(&id.to_string());
             canonical.push('|');
             canonical.push_str(
-                &serde_json::to_string(&overlay.description)
-                    .expect("an optional string always serializes"),
-            );
-            canonical.push('|');
-            canonical.push_str(
-                &serde_json::to_string(&overlay.guidance)
-                    .expect("an optional string always serializes"),
+                &serde_json::to_string(overlay)
+                    .expect("a resolved skill overlay always serializes"),
             );
             canonical.push('\n');
         }
