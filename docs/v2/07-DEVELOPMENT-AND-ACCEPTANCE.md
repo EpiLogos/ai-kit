@@ -60,6 +60,17 @@
 - optional refraction surfaces;
 - support experimental runtime provider references.
 
+### V2-H — Verification resolution and provider projection
+
+- discover Project-owned verification requirements and canonical verification surfaces;
+- resolve an inspectable effective `VerificationPlan` for the present Subject/Focus rather than impose one universal workflow;
+- preserve deterministic Check, automated Assessment, and human judgement as distinct evidence forms;
+- carry Subject-bound result provenance and evidence freshness;
+- expose assurance drift across declared, executable, provider, and observed state;
+- detect material `AssuranceImpact` as a semantic property of changes;
+- implement GitHub as the first rich provider while keeping provider orchestration subordinate to shared Run/Evidence/Gate semantics;
+- prove lightweight and maximal Project verification postures through the same abstraction.
+
 ---
 
 # Part XX — Acceptance cases
@@ -121,7 +132,7 @@ The V2 design is not complete unless tests can show:
 - a never-agent-visible source payload never enters agent-searchable indexes;
 - local visibility does not imply external-provider egress;
 - Generation provenance records disclosure source/policy;
-- secret payloads never enter ordinary event or source indexes.
+- dedicated secret mechanisms remain outside ordinary event and source indexes.
 
 ---
 
