@@ -89,5 +89,6 @@ This directory is one authoritative AIKit V2 target-design specification split i
 5. `05-QL-INTEGRATION-AND-RUNTIME.md`
 6. `06-NEIGHBOURS-AND-MIGRATION.md`
 7. `07-DEVELOPMENT-AND-ACCEPTANCE.md`
+8. `08-VERIFICATION-RUNS-AND-CLOSURE.md`
 
 The package defines the target product. `../ARCHITECTURE.md` remains evidence for the current implementation and migration baseline rather than a constraint on the V2 target.
