@@ -30,14 +30,5 @@ jobs:
       - name: Install tmux
         run: brew install tmux
 
-      - name: Test every target
-        run: cargo test --locked --workspace --all-targets --no-fail-fast -- --test-threads=1
-
-      - name: Deny compiler warnings
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
-      - name: Build the release profile
-        run: cargo build --locked --workspace --release
-
-      - name: Check patch whitespace
-        run: git diff --check
+      - name: Verify repository
+        run: bash scripts/verify

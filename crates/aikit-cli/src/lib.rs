@@ -27,6 +27,7 @@ pub mod jump;
 pub mod multicall;
 pub mod mux_install;
 pub mod profile_ops;
+pub mod project_binding;
 pub mod projects;
 pub mod run;
 pub mod skill_sources;
