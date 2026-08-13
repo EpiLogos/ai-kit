@@ -86,6 +86,8 @@ This directory is one authoritative AIKit V2 target-design specification split i
 2. `02-RESOLUTION-AND-CONTEXT-COGNITION.md`
 3. `03-ACTOR-RUNTIME-AND-PROJECTION.md`
 4. `04-INTERFACES-TUI-AND-SOFTWARE-DESIGN.md`
-5. `05-QL-INTEGRATION-MIGRATION-AND-ACCEPTANCE.md`
+5. `05-QL-INTEGRATION-AND-RUNTIME.md`
+6. `06-NEIGHBOURS-AND-MIGRATION.md`
+7. `07-DEVELOPMENT-AND-ACCEPTANCE.md`
 
 The package defines the target product. `../ARCHITECTURE.md` remains evidence for the current implementation and migration baseline rather than a constraint on the V2 target.
