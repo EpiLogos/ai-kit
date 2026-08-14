@@ -47,7 +47,7 @@ fn source_record(id: &str, provider_state: ProviderState) -> ResourceRecord {
     record
 }
 
-fn context_source_entry(id: &str, provider_state: ProviderState) -> ContextSourceEntry {
+fn entry(id: &str, provider_state: ProviderState) -> ContextSourceEntry {
     let mut entry = ContextSourceEntry::new(source_record(id, provider_state)).unwrap();
     entry.relation.project = Some(project_ref());
     entry.relation.scope = Some(ScopeKind::Project);
@@ -126,15 +126,13 @@ fn large_horizon_is_descriptor_searchable_without_provider_reads_or_payload_inje
     let mut provider = FakeProvider::new();
     for number in 0..2048 {
         let id = format!("context-source:document:{number:04}");
-        index.insert(context_source_entry(&id, ProviderState::Available));
+        index.insert(entry(&id, ProviderState::Available));
         provider = provider.with_payload(&id, &format!("private payload {number}"));
     }
 
     let request = HorizonRequest::agent(Some(project_ref()));
-    let horizon = index.horizon(&request);
+    assert_eq!(index.horizon(&request).len(), 2048);
     let result = index.search(&request, "1999");
-
-    assert_eq!(horizon.len(), 2048);
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].resource.as_str(), "context-source:document:1999");
     assert_eq!(provider.read_count, 0);
@@ -146,8 +144,8 @@ fn known_askable_retrieved_loaded_and_focused_are_independent_transitions() {
     let target = "context-source:document:target";
     let unrelated = "context-source:document:unrelated";
     let mut index = ContextSourceIndex::default();
-    index.insert(context_source_entry(target, ProviderState::Available));
-    index.insert(context_source_entry(unrelated, ProviderState::Available));
+    index.insert(entry(target, ProviderState::Available));
+    index.insert(entry(unrelated, ProviderState::Available));
     let mut provider = FakeProvider::new().with_payload(target, "selected material");
 
     let outcome = index.retrieve(
@@ -162,18 +160,14 @@ fn known_askable_retrieved_loaded_and_focused_are_independent_transitions() {
 
     let target_ref = ResourceRef::parse(target).unwrap();
     let unrelated_ref = ResourceRef::parse(unrelated).unwrap();
-    let target_after_retrieval = index.explain(&target_ref).unwrap();
-    assert!(target_after_retrieval.disclosure.known_to_exist);
-    assert!(target_after_retrieval.disclosure.askable);
-    assert!(target_after_retrieval.disclosure.retrieved);
-    assert!(!target_after_retrieval.disclosure.focused);
-    assert!(!target_after_retrieval.operational.loaded);
-    assert!(target_after_retrieval.operational.invoked);
-
-    let unrelated_after_retrieval = index.explain(&unrelated_ref).unwrap();
-    assert!(!unrelated_after_retrieval.disclosure.retrieved);
-    assert!(!unrelated_after_retrieval.disclosure.focused);
-    assert!(!unrelated_after_retrieval.operational.loaded);
+    let after_retrieval = index.explain(&target_ref).unwrap();
+    assert!(after_retrieval.disclosure.known_to_exist);
+    assert!(after_retrieval.disclosure.askable);
+    assert!(after_retrieval.disclosure.retrieved);
+    assert!(!after_retrieval.disclosure.focused);
+    assert!(!after_retrieval.operational.loaded);
+    assert!(after_retrieval.operational.invoked);
+    assert!(!index.explain(&unrelated_ref).unwrap().disclosure.retrieved);
 
     index.set_loaded(&target_ref, true).unwrap();
     let after_load = index.explain(&target_ref).unwrap();
@@ -191,7 +185,7 @@ fn known_askable_retrieved_loaded_and_focused_are_independent_transitions() {
 fn disclosure_state_does_not_infer_operational_or_other_epistemic_states() {
     let id = ResourceRef::parse("context-source:nonlinear-disclosure").unwrap();
     let mut index = ContextSourceIndex::default();
-    index.insert(context_source_entry(id.as_str(), ProviderState::Available));
+    index.insert(entry(id.as_str(), ProviderState::Available));
     index
         .set_disclosure(
             &id,
@@ -219,18 +213,28 @@ fn canonical_identity_survives_provider_loss_degradation_reappearance_and_rebuil
     let id = "context-source:canon:architecture";
     let canonical = ResourceRef::parse(id).unwrap();
 
-    let mut unavailable = ContextSourceIndex::default();
-    unavailable.insert(context_source_entry(
+    let mut unavailable_entry = entry(
         id,
         ProviderState::Unavailable {
             reason: "provider offline".into(),
         },
-    ));
+    );
+    unavailable_entry.resource.descriptor.sources[0].state = SourceState::Unavailable {
+        reason: "source temporarily unreadable".into(),
+    };
+    let mut unavailable = ContextSourceIndex::default();
+    unavailable.insert(unavailable_entry);
     let first = unavailable.explain(&canonical).unwrap();
     assert_eq!(first.resource, canonical);
     assert!(matches!(first.availability, Availability::Unavailable { .. }));
+    assert_eq!(
+        unavailable
+            .search(&HorizonRequest::human(Some(project_ref())), "architecture")[0]
+            .resource,
+        canonical
+    );
 
-    let mut degraded_entry = context_source_entry(id, ProviderState::Available);
+    let mut degraded_entry = entry(id, ProviderState::Available);
     degraded_entry.provider_descriptors.insert(
         provider_ref(),
         ContextSourceProviderDescriptor {
@@ -254,7 +258,7 @@ fn canonical_identity_survives_provider_loss_degradation_reappearance_and_rebuil
     ));
 
     let mut rebuilt = ContextSourceIndex::default();
-    rebuilt.insert(context_source_entry(id, ProviderState::Available));
+    rebuilt.insert(entry(id, ProviderState::Available));
     let final_state = rebuilt.explain(&canonical).unwrap();
     assert_eq!(final_state.resource, canonical);
     assert_eq!(final_state.availability, Availability::Available);
@@ -274,29 +278,32 @@ fn all_structured_absence_meanings_are_distinguishable() {
     for (kind, suffix) in cases {
         let id = format!("context-source:absence:{suffix}");
         let resource = ResourceRef::parse(&id).unwrap();
-        let mut entry = context_source_entry(&id, ProviderState::Available);
-        entry.absence = Some(StructuredAbsence::new(kind, suffix));
+        let mut source = entry(&id, ProviderState::Available);
+        source.absence = Some(StructuredAbsence::new(kind, suffix));
         let mut index = ContextSourceIndex::default();
-        index.insert(entry);
-        let explanation = index.explain(&resource).unwrap();
-        observed.push(explanation.absence.unwrap().kind);
+        index.insert(source);
+        observed.push(index.explain(&resource).unwrap().absence.unwrap().kind);
     }
 
     assert_eq!(observed.len(), 6);
-    assert!(observed.contains(&AbsenceKind::Open));
-    assert!(observed.contains(&AbsenceKind::Latent));
-    assert!(observed.contains(&AbsenceKind::Unknown));
-    assert!(observed.contains(&AbsenceKind::Irrelevant));
-    assert!(observed.contains(&AbsenceKind::Bound));
-    assert!(observed.contains(&AbsenceKind::Missing));
+    for expected in [
+        AbsenceKind::Open,
+        AbsenceKind::Latent,
+        AbsenceKind::Unknown,
+        AbsenceKind::Irrelevant,
+        AbsenceKind::Bound,
+        AbsenceKind::Missing,
+    ] {
+        assert!(observed.contains(&expected));
+    }
 }
 
 #[test]
-fn retrieval_carries_canonical_identity_revision_provider_provenance_and_eligibility() {
+fn retrieval_carries_identity_scope_revision_provider_provenance_and_eligibility() {
     let id = "context-source:paper:ql";
     let resource = ResourceRef::parse(id).unwrap();
     let mut index = ContextSourceIndex::default();
-    index.insert(context_source_entry(id, ProviderState::Available));
+    index.insert(entry(id, ProviderState::Available));
     let mut provider = FakeProvider::new().with_payload(id, "paper material");
 
     let retrieval = match index.retrieve(
@@ -320,7 +327,10 @@ fn retrieval_carries_canonical_identity_revision_provider_provenance_and_eligibi
         source.authority == Some(SourceAuthority::Authored)
             && source.revision.as_ref().map(SourceRevision::as_str) == Some("rev:source-1")
     }));
+
     let explanation = index.explain(&resource).unwrap();
+    assert_eq!(explanation.relation.project, Some(project_ref()));
+    assert_eq!(explanation.relation.scope, Some(ScopeKind::Project));
     assert!(explanation.provider_descriptors[&provider_ref()]
         .capabilities
         .supports(ContextSourceOperation::Read));
@@ -330,12 +340,12 @@ fn retrieval_carries_canonical_identity_revision_provider_provenance_and_eligibi
 fn privacy_excludes_never_agent_visible_material_and_denies_external_egress_before_read() {
     let hidden_id = "context-source:private:hidden";
     let local_id = "context-source:private:local-only";
-    let mut hidden = context_source_entry(hidden_id, ProviderState::Available);
+    let mut hidden = entry(hidden_id, ProviderState::Available);
     hidden.privacy = ContextSourcePrivacy {
         agent_visibility: AgentVisibility::Hidden,
         external_egress: ExternalEgress::Denied,
     };
-    let mut local = context_source_entry(local_id, ProviderState::Available);
+    let mut local = entry(local_id, ProviderState::Available);
     local.privacy = ContextSourcePrivacy {
         agent_visibility: AgentVisibility::Payload,
         external_egress: ExternalEgress::Denied,
@@ -399,13 +409,13 @@ fn privacy_excludes_never_agent_visible_material_and_denies_external_egress_befo
 #[test]
 fn metadata_only_agent_disclosure_exposes_descriptor_not_payload() {
     let id = "context-source:private:metadata-only";
-    let mut entry = context_source_entry(id, ProviderState::Available);
-    entry.privacy = ContextSourcePrivacy {
+    let mut source = entry(id, ProviderState::Available);
+    source.privacy = ContextSourcePrivacy {
         agent_visibility: AgentVisibility::MetadataOnly,
         external_egress: ExternalEgress::Denied,
     };
     let mut index = ContextSourceIndex::default();
-    index.insert(entry);
+    index.insert(source);
     let request = HorizonRequest::agent(Some(project_ref()));
     assert_eq!(index.search(&request, "metadata-only").len(), 1);
 
@@ -437,7 +447,7 @@ fn descriptor_search_is_deterministic_for_identical_explicit_inputs() {
         "context-source:design:alpha",
         "context-source:design:gamma",
     ] {
-        index.insert(context_source_entry(id, ProviderState::Available));
+        index.insert(entry(id, ProviderState::Available));
     }
     let request = HorizonRequest::human(Some(project_ref()));
     let first = index.search(&request, "design");
