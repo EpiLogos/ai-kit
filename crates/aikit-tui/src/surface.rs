@@ -9,9 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers,
+    DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
+    MouseEventKind,
 };
 use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use aikit_core::error::AikitError;
@@ -24,6 +26,7 @@ use crate::backend::{PaletteBackend, Toggle};
 use crate::driver::{PaletteController, PaletteStep};
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::host::UiHost;
+use crate::layout::Layout;
 use crate::staging::is_on;
 use crate::tree::{NodeKind, TreeEffect, TreeState};
 use crate::tree_driver::{TreeController, TreeRequest, TreeStep};
@@ -190,6 +193,15 @@ impl SurfaceController {
 
         match self.state.presentation {
             Presentation::Quick => {
+                // Mouse navigation resolves the exact same stable selection
+                // action as keyboard navigation. The legacy palette never sees a
+                // mouse-specific semantic branch; its cursor is only a projection.
+                if let Some(resource) = self.quick_mouse_selection(&event) {
+                    self.set_selected(Some(resource));
+                    self.align_palette_to_selected();
+                    return Ok(SurfaceStep::Continue);
+                }
+
                 // Search-resting Esc/Ctrl-C is semantic Back. It is deliberately
                 // not forwarded to the V1 reducer, whose historical behaviour
                 // cleared query, then staged changes, then exited on successive
@@ -497,12 +509,61 @@ impl SurfaceController {
         self.tree.state_mut().selected = index;
         true
     }
+
+    fn quick_mouse_selection(&self, event: &PaletteEvent) -> Option<ResourceRef> {
+        if self.palette.state().mode != Mode::Search || self.palette.state().in_manage_lane() {
+            return None;
+        }
+        let PaletteEvent::Mouse(mouse) = event else {
+            return None;
+        };
+
+        let index = match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.quick_row_at(mouse.column, mouse.row)?,
+            MouseEventKind::ScrollDown => self
+                .palette
+                .state()
+                .cursor
+                .saturating_add(1)
+                .min(self.palette.state().rows.len().saturating_sub(1)),
+            MouseEventKind::ScrollUp => self.palette.state().cursor.saturating_sub(1),
+            _ => return None,
+        };
+        self.palette
+            .state()
+            .rows
+            .get(index)
+            .and_then(|row| resource_ref_for_capsule(&row.doc.id))
+    }
+
+    fn quick_row_at(&self, column: u16, row: u16) -> Option<usize> {
+        let (cols, rows) = self.state.area;
+        if cols < 2 || rows < 2 {
+            return None;
+        }
+        let inner = Rect::new(1, 1, cols.saturating_sub(2), rows.saturating_sub(2));
+        let panes = Layout::for_width(inner.width).split(inner);
+        let list = panes.list;
+        if column < list.x
+            || column >= list.x.saturating_add(list.width)
+            || row < list.y
+            || row >= list.y.saturating_add(list.height)
+        {
+            return None;
+        }
+
+        let height = list.height as usize;
+        let first = self
+            .palette
+            .state()
+            .cursor
+            .saturating_sub(height.saturating_sub(1));
+        let index = first.saturating_add((row - list.y) as usize);
+        (index < self.palette.state().rows.len()).then_some(index)
+    }
 }
 
 fn resource_ref_for_capsule(capsule: &CapsuleId) -> Option<ResourceRef> {
-    // V1 capabilities already have stable content identity. During migration the
-    // same opaque string is lifted into the V2 resource-address space; the V2
-    // application service will eventually hand ResourceRef to the TUI directly.
     ResourceRef::parse(&capsule.to_string()).ok()
 }
 
@@ -573,11 +634,6 @@ pub fn run_on_terminal<B: SurfaceBackend>(
     run_inner(backend, request, host)
 }
 
-/// Owns every terminal mode as soon as it is acquired.
-///
-/// Setup can fail between raw mode, the alternate screen, and mouse capture.
-/// Keeping acquisition flags in a guard makes those partial paths use the same
-/// reversal as ordinary exits and render errors.
 struct TerminalSession {
     raw: bool,
     alternate: bool,
