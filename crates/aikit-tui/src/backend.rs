@@ -1,26 +1,16 @@
-//! What the palette needs from the application.
+//! What the TUI needs from the application.
 //!
 //! This trait is the whole of the palette's contact with the rest of AIKit. It is
 //! deliberately small and deliberately *dumb*: every method either hands over
-//! data the store already has or asks `aikit-core` a question. There is no method
-//! here whose implementation could reasonably contain a capability rule, because
-//! a rule reachable from the TUI is a rule that can disagree with `aikit explain`.
+//! data the store/core already has or asks `aikit-core` a question. There is no
+//! method here whose implementation could reasonably contain a resolver rule,
+//! because a rule reachable from the TUI is a rule that can disagree with CLI
+//! Explain/Search over the same application service.
 //!
-//! Note what is **not** here. There is no `explain` method: an explanation is a
-//! pure projection of a resolved view, so the palette calls
-//! [`aikit_core::resolve::ResolvedView::explain`] on the view it already holds.
-//! There is no `stage` method either — staging is [`preview`](PaletteBackend::preview)
-//! plus a diff computed in [`crate::staging`], which is why staging provably
-//! cannot write anything: the only write method on this trait is
-//! [`apply`](PaletteBackend::apply).
-//!
-//! ## Running is handed back, not performed here
-//!
-//! [`PaletteBackend::start`] exists only for execution modes that keep the
-//! palette on screen — `capture` and `background`. A foreground or `replace` mode
-//! needs the terminal the palette is holding, so those come back to the caller as
-//! [`crate::PaletteOutcome::Run`] and are executed after teardown. Doing otherwise
-//! would hand a child process a raw-mode terminal and an alternate screen.
+//! The V2 resource methods are additive migration seams. Their defaults faithfully
+//! adapt the V1 capability application service; a V2 backend can override them to
+//! return the wider `ContextResolution`/`ContextSource` field without forcing the
+//! TUI back into Capsule-only identity.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -28,10 +18,13 @@ use std::path::PathBuf;
 use aikit_core::arg::{ArgSpec, ArgValue, ArgValues};
 use aikit_core::capsule::{Capsule, ExecMode, WorkingDir};
 use aikit_core::context::ContextDescriptor;
+use aikit_core::context_resolution::ContextResolution;
+use aikit_core::context_source::ContextSourceExplanation;
 use aikit_core::id::{CapsuleId, ContextId, GenerationId};
 use aikit_core::platform::TargetId;
 use aikit_core::projection::ActivationEffect;
-use aikit_core::resolve::ResolvedView;
+use aikit_core::resolve::{Explanation, ResolvedView};
+use aikit_core::resource::{ResourceKind, ResourceRef};
 use aikit_core::scope::ScopeKind;
 use aikit_core::search::SearchDoc;
 use aikit_core::Result;
@@ -51,6 +44,40 @@ impl Toggle {
     pub fn new(capsule: CapsuleId, enable: bool) -> Self {
         Self { capsule, enable }
     }
+}
+
+/// V2 mutation identity. The compatibility implementation accepts capability
+/// Resources; future Action/other mutable resource types can be added by the
+/// application service without changing `TuiState`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceMutation {
+    pub resource: ResourceRef,
+    pub enable: bool,
+}
+
+impl ResourceMutation {
+    pub fn new(resource: ResourceRef, enable: bool) -> Self {
+        Self { resource, enable }
+    }
+}
+
+/// Cheap, resource-oriented row identity for V2 application read models.
+/// Operational/disclosure semantics remain on ContextResolution/ContextSource
+/// explanation rather than being re-derived into this presentation summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceSummary {
+    pub resource: ResourceRef,
+    pub kind: ResourceKind,
+    pub name: String,
+    pub description: String,
+}
+
+/// The explanation variants the TUI can display without owning explanation
+/// semantics. Both are produced by core contracts.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResourceExplanation {
+    Capability(Explanation),
+    ContextSource(ContextSourceExplanation),
 }
 
 /// What applying a view would mean for one client.
@@ -82,10 +109,6 @@ pub struct Projected {
 }
 
 /// Everything needed to run one capability once.
-///
-/// Carries the argument *specification* alongside the values so that redaction,
-/// argv construction and the "can this be repeated" question all have one source
-/// of truth — [`aikit_core::arg`] — rather than a copy of it in the palette.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunIntent {
     pub capsule: CapsuleId,
@@ -107,9 +130,6 @@ impl RunIntent {
     }
 
     /// The argv as it may be shown, logged or recorded.
-    ///
-    /// Secrets are replaced *before* argv is built rather than masked afterwards,
-    /// so there is no window in which the real value exists in a display string.
     pub fn redacted_argv(&self) -> Result<Vec<String>> {
         aikit_core::arg::build_argv(&self.specs, &self.redacted_values())
     }
@@ -121,10 +141,6 @@ impl RunIntent {
     }
 
     /// The same invocation with every secret dropped.
-    ///
-    /// This is what the recent list keeps. Repeating it will fail the required
-    /// check for any secret argument, which is the intended outcome: a secret is
-    /// re-entered, never replayed out of a history buffer.
     pub fn without_secrets(&self) -> Self {
         let secret_names: Vec<&str> = self
             .specs
@@ -178,10 +194,6 @@ impl JobOutput {
 }
 
 /// A capture ready to become a capsule, plus what promotion would produce.
-///
-/// The body is held separately from the candidate because a **quarantined**
-/// candidate's body must never reach a preview. That is enforced at construction:
-/// there is no way to build a draft that both is withheld and carries its text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromotionDraft {
     pub candidate: Candidate,
@@ -207,10 +219,7 @@ impl PromotionDraft {
     }
 
     /// Attach the candidate's stored (already redacted) text.
-    ///
-    /// Silently refused for a withheld candidate — not as a courtesy, but because
-    /// the alternative is a code path where quarantined text is in memory next to
-    /// a renderer that might one day forget to check.
+    /// Silently refused for a withheld candidate.
     #[must_use]
     pub fn with_body(mut self, lines: Vec<String>) -> Self {
         if self.withheld_reason().is_none() {
@@ -219,7 +228,6 @@ impl PromotionDraft {
         self
     }
 
-    /// Why this candidate cannot be promoted or previewed, if it cannot.
     pub fn withheld_reason(&self) -> Option<String> {
         if self.candidate.state == CandidateState::Quarantined || !self.candidate.findings.is_empty()
         {
@@ -239,32 +247,94 @@ impl PromotionDraft {
         None
     }
 
-    /// The body, which is empty for anything withheld.
     pub fn body(&self) -> &[String] {
         &self.body
     }
 }
 
-/// The application service, as the palette needs it.
+/// The application service, as the TUI needs it.
 pub trait PaletteBackend {
     /// The context the palette was opened in.
     fn context(&self) -> &ContextDescriptor;
 
-    /// The effective view for that context, right now.
+    /// The effective V1 capability view for that context, right now.
     fn view(&self) -> &ResolvedView;
 
-    /// The rows to search over, with the usage facts from the event log.
+    /// The rows to search over, with usage facts from the event log.
     fn documents(&self) -> Vec<SearchDoc>;
 
-    /// The full manifest behind a row, for the preview and the argument form.
+    /// V2 resource-oriented search/read-model identities.
+    ///
+    /// The default adapts every V1 capability row without inventing any wider
+    /// resource semantics. V2 backends may append Action/ContextSource/etc rows
+    /// from their authoritative resource index.
+    fn resource_summaries(&self) -> Vec<ResourceSummary> {
+        self.documents()
+            .into_iter()
+            .filter_map(|doc| {
+                ResourceRef::parse(&doc.id.to_string())
+                    .ok()
+                    .map(|resource| ResourceSummary {
+                        resource,
+                        kind: ResourceKind::Capability,
+                        name: doc.name,
+                        description: doc.description,
+                    })
+            })
+            .collect()
+    }
+
+    /// The complete V2 ContextResolution when the backend has migrated to it.
+    /// Returning `None` is an explicit V1 compatibility state, not a second
+    /// resolution performed in the TUI.
+    fn context_resolution(&self) -> Option<ContextResolution> {
+        None
+    }
+
+    /// ContextSource disclosure supplied by the #26 application seam.
+    fn context_source_disclosure(&self) -> Vec<ContextSourceExplanation> {
+        Vec::new()
+    }
+
+    /// Explain one stable ResourceRef through core-owned explanation contracts.
+    fn explain_resource(&self, resource: &ResourceRef) -> Option<ResourceExplanation> {
+        let capsule = CapsuleId::parse(resource.as_str()).ok()?;
+        self.view()
+            .explain(&capsule)
+            .map(ResourceExplanation::Capability)
+    }
+
+    /// The full manifest behind a V1 capability row, for preview/run forms.
     fn capsule(&self, id: &CapsuleId) -> Option<&Capsule>;
 
-    /// Resolve the view these toggles *would* produce, and what each client would
-    /// see. Writes nothing.
+    /// Resolve the view these V1 toggles *would* produce, and what each client
+    /// would see. Writes nothing.
     fn preview(&self, scope: ScopeKind, toggles: &[Toggle]) -> Result<Projected>;
 
-    /// Commit the whole set at once, returning the new generation.
+    /// Resource-oriented composition preview. The default accepts only Resources
+    /// that are valid legacy capability ids and delegates to the same application
+    /// service; it never performs resolution in the TUI.
+    fn preview_resources(
+        &self,
+        scope: ScopeKind,
+        mutations: &[ResourceMutation],
+    ) -> Result<Projected> {
+        let toggles = legacy_toggles(mutations)?;
+        self.preview(scope, &toggles)
+    }
+
+    /// Commit the whole V1 set at once, returning the new generation.
     fn apply(&mut self, scope: ScopeKind, toggles: &[Toggle]) -> Result<GenerationId>;
+
+    /// Resource-oriented commit using the same application write path.
+    fn apply_resources(
+        &mut self,
+        scope: ScopeKind,
+        mutations: &[ResourceMutation],
+    ) -> Result<GenerationId> {
+        let toggles = legacy_toggles(mutations)?;
+        self.apply(scope, &toggles)
+    }
 
     /// Run something whose output the palette will display.
     fn start(&mut self, intent: &RunIntent) -> Result<JobOutput>;
@@ -278,8 +348,7 @@ pub trait PaletteBackend {
     /// Turn a draft into a capsule.
     fn promote(&mut self, draft: &PromotionDraft) -> Result<CapsuleId>;
 
-    /// Reveal where a capability's source lives, opening it if the application is
-    /// configured to. Returns the path so the palette can say what it did.
+    /// Reveal where a capability's source lives, opening it if configured to.
     fn open_source(&mut self, id: &CapsuleId) -> Result<PathBuf> {
         match self.capsule(id).and_then(|c| c.root.clone()) {
             Some(root) => Ok(root),
@@ -290,4 +359,24 @@ pub trait PaletteBackend {
             .with("capability", id.to_string())),
         }
     }
+}
+
+fn legacy_toggles(mutations: &[ResourceMutation]) -> Result<Vec<Toggle>> {
+    mutations
+        .iter()
+        .map(|mutation| {
+            CapsuleId::parse(mutation.resource.as_str())
+                .map(|capsule| Toggle::new(capsule, mutation.enable))
+                .map_err(|_| {
+                    aikit_core::AikitError::new(
+                        "tui.resource_mutation_unsupported",
+                        format!(
+                            "resource {} is not mutable through the legacy capability adapter",
+                            mutation.resource
+                        ),
+                    )
+                    .with("resource", mutation.resource.to_string())
+                })
+        })
+        .collect()
 }
