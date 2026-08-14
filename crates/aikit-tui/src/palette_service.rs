@@ -10,13 +10,15 @@
 use aikit_core::id::CapsuleId;
 use aikit_core::resource::{ContextualActionDescriptor, ResourceRef};
 use aikit_core::{AikitError, Result};
-use serde_json::{json, to_value, Value};
+use serde_json::{json, to_string_pretty, to_value, Value};
 
 use crate::application::{
-    ActivationIntent, ApplyReceipt, CompositionPreview, HistoryEntry, RelationReadModel,
-    ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService,
+    ActionOutcome, ActivationIntent, ApplyReceipt, CompositionPreview, HistoryEntry,
+    RelationReadModel, ResourceListItem, ResourceListReadModel, StagedChanges,
+    TuiApplicationService,
 };
 use crate::backend::{PaletteBackend, Toggle};
+use crate::staging::is_on;
 
 pub struct PaletteApplicationService<'a> {
     backend: &'a mut dyn PaletteBackend,
@@ -197,6 +199,46 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
     fn contextual_actions(&self, resource: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
         let index = self.backend.navigation_index();
         Ok(index.actions_for(resource).into_iter().cloned().collect())
+    }
+
+    fn invoke_action(&mut self, action: &ContextualActionDescriptor) -> Result<ActionOutcome> {
+        match action.action.as_str() {
+            "action/project/open" => Ok(ActionOutcome::Opened {
+                subject: action.subject.clone(),
+                summary: format!("opened {}", action.subject),
+            }),
+            "action/capability/explain" => {
+                let explanation = self.explain(&action.subject)?;
+                Ok(ActionOutcome::Explained {
+                    subject: action.subject.clone(),
+                    summary: to_string_pretty(&explanation).map_err(json_error)?,
+                })
+            }
+            "action/capability/toggle" => {
+                let capsule = capsule_id(&action.subject)?;
+                let intent = if is_on(self.backend.view(), &capsule) {
+                    ActivationIntent::Disable
+                } else {
+                    ActivationIntent::Enable
+                };
+                Ok(ActionOutcome::Staged {
+                    resource: action.subject.clone(),
+                    intent,
+                    summary: format!(
+                        "staged {} for {}",
+                        match intent {
+                            ActivationIntent::Enable => "enable",
+                            ActivationIntent::Disable => "disable",
+                        },
+                        action.subject
+                    ),
+                })
+            }
+            other => Err(AikitError::new(
+                "tui.action_not_implemented",
+                format!("canonical Action {other} has no TUI application operation"),
+            )),
+        }
     }
 }
 
