@@ -1,8 +1,9 @@
-//! One transient AIKit surface with palette and tree modes.
+//! One transient AIKit surface with Quick and Workspace presentations.
 //!
-//! A mode switch is not an outcome and does not surrender the terminal. Both
-//! controllers stay resident under one event source and one backend, so their
-//! navigation state and the staged graph survive `Ctrl-T`.
+//! During the V2 migration the existing PaletteController and TreeController are
+//! retained as presentation adapters, but semantic presentation/selection already
+//! lives in [`TuiState`]. The remaining staged-state adapter is intentionally
+//! visible here until the next migration slice removes the duplicated V1 graph.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -12,6 +13,8 @@ use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use aikit_core::error::AikitError;
+use aikit_core::id::CapsuleId;
+use aikit_core::resource::ResourceRef;
 use aikit_core::Result;
 
 use crate::app::Action;
@@ -20,8 +23,9 @@ use crate::driver::{PaletteController, PaletteStep};
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::host::UiHost;
 use crate::staging::is_on;
-use crate::tree::{TreeEffect, TreeState};
+use crate::tree::{NodeKind, TreeEffect, TreeState};
 use crate::tree_driver::{TreeController, TreeRequest, TreeStep};
+use crate::tui_state::{reduce_tui, Presentation, TuiState, UiAction};
 use crate::{PaletteOutcome, PaletteRequest};
 
 /// The application operations the unified surface needs beyond the palette.
@@ -30,10 +34,32 @@ pub trait SurfaceBackend: PaletteBackend {
     fn apply_tree_effect(&mut self, effect: TreeEffect) -> Result<()>;
 }
 
+/// V1-compatible names for the two current presentations.
+///
+/// The semantic state uses `Quick`/`Workspace`: Palette/Tree remain only at the
+/// compatibility boundary while callers migrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceMode {
     Palette,
     Tree,
+}
+
+impl From<SurfaceMode> for Presentation {
+    fn from(value: SurfaceMode) -> Self {
+        match value {
+            SurfaceMode::Palette => Presentation::Quick,
+            SurfaceMode::Tree => Presentation::Workspace,
+        }
+    }
+}
+
+impl From<Presentation> for SurfaceMode {
+    fn from(value: Presentation) -> Self {
+        match value {
+            Presentation::Quick => SurfaceMode::Palette,
+            Presentation::Workspace => SurfaceMode::Tree,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,7 +106,7 @@ impl SurfaceRequest {
 }
 
 pub struct SurfaceController {
-    mode: SurfaceMode,
+    state: TuiState,
     host: UiHost,
     palette: PaletteController,
     tree: TreeController,
@@ -90,18 +116,28 @@ impl SurfaceController {
     pub fn new<B: SurfaceBackend>(backend: &mut B, request: SurfaceRequest) -> Result<Self> {
         let palette = PaletteController::new(backend, request.palette_request())?;
         let tree = TreeController::new(backend.surface_tree()?, TreeRequest::new(request.host));
+        let mut state = TuiState::new(request.initial_mode.into());
+        state.query = palette.state().query.clone();
         let mut surface = Self {
-            mode: request.initial_mode,
+            state,
             host: request.host,
             palette,
             tree,
         };
+        match surface.state.presentation {
+            Presentation::Quick => surface.capture_palette_selection(),
+            Presentation::Workspace => surface.capture_tree_selection(),
+        }
         surface.sync_palette_to_tree();
         Ok(surface)
     }
 
     pub fn mode(&self) -> SurfaceMode {
-        self.mode
+        self.state.presentation.into()
+    }
+
+    pub fn tui_state(&self) -> &TuiState {
+        &self.state
     }
 
     pub fn palette(&self) -> &PaletteController {
@@ -113,9 +149,11 @@ impl SurfaceController {
     }
 
     pub fn draw(&mut self, frame: &mut ratatui::Frame) {
-        match self.mode {
-            SurfaceMode::Palette => self.palette.draw(frame),
-            SurfaceMode::Tree => self.tree.draw(frame),
+        let area = frame.area();
+        self.reduce_semantic(UiAction::Resize(area.width, area.height));
+        match self.state.presentation {
+            Presentation::Quick => self.palette.draw(frame),
+            Presentation::Workspace => self.tree.draw(frame),
         }
     }
 
@@ -140,13 +178,18 @@ impl SurfaceController {
         backend: &mut B,
         event: PaletteEvent,
     ) -> Result<SurfaceStep> {
-        match self.mode {
-            SurfaceMode::Palette => {
+        if let PaletteEvent::Resize(cols, rows) = &event {
+            self.reduce_semantic(UiAction::Resize(*cols, *rows));
+        }
+        match self.state.presentation {
+            Presentation::Quick => {
                 let step = self.palette.handle(backend, event)?;
+                self.capture_palette_state();
                 self.handle_palette_step(backend, step)
             }
-            SurfaceMode::Tree => {
+            Presentation::Workspace => {
                 let step = self.tree.handle(event)?;
+                self.capture_tree_selection();
                 self.handle_tree_step(backend, step)
             }
         }
@@ -161,7 +204,8 @@ impl SurfaceController {
             PaletteStep::Continue => SurfaceStep::Continue,
             PaletteStep::Tree => {
                 self.sync_palette_to_tree();
-                self.mode = SurfaceMode::Tree;
+                self.set_presentation(Presentation::Workspace);
+                self.align_tree_to_selected();
                 SurfaceStep::Continue
             }
             PaletteStep::Outcome(PaletteOutcome::Applied(generation)) => {
@@ -188,19 +232,25 @@ impl SurfaceController {
             }
             TreeStep::Palette => {
                 self.sync_tree_to_palette(backend);
-                self.mode = SurfaceMode::Palette;
+                self.set_presentation(Presentation::Quick);
+                self.align_palette_to_selected();
                 Ok(SurfaceStep::Continue)
             }
             TreeStep::Apply(_) => {
                 self.sync_tree_to_palette(backend);
-                self.mode = SurfaceMode::Palette;
+                self.set_presentation(Presentation::Quick);
+                self.align_palette_to_selected();
                 let step = self.palette.dispatch(backend, Action::CtrlEnter);
+                self.capture_palette_state();
                 self.handle_palette_step(backend, step)
             }
             TreeStep::Effect(TreeEffect::Activate { capsule }) => {
                 self.sync_tree_to_palette(backend);
-                self.mode = SurfaceMode::Palette;
+                self.set_selected(resource_ref_for_capsule(&capsule));
+                self.set_presentation(Presentation::Quick);
+                self.align_palette_to_selected();
                 let step = self.palette.activate(backend, capsule);
+                self.capture_palette_query();
                 self.handle_palette_step(backend, step)
             }
             TreeStep::Effect(effect) => {
@@ -217,6 +267,8 @@ impl SurfaceController {
         }
     }
 
+    /// Temporary V1 staging adapter. Selection/presentation no longer depend on
+    /// this synchronisation; staged graph ownership moves into `TuiState` next.
     fn sync_palette_to_tree(&mut self) {
         self.tree.state_mut().staged = self
             .palette
@@ -228,6 +280,8 @@ impl SurfaceController {
             .collect();
     }
 
+    /// Temporary V1 staging adapter. Kept explicit so #40 cannot accidentally be
+    /// declared closed while duplicate staged state still exists.
     fn sync_tree_to_palette<B: SurfaceBackend>(&mut self, backend: &mut B) {
         let ids = self.tree.state().staged.clone();
         let current: BTreeSet<_> = self
@@ -270,6 +324,8 @@ impl SurfaceController {
                 .with_scope(scope),
         )?;
         self.palette.state_mut().status = Some(crate::app::Status::info(message));
+        self.align_palette_to_selected();
+        self.capture_palette_query();
         self.replace_tree(backend.surface_tree()?);
         self.sync_palette_to_tree();
         Ok(())
@@ -277,12 +333,118 @@ impl SurfaceController {
 
     fn replace_tree(&mut self, mut state: TreeState) {
         let old = self.tree.state();
+        let old_selected_path = old.selected_row().map(|row| row.path);
         state.expanded = old.expanded.clone();
-        state.selected = old.selected.min(state.rows().len().saturating_sub(1));
         state.filter = old.filter.clone();
         state.yanked = old.yanked.clone();
         state.staged = old.staged.clone();
         self.tree = TreeController::new(state, TreeRequest::new(self.host));
+        if self.align_tree_to_selected() {
+            return;
+        }
+        if let Some(path) = old_selected_path {
+            if let Some(index) = self
+                .tree
+                .state()
+                .rows()
+                .iter()
+                .position(|row| row.path == path)
+            {
+                self.tree.state_mut().selected = index;
+            }
+        }
+    }
+
+    fn set_presentation(&mut self, presentation: Presentation) {
+        self.reduce_semantic(UiAction::Present(presentation));
+    }
+
+    fn set_selected(&mut self, selected: Option<ResourceRef>) {
+        self.reduce_semantic(UiAction::Select(selected));
+    }
+
+    fn reduce_semantic(&mut self, action: UiAction) {
+        self.state = reduce_tui(self.state.clone(), action).state;
+    }
+
+    fn capture_palette_state(&mut self) {
+        self.capture_palette_query();
+        self.capture_palette_selection();
+    }
+
+    fn capture_palette_query(&mut self) {
+        let query = self.palette.state().query.clone();
+        self.reduce_semantic(UiAction::SetQuery(query));
+    }
+
+    fn capture_palette_selection(&mut self) {
+        let selected = self
+            .palette
+            .state()
+            .selected_row()
+            .and_then(|row| resource_ref_for_capsule(&row.doc.id));
+        self.set_selected(selected);
+    }
+
+    fn capture_tree_selection(&mut self) {
+        let selected = self
+            .tree
+            .state()
+            .selected_row()
+            .and_then(|row| resource_ref_for_tree_kind(&row.node.kind));
+        self.set_selected(selected);
+    }
+
+    fn align_palette_to_selected(&mut self) -> bool {
+        let Some(selected) = self.state.selected.as_ref() else {
+            return false;
+        };
+        let Ok(capsule) = CapsuleId::parse(selected.as_str()) else {
+            return false;
+        };
+        let Some(index) = self
+            .palette
+            .state()
+            .rows
+            .iter()
+            .position(|row| row.doc.id == capsule)
+        else {
+            return false;
+        };
+        self.palette.state_mut().cursor = index;
+        true
+    }
+
+    fn align_tree_to_selected(&mut self) -> bool {
+        let Some(selected) = self.state.selected.as_ref() else {
+            return false;
+        };
+        let rows = self.tree.state().rows();
+        let Some(index) = rows.iter().position(|row| {
+            resource_ref_for_tree_kind(&row.node.kind).as_ref() == Some(selected)
+        }) else {
+            return false;
+        };
+        self.tree.state_mut().selected = index;
+        true
+    }
+}
+
+fn resource_ref_for_capsule(capsule: &CapsuleId) -> Option<ResourceRef> {
+    // V1 capabilities already have stable content identity. During migration the
+    // same opaque string is lifted into the V2 resource-address space; the V2
+    // application service will eventually hand ResourceRef to the TUI directly.
+    ResourceRef::parse(&capsule.to_string()).ok()
+}
+
+fn resource_ref_for_tree_kind(kind: &NodeKind) -> Option<ResourceRef> {
+    match kind {
+        NodeKind::Capability { id } => resource_ref_for_capsule(id),
+        NodeKind::HookStep { capsule, .. } => resource_ref_for_capsule(capsule),
+        NodeKind::Root(_)
+        | NodeKind::Set { .. }
+        | NodeKind::Group { .. }
+        | NodeKind::Entry { .. } => None,
     }
 }
 
