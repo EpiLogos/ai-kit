@@ -81,7 +81,7 @@ pub use application::{
     keyboard_select, mouse_select, reduce_tui, unresolved_staged, ActivationIntent, ApplyReceipt,
     CompositionPreview, HistoryEntry, NavigationPoint, Overlay, PresentationMode, RelationReadModel,
     RelationView, ResourceListItem, ResourceListReadModel, SelectionInvalidation, StagedChanges,
-    TuiApplicationService, TuiReduction, TuiState, UiAction, UiEffect, UiStatus,
+    TuiApplicationService, TuiReduction, TuiRuntime, TuiState, UiAction, UiEffect, UiStatus,
 };
 pub use backend::{
     ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
