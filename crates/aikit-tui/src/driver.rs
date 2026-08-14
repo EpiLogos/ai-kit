@@ -29,7 +29,7 @@ use aikit_core::error::AikitError;
 use aikit_core::search::parse_query;
 use aikit_core::Result;
 
-use crate::app::{reduce, Action, AppState, Effect, Opened, OpenedForm, Status};
+use crate::app::{reduce, Action, AppState, Effect, Mode, Opened, OpenedForm, Status};
 use crate::backend::PaletteBackend;
 use crate::backend::Toggle;
 use crate::event::{action_for, CrosstermEvents, EventSource};
@@ -217,6 +217,44 @@ impl PaletteController {
     pub fn dispatch(&mut self, backend: &mut dyn PaletteBackend, action: Action) -> PaletteStep {
         self.state = self.runtime.step(backend, self.state.clone(), action);
         self.step_result()
+    }
+
+    /// Refresh backend-owned read state without reconstructing this controller or
+    /// its effect runtime. Cursor continuity is by stable CapsuleId; a vanished
+    /// capsule is allowed to invalidate selection rather than selecting whatever
+    /// happens to occupy the old row number.
+    pub fn refresh(&mut self, backend: &mut dyn PaletteBackend) -> Result<()> {
+        let selected = self.state.selected_row().map(|row| row.doc.id.clone());
+        let scope = self.state.scope.current();
+        let descriptor = backend.context().clone();
+
+        self.state.descriptor = descriptor.clone();
+        self.state.scope = crate::scope::ScopeSelector::with_scope(&descriptor, scope)?;
+        self.state.view = backend.view().clone();
+        self.state.recent = backend.recent();
+        self.state.drafts = backend.promotion_drafts();
+        self.state.outcome = None;
+        self.state.mode = Mode::Search;
+
+        let mut effects = vec![Effect::Search {
+            query: self.state.query.clone(),
+        }];
+        if !self.state.staged.is_empty() {
+            effects.push(Effect::Stage);
+        }
+        self.state = self.runtime.settle(backend, self.state.clone(), effects);
+
+        if let Some(selected) = selected {
+            if let Some(index) = self
+                .state
+                .rows
+                .iter()
+                .position(|row| row.doc.id == selected)
+            {
+                self.state.cursor = index;
+            }
+        }
+        Ok(())
     }
 
     /// Open one exact capsule without replacing the resident palette state.
