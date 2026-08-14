@@ -43,6 +43,7 @@
 //! | Question | Module |
 //! |---|---|
 //! | What is the V2 semantic TUI state/application-service seam? | [`application`] |
+//! | How does the existing shared backend feed the V2 service? | [`palette_service`] |
 //! | What does a key do? | [`app`], [`event`] |
 //! | Why is this row above that one? | [`search`] |
 //! | What would this toggle actually cost? | [`staging`] |
@@ -62,6 +63,7 @@ pub mod event;
 pub mod form;
 pub mod host;
 pub mod layout;
+pub mod palette_service;
 pub mod render;
 pub mod scope;
 pub mod search;
@@ -90,6 +92,7 @@ pub use event::{EventSource, PaletteEvent, ScriptedEvents};
 pub use form::{ArgForm, RunPreview};
 pub use host::{Escalation, TerminalProfile, UiHost};
 pub use layout::{Glyphs, Layout, Width};
+pub use palette_service::PaletteApplicationService;
 pub use scope::ScopeSelector;
 pub use search::{rank, Matcher, Row};
 pub use staging::{stage, StagedDiff, StagedProblem, StagedSet};
