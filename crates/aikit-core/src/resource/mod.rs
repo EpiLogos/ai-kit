@@ -4,6 +4,7 @@
 //! module widens the indexed operational field without claiming ownership of the
 //! external semantics it references.
 
+mod action_search;
 mod factory;
 mod index;
 mod legacy;
@@ -11,6 +12,7 @@ mod model;
 mod refs;
 mod search;
 
+pub use action_search::search_contextual_actions;
 pub use factory::{FactoryInteropView, FactoryResourceImport};
 pub use index::{MemoryResourceIndex, ResourceIndex};
 pub use model::{
