@@ -13,15 +13,11 @@ fn resource() -> ResourceRef {
 
 #[derive(Default)]
 struct FakeService {
-    searches: usize,
-    previews: usize,
     applies: usize,
 }
 
 impl TuiApplicationService for FakeService {
     fn search(&self, query: &str) -> Result<ResourceListReadModel> {
-        // Interior mutability is unnecessary for the contract proof; search's
-        // result itself proves the runtime went through this service method.
         Ok(ResourceListReadModel {
             revision: format!("search:{query}"),
             resources: vec![ResourceListItem {
@@ -120,7 +116,6 @@ fn preview_then_confirmation_then_apply_crosses_the_service_boundary_once() {
         .unwrap();
     assert_eq!(service.applies, 0);
 
-    // First Apply request can only obtain a preview through the service.
     state = runtime
         .step(&mut service, state, UiAction::RequestApply)
         .unwrap();
@@ -128,13 +123,11 @@ fn preview_then_confirmation_then_apply_crosses_the_service_boundary_once() {
     assert!(!state.staged.is_empty());
     assert_eq!(service.applies, 0);
 
-    // Second request moves only to confirmation; it still cannot mutate.
     state = runtime
         .step(&mut service, state, UiAction::RequestApply)
         .unwrap();
     assert_eq!(service.applies, 0);
 
-    // Confirmation is the sole reducer route that emits the apply service effect.
     state = runtime
         .step(&mut service, state, UiAction::ConfirmApply)
         .unwrap();
