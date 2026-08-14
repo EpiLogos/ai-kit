@@ -38,6 +38,7 @@ pub mod procedure;
 pub mod profile;
 pub mod project;
 pub mod projection;
+pub mod ql;
 pub mod resolve;
 pub mod resource;
 pub mod scope;
@@ -97,6 +98,14 @@ pub use profile::{ConfigMerge, ConfigTable, PoolPatch, Profile};
 pub use projection::{
     target_label, ActivationEffect, MaterializationMode, ProjectionItem, ProjectionPlan,
     ResolvedContext, TargetAdapter, TargetCapabilities,
+};
+pub use ql::{
+    project_context_with_ql, QlAttachment, QlClientSubject, QlInputLimits, QlInputRefRevision,
+    QlMode, QlOperation, QlProjectedContext, QlProjectedRefraction, QlProjectionRequest,
+    QlProvenance, QlProviderCapabilities, QlProviderClass, QlProviderClient, QlProviderDiscovery,
+    QlProviderFailure, QlProviderHealth, QlProviderRef, QlProviderState, QlReading,
+    QlRefractionRequest, QlResultClass, QlTargetView, QL_MEF_REGISTRY_VERSION,
+    QL_OUTPUT_SCHEMA_VERSION, QL_PROVENANCE_SCHEMA_VERSION,
 };
 pub use resolve::{
     resolve, resolve_diagnostic, ActiveCapability, Diagnosis, ResolveRequest, ResolvedView,
