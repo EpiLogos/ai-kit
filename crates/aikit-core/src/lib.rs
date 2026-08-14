@@ -23,6 +23,7 @@ pub mod capsule;
 pub mod catalog;
 pub mod context;
 pub mod context_resolution;
+pub mod context_source;
 pub mod duration;
 pub mod effects;
 pub mod error;
@@ -58,6 +59,15 @@ pub use context_resolution::{
     availability as resource_availability, compose_context_resolution, Availability,
     ContextResolution, ProjectionIntent, ReferenceResolution, RequestedActors, ResolvedResource,
     RetrievalPlan, ScopeResolution, CONTEXT_RESOLUTION_VERSION,
+};
+pub use context_source::{
+    AbsenceKind, AgentVisibility, ContextSourceEntry, ContextSourceExplanation, ContextSourceHit,
+    ContextSourceIndex, ContextSourceOperation, ContextSourceOperationalState,
+    ContextSourcePrivacy, ContextSourceProvider, ContextSourceProviderCapabilities,
+    ContextSourceProviderDescriptor, ContextSourceProviderStatus, ContextSourceReadOutcome,
+    ContextSourceReadRequest, ContextSourceRetrieval, ContextSourceScope, DisclosureState,
+    ExternalEgress, Freshness, HorizonRequest, ProviderReadResult, RetrievalTarget, SearchAudience,
+    StructuredAbsence, CONTEXT_SOURCE_INDEX_VERSION,
 };
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
