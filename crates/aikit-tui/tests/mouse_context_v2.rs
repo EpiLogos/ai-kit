@@ -55,10 +55,24 @@ fn mouse(column: u16, row: u16) -> PaletteEvent {
     })
 }
 
-fn draw(surface: &mut SurfaceController) -> Terminal<TestBackend> {
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+fn draw_width(surface: &mut SurfaceController, width: u16, height: u16) -> Terminal<TestBackend> {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     surface.draw_terminal(&mut terminal).unwrap();
     terminal
+}
+
+fn draw(surface: &mut SurfaceController) -> Terminal<TestBackend> {
+    draw_width(surface, 120, 30)
+}
+
+fn rendered(terminal: &Terminal<TestBackend>) -> String {
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>()
 }
 
 #[test]
@@ -125,8 +139,6 @@ fn mouse_and_keyboard_choose_the_same_workspace_section() {
     )
     .unwrap();
     let _ = draw(&mut mouse_surface);
-    // query line: x=1 + "/ " + "deploy" + three-space separator +
-    // "Projects" + " · "; Compose begins at x=23.
     mouse_surface
         .handle(&mut mouse_backend, mouse(24, 1))
         .unwrap();
@@ -177,17 +189,27 @@ fn live_shell_title_exposes_truthful_ambient_context_without_invented_identity()
     )
     .unwrap();
     let terminal = draw(&mut surface);
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
+    let output = rendered(&terminal);
 
-    assert!(rendered.contains("AIKit · Workspace · Project: payments"));
-    assert!(rendered.contains("Host: test-host"));
-    assert!(rendered.contains("Target: shell"));
-    assert!(!rendered.contains("Profile:"));
-    assert!(!rendered.contains("Agency:"));
+    assert!(output.contains("AIKit · Workspace · Project: payments"));
+    assert!(output.contains("Host: test-host"));
+    assert!(output.contains("Target: shell"));
+    assert!(!output.contains("Profile:"));
+    assert!(!output.contains("Agency:"));
+}
+
+#[test]
+fn narrow_shell_keeps_compact_project_and_host_context_legible() {
+    let mut backend = fixture();
+    let mut surface = SurfaceController::new(
+        &mut backend,
+        SurfaceRequest::new(UiHost::TmuxPopup),
+    )
+    .unwrap();
+    let terminal = draw_width(&mut surface, 60, 20);
+    let output = rendered(&terminal);
+
+    assert!(output.contains("AIKit · Workspace · payments · test-host"));
+    assert!(!output.contains("Profile:"));
+    assert!(!output.contains("Agency:"));
 }
