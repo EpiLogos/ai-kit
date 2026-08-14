@@ -168,7 +168,10 @@ fn extended_resolution_preserves_deterministic_resolver_and_composes_full_v2_fie
         result.retrieval.context_sources[0].as_str(),
         "context-source:project-map"
     );
-    assert_eq!(result.projection.targets, deterministic.context.targets);
+    let mut expected_targets = deterministic.context.targets.clone();
+    expected_targets.sort();
+    expected_targets.dedup();
+    assert_eq!(result.projection.targets, expected_targets);
     assert_eq!(result.projection.active_capabilities, ["script/test/check"]);
     assert_eq!(result.warnings, deterministic.warnings);
 
