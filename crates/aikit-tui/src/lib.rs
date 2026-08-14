@@ -51,7 +51,7 @@
 //! | How is an argument form built from a manifest? | [`form`] |
 //! | What fits at this width? | [`layout`] |
 //! | Where does the palette appear? | [`host`] |
-//! | What does it look like? | [`render`], [`theme`] |
+//! | What does it look like? | [`render`], [`v2_render`], [`theme`] |
 //! | What does the palette need from the application? | [`backend`] |
 
 #![forbid(unsafe_code)]
@@ -72,6 +72,7 @@ pub mod surface;
 pub mod theme;
 pub mod tree;
 pub mod tree_driver;
+pub mod v2_render;
 
 pub mod driver;
 
