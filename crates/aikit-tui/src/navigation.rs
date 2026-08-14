@@ -39,18 +39,30 @@ pub struct AmbientContext {
 }
 
 impl AmbientContext {
-    /// Compact context line for the shell. Narrow surfaces retain Project/Focus
-    /// and host identity first; wider surfaces add the remaining dimensions.
+    /// Narrow surfaces carry truthful values without verbose labels so the current
+    /// Project/Focus/Host remain legible. Wide surfaces add the explicit labels and
+    /// only show Profile/Agency/Target when authoritative values are actually known.
     pub fn line(&self, width: u16) -> String {
+        if width < 80 {
+            return [
+                self.project.as_deref(),
+                self.focus.as_deref(),
+                self.host.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        }
+
         let mut parts = Vec::new();
         push(&mut parts, "Project", self.project.as_deref());
         push(&mut parts, "Focus", self.focus.as_deref());
         push(&mut parts, "Host", self.host.as_deref());
-        if width >= 80 {
-            push(&mut parts, "Profile", self.profile.as_deref());
-            push(&mut parts, "Agency", self.agency.as_deref());
-            push(&mut parts, "Target", self.target.as_deref());
-        }
+        push(&mut parts, "Profile", self.profile.as_deref());
+        push(&mut parts, "Agency", self.agency.as_deref());
+        push(&mut parts, "Target", self.target.as_deref());
         parts.join(" · ")
     }
 }
@@ -206,13 +218,27 @@ mod tests {
 
         let narrow = context.line(60);
         let wide = context.line(120);
-        assert_eq!(
-            narrow,
-            "Project: ai-kit · Focus: V2-E1 · Host: worker-laptop"
-        );
+        assert_eq!(narrow, "ai-kit · V2-E1 · worker-laptop");
         assert!(wide.contains("Project: ai-kit"));
+        assert!(wide.contains("Focus: V2-E1"));
+        assert!(wide.contains("Host: worker-laptop"));
         assert!(wide.contains("Profile: code"));
         assert!(wide.contains("Agency: Mahāmāyā"));
+        assert!(wide.contains("Target: codex"));
+    }
+
+    #[test]
+    fn absent_profile_and_agency_are_not_invented() {
+        let context = AmbientContext {
+            project: Some("ai-kit".into()),
+            focus: Some("V2-E1".into()),
+            host: Some("worker-laptop".into()),
+            target: Some("codex".into()),
+            ..AmbientContext::default()
+        };
+        let wide = context.line(120);
+        assert!(!wide.contains("Profile:"));
+        assert!(!wide.contains("Agency:"));
         assert!(wide.contains("Target: codex"));
     }
 }
