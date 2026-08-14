@@ -148,13 +148,17 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
             .into_iter()
             .enumerate()
             .filter(|(_, intent)| wanted.as_ref().is_none_or(|id| &intent.capsule == id))
-            .map(|(index, intent)| HistoryEntry {
-                id: format!("recent-{index}"),
-                summary: if intent.args.is_empty() {
-                    intent.capsule.to_string()
-                } else {
-                    format!("{} {}", intent.capsule, intent.args.join(" "))
-                },
+            .map(|(index, intent)| {
+                let summary = intent
+                    .redacted_argv()
+                    .ok()
+                    .filter(|argv| !argv.is_empty())
+                    .map(|argv| format!("{} · {}", intent.capsule, argv.join(" ")))
+                    .unwrap_or_else(|| intent.capsule.to_string());
+                HistoryEntry {
+                    id: format!("recent-{index}"),
+                    summary,
+                }
             })
             .collect())
     }

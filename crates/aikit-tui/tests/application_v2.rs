@@ -269,15 +269,15 @@ fn changing_scope_invalidates_preview_and_requires_a_new_one() {
         summary: "project preview".into(),
     });
 
-    let state = reduce_tui(state, UiAction::SetMutationScope(ScopeKind::User)).state;
-    assert_eq!(state.mutation_scope, Some(ScopeKind::User));
+    let state = reduce_tui(state, UiAction::SetMutationScope(ScopeKind::Global)).state;
+    assert_eq!(state.mutation_scope, Some(ScopeKind::Global));
     assert!(state.preview.is_none());
 
     let reduction = reduce_tui(state, UiAction::RequestApply);
     assert_eq!(
         reduction.effects,
         vec![UiEffect::PreviewComposition {
-            scope: ScopeKind::User,
+            scope: ScopeKind::Global,
             staged: reduction.state.staged.clone(),
         }]
     );

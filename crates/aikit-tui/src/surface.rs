@@ -8,9 +8,11 @@ use std::collections::BTreeMap;
 use std::io;
 
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers,
+    DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
+    MouseEventKind,
 };
 use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use aikit_core::error::AikitError;
@@ -20,13 +22,14 @@ use aikit_core::Result;
 
 use crate::app::{Action, Mode, Status};
 use crate::application::{
-    reduce_tui, ActivationIntent, PresentationMode, RelationView, ResourceListItem,
-    ResourceListReadModel, TuiState, UiAction,
+    keyboard_select, mouse_select, reduce_tui, ActivationIntent, PresentationMode, RelationView,
+    ResourceListItem, ResourceListReadModel, TuiState, UiAction,
 };
 use crate::backend::{PaletteBackend, Toggle};
 use crate::driver::{PaletteController, PaletteStep};
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::host::UiHost;
+use crate::layout::Layout;
 use crate::staging::is_on;
 use crate::tree::{Node, NodeKind, TreeEffect, TreeState};
 use crate::tree_driver::{TreeController, TreeRequest, TreeStep};
@@ -101,7 +104,8 @@ impl SurfaceController {
         let tree_state = backend.surface_tree()?;
         let semantic = TuiState {
             query: palette.state().query.clone(),
-            read_model: compatibility_read_model(&tree_state),
+            read_model: compatibility_read_model(backend, &tree_state),
+            mutation_scope: Some(palette.state().scope.current()),
             presentation: presentation_for_host(request.host),
             relation_view: relation_view_for_mode(request.initial_mode),
             ..TuiState::default()
@@ -140,6 +144,8 @@ impl SurfaceController {
     }
 
     pub fn draw(&mut self, frame: &mut ratatui::Frame) {
+        let area = frame.area();
+        self.apply_semantic(UiAction::Resize(area.width, area.height));
         match self.mode {
             SurfaceMode::Palette => self.palette.draw(frame),
             SurfaceMode::Tree => self.tree.draw(frame),
@@ -173,6 +179,11 @@ impl SurfaceController {
 
         match self.mode {
             SurfaceMode::Palette => {
+                if let Some(action) = self.quick_mouse_action(&event) {
+                    self.apply_semantic(action);
+                    self.project_semantic_to_palette(backend);
+                    return Ok(SurfaceStep::Continue);
+                }
                 let step = self.palette.handle(backend, event)?;
                 self.capture_palette_semantics();
                 self.handle_palette_step(backend, step)
@@ -329,13 +340,14 @@ impl SurfaceController {
     /// ResourceRef state.
     fn capture_palette_semantics(&mut self) {
         self.semantic.query = self.palette.state().query.clone();
+        self.apply_semantic(UiAction::SetMutationScope(self.palette.state().scope.current()));
         if let Some(resource) = self
             .palette
             .state()
             .selected_row()
             .and_then(|row| capsule_resource_ref(&row.doc.id))
         {
-            self.apply_semantic(UiAction::Select(resource));
+            self.apply_semantic(keyboard_select(resource));
         }
 
         let observed: BTreeMap<ResourceRef, ActivationIntent> = self
@@ -476,6 +488,7 @@ impl SurfaceController {
 
         self.tree = TreeController::new(state, TreeRequest::new(self.host));
         self.apply_semantic(UiAction::Refresh(compatibility_read_model(
+            backend,
             self.tree.state(),
         )));
 
@@ -501,6 +514,60 @@ impl SurfaceController {
     fn apply_semantic(&mut self, action: UiAction) {
         let state = std::mem::take(&mut self.semantic);
         self.semantic = reduce_tui(state, action).state;
+    }
+
+    fn quick_mouse_action(&self, event: &PaletteEvent) -> Option<UiAction> {
+        if self.mode != SurfaceMode::Palette
+            || self.palette.state().mode != Mode::Search
+            || self.palette.state().in_manage_lane()
+        {
+            return None;
+        }
+        let PaletteEvent::Mouse(mouse) = event else {
+            return None;
+        };
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let index = self.quick_row_at(mouse.column, mouse.row)?;
+                let resource = self
+                    .palette
+                    .state()
+                    .rows
+                    .get(index)
+                    .and_then(|row| capsule_resource_ref(&row.doc.id))?;
+                Some(mouse_select(resource))
+            }
+            MouseEventKind::ScrollDown => Some(UiAction::SelectNext),
+            MouseEventKind::ScrollUp => Some(UiAction::SelectPrevious),
+            _ => None,
+        }
+    }
+
+    fn quick_row_at(&self, column: u16, row: u16) -> Option<usize> {
+        let (cols, rows) = self.semantic.area;
+        if cols < 2 || rows < 2 {
+            return None;
+        }
+        let inner = Rect::new(1, 1, cols.saturating_sub(2), rows.saturating_sub(2));
+        let panes = Layout::for_width(inner.width).split(inner);
+        let list = panes.list;
+        if column < list.x
+            || column >= list.x.saturating_add(list.width)
+            || row < list.y
+            || row >= list.y.saturating_add(list.height)
+        {
+            return None;
+        }
+
+        let height = list.height as usize;
+        let first = self
+            .palette
+            .state()
+            .cursor
+            .saturating_sub(height.saturating_sub(1));
+        let index = first.saturating_add((row - list.y) as usize);
+        (index < self.palette.state().rows.len()).then_some(index)
     }
 }
 
@@ -537,13 +604,29 @@ fn node_resource_ref(node: &Node) -> Option<ResourceRef> {
     }
 }
 
-fn compatibility_read_model(tree: &TreeState) -> ResourceListReadModel {
+fn compatibility_read_model(
+    backend: &dyn PaletteBackend,
+    tree: &TreeState,
+) -> ResourceListReadModel {
     let mut resources = BTreeMap::<ResourceRef, ResourceListItem>::new();
+    for doc in backend.documents() {
+        if let Some(resource) = capsule_resource_ref(&doc.id) {
+            resources.insert(
+                resource.clone(),
+                ResourceListItem {
+                    resource,
+                    kind: ResourceKind::Capability,
+                    label: doc.name,
+                    summary: doc.description,
+                },
+            );
+        }
+    }
     for root in &tree.roots {
         collect_compatibility_resources(root, &mut resources);
     }
     ResourceListReadModel {
-        revision: "aikit.tui/v1-compat-tree".into(),
+        revision: "aikit.tui/v1-compat-resources".into(),
         resources: resources.into_values().collect(),
     }
 }
