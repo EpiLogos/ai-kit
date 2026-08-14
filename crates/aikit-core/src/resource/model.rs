@@ -79,6 +79,10 @@ pub enum ProviderState {
     /// A provider reference was declared, but AIKit has not resolved a live offer yet.
     Unresolved,
     Available,
+    /// The provider remains usable, but one or more advertised faculties are impaired.
+    /// Degradation is therefore operationally different from absence and remains
+    /// inspectable rather than being flattened into Available.
+    Degraded { reason: String },
     Unavailable { reason: String },
 }
 
