@@ -329,6 +329,7 @@ mod tests {
         );
         let mut entry = ContextSourceEntry::new(source.resource).unwrap();
         entry.disclosure = DisclosureState {
+            exists: true,
             known_to_exist: true,
             askable: true,
             retrieved: false,
