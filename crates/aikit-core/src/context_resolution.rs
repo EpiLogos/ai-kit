@@ -250,10 +250,6 @@ fn resolve_reference(
 
 /// Resolve only operational observation. Eligibility and preference are retained
 /// on the record as independent axes and never folded into this result.
-///
-/// A degraded provider is still operationally available: degradation remains on
-/// the provider offer itself so callers can explain the impaired faculty instead
-/// of confusing it with absence.
 pub fn availability(record: &ResourceRecord) -> Availability {
     let mut available = false;
     let mut unresolved = Vec::new();
@@ -270,7 +266,7 @@ pub fn availability(record: &ResourceRecord) -> Availability {
     }
     for provider in &record.providers {
         match &provider.state {
-            ProviderState::Available | ProviderState::Degraded { .. } => available = true,
+            ProviderState::Available => available = true,
             ProviderState::Unresolved => {
                 unresolved.push(format!("provider {} unresolved", provider.provider))
             }
