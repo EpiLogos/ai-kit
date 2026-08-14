@@ -8,7 +8,7 @@
 //! remains available only to the V1 compatibility presentation.
 
 use aikit_core::id::CapsuleId;
-use aikit_core::resource::{ResourceKind, ResourceRef};
+use aikit_core::resource::{ContextualActionDescriptor, ResourceRef};
 use aikit_core::{AikitError, Result};
 use serde_json::{json, to_value, Value};
 
@@ -192,6 +192,11 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
                     .collect::<Vec<_>>(),
             }),
         })
+    }
+
+    fn contextual_actions(&self, resource: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
+        let index = self.backend.navigation_index();
+        Ok(index.actions_for(resource).into_iter().cloned().collect())
     }
 }
 

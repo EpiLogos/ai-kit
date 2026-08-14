@@ -8,11 +8,11 @@
 //!
 //! Application semantics stay behind [`TuiApplicationService`]. The reducer is
 //! pure and can only request effects; it cannot resolve capabilities, eligibility,
-//! provenance, composition or history itself.
+//! provenance, composition, contextual Actions or history itself.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use aikit_core::resource::{ResourceKind, ResourceRef};
+use aikit_core::resource::{ContextualActionDescriptor, ResourceKind, ResourceRef};
 use aikit_core::scope::ScopeKind;
 use aikit_core::Result;
 use serde::{Deserialize, Serialize};
@@ -149,6 +149,13 @@ pub trait TuiApplicationService {
     fn explain(&self, resource: &ResourceRef) -> Result<Value>;
     fn history(&self, resource: Option<&ResourceRef>) -> Result<Vec<HistoryEntry>>;
     fn relations(&self, resource: &ResourceRef) -> Result<RelationReadModel>;
+
+    /// Canonical Actions currently applicable to this Resource in this context.
+    /// The default keeps existing service implementations source-compatible while
+    /// richer backends opt into the V2 Action field.
+    fn contextual_actions(&self, _resource: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +190,12 @@ pub struct TuiState {
     pub read_model: ResourceListReadModel,
     /// The one canonical semantic selection for all presentations.
     pub selected: Option<ResourceRef>,
+    /// Contextual Actions are relations for the selected Resource; they are not
+    /// alternate search-row identities.
+    #[serde(default)]
+    pub contextual_actions_for: Option<ResourceRef>,
+    #[serde(default)]
+    pub contextual_actions: Vec<ContextualActionDescriptor>,
     pub staged: StagedChanges,
     /// Mutation scope is semantic intent, not view chrome. A staged change without
     /// its scope is incomplete and may not be previewed or applied.
@@ -204,6 +217,8 @@ impl Default for TuiState {
             query: String::new(),
             read_model: ResourceListReadModel::default(),
             selected: None,
+            contextual_actions_for: None,
+            contextual_actions: Vec::new(),
             staged: StagedChanges::default(),
             mutation_scope: None,
             presentation: PresentationMode::Quick,
@@ -227,6 +242,10 @@ pub enum UiAction {
     Select(ResourceRef),
     SelectNext,
     SelectPrevious,
+    ContextualActionsLoaded {
+        subject: ResourceRef,
+        actions: Vec<ContextualActionDescriptor>,
+    },
     OpenSelection,
     Back,
     SetMutationScope(ScopeKind),
@@ -253,6 +272,9 @@ pub enum UiAction {
 pub enum UiEffect {
     Search {
         query: String,
+    },
+    LoadContextualActions {
+        subject: ResourceRef,
     },
     PreviewComposition {
         scope: ScopeKind,
@@ -287,6 +309,10 @@ impl TuiRuntime {
     ) -> Result<UiAction> {
         match effect {
             UiEffect::Search { query } => Ok(UiAction::SearchFinished(service.search(&query)?)),
+            UiEffect::LoadContextualActions { subject } => Ok(UiAction::ContextualActionsLoaded {
+                actions: service.contextual_actions(&subject)?,
+                subject,
+            }),
             UiEffect::PreviewComposition { scope, staged } => Ok(UiAction::CompositionPreviewed(
                 service.preview_composition(scope, &staged)?,
             )),
@@ -336,11 +362,17 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         }
         UiAction::SearchFinished(model) | UiAction::Refresh(model) => {
             reconcile_read_model(&mut state, model);
+            if let Some(subject) = state.selected.clone() {
+                clear_contextual_actions(&mut state);
+                effects.push(UiEffect::LoadContextualActions { subject });
+            }
         }
         UiAction::Select(resource) => {
             if state.read_model.contains(&resource) {
-                state.selected = Some(resource);
+                state.selected = Some(resource.clone());
                 state.selection_invalidation = None;
+                clear_contextual_actions(&mut state);
+                effects.push(UiEffect::LoadContextualActions { subject: resource });
             } else {
                 state.selection_invalidation = Some(SelectionInvalidation {
                     previous: resource,
@@ -348,8 +380,24 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 });
             }
         }
-        UiAction::SelectNext => select_relative(&mut state, 1),
-        UiAction::SelectPrevious => select_relative(&mut state, -1),
+        UiAction::SelectNext => {
+            if let Some(subject) = select_relative(&mut state, 1) {
+                clear_contextual_actions(&mut state);
+                effects.push(UiEffect::LoadContextualActions { subject });
+            }
+        }
+        UiAction::SelectPrevious => {
+            if let Some(subject) = select_relative(&mut state, -1) {
+                clear_contextual_actions(&mut state);
+                effects.push(UiEffect::LoadContextualActions { subject });
+            }
+        }
+        UiAction::ContextualActionsLoaded { subject, actions } => {
+            if state.selected.as_ref() == Some(&subject) {
+                state.contextual_actions_for = Some(subject);
+                state.contextual_actions = actions;
+            }
+        }
         UiAction::OpenSelection => {
             state.navigation.push(NavigationPoint {
                 selected: state.selected.clone(),
@@ -361,6 +409,10 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 if let Some(point) = state.navigation.pop() {
                     state.selected = point.selected.filter(|id| state.read_model.contains(id));
                     state.relation_view = point.relation_view;
+                    clear_contextual_actions(&mut state);
+                    if let Some(subject) = state.selected.clone() {
+                        effects.push(UiEffect::LoadContextualActions { subject });
+                    }
                 }
             }
         }
@@ -487,6 +539,7 @@ fn reconcile_read_model(state: &mut TuiState, model: ResourceListReadModel) {
             state.selected = Some(selected);
         } else {
             state.selected = None;
+            clear_contextual_actions(state);
             state.selection_invalidation = Some(SelectionInvalidation {
                 previous: selected,
                 reason: "selected resource disappeared during refresh".into(),
@@ -498,10 +551,16 @@ fn reconcile_read_model(state: &mut TuiState, model: ResourceListReadModel) {
     // silently discard user intent.
 }
 
-fn select_relative(state: &mut TuiState, delta: isize) {
+fn clear_contextual_actions(state: &mut TuiState) {
+    state.contextual_actions_for = None;
+    state.contextual_actions.clear();
+}
+
+fn select_relative(state: &mut TuiState, delta: isize) -> Option<ResourceRef> {
     if state.read_model.resources.is_empty() {
         state.selected = None;
-        return;
+        clear_contextual_actions(state);
+        return None;
     }
     let current = state
         .selected
@@ -515,6 +574,7 @@ fn select_relative(state: &mut TuiState, delta: isize) {
     };
     state.selected = state.read_model.resource_at(next).cloned();
     state.selection_invalidation = None;
+    state.selected.clone()
 }
 
 /// Presentation adapters resolve both keyboard navigation and mouse hit-testing to
