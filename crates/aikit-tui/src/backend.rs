@@ -33,8 +33,8 @@ use aikit_core::platform::TargetId;
 use aikit_core::projection::ActivationEffect;
 use aikit_core::resolve::ResolvedView;
 use aikit_core::resource::{
-    NavigationEvidence, NavigationEvidenceClass, ResourceDescriptor, ResourceKind, ResourceRecord,
-    ResourceRef, ResourceSearchIndex,
+    ActionStageability, ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass,
+    ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
 };
 use aikit_core::scope::ScopeKind;
 use aikit_core::search::SearchDoc;
@@ -263,11 +263,11 @@ pub trait PaletteBackend {
 
     /// The shallow V2 navigation field.
     ///
-    /// This shared default already includes context-native Project and Host
-    /// Resources plus proven capsule documents. Implementations may widen it with
-    /// Profiles, SkillSets, Procedures, Actions, ContextSources and later
-    /// Knowledge resources without changing TUI search. Building this index must
-    /// never invoke deep providers.
+    /// This shared default includes context-native Project and Host Resources,
+    /// proven capsule documents, and canonical Action resources/relations over
+    /// them. Implementations may widen it with Profiles, SkillSets, Procedures,
+    /// Agents, ContextSources and later Knowledge resources without changing TUI
+    /// search. Building this index must never invoke deep providers.
     fn navigation_index(&self) -> ResourceSearchIndex {
         let recent: BTreeSet<CapsuleId> = self
             .recent()
@@ -277,6 +277,8 @@ pub trait PaletteBackend {
         let mut index = ResourceSearchIndex::default();
         let current = vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
             .with_detail("part of the resolved operating context")];
+        let mut project_subject = None;
+        let mut capability_subjects = Vec::new();
 
         if let Some(project_id) = self.context().project_id.as_ref() {
             if let Ok(resource) = ResourceRef::parse(&format!("project/{project_id}")) {
@@ -295,13 +297,14 @@ pub trait PaletteBackend {
                     .unwrap_or_else(|| "current project".into());
                 index.insert_resource(
                     ResourceRecord::new(ResourceDescriptor::new(
-                        resource,
+                        resource.clone(),
                         ResourceKind::Project,
                         name,
                         description,
                     )),
                     current.clone(),
                 );
+                project_subject = Some(resource);
             }
         }
 
@@ -344,7 +347,7 @@ pub trait PaletteBackend {
                 );
             }
             let mut descriptor = ResourceDescriptor::new(
-                resource,
+                resource.clone(),
                 ResourceKind::Capability,
                 doc.name,
                 doc.description,
@@ -353,6 +356,82 @@ pub trait PaletteBackend {
                 .annotations
                 .insert("capsule-kind".into(), doc.kind.as_str().into());
             index.insert_resource(ResourceRecord::new(descriptor), evidence);
+            capability_subjects.push(resource);
+        }
+
+        let open_project = ResourceRef::parse("action/project/open")
+            .expect("static V2 Action ResourceRef must be valid");
+        let explain_capability = ResourceRef::parse("action/capability/explain")
+            .expect("static V2 Action ResourceRef must be valid");
+        let toggle_capability = ResourceRef::parse("action/capability/toggle")
+            .expect("static V2 Action ResourceRef must be valid");
+        index.insert_resource(
+            ResourceRecord::new(ResourceDescriptor::new(
+                open_project.clone(),
+                ResourceKind::Action,
+                "Open project",
+                "enter the selected Project workspace",
+            )),
+            Vec::new(),
+        );
+        index.insert_resource(
+            ResourceRecord::new(ResourceDescriptor::new(
+                explain_capability.clone(),
+                ResourceKind::Action,
+                "Explain capability",
+                "show why this Capability has its current resolved state",
+            )),
+            Vec::new(),
+        );
+        index.insert_resource(
+            ResourceRecord::new(ResourceDescriptor::new(
+                toggle_capability.clone(),
+                ResourceKind::Action,
+                "Toggle capability",
+                "stage an enable/disable change at the selected mutation scope",
+            )),
+            Vec::new(),
+        );
+
+        if let Some(subject) = project_subject {
+            index
+                .insert_action(
+                    ContextualActionDescriptor::new(
+                        open_project,
+                        subject,
+                        "Open workspace",
+                        "enter this Project without changing composition",
+                        ActionStageability::NotStageable,
+                    )
+                    .with_keywords(["open", "workspace", "enter"]),
+                )
+                .expect("indexed Project and Action must form a valid relation");
+        }
+        for subject in capability_subjects {
+            index
+                .insert_action(
+                    ContextualActionDescriptor::new(
+                        explain_capability.clone(),
+                        subject.clone(),
+                        "Explain",
+                        "show resolution, eligibility and provenance for this Capability",
+                        ActionStageability::NotStageable,
+                    )
+                    .with_keywords(["why", "explain", "provenance"]),
+                )
+                .expect("indexed Capability and Action must form a valid relation");
+            index
+                .insert_action(
+                    ContextualActionDescriptor::new(
+                        toggle_capability.clone(),
+                        subject,
+                        "Toggle activation",
+                        "stage an explicit enable/disable change for this Capability",
+                        ActionStageability::Stageable,
+                    )
+                    .with_keywords(["enable", "disable", "stage"]),
+                )
+                .expect("indexed Capability and Action must form a valid relation");
         }
         index
     }
