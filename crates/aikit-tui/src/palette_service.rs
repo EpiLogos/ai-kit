@@ -134,7 +134,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
             "kind": entry.kind.as_str(),
             "active": view.is_active(&capsule),
             "declaredEnabled": view.is_declared_enabled(&capsule),
-            "unavailable": view.unavailable.get(&capsule).map(|reason| reason.describe()),
+            "unavailable": view.unavailable.get(&capsule).map(|reason| format!("{reason:?}")),
             "related": view.related_to(&capsule).into_iter().map(|id| id.to_string()).collect::<Vec<_>>(),
             "resolutionHash": view.hash.to_string(),
         }))
@@ -185,7 +185,7 @@ fn capsule_id(resource: &ResourceRef) -> Result<CapsuleId> {
     CapsuleId::parse(resource.as_str()).map_err(|error| {
         AikitError::new(
             "tui.resource_not_capsule_compatible",
-            format!("{resource} is not representable by the V1 capsule adapter: {error}"),
+            format!("{resource} is not representable by the V1 capsule adapter: {error:?}"),
         )
     })
 }
