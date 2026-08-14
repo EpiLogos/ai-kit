@@ -1,4 +1,6 @@
-use aikit_core::resource::{ResourceKind, ResourceRef};
+use aikit_core::resource::{
+    ActionStageability, ContextualActionDescriptor, ResourceKind, ResourceRef,
+};
 use aikit_core::scope::ScopeKind;
 use aikit_core::Result;
 use aikit_tui::{
@@ -10,6 +12,10 @@ use serde_json::{json, Value};
 
 fn resource() -> ResourceRef {
     ResourceRef::parse("factory:capability:alpha").unwrap()
+}
+
+fn explain_action() -> ResourceRef {
+    ResourceRef::parse("action/capability/explain").unwrap()
 }
 
 #[derive(Default)]
@@ -74,6 +80,16 @@ impl TuiApplicationService for FakeService {
             value: json!({"edges": []}),
         })
     }
+
+    fn contextual_actions(&self, subject: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
+        Ok(vec![ContextualActionDescriptor::new(
+            explain_action(),
+            subject.clone(),
+            "Explain",
+            "explain the selected capability",
+            ActionStageability::NotStageable,
+        )])
+    }
 }
 
 #[test]
@@ -93,6 +109,29 @@ fn search_effect_is_executed_by_the_application_service_and_returns_as_state() {
     assert_eq!(state.read_model.revision, "search:alpha");
     assert_eq!(state.read_model.resources.len(), 1);
     assert_eq!(state.read_model.resources[0].resource, resource());
+}
+
+#[test]
+fn semantic_selection_loads_contextual_actions_through_the_same_runtime() {
+    let mut runtime = TuiRuntime::new();
+    let mut service = FakeService::default();
+    let mut state = runtime
+        .step(
+            &mut service,
+            TuiState::default(),
+            UiAction::SetQuery("alpha".into()),
+        )
+        .unwrap();
+
+    state = runtime
+        .step(&mut service, state, UiAction::Select(resource()))
+        .unwrap();
+
+    assert_eq!(state.selected, Some(resource()));
+    assert_eq!(state.contextual_actions_for, Some(resource()));
+    assert_eq!(state.contextual_actions.len(), 1);
+    assert_eq!(state.contextual_actions[0].action, explain_action());
+    assert_eq!(state.contextual_actions[0].subject, resource());
 }
 
 #[test]
