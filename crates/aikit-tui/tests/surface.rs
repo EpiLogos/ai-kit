@@ -1,9 +1,10 @@
-//! The popup is one surface: palette and tree are modes, not terminal hand-offs.
+//! The popup is one surface: Quick and Workspace are presentations, not terminal hand-offs.
 
 mod common;
 
 use common::*;
 
+use aikit_core::resource::ResourceRef;
 use aikit_core::Result;
 use aikit_tui::event::{PaletteEvent, ScriptedEvents};
 use aikit_tui::host::UiHost;
@@ -121,8 +122,12 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> PaletteEvent {
     PaletteEvent::Key(KeyEvent::new(code, modifiers))
 }
 
+fn rref(raw: &str) -> ResourceRef {
+    ResourceRef::parse(raw).unwrap()
+}
+
 #[test]
-fn switching_modes_preserves_both_views_and_shares_the_staged_graph() {
+fn switching_presentations_preserves_views_and_projects_canonical_staged_intent() {
     let mut backend = fixture();
     let mut surface = SurfaceController::new(&mut backend, request("deploy")).unwrap();
     let ctrl = KeyModifiers::CONTROL;
@@ -145,6 +150,14 @@ fn switching_modes_preserves_both_views_and_shares_the_staged_graph() {
         .handle(&mut backend, key(KeyCode::Char(' '), KeyModifiers::NONE))
         .unwrap();
     let selected = surface.tree().state().selected;
+    assert_eq!(
+        surface
+            .tui_state()
+            .staged
+            .get(&rref("skill/rust/review")),
+        Some(&true),
+        "TuiState is the semantic staged authority"
+    );
 
     surface
         .handle(&mut backend, key(KeyCode::Char('t'), ctrl))
@@ -172,7 +185,7 @@ fn switching_modes_preserves_both_views_and_shares_the_staged_graph() {
 }
 
 #[test]
-fn activating_a_tree_leaf_preserves_the_palette_and_shared_staging() {
+fn activating_a_tree_leaf_preserves_the_palette_and_canonical_staging() {
     let mut backend = fixture();
     let mut surface = SurfaceController::new(&mut backend, request("deploy")).unwrap();
 
@@ -203,6 +216,13 @@ fn activating_a_tree_leaf_preserves_the_palette_and_shared_staging() {
             .state_of(&cid("skill/rust/review")),
         Some(true)
     );
+    assert_eq!(
+        surface
+            .tui_state()
+            .staged
+            .get(&rref("skill/rust/review")),
+        Some(&true)
+    );
     assert!(surface
         .tree()
         .state()
@@ -214,7 +234,7 @@ fn activating_a_tree_leaf_preserves_the_palette_and_shared_staging() {
     let frame = buffer_text(terminal.backend());
     assert!(
         frame.contains("skill/rust/review"),
-        "the preview must explain the activated tree capsule, not the palette cursor: {frame}"
+        "the preview must explain the activated tree capability, not the palette cursor: {frame}"
     );
 
     surface
@@ -229,7 +249,7 @@ fn activating_a_tree_leaf_preserves_the_palette_and_shared_staging() {
 }
 
 #[test]
-fn one_terminal_loop_spans_palette_tree_palette_and_closes_from_palette() {
+fn one_terminal_loop_spans_quick_workspace_quick_and_uses_explicit_exit() {
     let mut backend = fixture();
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     let mut events = ScriptedEvents::new([
@@ -238,7 +258,7 @@ fn one_terminal_loop_spans_palette_tree_palette_and_closes_from_palette() {
         key(KeyCode::Down, KeyModifiers::NONE),
         key(KeyCode::Char(' '), KeyModifiers::NONE),
         key(KeyCode::Char('t'), KeyModifiers::CONTROL),
-        key(KeyCode::Esc, KeyModifiers::NONE),
+        key(KeyCode::Char('q'), KeyModifiers::CONTROL),
     ]);
 
     let outcome = event_loop(&mut terminal, &mut events, &mut backend, request("")).unwrap();
@@ -247,7 +267,51 @@ fn one_terminal_loop_spans_palette_tree_palette_and_closes_from_palette() {
 }
 
 #[test]
-fn applying_from_the_tree_uses_the_palette_gate_and_keeps_the_surface_open() {
+fn resting_back_never_clears_query_discards_staging_or_exits() {
+    let mut backend = fixture();
+    let mut surface = SurfaceController::new(&mut backend, request("")).unwrap();
+
+    // Stage the current capability through the real Quick event path.
+    assert_eq!(
+        surface
+            .handle(&mut backend, key(KeyCode::Char(' '), KeyModifiers::NONE))
+            .unwrap(),
+        SurfaceStep::Continue
+    );
+    assert_eq!(surface.tui_state().staged.len(), 1);
+
+    // A typed query makes the old V1 Esc behaviour particularly dangerous: it
+    // used to clear query on one press, discard staging on the next and exit on
+    // the third. V2 Back does none of those things.
+    surface
+        .handle(&mut backend, key(KeyCode::Char('x'), KeyModifiers::NONE))
+        .unwrap();
+    let query = surface.tui_state().query.clone();
+    let staged = surface.tui_state().staged.clone();
+
+    assert_eq!(
+        surface
+            .handle(&mut backend, key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap(),
+        SurfaceStep::Continue
+    );
+    assert_eq!(surface.tui_state().query, query);
+    assert_eq!(surface.tui_state().staged, staged);
+    assert!(surface.palette().state().outcome.is_none());
+
+    assert_eq!(
+        surface
+            .handle(
+                &mut backend,
+                key(KeyCode::Char('q'), KeyModifiers::CONTROL),
+            )
+            .unwrap(),
+        SurfaceStep::Outcome(aikit_tui::PaletteOutcome::Closed)
+    );
+}
+
+#[test]
+fn applying_from_workspace_uses_palette_gate_and_clears_canonical_staging() {
     let mut backend = fixture();
     let mut surface = SurfaceController::new(&mut backend, request("")).unwrap();
 
@@ -263,6 +327,7 @@ fn applying_from_the_tree_uses_the_palette_gate_and_keeps_the_surface_open() {
         );
     }
 
+    assert_eq!(surface.tui_state().staged.len(), 1);
     assert_eq!(
         surface
             .handle(&mut backend, key(KeyCode::Enter, KeyModifiers::CONTROL),)
@@ -272,10 +337,11 @@ fn applying_from_the_tree_uses_the_palette_gate_and_keeps_the_surface_open() {
     );
     assert_eq!(surface.mode(), SurfaceMode::Palette);
     assert_eq!(backend.applied.len(), 1);
+    assert!(surface.tui_state().staged.is_empty());
     assert!(surface.palette().state().staged.is_empty());
     assert!(
         surface.tree().state().staged.is_empty(),
-        "a successful apply must clear the shared staged graph in both modes"
+        "a successful apply must clear canonical staged state and both projections"
     );
     assert!(surface
         .palette()
@@ -286,7 +352,7 @@ fn applying_from_the_tree_uses_the_palette_gate_and_keeps_the_surface_open() {
 }
 
 #[test]
-fn each_mode_names_the_other_mode_in_the_live_popup_chrome() {
+fn each_presentation_names_the_other_in_the_live_popup_chrome() {
     let mut backend = fixture();
     let mut surface = SurfaceController::new(&mut backend, request("")).unwrap();
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
