@@ -7,7 +7,7 @@ use aikit_core::resource::{
     ResourceRef, ResourceSearchIndex,
 };
 use aikit_core::Result;
-use aikit_tui::application::{Overlay, PresentationMode};
+use aikit_tui::application::{ActionOutcome, Overlay, PresentationMode, WorkspaceSection};
 use aikit_tui::event::PaletteEvent;
 use aikit_tui::host::UiHost;
 use aikit_tui::layout::Layout;
@@ -155,6 +155,10 @@ fn ctrl(code: KeyCode) -> PaletteEvent {
     PaletteEvent::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
 }
 
+fn alt(code: KeyCode) -> PaletteEvent {
+    PaletteEvent::Key(KeyEvent::new(code, KeyModifiers::ALT))
+}
+
 fn mouse(column: u16, row: u16) -> PaletteEvent {
     PaletteEvent::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -166,6 +170,14 @@ fn mouse(column: u16, row: u16) -> PaletteEvent {
 
 fn rref(raw: &str) -> ResourceRef {
     ResourceRef::parse(raw).unwrap()
+}
+
+fn type_text(surface: &mut SurfaceController, backend: &mut SurfaceFixture, text: &str) {
+    for character in text.chars() {
+        surface
+            .handle(backend, key(KeyCode::Char(character)))
+            .unwrap();
+    }
 }
 
 #[test]
@@ -285,15 +297,7 @@ fn resting_query_is_resolved_by_v2_runtime_and_projected_back_to_palette() {
     )
     .unwrap();
 
-    surface
-        .handle(&mut backend, key(KeyCode::Char('d')))
-        .unwrap();
-    surface
-        .handle(&mut backend, key(KeyCode::Char('e')))
-        .unwrap();
-    surface
-        .handle(&mut backend, key(KeyCode::Char('p')))
-        .unwrap();
+    type_text(&mut surface, &mut backend, "dep");
 
     assert_eq!(surface.semantic().query, "dep");
     assert_eq!(surface.palette().state().query, "dep");
@@ -312,6 +316,75 @@ fn resting_query_is_resolved_by_v2_runtime_and_projected_back_to_palette() {
 }
 
 #[test]
+fn action_text_mode_is_separate_from_resource_search_and_invokes_immediate_actions() {
+    let mut backend = fixture();
+    let mut surface = SurfaceController::new(
+        &mut backend,
+        SurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
+    )
+    .unwrap();
+    assert_eq!(surface.semantic().query, "deploy");
+    assert!(!surface.semantic().contextual_actions.is_empty());
+
+    surface.handle(&mut backend, key(KeyCode::Char(':'))).unwrap();
+    assert_eq!(surface.semantic().action_query.as_deref(), Some(""));
+    type_text(&mut surface, &mut backend, "explain");
+    assert_eq!(surface.semantic().query, "deploy");
+    assert_eq!(surface.semantic().action_query.as_deref(), Some("explain"));
+    assert!(surface.semantic().staged.is_empty());
+
+    surface.handle(&mut backend, key(KeyCode::Char(' '))).unwrap();
+    assert!(surface.semantic().staged.is_empty());
+    assert!(surface
+        .semantic()
+        .status
+        .as_ref()
+        .unwrap()
+        .message
+        .contains("not stageable"));
+    assert_eq!(surface.semantic().action_query.as_deref(), Some("explain"));
+
+    surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
+    assert!(surface.semantic().action_query.is_none());
+    assert_eq!(surface.semantic().overlay, Some(Overlay::Explain));
+    assert!(matches!(
+        surface.semantic().action_result,
+        Some(ActionOutcome::Explained { .. })
+    ));
+    assert!(surface.semantic().staged.is_empty());
+}
+
+#[test]
+fn action_space_invokes_only_a_stageable_selected_action() {
+    let mut backend = fixture();
+    let mut surface = SurfaceController::new(
+        &mut backend,
+        SurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
+    )
+    .unwrap();
+
+    surface.handle(&mut backend, key(KeyCode::Char(':'))).unwrap();
+    type_text(&mut surface, &mut backend, "toggle");
+    assert_eq!(surface.semantic().action_query.as_deref(), Some("toggle"));
+    assert!(surface.semantic().staged.is_empty());
+
+    surface.handle(&mut backend, key(KeyCode::Char(' '))).unwrap();
+    assert!(surface.semantic().action_query.is_none());
+    assert_eq!(surface.semantic().staged.len(), 1);
+    assert_eq!(
+        surface
+            .semantic()
+            .staged
+            .get(&rref("script/ops/deploy")),
+        Some(aikit_tui::ActivationIntent::Enable)
+    );
+    assert!(matches!(
+        surface.semantic().action_result,
+        Some(ActionOutcome::Staged { .. })
+    ));
+}
+
+#[test]
 fn live_staging_and_apply_follow_one_v2_preview_confirm_effect_path() {
     let mut backend = fixture();
     let mut surface = SurfaceController::new(
@@ -320,6 +393,10 @@ fn live_staging_and_apply_follow_one_v2_preview_confirm_effect_path() {
     )
     .unwrap();
 
+    // Outside text-Action mode, a single stageable Action may be used as the
+    // explicit mutation operation for this Resource. The mutation still executes
+    // through the same canonical Action application service rather than toggling
+    // semantic state directly.
     surface.handle(&mut backend, key(KeyCode::Char(' '))).unwrap();
     assert_eq!(surface.semantic().staged.len(), 1);
     assert_eq!(surface.palette().state().staged.toggles().len(), 1);
@@ -362,4 +439,28 @@ fn quick_workspace_switch_changes_presentation_without_rebuilding_semantic_state
     assert_eq!(surface.semantic().presentation, PresentationMode::Quick);
     assert_eq!(surface.semantic().selected, selected);
     assert_eq!(surface.semantic().read_model.revision, revision);
+}
+
+#[test]
+fn workspace_section_navigation_preserves_query_selection_and_staging() {
+    let mut backend = fixture();
+    let mut surface = SurfaceController::new(
+        &mut backend,
+        SurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
+    )
+    .unwrap();
+    assert_eq!(surface.semantic().presentation, PresentationMode::Workspace);
+    let selected = surface.semantic().selected.clone();
+
+    surface.handle(&mut backend, key(KeyCode::Char(' '))).unwrap();
+    assert_eq!(surface.semantic().staged.len(), 1);
+    surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
+
+    assert_eq!(surface.semantic().workspace_section, WorkspaceSection::Compose);
+    assert_eq!(surface.semantic().query, "deploy");
+    assert_eq!(surface.semantic().selected, selected);
+    assert_eq!(surface.semantic().staged.len(), 1);
+
+    surface.handle(&mut backend, alt(KeyCode::Left)).unwrap();
+    assert_eq!(surface.semantic().workspace_section, WorkspaceSection::Projects);
 }
