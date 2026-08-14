@@ -32,25 +32,12 @@
 //! crate is a reducer test — the interesting behaviour is reachable without a
 //! terminal, and the part that does need a terminal is [`render`], which is
 //! snapshot-tested against a real `TestBackend`.
-//!
-//! ## Where to look
-//!
-//! | Question | Module |
-//! |---|---|
-//! | What does a key do? | [`app`], [`event`] |
-//! | Why is this row above that one? | [`search`] |
-//! | What would this toggle actually cost? | [`staging`] |
-//! | Where would a change be written, and what confirms it? | [`scope`] |
-//! | How is an argument form built from a manifest? | [`form`] |
-//! | What fits at this width? | [`layout`] |
-//! | Where does the palette appear? | [`host`] |
-//! | What does it look like? | [`render`], [`theme`] |
-//! | What does the palette need from the application? | [`backend`] |
 
 #![forbid(unsafe_code)]
 
 pub mod app;
 pub mod backend;
+pub mod driver;
 pub mod event;
 pub mod form;
 pub mod host;
@@ -63,8 +50,7 @@ pub mod surface;
 pub mod theme;
 pub mod tree;
 pub mod tree_driver;
-
-pub mod driver;
+pub mod tui_state;
 
 use aikit_core::id::{CapsuleId, GenerationId};
 use aikit_core::scope::ScopeKind;
@@ -81,6 +67,10 @@ pub use scope::ScopeSelector;
 pub use search::{rank, Matcher, Row};
 pub use staging::{stage, StagedDiff, StagedProblem, StagedSet};
 pub use theme::Theme;
+pub use tui_state::{
+    reduce_tui, Overlay as TuiOverlay, Presentation, PreviewState as TuiPreviewState,
+    SelectionInvalidation, StagedMutation, TuiReduction, TuiState, UiAction, UiEffect,
+};
 
 /// How the CLI asks for a palette.
 pub struct PaletteRequest {
@@ -166,6 +156,9 @@ pub fn run_tree(
 /// [`driver::event_loop`], which is generic over the ratatui backend and the
 /// event source — that is what lets the end-to-end tests drive a real palette
 /// against a `TestBackend` and a scripted key sequence.
-pub fn run(app: &mut dyn PaletteBackend, request: PaletteRequest) -> aikit_core::Result<PaletteOutcome> {
+pub fn run(
+    app: &mut dyn PaletteBackend,
+    request: PaletteRequest,
+) -> aikit_core::Result<PaletteOutcome> {
     driver::run_on_terminal(app, request)
 }
