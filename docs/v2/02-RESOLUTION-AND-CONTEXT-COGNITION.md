@@ -146,6 +146,39 @@ AIKit should not mirror all source payloads into one proprietary database as the
 
 A provider should be able to expose descriptors containing enough information to support discovery, eligibility, freshness, provenance, and retrieval.
 
+### 16.1 Knowledge navigation over Context Sources
+
+Semantic Wikis and SourcePools are first-class specialised Context Sources. They participate in the same resolution, Search, Context, Explain and History application state as other resources even though their provider semantics differ.
+
+The generic knowledge-navigation field should be able to address concepts equivalent to:
+
+```text
+Space
+    a persistent/addressable whole or subspace
+
+Node
+    an addressable semantic or knowledge item
+
+Source
+    an addressable evidential/retrieval item
+
+Frame
+    a contextual whole selected for a present act; may cross Spaces/providers
+
+Route
+    an operational traversal through addressable resources
+```
+
+These are navigation roles, not a command to collapse provider ontologies into one schema. `SemanticWiki`, `SourcePoolProvider`, `CodeIndexProvider`, ordinary ContextSources and Project-owned material retain their own authority and relation meanings.
+
+`ProjectMap` is the Project-scoped federation/index that can bind these distinct lenses through stable refs. It is not a universal graph database. A Wiki edge, a code-graph edge, a source-provenance relation and a learned route remain distinguishable even when one navigation path crosses all four.
+
+A selected knowledge item should be able to move from **leaf to local whole**: exact lookup/search may first resolve one Node/Source/ref, after which deliberate relation expansion can reveal its enclosing Space, neighbourhood, provenance, cross-lens bindings, Frames and known Routes. Expansion is explicit, bounded and explainable; discovering a larger neighbourhood does not imply loading its payload into current context.
+
+`KnowledgeRoute` records actual traversal and may contribute learned accessibility/familiarity. It never manufactures authored semantic relations, code-graph truth, trust or preference. Route history remains evidence about use.
+
+The same provider-neutral navigation/application services should serve human TUI, CLI and agent surfaces. A richer visual relation view must therefore be a read-model projection over canonical refs and provider-owned relations rather than a TUI-only semantic store.
+
 ---
 
 ## 17. Five disclosure states
