@@ -22,6 +22,7 @@ pub mod arg;
 pub mod capsule;
 pub mod catalog;
 pub mod context;
+pub mod context_resolution;
 pub mod duration;
 pub mod effects;
 pub mod error;
@@ -45,21 +46,6 @@ pub mod skillset;
 pub mod surfacing;
 pub mod trust;
 
-// ---------------------------------------------------------------------------
-// Crate-root re-exports
-// ---------------------------------------------------------------------------
-//
-// The modules stay public and are the documented home of each type; these are a
-// convenience surface for the four consuming crates, which otherwise spend a
-// dozen `use` lines reaching for the same names.
-//
-// A bare verb at the crate root says nothing about what it acts on, so the two
-// that would be ambiguous are renamed rather than dropped: `session::compile`
-// becomes `compile_session` and `hooks::matches` becomes `hook_matches`. Names
-// that genuinely collide keep their module path and are deliberately absent here
-// — `capsule::SUPPORTED_SCHEMA` and `session::SUPPORTED_SCHEMA` are different
-// numbers for different documents and must not be reachable under one name.
-
 pub use error::{AikitError, Result};
 
 pub use capsule::{
@@ -68,6 +54,11 @@ pub use capsule::{
 };
 pub use catalog::{Catalog, MemoryCatalog};
 pub use context::{ContextBinding, ContextDescriptor, Isolation};
+pub use context_resolution::{
+    availability as resource_availability, compose_context_resolution, Availability,
+    ContextResolution, ProjectionIntent, ReferenceResolution, RequestedActors, ResolvedResource,
+    RetrievalPlan, ScopeResolution, CONTEXT_RESOLUTION_VERSION,
+};
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
 pub use frecency::{Candidate, Jump, Tiebreak};
