@@ -4,9 +4,9 @@ use aikit_core::project::{
     ProjectBinding, ProjectBindingLocator, ProjectConstituentRef, ProjectRef,
 };
 use aikit_core::resource::{
-    Eligibility, PreferenceIntent, ProviderOffer, ProviderRef, ProviderState, ResourceDescriptor,
-    ResourceKind, ResourceLocator, ResourceRecord, ResourceRef, ResourceSource, SourceRef,
-    SourceRevision, SourceState,
+    Eligibility, FactoryInteropView, PreferenceIntent, ProviderOffer, ProviderRef, ProviderState,
+    ResourceDescriptor, ResourceKind, ResourceLocator, ResourceRecord, ResourceRef, ResourceSource,
+    SourceRef, SourceRevision, SourceState,
 };
 use aikit_core::{Capsule, ContextDescriptor, ProjectId, RegistrySource, Revision};
 
@@ -143,5 +143,105 @@ fn legacy_context_becomes_a_binding_only_with_external_project_identity() {
     assert!(matches!(
         binding.locator,
         ProjectBindingLocator::LocalDirectory { .. }
+    ));
+}
+
+#[test]
+fn factory_cr001_fixture_is_consumed_as_external_resource_views_without_identity_translation() {
+    let view = FactoryInteropView::from_fixture_json(include_str!(
+        "fixtures/factory-interop-v1.json"
+    ))
+    .expect("Factory CR-001 fixture");
+
+    let action = view.action_resource().expect("Factory Action view");
+    assert_eq!(action.record.descriptor.id.as_str(), "factory:action:update");
+    assert_eq!(action.record.descriptor.kind, ResourceKind::Action);
+    assert_eq!(
+        action.record.descriptor.owner.as_ref().unwrap().as_str(),
+        "factory:project:factory"
+    );
+    assert_eq!(
+        action.record.descriptor.sources[0].source.as_str(),
+        "source:project:factory"
+    );
+    assert_eq!(
+        action.record.descriptor.sources[0]
+            .revision
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "rev:3"
+    );
+    assert_eq!(action.record.descriptor.sources[0].state, SourceState::Unresolved);
+    assert!(action.declared_provider.is_none());
+
+    let capability = view
+        .capability_resource()
+        .expect("Factory Capability view");
+    assert_eq!(
+        capability.record.descriptor.id.as_str(),
+        "factory:capability:browser"
+    );
+    assert_eq!(capability.record.descriptor.kind, ResourceKind::Capability);
+    assert_ne!(
+        action.record.descriptor.id,
+        capability.record.descriptor.id
+    );
+    assert_eq!(
+        capability.declared_provider.as_ref().unwrap().as_str(),
+        "provider:browser"
+    );
+    assert_eq!(capability.record.providers[0].state, ProviderState::Unresolved);
+    assert_eq!(
+        capability.record.providers[0].provider.as_str(),
+        "provider:browser"
+    );
+
+    let factory_project_ref = view.project_ref().expect("Factory ProjectRef");
+    assert_eq!(factory_project_ref.as_str(), "factory:project:factory");
+    let project_source = view.project_source().expect("Factory project source");
+    assert_eq!(
+        project_source.source.as_str(),
+        "source:git:EpiLogos/agent-system-design"
+    );
+    assert_eq!(project_source.state, SourceState::Unresolved);
+
+    let operational_binding = ProjectBinding::new(
+        factory_project_ref,
+        ProjectConstituentRef::parse("constituent:source").unwrap(),
+        ProjectBindingLocator::LocalDirectory {
+            path: PathBuf::from("/work/factory"),
+        },
+    );
+    assert_eq!(operational_binding.project.as_str(), "factory:project:factory");
+    assert!(operational_binding.legacy_aikit_project_id.is_none());
+}
+
+#[test]
+fn imported_factory_provider_and_source_state_can_degrade_without_rewriting_external_identity() {
+    let view = FactoryInteropView::from_fixture_json(include_str!(
+        "fixtures/factory-interop-v1.json"
+    ))
+    .unwrap();
+    let mut capability = view.capability_resource().unwrap().record;
+    let original = capability.descriptor.id.clone();
+
+    capability.descriptor.sources[0].state = SourceState::Unavailable {
+        reason: "Factory source not reachable".into(),
+    };
+    capability.providers[0].state = ProviderState::Unavailable {
+        reason: "declared provider not installed".into(),
+    };
+
+    let explanation = capability.explanation();
+    assert_eq!(explanation.id, original);
+    assert_eq!(explanation.id.as_str(), "factory:capability:browser");
+    assert!(matches!(
+        explanation.sources[0].state,
+        SourceState::Unavailable { .. }
+    ));
+    assert!(matches!(
+        explanation.providers[0].state,
+        ProviderState::Unavailable { .. }
     ));
 }
