@@ -1,10 +1,10 @@
-//! One transient AIKit surface with palette and tree modes.
+//! One transient AIKit surface with palette and tree compatibility presentations.
 //!
-//! A mode switch is not an outcome and does not surrender the terminal. Both
-//! controllers stay resident under one event source and one backend, so their
-//! navigation state and the staged graph survive `Ctrl-T`.
+//! V2 makes [`TuiState`] the semantic owner. Palette and tree remain resident
+//! presentation/controllers while they are migrated, but they no longer copy
+//! semantic staging directly between one another or treat a row index as identity.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
@@ -12,15 +12,21 @@ use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use aikit_core::error::AikitError;
+use aikit_core::id::CapsuleId;
+use aikit_core::resource::{ResourceKind, ResourceRef};
 use aikit_core::Result;
 
 use crate::app::Action;
+use crate::application::{
+    reduce_tui, ActivationIntent, PresentationMode, RelationView, ResourceListItem,
+    ResourceListReadModel, TuiState, UiAction,
+};
 use crate::backend::{PaletteBackend, Toggle};
 use crate::driver::{PaletteController, PaletteStep};
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::host::UiHost;
 use crate::staging::is_on;
-use crate::tree::{TreeEffect, TreeState};
+use crate::tree::{Node, NodeKind, TreeEffect, TreeState};
 use crate::tree_driver::{TreeController, TreeRequest, TreeStep};
 use crate::{PaletteOutcome, PaletteRequest};
 
@@ -82,6 +88,7 @@ impl SurfaceRequest {
 pub struct SurfaceController {
     mode: SurfaceMode,
     host: UiHost,
+    semantic: TuiState,
     palette: PaletteController,
     tree: TreeController,
 }
@@ -89,19 +96,37 @@ pub struct SurfaceController {
 impl SurfaceController {
     pub fn new<B: SurfaceBackend>(backend: &mut B, request: SurfaceRequest) -> Result<Self> {
         let palette = PaletteController::new(backend, request.palette_request())?;
-        let tree = TreeController::new(backend.surface_tree()?, TreeRequest::new(request.host));
+        let tree_state = backend.surface_tree()?;
+        let semantic = TuiState {
+            query: palette.state().query.clone(),
+            read_model: compatibility_read_model(&tree_state),
+            presentation: presentation_for_host(request.host),
+            relation_view: relation_view_for_mode(request.initial_mode),
+            ..TuiState::default()
+        };
+        let tree = TreeController::new(tree_state, TreeRequest::new(request.host));
         let mut surface = Self {
             mode: request.initial_mode,
             host: request.host,
+            semantic,
             palette,
             tree,
         };
-        surface.sync_palette_to_tree();
+        match surface.mode {
+            SurfaceMode::Palette => surface.capture_palette_semantics(),
+            SurfaceMode::Tree => surface.capture_tree_semantics(),
+        }
+        surface.project_semantic_to_presentations(backend);
         Ok(surface)
     }
 
     pub fn mode(&self) -> SurfaceMode {
         self.mode
+    }
+
+    /// The one semantic state shared by every presentation.
+    pub fn semantic(&self) -> &TuiState {
+        &self.semantic
     }
 
     pub fn palette(&self) -> &PaletteController {
@@ -143,10 +168,12 @@ impl SurfaceController {
         match self.mode {
             SurfaceMode::Palette => {
                 let step = self.palette.handle(backend, event)?;
+                self.capture_palette_semantics();
                 self.handle_palette_step(backend, step)
             }
             SurfaceMode::Tree => {
                 let step = self.tree.handle(event)?;
+                self.capture_tree_semantics();
                 self.handle_tree_step(backend, step)
             }
         }
@@ -158,10 +185,14 @@ impl SurfaceController {
         step: PaletteStep,
     ) -> Result<SurfaceStep> {
         Ok(match step {
-            PaletteStep::Continue => SurfaceStep::Continue,
+            PaletteStep::Continue => {
+                self.project_semantic_to_tree();
+                SurfaceStep::Continue
+            }
             PaletteStep::Tree => {
-                self.sync_palette_to_tree();
                 self.mode = SurfaceMode::Tree;
+                self.apply_semantic(UiAction::SetRelationView(RelationView::Tree));
+                self.project_semantic_to_tree();
                 SurfaceStep::Continue
             }
             PaletteStep::Outcome(PaletteOutcome::Applied(generation)) => {
@@ -183,24 +214,32 @@ impl SurfaceController {
     ) -> Result<SurfaceStep> {
         match step {
             TreeStep::Continue => {
-                self.sync_tree_to_palette(backend);
+                self.project_semantic_to_palette(backend);
                 Ok(SurfaceStep::Continue)
             }
             TreeStep::Palette => {
-                self.sync_tree_to_palette(backend);
                 self.mode = SurfaceMode::Palette;
+                self.apply_semantic(UiAction::SetRelationView(RelationView::List));
+                self.project_semantic_to_palette(backend);
                 Ok(SurfaceStep::Continue)
             }
             TreeStep::Apply(_) => {
-                self.sync_tree_to_palette(backend);
                 self.mode = SurfaceMode::Palette;
+                self.apply_semantic(UiAction::SetRelationView(RelationView::List));
+                self.project_semantic_to_palette(backend);
                 let step = self.palette.dispatch(backend, Action::CtrlEnter);
+                self.capture_palette_semantics();
                 self.handle_palette_step(backend, step)
             }
             TreeStep::Effect(TreeEffect::Activate { capsule }) => {
-                self.sync_tree_to_palette(backend);
                 self.mode = SurfaceMode::Palette;
+                if let Some(resource) = capsule_resource_ref(&capsule) {
+                    self.apply_semantic(UiAction::Select(resource));
+                }
+                self.apply_semantic(UiAction::SetRelationView(RelationView::List));
+                self.project_semantic_to_palette(backend);
                 let step = self.palette.activate(backend, capsule);
+                self.capture_palette_semantics();
                 self.handle_palette_step(backend, step)
             }
             TreeStep::Effect(effect) => {
@@ -209,7 +248,7 @@ impl SurfaceController {
                     return Ok(SurfaceStep::Continue);
                 }
                 match backend.surface_tree() {
-                    Ok(tree) => self.replace_tree(tree),
+                    Ok(tree) => self.replace_tree(tree, backend),
                     Err(error) => self.tree.report_error(&error),
                 }
                 Ok(SurfaceStep::Continue)
@@ -217,43 +256,136 @@ impl SurfaceController {
         }
     }
 
-    fn sync_palette_to_tree(&mut self) {
-        self.tree.state_mut().staged = self
+    /// Ingest the compatibility palette after a semantic gesture. This is the
+    /// migration boundary: the palette may still own a row cursor, but its selected
+    /// capsule and staged toggles are immediately converted to the authoritative
+    /// ResourceRef state.
+    fn capture_palette_semantics(&mut self) {
+        self.semantic.query = self.palette.state().query.clone();
+        if let Some(resource) = self
+            .palette
+            .state()
+            .selected_row()
+            .and_then(|row| capsule_resource_ref(&row.doc.id))
+        {
+            self.apply_semantic(UiAction::Select(resource));
+        }
+
+        let observed: BTreeMap<ResourceRef, ActivationIntent> = self
             .palette
             .state()
             .staged
             .toggles()
             .into_iter()
-            .map(|toggle| toggle.capsule)
+            .filter_map(|toggle| {
+                capsule_resource_ref(&toggle.capsule).map(|resource| {
+                    let intent = if toggle.enable {
+                        ActivationIntent::Enable
+                    } else {
+                        ActivationIntent::Disable
+                    };
+                    (resource, intent)
+                })
+            })
             .collect();
+        self.reconcile_compatibility_staging(observed);
     }
 
-    fn sync_tree_to_palette<B: SurfaceBackend>(&mut self, backend: &mut B) {
-        let ids = self.tree.state().staged.clone();
-        let current: BTreeSet<_> = self
-            .palette
+    fn capture_tree_semantics(&mut self) {
+        if let Some(resource) = self
+            .tree
+            .state()
+            .selected_row()
+            .and_then(|row| node_resource_ref(&row.node))
+        {
+            self.apply_semantic(UiAction::Select(resource));
+        }
+
+        let observed: BTreeMap<ResourceRef, ActivationIntent> = self
+            .tree
             .state()
             .staged
-            .toggles()
-            .into_iter()
-            .map(|toggle| toggle.capsule)
+            .iter()
+            .filter_map(|capsule| {
+                let resource = capsule_resource_ref(capsule)?;
+                let intent = self.semantic.staged.get(&resource).unwrap_or_else(|| {
+                    if is_on(&self.palette.state().view, capsule) {
+                        ActivationIntent::Disable
+                    } else {
+                        ActivationIntent::Enable
+                    }
+                });
+                Some((resource, intent))
+            })
             .collect();
-        if ids == current {
-            return;
+        self.reconcile_compatibility_staging(observed);
+    }
+
+    /// Replace only the capsule-shaped compatibility subset. V2 Resources staged
+    /// by newer surfaces survive even when the V1 palette/tree cannot render them.
+    fn reconcile_compatibility_staging(
+        &mut self,
+        observed: BTreeMap<ResourceRef, ActivationIntent>,
+    ) {
+        let compatibility_refs: Vec<_> = self
+            .semantic
+            .staged
+            .resources()
+            .filter(|resource| resource_capsule_id(resource).is_some())
+            .cloned()
+            .collect();
+        for resource in compatibility_refs {
+            if !observed.contains_key(&resource) {
+                self.semantic.staged.unstage(&resource);
+            }
         }
-        let toggles = ids
-            .into_iter()
-            .map(|capsule| {
-                let enable = self
-                    .palette
-                    .state()
-                    .staged
-                    .state_of(&capsule)
-                    .unwrap_or_else(|| !is_on(&self.palette.state().view, &capsule));
-                Toggle::new(capsule, enable)
+        for (resource, intent) in observed {
+            self.semantic.staged.stage(resource, intent);
+        }
+        self.semantic.preview = None;
+    }
+
+    fn project_semantic_to_presentations<B: SurfaceBackend>(&mut self, backend: &mut B) {
+        self.project_semantic_to_tree();
+        self.project_semantic_to_palette(backend);
+    }
+
+    fn project_semantic_to_tree(&mut self) {
+        self.tree.state_mut().staged = self
+            .semantic
+            .staged
+            .resources()
+            .filter_map(resource_capsule_id)
+            .collect();
+        if let Some(selected) = &self.semantic.selected {
+            if let Some(index) = self.tree.state().rows().iter().position(|row| {
+                node_resource_ref(&row.node).as_ref() == Some(selected)
+            }) {
+                self.tree.state_mut().selected = index;
+            }
+        }
+    }
+
+    fn project_semantic_to_palette<B: SurfaceBackend>(&mut self, backend: &mut B) {
+        let toggles = self
+            .semantic
+            .staged
+            .resources()
+            .filter_map(|resource| {
+                let capsule = resource_capsule_id(resource)?;
+                let enable = self.semantic.staged.get(resource)? == ActivationIntent::Enable;
+                Some(Toggle::new(capsule, enable))
             })
             .collect();
         self.palette.replace_staged(backend, toggles);
+
+        if let Some(selected) = &self.semantic.selected {
+            if let Some(index) = self.palette.state().rows.iter().position(|row| {
+                capsule_resource_ref(&row.doc.id).as_ref() == Some(selected)
+            }) {
+                self.palette.state_mut().cursor = index;
+            }
+        }
     }
 
     fn refresh_after_change<B: SurfaceBackend>(
@@ -270,19 +402,110 @@ impl SurfaceController {
                 .with_scope(scope),
         )?;
         self.palette.state_mut().status = Some(crate::app::Status::info(message));
-        self.replace_tree(backend.surface_tree()?);
-        self.sync_palette_to_tree();
+        self.replace_tree(backend.surface_tree()?, backend);
+        self.project_semantic_to_presentations(backend);
         Ok(())
     }
 
-    fn replace_tree(&mut self, mut state: TreeState) {
+    fn replace_tree<B: SurfaceBackend>(&mut self, mut state: TreeState, backend: &mut B) {
         let old = self.tree.state();
+        let old_selected_path = old.selected_row().map(|row| row.path);
         state.expanded = old.expanded.clone();
-        state.selected = old.selected.min(state.rows().len().saturating_sub(1));
         state.filter = old.filter.clone();
         state.yanked = old.yanked.clone();
-        state.staged = old.staged.clone();
+
         self.tree = TreeController::new(state, TreeRequest::new(self.host));
+        self.apply_semantic(UiAction::Refresh(compatibility_read_model(
+            self.tree.state(),
+        )));
+
+        // Resource selection is projected by stable ResourceRef. If the selected
+        // row is a presentation-only group/root, preserve its stable path instead
+        // of its old numeric row index.
+        if self.semantic.selected.is_none() {
+            if let Some(path) = old_selected_path {
+                if let Some(index) = self
+                    .tree
+                    .state()
+                    .rows()
+                    .iter()
+                    .position(|row| row.path == path)
+                {
+                    self.tree.state_mut().selected = index;
+                }
+            }
+        }
+        self.project_semantic_to_presentations(backend);
+    }
+
+    fn apply_semantic(&mut self, action: UiAction) {
+        let state = std::mem::take(&mut self.semantic);
+        self.semantic = reduce_tui(state, action).state;
+    }
+}
+
+fn presentation_for_host(host: UiHost) -> PresentationMode {
+    match host {
+        UiHost::Inline(_) => PresentationMode::Quick,
+        UiHost::TmuxPopup | UiHost::Fullscreen => PresentationMode::Workspace,
+    }
+}
+
+fn relation_view_for_mode(mode: SurfaceMode) -> RelationView {
+    match mode {
+        SurfaceMode::Palette => RelationView::List,
+        SurfaceMode::Tree => RelationView::Tree,
+    }
+}
+
+fn capsule_resource_ref(capsule: &CapsuleId) -> Option<ResourceRef> {
+    ResourceRef::parse(&capsule.to_string()).ok()
+}
+
+fn resource_capsule_id(resource: &ResourceRef) -> Option<CapsuleId> {
+    CapsuleId::parse(resource.as_str()).ok()
+}
+
+fn node_resource_ref(node: &Node) -> Option<ResourceRef> {
+    match &node.kind {
+        NodeKind::Capability { id } | NodeKind::HookStep { capsule: id, .. } => {
+            capsule_resource_ref(id)
+        }
+        NodeKind::Root(_) | NodeKind::Set { .. } | NodeKind::Group { .. } | NodeKind::Entry { .. } => {
+            None
+        }
+    }
+}
+
+fn compatibility_read_model(tree: &TreeState) -> ResourceListReadModel {
+    let mut resources = BTreeMap::<ResourceRef, ResourceListItem>::new();
+    for root in &tree.roots {
+        collect_compatibility_resources(root, &mut resources);
+    }
+    ResourceListReadModel {
+        revision: "aikit.tui/v1-compat-tree".into(),
+        resources: resources.into_values().collect(),
+    }
+}
+
+fn collect_compatibility_resources(
+    node: &Node,
+    resources: &mut BTreeMap<ResourceRef, ResourceListItem>,
+) {
+    if let Some(resource) = node_resource_ref(node) {
+        resources.entry(resource.clone()).or_insert_with(|| ResourceListItem {
+            resource,
+            kind: ResourceKind::Capability,
+            label: match &node.kind {
+                NodeKind::Capability { id } => id.to_string(),
+                NodeKind::HookStep { capsule, .. } => capsule.to_string(),
+                _ => String::new(),
+            },
+            summary: node.summary.clone(),
+        });
+    }
+    for child in &node.children {
+        collect_compatibility_resources(child, resources);
     }
 }
 
