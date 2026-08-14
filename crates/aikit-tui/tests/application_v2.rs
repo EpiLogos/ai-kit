@@ -164,6 +164,25 @@ fn dismiss_and_back_never_discard_staged_state_or_request_exit() {
 }
 
 #[test]
+fn exit_is_explicit_but_cannot_implicitly_discard_staged_intent() {
+    let staged = id("factory:capability:alpha");
+    let mut state = state_with_model(&["factory:capability:alpha"]);
+    state
+        .staged
+        .stage(staged.clone(), ActivationIntent::Enable);
+
+    let state = reduce_tui(state, UiAction::Exit).state;
+    assert!(!state.exit_requested);
+    assert_eq!(state.staged.get(&staged), Some(ActivationIntent::Enable));
+    assert!(state
+        .status
+        .as_ref()
+        .unwrap()
+        .message
+        .contains("apply or discard"));
+}
+
+#[test]
 fn discard_and_exit_are_explicit_actions() {
     let staged = id("factory:capability:alpha");
     let mut state = state_with_model(&["factory:capability:alpha"]);
