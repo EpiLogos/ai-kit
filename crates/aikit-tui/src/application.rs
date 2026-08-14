@@ -3,8 +3,9 @@
 //! The V1 palette and tree remain useful presentation implementations, but they
 //! must not remain independent semantic owners. This module defines the state that
 //! list, tree and future graph views share: one selected [`ResourceRef`], one
-//! staged change set and mutation scope, one navigation/overlay history, and
-//! refresh reconciliation by stable identity rather than row index.
+//! staged change set and mutation scope, one navigation/overlay history, one
+//! contextual Action lane, and refresh reconciliation by stable identity rather
+//! than row index.
 //!
 //! Application semantics stay behind [`TuiApplicationService`]. The reducer is
 //! pure and can only request effects; it cannot resolve capabilities, eligibility,
@@ -12,7 +13,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use aikit_core::resource::{ContextualActionDescriptor, ResourceKind, ResourceRef};
+use aikit_core::resource::{
+    search_contextual_actions, ContextualActionDescriptor, ResourceKind, ResourceRef,
+};
 use aikit_core::scope::ScopeKind;
 use aikit_core::Result;
 use serde::{Deserialize, Serialize};
@@ -23,6 +26,47 @@ use serde_json::Value;
 pub enum PresentationMode {
     Quick,
     Workspace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkspaceSection {
+    Projects,
+    Compose,
+    Explore,
+    Projection,
+    History,
+}
+
+impl WorkspaceSection {
+    pub const ALL: [Self; 5] = [
+        Self::Projects,
+        Self::Compose,
+        Self::Explore,
+        Self::Projection,
+        Self::History,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Projects => "Projects",
+            Self::Compose => "Compose",
+            Self::Explore => "Explore",
+            Self::Projection => "Projection",
+            Self::History => "History",
+        }
+    }
+
+    fn relative(self, delta: isize) -> Self {
+        let current = Self::ALL.iter().position(|candidate| *candidate == self).unwrap_or(0);
+        let last = Self::ALL.len().saturating_sub(1);
+        let next = if delta.is_negative() {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            (current + delta as usize).min(last)
+        };
+        Self::ALL[next]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +175,38 @@ pub struct RelationReadModel {
     pub value: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ActionOutcome {
+    Opened {
+        subject: ResourceRef,
+        summary: String,
+    },
+    Explained {
+        subject: ResourceRef,
+        summary: String,
+    },
+    Staged {
+        resource: ResourceRef,
+        intent: ActivationIntent,
+        summary: String,
+    },
+    Status {
+        summary: String,
+    },
+}
+
+impl ActionOutcome {
+    pub fn summary(&self) -> &str {
+        match self {
+            Self::Opened { summary, .. }
+            | Self::Explained { summary, .. }
+            | Self::Staged { summary, .. }
+            | Self::Status { summary } => summary,
+        }
+    }
+}
+
 /// Shared application service for the human TUI. The CLI may consume the same
 /// underlying application services directly; the TUI must never shell the CLI.
 ///
@@ -156,6 +232,14 @@ pub trait TuiApplicationService {
     fn contextual_actions(&self, _resource: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
         Ok(Vec::new())
     }
+
+    /// Invoke one already-resolved contextual Action. Providers remain responsible
+    /// for operation semantics; the reducer only consumes the typed outcome.
+    fn invoke_action(&mut self, action: &ContextualActionDescriptor) -> Result<ActionOutcome> {
+        Ok(ActionOutcome::Status {
+            summary: format!("action {} has no application implementation", action.action),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +255,7 @@ pub enum Overlay {
 pub struct NavigationPoint {
     pub selected: Option<ResourceRef>,
     pub relation_view: RelationView,
+    pub workspace_section: WorkspaceSection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,11 +281,20 @@ pub struct TuiState {
     pub contextual_actions_for: Option<ResourceRef>,
     #[serde(default)]
     pub contextual_actions: Vec<ContextualActionDescriptor>,
+    /// `Some` means the text-action lane is open. Its query is intentionally
+    /// distinct from the global Resource search query.
+    #[serde(default)]
+    pub action_query: Option<String>,
+    #[serde(default)]
+    pub action_cursor: usize,
+    #[serde(default)]
+    pub action_result: Option<ActionOutcome>,
     pub staged: StagedChanges,
     /// Mutation scope is semantic intent, not view chrome. A staged change without
     /// its scope is incomplete and may not be previewed or applied.
     pub mutation_scope: Option<ScopeKind>,
     pub presentation: PresentationMode,
+    pub workspace_section: WorkspaceSection,
     pub relation_view: RelationView,
     pub overlay: Option<Overlay>,
     pub navigation: Vec<NavigationPoint>,
@@ -219,9 +313,13 @@ impl Default for TuiState {
             selected: None,
             contextual_actions_for: None,
             contextual_actions: Vec::new(),
+            action_query: None,
+            action_cursor: 0,
+            action_result: None,
             staged: StagedChanges::default(),
             mutation_scope: None,
             presentation: PresentationMode::Quick,
+            workspace_section: WorkspaceSection::Projects,
             relation_view: RelationView::List,
             overlay: None,
             navigation: Vec::new(),
@@ -246,10 +344,19 @@ pub enum UiAction {
         subject: ResourceRef,
         actions: Vec<ContextualActionDescriptor>,
     },
+    BeginActionSearch,
+    SetActionQuery(String),
+    SelectNextAction,
+    SelectPreviousAction,
+    InvokeAction(ResourceRef),
+    ActionFinished(ActionOutcome),
     OpenSelection,
     Back,
     SetMutationScope(ScopeKind),
     SetPresentation(PresentationMode),
+    SetWorkspaceSection(WorkspaceSection),
+    NextWorkspaceSection,
+    PreviousWorkspaceSection,
     SetRelationView(RelationView),
     ShowOverlay(Overlay),
     Dismiss,
@@ -275,6 +382,9 @@ pub enum UiEffect {
     },
     LoadContextualActions {
         subject: ResourceRef,
+    },
+    InvokeContextualAction {
+        action: ContextualActionDescriptor,
     },
     PreviewComposition {
         scope: ScopeKind,
@@ -313,6 +423,9 @@ impl TuiRuntime {
                 actions: service.contextual_actions(&subject)?,
                 subject,
             }),
+            UiEffect::InvokeContextualAction { action } => {
+                Ok(UiAction::ActionFinished(service.invoke_action(&action)?))
+            }
             UiEffect::PreviewComposition { scope, staged } => Ok(UiAction::CompositionPreviewed(
                 service.preview_composition(scope, &staged)?,
             )),
@@ -358,6 +471,8 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
     match action {
         UiAction::SetQuery(query) => {
             state.query = query.clone();
+            state.action_query = None;
+            state.action_cursor = 0;
             effects.push(UiEffect::Search { query });
         }
         UiAction::SearchFinished(model) | UiAction::Refresh(model) => {
@@ -371,6 +486,8 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             if state.read_model.contains(&resource) {
                 state.selected = Some(resource.clone());
                 state.selection_invalidation = None;
+                state.action_query = None;
+                state.action_cursor = 0;
                 clear_contextual_actions(&mut state);
                 effects.push(UiEffect::LoadContextualActions { subject: resource });
             } else {
@@ -382,12 +499,16 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         }
         UiAction::SelectNext => {
             if let Some(subject) = select_relative(&mut state, 1) {
+                state.action_query = None;
+                state.action_cursor = 0;
                 clear_contextual_actions(&mut state);
                 effects.push(UiEffect::LoadContextualActions { subject });
             }
         }
         UiAction::SelectPrevious => {
             if let Some(subject) = select_relative(&mut state, -1) {
+                state.action_query = None;
+                state.action_cursor = 0;
                 clear_contextual_actions(&mut state);
                 effects.push(UiEffect::LoadContextualActions { subject });
             }
@@ -396,19 +517,83 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             if state.selected.as_ref() == Some(&subject) {
                 state.contextual_actions_for = Some(subject);
                 state.contextual_actions = actions;
+                state.action_cursor = state
+                    .action_cursor
+                    .min(visible_contextual_actions(&state).len().saturating_sub(1));
             }
+        }
+        UiAction::BeginActionSearch => {
+            if state.selected.is_some() && !state.contextual_actions.is_empty() {
+                state.action_query = Some(String::new());
+                state.action_cursor = 0;
+                state.action_result = None;
+            } else {
+                state.status = Some(UiStatus {
+                    message: "the selected resource exposes no contextual actions".into(),
+                });
+            }
+        }
+        UiAction::SetActionQuery(query) => {
+            if state.action_query.is_some() {
+                state.action_query = Some(query);
+                state.action_cursor = 0;
+            }
+        }
+        UiAction::SelectNextAction => move_action_cursor(&mut state, 1),
+        UiAction::SelectPreviousAction => move_action_cursor(&mut state, -1),
+        UiAction::InvokeAction(action_ref) => {
+            let available = visible_contextual_actions(&state);
+            if let Some(action) = available
+                .into_iter()
+                .find(|candidate| candidate.action == action_ref)
+            {
+                effects.push(UiEffect::InvokeContextualAction { action });
+            } else {
+                state.status = Some(UiStatus {
+                    message: format!("action {action_ref} is not available for the selected resource"),
+                });
+            }
+        }
+        UiAction::ActionFinished(outcome) => {
+            state.action_query = None;
+            state.action_cursor = 0;
+            state.status = Some(UiStatus {
+                message: outcome.summary().to_string(),
+            });
+            match &outcome {
+                ActionOutcome::Opened { .. } => {
+                    state.navigation.push(NavigationPoint {
+                        selected: state.selected.clone(),
+                        relation_view: state.relation_view,
+                        workspace_section: state.workspace_section,
+                    });
+                }
+                ActionOutcome::Explained { .. } => {
+                    state.overlay = Some(Overlay::Explain);
+                }
+                ActionOutcome::Staged { resource, intent, .. } => {
+                    state.staged.stage(resource.clone(), *intent);
+                    state.preview = None;
+                }
+                ActionOutcome::Status { .. } => {}
+            }
+            state.action_result = Some(outcome);
         }
         UiAction::OpenSelection => {
             state.navigation.push(NavigationPoint {
                 selected: state.selected.clone(),
                 relation_view: state.relation_view,
+                workspace_section: state.workspace_section,
             });
         }
         UiAction::Back => {
-            if state.overlay.take().is_none() {
+            if state.action_query.take().is_some() {
+                state.action_cursor = 0;
+            } else if state.overlay.take().is_none() {
                 if let Some(point) = state.navigation.pop() {
                     state.selected = point.selected.filter(|id| state.read_model.contains(id));
                     state.relation_view = point.relation_view;
+                    state.workspace_section = point.workspace_section;
                     clear_contextual_actions(&mut state);
                     if let Some(subject) = state.selected.clone() {
                         effects.push(UiEffect::LoadContextualActions { subject });
@@ -423,12 +608,23 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             }
         }
         UiAction::SetPresentation(presentation) => state.presentation = presentation,
+        UiAction::SetWorkspaceSection(section) => state.workspace_section = section,
+        UiAction::NextWorkspaceSection => {
+            state.workspace_section = state.workspace_section.relative(1)
+        }
+        UiAction::PreviousWorkspaceSection => {
+            state.workspace_section = state.workspace_section.relative(-1)
+        }
         UiAction::SetRelationView(view) => state.relation_view = view,
         UiAction::ShowOverlay(overlay) => state.overlay = Some(overlay),
         UiAction::Dismiss => {
             // Esc/dismiss is intentionally incapable of clearing query, staged
             // changes, selection, scope, or requesting application exit.
-            state.overlay = None;
+            if state.action_query.take().is_some() {
+                state.action_cursor = 0;
+            } else {
+                state.overlay = None;
+            }
         }
         UiAction::Stage { resource, intent } => {
             state.staged.stage(resource, intent);
@@ -539,6 +735,8 @@ fn reconcile_read_model(state: &mut TuiState, model: ResourceListReadModel) {
             state.selected = Some(selected);
         } else {
             state.selected = None;
+            state.action_query = None;
+            state.action_cursor = 0;
             clear_contextual_actions(state);
             state.selection_invalidation = Some(SelectionInvalidation {
                 previous: selected,
@@ -575,6 +773,36 @@ fn select_relative(state: &mut TuiState, delta: isize) -> Option<ResourceRef> {
     state.selected = state.read_model.resource_at(next).cloned();
     state.selection_invalidation = None;
     state.selected.clone()
+}
+
+fn move_action_cursor(state: &mut TuiState, delta: isize) {
+    if state.action_query.is_none() {
+        return;
+    }
+    let len = visible_contextual_actions(state).len();
+    if len == 0 {
+        state.action_cursor = 0;
+        return;
+    }
+    state.action_cursor = if delta.is_negative() {
+        state.action_cursor.saturating_sub(delta.unsigned_abs())
+    } else {
+        (state.action_cursor + delta as usize).min(len.saturating_sub(1))
+    };
+}
+
+/// Contextual Action results visible for the current text-action query. This calls
+/// the core navigation matcher, so Quick and Workspace do not grow a second fuzzy
+/// grammar.
+pub fn visible_contextual_actions(state: &TuiState) -> Vec<ContextualActionDescriptor> {
+    let query = state.action_query.as_deref().unwrap_or("");
+    search_contextual_actions(&state.contextual_actions, query)
+}
+
+pub fn selected_contextual_action(state: &TuiState) -> Option<ContextualActionDescriptor> {
+    visible_contextual_actions(state)
+        .get(state.action_cursor)
+        .cloned()
 }
 
 /// Presentation adapters resolve both keyboard navigation and mouse hit-testing to
