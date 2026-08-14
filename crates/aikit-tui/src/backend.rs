@@ -263,11 +263,11 @@ pub trait PaletteBackend {
 
     /// The shallow V2 navigation field.
     ///
-    /// The default adapter lifts proven capsule documents into Resource records
-    /// and labels all usage-derived ranking facts explicitly. Implementations may
-    /// override this to add Projects, Profiles, SkillSets, Procedures, Actions,
-    /// ContextSources and later Knowledge resources without changing TUI search.
-    /// Building this index must not invoke deep providers.
+    /// This shared default already includes context-native Project and Host
+    /// Resources plus proven capsule documents. Implementations may widen it with
+    /// Profiles, SkillSets, Procedures, Actions, ContextSources and later
+    /// Knowledge resources without changing TUI search. Building this index must
+    /// never invoke deep providers.
     fn navigation_index(&self) -> ResourceSearchIndex {
         let recent: BTreeSet<CapsuleId> = self
             .recent()
@@ -275,6 +275,50 @@ pub trait PaletteBackend {
             .map(|intent| intent.capsule)
             .collect();
         let mut index = ResourceSearchIndex::default();
+        let current = vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+            .with_detail("part of the resolved operating context")];
+
+        if let Some(project_id) = self.context().project_id.as_ref() {
+            if let Ok(resource) = ResourceRef::parse(&format!("project/{project_id}")) {
+                let name = self
+                    .context()
+                    .project_root
+                    .as_ref()
+                    .and_then(|root| root.file_name())
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| project_id.to_string());
+                let description = self
+                    .context()
+                    .project_root
+                    .as_ref()
+                    .map(|root| format!("current project · {}", root.display()))
+                    .unwrap_or_else(|| "current project".into());
+                index.insert_resource(
+                    ResourceRecord::new(ResourceDescriptor::new(
+                        resource,
+                        ResourceKind::Project,
+                        name,
+                        description,
+                    )),
+                    current.clone(),
+                );
+            }
+        }
+
+        if !self.context().host.trim().is_empty() {
+            if let Ok(resource) = ResourceRef::parse(&format!("host/{}", self.context().host)) {
+                index.insert_resource(
+                    ResourceRecord::new(ResourceDescriptor::new(
+                        resource,
+                        ResourceKind::Host,
+                        self.context().host.clone(),
+                        format!("current host · {}", self.context().platform),
+                    )),
+                    current.clone(),
+                );
+            }
+        }
+
         for doc in self.documents() {
             let Ok(resource) = ResourceRef::parse(&doc.id.to_string()) else {
                 continue;
