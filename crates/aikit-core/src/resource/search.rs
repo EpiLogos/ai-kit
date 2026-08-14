@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AikitError, Result};
 
-use super::{ResourceKind, ResourceRecord, ResourceRef};
+use super::{ResourceIndex, ResourceKind, ResourceRecord, ResourceRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -273,8 +273,6 @@ impl ResourceSearchIndex {
             .filter_map(|candidate| fuzzy_score(query, candidate))
             .max();
 
-            // Action relationship vocabulary is useful for finding the canonical
-            // Action resource, but it may never create one row per subject.
             if descriptor.kind == ResourceKind::Action {
                 for contextual in self
                     .actions
@@ -294,6 +292,23 @@ impl ResourceSearchIndex {
             }
         }
         hits
+    }
+}
+
+/// The shallow human-navigation field is also a valid read-only `ResourceIndex`.
+/// Project-world disclosure and ContextResolution can therefore consume the same
+/// descriptor records without constructing a parallel resource registry or
+/// invoking any deep provider.
+impl ResourceIndex for ResourceSearchIndex {
+    fn resource(&self, id: &ResourceRef) -> Option<&ResourceRecord> {
+        self.resources.get(id).map(|indexed| &indexed.record)
+    }
+
+    fn resources(&self) -> Vec<&ResourceRecord> {
+        self.resources
+            .values()
+            .map(|indexed| &indexed.record)
+            .collect()
     }
 }
 
@@ -369,5 +384,31 @@ mod tests {
         let scattered = fuzzy_score("proj", "profile object relation job").unwrap();
         assert!(prefix > scattered);
         assert!(fuzzy_score("xyz", "project").is_none());
+    }
+
+    #[test]
+    fn navigation_index_is_also_a_resource_index_without_loading_providers() {
+        use super::super::{ResourceDescriptor, ResourceIndex};
+
+        let mut index = ResourceSearchIndex::default();
+        let id = ResourceRef::parse("project:capability:review").unwrap();
+        index.insert_resource(
+            ResourceRecord::new(ResourceDescriptor::new(
+                id.clone(),
+                ResourceKind::Capability,
+                "Review",
+                "review capability",
+            )),
+            Vec::new(),
+        );
+
+        assert_eq!(ResourceIndex::resources(&index).len(), 1);
+        assert_eq!(
+            ResourceIndex::resource(&index, &id)
+                .unwrap()
+                .descriptor
+                .id,
+            id
+        );
     }
 }
