@@ -352,7 +352,20 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             });
         }
         UiAction::Resize(cols, rows) => state.area = (cols, rows),
-        UiAction::Exit => state.exit_requested = true,
+        UiAction::Exit => {
+            if state.staged.is_empty() {
+                state.exit_requested = true;
+            } else {
+                state.exit_requested = false;
+                state.status = Some(UiStatus {
+                    message: format!(
+                        "{} staged change{} remain; apply or discard them explicitly before exit",
+                        state.staged.len(),
+                        if state.staged.len() == 1 { "" } else { "s" }
+                    ),
+                });
+            }
+        }
     }
 
     TuiReduction { state, effects }
