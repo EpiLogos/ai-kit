@@ -22,7 +22,7 @@
 //! [`crate::PaletteOutcome::Run`] and are executed after teardown. Doing otherwise
 //! would hand a child process a raw-mode terminal and an alternate screen.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use aikit_core::arg::{ArgSpec, ArgValue, ArgValues};
@@ -32,6 +32,10 @@ use aikit_core::id::{CapsuleId, ContextId, GenerationId};
 use aikit_core::platform::TargetId;
 use aikit_core::projection::ActivationEffect;
 use aikit_core::resolve::ResolvedView;
+use aikit_core::resource::{
+    NavigationEvidence, NavigationEvidenceClass, ResourceDescriptor, ResourceKind, ResourceRecord,
+    ResourceRef, ResourceSearchIndex,
+};
 use aikit_core::scope::ScopeKind;
 use aikit_core::search::SearchDoc;
 use aikit_core::Result;
@@ -253,8 +257,61 @@ pub trait PaletteBackend {
     /// The effective view for that context, right now.
     fn view(&self) -> &ResolvedView;
 
-    /// The rows to search over, with the usage facts from the event log.
+    /// The V1 capability rows. They remain the compatibility source for the
+    /// capability-specific presentation and execution forms.
     fn documents(&self) -> Vec<SearchDoc>;
+
+    /// The shallow V2 navigation field.
+    ///
+    /// The default adapter lifts proven capsule documents into Resource records
+    /// and labels all usage-derived ranking facts explicitly. Implementations may
+    /// override this to add Projects, Profiles, SkillSets, Procedures, Actions,
+    /// ContextSources and later Knowledge resources without changing TUI search.
+    /// Building this index must not invoke deep providers.
+    fn navigation_index(&self) -> ResourceSearchIndex {
+        let recent: BTreeSet<CapsuleId> = self
+            .recent()
+            .into_iter()
+            .map(|intent| intent.capsule)
+            .collect();
+        let mut index = ResourceSearchIndex::default();
+        for doc in self.documents() {
+            let Ok(resource) = ResourceRef::parse(&doc.id.to_string()) else {
+                continue;
+            };
+            let mut evidence = Vec::new();
+            if doc.in_active_context {
+                evidence.push(
+                    NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                        .with_detail("active in the resolved context"),
+                );
+            }
+            if recent.contains(&doc.id) {
+                evidence.push(
+                    NavigationEvidence::new(NavigationEvidenceClass::Recent)
+                        .with_detail("present in recent run history"),
+                );
+            }
+            if doc.usage.successful_runs > 0 {
+                evidence.push(
+                    NavigationEvidence::new(NavigationEvidenceClass::LearnedUsage).with_detail(
+                        format!("{} successful run(s)", doc.usage.successful_runs),
+                    ),
+                );
+            }
+            let mut descriptor = ResourceDescriptor::new(
+                resource,
+                ResourceKind::Capability,
+                doc.name,
+                doc.description,
+            );
+            descriptor
+                .annotations
+                .insert("capsule-kind".into(), doc.kind.as_str().into());
+            index.insert_resource(ResourceRecord::new(descriptor), evidence);
+        }
+        index
+    }
 
     /// The full manifest behind a row, for the preview and the argument form.
     fn capsule(&self, id: &CapsuleId) -> Option<&Capsule>;

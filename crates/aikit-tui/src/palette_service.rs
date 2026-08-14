@@ -3,15 +3,12 @@
 //! The CLI's application `Service` already implements [`PaletteBackend`]. This
 //! adapter therefore lets the V2 reducer/runtime consume that same service object
 //! without shelling `aikit`, cloning resolver rules into the TUI, or waiting for
-//! every V1 Capsule presentation to be removed. #41 can widen search from the
-//! compatibility capsule catalog to all V2 Resources without changing the service
-//! boundary established here.
-
-use std::cell::RefCell;
+//! every V1 Capsule presentation to be removed. The V2 Quick path consumes the
+//! backend's ResourceRef-native shallow navigation index; the old capsule matcher
+//! remains available only to the V1 compatibility presentation.
 
 use aikit_core::id::CapsuleId;
 use aikit_core::resource::{ResourceKind, ResourceRef};
-use aikit_core::search::parse_query;
 use aikit_core::{AikitError, Result};
 use serde_json::{json, to_value, Value};
 
@@ -20,19 +17,14 @@ use crate::application::{
     ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService,
 };
 use crate::backend::{PaletteBackend, Toggle};
-use crate::search::Matcher;
 
 pub struct PaletteApplicationService<'a> {
     backend: &'a mut dyn PaletteBackend,
-    matcher: RefCell<Matcher>,
 }
 
 impl<'a> PaletteApplicationService<'a> {
     pub fn new(backend: &'a mut dyn PaletteBackend) -> Self {
-        Self {
-            backend,
-            matcher: RefCell::new(Matcher::new()),
-        }
+        Self { backend }
     }
 
     pub fn backend(&self) -> &dyn PaletteBackend {
@@ -46,23 +38,20 @@ impl<'a> PaletteApplicationService<'a> {
 
 impl TuiApplicationService for PaletteApplicationService<'_> {
     fn search(&self, query: &str) -> Result<ResourceListReadModel> {
-        let parsed = parse_query(query);
-        let docs = self.backend.documents();
-        let rows = self.matcher.borrow_mut().rank(&parsed, &docs);
-        let resources = rows
+        let index = self.backend.navigation_index();
+        let resources = index
+            .search(query, 256)
             .into_iter()
-            .map(|row| {
-                Ok(ResourceListItem {
-                    resource: resource_ref(&row.doc.id)?,
-                    kind: ResourceKind::Capability,
-                    label: row.doc.name,
-                    summary: row.doc.description,
-                })
+            .map(|hit| ResourceListItem {
+                resource: hit.resource,
+                kind: hit.kind,
+                label: hit.label,
+                summary: hit.summary,
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect();
         Ok(ResourceListReadModel {
             revision: format!(
-                "{}:{}:{}",
+                "aikit.resource-search/v2:{}:{}:{}",
                 self.backend.view().catalog_revision,
                 self.backend.view().hash,
                 query
@@ -72,17 +61,38 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
     }
 
     fn context_disclosure(&self, resource: &ResourceRef) -> Result<Value> {
-        let capsule = capsule_id(resource)?;
-        let view = self.backend.view();
+        if let Ok(capsule) = CapsuleId::parse(resource.as_str()) {
+            let view = self.backend.view();
+            return Ok(json!({
+                "resource": resource.as_str(),
+                "context": to_value(self.backend.context()).map_err(json_error)?,
+                "active": view.is_active(&capsule),
+                "declaredEnabled": view.is_declared_enabled(&capsule),
+                "available": !view.unavailable.contains_key(&capsule),
+                "runnable": view.can_run(&capsule),
+                "catalogRevision": view.catalog_revision,
+                "resolutionHash": view.hash.to_string(),
+            }));
+        }
+
+        let index = self.backend.navigation_index();
+        let hit = index
+            .search(resource.as_str(), 256)
+            .into_iter()
+            .find(|hit| &hit.resource == resource)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "tui.resource_not_in_navigation_index",
+                    format!("{resource} is not in the V2 navigation index"),
+                )
+            })?;
         Ok(json!({
             "resource": resource.as_str(),
+            "kind": hit.kind.as_str(),
+            "label": hit.label,
+            "summary": hit.summary,
             "context": to_value(self.backend.context()).map_err(json_error)?,
-            "active": view.is_active(&capsule),
-            "declaredEnabled": view.is_declared_enabled(&capsule),
-            "available": !view.unavailable.contains_key(&capsule),
-            "runnable": view.can_run(&capsule),
-            "catalogRevision": view.catalog_revision,
-            "resolutionHash": view.hash.to_string(),
+            "navigationEvidence": hit.navigation_evidence,
         }))
     }
 
@@ -190,15 +200,6 @@ fn capsule_id(resource: &ResourceRef) -> Result<CapsuleId> {
         AikitError::new(
             "tui.resource_not_capsule_compatible",
             format!("{resource} is not representable by the V1 capsule adapter: {error:?}"),
-        )
-    })
-}
-
-fn resource_ref(capsule: &CapsuleId) -> Result<ResourceRef> {
-    ResourceRef::parse(&capsule.to_string()).map_err(|error| {
-        AikitError::new(
-            "tui.invalid_resource_ref",
-            format!("could not expose capsule {capsule} as a ResourceRef: {error}"),
         )
     })
 }
