@@ -2,14 +2,16 @@
 //!
 //! Quick and Workspace are presentations of [`TuiState`], not alternate semantic
 //! controllers. This renderer therefore knows only the application read model,
-//! stable selection, staging and overlays. Capability-specific forms and run
-//! output continue to use the compatibility renderer while those operations are
-//! migrated to first-class V2 Actions.
+//! stable selection, contextual Actions, staging and overlays. Capability-specific
+//! forms and run output continue to use the compatibility renderer while those
+//! operations are migrated to first-class V2 Actions.
 
 use ratatui::layout::Alignment;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
+
+use aikit_core::resource::ActionStageability;
 
 use crate::application::{Overlay, PresentationMode, ResourceListItem, TuiState};
 use crate::layout::Layout;
@@ -169,15 +171,32 @@ fn preview_pane<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
     let Some(item) = selected_item(state) else {
         return Paragraph::new(Line::from(Span::styled("nothing selected", theme.dim())));
     };
-    Paragraph::new(vec![
+    let mut lines = vec![
         Line::from(Span::styled(item.label.clone(), theme.heading())),
         Line::from(Span::styled(item.kind.as_str(), theme.accent())),
         Line::from(""),
         Line::from(Span::raw(item.summary.clone())),
         Line::from(""),
         Line::from(Span::styled(item.resource.as_str().to_string(), theme.dim())),
-    ])
-    .wrap(Wrap { trim: false })
+    ];
+    if state.contextual_actions_for.as_ref() == Some(&item.resource)
+        && !state.contextual_actions.is_empty()
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Actions", theme.heading())));
+        for action in &state.contextual_actions {
+            let marker = match action.stageability {
+                ActionStageability::Stageable => "*",
+                ActionStageability::NotStageable => "›",
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{marker} "), theme.accent()),
+                Span::styled(action.label.clone(), theme.base()),
+                Span::styled(format!(" · {}", action.description), theme.dim()),
+            ]));
+        }
+    }
+    Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
 fn footer<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
