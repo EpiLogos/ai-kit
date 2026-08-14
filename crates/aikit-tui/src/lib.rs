@@ -81,10 +81,11 @@ use aikit_core::scope::ScopeKind;
 
 pub use app::{reduce, Action, AppState, Effect, ManageAction, Mode, Reduction};
 pub use application::{
-    keyboard_select, mouse_select, reduce_tui, unresolved_staged, ActivationIntent, ApplyReceipt,
-    CompositionPreview, HistoryEntry, NavigationPoint, Overlay, PresentationMode, RelationReadModel,
-    RelationView, ResourceListItem, ResourceListReadModel, SelectionInvalidation, StagedChanges,
-    TuiApplicationService, TuiReduction, TuiRuntime, TuiState, UiAction, UiEffect, UiStatus,
+    keyboard_select, mouse_select, reduce_tui, unresolved_staged, ActionOutcome, ActivationIntent,
+    ApplyReceipt, CompositionPreview, HistoryEntry, NavigationPoint, Overlay, PresentationMode,
+    RelationReadModel, RelationView, ResourceListItem, ResourceListReadModel, SelectionInvalidation,
+    StagedChanges, TuiApplicationService, TuiReduction, TuiRuntime, TuiState, UiAction, UiEffect,
+    UiStatus, WorkspaceSection,
 };
 pub use backend::{
     ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
