@@ -34,6 +34,7 @@ use crate::driver::{PaletteController, PaletteStep};
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::host::UiHost;
 use crate::layout::Layout;
+use crate::navigation::AmbientContext;
 use crate::palette_service::PaletteApplicationService;
 use crate::scope::ScopeSelector;
 use crate::search::Row;
@@ -167,7 +168,8 @@ impl SurfaceController {
                 if self.palette.state().mode == Mode::Search
                     && !self.palette.state().in_manage_lane() =>
             {
-                v2_render::draw(frame, &self.semantic)
+                let ambient = ambient_context(&self.palette.state().descriptor);
+                v2_render::draw_with_context(frame, &self.semantic, &ambient)
             }
             SurfaceMode::Palette => self.palette.draw(frame),
             SurfaceMode::Tree => self.tree.draw(frame),
@@ -957,6 +959,21 @@ impl SurfaceController {
         let first = selected_index.saturating_sub(height.saturating_sub(1));
         let index = first.saturating_add((row - list.y) as usize);
         (index < self.semantic.read_model.resources.len()).then_some(index)
+    }
+}
+
+fn ambient_context(descriptor: &aikit_core::ContextDescriptor) -> AmbientContext {
+    AmbientContext {
+        project: descriptor
+            .project_root
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned()),
+        focus: descriptor.task.clone(),
+        profile: None,
+        agency: None,
+        host: (!descriptor.host.is_empty()).then(|| descriptor.host.clone()),
+        target: descriptor.targets.first().map(|target| target.as_str().to_string()),
     }
 }
 
