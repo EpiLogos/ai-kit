@@ -9,6 +9,7 @@ mod index;
 mod legacy;
 mod model;
 mod refs;
+mod search;
 
 pub use factory::{FactoryInteropView, FactoryResourceImport};
 pub use index::{MemoryResourceIndex, ResourceIndex};
@@ -18,3 +19,7 @@ pub use model::{
     SourceAuthority, SourceState,
 };
 pub use refs::{OwnerRef, ProviderRef, ResourceRef, SourceRef, SourceRevision};
+pub use search::{
+    ActionStageability, ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass,
+    ResourceSearchHit, ResourceSearchHitKind, ResourceSearchIndex,
+};

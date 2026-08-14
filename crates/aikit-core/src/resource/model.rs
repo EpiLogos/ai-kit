@@ -7,8 +7,12 @@ use super::refs::{OwnerRef, ProviderRef, ResourceRef, SourceRef, SourceRevision}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceKind {
+    Project,
+    Profile,
+    SkillSet,
     Capability,
     Action,
+    Procedure,
     Agent,
     Agency,
     ContextSource,
@@ -16,13 +20,23 @@ pub enum ResourceKind {
     Harness,
     Host,
     ExecutionOffer,
+    KnowledgeSpace,
+    KnowledgeNode,
+    KnowledgeSource,
+    KnowledgeFrame,
+    KnowledgeRoute,
+    CodeReference,
 }
 
 impl ResourceKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Project => "project",
+            Self::Profile => "profile",
+            Self::SkillSet => "skill-set",
             Self::Capability => "capability",
             Self::Action => "action",
+            Self::Procedure => "procedure",
             Self::Agent => "agent",
             Self::Agency => "agency",
             Self::ContextSource => "context-source",
@@ -30,6 +44,12 @@ impl ResourceKind {
             Self::Harness => "harness",
             Self::Host => "host",
             Self::ExecutionOffer => "execution-offer",
+            Self::KnowledgeSpace => "knowledge-space",
+            Self::KnowledgeNode => "knowledge-node",
+            Self::KnowledgeSource => "knowledge-source",
+            Self::KnowledgeFrame => "knowledge-frame",
+            Self::KnowledgeRoute => "knowledge-route",
+            Self::CodeReference => "code-reference",
         }
     }
 }
