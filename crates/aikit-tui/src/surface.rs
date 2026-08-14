@@ -400,8 +400,9 @@ impl SurfaceController {
         self.reconcile_compatibility_staging(observed);
     }
 
-    /// Replace only the capsule-shaped compatibility subset. V2 Resources staged
-    /// by newer surfaces survive even when the V1 palette/tree cannot render them.
+    /// Reconcile only through semantic actions. Compatibility controllers may
+    /// report what their legacy projection currently contains, but they never get
+    /// a second mutation implementation or bypass TuiState's preview invalidation.
     fn reconcile_compatibility_staging(
         &mut self,
         observed: BTreeMap<ResourceRef, ActivationIntent>,
@@ -415,13 +416,14 @@ impl SurfaceController {
             .collect();
         for resource in compatibility_refs {
             if !observed.contains_key(&resource) {
-                self.semantic.staged.unstage(&resource);
+                self.apply_semantic(UiAction::Unstage(resource));
             }
         }
         for (resource, intent) in observed {
-            self.semantic.staged.stage(resource, intent);
+            if self.semantic.staged.get(&resource) != Some(intent) {
+                self.apply_semantic(UiAction::Stage { resource, intent });
+            }
         }
-        self.semantic.preview = None;
     }
 
     fn project_semantic_to_presentations<B: SurfaceBackend>(&mut self, backend: &mut B) {
