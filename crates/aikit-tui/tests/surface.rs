@@ -12,7 +12,9 @@ use aikit_tui::surface::{
     event_loop, SurfaceBackend, SurfaceController, SurfaceMode, SurfaceRequest, SurfaceStep,
 };
 use aikit_tui::tree::{Node, NodeKind, Root, TreeEffect, TreeState};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -122,6 +124,15 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> PaletteEvent {
     PaletteEvent::Key(KeyEvent::new(code, modifiers))
 }
 
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> PaletteEvent {
+    PaletteEvent::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
 fn rref(raw: &str) -> ResourceRef {
     ResourceRef::parse(raw).unwrap()
 }
@@ -182,6 +193,41 @@ fn switching_presentations_preserves_views_and_projects_canonical_staged_intent(
         .state()
         .staged
         .contains(&cid("skill/rust/review")));
+}
+
+#[test]
+fn quick_keyboard_and_mouse_navigation_converge_on_same_resource_selection() {
+    let mut keyboard_backend = fixture();
+    let mut keyboard = SurfaceController::new(&mut keyboard_backend, request("")).unwrap();
+    let mut keyboard_terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    keyboard
+        .draw_terminal(&mut keyboard_terminal)
+        .expect("draw establishes exact live geometry");
+    keyboard
+        .handle(&mut keyboard_backend, key(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+    let keyboard_selection = keyboard.tui_state().selected.clone();
+    assert!(keyboard_selection.is_some());
+
+    let mut mouse_backend = fixture();
+    let mut mouse_surface = SurfaceController::new(&mut mouse_backend, request("")).unwrap();
+    let mut mouse_terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    mouse_surface
+        .draw_terminal(&mut mouse_terminal)
+        .expect("draw establishes exact live geometry");
+    // Outer border y=0, query y=1, list starts y=2; y=3 is the second row.
+    mouse_surface
+        .handle(
+            &mut mouse_backend,
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 3),
+        )
+        .unwrap();
+
+    assert_eq!(mouse_surface.tui_state().selected, keyboard_selection);
+    assert_eq!(
+        mouse_surface.palette().state().selected_row().map(|row| row.doc.id.clone()),
+        keyboard.palette().state().selected_row().map(|row| row.doc.id.clone())
+    );
 }
 
 #[test]
@@ -271,7 +317,6 @@ fn resting_back_never_clears_query_discards_staging_or_exits() {
     let mut backend = fixture();
     let mut surface = SurfaceController::new(&mut backend, request("")).unwrap();
 
-    // Stage the current capability through the real Quick event path.
     assert_eq!(
         surface
             .handle(&mut backend, key(KeyCode::Char(' '), KeyModifiers::NONE))
@@ -280,9 +325,6 @@ fn resting_back_never_clears_query_discards_staging_or_exits() {
     );
     assert_eq!(surface.tui_state().staged.len(), 1);
 
-    // A typed query makes the old V1 Esc behaviour particularly dangerous: it
-    // used to clear query on one press, discard staging on the next and exit on
-    // the third. V2 Back does none of those things.
     surface
         .handle(&mut backend, key(KeyCode::Char('x'), KeyModifiers::NONE))
         .unwrap();
