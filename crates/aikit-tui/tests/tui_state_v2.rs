@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use aikit_core::resource::ResourceRef;
 use aikit_tui::tui_state::{
@@ -13,6 +13,10 @@ fn resources(values: &[&str]) -> BTreeSet<ResourceRef> {
     values.iter().map(|value| resource(value)).collect()
 }
 
+fn staged(resource: ResourceRef, enable: bool) -> BTreeMap<ResourceRef, bool> {
+    [(resource, enable)].into_iter().collect()
+}
+
 fn apply(state: TuiState, action: UiAction) -> TuiState {
     reduce_tui(state, action).state
 }
@@ -20,8 +24,10 @@ fn apply(state: TuiState, action: UiAction) -> TuiState {
 #[test]
 fn refresh_reconciles_selection_by_stable_ref_not_position() {
     let selected = resource("capability:review");
-    let mut state = TuiState::default();
-    state.selected = Some(selected.clone());
+    let state = TuiState {
+        selected: Some(selected.clone()),
+        ..TuiState::default()
+    };
 
     // Order is deliberately unrelated to a prior list position.
     let reduction = reduce_tui(
@@ -40,8 +46,10 @@ fn refresh_reconciles_selection_by_stable_ref_not_position() {
 #[test]
 fn missing_selected_ref_is_explicitly_invalidated_with_explanation() {
     let selected = resource("capability:review");
-    let mut state = TuiState::default();
-    state.selected = Some(selected.clone());
+    let state = TuiState {
+        selected: Some(selected.clone()),
+        ..TuiState::default()
+    };
 
     let reduction = reduce_tui(
         state,
@@ -57,12 +65,14 @@ fn missing_selected_ref_is_explicitly_invalidated_with_explanation() {
 #[test]
 fn resize_and_quick_workspace_switch_preserve_semantic_state() {
     let selected = resource("context-source:design");
-    let staged = resource("capability:review");
-    let mut state = TuiState::default();
-    state.selected = Some(selected.clone());
-    state.query = "review".into();
-    state.staged.insert(staged.clone(), true);
-    state.preview = PreviewState::Ready;
+    let staged_resource = resource("capability:review");
+    let mut state = TuiState {
+        selected: Some(selected.clone()),
+        query: "review".into(),
+        staged: staged(staged_resource.clone(), true),
+        preview: PreviewState::Ready,
+        ..TuiState::default()
+    };
 
     state = apply(state, UiAction::Present(Presentation::Workspace));
     state = apply(state, UiAction::Resize(140, 48));
@@ -72,35 +82,39 @@ fn resize_and_quick_workspace_switch_preserve_semantic_state() {
     assert_eq!(state.area, (140, 48));
     assert_eq!(state.selected, Some(selected));
     assert_eq!(state.query, "review");
-    assert_eq!(state.staged.get(&staged), Some(&true));
+    assert_eq!(state.staged.get(&staged_resource), Some(&true));
     assert_eq!(state.preview, PreviewState::Ready);
 }
 
 #[test]
 fn back_never_clears_query_discards_stage_applies_or_exits() {
-    let staged = resource("capability:review");
-    let mut state = TuiState::default();
-    state.query = "keep me".into();
-    state.staged.insert(staged.clone(), true);
-    state.preview = PreviewState::Ready;
-    state.overlay = Some(Overlay::ApplyConfirmation);
+    let staged_resource = resource("capability:review");
+    let state = TuiState {
+        query: "keep me".into(),
+        staged: staged(staged_resource.clone(), true),
+        preview: PreviewState::Ready,
+        overlay: Some(Overlay::ApplyConfirmation),
+        ..TuiState::default()
+    };
 
     let reduction = reduce_tui(state, UiAction::Back);
 
     assert!(reduction.effects.is_empty());
     assert_eq!(reduction.state.query, "keep me");
-    assert_eq!(reduction.state.staged.get(&staged), Some(&true));
+    assert_eq!(reduction.state.staged.get(&staged_resource), Some(&true));
     assert_eq!(reduction.state.preview, PreviewState::Ready);
     assert!(reduction.state.overlay.is_none());
 }
 
 #[test]
 fn clear_query_discard_stage_and_exit_are_explicit_independent_actions() {
-    let staged = resource("capability:review");
-    let mut state = TuiState::default();
-    state.query = "review".into();
-    state.staged.insert(staged, true);
-    state.preview = PreviewState::Ready;
+    let staged_resource = resource("capability:review");
+    let state = TuiState {
+        query: "review".into(),
+        staged: staged(staged_resource, true),
+        preview: PreviewState::Ready,
+        ..TuiState::default()
+    };
 
     let clear = reduce_tui(state.clone(), UiAction::ClearQuery);
     assert!(clear.state.query.is_empty());
@@ -158,12 +172,12 @@ fn stage_always_previews_before_an_apply_can_be_emitted() {
 
 #[test]
 fn refresh_navigation_and_presentation_never_drop_staged_intent() {
-    let staged = resource("capability:review");
+    let staged_resource = resource("capability:review");
     let selected = resource("context-source:docs");
     let state = apply(
         TuiState::default(),
         UiAction::Stage {
-            resource: staged.clone(),
+            resource: staged_resource.clone(),
             enable: true,
         },
     );
@@ -176,7 +190,7 @@ fn refresh_navigation_and_presentation_never_drop_staged_intent() {
     let state = apply(state, UiAction::Back);
 
     assert_eq!(state.selected, Some(selected));
-    assert_eq!(state.staged.get(&staged), Some(&true));
+    assert_eq!(state.staged.get(&staged_resource), Some(&true));
     assert_eq!(state.preview, PreviewState::Required);
 }
 
