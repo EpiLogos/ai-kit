@@ -48,6 +48,30 @@ pub enum ReferenceResolution {
     },
 }
 
+impl ReferenceResolution {
+    fn warning(&self, role: &str) -> Option<String> {
+        match self {
+            Self::Resolved { .. } => None,
+            Self::Missing {
+                reference,
+                expected,
+            } => Some(format!(
+                "requested {role} {reference} is not present in the V2 resource index (expected {})",
+                expected.as_str()
+            )),
+            Self::WrongKind {
+                reference,
+                expected,
+                actual,
+            } => Some(format!(
+                "requested {role} {reference} has kind {}, expected {}",
+                actual.as_str(),
+                expected.as_str()
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeResolution {
     pub kind: ScopeKind,
@@ -78,12 +102,17 @@ pub struct RequestedActors {
     pub host: Option<ResourceRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One complete V2 resolution.
+///
+/// `deterministic` is intentionally the full legacy `ResolvedView`, not a lossy
+/// summary. Existing scope/trust/dependency decisions therefore survive V2
+/// composition byte-for-byte at the semantic level while the wider resource field
+/// is layered alongside them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextResolution {
     pub version: String,
     pub project_binding: ProjectBinding,
-    pub legacy_resolution_hash: String,
-    pub catalog_revision: String,
+    pub deterministic: ResolvedView,
     pub profiles: Vec<ProfileId>,
     pub scopes: Vec<ScopeResolution>,
     #[serde(default)]
@@ -104,7 +133,7 @@ pub struct ContextResolution {
 }
 
 pub fn compose_context_resolution(
-    legacy: &ResolvedView,
+    deterministic: &ResolvedView,
     project_binding: ProjectBinding,
     scope_layers: &[ScopeLayer],
     resources: &dyn ResourceIndex,
@@ -124,7 +153,7 @@ pub fn compose_context_resolution(
         values.sort_by(|left, right| left.resource.descriptor.id.cmp(&right.resource.descriptor.id));
     }
 
-    let profiles = profiles(scope_layers);
+    let profiles = profiles(deterministic, scope_layers);
     let scopes = scopes(scope_layers);
     let context_sources = take_group(&mut grouped, ResourceKind::ContextSource);
     let retrieval = RetrievalPlan {
@@ -134,12 +163,16 @@ pub fn compose_context_resolution(
             .collect(),
     };
 
-    let mut targets = legacy.context.targets.clone();
+    let mut targets = deterministic.context.targets.clone();
     targets.sort();
     targets.dedup();
     let projection = ProjectionIntent {
         targets,
-        active_capabilities: legacy.active.keys().map(ToString::to_string).collect(),
+        active_capabilities: deterministic
+            .active
+            .keys()
+            .map(ToString::to_string)
+            .collect(),
     };
 
     let agent = requested
@@ -152,11 +185,21 @@ pub fn compose_context_resolution(
         .host
         .map(|reference| resolve_reference(resources, reference, ResourceKind::Host));
 
+    let mut warnings = deterministic.warnings.clone();
+    for (role, resolution) in [
+        ("agent", agent.as_ref()),
+        ("agency", agency.as_ref()),
+        ("host", host.as_ref()),
+    ] {
+        if let Some(warning) = resolution.and_then(|value| value.warning(role)) {
+            warnings.push(warning);
+        }
+    }
+
     ContextResolution {
         version: CONTEXT_RESOLUTION_VERSION.to_string(),
         project_binding,
-        legacy_resolution_hash: legacy.hash.as_str().to_string(),
-        catalog_revision: legacy.catalog_revision.clone(),
+        deterministic: deterministic.clone(),
         profiles,
         scopes,
         agent,
@@ -170,7 +213,7 @@ pub fn compose_context_resolution(
         execution_offers: take_group(&mut grouped, ResourceKind::ExecutionOffer),
         projection,
         retrieval,
-        warnings: legacy.warnings.clone(),
+        warnings,
     }
 }
 
@@ -261,12 +304,18 @@ pub fn availability(record: &ResourceRecord) -> Availability {
     }
 }
 
-fn profiles(scope_layers: &[ScopeLayer]) -> Vec<ProfileId> {
+fn profiles(deterministic: &ResolvedView, scope_layers: &[ScopeLayer]) -> Vec<ProfileId> {
     let mut profiles = BTreeSet::new();
     for layer in scope_layers {
         profiles.extend(layer.patch.profiles.iter().cloned());
         profiles.extend(layer.patch.uses.iter().map(|profile| profile.profile.clone()));
     }
+    profiles.extend(
+        deterministic
+            .selection_log
+            .iter()
+            .filter_map(|operation| operation.via_profile.clone()),
+    );
     profiles.into_iter().collect()
 }
 
