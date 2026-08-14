@@ -33,10 +33,16 @@
 //! terminal, and the part that does need a terminal is [`render`], which is
 //! snapshot-tested against a real `TestBackend`.
 //!
+//! V2 builds on that proven reducer discipline with [`application::TuiState`]: one
+//! semantic ResourceRef selection/staging/navigation state shared by Quick,
+//! Workspace, list, tree and future graph presentations. The older palette/tree
+//! models remain compatibility presentations while that state is adopted.
+//!
 //! ## Where to look
 //!
 //! | Question | Module |
 //! |---|---|
+//! | What is the V2 semantic TUI state/application-service seam? | [`application`] |
 //! | What does a key do? | [`app`], [`event`] |
 //! | Why is this row above that one? | [`search`] |
 //! | What would this toggle actually cost? | [`staging`] |
@@ -50,6 +56,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod application;
 pub mod backend;
 pub mod event;
 pub mod form;
@@ -70,6 +77,12 @@ use aikit_core::id::{CapsuleId, GenerationId};
 use aikit_core::scope::ScopeKind;
 
 pub use app::{reduce, Action, AppState, Effect, ManageAction, Mode, Reduction};
+pub use application::{
+    keyboard_select, mouse_select, reduce_tui, unresolved_staged, ActivationIntent, ApplyReceipt,
+    CompositionPreview, HistoryEntry, NavigationPoint, Overlay, PresentationMode, RelationReadModel,
+    RelationView, ResourceListItem, ResourceListReadModel, SelectionInvalidation, StagedChanges,
+    TuiApplicationService, TuiReduction, TuiState, UiAction, UiEffect, UiStatus,
+};
 pub use backend::{
     ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
 };
