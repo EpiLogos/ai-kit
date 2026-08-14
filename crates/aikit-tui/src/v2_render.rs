@@ -18,14 +18,25 @@ use crate::application::{
     TuiState, WorkspaceSection,
 };
 use crate::layout::Layout;
+use crate::navigation::AmbientContext;
 use crate::theme::Theme;
 
 pub fn draw(frame: &mut Frame, state: &TuiState) {
+    draw_with_context(frame, state, &AmbientContext::default());
+}
+
+pub fn draw_with_context(frame: &mut Frame, state: &TuiState, ambient: &AmbientContext) {
     let theme = Theme::new();
     let area = frame.area();
-    let title = match state.presentation {
-        PresentationMode::Quick => " AIKit · Quick ",
-        PresentationMode::Workspace => " AIKit · Workspace ",
+    let base_title = match state.presentation {
+        PresentationMode::Quick => "AIKit · Quick",
+        PresentationMode::Workspace => "AIKit · Workspace",
+    };
+    let ambient_line = ambient.line(area.width.saturating_sub(20));
+    let title = if ambient_line.is_empty() {
+        format!(" {base_title} ")
+    } else {
+        format!(" {base_title} · {ambient_line} ")
     };
     let block = Block::default()
         .borders(Borders::ALL)
