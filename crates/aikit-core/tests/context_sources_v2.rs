@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use aikit_core::project::ProjectRef;
 use aikit_core::resource::{
@@ -270,7 +270,7 @@ fn all_structured_absence_meanings_are_distinguishable() {
         (AbsenceKind::Bound, "bound"),
         (AbsenceKind::Missing, "missing"),
     ];
-    let mut observed = BTreeSet::new();
+    let mut observed = Vec::new();
     for (kind, suffix) in cases {
         let id = format!("context-source:absence:{suffix}");
         let resource = ResourceRef::parse(&id).unwrap();
@@ -279,10 +279,16 @@ fn all_structured_absence_meanings_are_distinguishable() {
         let mut index = ContextSourceIndex::default();
         index.insert(entry);
         let explanation = index.explain(&resource).unwrap();
-        observed.insert(explanation.absence.unwrap().kind);
+        observed.push(explanation.absence.unwrap().kind);
     }
 
     assert_eq!(observed.len(), 6);
+    assert!(observed.contains(&AbsenceKind::Open));
+    assert!(observed.contains(&AbsenceKind::Latent));
+    assert!(observed.contains(&AbsenceKind::Unknown));
+    assert!(observed.contains(&AbsenceKind::Irrelevant));
+    assert!(observed.contains(&AbsenceKind::Bound));
+    assert!(observed.contains(&AbsenceKind::Missing));
 }
 
 #[test]
