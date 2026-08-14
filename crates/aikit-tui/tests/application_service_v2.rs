@@ -1,4 +1,5 @@
 use aikit_core::resource::{ResourceKind, ResourceRef};
+use aikit_core::scope::ScopeKind;
 use aikit_core::Result;
 use aikit_tui::{
     ActivationIntent, ApplyReceipt, CompositionPreview, HistoryEntry, RelationReadModel,
@@ -33,9 +34,14 @@ impl TuiApplicationService for FakeService {
         Ok(json!({"resource": subject.as_str(), "disclosed": true}))
     }
 
-    fn preview_composition(&self, staged: &StagedChanges) -> Result<CompositionPreview> {
+    fn preview_composition(
+        &self,
+        scope: ScopeKind,
+        staged: &StagedChanges,
+    ) -> Result<CompositionPreview> {
         Ok(CompositionPreview {
             revision: "preview-r1".into(),
+            scope,
             staged: staged.clone(),
             summary: format!("preview {} staged change(s)", staged.len()),
         })
@@ -94,6 +100,7 @@ fn preview_then_confirmation_then_apply_crosses_the_service_boundary_once() {
     let mut runtime = TuiRuntime::new();
     let mut service = FakeService::default();
     let mut state = TuiState::default();
+    state.mutation_scope = Some(ScopeKind::Project);
     state.read_model = ResourceListReadModel {
         revision: "r1".into(),
         resources: vec![ResourceListItem {
@@ -119,7 +126,7 @@ fn preview_then_confirmation_then_apply_crosses_the_service_boundary_once() {
     state = runtime
         .step(&mut service, state, UiAction::RequestApply)
         .unwrap();
-    assert!(state.preview.is_some());
+    assert_eq!(state.preview.as_ref().unwrap().scope, ScopeKind::Project);
     assert!(!state.staged.is_empty());
     assert_eq!(service.applies, 0);
 
