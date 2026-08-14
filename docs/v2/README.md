@@ -1,9 +1,9 @@
 # AIKit V2 — Vision and Design Specification
 
 **Status:** AUTHORITATIVE TARGET DESIGN — proposed for V2 programme  
-**Date:** 2026-08-13  
+**Date:** 2026-08-14  
 **Repository:** `EpiLogos/ai-kit`  
-**Scope:** product vision, ownership, context cognition, resource resolution, source/retrieval model, actor environment, projection, memory, TUI/CLI, runtime integration, QL/MEF interoperability, migration from the current implementation  
+**Scope:** product vision, ownership, context cognition, resource resolution, source/retrieval model, Knowledge Navigation, actor environment, projection, memory, human TUI/CLI, runtime integration, QL/MEF interoperability, migration from the current implementation  
 **Implementation posture:** the current AIKit is a valuable production-oriented alpha and a source of proven mechanisms. This specification defines the correct full product even where V2 requires substantial internal, TUI, schema, or UX rework.
 
 ---
@@ -12,7 +12,7 @@
 
 AIKit is the **context-cognitive control plane for human and artificial actors**.
 
-It indexes independently owned sources, powers, actor resources, and execution resources; deterministically resolves the operational world appropriate to a Project, Profile, Agency, scope, and present Focus; makes a broader information and capability horizon discoverable without indiscriminately loading it; remembers routes that become familiar through use; explains why resources are available, absent, selected, or withheld; and projects the resulting world into heterogeneous agent harnesses and human surfaces.
+It indexes independently owned sources, powers, actor resources, execution resources and addressable project knowledge; deterministically resolves the operational world appropriate to a Project, Profile, Agency, scope, and present Focus; makes broader information and capability horizons discoverable without indiscriminately loading them; remembers destinations and routes that become familiar through use; explains why resources are available, absent, selected, related or withheld; and projects the resulting world into heterogeneous agent harnesses and human surfaces.
 
 The existing product correctly discovered the nucleus:
 
@@ -30,7 +30,7 @@ explainable effective state
 target projection
 ```
 
-V2 generalises **what the resolver can resolve**.
+V2 generalises **what the resolver can resolve and what an actor can navigate**.
 
 The product moves from a context-scoped capability router for terminal work toward a context-cognitive operating substrate capable of resolving and disclosing:
 
@@ -42,6 +42,7 @@ Capabilities
 Skills
 Actions / Action Sets
 Context Sources
+SemanticWiki / SourcePool / ProjectMap knowledge horizons
 Models
 Harnesses
 Hosts
@@ -53,6 +54,10 @@ present Focus
 retrieved versus latent information
 target-specific projections
 ```
+
+For humans, the CLI is AIKit's operational language while the TUI becomes the human environment-composition and context-navigation instrument over that same application state. Search, Context, Compose, Explain, History and relation navigation are semantic capabilities, not separate semantic stores.
+
+Knowledge Navigation preserves distinct provider authorities: SemanticWiki is authored semantic/meaning structure, SourcePool is an evidential retrieval horizon, code-index providers own structural code intelligence, ProjectMap federates those lenses through stable refs, and KnowledgeRoute records actual traversal/familiarity without manufacturing semantic truth. The same addressable field may be rendered as list, tree or local graph without collapsing relation ownership.
 
 AIKit does not become the owner of the meanings it carries. Project meaning remains Project-owned. Agent identity remains independent of AIKit. Application Actions remain application-owned. Human-authored material remains human-owned. Workcell remains the materialisation layer. QL/MEF remains an independent formal/semantic module. Harnesses remain the embodied agent-loop implementations.
 
@@ -68,6 +73,8 @@ independently authored / observed world
          context cognition
                 ↓
      selective retrieval/disclosure
+                ↓
+      navigation / composition
                 ↓
         target projection
                 ↓
