@@ -2,7 +2,10 @@ mod common;
 
 use common::*;
 
-use aikit_core::resource::ResourceRef;
+use aikit_core::resource::{
+    NavigationEvidence, NavigationEvidenceClass, ResourceDescriptor, ResourceKind, ResourceRecord,
+    ResourceRef, ResourceSearchIndex,
+};
 use aikit_core::Result;
 use aikit_tui::application::{Overlay, PresentationMode};
 use aikit_tui::event::PaletteEvent;
@@ -18,41 +21,60 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 
-struct SurfaceFixture(Fixture);
+struct SurfaceFixture {
+    fixture: Fixture,
+    include_project: bool,
+}
 
 impl std::ops::Deref for SurfaceFixture {
     type Target = Fixture;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.fixture
     }
 }
 
 impl std::ops::DerefMut for SurfaceFixture {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.fixture
     }
 }
 
 impl aikit_tui::PaletteBackend for SurfaceFixture {
     fn context(&self) -> &aikit_core::ContextDescriptor {
-        self.0.context()
+        self.fixture.context()
     }
 
     fn view(&self) -> &aikit_core::resolve::ResolvedView {
-        self.0.view()
+        self.fixture.view()
     }
 
     fn documents(&self) -> Vec<aikit_core::search::SearchDoc> {
-        self.0.documents()
+        self.fixture.documents()
+    }
+
+    fn navigation_index(&self) -> ResourceSearchIndex {
+        let mut index = aikit_tui::PaletteBackend::navigation_index(&self.fixture);
+        if self.include_project {
+            index.insert_resource(
+                ResourceRecord::new(ResourceDescriptor::new(
+                    rref("project/aikit"),
+                    ResourceKind::Project,
+                    "AIKit V2",
+                    "current project destination",
+                )),
+                vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)],
+            );
+        }
+        index
     }
 
     fn capsule(&self, id: &aikit_core::CapsuleId) -> Option<&aikit_core::capsule::Capsule> {
-        self.0.capsule(id)
+        self.fixture.capsule(id)
     }
 
     fn recent(&self) -> Vec<aikit_tui::RunIntent> {
-        self.0.recent()
+        self.fixture.recent()
     }
 
     fn preview(
@@ -60,7 +82,7 @@ impl aikit_tui::PaletteBackend for SurfaceFixture {
         scope: aikit_core::scope::ScopeKind,
         toggles: &[aikit_tui::Toggle],
     ) -> Result<aikit_tui::Projected> {
-        self.0.preview(scope, toggles)
+        self.fixture.preview(scope, toggles)
     }
 
     fn apply(
@@ -68,23 +90,23 @@ impl aikit_tui::PaletteBackend for SurfaceFixture {
         scope: aikit_core::scope::ScopeKind,
         toggles: &[aikit_tui::Toggle],
     ) -> Result<aikit_core::GenerationId> {
-        self.0.apply(scope, toggles)
+        self.fixture.apply(scope, toggles)
     }
 
     fn start(&mut self, intent: &aikit_tui::RunIntent) -> Result<aikit_tui::JobOutput> {
-        self.0.start(intent)
+        self.fixture.start(intent)
     }
 
     fn open_source(&mut self, id: &aikit_core::CapsuleId) -> Result<std::path::PathBuf> {
-        self.0.open_source(id)
+        self.fixture.open_source(id)
     }
 
     fn promotion_drafts(&self) -> Vec<aikit_tui::PromotionDraft> {
-        self.0.promotion_drafts()
+        self.fixture.promotion_drafts()
     }
 
     fn promote(&mut self, draft: &aikit_tui::PromotionDraft) -> Result<aikit_core::CapsuleId> {
-        self.0.promote(draft)
+        self.fixture.promote(draft)
     }
 }
 
@@ -109,13 +131,20 @@ impl SurfaceBackend for SurfaceFixture {
     }
 }
 
-fn fixture() -> SurfaceFixture {
+fn fixture_with_project(include_project: bool) -> SurfaceFixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.keep();
-    SurfaceFixture(Fixture::new(
-        &root,
-        vec![script("script/ops/deploy"), skill("skill/rust/review")],
-    ))
+    SurfaceFixture {
+        fixture: Fixture::new(
+            &root,
+            vec![script("script/ops/deploy"), skill("skill/rust/review")],
+        ),
+        include_project,
+    }
+}
+
+fn fixture() -> SurfaceFixture {
+    fixture_with_project(false)
 }
 
 fn key(code: KeyCode) -> PaletteEvent {
@@ -219,6 +248,32 @@ fn live_quick_keyboard_and_mouse_selection_converge_on_the_same_resource_ref() {
             .map(|row| row.doc.id.clone()),
         "legacy cursors are projections of the same semantic ResourceRef selection"
     );
+}
+
+#[test]
+fn generic_project_resource_is_searchable_drawable_and_mouse_addressable() {
+    let mut backend = fixture_with_project(true);
+    let mut surface = SurfaceController::new(
+        &mut backend,
+        SurfaceRequest::new(UiHost::TmuxPopup).with_query("AIKit V2"),
+    )
+    .unwrap();
+    assert_eq!(surface.semantic().selected, Some(rref("project/aikit")));
+    assert_eq!(
+        surface.semantic().read_model.resources[0].kind,
+        ResourceKind::Project
+    );
+    assert!(surface.palette().state().rows.is_empty());
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    surface.draw_terminal(&mut terminal).unwrap();
+
+    let inner = Rect::new(1, 1, 98, 22);
+    let list = Layout::for_width(inner.width).split(inner).list;
+    surface
+        .handle(&mut backend, mouse(list.x, list.y))
+        .unwrap();
+    assert_eq!(surface.semantic().selected, Some(rref("project/aikit")));
 }
 
 #[test]
