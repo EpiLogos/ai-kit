@@ -1,8 +1,10 @@
 //! One transient AIKit surface with palette and tree compatibility presentations.
 //!
 //! V2 makes [`TuiState`] the semantic owner. Palette and tree remain resident
-//! presentation/controllers while they are migrated, but they no longer copy
-//! semantic staging directly between one another or treat a row index as identity.
+//! compatibility presentations while they are migrated. Search, selection,
+//! staging, mutation scope and composition effects are routed through the V2
+//! reducer/runtime; the legacy controllers retain only presentation-specific and
+//! capability-specific interaction until V2 Action descriptors replace them.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -20,16 +22,19 @@ use aikit_core::id::CapsuleId;
 use aikit_core::resource::{ResourceKind, ResourceRef};
 use aikit_core::Result;
 
-use crate::app::{Action, Mode, Status};
+use crate::app::{Mode, Status};
 use crate::application::{
-    keyboard_select, mouse_select, reduce_tui, ActivationIntent, PresentationMode, RelationView,
-    ResourceListItem, ResourceListReadModel, TuiState, UiAction,
+    keyboard_select, mouse_select, reduce_tui, ActivationIntent, Overlay, PresentationMode,
+    RelationView, ResourceListItem, ResourceListReadModel, TuiRuntime, TuiState, UiAction,
 };
 use crate::backend::{PaletteBackend, Toggle};
 use crate::driver::{PaletteController, PaletteStep};
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::host::UiHost;
 use crate::layout::Layout;
+use crate::palette_service::PaletteApplicationService;
+use crate::scope::ScopeSelector;
+use crate::search::Row;
 use crate::staging::is_on;
 use crate::tree::{Node, NodeKind, TreeEffect, TreeState};
 use crate::tree_driver::{TreeController, TreeRequest, TreeStep};
@@ -94,12 +99,17 @@ pub struct SurfaceController {
     mode: SurfaceMode,
     host: UiHost,
     semantic: TuiState,
+    runtime: TuiRuntime,
     palette: PaletteController,
     tree: TreeController,
 }
 
 impl SurfaceController {
     pub fn new<B: SurfaceBackend>(backend: &mut B, request: SurfaceRequest) -> Result<Self> {
+        // The resident V1 controllers are created only as compatibility
+        // presentations. Their initial effect pass is not accepted as V2 state;
+        // the canonical read model is immediately resolved again through
+        // TuiRuntime + TuiApplicationService below.
         let palette = PaletteController::new(backend, request.palette_request())?;
         let tree_state = backend.surface_tree()?;
         let semantic = TuiState {
@@ -115,6 +125,7 @@ impl SurfaceController {
             mode: request.initial_mode,
             host: request.host,
             semantic,
+            runtime: TuiRuntime::new(),
             palette,
             tree,
         };
@@ -122,6 +133,9 @@ impl SurfaceController {
             SurfaceMode::Palette => surface.capture_palette_semantics(),
             SurfaceMode::Tree => surface.capture_tree_semantics(),
         }
+        let initial_query = surface.semantic.query.clone();
+        surface.dispatch_semantic(backend, UiAction::SetQuery(initial_query))?;
+        surface.ensure_semantic_selection();
         surface.project_semantic_to_presentations(backend);
         Ok(surface)
     }
@@ -153,10 +167,6 @@ impl SurfaceController {
     }
 
     /// Draw one production frame through a caller-owned terminal.
-    ///
-    /// Keeping this seam on the controller makes the release performance gate
-    /// measure the same draw path as the event loop rather than a test-only
-    /// rendering approximation.
     pub fn draw_terminal<T>(&mut self, terminal: &mut Terminal<T>) -> Result<()>
     where
         T: Backend,
@@ -184,6 +194,13 @@ impl SurfaceController {
                     self.project_semantic_to_palette(backend);
                     return Ok(SurfaceStep::Continue);
                 }
+                if let Some(step) = self.handle_v2_palette_event(backend, &event)? {
+                    return Ok(step);
+                }
+
+                // Capability-specific details/forms/run handoff remain on the
+                // compatibility controller. Search/stage/apply never reach this
+                // path in the resting V2 surface.
                 let step = self.palette.handle(backend, event)?;
                 self.capture_palette_semantics();
                 self.handle_palette_step(backend, step)
@@ -196,9 +213,9 @@ impl SurfaceController {
         }
     }
 
-    /// V2 owns the ambiguous navigation keys before either compatibility
-    /// presentation sees them. Esc is therefore only back/dismiss at the resting
-    /// surface, while clearing and exiting are separate, explicit commands.
+    /// V2 owns ambiguous navigation before either compatibility presentation sees
+    /// it. Esc is only back/dismiss at the resting surface; clear and exit are
+    /// separate explicit commands.
     fn handle_explicit_navigation<B: SurfaceBackend>(
         &mut self,
         backend: &mut B,
@@ -217,21 +234,16 @@ impl SurfaceController {
             if self.semantic.exit_requested {
                 return Ok(Some(SurfaceStep::Outcome(PaletteOutcome::Closed)));
             }
-            if let Some(status) = self.semantic.status.as_ref() {
-                self.palette.state_mut().status = Some(Status::info(status.message.clone()));
-            }
+            self.sync_semantic_status();
             return Ok(Some(SurfaceStep::Continue));
         }
 
         if control && key.code == KeyCode::Char('u') {
-            self.clear_query_explicitly(backend);
+            self.clear_query_explicitly(backend)?;
             return Ok(Some(SurfaceStep::Continue));
         }
 
         if key.code == KeyCode::Esc {
-            // Dialog/form/preview Esc already means one-layer back in the proven V1
-            // reducer. Only the resting Search state and Tree need interception to
-            // prevent the old context-dependent clear/discard/close semantics.
             if self.mode == SurfaceMode::Palette && self.palette.state().mode != Mode::Search {
                 return Ok(None);
             }
@@ -243,18 +255,193 @@ impl SurfaceController {
         Ok(None)
     }
 
-    fn clear_query_explicitly<B: SurfaceBackend>(&mut self, backend: &mut B) {
-        self.apply_semantic(UiAction::SetQuery(String::new()));
-
-        // The V1 palette has no explicit ClearQuery action. Drive its proven
-        // Backspace action until the compatibility presentation matches the one
-        // semantic query; each step remains inside its reducer/effect discipline.
-        while !self.palette.state().query.is_empty() {
-            let _ = self.palette.dispatch(backend, Action::Backspace);
+    /// Translate the resting Quick/Workspace compatibility palette into the one
+    /// V2 action language. Keys not owned here are capability-specific legacy
+    /// interactions and are deliberately handed on.
+    fn handle_v2_palette_event<B: SurfaceBackend>(
+        &mut self,
+        backend: &mut B,
+        event: &PaletteEvent,
+    ) -> Result<Option<SurfaceStep>> {
+        if self.palette.state().mode != Mode::Search || self.palette.state().in_manage_lane() {
+            return Ok(None);
         }
+        let PaletteEvent::Key(key) = event else {
+            return Ok(None);
+        };
+        if key.kind == KeyEventKind::Release {
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+        if ctrl && key.code == KeyCode::Char('s')
+            || ctrl && key.code == KeyCode::Enter
+        {
+            self.advance_composition(backend)?;
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        if ctrl && key.code == KeyCode::Char('w') {
+            let presentation = match self.semantic.presentation {
+                PresentationMode::Quick => PresentationMode::Workspace,
+                PresentationMode::Workspace => PresentationMode::Quick,
+            };
+            self.apply_semantic(UiAction::SetPresentation(presentation));
+            self.sync_semantic_status();
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
+            self.cycle_scope(backend)?;
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        if key.code == KeyCode::Insert || ctrl && key.code == KeyCode::Char(' ') {
+            self.toggle_selected_staged(backend);
+            self.project_semantic_to_presentations(backend);
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        if key.code == KeyCode::Up || ctrl && key.code == KeyCode::Char('k') {
+            self.apply_semantic(UiAction::SelectPrevious);
+            self.project_semantic_to_palette(backend);
+            return Ok(Some(SurfaceStep::Continue));
+        }
+        if key.code == KeyCode::Down || ctrl && key.code == KeyCode::Char('j') {
+            self.apply_semantic(UiAction::SelectNext);
+            self.project_semantic_to_palette(backend);
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        if key.code == KeyCode::Backspace {
+            let mut query = self.semantic.query.clone();
+            query.pop();
+            self.update_query(backend, query)?;
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        if key.code == KeyCode::Char(' ') && self.semantic.query.is_empty() {
+            self.toggle_selected_staged(backend);
+            self.project_semantic_to_presentations(backend);
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        // Keep the proven management lane alive until V2 contextual Action
+        // descriptors replace it; entering ':' therefore remains explicitly a
+        // compatibility interaction rather than a second V2 search grammar.
+        if key.code == KeyCode::Char(':') && self.semantic.query.is_empty() {
+            return Ok(None);
+        }
+        if key.code == KeyCode::Char('?') && self.semantic.query.is_empty() {
+            return Ok(None);
+        }
+
+        if let KeyCode::Char(c) = key.code {
+            if !ctrl && !alt {
+                let mut query = self.semantic.query.clone();
+                query.push(c);
+                self.update_query(backend, query)?;
+                return Ok(Some(SurfaceStep::Continue));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn update_query<B: SurfaceBackend>(&mut self, backend: &mut B, query: String) -> Result<()> {
+        self.dispatch_semantic(backend, UiAction::SetQuery(query))?;
+        self.ensure_semantic_selection();
+        self.project_semantic_to_palette(backend);
+        self.tree.state_mut().filter = self.semantic.query.clone();
+        Ok(())
+    }
+
+    fn clear_query_explicitly<B: SurfaceBackend>(&mut self, backend: &mut B) -> Result<()> {
+        self.update_query(backend, String::new())?;
         self.tree.state_mut().filter.clear();
-        self.capture_palette_semantics();
-        self.project_semantic_to_tree();
+        Ok(())
+    }
+
+    fn cycle_scope<B: SurfaceBackend>(&mut self, backend: &mut B) -> Result<()> {
+        let permitted = backend.context().permitted_scopes();
+        if permitted.is_empty() {
+            return Ok(());
+        }
+        let current = self
+            .semantic
+            .mutation_scope
+            .unwrap_or_else(|| backend.context().default_mutation_scope());
+        let index = permitted.iter().position(|scope| *scope == current).unwrap_or(0);
+        let next = permitted[(index + 1) % permitted.len()];
+        self.apply_semantic(UiAction::SetMutationScope(next));
+        self.palette.state_mut().scope = ScopeSelector::with_scope(backend.context(), next)?;
+        self.sync_semantic_status();
+        Ok(())
+    }
+
+    fn toggle_selected_staged<B: SurfaceBackend>(&mut self, backend: &B) {
+        let Some(resource) = self.semantic.selected.clone() else {
+            return;
+        };
+        if self.semantic.staged.get(&resource).is_some() {
+            self.apply_semantic(UiAction::Unstage(resource));
+            return;
+        }
+        let Some(capsule) = resource_capsule_id(&resource) else {
+            self.semantic.status = Some(crate::application::UiStatus {
+                message: "the selected resource has no activation mutation".into(),
+            });
+            self.sync_semantic_status();
+            return;
+        };
+        let intent = if is_on(backend.view(), &capsule) {
+            ActivationIntent::Disable
+        } else {
+            ActivationIntent::Enable
+        };
+        self.apply_semantic(UiAction::Stage { resource, intent });
+    }
+
+    fn advance_composition<B: SurfaceBackend>(&mut self, backend: &mut B) -> Result<()> {
+        if self.semantic.staged.is_empty() {
+            self.semantic.status = Some(crate::application::UiStatus {
+                message: "nothing is staged".into(),
+            });
+            self.sync_semantic_status();
+            return Ok(());
+        }
+
+        match self.semantic.overlay {
+            Some(Overlay::ConfirmApply) => {
+                self.dispatch_semantic(backend, UiAction::ConfirmApply)?;
+                let message = self
+                    .semantic
+                    .status
+                    .as_ref()
+                    .map(|status| status.message.clone())
+                    .unwrap_or_else(|| "composition applied".into());
+                self.refresh_after_change(backend, message)?;
+            }
+            Some(Overlay::CompositionPreview) => {
+                self.dispatch_semantic(backend, UiAction::RequestApply)?;
+                if self.semantic.overlay == Some(Overlay::ConfirmApply) {
+                    self.palette.state_mut().status = Some(Status::info(
+                        "preview accepted; press Ctrl+S again to confirm apply",
+                    ));
+                }
+                self.project_semantic_to_presentations(backend);
+            }
+            _ => {
+                self.dispatch_semantic(backend, UiAction::RequestCompositionPreview)?;
+                if let Some(preview) = self.semantic.preview.as_ref() {
+                    self.palette.state_mut().status = Some(Status::info(preview.summary.clone()));
+                }
+                self.project_semantic_to_presentations(backend);
+            }
+        }
+        Ok(())
     }
 
     fn handle_palette_step<B: SurfaceBackend>(
@@ -305,9 +492,8 @@ impl SurfaceController {
                 self.mode = SurfaceMode::Palette;
                 self.apply_semantic(UiAction::SetRelationView(RelationView::List));
                 self.project_semantic_to_palette(backend);
-                let step = self.palette.dispatch(backend, Action::CtrlEnter);
-                self.capture_palette_semantics();
-                self.handle_palette_step(backend, step)
+                self.advance_composition(backend)?;
+                Ok(SurfaceStep::Continue)
             }
             TreeStep::Effect(TreeEffect::Activate { capsule }) => {
                 self.mode = SurfaceMode::Palette;
@@ -334,10 +520,8 @@ impl SurfaceController {
         }
     }
 
-    /// Ingest the compatibility palette after a semantic gesture. This is the
-    /// migration boundary: the palette may still own a row cursor, but its selected
-    /// capsule and staged toggles are immediately converted to the authoritative
-    /// ResourceRef state.
+    /// Ingest compatibility state only after a capability-specific legacy gesture.
+    /// Resting search/stage/apply never get here because V2 consumed them first.
     fn capture_palette_semantics(&mut self) {
         self.semantic.query = self.palette.state().query.clone();
         self.apply_semantic(UiAction::SetMutationScope(self.palette.state().scope.current()));
@@ -400,9 +584,6 @@ impl SurfaceController {
         self.reconcile_compatibility_staging(observed);
     }
 
-    /// Reconcile only through semantic actions. Compatibility controllers may
-    /// report what their legacy projection currently contains, but they never get
-    /// a second mutation implementation or bypass TuiState's preview invalidation.
     fn reconcile_compatibility_staging(
         &mut self,
         observed: BTreeMap<ResourceRef, ActivationIntent>,
@@ -447,8 +628,30 @@ impl SurfaceController {
         }
     }
 
+    /// Project the V2 search/staging state into the resident palette without
+    /// executing the V1 Search or Stage effects. The order comes from the V2
+    /// application-service read model; legacy rows only supply rendering metadata.
     fn project_semantic_to_palette<B: SurfaceBackend>(&mut self, backend: &mut B) {
-        let toggles = self
+        let docs: BTreeMap<CapsuleId, _> = backend
+            .documents()
+            .into_iter()
+            .map(|doc| (doc.id.clone(), doc))
+            .collect();
+        let rows: Vec<Row> = self
+            .semantic
+            .read_model
+            .resources
+            .iter()
+            .filter_map(|item| {
+                let id = resource_capsule_id(&item.resource)?;
+                docs.get(&id).cloned().map(|doc| Row {
+                    doc,
+                    score: 0.0,
+                    text_score: 0.0,
+                })
+            })
+            .collect();
+        let toggles: Vec<Toggle> = self
             .semantic
             .staged
             .resources()
@@ -458,15 +661,24 @@ impl SurfaceController {
                 Some(Toggle::new(capsule, enable))
             })
             .collect();
-        self.palette.replace_staged(backend, toggles);
+
+        let state = self.palette.state_mut();
+        state.query = self.semantic.query.clone();
+        state.rows = rows;
+        state.staged.replace(toggles);
+        state.staged_outcome = None;
+        if state.rows.is_empty() {
+            state.cursor = 0;
+        }
 
         if let Some(selected) = &self.semantic.selected {
-            if let Some(index) = self.palette.state().rows.iter().position(|row| {
+            if let Some(index) = state.rows.iter().position(|row| {
                 capsule_resource_ref(&row.doc.id).as_ref() == Some(selected)
             }) {
-                self.palette.state_mut().cursor = index;
+                state.cursor = index;
             }
         }
+        self.sync_semantic_status();
     }
 
     fn refresh_after_change<B: SurfaceBackend>(
@@ -474,9 +686,34 @@ impl SurfaceController {
         backend: &mut B,
         message: String,
     ) -> Result<()> {
-        self.palette.refresh(backend)?;
-        self.palette.state_mut().status = Some(Status::info(message));
+        let descriptor = backend.context().clone();
+        let scope = self
+            .semantic
+            .mutation_scope
+            .unwrap_or_else(|| descriptor.default_mutation_scope());
+        let scope_selector = ScopeSelector::with_scope(&descriptor, scope)?;
+        let view = backend.view().clone();
+        let recent = backend.recent();
+        let drafts = backend.promotion_drafts();
+        {
+            let state = self.palette.state_mut();
+            state.descriptor = descriptor;
+            state.scope = scope_selector;
+            state.view = view;
+            state.recent = recent;
+            state.drafts = drafts;
+            state.outcome = None;
+            state.mode = Mode::Search;
+            state.form = None;
+            state.confirm = None;
+            state.job = None;
+            state.status = Some(Status::info(message));
+        }
+
         self.replace_tree(backend.surface_tree()?, backend);
+        let query = self.semantic.query.clone();
+        self.dispatch_semantic(backend, UiAction::SetQuery(query))?;
+        self.ensure_semantic_selection();
         self.project_semantic_to_presentations(backend);
         Ok(())
     }
@@ -489,14 +726,7 @@ impl SurfaceController {
         state.yanked = old.yanked.clone();
 
         self.tree = TreeController::new(state, TreeRequest::new(self.host));
-        self.apply_semantic(UiAction::Refresh(compatibility_read_model(
-            backend,
-            self.tree.state(),
-        )));
 
-        // Resource selection is projected by stable ResourceRef. If the selected
-        // row is a presentation-only group/root, preserve its stable path instead
-        // of its old numeric row index.
         if self.semantic.selected.is_none() {
             if let Some(path) = old_selected_path {
                 if let Some(index) = self
@@ -513,9 +743,51 @@ impl SurfaceController {
         self.project_semantic_to_presentations(backend);
     }
 
+    /// Pure state-only actions remain cheap. Any action capable of producing an
+    /// application effect must go through `dispatch_semantic` instead.
     fn apply_semantic(&mut self, action: UiAction) {
         let state = std::mem::take(&mut self.semantic);
         self.semantic = reduce_tui(state, action).state;
+    }
+
+    fn dispatch_semantic<B: SurfaceBackend>(
+        &mut self,
+        backend: &mut B,
+        action: UiAction,
+    ) -> Result<()> {
+        let state = std::mem::take(&mut self.semantic);
+        let fallback = state.clone();
+        let mut service = PaletteApplicationService::new(backend);
+        match self.runtime.step(&mut service, state, action) {
+            Ok(next) => {
+                self.semantic = next;
+                Ok(())
+            }
+            Err(error) => {
+                self.semantic = fallback;
+                Err(error)
+            }
+        }
+    }
+
+    fn ensure_semantic_selection(&mut self) {
+        if self.semantic.selected.is_none() {
+            if let Some(resource) = self
+                .semantic
+                .read_model
+                .resources
+                .first()
+                .map(|item| item.resource.clone())
+            {
+                self.apply_semantic(UiAction::Select(resource));
+            }
+        }
+    }
+
+    fn sync_semantic_status(&mut self) {
+        if let Some(status) = self.semantic.status.as_ref() {
+            self.palette.state_mut().status = Some(Status::info(status.message.clone()));
+        }
     }
 
     fn quick_mouse_action(&self, event: &PaletteEvent) -> Option<UiAction> {
@@ -690,10 +962,6 @@ pub fn run_on_terminal<B: SurfaceBackend>(
 }
 
 /// Owns every terminal mode as soon as it is acquired.
-///
-/// Setup can fail between raw mode, the alternate screen, and mouse capture.
-/// Keeping acquisition flags in a guard makes those partial paths use the same
-/// reversal as ordinary exits and render errors.
 struct TerminalSession {
     raw: bool,
     alternate: bool,

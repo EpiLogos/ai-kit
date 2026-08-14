@@ -4,6 +4,7 @@ use common::*;
 
 use aikit_core::resource::ResourceRef;
 use aikit_core::Result;
+use aikit_tui::application::{Overlay, PresentationMode};
 use aikit_tui::event::PaletteEvent;
 use aikit_tui::host::UiHost;
 use aikit_tui::layout::Layout;
@@ -120,6 +121,10 @@ fn key(code: KeyCode) -> PaletteEvent {
     PaletteEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
+fn ctrl(code: KeyCode) -> PaletteEvent {
+    PaletteEvent::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
+}
+
 fn mouse(column: u16, row: u16) -> PaletteEvent {
     PaletteEvent::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -213,4 +218,92 @@ fn live_quick_keyboard_and_mouse_selection_converge_on_the_same_resource_ref() {
             .map(|row| row.doc.id.clone()),
         "legacy cursors are projections of the same semantic ResourceRef selection"
     );
+}
+
+#[test]
+fn resting_query_is_resolved_by_v2_runtime_and_projected_back_to_palette() {
+    let mut backend = fixture();
+    let mut surface = SurfaceController::new(
+        &mut backend,
+        SurfaceRequest::new(UiHost::TmuxPopup),
+    )
+    .unwrap();
+
+    surface
+        .handle(&mut backend, key(KeyCode::Char('d')))
+        .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('e')))
+        .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('p')))
+        .unwrap();
+
+    assert_eq!(surface.semantic().query, "dep");
+    assert_eq!(surface.palette().state().query, "dep");
+    assert_eq!(
+        surface.semantic().selected,
+        Some(rref("script/ops/deploy"))
+    );
+    assert_eq!(
+        surface
+            .palette()
+            .state()
+            .selected_row()
+            .map(|row| row.doc.id.to_string()),
+        Some("script/ops/deploy".into())
+    );
+}
+
+#[test]
+fn live_staging_and_apply_follow_one_v2_preview_confirm_effect_path() {
+    let mut backend = fixture();
+    let mut surface = SurfaceController::new(
+        &mut backend,
+        SurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
+    )
+    .unwrap();
+
+    surface.handle(&mut backend, key(KeyCode::Char(' '))).unwrap();
+    assert_eq!(surface.semantic().staged.len(), 1);
+    assert_eq!(surface.palette().state().staged.toggles().len(), 1);
+
+    surface
+        .handle(&mut backend, ctrl(KeyCode::Char('s')))
+        .unwrap();
+    assert_eq!(surface.semantic().overlay, Some(Overlay::CompositionPreview));
+    assert!(surface.semantic().preview.is_some());
+
+    surface
+        .handle(&mut backend, ctrl(KeyCode::Char('s')))
+        .unwrap();
+    assert_eq!(surface.semantic().overlay, Some(Overlay::ConfirmApply));
+
+    surface
+        .handle(&mut backend, ctrl(KeyCode::Char('s')))
+        .unwrap();
+    assert!(surface.semantic().staged.is_empty());
+    assert!(surface.semantic().preview.is_none());
+    assert!(backend.view().is_active(&cid("script/ops/deploy")));
+}
+
+#[test]
+fn quick_workspace_switch_changes_presentation_without_rebuilding_semantic_state() {
+    let mut backend = fixture();
+    let mut surface = SurfaceController::new(
+        &mut backend,
+        SurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
+    )
+    .unwrap();
+    let selected = surface.semantic().selected.clone();
+    let revision = surface.semantic().read_model.revision.clone();
+    assert_eq!(surface.semantic().presentation, PresentationMode::Workspace);
+
+    surface
+        .handle(&mut backend, ctrl(KeyCode::Char('w')))
+        .unwrap();
+
+    assert_eq!(surface.semantic().presentation, PresentationMode::Quick);
+    assert_eq!(surface.semantic().selected, selected);
+    assert_eq!(surface.semantic().read_model.revision, revision);
 }
