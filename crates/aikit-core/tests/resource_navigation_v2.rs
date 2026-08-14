@@ -2,8 +2,7 @@ use std::time::{Duration, Instant};
 
 use aikit_core::resource::{
     ActionStageability, ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass,
-    ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef, ResourceSearchHitKind,
-    ResourceSearchIndex,
+    ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
 };
 
 fn rref(raw: &str) -> ResourceRef {
@@ -81,10 +80,14 @@ fn zero_query_results_are_evidence_bearing_not_implicit_recommendations() {
 }
 
 #[test]
-fn contextual_actions_are_resource_derived_searchable_and_explicitly_stageable() {
+fn contextual_actions_keep_one_search_identity_across_many_subjects() {
     let mut index = ResourceSearchIndex::default();
     index.insert_resource(
         record("project/aikit", ResourceKind::Project, "AIKit"),
+        Vec::new(),
+    );
+    index.insert_resource(
+        record("project/factory", ResourceKind::Project, "Factory"),
         Vec::new(),
     );
     index.insert_resource(
@@ -96,15 +99,20 @@ fn contextual_actions_are_resource_derived_searchable_and_explicitly_stageable()
         Vec::new(),
     );
 
-    index
-        .insert_action(ContextualActionDescriptor::new(
-            rref("action/project/open"),
-            rref("project/aikit"),
-            "Open AIKit workspace",
-            "Enter the project without mutating composition",
-            ActionStageability::NotStageable,
-        ))
-        .unwrap();
+    for subject in ["project/aikit", "project/factory"] {
+        index
+            .insert_action(
+                ContextualActionDescriptor::new(
+                    rref("action/project/open"),
+                    rref(subject),
+                    "Open workspace",
+                    "Enter this project without mutating composition",
+                    ActionStageability::NotStageable,
+                )
+                .with_keywords(["workspace", "enter"]),
+            )
+            .unwrap();
+    }
     index
         .insert_action(ContextualActionDescriptor::new(
             rref("action/project/pin"),
@@ -116,21 +124,30 @@ fn contextual_actions_are_resource_derived_searchable_and_explicitly_stageable()
         .unwrap();
 
     let hits = index.search("open workspace", 20);
-    let action = hits
+    let open_hits: Vec<_> = hits
         .iter()
-        .find(|hit| hit.hit_kind == ResourceSearchHitKind::ContextualAction)
-        .expect("contextual action should be searchable");
-    assert_eq!(action.resource, rref("action/project/open"));
-    assert_eq!(action.subject, Some(rref("project/aikit")));
-    assert_eq!(action.stageability, Some(ActionStageability::NotStageable));
-
-    let actions = index.actions_for(&rref("project/aikit"));
-    assert_eq!(actions.len(), 2);
+        .filter(|hit| hit.resource == rref("action/project/open"))
+        .collect();
     assert_eq!(
-        actions.iter().filter(|action| action.stageability.is_stageable()).count(),
+        open_hits.len(),
+        1,
+        "one Action ResourceRef must never become one row per contextual subject"
+    );
+    assert_eq!(open_hits[0].kind, ResourceKind::Action);
+
+    let aikit_actions = index.actions_for(&rref("project/aikit"));
+    assert_eq!(aikit_actions.len(), 2);
+    assert_eq!(
+        aikit_actions
+            .iter()
+            .filter(|action| action.stageability.is_stageable())
+            .count(),
         1,
         "Space may only stage actions which declare that semantic explicitly"
     );
+    let factory_actions = index.actions_for(&rref("project/factory"));
+    assert_eq!(factory_actions.len(), 1);
+    assert_eq!(factory_actions[0].action, rref("action/project/open"));
 }
 
 #[test]
@@ -185,7 +202,9 @@ fn shallow_fuzzy_search_stays_fast_over_a_large_resource_field() {
     let elapsed = started.elapsed();
 
     assert_eq!(index.len(), 20_000);
-    assert!(hits.iter().any(|hit| hit.resource == rref("capability/synthetic/19731")));
+    assert!(hits
+        .iter()
+        .any(|hit| hit.resource == rref("capability/synthetic/19731")));
     assert!(
         elapsed < Duration::from_secs(2),
         "shallow search took {elapsed:?}; Quick must not wait on deep providers"
