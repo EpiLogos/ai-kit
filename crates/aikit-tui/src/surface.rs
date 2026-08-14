@@ -1,14 +1,16 @@
 //! One transient AIKit surface with Quick and Workspace presentations.
 //!
 //! During the V2 migration the existing PaletteController and TreeController are
-//! retained as presentation adapters, but semantic presentation/selection already
-//! lives in [`TuiState`]. The remaining staged-state adapter is intentionally
-//! visible here until the next migration slice removes the duplicated V1 graph.
+//! retained as presentation adapters. Semantic presentation, selection and staged
+//! mutation intent live in [`TuiState`]; the V1 controller state is projected from
+//! that authority only where a legacy renderer/effect path still requires it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers,
+};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
@@ -17,7 +19,7 @@ use aikit_core::id::CapsuleId;
 use aikit_core::resource::ResourceRef;
 use aikit_core::Result;
 
-use crate::app::Action;
+use crate::app::{Action, Mode};
 use crate::backend::{PaletteBackend, Toggle};
 use crate::driver::{PaletteController, PaletteStep};
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
@@ -25,7 +27,7 @@ use crate::host::UiHost;
 use crate::staging::is_on;
 use crate::tree::{NodeKind, TreeEffect, TreeState};
 use crate::tree_driver::{TreeController, TreeRequest, TreeStep};
-use crate::tui_state::{reduce_tui, Presentation, TuiState, UiAction};
+use crate::tui_state::{reduce_tui, Presentation, TuiState, UiAction, UiEffect};
 use crate::{PaletteOutcome, PaletteRequest};
 
 /// The application operations the unified surface needs beyond the palette.
@@ -116,19 +118,20 @@ impl SurfaceController {
     pub fn new<B: SurfaceBackend>(backend: &mut B, request: SurfaceRequest) -> Result<Self> {
         let palette = PaletteController::new(backend, request.palette_request())?;
         let tree = TreeController::new(backend.surface_tree()?, TreeRequest::new(request.host));
-        let mut state = TuiState::new(request.initial_mode.into());
-        state.query = palette.state().query.clone();
+        let state = TuiState::new(request.initial_mode.into());
         let mut surface = Self {
             state,
             host: request.host,
             palette,
             tree,
         };
+        surface.reduce_semantic(UiAction::SetQuery(surface.palette.state().query.clone()));
+        surface.capture_palette_staging();
         match surface.state.presentation {
             Presentation::Quick => surface.capture_palette_selection(),
             Presentation::Workspace => surface.capture_tree_selection(),
         }
-        surface.sync_palette_to_tree();
+        surface.project_staging_to_tree();
         Ok(surface)
     }
 
@@ -158,10 +161,6 @@ impl SurfaceController {
     }
 
     /// Draw one production frame through a caller-owned terminal.
-    ///
-    /// Keeping this seam on the controller makes the release performance gate
-    /// measure the same draw path as the event loop rather than a test-only
-    /// rendering approximation.
     pub fn draw_terminal<T>(&mut self, terminal: &mut Terminal<T>) -> Result<()>
     where
         T: Backend,
@@ -181,15 +180,39 @@ impl SurfaceController {
         if let PaletteEvent::Resize(cols, rows) = &event {
             self.reduce_semantic(UiAction::Resize(*cols, *rows));
         }
+
+        if explicit_exit(&event) {
+            let effects = self.reduce_semantic(UiAction::RequestExit);
+            if effects.contains(&UiEffect::Exit) {
+                return Ok(SurfaceStep::Outcome(PaletteOutcome::Closed));
+            }
+        }
+
         match self.state.presentation {
             Presentation::Quick => {
+                // Search-resting Esc/Ctrl-C is semantic Back. It is deliberately
+                // not forwarded to the V1 reducer, whose historical behaviour
+                // cleared query, then staged changes, then exited on successive
+                // presses. In real submodes Esc still goes to the local V1
+                // dismiss/back path while those modes are migrated.
+                if semantic_back(&event) && self.palette.state().mode == Mode::Search {
+                    self.reduce_semantic(UiAction::Back);
+                    return Ok(SurfaceStep::Continue);
+                }
+
+                if semantic_back(&event) {
+                    self.reduce_semantic(UiAction::Back);
+                }
                 let step = self.palette.handle(backend, event)?;
                 self.capture_palette_state();
+                self.project_staging_to_tree();
                 self.handle_palette_step(backend, step)
             }
             Presentation::Workspace => {
                 let step = self.tree.handle(event)?;
                 self.capture_tree_selection();
+                self.capture_tree_staging();
+                self.project_staging_to_palette(backend);
                 self.handle_tree_step(backend, step)
             }
         }
@@ -203,12 +226,13 @@ impl SurfaceController {
         Ok(match step {
             PaletteStep::Continue => SurfaceStep::Continue,
             PaletteStep::Tree => {
-                self.sync_palette_to_tree();
                 self.set_presentation(Presentation::Workspace);
                 self.align_tree_to_selected();
+                self.project_staging_to_tree();
                 SurfaceStep::Continue
             }
             PaletteStep::Outcome(PaletteOutcome::Applied(generation)) => {
+                self.reduce_semantic(UiAction::ApplyFinished);
                 self.refresh_after_change(backend, format!("applied generation {generation}"))?;
                 SurfaceStep::Continue
             }
@@ -226,31 +250,27 @@ impl SurfaceController {
         step: TreeStep,
     ) -> Result<SurfaceStep> {
         match step {
-            TreeStep::Continue => {
-                self.sync_tree_to_palette(backend);
-                Ok(SurfaceStep::Continue)
-            }
+            TreeStep::Continue => Ok(SurfaceStep::Continue),
             TreeStep::Palette => {
-                self.sync_tree_to_palette(backend);
                 self.set_presentation(Presentation::Quick);
                 self.align_palette_to_selected();
                 Ok(SurfaceStep::Continue)
             }
             TreeStep::Apply(_) => {
-                self.sync_tree_to_palette(backend);
                 self.set_presentation(Presentation::Quick);
                 self.align_palette_to_selected();
                 let step = self.palette.dispatch(backend, Action::CtrlEnter);
                 self.capture_palette_state();
+                self.project_staging_to_tree();
                 self.handle_palette_step(backend, step)
             }
             TreeStep::Effect(TreeEffect::Activate { capsule }) => {
-                self.sync_tree_to_palette(backend);
                 self.set_selected(resource_ref_for_capsule(&capsule));
                 self.set_presentation(Presentation::Quick);
                 self.align_palette_to_selected();
                 let step = self.palette.activate(backend, capsule);
-                self.capture_palette_query();
+                self.capture_palette_state();
+                self.project_staging_to_tree();
                 self.handle_palette_step(backend, step)
             }
             TreeStep::Effect(effect) => {
@@ -267,47 +287,87 @@ impl SurfaceController {
         }
     }
 
-    /// Temporary V1 staging adapter. Selection/presentation no longer depend on
-    /// this synchronisation; staged graph ownership moves into `TuiState` next.
-    fn sync_palette_to_tree(&mut self) {
-        self.tree.state_mut().staged = self
+    /// Import the Quick adapter's V1 staged projection into the canonical state.
+    /// This is a migration edge, not controller-to-controller synchronisation.
+    fn capture_palette_staging(&mut self) {
+        let observed = self
             .palette
             .state()
             .staged
             .toggles()
             .into_iter()
-            .map(|toggle| toggle.capsule)
-            .collect();
-    }
-
-    /// Temporary V1 staging adapter. Kept explicit so #40 cannot accidentally be
-    /// declared closed while duplicate staged state still exists.
-    fn sync_tree_to_palette<B: SurfaceBackend>(&mut self, backend: &mut B) {
-        let ids = self.tree.state().staged.clone();
-        let current: BTreeSet<_> = self
-            .palette
-            .state()
-            .staged
-            .toggles()
-            .into_iter()
-            .map(|toggle| toggle.capsule)
-            .collect();
-        if ids == current {
-            return;
-        }
-        let toggles = ids
-            .into_iter()
-            .map(|capsule| {
-                let enable = self
-                    .palette
-                    .state()
-                    .staged
-                    .state_of(&capsule)
-                    .unwrap_or_else(|| !is_on(&self.palette.state().view, &capsule));
-                Toggle::new(capsule, enable)
+            .filter_map(|toggle| {
+                resource_ref_for_capsule(&toggle.capsule).map(|resource| (resource, toggle.enable))
             })
             .collect();
-        self.palette.replace_staged(backend, toggles);
+        self.reconcile_staging(observed);
+    }
+
+    /// Import the Workspace adapter's ID-only staged projection. Direction is
+    /// inherited from canonical staged intent where it exists; a newly staged V1
+    /// capability uses the same resolved-view inverse that the palette uses.
+    fn capture_tree_staging(&mut self) {
+        let observed = self
+            .tree
+            .state()
+            .staged
+            .iter()
+            .filter_map(|capsule| {
+                let resource = resource_ref_for_capsule(capsule)?;
+                let enable = self
+                    .state
+                    .staged
+                    .get(&resource)
+                    .copied()
+                    .unwrap_or_else(|| !is_on(&self.palette.state().view, capsule));
+                Some((resource, enable))
+            })
+            .collect();
+        self.reconcile_staging(observed);
+    }
+
+    fn reconcile_staging(&mut self, observed: BTreeMap<ResourceRef, bool>) {
+        let removed: Vec<_> = self
+            .state
+            .staged
+            .keys()
+            .filter(|resource| !observed.contains_key(*resource))
+            .cloned()
+            .collect();
+        for resource in removed {
+            self.reduce_semantic(UiAction::Unstage(resource));
+        }
+        for (resource, enable) in observed {
+            if self.state.staged.get(&resource).copied() != Some(enable) {
+                self.reduce_semantic(UiAction::Stage { resource, enable });
+            }
+        }
+    }
+
+    fn project_staging_to_tree(&mut self) {
+        self.tree.state_mut().staged = self
+            .state
+            .staged
+            .keys()
+            .filter_map(|resource| CapsuleId::parse(resource.as_str()).ok())
+            .collect::<BTreeSet<_>>();
+    }
+
+    fn project_staging_to_palette<B: SurfaceBackend>(&mut self, backend: &mut B) {
+        let desired: Vec<_> = self
+            .state
+            .staged
+            .iter()
+            .filter_map(|(resource, enable)| {
+                CapsuleId::parse(resource.as_str())
+                    .ok()
+                    .map(|capsule| Toggle::new(capsule, *enable))
+            })
+            .collect();
+        let current = self.palette.state().staged.toggles();
+        if current != desired {
+            self.palette.replace_staged(backend, desired);
+        }
     }
 
     fn refresh_after_change<B: SurfaceBackend>(
@@ -315,19 +375,19 @@ impl SurfaceController {
         backend: &mut B,
         message: String,
     ) -> Result<()> {
-        let query = self.palette.state().query.clone();
         let scope = self.palette.state().scope.current();
         self.palette = PaletteController::new(
             backend,
             PaletteRequest::new(self.host)
-                .with_query(query)
+                .with_query(self.state.query.clone())
                 .with_scope(scope),
         )?;
         self.palette.state_mut().status = Some(crate::app::Status::info(message));
+        self.project_staging_to_palette(backend);
         self.align_palette_to_selected();
         self.capture_palette_query();
         self.replace_tree(backend.surface_tree()?);
-        self.sync_palette_to_tree();
+        self.project_staging_to_tree();
         Ok(())
     }
 
@@ -337,7 +397,12 @@ impl SurfaceController {
         state.expanded = old.expanded.clone();
         state.filter = old.filter.clone();
         state.yanked = old.yanked.clone();
-        state.staged = old.staged.clone();
+        state.staged = self
+            .state
+            .staged
+            .keys()
+            .filter_map(|resource| CapsuleId::parse(resource.as_str()).ok())
+            .collect();
         self.tree = TreeController::new(state, TreeRequest::new(self.host));
         if self.align_tree_to_selected() {
             return;
@@ -363,13 +428,16 @@ impl SurfaceController {
         self.reduce_semantic(UiAction::Select(selected));
     }
 
-    fn reduce_semantic(&mut self, action: UiAction) {
-        self.state = reduce_tui(self.state.clone(), action).state;
+    fn reduce_semantic(&mut self, action: UiAction) -> Vec<UiEffect> {
+        let reduction = reduce_tui(self.state.clone(), action);
+        self.state = reduction.state;
+        reduction.effects
     }
 
     fn capture_palette_state(&mut self) {
         self.capture_palette_query();
         self.capture_palette_selection();
+        self.capture_palette_staging();
     }
 
     fn capture_palette_query(&mut self) {
@@ -420,9 +488,10 @@ impl SurfaceController {
             return false;
         };
         let rows = self.tree.state().rows();
-        let Some(index) = rows.iter().position(|row| {
-            resource_ref_for_tree_kind(&row.node.kind).as_ref() == Some(selected)
-        }) else {
+        let Some(index) = rows
+            .iter()
+            .position(|row| resource_ref_for_tree_kind(&row.node.kind).as_ref() == Some(selected))
+        else {
             return false;
         };
         self.tree.state_mut().selected = index;
@@ -446,6 +515,27 @@ fn resource_ref_for_tree_kind(kind: &NodeKind) -> Option<ResourceRef> {
         | NodeKind::Group { .. }
         | NodeKind::Entry { .. } => None,
     }
+}
+
+fn semantic_back(event: &PaletteEvent) -> bool {
+    matches!(
+        event,
+        PaletteEvent::Key(key)
+            if key.kind != KeyEventKind::Release
+                && (key.code == KeyCode::Esc
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)))
+    )
+}
+
+fn explicit_exit(event: &PaletteEvent) -> bool {
+    matches!(
+        event,
+        PaletteEvent::Key(key)
+            if key.kind != KeyEventKind::Release
+                && key.code == KeyCode::Char('q')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+    )
 }
 
 pub fn event_loop<B, T, E>(
