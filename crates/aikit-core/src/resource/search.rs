@@ -69,9 +69,10 @@ impl ActionStageability {
 
 /// One canonical Action made contextual to a ResourceRef.
 ///
-/// `action` names a ResourceKind::Action record in this same index. `subject`
-/// remains the destination on which it operates; the action never steals or
-/// rewrites the subject's identity.
+/// `action` names one unique `ResourceKind::Action` record in this same index.
+/// `subject` remains the Resource on which that Action currently applies. The
+/// relation never manufactures a second Action identity merely because the same
+/// operation is available on another subject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextualActionDescriptor {
     pub action: ResourceRef,
@@ -100,19 +101,25 @@ impl ContextualActionDescriptor {
             stageability,
         }
     }
+
+    #[must_use]
+    pub fn with_keywords(mut self, keywords: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.keywords = keywords.into_iter().map(Into::into).collect();
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceSearchHitKind {
+    /// A unique resource in the navigation field. Actions are returned here once
+    /// by their canonical Action ResourceRef; contextual applicability is loaded
+    /// separately through `actions_for(subject)`.
     Resource,
-    ContextualAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceSearchHit {
-    /// The stable address selected by the shell. For contextual actions this is
-    /// the Action ResourceRef; `subject` preserves the operated-on destination.
     pub resource: ResourceRef,
     pub kind: ResourceKind,
     pub hit_kind: ResourceSearchHitKind,
@@ -120,11 +127,7 @@ pub struct ResourceSearchHit {
     pub summary: String,
     pub score: i64,
     #[serde(default)]
-    pub subject: Option<ResourceRef>,
-    #[serde(default)]
     pub navigation_evidence: Vec<NavigationEvidence>,
-    #[serde(default)]
-    pub stageability: Option<ActionStageability>,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +193,10 @@ impl ResourceSearchIndex {
         Ok(())
     }
 
+    /// Actions currently applicable to one selected Resource.
+    ///
+    /// The returned relation carries subject and stageability while preserving one
+    /// canonical Action identity across any number of subjects.
     pub fn actions_for(&self, subject: &ResourceRef) -> Vec<&ContextualActionDescriptor> {
         self.actions
             .iter()
@@ -210,6 +217,11 @@ impl ResourceSearchIndex {
     /// An empty query is intentionally not "all resources". It returns only
     /// destinations with explicit navigation evidence, and every hit carries that
     /// evidence so learned usage can never masquerade as preference or truth.
+    ///
+    /// Non-empty search returns each canonical ResourceRef at most once. In
+    /// particular, Action applicability is *not* expanded into synthetic
+    /// `(action, subject)` search rows because that would violate stable selection
+    /// identity when the same Action applies to many resources.
     pub fn search(&self, query: &str, limit: usize) -> Vec<ResourceSearchHit> {
         if limit == 0 {
             return Vec::new();
@@ -226,7 +238,6 @@ impl ResourceSearchIndex {
                 .cmp(&left.score)
                 .then_with(|| left.label.cmp(&right.label))
                 .then_with(|| left.resource.cmp(&right.resource))
-                .then_with(|| left.subject.cmp(&right.subject))
         });
         hits.truncate(limit);
         hits
@@ -252,53 +263,34 @@ impl ResourceSearchIndex {
         let mut hits = Vec::new();
         for indexed in self.resources.values() {
             let descriptor = &indexed.record.descriptor;
-            let haystacks = [
+            let mut score = [
                 descriptor.name.as_str(),
                 descriptor.description.as_str(),
                 descriptor.id.as_str(),
                 descriptor.kind.as_str(),
-            ];
-            if let Some(score) = haystacks
-                .iter()
-                .filter_map(|candidate| fuzzy_score(query, candidate))
-                .max()
-            {
-                hits.push(resource_hit(indexed, score));
-            }
-        }
-
-        for action in self.actions.values() {
-            let Some(action_record) = self.resources.get(&action.action) else {
-                continue;
-            };
-            let Some(subject_record) = self.resources.get(&action.subject) else {
-                continue;
-            };
-            let mut score = [
-                action.label.as_str(),
-                action.description.as_str(),
-                action.action.as_str(),
-                subject_record.record.descriptor.name.as_str(),
-                subject_record.record.descriptor.id.as_str(),
             ]
             .iter()
             .filter_map(|candidate| fuzzy_score(query, candidate))
             .max();
-            for keyword in &action.keywords {
-                score = score.max(fuzzy_score(query, keyword));
+
+            // Action relationship vocabulary is useful for finding the canonical
+            // Action resource, but it may never create one row per subject.
+            if descriptor.kind == ResourceKind::Action {
+                for contextual in self
+                    .actions
+                    .values()
+                    .filter(|action| action.action == descriptor.id)
+                {
+                    score = score.max(fuzzy_score(query, &contextual.label));
+                    score = score.max(fuzzy_score(query, &contextual.description));
+                    for keyword in &contextual.keywords {
+                        score = score.max(fuzzy_score(query, keyword));
+                    }
+                }
             }
+
             if let Some(score) = score {
-                hits.push(ResourceSearchHit {
-                    resource: action.action.clone(),
-                    kind: action_record.record.descriptor.kind,
-                    hit_kind: ResourceSearchHitKind::ContextualAction,
-                    label: action.label.clone(),
-                    summary: action.description.clone(),
-                    score,
-                    subject: Some(action.subject.clone()),
-                    navigation_evidence: Vec::new(),
-                    stageability: Some(action.stageability),
-                });
+                hits.push(resource_hit(indexed, score));
             }
         }
         hits
@@ -313,9 +305,7 @@ fn resource_hit(indexed: &IndexedResource, score: i64) -> ResourceSearchHit {
         label: indexed.record.descriptor.name.clone(),
         summary: indexed.record.descriptor.description.clone(),
         score,
-        subject: None,
         navigation_evidence: indexed.evidence.clone(),
-        stageability: None,
     }
 }
 
