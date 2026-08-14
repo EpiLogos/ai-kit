@@ -4,10 +4,12 @@
 //! presentation/controllers while they are migrated, but they no longer copy
 //! semantic staging directly between one another or treat a row index as identity.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers,
+};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
@@ -16,7 +18,7 @@ use aikit_core::id::CapsuleId;
 use aikit_core::resource::{ResourceKind, ResourceRef};
 use aikit_core::Result;
 
-use crate::app::Action;
+use crate::app::{Action, Mode, Status};
 use crate::application::{
     reduce_tui, ActivationIntent, PresentationMode, RelationView, ResourceListItem,
     ResourceListReadModel, TuiState, UiAction,
@@ -165,6 +167,10 @@ impl SurfaceController {
         backend: &mut B,
         event: PaletteEvent,
     ) -> Result<SurfaceStep> {
+        if let Some(step) = self.handle_explicit_navigation(backend, &event)? {
+            return Ok(step);
+        }
+
         match self.mode {
             SurfaceMode::Palette => {
                 let step = self.palette.handle(backend, event)?;
@@ -177,6 +183,67 @@ impl SurfaceController {
                 self.handle_tree_step(backend, step)
             }
         }
+    }
+
+    /// V2 owns the ambiguous navigation keys before either compatibility
+    /// presentation sees them. Esc is therefore only back/dismiss at the resting
+    /// surface, while clearing and exiting are separate, explicit commands.
+    fn handle_explicit_navigation<B: SurfaceBackend>(
+        &mut self,
+        backend: &mut B,
+        event: &PaletteEvent,
+    ) -> Result<Option<SurfaceStep>> {
+        let PaletteEvent::Key(key) = event else {
+            return Ok(None);
+        };
+        if key.kind == KeyEventKind::Release {
+            return Ok(None);
+        }
+
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if control && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q')) {
+            self.apply_semantic(UiAction::Exit);
+            if self.semantic.exit_requested {
+                return Ok(Some(SurfaceStep::Outcome(PaletteOutcome::Closed)));
+            }
+            if let Some(status) = self.semantic.status.as_ref() {
+                self.palette.state_mut().status = Some(Status::info(status.message.clone()));
+            }
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        if control && key.code == KeyCode::Char('u') {
+            self.clear_query_explicitly(backend);
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        if key.code == KeyCode::Esc {
+            // Dialog/form/preview Esc already means one-layer back in the proven V1
+            // reducer. Only the resting Search state and Tree need interception to
+            // prevent the old context-dependent clear/discard/close semantics.
+            if self.mode == SurfaceMode::Palette && self.palette.state().mode != Mode::Search {
+                return Ok(None);
+            }
+            self.apply_semantic(UiAction::Back);
+            self.project_semantic_to_presentations(backend);
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        Ok(None)
+    }
+
+    fn clear_query_explicitly<B: SurfaceBackend>(&mut self, backend: &mut B) {
+        self.apply_semantic(UiAction::SetQuery(String::new()));
+
+        // The V1 palette has no explicit ClearQuery action. Drive its proven
+        // Backspace action until the compatibility presentation matches the one
+        // semantic query; each step remains inside its reducer/effect discipline.
+        while !self.palette.state().query.is_empty() {
+            let _ = self.palette.dispatch(backend, Action::Backspace);
+        }
+        self.tree.state_mut().filter.clear();
+        self.capture_palette_semantics();
+        self.project_semantic_to_tree();
     }
 
     fn handle_palette_step<B: SurfaceBackend>(
@@ -394,7 +461,7 @@ impl SurfaceController {
         message: String,
     ) -> Result<()> {
         self.palette.refresh(backend)?;
-        self.palette.state_mut().status = Some(crate::app::Status::info(message));
+        self.palette.state_mut().status = Some(Status::info(message));
         self.replace_tree(backend.surface_tree()?, backend);
         self.project_semantic_to_presentations(backend);
         Ok(())
