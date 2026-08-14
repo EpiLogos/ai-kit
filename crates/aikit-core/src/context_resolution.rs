@@ -39,7 +39,7 @@ pub struct ResolvedResource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum ReferenceResolution {
-    Resolved { resource: ResolvedResource },
+    Resolved { resource: Box<ResolvedResource> },
     Missing { reference: ResourceRef, expected: ResourceKind },
     WrongKind {
         reference: ResourceRef,
@@ -240,10 +240,10 @@ fn resolve_reference(
             actual: record.descriptor.kind,
         },
         Some(record) => ReferenceResolution::Resolved {
-            resource: ResolvedResource {
+            resource: Box::new(ResolvedResource {
                 resource: record.clone(),
                 availability: availability(record),
-            },
+            }),
         },
     }
 }
