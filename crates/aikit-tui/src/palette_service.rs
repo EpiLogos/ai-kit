@@ -8,7 +8,9 @@
 //! remains available only to the V1 compatibility presentation.
 
 use aikit_core::id::CapsuleId;
-use aikit_core::resource::{ContextualActionDescriptor, ResourceRef};
+use aikit_core::resource::{
+    ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass, ResourceRef,
+};
 use aikit_core::{AikitError, Result};
 use serde_json::{json, to_string_pretty, to_value, Value};
 
@@ -48,7 +50,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
                 resource: hit.resource,
                 kind: hit.kind,
                 label: hit.label,
-                summary: hit.summary,
+                summary: summary_with_navigation_evidence(hit.summary, &hit.navigation_evidence),
             })
             .collect();
         Ok(ResourceListReadModel {
@@ -240,6 +242,30 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
             )),
         }
     }
+}
+
+fn summary_with_navigation_evidence(summary: String, evidence: &[NavigationEvidence]) -> String {
+    if evidence.is_empty() {
+        return summary;
+    }
+    let labels = evidence
+        .iter()
+        .map(|item| {
+            let class = match item.class {
+                NavigationEvidenceClass::CurrentContext => "current context",
+                NavigationEvidenceClass::ExplicitPin => "explicit pin",
+                NavigationEvidenceClass::Recent => "recent",
+                NavigationEvidenceClass::LearnedUsage => "learned usage",
+                NavigationEvidenceClass::ChangedProject => "changed project",
+            };
+            item.detail
+                .as_deref()
+                .map(|detail| format!("{class}: {detail}"))
+                .unwrap_or_else(|| class.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{summary} · evidence: {labels}")
 }
 
 fn capsule_id(resource: &ResourceRef) -> Result<CapsuleId> {

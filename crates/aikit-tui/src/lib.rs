@@ -45,6 +45,7 @@
 //! | What is the V2 semantic TUI state/application-service seam? | [`application`] |
 //! | How does the existing shared backend feed the V2 service? | [`palette_service`] |
 //! | What does a key do? | [`app`], [`event`] |
+//! | How do Quick/Workspace map Resource hits and contextual Actions into shared intents? | [`navigation`] |
 //! | Why is this row above that one? | [`search`] |
 //! | What would this toggle actually cost? | [`staging`] |
 //! | Where would a change be written, and what confirms it? | [`scope`] |
@@ -63,6 +64,7 @@ pub mod event;
 pub mod form;
 pub mod host;
 pub mod layout;
+pub mod navigation;
 pub mod palette_service;
 pub mod render;
 pub mod scope;
@@ -94,6 +96,11 @@ pub use event::{EventSource, PaletteEvent, ScriptedEvents};
 pub use form::{ArgForm, RunPreview};
 pub use host::{Escalation, TerminalProfile, UiHost};
 pub use layout::{Glyphs, Layout, Width};
+pub use navigation::{
+    keyboard_invoke_action, keyboard_open_hit, keyboard_select_hit, keyboard_set_presentation,
+    mouse_invoke_action, mouse_open_hit, mouse_select_hit, mouse_set_presentation, stage_action,
+    AmbientContext, NavigationIntent,
+};
 pub use palette_service::PaletteApplicationService;
 pub use scope::ScopeSelector;
 pub use search::{rank, Matcher, Row};

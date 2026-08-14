@@ -3,6 +3,7 @@ mod common;
 use common::*;
 
 use aikit_core::scope::ScopeKind;
+use aikit_core::search::UsageStats;
 use aikit_tui::{
     ActivationIntent, PaletteApplicationService, StagedChanges, TuiApplicationService,
 };
@@ -21,6 +22,36 @@ fn production_adapter_searches_the_same_resolved_catalog_as_the_palette() {
     assert_eq!(model.resources.len(), 1);
     assert_eq!(model.resources[0].resource.as_str(), "script/ops/deploy");
     assert!(model.revision.contains("deploy"));
+}
+
+#[test]
+fn zero_query_learned_usage_stays_labelled_as_evidence_not_preference() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = Fixture::new(
+        dir.path(),
+        vec![script("script/ops/deploy"), skill("skill/rust/review")],
+    );
+    backend.usage.insert(
+        cid("script/ops/deploy"),
+        UsageStats {
+            successful_runs: 7,
+            failed_runs: 0,
+            last_success_age: None,
+        },
+    );
+
+    let service = PaletteApplicationService::new(&mut backend);
+    let model = service.search("").unwrap();
+    let deploy = model
+        .resources
+        .iter()
+        .find(|item| item.resource.as_str() == "script/ops/deploy")
+        .expect("learned usage should make the destination visible at zero query");
+
+    assert!(deploy.summary.contains("evidence: learned usage"));
+    assert!(deploy.summary.contains("7 successful run(s)"));
+    assert!(!deploy.summary.contains("preferred"));
+    assert!(!deploy.summary.contains("trusted"));
 }
 
 #[test]
