@@ -114,3 +114,17 @@ pub use session::{
 pub use skillset::{SetMembership, SetProjection, SetProvenance, SkillSet, Withheld, WithheldReason};
 pub use surfacing::{plan_surfacing, DisplayContext, SurfacingPlan};
 pub use trust::{TrustKey, TrustOracle, TrustState};
+
+// Stable ordering is useful for deterministic structured diagnostics and evidence
+// comparisons. Keep the semantic names independent from their presentation order.
+impl PartialOrd for context_source::AbsenceKind {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for context_source::AbsenceKind {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (*self as u8).cmp(&(*other as u8))
+    }
+}
