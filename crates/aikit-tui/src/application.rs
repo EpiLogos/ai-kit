@@ -3,8 +3,8 @@
 //! The V1 palette and tree remain useful presentation implementations, but they
 //! must not remain independent semantic owners. This module defines the state that
 //! list, tree and future graph views share: one selected [`ResourceRef`], one
-//! staged change set, one navigation/overlay history, and refresh reconciliation
-//! by stable identity rather than row index.
+//! staged change set and mutation scope, one navigation/overlay history, and
+//! refresh reconciliation by stable identity rather than row index.
 //!
 //! Application semantics stay behind [`TuiApplicationService`]. The reducer is
 //! pure and can only request effects; it cannot resolve capabilities, eligibility,
@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use aikit_core::resource::{ResourceKind, ResourceRef};
+use aikit_core::scope::ScopeKind;
 use aikit_core::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -107,6 +108,7 @@ impl StagedChanges {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompositionPreview {
     pub revision: String,
+    pub scope: ScopeKind,
     pub staged: StagedChanges,
     pub summary: String,
 }
@@ -138,7 +140,11 @@ pub struct RelationReadModel {
 pub trait TuiApplicationService {
     fn search(&self, query: &str) -> Result<ResourceListReadModel>;
     fn context_disclosure(&self, resource: &ResourceRef) -> Result<Value>;
-    fn preview_composition(&self, staged: &StagedChanges) -> Result<CompositionPreview>;
+    fn preview_composition(
+        &self,
+        scope: ScopeKind,
+        staged: &StagedChanges,
+    ) -> Result<CompositionPreview>;
     fn apply_composition(&mut self, preview: &CompositionPreview) -> Result<ApplyReceipt>;
     fn explain(&self, resource: &ResourceRef) -> Result<Value>;
     fn history(&self, resource: Option<&ResourceRef>) -> Result<Vec<HistoryEntry>>;
@@ -178,6 +184,9 @@ pub struct TuiState {
     /// The one canonical semantic selection for all presentations.
     pub selected: Option<ResourceRef>,
     pub staged: StagedChanges,
+    /// Mutation scope is semantic intent, not view chrome. A staged change without
+    /// its scope is incomplete and may not be previewed or applied.
+    pub mutation_scope: Option<ScopeKind>,
     pub presentation: PresentationMode,
     pub relation_view: RelationView,
     pub overlay: Option<Overlay>,
@@ -196,6 +205,7 @@ impl Default for TuiState {
             read_model: ResourceListReadModel::default(),
             selected: None,
             staged: StagedChanges::default(),
+            mutation_scope: None,
             presentation: PresentationMode::Quick,
             relation_view: RelationView::List,
             overlay: None,
@@ -219,6 +229,7 @@ pub enum UiAction {
     SelectPrevious,
     OpenSelection,
     Back,
+    SetMutationScope(ScopeKind),
     SetPresentation(PresentationMode),
     SetRelationView(RelationView),
     ShowOverlay(Overlay),
@@ -240,9 +251,16 @@ pub enum UiAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiEffect {
-    Search { query: String },
-    PreviewComposition { staged: StagedChanges },
-    ApplyComposition { preview: CompositionPreview },
+    Search {
+        query: String,
+    },
+    PreviewComposition {
+        scope: ScopeKind,
+        staged: StagedChanges,
+    },
+    ApplyComposition {
+        preview: CompositionPreview,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,8 +287,8 @@ impl TuiRuntime {
     ) -> Result<UiAction> {
         match effect {
             UiEffect::Search { query } => Ok(UiAction::SearchFinished(service.search(&query)?)),
-            UiEffect::PreviewComposition { staged } => Ok(UiAction::CompositionPreviewed(
-                service.preview_composition(&staged)?,
+            UiEffect::PreviewComposition { scope, staged } => Ok(UiAction::CompositionPreviewed(
+                service.preview_composition(scope, &staged)?,
             )),
             UiEffect::ApplyComposition { preview } => {
                 Ok(UiAction::ApplyFinished(service.apply_composition(&preview)?))
@@ -346,12 +364,18 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 }
             }
         }
+        UiAction::SetMutationScope(scope) => {
+            if state.mutation_scope != Some(scope) {
+                state.mutation_scope = Some(scope);
+                state.preview = None;
+            }
+        }
         UiAction::SetPresentation(presentation) => state.presentation = presentation,
         UiAction::SetRelationView(view) => state.relation_view = view,
         UiAction::ShowOverlay(overlay) => state.overlay = Some(overlay),
         UiAction::Dismiss => {
             // Esc/dismiss is intentionally incapable of clearing query, staged
-            // changes, selection, or requesting application exit.
+            // changes, selection, scope, or requesting application exit.
             state.overlay = None;
         }
         UiAction::Stage { resource, intent } => {
@@ -370,30 +394,42 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 message: "staged changes discarded explicitly".into(),
             });
         }
-        UiAction::RequestCompositionPreview => {
-            if !state.staged.is_empty() {
-                effects.push(UiEffect::PreviewComposition {
-                    staged: state.staged.clone(),
+        UiAction::RequestCompositionPreview => request_preview(&mut state, &mut effects),
+        UiAction::CompositionPreviewed(preview) => {
+            if state.mutation_scope == Some(preview.scope) && preview.staged == state.staged {
+                state.preview = Some(preview);
+                state.overlay = Some(Overlay::CompositionPreview);
+            } else {
+                state.preview = None;
+                state.status = Some(UiStatus {
+                    message: "composition preview became stale before it was displayed".into(),
                 });
             }
         }
-        UiAction::CompositionPreviewed(preview) => {
-            state.preview = Some(preview);
-            state.overlay = Some(Overlay::CompositionPreview);
-        }
         UiAction::RequestApply => {
-            if state.preview.is_some() && !state.staged.is_empty() {
+            let preview_is_current = state.preview.as_ref().is_some_and(|preview| {
+                state.mutation_scope == Some(preview.scope) && preview.staged == state.staged
+            });
+            if preview_is_current && !state.staged.is_empty() {
                 state.overlay = Some(Overlay::ConfirmApply);
             } else if !state.staged.is_empty() {
-                effects.push(UiEffect::PreviewComposition {
-                    staged: state.staged.clone(),
-                });
+                state.preview = None;
+                request_preview(&mut state, &mut effects);
             }
         }
         UiAction::ConfirmApply => {
             if state.overlay == Some(Overlay::ConfirmApply) {
                 if let Some(preview) = state.preview.clone() {
-                    effects.push(UiEffect::ApplyComposition { preview });
+                    if state.mutation_scope == Some(preview.scope) && preview.staged == state.staged {
+                        effects.push(UiEffect::ApplyComposition { preview });
+                    } else {
+                        state.overlay = None;
+                        state.preview = None;
+                        state.status = Some(UiStatus {
+                            message: "composition changed after preview; preview again before apply"
+                                .into(),
+                        });
+                    }
                 }
             }
         }
@@ -423,6 +459,22 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
     }
 
     TuiReduction { state, effects }
+}
+
+fn request_preview(state: &mut TuiState, effects: &mut Vec<UiEffect>) {
+    if state.staged.is_empty() {
+        return;
+    }
+    if let Some(scope) = state.mutation_scope {
+        effects.push(UiEffect::PreviewComposition {
+            scope,
+            staged: state.staged.clone(),
+        });
+    } else {
+        state.status = Some(UiStatus {
+            message: "mutation scope is unresolved; choose a scope before preview/apply".into(),
+        });
+    }
 }
 
 fn reconcile_read_model(state: &mut TuiState, model: ResourceListReadModel) {
