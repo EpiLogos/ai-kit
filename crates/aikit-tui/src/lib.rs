@@ -57,7 +57,8 @@ use aikit_core::scope::ScopeKind;
 
 pub use app::{reduce, Action, AppState, Effect, ManageAction, Mode, Reduction};
 pub use backend::{
-    ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
+    ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, ResourceExplanation,
+    ResourceMutation, ResourceSummary, RunIntent, Toggle,
 };
 pub use event::{EventSource, PaletteEvent, ScriptedEvents};
 pub use form::{ArgForm, RunPreview};
@@ -126,11 +127,6 @@ impl PaletteRequest {
 }
 
 /// What the palette did before it closed.
-///
-/// `Run` hands back rather than executing because a foreground or `replace`
-/// execution mode needs the terminal the palette is currently holding: the caller
-/// tears the palette down and *then* runs the command, so the child inherits a
-/// clean terminal instead of a raw-mode one.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaletteOutcome {
     Closed,
@@ -150,12 +146,6 @@ pub fn run_tree(
 }
 
 /// Open the palette, run it to completion, and return what it did.
-///
-/// Terminal setup and teardown happen here so that the outcome is delivered to a
-/// caller holding a restored terminal. The loop itself is
-/// [`driver::event_loop`], which is generic over the ratatui backend and the
-/// event source — that is what lets the end-to-end tests drive a real palette
-/// against a `TestBackend` and a scripted key sequence.
 pub fn run(
     app: &mut dyn PaletteBackend,
     request: PaletteRequest,
