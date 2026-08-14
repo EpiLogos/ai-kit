@@ -1,4 +1,5 @@
 use aikit_core::resource::{ResourceKind, ResourceRef};
+use aikit_core::scope::ScopeKind;
 use aikit_tui::{
     keyboard_select, mouse_select, reduce_tui, unresolved_staged, ActivationIntent,
     CompositionPreview, Overlay, PresentationMode, RelationView, ResourceListItem,
@@ -28,6 +29,7 @@ fn model(revision: &str, refs: &[&str]) -> ResourceListReadModel {
 fn state_with_model(refs: &[&str]) -> TuiState {
     let mut state = TuiState::default();
     state.read_model = model("r1", refs);
+    state.mutation_scope = Some(ScopeKind::Project);
     state
 }
 
@@ -121,6 +123,7 @@ fn presentation_resize_relation_views_and_navigation_do_not_own_semantic_state()
     assert_eq!(state.relation_view, RelationView::Graph);
     assert_eq!(state.selected, Some(selected));
     assert_eq!(state.staged.get(&staged), Some(ActivationIntent::Enable));
+    assert_eq!(state.mutation_scope, Some(ScopeKind::Project));
 }
 
 #[test]
@@ -142,10 +145,11 @@ fn staged_intent_survives_refresh_even_when_the_resource_temporarily_disappears(
 
     assert_eq!(state.staged.get(&staged), Some(ActivationIntent::Disable));
     assert_eq!(unresolved_staged(&state), [staged].into_iter().collect());
+    assert_eq!(state.mutation_scope, Some(ScopeKind::Project));
 }
 
 #[test]
-fn dismiss_and_back_never_discard_staged_state_or_request_exit() {
+fn dismiss_and_back_never_discard_staged_state_scope_or_request_exit() {
     let staged = id("factory:capability:alpha");
     let mut state = state_with_model(&["factory:capability:alpha"]);
     state
@@ -156,10 +160,12 @@ fn dismiss_and_back_never_discard_staged_state_or_request_exit() {
     let state = reduce_tui(state, UiAction::Dismiss).state;
     assert!(state.overlay.is_none());
     assert_eq!(state.staged.get(&staged), Some(ActivationIntent::Enable));
+    assert_eq!(state.mutation_scope, Some(ScopeKind::Project));
     assert!(!state.exit_requested);
 
     let state = reduce_tui(state, UiAction::Back).state;
     assert_eq!(state.staged.get(&staged), Some(ActivationIntent::Enable));
+    assert_eq!(state.mutation_scope, Some(ScopeKind::Project));
     assert!(!state.exit_requested);
 }
 
@@ -205,7 +211,7 @@ fn discard_and_exit_are_explicit_actions() {
 }
 
 #[test]
-fn apply_requires_preview_and_separate_confirmation() {
+fn apply_requires_scoped_preview_and_separate_confirmation() {
     let staged = id("factory:capability:alpha");
     let mut state = state_with_model(&["factory:capability:alpha"]);
     state
@@ -216,6 +222,7 @@ fn apply_requires_preview_and_separate_confirmation() {
     assert_eq!(
         reduction.effects,
         vec![UiEffect::PreviewComposition {
+            scope: ScopeKind::Project,
             staged: reduction.state.staged.clone(),
         }]
     );
@@ -223,6 +230,7 @@ fn apply_requires_preview_and_separate_confirmation() {
 
     let preview = CompositionPreview {
         revision: "preview-r1".into(),
+        scope: ScopeKind::Project,
         staged: reduction.state.staged.clone(),
         summary: "enable alpha".into(),
     };
@@ -244,6 +252,34 @@ fn apply_requires_preview_and_separate_confirmation() {
     assert_eq!(
         reduction.state.staged.get(&staged),
         Some(ActivationIntent::Enable)
+    );
+}
+
+#[test]
+fn changing_scope_invalidates_preview_and_requires_a_new_one() {
+    let staged = id("factory:capability:alpha");
+    let mut state = state_with_model(&["factory:capability:alpha"]);
+    state
+        .staged
+        .stage(staged, ActivationIntent::Enable);
+    state.preview = Some(CompositionPreview {
+        revision: "preview-project".into(),
+        scope: ScopeKind::Project,
+        staged: state.staged.clone(),
+        summary: "project preview".into(),
+    });
+
+    let state = reduce_tui(state, UiAction::SetMutationScope(ScopeKind::User)).state;
+    assert_eq!(state.mutation_scope, Some(ScopeKind::User));
+    assert!(state.preview.is_none());
+
+    let reduction = reduce_tui(state, UiAction::RequestApply);
+    assert_eq!(
+        reduction.effects,
+        vec![UiEffect::PreviewComposition {
+            scope: ScopeKind::User,
+            staged: reduction.state.staged.clone(),
+        }]
     );
 }
 
