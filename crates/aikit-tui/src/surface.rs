@@ -20,13 +20,14 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use aikit_core::error::AikitError;
 use aikit_core::id::CapsuleId;
-use aikit_core::resource::{ResourceKind, ResourceRef};
+use aikit_core::resource::{ActionStageability, ResourceKind, ResourceRef};
 use aikit_core::Result;
 
 use crate::app::{Mode, Status};
 use crate::application::{
-    keyboard_select, mouse_select, reduce_tui, ActivationIntent, Overlay, PresentationMode,
-    RelationView, ResourceListItem, ResourceListReadModel, TuiRuntime, TuiState, UiAction,
+    keyboard_select, mouse_select, reduce_tui, selected_contextual_action, ActivationIntent,
+    Overlay, PresentationMode, RelationView, ResourceListItem, ResourceListReadModel, TuiRuntime,
+    TuiState, UiAction, WorkspaceSection,
 };
 use crate::backend::{PaletteBackend, Toggle};
 use crate::driver::{PaletteController, PaletteStep};
@@ -36,7 +37,6 @@ use crate::layout::Layout;
 use crate::palette_service::PaletteApplicationService;
 use crate::scope::ScopeSelector;
 use crate::search::Row;
-use crate::staging::is_on;
 use crate::tree::{Node, NodeKind, TreeEffect, TreeState};
 use crate::tree_driver::{TreeController, TreeRequest, TreeStep};
 use crate::v2_render;
@@ -247,7 +247,11 @@ impl SurfaceController {
         }
 
         if control && key.code == KeyCode::Char('u') {
-            self.clear_query_explicitly(backend)?;
+            if self.semantic.action_query.is_some() {
+                self.dispatch_semantic(backend, UiAction::SetActionQuery(String::new()))?;
+            } else {
+                self.clear_query_explicitly(backend)?;
+            }
             return Ok(Some(SurfaceStep::Continue));
         }
 
@@ -284,9 +288,60 @@ impl SurfaceController {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
 
-        if ctrl && key.code == KeyCode::Char('s')
-            || ctrl && key.code == KeyCode::Enter
-        {
+        if self.semantic.action_query.is_some() {
+            match key.code {
+                KeyCode::Up => {
+                    self.dispatch_semantic(backend, UiAction::SelectPreviousAction)?;
+                }
+                KeyCode::Down => {
+                    self.dispatch_semantic(backend, UiAction::SelectNextAction)?;
+                }
+                KeyCode::Backspace => {
+                    let mut query = self.semantic.action_query.clone().unwrap_or_default();
+                    query.pop();
+                    self.dispatch_semantic(backend, UiAction::SetActionQuery(query))?;
+                }
+                KeyCode::Enter => {
+                    self.invoke_selected_contextual_action(backend, false)?;
+                }
+                KeyCode::Char(' ') if !ctrl && !alt => {
+                    self.invoke_selected_contextual_action(backend, true)?;
+                }
+                KeyCode::Char(c) if !ctrl && !alt => {
+                    let mut query = self.semantic.action_query.clone().unwrap_or_default();
+                    query.push(c);
+                    self.dispatch_semantic(backend, UiAction::SetActionQuery(query))?;
+                }
+                _ => {}
+            }
+            self.project_semantic_to_presentations(backend);
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        if alt && key.code == KeyCode::Left {
+            self.apply_semantic(UiAction::PreviousWorkspaceSection);
+            return Ok(Some(SurfaceStep::Continue));
+        }
+        if alt && key.code == KeyCode::Right {
+            self.apply_semantic(UiAction::NextWorkspaceSection);
+            return Ok(Some(SurfaceStep::Continue));
+        }
+        if ctrl {
+            let section = match key.code {
+                KeyCode::Char('1') => Some(WorkspaceSection::Projects),
+                KeyCode::Char('2') => Some(WorkspaceSection::Compose),
+                KeyCode::Char('3') => Some(WorkspaceSection::Explore),
+                KeyCode::Char('4') => Some(WorkspaceSection::Projection),
+                KeyCode::Char('5') => Some(WorkspaceSection::History),
+                _ => None,
+            };
+            if let Some(section) = section {
+                self.apply_semantic(UiAction::SetWorkspaceSection(section));
+                return Ok(Some(SurfaceStep::Continue));
+            }
+        }
+
+        if ctrl && (key.code == KeyCode::Char('s') || key.code == KeyCode::Enter) {
             self.advance_composition(backend)?;
             return Ok(Some(SurfaceStep::Continue));
         }
@@ -306,20 +361,25 @@ impl SurfaceController {
             return Ok(Some(SurfaceStep::Continue));
         }
 
-        if key.code == KeyCode::Insert || ctrl && key.code == KeyCode::Char(' ') {
-            self.toggle_selected_staged(backend);
+        if key.code == KeyCode::Insert || (ctrl && key.code == KeyCode::Char(' ')) {
+            self.stage_selected_via_action(backend)?;
             self.project_semantic_to_presentations(backend);
             return Ok(Some(SurfaceStep::Continue));
         }
 
-        if key.code == KeyCode::Up || ctrl && key.code == KeyCode::Char('k') {
+        if key.code == KeyCode::Up || (ctrl && key.code == KeyCode::Char('k')) {
             self.dispatch_semantic(backend, UiAction::SelectPrevious)?;
             self.project_semantic_to_palette(backend);
             return Ok(Some(SurfaceStep::Continue));
         }
-        if key.code == KeyCode::Down || ctrl && key.code == KeyCode::Char('j') {
+        if key.code == KeyCode::Down || (ctrl && key.code == KeyCode::Char('j')) {
             self.dispatch_semantic(backend, UiAction::SelectNext)?;
             self.project_semantic_to_palette(backend);
+            return Ok(Some(SurfaceStep::Continue));
+        }
+
+        if key.code == KeyCode::Char(':') && !ctrl && !alt {
+            self.dispatch_semantic(backend, UiAction::BeginActionSearch)?;
             return Ok(Some(SurfaceStep::Continue));
         }
 
@@ -353,17 +413,11 @@ impl SurfaceController {
         }
 
         if key.code == KeyCode::Char(' ') && self.semantic.query.is_empty() {
-            self.toggle_selected_staged(backend);
+            self.stage_selected_via_action(backend)?;
             self.project_semantic_to_presentations(backend);
             return Ok(Some(SurfaceStep::Continue));
         }
 
-        // Keep the proven management lane alive until V2 contextual Action
-        // invocation fully replaces it; entering ':' therefore remains explicitly
-        // a compatibility interaction rather than a second search grammar.
-        if key.code == KeyCode::Char(':') && self.semantic.query.is_empty() {
-            return Ok(None);
-        }
         if key.code == KeyCode::Char('?') && self.semantic.query.is_empty() {
             return Ok(None);
         }
@@ -411,27 +465,66 @@ impl SurfaceController {
         Ok(())
     }
 
-    fn toggle_selected_staged<B: SurfaceBackend>(&mut self, backend: &B) {
+    fn invoke_selected_contextual_action<B: SurfaceBackend>(
+        &mut self,
+        backend: &mut B,
+        require_stageable: bool,
+    ) -> Result<()> {
+        let Some(action) = selected_contextual_action(&self.semantic) else {
+            self.semantic.status = Some(crate::application::UiStatus {
+                message: "no matching contextual action".into(),
+            });
+            self.sync_semantic_status();
+            return Ok(());
+        };
+        if require_stageable && action.stageability != ActionStageability::Stageable {
+            self.semantic.status = Some(crate::application::UiStatus {
+                message: format!("{} is immediate, not stageable; press Enter to invoke it", action.label),
+            });
+            self.sync_semantic_status();
+            return Ok(());
+        }
+        self.dispatch_semantic(backend, UiAction::InvokeAction(action.action))?;
+        Ok(())
+    }
+
+    fn stage_selected_via_action<B: SurfaceBackend>(&mut self, backend: &mut B) -> Result<()> {
         let Some(resource) = self.semantic.selected.clone() else {
-            return;
+            return Ok(());
         };
         if self.semantic.staged.get(&resource).is_some() {
             self.apply_semantic(UiAction::Unstage(resource));
-            return;
-        }
-        let Some(capsule) = resource_capsule_id(&resource) else {
             self.semantic.status = Some(crate::application::UiStatus {
-                message: "the selected resource has no activation mutation".into(),
+                message: "staged activation change removed".into(),
             });
             self.sync_semantic_status();
-            return;
-        };
-        let intent = if is_on(backend.view(), &capsule) {
-            ActivationIntent::Disable
-        } else {
-            ActivationIntent::Enable
-        };
-        self.apply_semantic(UiAction::Stage { resource, intent });
+            return Ok(());
+        }
+
+        let stageable = self
+            .semantic
+            .contextual_actions
+            .iter()
+            .filter(|action| action.stageability == ActionStageability::Stageable)
+            .collect::<Vec<_>>();
+        match stageable.as_slice() {
+            [action] => {
+                self.dispatch_semantic(backend, UiAction::InvokeAction(action.action.clone()))?;
+            }
+            [] => {
+                self.semantic.status = Some(crate::application::UiStatus {
+                    message: "the selected resource exposes no stageable action".into(),
+                });
+                self.sync_semantic_status();
+            }
+            _ => {
+                self.semantic.status = Some(crate::application::UiStatus {
+                    message: "multiple stageable actions are available; press : and choose one".into(),
+                });
+                self.sync_semantic_status();
+            }
+        }
+        Ok(())
     }
 
     fn advance_composition<B: SurfaceBackend>(&mut self, backend: &mut B) -> Result<()> {
@@ -601,13 +694,7 @@ impl SurfaceController {
             .iter()
             .filter_map(|capsule| {
                 let resource = capsule_resource_ref(capsule)?;
-                let intent = self.semantic.staged.get(&resource).unwrap_or_else(|| {
-                    if is_on(&self.palette.state().view, capsule) {
-                        ActivationIntent::Disable
-                    } else {
-                        ActivationIntent::Enable
-                    }
-                });
+                let intent = self.semantic.staged.get(&resource).unwrap_or(ActivationIntent::Enable);
                 Some((resource, intent))
             })
             .collect();
