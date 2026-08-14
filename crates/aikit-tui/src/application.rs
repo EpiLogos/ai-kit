@@ -10,7 +10,7 @@
 //! pure and can only request effects; it cannot resolve capabilities, eligibility,
 //! provenance, composition or history itself.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use aikit_core::resource::{ResourceKind, ResourceRef};
 use aikit_core::Result;
@@ -249,6 +249,60 @@ pub enum UiEffect {
 pub struct TuiReduction {
     pub state: TuiState,
     pub effects: Vec<UiEffect>,
+}
+
+/// Executes reducer effects exclusively through [`TuiApplicationService`]. This is
+/// the V2 equivalent of the proven V1 effect runtime: the TUI asks for application
+/// semantics and feeds the resulting read model/preview/receipt back as UiActions.
+#[derive(Debug, Default)]
+pub struct TuiRuntime;
+
+impl TuiRuntime {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn execute(
+        &mut self,
+        service: &mut dyn TuiApplicationService,
+        effect: UiEffect,
+    ) -> Result<UiAction> {
+        match effect {
+            UiEffect::Search { query } => Ok(UiAction::SearchFinished(service.search(&query)?)),
+            UiEffect::PreviewComposition { staged } => Ok(UiAction::CompositionPreviewed(
+                service.preview_composition(&staged)?,
+            )),
+            UiEffect::ApplyComposition { preview } => {
+                Ok(UiAction::ApplyFinished(service.apply_composition(&preview)?))
+            }
+        }
+    }
+
+    pub fn settle(
+        &mut self,
+        service: &mut dyn TuiApplicationService,
+        mut state: TuiState,
+        effects: Vec<UiEffect>,
+    ) -> Result<TuiState> {
+        let mut queue: VecDeque<UiEffect> = effects.into();
+        while let Some(effect) = queue.pop_front() {
+            let action = self.execute(service, effect)?;
+            let reduction = reduce_tui(state, action);
+            state = reduction.state;
+            queue.extend(reduction.effects);
+        }
+        Ok(state)
+    }
+
+    pub fn step(
+        &mut self,
+        service: &mut dyn TuiApplicationService,
+        state: TuiState,
+        action: UiAction,
+    ) -> Result<TuiState> {
+        let reduction = reduce_tui(state, action);
+        self.settle(service, reduction.state, reduction.effects)
+    }
 }
 
 /// Pure semantic reducer. Presentation adapters may turn keys, clicks, list rows,
