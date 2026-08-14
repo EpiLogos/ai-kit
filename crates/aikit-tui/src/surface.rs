@@ -38,6 +38,7 @@ use crate::search::Row;
 use crate::staging::is_on;
 use crate::tree::{Node, NodeKind, TreeEffect, TreeState};
 use crate::tree_driver::{TreeController, TreeRequest, TreeStep};
+use crate::v2_render;
 use crate::{PaletteOutcome, PaletteRequest};
 
 /// The application operations the unified surface needs beyond the palette.
@@ -161,6 +162,12 @@ impl SurfaceController {
         let area = frame.area();
         self.apply_semantic(UiAction::Resize(area.width, area.height));
         match self.mode {
+            SurfaceMode::Palette
+                if self.palette.state().mode == Mode::Search
+                    && !self.palette.state().in_manage_lane() =>
+            {
+                v2_render::draw(frame, &self.semantic)
+            }
             SurfaceMode::Palette => self.palette.draw(frame),
             SurfaceMode::Tree => self.tree.draw(frame),
         }
@@ -313,6 +320,28 @@ impl SurfaceController {
             self.apply_semantic(UiAction::SelectNext);
             self.project_semantic_to_palette(backend);
             return Ok(Some(SurfaceStep::Continue));
+        }
+
+        if key.code == KeyCode::Enter {
+            if let Some(resource) = self.semantic.selected.clone() {
+                if resource_capsule_id(&resource).is_none() {
+                    self.apply_semantic(UiAction::OpenSelection);
+                    let kind = self
+                        .semantic
+                        .read_model
+                        .resources
+                        .iter()
+                        .find(|item| item.resource == resource)
+                        .map(|item| item.kind.as_str())
+                        .unwrap_or("resource");
+                    self.semantic.status = Some(crate::application::UiStatus {
+                        message: format!("opened {kind} {resource}"),
+                    });
+                    self.sync_semantic_status();
+                    return Ok(Some(SurfaceStep::Continue));
+                }
+            }
+            return Ok(None);
         }
 
         if key.code == KeyCode::Backspace {
@@ -804,12 +833,7 @@ impl SurfaceController {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let index = self.quick_row_at(mouse.column, mouse.row)?;
-                let resource = self
-                    .palette
-                    .state()
-                    .rows
-                    .get(index)
-                    .and_then(|row| capsule_resource_ref(&row.doc.id))?;
+                let resource = self.semantic.read_model.resource_at(index)?.clone();
                 Some(mouse_select(resource))
             }
             MouseEventKind::ScrollDown => Some(UiAction::SelectNext),
@@ -835,13 +859,15 @@ impl SurfaceController {
         }
 
         let height = list.height as usize;
-        let first = self
-            .palette
-            .state()
-            .cursor
-            .saturating_sub(height.saturating_sub(1));
+        let selected_index = self
+            .semantic
+            .selected
+            .as_ref()
+            .and_then(|selected| self.semantic.read_model.position(selected))
+            .unwrap_or(0);
+        let first = selected_index.saturating_sub(height.saturating_sub(1));
         let index = first.saturating_add((row - list.y) as usize);
-        (index < self.palette.state().rows.len()).then_some(index)
+        (index < self.semantic.read_model.resources.len()).then_some(index)
     }
 }
 
