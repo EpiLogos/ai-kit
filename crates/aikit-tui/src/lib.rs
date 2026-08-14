@@ -37,23 +37,6 @@
 //! semantic ResourceRef selection/staging/navigation state shared by Quick,
 //! Workspace, list, tree and future graph presentations. The older palette/tree
 //! models remain compatibility presentations while that state is adopted.
-//!
-//! ## Where to look
-//!
-//! | Question | Module |
-//! |---|---|
-//! | What is the V2 semantic TUI state/application-service seam? | [`application`] |
-//! | How does the existing shared backend feed the V2 service? | [`palette_service`] |
-//! | What does a key do? | [`app`], [`event`] |
-//! | How do Quick/Workspace map Resource hits and contextual Actions into shared intents? | [`navigation`] |
-//! | Why is this row above that one? | [`search`] |
-//! | What would this toggle actually cost? | [`staging`] |
-//! | Where would a change be written, and what confirms it? | [`scope`] |
-//! | How is an argument form built from a manifest? | [`form`] |
-//! | What fits at this width? | [`layout`] |
-//! | Where does the palette appear? | [`host`] |
-//! | What does it look like? | [`render`], [`v2_render`], [`theme`] |
-//! | What does the palette need from the application? | [`backend`] |
 
 #![forbid(unsafe_code)]
 
@@ -66,6 +49,8 @@ pub mod host;
 pub mod layout;
 pub mod navigation;
 pub mod palette_service;
+pub mod project_world_api;
+pub mod project_world_service;
 pub mod render;
 pub mod scope;
 pub mod search;
@@ -102,6 +87,7 @@ pub use navigation::{
     AmbientContext, NavigationIntent,
 };
 pub use palette_service::PaletteApplicationService;
+pub use project_world_api::ProjectWorldApplicationService;
 pub use scope::ScopeSelector;
 pub use search::{rank, Matcher, Row};
 pub use staging::{stage, StagedDiff, StagedProblem, StagedSet};
@@ -185,12 +171,6 @@ pub fn run_tree(
 }
 
 /// Open the palette, run it to completion, and return what it did.
-///
-/// Terminal setup and teardown happen here so that the outcome is delivered to a
-/// caller holding a restored terminal. The loop itself is
-/// [`driver::event_loop`], which is generic over the ratatui backend and the
-/// event source — that is what lets the end-to-end tests drive a real palette
-/// against a `TestBackend` and a scripted key sequence.
 pub fn run(app: &mut dyn PaletteBackend, request: PaletteRequest) -> aikit_core::Result<PaletteOutcome> {
     driver::run_on_terminal(app, request)
 }
