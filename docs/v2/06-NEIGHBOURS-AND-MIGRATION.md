@@ -65,13 +65,15 @@ The current AIKit proves valuable mechanisms:
 - Skill discovery;
 - frecency foundations;
 - JSON CLI;
-- TUI event/reducer architecture.
+- TUI event/reducer architecture;
+- terminal restoration, host handling and snapshot/performance testing.
 
 These mechanisms should be retained where they continue to serve the full product.
 
 The following are explicitly open to substantial V2 change:
 
 - TUI information architecture and visual design;
+- TUI controller/state topology;
 - internal resource schemas;
 - store/index layout;
 - command taxonomy;
@@ -82,6 +84,25 @@ The following are explicitly open to substantial V2 change:
 - naming carried over from narrower V1 assumptions.
 
 The design target governs over accidental implementation shape.
+
+### 61.1 TUI migration specifically
+
+The existing TUI's palette/tree separation is migration evidence, not a V2 invariant. V2 should preserve the useful pure-event/reducer discipline, host safety, terminal restoration, staging/confirmation practices, accessibility foundations, snapshots and performance discipline while replacing semantic duplication between surface controllers.
+
+The migration target is one authoritative `TuiState` and `UiAction` reducer over resource-oriented application services/read models. Quick and Workspace presentations, and list/tree/graph relation projections, must not maintain separate copies of canonical selection, staging or resolution state.
+
+The existing capsule-shaped backend may be adapted incrementally while V2 resource/application contracts land, but it must not become a compatibility wall that forces Profiles, ContextSources, Agent/Agency, Knowledge Navigation or projection back into Capsule/Capability-only shapes.
+
+Migration should explicitly remove or replace interaction patterns where old semantics are unsafe or misleading, including:
+
+- manual Palette ↔ Tree state synchronisation;
+- mouse paths that bypass the semantic action reducer;
+- context-dependent Esc behaviour that can discard staged work;
+- TUI-local resolver/provider semantics;
+- hidden CLI shell-out as an application-service substitute;
+- transient row/index identity where stable ResourceRefs exist.
+
+The terminal host model should remain honest: real popup primitives may be used where present; inline/fullscreen behaviour must remain explicit and recoverable; no host capability should be fabricated for visual symmetry.
 
 ---
 
@@ -101,6 +122,7 @@ reversible external mutation
 honest target effects
 machine-readable interfaces
 session-local scoping
+stable resource identity across presentation changes
 ```
 
 Refactor freely where needed to achieve:
@@ -113,6 +135,9 @@ Agent/Agency integration
 Action indexing
 project binding
 higher-quality TUI
+human environment composition
+unified knowledge navigation
+relation list/tree/graph projections
 memory/familiarity
 QL/MEF interop
 ```
