@@ -8,6 +8,8 @@ AIKit should support four increasing depths without requiring the deepest level.
 
 The product can embody QL-aligned distinctions such as whole/context, 4+2 structural sensitivity, source/projection difference, return, and retained difference without exposing QL vocabulary or requiring a service.
 
+SemanticWiki may also be structurally QL-native at this architectural level: recursive whole/member topology, central whole-anchor, constellation/return and content-free relation-family traversal can inform generic Wiki structure without requiring a live QL/MEF provider or user-facing QL terminology.
+
 ### B. Passive interoperability
 
 AIKit can carry shared references such as:
@@ -57,6 +59,8 @@ No live QL service may be required for:
 - Action identity;
 - ProjectBinding;
 - Agent identity;
+- SemanticWiki base navigation;
+- ProjectMap/SourcePool correctness;
 - Generation/Projection correctness;
 - Procedure safety;
 - Workcell materialisation.
@@ -79,9 +83,30 @@ AIKit may use MEF through the external QL/MEF module for tasks such as:
 - model/Agency attunement;
 - growth/reflection;
 - context-source inquiry;
-- Skill authoring/discovery research.
+- Skill authoring/discovery research;
+- optional deeper readings of SemanticWiki/ProjectMap neighbourhoods and Frames.
 
-Any lens-related influence on resolution must be explicit and explainable. Lens semantics do not silently override trust, policy, or authored preference.
+Any lens-related influence on resolution must be explicit and explainable. Lens semantics do not silently override trust, policy, authored preference or canonical provider relations.
+
+### 53.1 QL/MEF Wiki and meta-Space navigation
+
+The QL-MEF Wiki may act as a **meta-Space** able to navigate across mapped Project wikis and other QL-addressable fields. This does not transfer ownership of those Project WikiNodes, Spaces or source relations to QL-MEF.
+
+The integration law is:
+
+```text
+project SemanticWiki / ProjectMap
+        │ stable refs / explicit mappings
+        ▼
+QL-MEF provider or meta-Space
+        │ derived refractive reading / relation overlay
+        ▼
+AIKit RelationView / Explain / Frame
+```
+
+QL-MEF may expose derived nodes/edges/readings, lens annotations, refractive paths or cross-wiki portal relations. AIKit must preserve their provider identity, target identity, derivation and provenance. A derived overlay does not become a canonical WikiEdge merely because the TUI can render it beside authored relations.
+
+Ordinary users should be able to navigate the underlying Wiki/Source/Project field without understanding QL vocabulary. MEF and developed QL views are explicit deeper surfaces selected when useful.
 
 ---
 
