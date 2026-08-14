@@ -393,14 +393,7 @@ impl SurfaceController {
         backend: &mut B,
         message: String,
     ) -> Result<()> {
-        let query = self.palette.state().query.clone();
-        let scope = self.palette.state().scope.current();
-        self.palette = PaletteController::new(
-            backend,
-            PaletteRequest::new(self.host)
-                .with_query(query)
-                .with_scope(scope),
-        )?;
+        self.palette.refresh(backend)?;
         self.palette.state_mut().status = Some(crate::app::Status::info(message));
         self.replace_tree(backend.surface_tree()?, backend);
         self.project_semantic_to_presentations(backend);
