@@ -10,6 +10,7 @@ use aikit_tui::host::UiHost;
 use aikit_tui::layout::Layout;
 use aikit_tui::surface::{SurfaceBackend, SurfaceController, SurfaceRequest};
 use aikit_tui::tree::{Node, NodeKind, Root, TreeEffect, TreeState};
+use aikit_tui::PaletteBackend;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
