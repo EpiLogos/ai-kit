@@ -18,6 +18,7 @@ use crate::application::{
     TuiApplicationService,
 };
 use crate::backend::{PaletteBackend, Toggle};
+use crate::project_world::ProjectWorldReadModel;
 use crate::staging::is_on;
 
 pub struct PaletteApplicationService<'a> {
@@ -35,6 +36,14 @@ impl<'a> PaletteApplicationService<'a> {
 
     pub fn backend_mut(&mut self) -> &mut dyn PaletteBackend {
         self.backend
+    }
+
+    /// One coherent disclosure of the currently resolved Project world.
+    ///
+    /// This stays on the same application-service adapter as search, composition,
+    /// Explain and History: Workspace never reconstructs resolver state itself.
+    pub fn project_world(&self) -> ProjectWorldReadModel {
+        ProjectWorldReadModel::from_backend(self.backend)
     }
 }
 
