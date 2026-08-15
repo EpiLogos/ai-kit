@@ -21,6 +21,7 @@
 pub mod arg;
 pub mod capsule;
 pub mod catalog;
+pub mod composition;
 pub mod context;
 pub mod context_resolution;
 pub mod context_source;
@@ -55,6 +56,15 @@ pub use capsule::{
     Payload, Requirement, Surface,
 };
 pub use catalog::{Catalog, MemoryCatalog};
+pub use composition::{
+    resolve_harness_composition, ActivationScope, ActivationScopeKind, ComponentBinding,
+    ComponentContribution, ComponentDescriptor, ComponentRequirement, ComponentSelection,
+    CompositionAbsence, CompositionActivationMode, CompositionCatalog, CompositionRelationKind,
+    CompositionState, ContractBinding, ContractProvider, ContributionKind, HarnessComposition,
+    HarnessCompositionRequest, LifetimeOwner, LifetimeOwnerKind, ProjectionBinding,
+    RequirementStrength, ResolutionScope, RetractionMode, SurfaceDescriptor, SurfaceKind,
+    TargetNativeComponentBinding, HARNESS_COMPOSITION_VERSION,
+};
 pub use context::{ContextBinding, ContextDescriptor, Isolation};
 pub use context_resolution::{
     availability as resource_availability, compose_context_resolution, Availability,
