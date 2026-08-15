@@ -115,18 +115,29 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
     ) -> Result<CompositionPreview> {
         let toggles = toggles(staged)?;
         let projected = self.backend.preview(scope, &toggles)?;
+        let effect_lines = projected
+            .effects
+            .iter()
+            .map(|effect| effect.describe())
+            .collect::<Vec<_>>();
+        let effect_summary = if effect_lines.is_empty() {
+            "none".to_string()
+        } else {
+            effect_lines.join(" · ")
+        };
         Ok(CompositionPreview {
             revision: format!("{}:{}", projected.view.catalog_revision, projected.view.hash),
             scope,
             staged: staged.clone(),
             summary: format!(
-                "{} staged change{} -> {} active capability{}; {} client effect{}",
+                "{} staged change{} -> {} active capability{}; {} client effect{}: {}",
                 staged.len(),
                 plural(staged.len()),
                 projected.view.active.len(),
                 plural(projected.view.active.len()),
                 projected.effects.len(),
                 plural(projected.effects.len()),
+                effect_summary,
             ),
         })
     }
