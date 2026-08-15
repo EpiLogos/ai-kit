@@ -9,7 +9,8 @@
 //! ## What follows from that
 //!
 //! When the task has its own tree ([`Isolation::is_isolated`]), the projection is
-//! genuinely per-task and everything is written.
+//! genuinely per-task and everything is written, including the V2 managed actor
+//! bootstrap when one is present.
 //!
 //! When the task shares the session's tree — **the default**, because a worktree
 //! costs a checkout, a branch, disk and a teardown decision that belongs to the
@@ -20,13 +21,13 @@
 //!
 //! 1. **project-stable native skills only.** Skills enabled at project scope or
 //!    above are the tree's normal contents; every sibling task sees them anyway,
-//!    so writing them changes nothing observable. Session-only deltas are *not*
-//!    projected.
-//! 2. **brokered.** Nothing is written; capabilities are reached through
-//!    `aikit capabilities list|read` and `aikit run`.
-//! 3. **an explicitly accepted shared projection.** Everything is written into
-//!    the shared tree. This requires [`CodexAdapter::accepting_shared_projection`]
-//!    and is otherwise refused with `projection.shared_tree_conflict`.
+//!    so writing them changes nothing observable. Session-only deltas and the
+//!    context-specific actor bootstrap are *not* projected.
+//! 2. **brokered.** Nothing is written; capabilities and actor disclosure are
+//!    reached through AIKit's broker/application surfaces.
+//! 3. **an explicitly accepted shared projection.** Capability skills may be
+//!    shared, but the actor bootstrap remains brokered because its Run/session/body
+//!    identity is not a project-stable tree property.
 //!
 //! ## Two things this adapter will never do
 //!
@@ -36,8 +37,8 @@
 //!
 //! It never reports a fallback as `Immediate` merely because the files on disk
 //! did not change. A no-op apply in the shared case still leaves the session
-//! deltas outside Codex, and saying otherwise would tell the user their toggle
-//! worked.
+//! deltas or actor bootstrap outside Codex, and saying otherwise would tell the
+//! user their projection worked when part of it was withheld.
 //!
 //! [`Isolation::is_isolated`]: aikit_core::context::Isolation::is_isolated
 
@@ -57,6 +58,7 @@ use aikit_core::scope::ScopeKind;
 use aikit_core::{AikitError, Result};
 
 use super::agent_skills;
+use super::bootstrap;
 use super::ClientAdapter;
 
 pub const CLIENT: &str = "codex";
@@ -159,11 +161,8 @@ impl CodexAdapter {
         self
     }
 
-    /// Accept that a shared-tree projection is visible to sibling tasks.
-    ///
-    /// The flag exists so that the acceptance is a *decision*, made by somebody
-    /// who was shown the consequence, rather than the accidental outcome of a
-    /// default.
+    /// Accept that a shared-tree capability projection is visible to sibling
+    /// tasks. Context-specific actor bootstrap identity is still withheld.
     #[must_use]
     pub fn accepting_shared_projection(mut self, accepted: bool) -> Self {
         self.accept_shared_projection = accepted;
@@ -197,13 +196,6 @@ impl CodexAdapter {
     /// The tree Codex would read `.agents/skills` from under `isolation`, and — for
     /// a shared task with no project root above it — an honest note about the
     /// fallback.
-    ///
-    /// An isolated task owns its tree, so the root is that tree. A shared task's
-    /// skills have to land where every sibling in the same project sees them: the
-    /// nearest project root above the working directory, exactly where Codex's own
-    /// upward discovery walk stops. When there is no project root above the working
-    /// directory, the working directory itself is used and the fallback is stated
-    /// rather than hidden.
     fn projection_tree(&self, isolation: Isolation) -> (PathBuf, Option<String>) {
         if isolation.is_isolated() {
             return (self.tree.clone(), None);
@@ -221,9 +213,6 @@ impl CodexAdapter {
         }
     }
 
-    /// The absolute `.agents/skills` directory Codex would discover under
-    /// `isolation`: the task's own tree when isolated, the nearest project root
-    /// when shared.
     pub fn skills_dir_for(&self, isolation: Isolation) -> PathBuf {
         self.projection_tree(isolation).0.join(SKILLS_PREFIX)
     }
@@ -285,25 +274,30 @@ impl CodexAdapter {
         }
         Ok(items)
     }
+
+    fn append_isolated_bootstrap(
+        &self,
+        context: &ResolvedContext,
+        plan: &mut ProjectionPlan,
+        items: &mut Vec<ProjectionItem>,
+    ) -> Result<()> {
+        if let Some(actor) = context.actor_bootstrap.as_ref() {
+            items.push(bootstrap::managed_bootstrap_item(Path::new(SKILLS_PREFIX), actor)?);
+            plan.notes.push(
+                "the managed `aikit-context` Agent Skill is private to this task worktree; richer AIKit state remains on-demand"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
-/// Is this capability part of the tree's durable contents, or a delta this
-/// context alone has?
-///
-/// Project scope and above are durable: every sibling task in the tree resolves
-/// them too, so writing them changes nothing anyone can observe. Session, task
-/// and one-shot selections are the ones that would leak.
-///
-/// A dependency inherits the answer from whatever pulled it in — expanding a
-/// session-only skill's requirement into the shared tree would leak just as
-/// surely as the skill itself.
 fn is_project_stable(
     capability: &ActiveCapability,
     all: &BTreeMap<CapsuleId, ActiveCapability>,
 ) -> bool {
     match &capability.origin {
         SelectionOrigin::Layer { scope, .. } => scope.rank() <= ScopeKind::ProjectLocal.rank(),
-        // Managed policy is durable by definition: it is not a per-session choice.
         SelectionOrigin::Policy { .. } => true,
         SelectionOrigin::Dependency { required_by } => match all.get(required_by) {
             Some(requirer) => is_project_stable(requirer, all),
@@ -322,7 +316,6 @@ impl TargetAdapter for CodexAdapter {
             live_reload: true,
             symlinks: true,
             isolated_per_context: true,
-            // The line that matters: Codex's skill directory lives in the tree.
             requires_isolated_tree_for_isolation: true,
             brokered_fallback: true,
             watches_for_changes: true,
@@ -333,21 +326,17 @@ impl TargetAdapter for CodexAdapter {
         let isolation = context.isolation();
         let skills: Vec<&ActiveCapability> = context.view.active_of_kind(Kind::Skill);
 
-        // --- Brokering is a choice available in either case ------------------
         if self.strategy == SharedTreeStrategy::BrokerAll {
             return Ok(ProjectionPlan::new(
                 self.target(),
                 ActivationEffect::brokered("this projection was configured to broker everything"),
             )
             .with_note(
-                "nothing was written into the working tree; Codex reaches these capabilities \
-                 through `aikit capabilities list --context current --agent-index`, \
-                 `aikit capabilities read <id>` and `aikit run <id>`"
+                "nothing was written into the working tree; Codex reaches capabilities and actor disclosure through AIKit's broker/application surfaces"
                     .to_string(),
             ));
         }
 
-        // --- The task has its own tree ---------------------------------------
         if isolation.is_isolated() {
             let mut plan = ProjectionPlan::new(
                 self.target(),
@@ -356,19 +345,15 @@ impl TargetAdapter for CodexAdapter {
                 ),
             )
             .with_note(format!(
-                "this task has its own working tree ({}), so its skills are written to \
-                         {} and no sibling task can see them",
+                "this task has its own working tree ({}), so its skills are written to {} and no sibling task can see them",
                 isolation.as_str(),
                 self.skills_dir().display()
             ));
-            let items = self.items_for(context, &skills, &mut plan)?;
+            let mut items = self.items_for(context, &skills, &mut plan)?;
+            self.append_isolated_bootstrap(context, &mut plan, &mut items)?;
             return Ok(plan.with_items(items));
         }
 
-        // --- The task shares the session's tree ------------------------------
-        // A shared projection has to be visible to every sibling in the project,
-        // so it targets the nearest project root above the working directory, not
-        // merely where this task happens to be working (decision #3).
         let (shared_root, root_fallback) = self.projection_tree(isolation);
         let shared_skills = shared_root.join(SKILLS_PREFIX);
 
@@ -388,10 +373,7 @@ impl TargetAdapter for CodexAdapter {
                 return Err(AikitError::new(
                     "projection.shared_tree_conflict",
                     format!(
-                        "a shared-tree projection was asked for, but this task uses the \
-                         session's working tree: writing {} would change what sibling tasks in \
-                         the same tree see, without telling them. Accept the shared projection \
-                         explicitly, or give the task its own tree with `--worktree`.",
+                        "a shared-tree projection was asked for, but this task uses the session's working tree: writing {} would change what sibling tasks in the same tree see, without telling them. Accept the shared projection explicitly, or give the task its own tree with `--worktree`.",
                         shared_skills.display()
                     ),
                 )
@@ -400,18 +382,25 @@ impl TargetAdapter for CodexAdapter {
                 .with("target", TargetId::CODEX));
             }
 
-            let mut plan = ProjectionPlan::new(
-                self.target(),
+            let effect = if context.actor_bootstrap.is_some() {
+                ActivationEffect::brokered(
+                    "the shared capability projection was accepted, but the Run/session-specific actor bootstrap is withheld from the shared tree",
+                )
+            } else {
                 ActivationEffect::next_session_only(
                     "plain Codex discovers project skills at task start",
-                ),
-            )
-            .with_note(format!(
-                "a shared-tree projection was explicitly accepted: every skill in this \
-                     context was written to {}, and sibling tasks working in the same tree will \
-                     see them too",
+                )
+            };
+            let mut plan = ProjectionPlan::new(self.target(), effect).with_note(format!(
+                "a shared-tree capability projection was explicitly accepted: projected skills are written to {}, and sibling tasks working in the same tree will see them too",
                 shared_skills.display()
             ));
+            if context.actor_bootstrap.is_some() {
+                plan = plan.with_note(
+                    "the managed actor bootstrap was not written: its Run/session/runtime-body identity is context-specific and would leak to sibling tasks; use an isolated worktree for native projection"
+                        .to_string(),
+                );
+            }
             if let Some(note) = &root_fallback {
                 plan = plan.with_note(note.clone());
             }
@@ -419,21 +408,29 @@ impl TargetAdapter for CodexAdapter {
             return Ok(plan.with_items(items));
         }
 
-        // Fallback 1: project-stable only.
-        let effect = if deltas.is_empty() {
+        let withheld_bootstrap = context.actor_bootstrap.is_some();
+        let effect = if deltas.is_empty() && !withheld_bootstrap {
             ActivationEffect::next_session_only(
                 "plain Codex discovers project-stable skills at task start",
             )
         } else {
+            let skill_part = if deltas.is_empty() {
+                "no session-only capability skills are withheld".to_string()
+            } else {
+                format!(
+                    "{} session-only skill{} {} withheld",
+                    deltas.len(),
+                    if deltas.len() == 1 { "" } else { "s" },
+                    if deltas.len() == 1 { "is" } else { "are" }
+                )
+            };
+            let bootstrap_part = if withheld_bootstrap {
+                "the context-specific actor bootstrap is also withheld"
+            } else {
+                "no actor bootstrap is present"
+            };
             ActivationEffect::brokered(format!(
-                "this task uses the session's shared working tree, so {} session-only {} not \
-                 written into it",
-                deltas.len(),
-                if deltas.len() == 1 {
-                    "skill was"
-                } else {
-                    "skills were"
-                }
+                "this task uses the session's shared working tree: {skill_part}; {bootstrap_part}"
             ))
         };
 
@@ -443,26 +440,21 @@ impl TargetAdapter for CodexAdapter {
         }
         if deltas.is_empty() {
             plan = plan.with_note(format!(
-                "this task uses the session's shared working tree; every active skill is \
-                 project-stable, so {} holds exactly what every task in this tree already sees",
+                "this task uses the session's shared working tree; every active capability skill is project-stable, so {} holds exactly what every task in this tree already sees",
                 shared_skills.display()
             ));
         } else {
             let names: Vec<String> = deltas.iter().map(|c| Self::export_name(c)).collect();
-            let (noun, verb, pronoun) = if names.len() == 1 {
-                ("skill", "is", "it")
-            } else {
-                ("skills", "are", "them")
-            };
             plan = plan.with_note(format!(
-                "this task uses the session's shared working tree, and Codex reads \
-                 `.agents/skills` from the tree — so a per-task projection would change what \
-                 sibling tasks see. Only the project-stable skills were written. The \
-                 session-only {noun} ({}) {verb} available through the broker \
-                 (`aikit capabilities list --context current --agent-index`). Give the task its \
-                 own tree with `--worktree` to have {pronoun} projected natively.",
+                "Codex reads `.agents/skills` from the shared tree, so session-only skills ({}) remain available through the broker. Give the task its own tree with `--worktree` for native projection.",
                 names.join(", "),
             ));
+        }
+        if withheld_bootstrap {
+            plan = plan.with_note(
+                "the managed `aikit-context` bootstrap is not projected into a shared tree because it contains Run/session/runtime-body identity; use an isolated worktree for a native seed"
+                    .to_string(),
+            );
         }
 
         let items = self.items_for(context, &stable, &mut plan)?;
@@ -474,9 +466,6 @@ impl TargetAdapter for CodexAdapter {
         old: Option<&ProjectionPlan>,
         new: &ProjectionPlan,
     ) -> ActivationEffect {
-        // A fallback effect survives a no-op apply. The files did not change, but
-        // the session deltas are still not in Codex, and "immediate" would say
-        // the opposite.
         if matches!(
             new.effect,
             ActivationEffect::Brokered { .. } | ActivationEffect::Unsupported { .. }
@@ -493,18 +482,10 @@ impl TargetAdapter for CodexAdapter {
 
 impl ClientAdapter for CodexAdapter {
     fn launch_command(&self, _context: &ResolvedContext) -> Vec<String> {
-        // Codex finds `.agents/skills` by walking up from the working directory.
-        // There is no directory flag to pass, and inventing one — or a synthetic
-        // `HOME` — would produce a command that either fails outright or quietly
-        // redirects the user's credentials.
         vec![self.binary.clone()]
     }
 
     fn install(&self, _config_dir: &Path) -> Result<Vec<ProjectionItem>> {
-        // AIKit's entries live in their own file rather than merged into the
-        // user's `config.toml`. A round-trip through a TOML parser would strip
-        // the comments out of a hand-written config, and no amount of tidiness is
-        // worth that.
         let mut contents = String::from(
             "# >>> aikit >>>\n\
              # Managed by AIKit. One durable dispatcher entry per Codex event; the chain each\n\
@@ -513,8 +494,7 @@ impl ClientAdapter for CodexAdapter {
         );
         for event in DISPATCH_EVENTS {
             contents.push_str(&format!(
-                "\n[[hooks]]\nevent = \"{event}\"\ncommand = \"aikit hook dispatch {CLIENT} \
-                 {event}\"\n"
+                "\n[[hooks]]\nevent = \"{event}\"\ncommand = \"aikit hook dispatch {CLIENT} {event}\"\n"
             ));
         }
         contents.push_str("\n# <<< aikit <<<\n");
