@@ -1,14 +1,13 @@
-//! Compatibility Project-world composition for the shared CLI/TUI application service.
+//! Project-world composition for the shared CLI/TUI application service.
 //!
-//! The current CLI `Service` already exposes one resolved legacy view, its authoritative
-//! `ContextDescriptor`, and the ResourceRef-native navigation index through `PaletteBackend`.
-//! This adapter composes the V2 `ContextResolution` from those same inputs rather than
-//! rebuilding resolution inside a renderer/controller.
+//! The application service already exposes one resolved legacy view, its authoritative
+//! `ContextDescriptor`, the ResourceRef-native navigation index, and—where the concrete
+//! backend owns it—the ordered scope-layer stack through `PaletteBackend`.
 //!
-//! One limitation remains explicit: the current public palette service does not expose
-//! the complete ordered `ScopeLayer` stack. `ContextResolution` can still recover profile
-//! provenance already present in the resolved selection log, but scope layers are
-//! intentionally left empty here rather than reconstructed from partial evidence.
+//! This adapter composes V2 `ContextResolution` from those same inputs rather than
+//! rebuilding resolution inside a renderer/controller. When a compatibility backend
+//! cannot expose scope layers, that absence remains explicit instead of being inferred
+//! from partial selection-log evidence.
 
 use aikit_core::context_resolution::{compose_context_resolution, RequestedActors};
 use aikit_core::context_source::{ContextSourceEntry, ContextSourceIndex};
@@ -25,10 +24,11 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
     let binding = ProjectBinding::from_legacy_context(project_ref, constituent, context)?;
 
     let resources = backend.navigation_index();
+    let scope_layers = backend.scope_layers();
     let resolution = compose_context_resolution(
         backend.view(),
         binding,
-        &[],
+        scope_layers.unwrap_or(&[]),
         &resources,
         RequestedActors::default(),
     );
@@ -49,10 +49,12 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
     }
 
     let mut world = disclose_project_world(&resolution, &source_index, None);
-    world.warnings.push(
-        "compatibility Project-world basis does not include the ordered scope-layer stack because the current palette application-service boundary does not expose it; profile provenance already present in the resolved view remains disclosed"
-            .into(),
-    );
+    if scope_layers.is_none() {
+        world.warnings.push(
+            "Project-world basis does not include the ordered scope-layer stack because this application-service boundary does not expose it; scope provenance is not reconstructed from partial evidence"
+                .into(),
+        );
+    }
     Ok(world)
 }
 
@@ -78,18 +80,20 @@ mod tests {
     use aikit_core::context::ContextDescriptor;
     use aikit_core::policy::ManagedPolicy;
     use aikit_core::resolve::{resolve, ResolveRequest};
-    use aikit_core::scope::ScopeKind;
+    use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
     use aikit_core::trust::MemoryTrust;
     use std::path::PathBuf;
 
     struct Backend {
         context: ContextDescriptor,
         view: aikit_core::ResolvedView,
+        layers: Option<Vec<ScopeLayer>>,
     }
 
     impl PaletteBackend for Backend {
         fn context(&self) -> &ContextDescriptor { &self.context }
         fn view(&self) -> &aikit_core::ResolvedView { &self.view }
+        fn scope_layers(&self) -> Option<&[ScopeLayer]> { self.layers.as_deref() }
         fn documents(&self) -> Vec<aikit_core::SearchDoc> { Vec::new() }
         fn capsule(&self, _id: &aikit_core::CapsuleId) -> Option<&aikit_core::Capsule> { None }
         fn recent(&self) -> Vec<crate::RunIntent> { Vec::new() }
@@ -119,27 +123,65 @@ mod tests {
         }
     }
 
-    #[test]
-    fn compatibility_service_does_not_invent_unexposed_scope_layers() {
-        let mut context = ContextDescriptor::for_project("/work/aikit");
-        context.host = "test-host".into();
+    fn resolved(context: &ContextDescriptor, layers: Vec<ScopeLayer>) -> aikit_core::ResolvedView {
         let catalog = MemoryCatalog::default();
         let trust = MemoryTrust::default();
-        let view = resolve(
+        resolve(
             &catalog,
             &trust,
             &ResolveRequest {
                 context: context.clone(),
-                layers: Vec::new(),
+                layers,
                 policy: ManagedPolicy::default(),
             },
         )
-        .unwrap();
-        let backend = Backend { context, view };
+        .unwrap()
+    }
+
+    #[test]
+    fn compatibility_service_does_not_invent_unexposed_scope_layers() {
+        let mut context = ContextDescriptor::for_project("/work/aikit");
+        context.host = "test-host".into();
+        let view = resolved(&context, Vec::new());
+        let backend = Backend {
+            context,
+            view,
+            layers: None,
+        };
 
         let world = project_world(&backend).unwrap();
         assert!(world.resolution_basis.scopes.is_empty());
         assert!(world
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("scope-layer stack")));
+    }
+
+    #[test]
+    fn authoritative_scope_stack_is_disclosed_without_compatibility_warning() {
+        let mut context = ContextDescriptor::for_project("/work/aikit");
+        context.host = "test-host".into();
+        let project_layer = ScopeLayer::new(
+            ScopeKind::Project,
+            LayerOrigin::new("/work/aikit/.aikit/profile.toml"),
+            Default::default(),
+        );
+        let layers = vec![project_layer];
+        let view = resolved(&context, layers.clone());
+        let backend = Backend {
+            context,
+            view,
+            layers: Some(layers),
+        };
+
+        let world = project_world(&backend).unwrap();
+        assert_eq!(world.resolution_basis.scopes.len(), 1);
+        assert_eq!(world.resolution_basis.scopes[0].kind, ScopeKind::Project);
+        assert_eq!(
+            world.resolution_basis.scopes[0].origin,
+            "/work/aikit/.aikit/profile.toml"
+        );
+        assert!(!world
             .warnings
             .iter()
             .any(|warning| warning.contains("scope-layer stack")));
