@@ -1,9 +1,9 @@
 # AIKit V2 — Vision and Design Specification
 
 **Status:** AUTHORITATIVE TARGET DESIGN — proposed for V2 programme  
-**Date:** 2026-08-14  
+**Date:** 2026-08-15  
 **Repository:** `EpiLogos/ai-kit`  
-**Scope:** product vision, ownership, context cognition, resource resolution, source/retrieval model, Knowledge Navigation, actor environment, projection, memory, human TUI/CLI, runtime integration, QL/MEF interoperability, migration from the current implementation  
+**Scope:** product vision, ownership, context cognition, resource resolution, source/retrieval model, Knowledge Navigation, actor environment, composable runtime environments, projection, memory, human TUI/CLI, runtime integration, QL/MEF interoperability, migration from the current implementation  
 **Implementation posture:** the current AIKit is a valuable production-oriented alpha and a source of proven mechanisms. This specification defines the correct full product even where V2 requires substantial internal, TUI, schema, or UX rework.
 
 ---
@@ -45,6 +45,8 @@ Context Sources
 SemanticWiki / SourcePool / ProjectMap knowledge horizons
 Models
 Harnesses
+Components / Contracts / runtime composition
+Surfaces and target-native contributions
 Hosts
 available execution worlds
 trust / availability / policy
@@ -59,7 +61,9 @@ For humans, the CLI is AIKit's operational language while the TUI becomes the hu
 
 Knowledge Navigation preserves distinct provider authorities: SemanticWiki is authored semantic/meaning structure, SourcePool is an evidential retrieval horizon, code-index providers own structural code intelligence, ProjectMap federates those lenses through stable refs, and KnowledgeRoute records actual traversal/familiarity without manufacturing semantic truth. The same addressable field may be rendered as list, tree or local graph without collapsing relation ownership.
 
-AIKit does not become the owner of the meanings it carries. Project meaning remains Project-owned. Agent identity remains independent of AIKit. Application Actions remain application-owned. Human-authored material remains human-owned. Workcell remains the materialisation layer. QL/MEF remains an independent formal/semantic module. Harnesses remain the embodied agent-loop implementations.
+AIKit does not become the owner of the meanings it carries. Project meaning remains Project-owned. Agent identity remains independent of AIKit. Application Actions remain application-owned. Human-authored material remains human-owned. Workcell remains the materialisation layer. QL/MEF remains an independent formal/semantic module. Harnesses remain the embodied agent-loop technologies.
+
+Some Harnesses expose a richly composable body rather than a fixed runtime shell. V2 therefore also resolves target-native Components, requirements/contracts, providers, activation scopes, contributions and Surfaces into an inspectable `HarnessComposition` while preserving the same canonical Agent, Action, Capability, Project and Context identities. DeepSeek Harness/Cordis is the first rich reference target for this contract, not a required dependency or a replacement ontology.
 
 The concise dependency direction is:
 
@@ -76,7 +80,7 @@ independently authored / observed world
                 ↓
       navigation / composition
                 ↓
-        target projection
+ target + runtime-body projection
                 ↓
        Agent / Agency / human
                 ↓
@@ -97,5 +101,6 @@ This directory is one authoritative AIKit V2 target-design specification split i
 6. `06-NEIGHBOURS-AND-MIGRATION.md`
 7. `07-DEVELOPMENT-AND-ACCEPTANCE.md`
 8. `08-VERIFICATION-RUNS-AND-CLOSURE.md`
+9. `09-COMPOSABLE-RUNTIME-ENVIRONMENTS.md`
 
 The package defines the target product. `../ARCHITECTURE.md` remains evidence for the current implementation and migration baseline rather than a constraint on the V2 target.
