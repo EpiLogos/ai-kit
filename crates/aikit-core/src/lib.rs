@@ -118,9 +118,9 @@ pub use id::{
 };
 pub use knowledge::{
     ContextPackBudget, KnowledgeContextPack, KnowledgeReading, KnowledgeRelationView,
-    KnowledgeRoute, KnowledgeRouteStep, ProvenanceClass, RelationDirection, RelationEdge,
-    RelationNode, RelationOrigin, RelationQuery, DEFAULT_RELATION_DEPTH,
-    DEFAULT_RELATION_EDGE_BUDGET, DEFAULT_RELATION_NODE_BUDGET,
+    KnowledgeRoute, KnowledgeRouteStep, RelationDirection, RelationEdge, RelationNode,
+    RelationOrigin, RelationQuery, DEFAULT_RELATION_DEPTH, DEFAULT_RELATION_EDGE_BUDGET,
+    DEFAULT_RELATION_NODE_BUDGET,
 };
 pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
 pub use platform::{MuxKind, Platform, TargetId};
