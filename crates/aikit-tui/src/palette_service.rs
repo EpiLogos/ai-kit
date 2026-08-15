@@ -18,8 +18,6 @@ use crate::application::{
     TuiApplicationService,
 };
 use crate::backend::{PaletteBackend, Toggle};
-use crate::navigation::resolved_navigation_index;
-use crate::project_world::ProjectWorldReadModel;
 use crate::staging::is_on;
 
 pub struct PaletteApplicationService<'a> {
@@ -38,19 +36,11 @@ impl<'a> PaletteApplicationService<'a> {
     pub fn backend_mut(&mut self) -> &mut dyn PaletteBackend {
         self.backend
     }
-
-    /// One coherent disclosure of the currently resolved Project world.
-    ///
-    /// This stays on the same application-service adapter as search, composition,
-    /// Explain and History: Workspace never reconstructs resolver state itself.
-    pub fn project_world(&self) -> ProjectWorldReadModel {
-        ProjectWorldReadModel::from_backend(self.backend)
-    }
 }
 
 impl TuiApplicationService for PaletteApplicationService<'_> {
     fn search(&self, query: &str) -> Result<ResourceListReadModel> {
-        let index = resolved_navigation_index(self.backend);
+        let index = self.backend.navigation_index();
         let resources = index
             .search(query, 256)
             .into_iter()
@@ -87,7 +77,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
             }));
         }
 
-        let index = resolved_navigation_index(self.backend);
+        let index = self.backend.navigation_index();
         let hit = index
             .search(resource.as_str(), 256)
             .into_iter()
@@ -115,29 +105,18 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
     ) -> Result<CompositionPreview> {
         let toggles = toggles(staged)?;
         let projected = self.backend.preview(scope, &toggles)?;
-        let effect_lines = projected
-            .effects
-            .iter()
-            .map(|effect| effect.describe())
-            .collect::<Vec<_>>();
-        let effect_summary = if effect_lines.is_empty() {
-            "none".to_string()
-        } else {
-            effect_lines.join(" · ")
-        };
         Ok(CompositionPreview {
             revision: format!("{}:{}", projected.view.catalog_revision, projected.view.hash),
             scope,
             staged: staged.clone(),
             summary: format!(
-                "{} staged change{} -> {} active capability{}; {} client effect{}: {}",
+                "{} staged change{} -> {} active capability{}; {} client effect{}",
                 staged.len(),
                 plural(staged.len()),
                 projected.view.active.len(),
                 plural(projected.view.active.len()),
                 projected.effects.len(),
                 plural(projected.effects.len()),
-                effect_summary,
             ),
         })
     }
@@ -218,7 +197,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
     }
 
     fn contextual_actions(&self, resource: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
-        let index = resolved_navigation_index(self.backend);
+        let index = self.backend.navigation_index();
         Ok(index.actions_for(resource).into_iter().cloned().collect())
     }
 

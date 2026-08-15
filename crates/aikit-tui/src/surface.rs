@@ -35,7 +35,6 @@ use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::host::UiHost;
 use crate::layout::Layout;
 use crate::palette_service::PaletteApplicationService;
-use crate::project_world::ProjectWorldReadModel;
 use crate::scope::ScopeSelector;
 use crate::search::Row;
 use crate::tree::{Node, NodeKind, TreeEffect, TreeState};
@@ -102,7 +101,6 @@ pub struct SurfaceController {
     mode: SurfaceMode,
     host: UiHost,
     semantic: TuiState,
-    project_world: ProjectWorldReadModel,
     runtime: TuiRuntime,
     palette: PaletteController,
     tree: TreeController,
@@ -124,13 +122,11 @@ impl SurfaceController {
             relation_view: relation_view_for_mode(request.initial_mode),
             ..TuiState::default()
         };
-        let project_world = ProjectWorldReadModel::from_backend(backend);
         let tree = TreeController::new(tree_state, TreeRequest::new(request.host));
         let mut surface = Self {
             mode: request.initial_mode,
             host: request.host,
             semantic,
-            project_world,
             runtime: TuiRuntime::new(),
             palette,
             tree,
@@ -155,11 +151,6 @@ impl SurfaceController {
         &self.semantic
     }
 
-    /// The same application-service Project disclosure rendered by Workspace.
-    pub fn project_world(&self) -> &ProjectWorldReadModel {
-        &self.project_world
-    }
-
     pub fn palette(&self) -> &PaletteController {
         &self.palette
     }
@@ -176,11 +167,7 @@ impl SurfaceController {
                 if self.palette.state().mode == Mode::Search
                     && !self.palette.state().in_manage_lane() =>
             {
-                v2_render::draw_with_project_world(
-                    frame,
-                    &self.semantic,
-                    Some(&self.project_world),
-                )
+                v2_render::draw(frame, &self.semantic)
             }
             SurfaceMode::Palette => self.palette.draw(frame),
             SurfaceMode::Tree => self.tree.draw(frame),
@@ -845,7 +832,6 @@ impl SurfaceController {
         self.dispatch_semantic(backend, UiAction::SetQuery(query))?;
         self.ensure_semantic_selection(backend)?;
         self.project_semantic_to_presentations(backend);
-        self.project_world = ProjectWorldReadModel::from_backend(backend);
         Ok(())
     }
 
