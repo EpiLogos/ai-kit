@@ -1,12 +1,15 @@
-//! Durable familiarity evidence on the existing SQLite event log.
+//! Durable familiarity evidence on AIKit's existing append-only event log.
 //!
-//! Familiarity is derived state, so persistence records observations/resets rather
-//! than a mutable ranking table. Replaying the ordered event stream reconstructs
-//! the current learned-accessibility store. Unknown familiarity schemas invalidate
-//! the learned replay explicitly; unrelated AIKit events and canonical Resource
-//! identities are untouched.
+//! Familiarity is derived operational memory, not canonical resource state. We
+//! therefore persist `resource-use` observations and explicit reset events in the
+//! same `usage_events` stream that already backs History/usage evidence, then
+//! reconstruct the learned-accessibility store by replay. Unknown familiarity
+//! schemas explicitly invalidate only the learned replay; unrelated events and
+//! canonical Resource identities remain untouched.
 
-use chrono::{DateTime, Utc};
+use std::collections::BTreeMap;
+
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
 use aikit_core::{
@@ -14,10 +17,11 @@ use aikit_core::{
     FAMILIARITY_SCHEMA_VERSION,
 };
 
-use crate::{Event, SqliteStore};
+use crate::{Event, EventAction, Index, Timestamp};
 
-pub const FAMILIARITY_OBSERVATION_EVENT: &str = "familiarity.observed";
-pub const FAMILIARITY_RESET_EVENT: &str = "familiarity.reset";
+pub const FAMILIARITY_OBSERVATION_EVENT: &str = "resource-use";
+pub const FAMILIARITY_RESET_EVENT: &str = "familiarity-reset";
+const FAMILIARITY_PAYLOAD_KEY: &str = "familiarity";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredObservation {
@@ -56,88 +60,124 @@ impl FamiliarityReplay {
     }
 }
 
-/// Append one learned-use observation at the observation's own deterministic
-/// timestamp. The durable Event gets its normal AIKit EventId; the payload retains
-/// the caller's trace/event observation identity as well.
-pub fn append_familiarity_observation(
-    store: &SqliteStore,
-    observation: FamiliarityObservation,
-) -> Result<()> {
-    let at = DateTime::<Utc>::from_timestamp_millis(observation.observed_at_ms as i64).ok_or_else(
-        || {
-            AikitError::new(
-                "familiarity.invalid_observation_time",
-                format!(
-                    "{} is not a representable UTC millisecond timestamp",
-                    observation.observed_at_ms
-                ),
-            )
-        },
-    )?;
-    let payload = serde_json::to_value(StoredObservation {
+/// Build the normal AIKit event corresponding to one learned-use observation.
+///
+/// The event gets its own monotonic `EventId`; the observation retains the
+/// originating trace/event id in its payload. Only ResourceRefs and explicit
+/// familiarity metadata are stored here — never prompt text or secret values.
+pub fn familiarity_observation_event(observation: FamiliarityObservation) -> Result<Event> {
+    let at = timestamp_from_ms(observation.observed_at_ms);
+    let payload = encode(&StoredObservation {
         schema: FAMILIARITY_SCHEMA_VERSION.to_string(),
         observation,
-    })
-    .map_err(encode_error)?;
-    store.append_event(&Event::new(FAMILIARITY_OBSERVATION_EVENT, payload, at))
+    })?;
+    let mut event = Event::new(EventAction::ResourceUse).at(at);
+    event
+        .arguments
+        .insert(FAMILIARITY_PAYLOAD_KEY.to_string(), payload);
+    Ok(event)
 }
 
-/// Append a scoped forgetting event. Forgetting is itself durable evidence so a
-/// replay after restart does not resurrect learned influence the user reset.
-pub fn append_familiarity_reset(
-    store: &SqliteStore,
-    scope: ForgetScope,
-    at: DateTime<Utc>,
-) -> Result<()> {
-    let payload = serde_json::to_value(StoredReset {
+/// Build the event representing an explicit learned-ease reset.
+pub fn familiarity_reset_event(scope: ForgetScope, at_ms: u64) -> Result<Event> {
+    let payload = encode(&StoredReset {
         schema: FAMILIARITY_SCHEMA_VERSION.to_string(),
         scope,
-    })
-    .map_err(encode_error)?;
-    store.append_event(&Event::new(FAMILIARITY_RESET_EVENT, payload, at))
+    })?;
+    let mut event = Event::new(EventAction::FamiliarityReset).at(timestamp_from_ms(at_ms));
+    event
+        .arguments
+        .insert(FAMILIARITY_PAYLOAD_KEY.to_string(), payload);
+    Ok(event)
+}
+
+/// Append one learned-use observation to the SQLite event stream.
+///
+/// Application paths that also own the JSONL sink should prefer building the
+/// event with [`familiarity_observation_event`] and passing it through
+/// `EventRecorder`; this helper is useful for store-level tests and migrations.
+pub fn append_familiarity_observation(
+    index: &Index,
+    observation: FamiliarityObservation,
+) -> Result<()> {
+    index.record_event(&familiarity_observation_event(observation)?)
+}
+
+/// Append a scoped forgetting event. Replay after restart therefore cannot
+/// resurrect learned influence that the user explicitly reset.
+pub fn append_familiarity_reset(index: &Index, scope: ForgetScope, at_ms: u64) -> Result<()> {
+    index.record_event(&familiarity_reset_event(scope, at_ms)?)
 }
 
 /// Rebuild current learned accessibility from the append-only event stream.
 ///
-/// Familiarity events are intentionally sparse among all AIKit events; unrelated
-/// kinds are skipped. A schema mismatch returns `Invalidated` immediately instead
-/// of mixing old and new ranking semantics.
-pub fn replay_familiarity(store: &SqliteStore) -> Result<FamiliarityReplay> {
-    let events = store.events_since(0)?;
+/// Only the two familiarity event kinds are queried, so ordinary Run/Apply/etc.
+/// evidence remains entirely independent. A schema mismatch returns
+/// `Invalidated` immediately instead of mixing old and new ranking semantics.
+pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
+    let mut stmt = index
+        .conn()
+        .prepare(
+            "SELECT event_id, action, arguments
+             FROM usage_events
+             WHERE action IN (?1, ?2)
+             ORDER BY timestamp_ns ASC, event_id ASC",
+        )
+        .map_err(db_error)?;
+    let rows = stmt
+        .query_map(
+            params![FAMILIARITY_OBSERVATION_EVENT, FAMILIARITY_RESET_EVENT],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(db_error)?;
+
     let mut learned = FamiliarityStore::new();
     let mut observation_events = 0usize;
     let mut reset_events = 0usize;
     let mut observations_removed_by_resets = 0usize;
 
-    for event in events {
-        match event.event.kind.as_str() {
+    for row in rows {
+        let (event_id, kind, arguments_json) = row.map_err(db_error)?;
+        let arguments: BTreeMap<String, String> =
+            serde_json::from_str(&arguments_json).map_err(|error| {
+                decode_error(&kind, &event_id, format!("invalid event arguments: {error}"))
+            })?;
+        let payload = arguments.get(FAMILIARITY_PAYLOAD_KEY).ok_or_else(|| {
+            decode_error(
+                &kind,
+                &event_id,
+                format!("missing `{FAMILIARITY_PAYLOAD_KEY}` payload"),
+            )
+        })?;
+
+        match kind.as_str() {
             FAMILIARITY_OBSERVATION_EVENT => {
-                let stored: StoredObservation = serde_json::from_value(event.event.payload.clone())
-                    .map_err(|error| decode_error(&event.event.kind, &event.event.id.to_string(), error))?;
+                let stored: StoredObservation = serde_json::from_str(payload).map_err(|error| {
+                    decode_error(&kind, &event_id, error.to_string())
+                })?;
                 if stored.schema != FAMILIARITY_SCHEMA_VERSION {
-                    return Ok(invalidated(
-                        stored.schema,
-                        &event.event.kind,
-                        &event.event.id.to_string(),
-                    ));
+                    return Ok(invalidated(stored.schema, &kind, &event_id));
                 }
                 learned.record(stored.observation)?;
                 observation_events += 1;
             }
             FAMILIARITY_RESET_EVENT => {
-                let stored: StoredReset = serde_json::from_value(event.event.payload.clone())
-                    .map_err(|error| decode_error(&event.event.kind, &event.event.id.to_string(), error))?;
+                let stored: StoredReset = serde_json::from_str(payload).map_err(|error| {
+                    decode_error(&kind, &event_id, error.to_string())
+                })?;
                 if stored.schema != FAMILIARITY_SCHEMA_VERSION {
-                    return Ok(invalidated(
-                        stored.schema,
-                        &event.event.kind,
-                        &event.event.id.to_string(),
-                    ));
+                    return Ok(invalidated(stored.schema, &kind, &event_id));
                 }
                 observations_removed_by_resets += learned.forget(&stored.scope);
                 reset_events += 1;
             }
-            _ => {}
+            _ => unreachable!("SQL query restricts familiarity event kinds"),
         }
     }
 
@@ -147,6 +187,11 @@ pub fn replay_familiarity(store: &SqliteStore) -> Result<FamiliarityReplay> {
         reset_events,
         observations_removed_by_resets,
     })
+}
+
+fn timestamp_from_ms(value: u64) -> Timestamp {
+    let capped = value.min(i64::MAX as u64 / 1_000_000);
+    Timestamp::from_nanos((capped as i64).saturating_mul(1_000_000))
 }
 
 fn invalidated(found_schema: String, event_kind: &str, event_id: &str) -> FamiliarityReplay {
@@ -160,18 +205,27 @@ fn invalidated(found_schema: String, event_kind: &str, event_id: &str) -> Famili
     }
 }
 
-fn encode_error(error: serde_json::Error) -> AikitError {
-    AikitError::new(
-        "familiarity.event_encode_failed",
-        format!("could not encode familiarity event payload: {error}"),
-    )
+fn encode<T: Serialize>(value: &T) -> Result<String> {
+    serde_json::to_string(value).map_err(|error| {
+        AikitError::new(
+            "familiarity.event_encode_failed",
+            format!("could not encode familiarity event payload: {error}"),
+        )
+    })
 }
 
-fn decode_error(kind: &str, event_id: &str, error: serde_json::Error) -> AikitError {
+fn decode_error(kind: &str, event_id: &str, detail: impl Into<String>) -> AikitError {
     AikitError::new(
         "familiarity.event_decode_failed",
-        format!("could not decode {kind} event {event_id}: {error}"),
+        format!("could not decode {kind} event {event_id}: {}", detail.into()),
     )
     .with("event_kind", kind)
     .with("event_id", event_id)
+}
+
+fn db_error(error: rusqlite::Error) -> AikitError {
+    AikitError::new(
+        "familiarity.event_query_failed",
+        format!("could not replay familiarity events: {error}"),
+    )
 }
