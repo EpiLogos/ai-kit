@@ -123,6 +123,10 @@ impl From<&HarnessComposition> for HarnessCompositionPointer {
 pub struct ActorBootstrap {
     pub version: String,
     pub project: ProjectBinding,
+    /// Run is client-supplied operational identity. AIKit preserves it verbatim;
+    /// changing session/model/harness/body never manufactures a replacement Run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<ResourceRef>,
     pub profiles: Vec<String>,
     pub scopes: Vec<ScopeResolution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,6 +152,7 @@ pub struct ActorBootstrap {
 
 #[derive(Debug, Clone, Default)]
 pub struct ActorBootstrapRequest<'a> {
+    pub run: Option<ResourceRef>,
     pub selected_harness: Option<ResourceRef>,
     pub selected_model: Option<ResourceRef>,
     pub agent_session: Option<String>,
@@ -175,6 +180,7 @@ pub fn project_actor_bootstrap(
     Ok(ActorBootstrap {
         version: ACTOR_BOOTSTRAP_VERSION.to_string(),
         project: resolution.project_binding.clone(),
+        run: request.run,
         profiles: resolution.profiles.iter().map(ToString::to_string).collect(),
         scopes: resolution.scopes.clone(),
         agent,
@@ -244,7 +250,7 @@ fn summarize_set(resources: &[ResolvedResource]) -> ResourceSetSummary {
     let mut unresolved = 0;
     let mut unavailable = 0;
     for resource in resources {
-        match resource.availability {
+        match &resource.availability {
             Availability::Available => available += 1,
             Availability::Unresolved { .. } => unresolved += 1,
             Availability::Unavailable { .. } => unavailable += 1,
@@ -272,9 +278,30 @@ fn validate_body_identity(
     agent: Option<&BootstrapReference>,
     agency: Option<&BootstrapReference>,
 ) -> Result<()> {
-    if let Some(selected) = request.selected_harness.as_ref() {
-        if selected != &body.harness {
-            return Err(identity_error("harness", selected, &body.harness));
+    let selected_harness = request.selected_harness.as_ref().ok_or_else(|| {
+        AikitError::new(
+            "bootstrap.runtime_body_without_harness_binding",
+            "a HarnessComposition pointer requires an explicit resolved Harness binding",
+        )
+    })?;
+    if selected_harness != &body.harness {
+        return Err(identity_error("harness", selected_harness, &body.harness));
+    }
+    if let (Some(selected_model), Some(body_model)) =
+        (request.selected_model.as_ref(), body.model.as_ref())
+    {
+        if selected_model != body_model {
+            return Err(identity_error("model", selected_model, body_model));
+        }
+    }
+    if let (Some(session), Some(body_session)) =
+        (request.agent_session.as_ref(), body.session.as_ref())
+    {
+        if session != body_session {
+            return Err(AikitError::new(
+                "bootstrap.runtime_body_session_mismatch",
+                format!("runtime body session {body_session} does not match bound session {session}"),
+            ));
         }
     }
     if let Some(project) = body.project.as_ref() {
