@@ -5,9 +5,7 @@
 //! and mouse presentations share. Resolver, provider and ranking semantics remain
 //! in the application/core layer.
 
-use aikit_core::resource::{
-    ActionStageability, ContextualActionDescriptor, ResourceSearchHit, ResourceRef,
-};
+use aikit_core::resource::{ContextualActionDescriptor, ResourceSearchHit, ResourceRef};
 
 use crate::application::PresentationMode;
 
@@ -125,7 +123,7 @@ pub fn mouse_set_presentation(mode: PresentationMode) -> NavigationIntent {
 mod tests {
     use super::*;
     use aikit_core::resource::{
-        ResourceDescriptor, ResourceKind, ResourceRecord, ResourceSearchIndex,
+        ActionStageability, ResourceDescriptor, ResourceKind, ResourceRecord, ResourceSearchIndex,
     };
 
     fn rref(raw: &str) -> ResourceRef {
