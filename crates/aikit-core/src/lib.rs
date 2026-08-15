@@ -39,6 +39,7 @@ pub mod knowledge;
 pub mod knowledge_okf;
 pub mod knowledge_source_pool;
 pub mod knowledge_wiki;
+pub mod knowledge_wiki_index;
 pub mod lifecycle;
 pub mod platform;
 pub mod policy;
@@ -136,6 +137,11 @@ pub use knowledge_wiki::{
     WikiConstellationMember, WikiConstellationReturn, WikiEdge, WikiEdgeOrigin, WikiFrame,
     WikiNode, WikiObject, WikiProvenanceRef, WikiReading as SemanticWikiReading, WikiSpace,
     WikiSurfaceKind, OKF_WIKI_PROFILE,
+};
+pub use knowledge_wiki_index::{
+    SemanticWikiIndex, WikiIndexStatus, WikiLocalWhole, WikiMutationProposal, WikiNeighbour,
+    WikiObjectEnvelope, WikiRelationDirection, WikiSearchHit, DEFAULT_WIKI_NEIGHBOUR_LIMIT,
+    DEFAULT_WIKI_SEARCH_LIMIT, SEMANTIC_WIKI_INDEX_VERSION,
 };
 pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
 pub use platform::{MuxKind, Platform, TargetId};
