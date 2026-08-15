@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 
+use aikit_core::project::ProjectBindingLocator;
 use aikit_tui::{PaletteApplicationService, ProjectWorldApplicationService};
 
 #[test]
@@ -16,14 +17,18 @@ fn shared_application_service_discloses_project_local_world_without_tui_resoluti
     let world = service.project_world().unwrap();
 
     assert_eq!(world.context.project_root.as_deref(), Some(dir.path()));
-    assert_eq!(world.project.root.as_deref(), Some(dir.path()));
+    assert!(matches!(
+        &world.project.locator,
+        ProjectBindingLocator::LocalDirectory { path } if path == dir.path()
+    ));
     assert!(world
         .capability_horizon
         .capabilities
         .iter()
         .any(|resource| resource.resource.as_str() == "skill/rust/review"));
+    assert!(world.resolution_basis.scopes.is_empty());
     assert!(world
         .warnings
         .iter()
-        .any(|warning| warning.contains("empty scope layers")));
+        .any(|warning| warning.contains("scope-layer stack")));
 }
