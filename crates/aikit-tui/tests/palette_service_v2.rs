@@ -2,10 +2,13 @@ mod common;
 
 use common::*;
 
+use aikit_core::projection::ActivationEffect;
 use aikit_core::scope::ScopeKind;
 use aikit_core::search::UsageStats;
+use aikit_core::TargetId;
 use aikit_tui::{
-    ActivationIntent, PaletteApplicationService, StagedChanges, TuiApplicationService,
+    ActivationIntent, ClientEffect, PaletteApplicationService, StagedChanges,
+    TuiApplicationService,
 };
 
 #[test]
@@ -86,6 +89,32 @@ fn production_adapter_previews_target_activation_semantics_before_apply() {
     assert_eq!(backend.applied[0].0, ScopeKind::Project);
     assert_eq!(backend.applied[0].1.len(), 1);
     assert!(backend.applied[0].1[0].enable);
+}
+
+#[test]
+fn production_adapter_never_calls_restart_only_effect_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = Fixture::new(dir.path(), vec![skill("skill/rust/review")]);
+    backend.effects = vec![ClientEffect::new(
+        TargetId::claude_code(),
+        ActivationEffect::restart_client("Claude Code"),
+    )];
+    let mut staged = StagedChanges::default();
+    staged.stage(
+        aikit_core::resource::ResourceRef::parse("skill/rust/review").unwrap(),
+        ActivationIntent::Enable,
+    );
+
+    let preview = {
+        let service = PaletteApplicationService::new(&mut backend);
+        service
+            .preview_composition(ScopeKind::Project, &staged)
+            .unwrap()
+    };
+
+    assert!(preview.summary.contains("restart Claude Code"));
+    assert!(!preview.summary.contains(": live"));
+    assert!(backend.applied.is_empty());
 }
 
 #[test]
