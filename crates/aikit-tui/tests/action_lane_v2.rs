@@ -227,12 +227,19 @@ fn compose_preview_confirm_apply_refreshes_the_resolved_project_world() {
     let world = surface
         .project_world()
         .expect("the Project-bound action lane must retain its resolved Project world");
-    assert!(world.capability_horizon.effective.contains(&resource));
-    let declared = world
+    assert!(world
         .capability_horizon
-        .declared
+        .capabilities
         .iter()
-        .find(|entry| entry.resource == resource)
-        .expect("applied authored intent should appear in refreshed Project world");
-    assert!(declared.enabled);
+        .any(|capability| capability.resource == resource));
+    assert!(world
+        .projection
+        .active_capabilities
+        .iter()
+        .any(|active| active == resource.as_str()));
+    assert_eq!(
+        world.effective_revision.resolution_hash,
+        backend.view().hash.to_string(),
+        "the read model must refresh to the same effective resolution that was applied"
+    );
 }
