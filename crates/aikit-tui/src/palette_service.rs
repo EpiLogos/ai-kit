@@ -7,11 +7,17 @@
 //! backend's ResourceRef-native shallow navigation index; the old capsule matcher
 //! remains available only to the V1 compatibility presentation.
 
-use aikit_core::id::CapsuleId;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use aikit_core::id::{CapsuleId, EventId};
 use aikit_core::resource::{
     ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass, ResourceRef,
+    ResourceSearchIndex,
 };
-use aikit_core::{AikitError, Result};
+use aikit_core::{
+    AikitError, FamiliarityContext, FamiliarityObservation, Result,
+    DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+};
 use serde_json::{json, to_string_pretty, to_value, Value};
 
 use crate::application::{
@@ -38,11 +44,39 @@ impl<'a> PaletteApplicationService<'a> {
     pub fn backend_mut(&mut self) -> &mut dyn PaletteBackend {
         self.backend
     }
+
+    fn navigation_index(&self) -> Result<ResourceSearchIndex> {
+        let mut index = self.backend.navigation_index();
+        if let Some(familiarity) = self.backend.familiarity()? {
+            index.apply_familiarity(
+                &familiarity,
+                &familiarity_context(self.backend.context()),
+                now_ms(),
+                DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+            );
+        }
+        Ok(index)
+    }
+
+    fn record_action_use(&mut self, action: &ContextualActionDescriptor) -> Result<()> {
+        let observation = FamiliarityObservation::destination(
+            EventId::generate().as_str().to_string(),
+            action.subject.clone(),
+            familiarity_context(self.backend.context()),
+            now_ms(),
+        )
+        .via_action(action.action.clone())
+        .from_surface(
+            ResourceRef::parse("surface/aikit/tui")
+                .expect("static V2 TUI surface ResourceRef must be valid"),
+        );
+        self.backend.record_familiarity(observation)
+    }
 }
 
 impl TuiApplicationService for PaletteApplicationService<'_> {
     fn search(&self, query: &str) -> Result<ResourceListReadModel> {
-        let index = self.backend.navigation_index();
+        let index = self.navigation_index()?;
         let resources = index
             .search(query, 256)
             .into_iter()
@@ -79,7 +113,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
             }));
         }
 
-        let index = self.backend.navigation_index();
+        let index = self.navigation_index()?;
         let hit = index
             .search(resource.as_str(), 256)
             .into_iter()
@@ -96,6 +130,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
             "label": hit.label,
             "summary": hit.summary,
             "context": to_value(self.backend.context()).map_err(json_error)?,
+            "ranking": hit.ranking,
             "navigationEvidence": hit.navigation_evidence,
         }))
     }
@@ -150,6 +185,18 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
                 format!("{resource} is not in the resolved catalog"),
             )
         })?;
+        let learned = self
+            .backend
+            .familiarity()?
+            .map(|store| {
+                store.assess_destination(
+                    resource,
+                    &familiarity_context(self.backend.context()),
+                    now_ms(),
+                    DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+                )
+            })
+            .filter(|assessment| !assessment.is_empty());
         Ok(json!({
             "resource": resource.as_str(),
             "name": entry.name,
@@ -159,6 +206,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
             "declaredEnabled": view.is_declared_enabled(&capsule),
             "unavailable": view.unavailable.get(&capsule).map(|reason| format!("{reason:?}")),
             "related": view.related_to(&capsule).into_iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            "learnedAccessibility": learned,
             "resolutionHash": view.hash.to_string(),
         }))
     }
@@ -208,22 +256,22 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
     }
 
     fn contextual_actions(&self, resource: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
-        let index = self.backend.navigation_index();
+        let index = self.navigation_index()?;
         Ok(index.actions_for(resource).into_iter().cloned().collect())
     }
 
     fn invoke_action(&mut self, action: &ContextualActionDescriptor) -> Result<ActionOutcome> {
-        match action.action.as_str() {
-            "action/project/open" => Ok(ActionOutcome::Opened {
+        let outcome = match action.action.as_str() {
+            "action/project/open" => ActionOutcome::Opened {
                 subject: action.subject.clone(),
                 summary: format!("opened {}", action.subject),
-            }),
+            },
             "action/capability/explain" => {
                 let explanation = self.explain(&action.subject)?;
-                Ok(ActionOutcome::Explained {
+                ActionOutcome::Explained {
                     subject: action.subject.clone(),
                     summary: to_string_pretty(&explanation).map_err(json_error)?,
-                })
+                }
             }
             "action/capability/toggle" => {
                 let capsule = capsule_id(&action.subject)?;
@@ -232,7 +280,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
                 } else {
                     ActivationIntent::Enable
                 };
-                Ok(ActionOutcome::Staged {
+                ActionOutcome::Staged {
                     resource: action.subject.clone(),
                     intent,
                     summary: format!(
@@ -243,14 +291,36 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
                         },
                         action.subject
                     ),
-                })
+                }
             }
-            other => Err(AikitError::new(
-                "tui.action_not_implemented",
-                format!("canonical Action {other} has no TUI application operation"),
-            )),
-        }
+            other => {
+                return Err(AikitError::new(
+                    "tui.action_not_implemented",
+                    format!("canonical Action {other} has no TUI application operation"),
+                ))
+            }
+        };
+        self.record_action_use(action)?;
+        Ok(outcome)
     }
+}
+
+fn familiarity_context(context: &aikit_core::ContextDescriptor) -> FamiliarityContext {
+    FamiliarityContext {
+        project: context.project_id.as_ref().and_then(|project| {
+            ResourceRef::parse(&format!("project/{project}")).ok()
+        }),
+        actor: None,
+        agency: None,
+        focus: context.task.clone(),
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or_default()
 }
 
 fn summary_with_navigation_evidence(summary: String, evidence: &[NavigationEvidence]) -> String {
