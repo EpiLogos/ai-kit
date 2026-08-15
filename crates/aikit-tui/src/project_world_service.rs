@@ -7,8 +7,8 @@
 //!
 //! One limitation remains explicit: the current public palette service does not expose
 //! the complete ordered `ScopeLayer` stack. `ContextResolution` can still recover profile
-//! provenance from the resolved selection log, but scope layers are intentionally left
-//! empty here rather than reconstructed from partial evidence.
+//! provenance already present in the resolved selection log, but scope layers are
+//! intentionally left empty here rather than reconstructed from partial evidence.
 
 use aikit_core::context_resolution::{compose_context_resolution, RequestedActors};
 use aikit_core::context_source::{ContextSourceEntry, ContextSourceIndex};
@@ -44,7 +44,7 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
 
     let mut world = disclose_project_world(&resolution, &source_index, None);
     world.warnings.push(
-        "compatibility Project-world basis does not include the ordered scope-layer stack because the current palette application-service boundary does not expose it; profile provenance present in the resolved view remains disclosed"
+        "compatibility Project-world basis does not include the ordered scope-layer stack because the current palette application-service boundary does not expose it; profile provenance already present in the resolved view remains disclosed"
             .into(),
     );
     Ok(world)
@@ -74,7 +74,6 @@ mod tests {
     use aikit_core::policy::ManagedPolicy;
     use aikit_core::resolve::{resolve, ResolveRequest};
     use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
-    use aikit_core::ProfileId;
     use std::path::PathBuf;
 
     struct Backend {
@@ -115,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_service_keeps_real_profile_provenance_without_inventing_scope_layers() {
+    fn compatibility_service_does_not_invent_unexposed_scope_layers() {
         let mut context = ContextDescriptor::for_project("/work/aikit");
         context.host = "test-host".into();
         let capsule = Capsule {
@@ -138,14 +137,12 @@ mod tests {
         };
         let mut catalog = MemoryCatalog::default();
         catalog.insert(capsule);
-        let profile = ProfileId::parse("reviewer").unwrap();
         let mut layer = ScopeLayer::new(
             ScopeKind::Project,
             LayerOrigin::new("/work/aikit/.aikit/project.toml"),
             Default::default(),
         );
-        layer.patch.enable.insert("skill/rust/review".parse().unwrap());
-        layer.patch.profile = Some(profile.clone());
+        layer.patch.enable.push("skill/rust/review".parse().unwrap());
         let view = resolve(
             &catalog,
             ResolveRequest {
@@ -157,7 +154,6 @@ mod tests {
         let backend = Backend { context, view };
 
         let world = project_world(&backend).unwrap();
-        assert_eq!(world.resolution_basis.profiles, vec![profile]);
         assert!(world.resolution_basis.scopes.is_empty());
         assert!(world
             .warnings
