@@ -21,7 +21,7 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use aikit_core::error::AikitError;
 use aikit_core::id::CapsuleId;
 use aikit_core::resource::{ActionStageability, ResourceKind, ResourceRef};
-use aikit_core::Result;
+use aikit_core::{ProjectWorldReadModel, Result};
 
 use crate::app::{Mode, Status};
 use crate::application::{
@@ -36,6 +36,7 @@ use crate::host::UiHost;
 use crate::layout::Layout;
 use crate::navigation::AmbientContext;
 use crate::palette_service::PaletteApplicationService;
+use crate::project_world_api::ProjectWorldApplicationService;
 use crate::scope::ScopeSelector;
 use crate::search::Row;
 use crate::tree::{Node, NodeKind, TreeEffect, TreeState};
@@ -103,6 +104,7 @@ pub struct SurfaceController {
     host: UiHost,
     semantic: TuiState,
     runtime: TuiRuntime,
+    project_world: ProjectWorldReadModel,
     palette: PaletteController,
     tree: TreeController,
 }
@@ -111,6 +113,10 @@ impl SurfaceController {
     pub fn new<B: SurfaceBackend>(backend: &mut B, request: SurfaceRequest) -> Result<Self> {
         let palette = PaletteController::new(backend, request.palette_request())?;
         let tree_state = backend.surface_tree()?;
+        let project_world = {
+            let service = PaletteApplicationService::new(backend);
+            service.project_world()?
+        };
         let semantic = TuiState {
             query: palette.state().query.clone(),
             read_model: compatibility_read_model(backend, &tree_state),
@@ -125,6 +131,7 @@ impl SurfaceController {
             host: request.host,
             semantic,
             runtime: TuiRuntime::new(),
+            project_world,
             palette,
             tree,
         };
@@ -147,6 +154,10 @@ impl SurfaceController {
         &self.semantic
     }
 
+    pub fn project_world(&self) -> &ProjectWorldReadModel {
+        &self.project_world
+    }
+
     pub fn palette(&self) -> &PaletteController {
         &self.palette
     }
@@ -164,7 +175,12 @@ impl SurfaceController {
                     && !self.palette.state().in_manage_lane() =>
             {
                 let ambient = ambient_context(&self.palette.state().descriptor);
-                v2_render::draw_with_context(frame, &self.semantic, &ambient)
+                v2_render::draw_with_project_world(
+                    frame,
+                    &self.semantic,
+                    &ambient,
+                    &self.project_world,
+                )
             }
             SurfaceMode::Palette => self.palette.draw(frame),
             SurfaceMode::Tree => self.tree.draw(frame),
@@ -800,6 +816,10 @@ impl SurfaceController {
             state.status = Some(Status::info(message));
         }
 
+        self.project_world = {
+            let service = PaletteApplicationService::new(backend);
+            service.project_world()?
+        };
         self.replace_tree(backend.surface_tree()?, backend);
         let query = self.semantic.query.clone();
         self.dispatch_semantic(backend, UiAction::SetQuery(query))?;
