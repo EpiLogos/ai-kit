@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod actor_bootstrap;
 pub mod arg;
 pub mod capsule;
 pub mod catalog;
@@ -52,6 +53,11 @@ pub mod trust;
 
 pub use error::{AikitError, Result};
 
+pub use actor_bootstrap::{
+    project_actor_bootstrap, ActorBootstrap, ActorBootstrapRequest, BootstrapReference,
+    HarnessCompositionPointer, ResourceSetSummary, RuntimeBodyInspection, ACTOR_BOOTSTRAP_VERSION,
+    BOOTSTRAP_RESOURCE_SAMPLE_LIMIT,
+};
 pub use capsule::{
     BypassPolicy, Capsule, Facets, Facing, FailurePolicy, HookPhase, Kind, LanguageFacet, Maturity,
     Payload, Requirement, Surface,
