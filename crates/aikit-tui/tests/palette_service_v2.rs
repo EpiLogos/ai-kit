@@ -145,3 +145,28 @@ fn production_adapter_explain_context_and_relations_are_resolved_read_models() {
     assert_eq!(relations.subject, subject);
     assert!(relations.value.get("related").is_some());
 }
+
+#[test]
+fn generic_host_explain_and_relations_do_not_fall_through_capsule_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = Fixture::new(dir.path(), vec![skill("skill/rust/review")]);
+    let host = aikit_core::resource::ResourceRef::parse("host/test-host").unwrap();
+    let service = PaletteApplicationService::new(&mut backend);
+
+    let disclosure = service.context_disclosure(&host).unwrap();
+    assert_eq!(disclosure["resource"], host.as_str());
+    assert_eq!(disclosure["kind"], "host");
+    assert!(disclosure.get("ranking").is_some());
+
+    let explanation = service.explain(&host).unwrap();
+    assert_eq!(explanation["resource"], host.as_str());
+    assert_eq!(explanation["kind"], "host");
+    assert!(explanation.get("eligibility").is_some());
+    assert!(explanation.get("contextualActions").is_some());
+    assert!(explanation.get("learnedAccessibility").is_some());
+
+    let relations = service.relations(&host).unwrap();
+    assert_eq!(relations.subject, host);
+    assert!(relations.value.get("contextualActions").is_some());
+    assert!(relations.value.get("resolverRelated").is_some());
+}
