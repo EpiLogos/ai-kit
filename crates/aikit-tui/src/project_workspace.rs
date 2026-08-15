@@ -155,7 +155,7 @@ mod tests {
             project: Some(ProjectRef::parse("project:aikit").unwrap()),
             scope: None,
         };
-        entry.visibility = AgentVisibility::MetadataOnly;
+        entry.privacy.agent_visibility = AgentVisibility::MetadataOnly;
         entry.disclosure = DisclosureState {
             exists: true,
             known_to_exist: true,
