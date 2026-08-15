@@ -2,9 +2,8 @@ mod common;
 
 use common::*;
 
-use aikit_core::{
-    RelationQuery, ResourceRef, SourceAuthority,
-};
+use aikit_core::resource::{ResourceRef, SourceAuthority};
+use aikit_core::RelationQuery;
 use aikit_tui::{KnowledgeNavigationService, PaletteApplicationService};
 
 #[test]
