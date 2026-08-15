@@ -14,6 +14,7 @@ use aikit_core::scope::ScopeKind;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::PaletteBackend;
+use crate::navigation::resolved_navigation_index;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectWorldIdentity {
@@ -148,7 +149,7 @@ impl ProjectWorldReadModel {
     pub fn from_backend(backend: &dyn PaletteBackend) -> Self {
         let context = backend.context();
         let view = backend.view();
-        let index = backend.navigation_index();
+        let index = resolved_navigation_index(backend);
 
         let project_resources = ProjectWorldResourceSet::from_index(
             &index,
