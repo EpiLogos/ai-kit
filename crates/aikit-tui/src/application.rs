@@ -226,6 +226,14 @@ pub trait TuiApplicationService {
     fn history(&self, resource: Option<&ResourceRef>) -> Result<Vec<HistoryEntry>>;
     fn relations(&self, resource: &ResourceRef) -> Result<RelationReadModel>;
 
+    /// Record that the actor actually traversed/opened this Resource. Cursor
+    /// movement and mere search visibility are deliberately not observations.
+    /// Minimal/test services remain source-compatible and deterministic via the
+    /// no-op default; durable backends may append typed familiarity evidence.
+    fn observe_resource_use(&mut self, _resource: &ResourceRef) -> Result<()> {
+        Ok(())
+    }
+
     /// Canonical Actions currently applicable to this Resource in this context.
     /// The default keeps existing service implementations source-compatible while
     /// richer backends opt into the V2 Action field.
@@ -351,6 +359,7 @@ pub enum UiAction {
     InvokeAction(ResourceRef),
     ActionFinished(ActionOutcome),
     OpenSelection,
+    ResourceUseObserved(ResourceRef),
     Back,
     SetMutationScope(ScopeKind),
     SetPresentation(PresentationMode),
@@ -379,6 +388,9 @@ pub enum UiAction {
 pub enum UiEffect {
     Search {
         query: String,
+    },
+    ObserveResourceUse {
+        resource: ResourceRef,
     },
     LoadContextualActions {
         subject: ResourceRef,
@@ -419,6 +431,10 @@ impl TuiRuntime {
     ) -> Result<UiAction> {
         match effect {
             UiEffect::Search { query } => Ok(UiAction::SearchFinished(service.search(&query)?)),
+            UiEffect::ObserveResourceUse { resource } => {
+                service.observe_resource_use(&resource)?;
+                Ok(UiAction::ResourceUseObserved(resource))
+            }
             UiEffect::LoadContextualActions { subject } => Ok(UiAction::ContextualActionsLoaded {
                 actions: service.contextual_actions(&subject)?,
                 subject,
@@ -585,6 +601,14 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 relation_view: state.relation_view,
                 workspace_section: state.workspace_section,
             });
+            if let Some(resource) = state.selected.clone() {
+                effects.push(UiEffect::ObserveResourceUse { resource });
+            }
+        }
+        UiAction::ResourceUseObserved(_resource) => {
+            // Observation is evidence, not a new navigation or status transition.
+            // The stable ResourceRef is carried back only so effect execution can
+            // be tested without inventing a second acknowledgement identity.
         }
         UiAction::Back => {
             if state.action_query.take().is_some() {
