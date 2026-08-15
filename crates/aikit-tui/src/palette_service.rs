@@ -18,6 +18,7 @@ use crate::application::{
     TuiApplicationService,
 };
 use crate::backend::{PaletteBackend, Toggle};
+use crate::navigation::resolved_navigation_index;
 use crate::project_world::ProjectWorldReadModel;
 use crate::staging::is_on;
 
@@ -49,7 +50,7 @@ impl<'a> PaletteApplicationService<'a> {
 
 impl TuiApplicationService for PaletteApplicationService<'_> {
     fn search(&self, query: &str) -> Result<ResourceListReadModel> {
-        let index = self.backend.navigation_index();
+        let index = resolved_navigation_index(self.backend);
         let resources = index
             .search(query, 256)
             .into_iter()
@@ -86,7 +87,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
             }));
         }
 
-        let index = self.backend.navigation_index();
+        let index = resolved_navigation_index(self.backend);
         let hit = index
             .search(resource.as_str(), 256)
             .into_iter()
@@ -206,7 +207,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
     }
 
     fn contextual_actions(&self, resource: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
-        let index = self.backend.navigation_index();
+        let index = resolved_navigation_index(self.backend);
         Ok(index.actions_for(resource).into_iter().cloned().collect())
     }
 
