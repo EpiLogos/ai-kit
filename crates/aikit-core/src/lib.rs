@@ -35,6 +35,7 @@ pub mod frecency;
 pub mod guidance;
 pub mod hooks;
 pub mod id;
+pub mod knowledge;
 pub mod lifecycle;
 pub mod platform;
 pub mod policy;
@@ -114,6 +115,12 @@ pub use hooks::{
 pub use id::{
     CapsuleId, ContextId, EventId, GenerationId, InboxId, ProcedureId, ProfileId, ProjectId,
     RegistrySource, Revision, SessionId,
+};
+pub use knowledge::{
+    ContextPackBudget, KnowledgeContextPack, KnowledgeReading, KnowledgeRelationView,
+    KnowledgeRoute, KnowledgeRouteStep, ProvenanceClass, RelationDirection, RelationEdge,
+    RelationNode, RelationOrigin, RelationQuery, DEFAULT_RELATION_DEPTH,
+    DEFAULT_RELATION_EDGE_BUDGET, DEFAULT_RELATION_NODE_BUDGET,
 };
 pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
 pub use platform::{MuxKind, Platform, TargetId};
