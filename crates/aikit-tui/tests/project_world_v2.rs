@@ -3,7 +3,7 @@ mod common;
 use common::*;
 
 use aikit_core::scope::ScopeKind;
-use aikit_tui::{PaletteBackend, ProjectWorldReadModel, Toggle};
+use aikit_tui::{PaletteApplicationService, PaletteBackend, ProjectWorldReadModel, Toggle};
 
 fn fixture() -> (tempfile::TempDir, Fixture) {
     let dir = tempfile::tempdir().unwrap();
@@ -72,4 +72,14 @@ fn declared_capability_intent_and_effective_activation_remain_distinct_axes() {
     assert!(declared.enabled);
     assert_eq!(declared.scope, ScopeKind::Project);
     assert!(applied.capability_horizon.effective.contains(&resource));
+}
+
+#[test]
+fn workspace_consumes_project_world_through_the_existing_application_service() {
+    let (_dir, mut backend) = fixture();
+    let service = PaletteApplicationService::new(&mut backend);
+    let world = service.project_world();
+
+    assert_eq!(world.project.label, "payments");
+    assert_eq!(world.revision, format!("{}:{}", service.backend().view().catalog_revision, service.backend().view().hash));
 }
