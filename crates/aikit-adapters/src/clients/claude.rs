@@ -39,6 +39,7 @@ use aikit_core::projection::{
 use aikit_core::{AikitError, Result};
 
 use super::agent_skills;
+use super::bootstrap;
 use super::ClientAdapter;
 
 /// The client's own name for itself in a hook command.
@@ -184,6 +185,17 @@ impl TargetAdapter for ClaudeAdapter {
                 mode,
                 overlays,
             )?);
+        }
+
+        if let Some(actor) = context.actor_bootstrap.as_ref() {
+            plan = plan.with_item(bootstrap::managed_bootstrap_item(
+                Path::new(SKILLS_PREFIX),
+                actor,
+            )?);
+            plan = plan.with_note(
+                "the managed `aikit-context` Agent Skill carries the resolved actor seed in this generation; richer AIKit state remains on-demand"
+                    .to_string(),
+            );
         }
 
         Ok(plan)
@@ -341,7 +353,7 @@ pub fn merge_dispatcher_entries(existing: Option<&str>) -> Result<String> {
     }
 
     // Remove any event key that ended up empty after the sweep, so an old install
-    // does not leave `"PreCompact": []` behind forever.
+    // does not leave `\"PreCompact\": []` behind forever.
     hooks.retain(|_, entries| entries.as_array().is_none_or(|a| !a.is_empty()));
 
     let mut rendered = serde_json::to_string_pretty(&document).map_err(|e| {
