@@ -49,6 +49,7 @@ pub mod host;
 pub mod layout;
 pub mod navigation;
 pub mod palette_service;
+pub mod project_workspace;
 pub mod project_world_api;
 pub mod project_world_service;
 pub mod render;
@@ -87,6 +88,7 @@ pub use navigation::{
     AmbientContext, NavigationIntent,
 };
 pub use palette_service::PaletteApplicationService;
+pub use project_workspace::{ComposeHorizon, ProjectWorkspaceSelection, ProjectWorkspaceState};
 pub use project_world_api::ProjectWorldApplicationService;
 pub use scope::ScopeSelector;
 pub use search::{rank, Matcher, Row};
