@@ -38,7 +38,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
 use serde_json::Value;
@@ -135,9 +135,7 @@ fn make_executable(path: &Path) {
 }
 
 #[cfg(target_os = "macos")]
-fn wait_for_pty_ui(
-    child: &mut std::process::Child,
-) -> std::thread::JoinHandle<Vec<u8>> {
+fn wait_for_pty_ui(child: &mut std::process::Child) -> std::thread::JoinHandle<Vec<u8>> {
     let mut stdout = child.stdout.take().expect("PTY stdout is captured");
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
@@ -171,12 +169,30 @@ fn finish_pty(
     mut child: std::process::Child,
     stdout_reader: std::thread::JoinHandle<Vec<u8>>,
 ) -> (std::process::ExitStatus, Vec<u8>, Vec<u8>) {
-    let status = child.wait().expect("the PTY child exits");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("the PTY child can be polled") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            break child.wait().expect("the timed-out PTY child can be reaped");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
     let stdout = stdout_reader.join().expect("the PTY output reader exits");
     let mut stderr = Vec::new();
     if let Some(mut stream) = child.stderr.take() {
         stream.read_to_end(&mut stderr).unwrap();
     }
+    assert!(
+        !timed_out,
+        "the PTY child did not exit after the scripted interaction: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
     (status, stdout, stderr)
 }
 
@@ -339,6 +355,7 @@ fn resolved_context(view: &ResolvedView, roots: &BTreeMap<CapsuleId, PathBuf>) -
     ResolvedContext {
         view: view.clone(),
         capsule_roots: roots.clone(),
+        actor_bootstrap: None,
     }
 }
 
@@ -1526,7 +1543,12 @@ fn an_unreviewed_script_is_refused_without_confirmation_even_when_inactive() {
     // `script/rust/cargo-nextest` is in the seed registry but reviewed by nobody,
     // and no profile here enables it, so it is inactive. Running it by id must be
     // refused before the payload is ever executed.
-    let (out, v) = run_json(&fixture, repo.path(), &[], &["run", "script/rust/cargo-nextest", "--json"]);
+    let (out, v) = run_json(
+        &fixture,
+        repo.path(),
+        &[],
+        &["run", "script/rust/cargo-nextest", "--json"],
+    );
     assert_eq!(v["ok"], false, "an unreviewed script must not run: {v}");
     assert_eq!(
         v["error"]["code"], "trust.required",
@@ -1551,7 +1573,12 @@ fn confirming_crosses_the_gate_so_the_failure_is_no_longer_about_trust() {
         &fixture,
         repo.path(),
         &[],
-        &["run", "script/rust/cargo-nextest", "--confirm", "--json"],
+        &[
+            "run",
+            "script/rust/cargo-nextest",
+            "--confirm",
+            "--json",
+        ],
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     if let Ok(v) = serde_json::from_str::<Value>(stdout.trim()) {
@@ -1784,8 +1811,7 @@ enable = ["script/acceptance/cargo-test"]
 "#,
     )
     .unwrap();
-    let (status_out, status) =
-        run_json(&home, forked.path(), &[], &["status", "--json"]);
+    let (status_out, status) = run_json(&home, forked.path(), &[], &["status", "--json"]);
     expect_ok(&status_out, &status, "resolve an inherited project fork");
     let mut ids: Vec<&str> = status["data"]["active"]
         .as_array()
@@ -1862,8 +1888,7 @@ fn a_real_skillset_failure_stays_inside_the_resident_tree_surface() {
 
     let home = fresh_home();
     let project = project_repo();
-    let create =
-        aikit_store::skillsets::plan_create(&home.home, "existing", &[], &[]).unwrap();
+    let create = aikit_store::skillsets::plan_create(&home.home, "existing", &[], &[]).unwrap();
     aikit_store::procedure::ProcedureRunner::new(&home.home)
         .run(&create)
         .unwrap();
@@ -1888,10 +1913,7 @@ fn a_real_skillset_failure_stays_inside_the_resident_tree_surface() {
         .chain("existing".chars().map(KeyCode::Char))
         .chain(std::iter::once(KeyCode::Enter))
     {
-        assert_eq!(
-            surface.handle(&mut service, key(code)).unwrap(),
-            SurfaceStep::Continue
-        );
+        assert_eq!(surface.handle(&mut service, key(code)).unwrap(), SurfaceStep::Continue);
     }
 
     assert_eq!(surface.mode(), SurfaceMode::Tree);
@@ -1961,7 +1983,7 @@ fn the_real_binary_completes_palette_tree_stage_palette_apply_in_one_lifecycle()
         std::thread::sleep(Duration::from_millis(75));
     }
     std::thread::sleep(Duration::from_millis(250));
-    input.write_all(b"\x1b").unwrap(); // Successful apply returns to resting palette.
+    input.write_all(b"\x11").unwrap(); // Ctrl-Q is the explicit exit action.
     drop(input);
 
     let (status, stdout, stderr) = finish_pty(child, stdout_reader);
@@ -2036,12 +2058,8 @@ fn the_real_binary_tree_applies_a_keyboard_staged_capability_through_a_pty() {
         input.flush().unwrap();
         std::thread::sleep(Duration::from_millis(75));
     }
-    // Apply now keeps the unified popup open on its palette result. Two Escapes
-    // also close deterministically if navigation failed and left us in the tree.
     std::thread::sleep(Duration::from_millis(250));
-    let _ = input.write_all(b"\x1b");
-    std::thread::sleep(Duration::from_millis(75));
-    let _ = input.write_all(b"\x1b");
+    input.write_all(b"\x11").unwrap(); // Ctrl-Q exits from whichever resident surface remains.
     drop(input);
     let (pty_status, pty_stdout, pty_stderr) = finish_pty(child, stdout_reader);
     assert!(
@@ -2133,9 +2151,7 @@ fn the_real_binary_tree_applies_an_exact_mouse_staged_capability_through_a_pty()
         std::thread::sleep(Duration::from_millis(100));
     }
     std::thread::sleep(Duration::from_millis(250));
-    let _ = input.write_all(b"\x1b");
-    std::thread::sleep(Duration::from_millis(75));
-    let _ = input.write_all(b"\x1b");
+    input.write_all(b"\x11").unwrap(); // Ctrl-Q is the explicit exit action.
     drop(input);
     let (status, stdout, stderr) = finish_pty(child, stdout_reader);
     assert!(
