@@ -12,14 +12,19 @@ fn shared_application_service_discloses_project_local_world_without_tui_resoluti
         dir.path(),
         vec![skill("skill/rust/review"), script("script/ops/deploy")],
     );
+    let expected_root = backend
+        .descriptor
+        .project_root
+        .clone()
+        .expect("fixture has a project root");
 
     let service = PaletteApplicationService::new(&mut backend);
     let world = service.project_world().unwrap();
 
-    assert_eq!(world.context.project_root.as_deref(), Some(dir.path()));
+    assert_eq!(world.context.project_root.as_ref(), Some(&expected_root));
     assert!(matches!(
         &world.project.locator,
-        ProjectBindingLocator::LocalDirectory { path } if path == dir.path()
+        ProjectBindingLocator::LocalDirectory { path } if path == &expected_root
     ));
     assert!(world
         .capability_horizon
