@@ -55,7 +55,7 @@ fn zero_query_learned_usage_stays_labelled_as_evidence_not_preference() {
 }
 
 #[test]
-fn production_adapter_previews_and_applies_through_the_same_backend_scope_writer() {
+fn production_adapter_previews_target_activation_semantics_before_apply() {
     let dir = tempfile::tempdir().unwrap();
     let mut backend = Fixture::new(
         dir.path(),
@@ -73,6 +73,8 @@ fn production_adapter_previews_and_applies_through_the_same_backend_scope_writer
     };
     assert_eq!(preview.scope, ScopeKind::Project);
     assert_eq!(preview.staged, staged);
+    assert!(preview.summary.contains("target effects:"));
+    assert!(preview.summary.contains("live"));
     assert!(backend.applied.is_empty());
 
     let receipt = {
