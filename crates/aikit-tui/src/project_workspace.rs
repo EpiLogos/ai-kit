@@ -165,17 +165,17 @@ mod tests {
         let sources = index.horizon(&HorizonRequest::human(Some(
             ProjectRef::parse("project:aikit").unwrap(),
         )));
+        let context = ContextDescriptor::for_project("/work/aikit");
 
         ProjectWorldReadModel {
             version: PROJECT_WORLD_VERSION.into(),
             project: ProjectBinding::from_legacy_context(
                 ProjectRef::parse("project:aikit").unwrap(),
                 ProjectConstituentRef::parse("source:working-tree").unwrap(),
-                None,
-                Some("/work/aikit".into()),
+                &context,
             )
             .unwrap(),
-            context: ContextDescriptor::for_project("/work/aikit"),
+            context,
             resolution_basis: ResolutionBasisDisclosure {
                 profiles: Vec::new(),
                 scopes: Vec::new(),
