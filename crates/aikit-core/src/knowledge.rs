@@ -13,31 +13,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::familiarity::{
-    FamiliarityContext, FamiliarityObservation, RouteStepEvidence,
+use crate::familiarity::{FamiliarityContext, FamiliarityObservation, RouteStepEvidence};
+use crate::resource::{
+    ProviderRef, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
 };
-use crate::resource::{ProviderRef, ResourceKind, ResourceRef, SourceRef};
 use crate::{AikitError, Result};
 
 pub const DEFAULT_RELATION_DEPTH: u8 = 1;
 pub const DEFAULT_RELATION_NODE_BUDGET: usize = 96;
 pub const DEFAULT_RELATION_EDGE_BUDGET: usize = 192;
-
-/// Epistemic provenance class used by Explain/History/navigation projections.
-///
-/// This does not state whether a claim is true. It says how the displayed datum
-/// entered the present read model, so authored state cannot be confused with an
-/// observation, provider derivation, generated projection or learned ergonomic
-/// evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProvenanceClass {
-    Authored,
-    Observed,
-    Derived,
-    Generated,
-    Learned,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -51,23 +35,25 @@ pub enum RelationDirection {
 ///
 /// `relation` itself remains provider vocabulary. AIKit does not normalize a
 /// GitNexus `CALLS`, Wiki edge type and source citation into one universal edge.
+/// `authority` reuses the canonical Resource-source epistemic classes so Explain,
+/// History and Knowledge navigation cannot drift into parallel vocabularies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelationOrigin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lens: Option<String>,
-    pub provenance: ProvenanceClass,
+    pub authority: SourceAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
 }
 
 impl RelationOrigin {
-    pub fn new(provenance: ProvenanceClass) -> Self {
+    pub fn new(authority: SourceAuthority) -> Self {
         Self {
             provider: None,
             lens: None,
-            provenance,
+            authority,
             revision: None,
         }
     }
@@ -251,24 +237,23 @@ pub struct KnowledgeRouteStep {
     pub provider: Option<ProviderRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lens: Option<String>,
-    /// The relation/transition used to arrive at this step, in the vocabulary of
-    /// the provider or ProjectMap binding that supplied it.
+    /// Provider/native relation used to arrive here, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
-    pub provenance: ProvenanceClass,
+    pub authority: SourceAuthority,
 }
 
 impl KnowledgeRouteStep {
-    pub fn new(resource: ResourceRef, provenance: ProvenanceClass) -> Self {
+    pub fn new(resource: ResourceRef, authority: SourceAuthority) -> Self {
         Self {
             resource,
             provider: None,
             lens: None,
             transition: None,
             revision: None,
-            provenance,
+            authority,
         }
     }
 }
@@ -359,7 +344,7 @@ pub struct KnowledgeReading {
     pub revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<String>,
-    pub provenance: ProvenanceClass,
+    pub authority: SourceAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(default)]
@@ -423,7 +408,7 @@ mod tests {
     #[test]
     fn relation_view_refuses_edges_to_invisible_nodes_and_respects_budget() {
         let query = RelationQuery {
-            focus: r("wiki-node/auth"),
+            focus: r("knowledge-node/auth"),
             depth: 1,
             max_nodes: 2,
             max_edges: 1,
@@ -431,36 +416,36 @@ mod tests {
         };
         let mut view = KnowledgeRelationView::focus_only(
             query,
-            RelationNode::new(r("wiki-node/auth"), ResourceKind::KnowledgeNode, "Auth"),
+            RelationNode::new(r("knowledge-node/auth"), ResourceKind::KnowledgeNode, "Auth"),
         )
         .unwrap();
         assert!(view.push_node(RelationNode::new(
-            r("source/spec"),
-            ResourceKind::Source,
+            r("knowledge-source/spec"),
+            ResourceKind::KnowledgeSource,
             "Spec",
         )));
         assert!(!view.push_node(RelationNode::new(
-            r("source/extra"),
-            ResourceKind::Source,
+            r("knowledge-source/extra"),
+            ResourceKind::KnowledgeSource,
             "Extra",
         )));
         assert!(view.truncated);
 
         view.push_edge(RelationEdge::new(
-            r("wiki-node/auth"),
-            r("source/spec"),
+            r("knowledge-node/auth"),
+            r("knowledge-source/spec"),
             "cites",
             RelationDirection::Outgoing,
-            RelationOrigin::new(ProvenanceClass::Authored).in_lens("semantic-wiki"),
+            RelationOrigin::new(SourceAuthority::Authored).in_lens("semantic-wiki"),
         ))
         .unwrap();
         assert!(view
             .push_edge(RelationEdge::new(
-                r("wiki-node/auth"),
-                r("source/missing"),
+                r("knowledge-node/auth"),
+                r("knowledge-source/missing"),
                 "cites",
                 RelationDirection::Outgoing,
-                RelationOrigin::new(ProvenanceClass::Authored),
+                RelationOrigin::new(SourceAuthority::Authored),
             ))
             .is_err());
     }
@@ -477,24 +462,24 @@ mod tests {
             },
         );
         route.steps.push(KnowledgeRouteStep {
-            resource: r("wiki-node/auth"),
+            resource: r("knowledge-node/auth"),
             provider: Some(ProviderRef::parse("provider/wiki").unwrap()),
             lens: Some("semantic-wiki".into()),
             transition: None,
             revision: Some("wiki-r3".into()),
-            provenance: ProvenanceClass::Authored,
+            authority: SourceAuthority::Authored,
         });
         route.steps.push(KnowledgeRouteStep {
-            resource: r("code-symbol/session-auth"),
+            resource: r("code-reference/session-auth"),
             provider: Some(ProviderRef::parse("provider/gitnexus").unwrap()),
             lens: Some("code-index".into()),
             transition: Some("project-map-binding".into()),
             revision: Some("git-abc".into()),
-            provenance: ProvenanceClass::Derived,
+            authority: SourceAuthority::Derived,
         });
 
         let observation = route.familiarity_observation("event/1", 42).unwrap();
-        assert_eq!(observation.destination, r("code-symbol/session-auth"));
+        assert_eq!(observation.destination, r("code-reference/session-auth"));
         assert_eq!(observation.observed_at_ms, 42);
         match observation.use_kind {
             crate::FamiliarityUse::Route { route, steps } => {
