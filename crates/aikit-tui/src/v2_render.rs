@@ -77,7 +77,22 @@ fn draw_shell(
     let layout = Layout::for_width(inner.width);
     let panes = layout.split(inner);
     frame.render_widget(query_line(state, &theme), panes.query);
-    draw_resources(frame, state, &theme, panes.list);
+
+    let compact_world_lines = if panes.preview.is_none()
+        && state.presentation == PresentationMode::Workspace
+    {
+        world
+            .map(|world| project_world_lines(state, world))
+            .filter(|lines| !lines.is_empty())
+    } else {
+        None
+    };
+    if let Some(lines) = compact_world_lines {
+        frame.render_widget(project_world_pane(lines, &theme), panes.list);
+    } else {
+        draw_resources(frame, state, &theme, panes.list);
+    }
+
     if let Some(preview) = panes.preview {
         frame.render_widget(preview_pane(state, &theme, world), preview);
     }
@@ -247,26 +262,9 @@ fn preview_pane<'a>(
 
     if state.presentation == PresentationMode::Workspace {
         if let Some(world) = world {
-            let world_lines = project_world_lines(state, world);
-            if !world_lines.is_empty() {
-                let lines = world_lines
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, line)| {
-                        if index == 0 {
-                            Line::from(Span::styled(line, theme.heading()))
-                        } else if line.starts_with("Intent") {
-                            Line::from(Span::styled(line, theme.accent()))
-                        } else if line.starts_with("Effective") {
-                            Line::from(Span::styled(line, theme.base()))
-                        } else if line.starts_with("Boundary") {
-                            Line::from(Span::styled(line, theme.dim()))
-                        } else {
-                            Line::from(Span::raw(line))
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                return Paragraph::new(lines).wrap(Wrap { trim: false });
+            let lines = project_world_lines(state, world);
+            if !lines.is_empty() {
+                return project_world_pane(lines, theme);
             }
         }
     }
@@ -326,6 +324,27 @@ fn preview_pane<'a>(
             lines.push(Line::from(Span::styled("no matching contextual actions", theme.dim())));
         }
     }
+    Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+fn project_world_pane(lines: Vec<String>, theme: &Theme) -> Paragraph<'static> {
+    let lines = lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                Line::from(Span::styled(line, theme.heading()))
+            } else if line.starts_with("Intent") {
+                Line::from(Span::styled(line, theme.accent()))
+            } else if line.starts_with("Effective") {
+                Line::from(Span::styled(line, theme.base()))
+            } else if line.starts_with("Boundary") {
+                Line::from(Span::styled(line, theme.dim()))
+            } else {
+                Line::from(Span::raw(line))
+            }
+        })
+        .collect::<Vec<_>>();
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
