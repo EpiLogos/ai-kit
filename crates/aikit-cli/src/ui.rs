@@ -11,9 +11,21 @@
 //! `display-popup`, and the inline and fullscreen hosts draw into the terminal
 //! that is already there.
 
-use aikit_core::platform::MuxKind;
-use aikit_core::Result;
+use std::path::PathBuf;
 
+use aikit_core::id::{CapsuleId, GenerationId};
+use aikit_core::platform::MuxKind;
+use aikit_core::projection::ResolvedView;
+use aikit_core::resource::ResourceSearchIndex;
+use aikit_core::scope::{ScopeKind, ScopeLayer};
+use aikit_core::search::SearchDoc;
+use aikit_core::{FamiliarityObservation, FamiliarityStore, Result};
+
+use aikit_store::{
+    familiarity_observation_event, replay_familiarity, EventRecorder, FamiliarityReplay,
+};
+
+use aikit_tui::backend::{JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle};
 use aikit_tui::host::{TerminalProfile, UiHost};
 use aikit_tui::surface::{SurfaceBackend, SurfaceRequest};
 use aikit_tui::tree::TreeEffect;
@@ -55,6 +67,101 @@ impl SurfaceBackend for Service {
         };
         aikit_store::procedure::ProcedureRunner::new(self.home()).run(&procedure)?;
         self.refresh()
+    }
+}
+
+/// V2 surface decorator that gives the shared Service one additional operational
+/// responsibility: replaying and recording learned navigation evidence.
+///
+/// This stays at the host/application boundary rather than inside the semantic
+/// resolver. Familiarity is rebuildable evidence, so the underlying Service and
+/// every non-V2 consumer keep the same canonical resolution semantics.
+struct V2SurfaceService<'a> {
+    service: &'a mut Service,
+}
+
+impl<'a> V2SurfaceService<'a> {
+    fn new(service: &'a mut Service) -> Self {
+        Self { service }
+    }
+}
+
+impl PaletteBackend for V2SurfaceService<'_> {
+    fn context(&self) -> &aikit_core::ContextDescriptor {
+        <Service as PaletteBackend>::context(self.service)
+    }
+
+    fn view(&self) -> &ResolvedView {
+        <Service as PaletteBackend>::view(self.service)
+    }
+
+    fn scope_layers(&self) -> Option<&[ScopeLayer]> {
+        <Service as PaletteBackend>::scope_layers(self.service)
+    }
+
+    fn documents(&self) -> Vec<SearchDoc> {
+        <Service as PaletteBackend>::documents(self.service)
+    }
+
+    fn navigation_index(&self) -> ResourceSearchIndex {
+        <Service as PaletteBackend>::navigation_index(self.service)
+    }
+
+    fn familiarity(&self) -> Result<Option<FamiliarityStore>> {
+        match replay_familiarity(self.service.index())? {
+            FamiliarityReplay::Loaded { store, .. } => Ok(Some(store)),
+            // Schema evolution invalidates only the learned influence. The user
+            // still gets the canonical navigation field and can inspect/reset the
+            // old event evidence independently.
+            FamiliarityReplay::Invalidated { .. } => Ok(None),
+        }
+    }
+
+    fn record_familiarity(&mut self, observation: FamiliarityObservation) -> Result<()> {
+        let event = familiarity_observation_event(observation)?;
+        EventRecorder::new(self.service.index(), self.service.home().event_log()).record(&event)
+    }
+
+    fn capsule(&self, id: &CapsuleId) -> Option<&aikit_core::Capsule> {
+        <Service as PaletteBackend>::capsule(self.service, id)
+    }
+
+    fn preview(&self, scope: ScopeKind, toggles: &[Toggle]) -> Result<Projected> {
+        <Service as PaletteBackend>::preview(self.service, scope, toggles)
+    }
+
+    fn apply(&mut self, scope: ScopeKind, toggles: &[Toggle]) -> Result<GenerationId> {
+        <Service as PaletteBackend>::apply(self.service, scope, toggles)
+    }
+
+    fn start(&mut self, intent: &RunIntent) -> Result<JobOutput> {
+        <Service as PaletteBackend>::start(self.service, intent)
+    }
+
+    fn recent(&self) -> Vec<RunIntent> {
+        <Service as PaletteBackend>::recent(self.service)
+    }
+
+    fn promotion_drafts(&self) -> Vec<PromotionDraft> {
+        <Service as PaletteBackend>::promotion_drafts(self.service)
+    }
+
+    fn promote(&mut self, draft: &PromotionDraft) -> Result<CapsuleId> {
+        <Service as PaletteBackend>::promote(self.service, draft)
+    }
+
+    fn open_source(&mut self, id: &CapsuleId) -> Result<PathBuf> {
+        <Service as PaletteBackend>::open_source(self.service, id)
+    }
+}
+
+impl SurfaceBackend for V2SurfaceService<'_> {
+    fn surface_tree(&self) -> Result<aikit_tui::tree::TreeState> {
+        <Service as SurfaceBackend>::surface_tree(self.service)
+    }
+
+    fn apply_tree_effect(&mut self, effect: TreeEffect) -> Result<()> {
+        <Service as SurfaceBackend>::apply_tree_effect(self.service, effect)
     }
 }
 
@@ -116,7 +223,8 @@ pub fn run_surface(
     if opening_tree {
         request = request.opening_tree();
     }
-    aikit_tui::surface::run_on_terminal(service, request)
+    let mut backend = V2SurfaceService::new(service);
+    aikit_tui::surface::run_on_terminal(&mut backend, request)
 }
 
 /// Open the palette over the service and run it to completion.
