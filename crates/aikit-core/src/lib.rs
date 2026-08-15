@@ -36,6 +36,9 @@ pub mod guidance;
 pub mod hooks;
 pub mod id;
 pub mod knowledge;
+pub mod knowledge_okf;
+pub mod knowledge_source_pool;
+pub mod knowledge_wiki;
 pub mod lifecycle;
 pub mod platform;
 pub mod policy;
@@ -121,6 +124,18 @@ pub use knowledge::{
     KnowledgeRoute, KnowledgeRouteStep, RelationDirection, RelationEdge, RelationNode,
     RelationOrigin, RelationQuery, DEFAULT_RELATION_DEPTH, DEFAULT_RELATION_EDGE_BUDGET,
     DEFAULT_RELATION_NODE_BUDGET,
+};
+pub use knowledge_okf::{validate_okf, OkfDocument, OKF_VERSION};
+pub use knowledge_source_pool::{
+    material_for_actor, NativeSourcePoolProvider, SourceBinding, SourceHit, SourceMaterial,
+    SourcePool, SourcePoolProvider, SourceProviderCapabilities, SourceProviderStatus,
+    SourceSearchMode, SourceVisibility, BKMR_GLADE_CONFORMANCE_VERSION,
+};
+pub use knowledge_wiki::{
+    parse_wiki_objects, OkfWikiBundle, SemanticRevision, WikiConstellation,
+    WikiConstellationMember, WikiConstellationReturn, WikiEdge, WikiEdgeOrigin, WikiFrame,
+    WikiNode, WikiObject, WikiProvenanceRef, WikiReading as SemanticWikiReading, WikiSpace,
+    WikiSurfaceKind, OKF_WIKI_PROFILE,
 };
 pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
 pub use platform::{MuxKind, Platform, TargetId};
