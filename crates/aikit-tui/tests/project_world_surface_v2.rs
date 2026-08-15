@@ -137,6 +137,36 @@ fn wide_workspace_renders_project_compose_and_projection_from_one_world() {
 }
 
 #[test]
+fn staged_composition_survives_project_compose_projection_navigation() {
+    let mut backend = fixture();
+    let mut surface = SurfaceController::new(
+        &mut backend,
+        SurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
+    )
+    .unwrap();
+    let selected = surface
+        .semantic()
+        .selected
+        .clone()
+        .expect("review query should select the review capability");
+
+    surface
+        .handle(&mut backend, ctrl(KeyCode::Char(' ')))
+        .unwrap();
+    assert_eq!(surface.semantic().staged.len(), 1);
+    assert!(surface.semantic().staged.get(&selected).is_some());
+
+    for section in ['1', '2', '4', '2'] {
+        surface
+            .handle(&mut backend, ctrl(KeyCode::Char(section)))
+            .unwrap();
+        assert_eq!(surface.semantic().staged.len(), 1);
+        assert!(surface.semantic().staged.get(&selected).is_some());
+    }
+    assert!(backend.applied.is_empty());
+}
+
+#[test]
 fn narrow_workspace_progressively_discloses_project_world_without_a_second_controller() {
     let mut backend = fixture();
     let mut surface = SurfaceController::new(
