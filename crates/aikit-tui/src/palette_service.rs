@@ -58,6 +58,20 @@ impl<'a> PaletteApplicationService<'a> {
         Ok(index)
     }
 
+    fn record_destination_use(&mut self, destination: ResourceRef) -> Result<()> {
+        let observation = FamiliarityObservation::destination(
+            EventId::generate().as_str().to_string(),
+            destination,
+            familiarity_context(self.backend.context()),
+            now_ms(),
+        )
+        .from_surface(
+            ResourceRef::parse("surface/aikit/tui")
+                .expect("static V2 TUI surface ResourceRef must be valid"),
+        );
+        self.backend.record_familiarity(observation)
+    }
+
     fn record_action_use(&mut self, action: &ContextualActionDescriptor) -> Result<()> {
         let observation = FamiliarityObservation::destination(
             EventId::generate().as_str().to_string(),
@@ -253,6 +267,10 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
                     .collect::<Vec<_>>(),
             }),
         })
+    }
+
+    fn observe_resource_use(&mut self, resource: &ResourceRef) -> Result<()> {
+        self.record_destination_use(resource.clone())
     }
 
     fn contextual_actions(&self, resource: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
