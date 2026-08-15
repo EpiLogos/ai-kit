@@ -357,3 +357,32 @@ pub fn materialize(items: &[aikit_core::projection::ProjectionItem], root: &Path
         }
     }
 }
+
+/// Return the exact materialized tree beneath `root`, relative to `root`.
+/// Directories are represented with a trailing slash and the result is sorted so
+/// golden projection tests are deterministic across filesystems.
+pub fn tree_of(root: &Path) -> Vec<String> {
+    fn visit(root: &Path, current: &Path, entries: &mut Vec<String>) {
+        let mut children = std::fs::read_dir(current)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .collect::<Vec<_>>();
+        children.sort_by_key(|entry| entry.file_name());
+
+        for entry in children {
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                entries.push(format!("{}/", relative.display()));
+                visit(root, &path, entries);
+            } else {
+                entries.push(relative.display().to_string());
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    visit(root, root, &mut entries);
+    entries.sort();
+    entries
+}
