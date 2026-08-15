@@ -38,7 +38,7 @@ use aikit_core::resource::{
 };
 use aikit_core::scope::{ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
-use aikit_core::Result;
+use aikit_core::{FamiliarityObservation, FamiliarityStore, Result};
 use aikit_store::inbox::{Candidate, CandidateState, PromotionEdits, Similarity};
 
 /// The mask a secret wears everywhere it is displayed.
@@ -444,6 +444,20 @@ pub trait PaletteBackend {
                 .expect("indexed Capability and Action must form a valid relation");
         }
         index
+    }
+
+    /// Current rebuildable learned-accessibility evidence for this application.
+    /// Backends without persistence remain fully functional and preserve baseline
+    /// deterministic navigation by returning no learned store.
+    fn familiarity(&self) -> Result<Option<FamiliarityStore>> {
+        Ok(None)
+    }
+
+    /// Record one actual destination/route use. The default is deliberately a
+    /// no-op so minimal/test backends need no persistence system just to implement
+    /// the human application contract.
+    fn record_familiarity(&mut self, _observation: FamiliarityObservation) -> Result<()> {
+        Ok(())
     }
 
     /// The full manifest behind a row, for the preview and the argument form.
