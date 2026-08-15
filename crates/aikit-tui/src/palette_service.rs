@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aikit_core::id::{CapsuleId, EventId};
 use aikit_core::resource::{
-    ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass, ResourceRef,
-    ResourceSearchIndex,
+    ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass, ResourceIndex,
+    ResourceRef, ResourceSearchIndex,
 };
 use aikit_core::{
     AikitError, FamiliarityContext, FamiliarityObservation, FamiliarityUse, Result,
@@ -56,6 +56,21 @@ impl<'a> PaletteApplicationService<'a> {
             );
         }
         Ok(index)
+    }
+
+    fn learned_accessibility(&self, resource: &ResourceRef) -> Result<Option<aikit_core::AccessibilityAssessment>> {
+        Ok(self
+            .backend
+            .familiarity()?
+            .map(|store| {
+                store.assess_destination(
+                    resource,
+                    &familiarity_context(self.backend.context()),
+                    now_ms(),
+                    DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+                )
+            })
+            .filter(|assessment| !assessment.is_empty()))
     }
 
     fn record_destination_use(&mut self, destination: ResourceRef) -> Result<()> {
@@ -191,37 +206,59 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
     }
 
     fn explain(&self, resource: &ResourceRef) -> Result<Value> {
-        let capsule = capsule_id(resource)?;
-        let view = self.backend.view();
-        let entry = view.catalog_index.get(&capsule).ok_or_else(|| {
+        let learned = self.learned_accessibility(resource)?;
+        if let Ok(capsule) = CapsuleId::parse(resource.as_str()) {
+            let view = self.backend.view();
+            if let Some(entry) = view.catalog_index.get(&capsule) {
+                return Ok(json!({
+                    "resource": resource.as_str(),
+                    "name": entry.name,
+                    "description": entry.description,
+                    "kind": entry.kind.as_str(),
+                    "active": view.is_active(&capsule),
+                    "declaredEnabled": view.is_declared_enabled(&capsule),
+                    "unavailable": view.unavailable.get(&capsule).map(|reason| format!("{reason:?}")),
+                    "related": view.related_to(&capsule).into_iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                    "learnedAccessibility": learned,
+                    "resolutionHash": view.hash.to_string(),
+                }));
+            }
+        }
+
+        let index = self.navigation_index()?;
+        let record = ResourceIndex::resource(&index, resource).ok_or_else(|| {
             AikitError::new(
-                "tui.resource_not_in_catalog",
-                format!("{resource} is not in the resolved catalog"),
+                "tui.resource_not_in_navigation_index",
+                format!("{resource} is not in the V2 navigation index"),
             )
         })?;
-        let learned = self
-            .backend
-            .familiarity()?
-            .map(|store| {
-                store.assess_destination(
-                    resource,
-                    &familiarity_context(self.backend.context()),
-                    now_ms(),
-                    DEFAULT_FAMILIARITY_HALF_LIFE_MS,
-                )
-            })
-            .filter(|assessment| !assessment.is_empty());
+        let hit = index
+            .search(resource.as_str(), 1)
+            .into_iter()
+            .find(|hit| &hit.resource == resource);
+        let contextual_actions = index
+            .actions_for(resource)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let explanation = record.explanation();
+
         Ok(json!({
             "resource": resource.as_str(),
-            "name": entry.name,
-            "description": entry.description,
-            "kind": entry.kind.as_str(),
-            "active": view.is_active(&capsule),
-            "declaredEnabled": view.is_declared_enabled(&capsule),
-            "unavailable": view.unavailable.get(&capsule).map(|reason| format!("{reason:?}")),
-            "related": view.related_to(&capsule).into_iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            "name": record.descriptor.name,
+            "description": record.descriptor.description,
+            "kind": record.descriptor.kind.as_str(),
+            "owner": explanation.owner,
+            "sources": explanation.sources,
+            "providers": explanation.providers,
+            "eligibility": explanation.eligibility,
+            "authoredPreference": explanation.preference,
+            "annotations": record.descriptor.annotations,
+            "ranking": hit.as_ref().map(|hit| &hit.ranking),
+            "navigationEvidence": hit.as_ref().map(|hit| &hit.navigation_evidence).unwrap_or(&Vec::new()),
+            "contextualActions": contextual_actions,
             "learnedAccessibility": learned,
-            "resolutionHash": view.hash.to_string(),
+            "resolutionHash": self.backend.view().hash.to_string(),
         }))
     }
 
@@ -298,22 +335,40 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
     }
 
     fn relations(&self, resource: &ResourceRef) -> Result<RelationReadModel> {
-        let capsule = capsule_id(resource)?;
-        let view = self.backend.view();
-        if !view.catalog_index.contains_key(&capsule) {
-            return Err(AikitError::new(
-                "tui.resource_not_in_catalog",
-                format!("{resource} is not in the resolved catalog"),
-            ));
-        }
-        Ok(RelationReadModel {
-            subject: resource.clone(),
-            value: json!({
-                "related": view
+        let index = self.navigation_index()?;
+        let record = ResourceIndex::resource(&index, resource).ok_or_else(|| {
+            AikitError::new(
+                "tui.resource_not_in_navigation_index",
+                format!("{resource} is not in the V2 navigation index"),
+            )
+        })?;
+        let explanation = record.explanation();
+        let contextual_actions = index
+            .actions_for(resource)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let resolver_related = CapsuleId::parse(resource.as_str())
+            .ok()
+            .filter(|capsule| self.backend.view().catalog_index.contains_key(capsule))
+            .map(|capsule| {
+                self.backend
+                    .view()
                     .related_to(&capsule)
                     .into_iter()
                     .map(|id| id.to_string())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        Ok(RelationReadModel {
+            subject: resource.clone(),
+            value: json!({
+                "owner": explanation.owner,
+                "sources": explanation.sources,
+                "providers": explanation.providers,
+                "contextualActions": contextual_actions,
+                "resolverRelated": resolver_related,
             }),
         })
     }
