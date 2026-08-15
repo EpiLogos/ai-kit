@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use aikit_core::id::{CapsuleId, GenerationId};
 use aikit_core::platform::MuxKind;
-use aikit_core::projection::ResolvedView;
+use aikit_core::resolve::ResolvedView;
 use aikit_core::resource::ResourceSearchIndex;
 use aikit_core::scope::{ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
