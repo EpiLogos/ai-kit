@@ -1,9 +1,8 @@
-//! Open Knowledge Format v0.2 parsing and validation.
+//! Open Knowledge Format v0.2 data model and validation.
 //!
 //! OKF is intentionally open: `type` is the only universally required field and
-//! unknown producer keys/types are data to preserve, not schema errors. This
-//! module is I/O-free; callers provide Markdown text and receive the parsed
-//! frontmatter plus body.
+//! unknown producer keys/types are data to preserve, not schema errors. Text/YAML
+//! codecs live in `aikit-adapters`; core owns only the validated, I/O-free model.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -20,24 +19,11 @@ pub struct OkfDocument {
 }
 
 impl OkfDocument {
-    pub fn parse(markdown: &str) -> Result<Self> {
-        let (yaml, body) = split_frontmatter(markdown)?;
-        let value: Value = serde_yaml::from_str(yaml).map_err(|error| {
-            AikitError::new(
-                "knowledge.okf_invalid_yaml",
-                format!("malformed OKF YAML frontmatter: {error}"),
-            )
-        })?;
-        let metadata = value.as_object().cloned().ok_or_else(|| {
-            AikitError::new(
-                "knowledge.okf_invalid_frontmatter",
-                "OKF frontmatter must be a YAML mapping",
-            )
-        })?;
+    pub fn new(metadata: Map<String, Value>, body: impl Into<String>) -> Result<Self> {
         validate_okf(&metadata)?;
         Ok(Self {
             metadata,
-            body: body.to_string(),
+            body: body.into(),
         })
     }
 
@@ -58,18 +44,6 @@ impl OkfDocument {
             .and_then(Value::as_array)
             .map(Vec::as_slice)
             .unwrap_or(&[])
-    }
-
-    /// Serialize the complete metadata map again. Formatting may change, but
-    /// unknown keys and values survive semantically unchanged.
-    pub fn to_markdown(&self) -> Result<String> {
-        let yaml = serde_yaml::to_string(&self.metadata).map_err(|error| {
-            AikitError::new(
-                "knowledge.okf_serialize",
-                format!("could not serialize OKF frontmatter: {error}"),
-            )
-        })?;
-        Ok(format!("---\n{}---\n{}", yaml, self.body))
     }
 }
 
@@ -148,63 +122,36 @@ pub fn validate_okf(metadata: &Map<String, Value>) -> Result<()> {
     }
 }
 
-fn split_frontmatter(markdown: &str) -> Result<(&str, &str)> {
-    let markdown = markdown.strip_prefix('\u{feff}').unwrap_or(markdown);
-    let Some(rest) = markdown.strip_prefix("---") else {
-        return Err(AikitError::new(
-            "knowledge.okf_missing_frontmatter",
-            "missing OKF frontmatter envelope",
-        ));
-    };
-    let rest = rest
-        .strip_prefix("\r\n")
-        .or_else(|| rest.strip_prefix('\n'))
-        .ok_or_else(|| {
-            AikitError::new(
-                "knowledge.okf_invalid_frontmatter",
-                "opening OKF frontmatter delimiter must occupy its own line",
-            )
-        })?;
-
-    let mut offset = 0usize;
-    for line in rest.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(|ch| ch == '\r' || ch == '\n');
-        if trimmed.trim() == "---" {
-            let yaml = &rest[..offset];
-            let body = &rest[offset + line.len()..];
-            return Ok((yaml, body));
-        }
-        offset += line.len();
-    }
-
-    Err(AikitError::new(
-        "knowledge.okf_invalid_frontmatter",
-        "missing closing OKF frontmatter delimiter",
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn unknown_types_and_extensions_round_trip() {
-        let input = "---\ntype: Future Knowledge Object\ntitle: Portable\nproducer_extension:\n  nested: [one, two]\n  future_flag: true\n---\n# Body\n";
-        let parsed = OkfDocument::parse(input).unwrap();
+    fn unknown_types_and_extensions_are_valid_core_data() {
+        let metadata = serde_json::json!({
+            "type": "Future Knowledge Object",
+            "title": "Portable",
+            "producer_extension": {"nested": ["one", "two"], "future_flag": true}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let parsed = OkfDocument::new(metadata.clone(), "# Body\n").unwrap();
         assert_eq!(parsed.object_type(), "Future Knowledge Object");
+        assert_eq!(parsed.metadata, metadata);
         assert_eq!(
             parsed.metadata["producer_extension"]["future_flag"],
             Value::Bool(true)
         );
-        let reparsed = OkfDocument::parse(&parsed.to_markdown().unwrap()).unwrap();
-        assert_eq!(reparsed.metadata, parsed.metadata);
-        assert_eq!(reparsed.body, parsed.body);
     }
 
     #[test]
     fn okf_floor_rejects_missing_type_but_not_unknown_fields() {
-        let error = OkfDocument::parse("---\ntitle: No type\nnew_field: 42\n---\nbody")
-            .unwrap_err();
+        let metadata = serde_json::json!({"title":"No type", "new_field":42})
+            .as_object()
+            .unwrap()
+            .clone();
+        let error = OkfDocument::new(metadata, "body").unwrap_err();
         assert_eq!(error.code(), "knowledge.okf_invalid");
     }
 }
