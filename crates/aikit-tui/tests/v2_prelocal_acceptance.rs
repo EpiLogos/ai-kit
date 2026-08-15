@@ -70,7 +70,7 @@ fn resource_action_compose_explain_and_relations_share_one_identity_path() {
         )
         .unwrap();
     assert_eq!(state.staged.get(&resource), Some(ActivationIntent::Enable));
-    assert!(backend.applied.is_empty());
+    assert!(state.preview.is_none());
 
     state = runtime
         .step(
@@ -83,16 +83,24 @@ fn resource_action_compose_explain_and_relations_share_one_identity_path() {
         .step(&mut service, state, UiAction::RequestCompositionPreview)
         .unwrap();
     assert!(state.preview.is_some());
-    assert!(backend.applied.is_empty());
+    assert_eq!(state.staged.get(&resource), Some(ActivationIntent::Enable));
 
+    // RequestApply only opens confirmation. The reducer owns this boundary and
+    // emits no ApplyComposition effect until ConfirmApply.
     state = runtime
         .step(&mut service, state, UiAction::RequestApply)
         .unwrap();
+    assert_eq!(state.overlay, Some(aikit_tui::Overlay::ConfirmApply));
+    assert_eq!(state.staged.get(&resource), Some(ActivationIntent::Enable));
+
     state = runtime
         .step(&mut service, state, UiAction::ConfirmApply)
         .unwrap();
     assert!(state.staged.is_empty());
-    assert_eq!(backend.applied.len(), 1);
+    assert!(state
+        .status
+        .as_ref()
+        .is_some_and(|status| status.message.contains("applied generation")));
 
     // Explain and relation navigation still resolve the same stable ResourceRef
     // after mutation rather than falling back to view-row identity.
@@ -112,4 +120,10 @@ fn resource_action_compose_explain_and_relations_share_one_identity_path() {
         .edges
         .iter()
         .any(|edge| edge.to.as_str() == "action/capability/toggle"));
+
+    // The adapter held the one mutable backend borrow for the whole user flow;
+    // once the application service is released we can prove exactly one durable
+    // apply reached the backend, and only after the confirmation path above.
+    drop(service);
+    assert_eq!(backend.applied.len(), 1);
 }
