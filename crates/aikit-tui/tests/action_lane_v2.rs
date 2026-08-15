@@ -203,25 +203,32 @@ fn compose_preview_confirm_apply_refreshes_the_resolved_project_world() {
     let resource = rref("script/ops/deploy");
 
     surface.handle(&mut backend, key(KeyCode::Char(' '))).unwrap();
-    assert_eq!(surface.semantic().staged.get(&resource), Some(aikit_tui::ActivationIntent::Enable));
+    assert_eq!(
+        surface.semantic().staged.get(&resource),
+        Some(aikit_tui::ActivationIntent::Enable)
+    );
     assert!(!backend.view().is_active(&cid("script/ops/deploy")));
 
     // preview -> confirmation -> durable apply
     surface.handle(&mut backend, ctrl(KeyCode::Char('s'))).unwrap();
-    assert_eq!(surface.semantic().overlay, Some(aikit_tui::Overlay::CompositionPreview));
+    assert_eq!(
+        surface.semantic().overlay,
+        Some(aikit_tui::Overlay::CompositionPreview)
+    );
     surface.handle(&mut backend, ctrl(KeyCode::Char('s'))).unwrap();
-    assert_eq!(surface.semantic().overlay, Some(aikit_tui::Overlay::ConfirmApply));
+    assert_eq!(
+        surface.semantic().overlay,
+        Some(aikit_tui::Overlay::ConfirmApply)
+    );
     surface.handle(&mut backend, ctrl(KeyCode::Char('s'))).unwrap();
 
     assert!(backend.view().is_active(&cid("script/ops/deploy")));
     assert!(surface.semantic().staged.is_empty());
-    assert!(surface
+    let world = surface
         .project_world()
-        .capability_horizon
-        .effective
-        .contains(&resource));
-    let declared = surface
-        .project_world()
+        .expect("the Project-bound action lane must retain its resolved Project world");
+    assert!(world.capability_horizon.effective.contains(&resource));
+    let declared = world
         .capability_horizon
         .declared
         .iter()
