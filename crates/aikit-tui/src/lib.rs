@@ -46,6 +46,7 @@ pub mod backend;
 pub mod event;
 pub mod form;
 pub mod host;
+pub mod knowledge_service;
 pub mod layout;
 pub mod navigation;
 pub mod palette_service;
@@ -82,6 +83,7 @@ pub use backend::{
 pub use event::{EventSource, PaletteEvent, ScriptedEvents};
 pub use form::{ArgForm, RunPreview};
 pub use host::{Escalation, TerminalProfile, UiHost};
+pub use knowledge_service::KnowledgeNavigationService;
 pub use layout::{Glyphs, Layout, Width};
 pub use navigation::{
     keyboard_invoke_action, keyboard_open_hit, keyboard_select_hit, keyboard_set_presentation,
