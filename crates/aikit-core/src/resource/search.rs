@@ -19,6 +19,8 @@ use crate::{AikitError, Result};
 
 use super::{ResourceIndex, ResourceKind, ResourceRecord, ResourceRef};
 
+const FAMILIARITY_EVIDENCE_PREFIX: &str = "familiarity:";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NavigationEvidenceClass {
@@ -213,9 +215,11 @@ impl ResourceSearchIndex {
     /// Apply rebuildable learned-accessibility evidence to this already-resolved
     /// navigation field.
     ///
-    /// Calling this repeatedly is idempotent with respect to navigation evidence:
-    /// prior LearnedUsage summaries are replaced rather than accumulated. The
-    /// canonical resource records are never mutated.
+    /// Calling this repeatedly is idempotent with respect to familiarity evidence:
+    /// only summaries produced by this method are replaced. Other learned evidence
+    /// (for example V1 successful-run history) is retained until it is deliberately
+    /// migrated into the unified observation stream. Canonical resource records are
+    /// never mutated.
     pub fn apply_familiarity(
         &mut self,
         familiarity: &FamiliarityStore,
@@ -224,9 +228,13 @@ impl ResourceSearchIndex {
         half_life_ms: u64,
     ) {
         for indexed in self.resources.values_mut() {
-            indexed
-                .evidence
-                .retain(|evidence| evidence.class != NavigationEvidenceClass::LearnedUsage);
+            indexed.evidence.retain(|evidence| {
+                !(evidence.class == NavigationEvidenceClass::LearnedUsage
+                    && evidence
+                        .detail
+                        .as_deref()
+                        .is_some_and(|detail| detail.starts_with(FAMILIARITY_EVIDENCE_PREFIX)))
+            });
 
             let assessment = familiarity.assess_destination(
                 &indexed.record.descriptor.id,
@@ -240,7 +248,7 @@ impl ResourceSearchIndex {
             }
 
             let mut detail = format!(
-                "{} observed use{}; {} contextual; frecency {:.3}; contextual {:.3}",
+                "{FAMILIARITY_EVIDENCE_PREFIX} {} observed use{}; {} contextual; frecency {:.3}; contextual {:.3}",
                 assessment.observations,
                 if assessment.observations == 1 { "" } else { "s" },
                 assessment.contextual_observations,
