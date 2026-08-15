@@ -4,11 +4,17 @@
 //! semantic, knowledge-graph or QL providers. Deep providers may contribute
 //! already-addressable resources elsewhere; the Quick path only ranks the
 //! descriptors and navigation evidence already present here.
+//!
+//! Familiarity is applied as derived navigation evidence. Search relevance and
+//! authored preference remain lexicographically above learned accessibility, so
+//! repetition can make an otherwise-equivalent destination easier to recover but
+//! can never turn use into authority, preference, eligibility or truth.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::familiarity::{AccessibilityAssessment, FamiliarityContext, FamiliarityStore};
 use crate::{AikitError, Result};
 
 use super::{ResourceIndex, ResourceKind, ResourceRecord, ResourceRef};
@@ -118,6 +124,29 @@ pub enum ResourceSearchHitKind {
     Resource,
 }
 
+/// Explainable ranking inputs for one shallow-search hit.
+///
+/// All learned floating-point assessments are quantised only for deterministic
+/// ordering/display here. Their source observations and full assessment remain in
+/// the familiarity subsystem. No field in this structure changes resource
+/// eligibility, trust or authored state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ResourceRankingSignals {
+    pub text_relevance: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authored_preference_rank: Option<i32>,
+    #[serde(default)]
+    pub learned_observations: usize,
+    #[serde(default)]
+    pub learned_contextual_observations: usize,
+    #[serde(default)]
+    pub learned_frecency_milli: i64,
+    #[serde(default)]
+    pub learned_contextual_frecency_milli: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learned_contextual_fitness_milli: Option<i32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceSearchHit {
     pub resource: ResourceRef,
@@ -125,7 +154,11 @@ pub struct ResourceSearchHit {
     pub hit_kind: ResourceSearchHitKind,
     pub label: String,
     pub summary: String,
+    /// Compatibility/display score for the primary search/navigation signal.
+    /// Ordering additionally uses the explicit fields in `ranking`.
     pub score: i64,
+    #[serde(default)]
+    pub ranking: ResourceRankingSignals,
     #[serde(default)]
     pub navigation_evidence: Vec<NavigationEvidence>,
 }
@@ -134,6 +167,7 @@ pub struct ResourceSearchHit {
 struct IndexedResource {
     record: ResourceRecord,
     evidence: Vec<NavigationEvidence>,
+    familiarity: Option<AccessibilityAssessment>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -150,11 +184,22 @@ impl ResourceSearchIndex {
     ) -> Option<ResourceRecord> {
         let id = record.descriptor.id.clone();
         self.resources
-            .insert(id, IndexedResource { record, evidence })
+            .insert(
+                id,
+                IndexedResource {
+                    record,
+                    evidence,
+                    familiarity: None,
+                },
+            )
             .map(|previous| previous.record)
     }
 
-    pub fn add_evidence(&mut self, resource: &ResourceRef, evidence: NavigationEvidence) -> Result<()> {
+    pub fn add_evidence(
+        &mut self,
+        resource: &ResourceRef,
+        evidence: NavigationEvidence,
+    ) -> Result<()> {
         let Some(indexed) = self.resources.get_mut(resource) else {
             return Err(AikitError::new(
                 "resource.search_unknown_resource",
@@ -165,11 +210,62 @@ impl ResourceSearchIndex {
         Ok(())
     }
 
+    /// Apply rebuildable learned-accessibility evidence to this already-resolved
+    /// navigation field.
+    ///
+    /// Calling this repeatedly is idempotent with respect to navigation evidence:
+    /// prior LearnedUsage summaries are replaced rather than accumulated. The
+    /// canonical resource records are never mutated.
+    pub fn apply_familiarity(
+        &mut self,
+        familiarity: &FamiliarityStore,
+        context: &FamiliarityContext,
+        now_ms: u64,
+        half_life_ms: u64,
+    ) {
+        for indexed in self.resources.values_mut() {
+            indexed
+                .evidence
+                .retain(|evidence| evidence.class != NavigationEvidenceClass::LearnedUsage);
+
+            let assessment = familiarity.assess_destination(
+                &indexed.record.descriptor.id,
+                context,
+                now_ms,
+                half_life_ms,
+            );
+            if assessment.is_empty() {
+                indexed.familiarity = None;
+                continue;
+            }
+
+            let mut detail = format!(
+                "{} observed use{}; {} contextual; frecency {:.3}; contextual {:.3}",
+                assessment.observations,
+                if assessment.observations == 1 { "" } else { "s" },
+                assessment.contextual_observations,
+                assessment.frecency,
+                assessment.contextual_frecency,
+            );
+            if let Some(fitness) = assessment.contextual_fitness_milli {
+                detail.push_str(&format!("; contextual fitness {fitness:.0}/1000"));
+            }
+            indexed.evidence.push(
+                NavigationEvidence::new(NavigationEvidenceClass::LearnedUsage)
+                    .with_detail(detail),
+            );
+            indexed.familiarity = Some(assessment);
+        }
+    }
+
     pub fn insert_action(&mut self, action: ContextualActionDescriptor) -> Result<()> {
         let Some(action_record) = self.resources.get(&action.action) else {
             return Err(AikitError::new(
                 "resource.search_unknown_action",
-                format!("contextual action {} is not present in the resource index", action.action),
+                format!(
+                    "contextual action {} is not present in the resource index",
+                    action.action
+                ),
             ));
         };
         if action_record.record.descriptor.kind != ResourceKind::Action {
@@ -185,7 +281,10 @@ impl ResourceSearchIndex {
         if !self.resources.contains_key(&action.subject) {
             return Err(AikitError::new(
                 "resource.search_unknown_subject",
-                format!("contextual action subject {} is not present in the resource index", action.subject),
+                format!(
+                    "contextual action subject {} is not present in the resource index",
+                    action.subject
+                ),
             ));
         }
         self.actions
@@ -214,14 +313,11 @@ impl ResourceSearchIndex {
 
     /// Search the already-resolved navigation field.
     ///
-    /// An empty query is intentionally not "all resources". It returns only
-    /// destinations with explicit navigation evidence, and every hit carries that
-    /// evidence so learned usage can never masquerade as preference or truth.
-    ///
-    /// Non-empty search returns each canonical ResourceRef at most once. In
-    /// particular, Action applicability is *not* expanded into synthetic
-    /// `(action, subject)` search rows because that would violate stable selection
-    /// identity when the same Action applies to many resources.
+    /// Ordering is deliberately lexicographic rather than a blended magic score:
+    /// primary text/current-navigation relevance → explicit authored preference →
+    /// learned contextual accessibility/fitness → deterministic identity ties.
+    /// This makes it impossible for repetition to outrank a more relevant match or
+    /// authored preference merely by growing a large numeric weight.
     pub fn search(&self, query: &str, limit: usize) -> Vec<ResourceSearchHit> {
         if limit == 0 {
             return Vec::new();
@@ -232,13 +328,7 @@ impl ResourceSearchIndex {
         } else {
             self.query_hits(&query)
         };
-        hits.sort_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| left.label.cmp(&right.label))
-                .then_with(|| left.resource.cmp(&right.resource))
-        });
+        hits.sort_by(compare_hits);
         hits.truncate(limit);
         hits
     }
@@ -273,6 +363,8 @@ impl ResourceSearchIndex {
             .filter_map(|candidate| fuzzy_score(query, candidate))
             .max();
 
+            // Action relationship vocabulary is useful for finding the canonical
+            // Action resource, but it may never create one row per subject.
             if descriptor.kind == ResourceKind::Action {
                 for contextual in self
                     .actions
@@ -313,6 +405,7 @@ impl ResourceIndex for ResourceSearchIndex {
 }
 
 fn resource_hit(indexed: &IndexedResource, score: i64) -> ResourceSearchHit {
+    let familiarity = indexed.familiarity.as_ref();
     ResourceSearchHit {
         resource: indexed.record.descriptor.id.clone(),
         kind: indexed.record.descriptor.kind,
@@ -320,8 +413,72 @@ fn resource_hit(indexed: &IndexedResource, score: i64) -> ResourceSearchHit {
         label: indexed.record.descriptor.name.clone(),
         summary: indexed.record.descriptor.description.clone(),
         score,
+        ranking: ResourceRankingSignals {
+            text_relevance: score,
+            authored_preference_rank: indexed.record.preference.as_ref().map(|value| value.rank),
+            learned_observations: familiarity.map_or(0, |value| value.observations),
+            learned_contextual_observations: familiarity
+                .map_or(0, |value| value.contextual_observations),
+            learned_frecency_milli: familiarity
+                .map_or(0, |value| quantise_milli(value.frecency)),
+            learned_contextual_frecency_milli: familiarity
+                .map_or(0, |value| quantise_milli(value.contextual_frecency)),
+            learned_contextual_fitness_milli: familiarity
+                .and_then(|value| value.contextual_fitness_milli)
+                .map(|value| value.round() as i32),
+        },
         navigation_evidence: indexed.evidence.clone(),
     }
+}
+
+fn compare_hits(left: &ResourceSearchHit, right: &ResourceSearchHit) -> std::cmp::Ordering {
+    right
+        .ranking
+        .text_relevance
+        .cmp(&left.ranking.text_relevance)
+        .then_with(|| {
+            right
+                .ranking
+                .authored_preference_rank
+                .is_some()
+                .cmp(&left.ranking.authored_preference_rank.is_some())
+        })
+        .then_with(|| {
+            right
+                .ranking
+                .authored_preference_rank
+                .unwrap_or_default()
+                .cmp(&left.ranking.authored_preference_rank.unwrap_or_default())
+        })
+        .then_with(|| {
+            right
+                .ranking
+                .learned_contextual_frecency_milli
+                .cmp(&left.ranking.learned_contextual_frecency_milli)
+        })
+        .then_with(|| {
+            right
+                .ranking
+                .learned_contextual_fitness_milli
+                .unwrap_or_default()
+                .cmp(&left.ranking.learned_contextual_fitness_milli.unwrap_or_default())
+        })
+        .then_with(|| {
+            right
+                .ranking
+                .learned_frecency_milli
+                .cmp(&left.ranking.learned_frecency_milli)
+        })
+        .then_with(|| left.label.cmp(&right.label))
+        .then_with(|| left.resource.cmp(&right.resource))
+}
+
+fn quantise_milli(value: f64) -> i64 {
+    let scaled = value * 1_000.0;
+    if !scaled.is_finite() {
+        return 0;
+    }
+    scaled.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64
 }
 
 /// Small deterministic fzf-like subsequence score.
