@@ -18,6 +18,13 @@ pub enum ResourceKind {
     ContextSource,
     Model,
     Harness,
+    /// Addressable composable runtime unit. A Component may expose powers or
+    /// Surfaces but never becomes their semantic identity merely by providing them.
+    Component,
+    /// Runtime service/interface seam against which providers and consumers bind.
+    Contract,
+    /// Encounter/operation locus (CLI, tool, TUI region, API, trajectory, etc.).
+    Surface,
     Host,
     ExecutionOffer,
     KnowledgeSpace,
@@ -42,6 +49,9 @@ impl ResourceKind {
             Self::ContextSource => "context-source",
             Self::Model => "model",
             Self::Harness => "harness",
+            Self::Component => "component",
+            Self::Contract => "contract",
+            Self::Surface => "surface",
             Self::Host => "host",
             Self::ExecutionOffer => "execution-offer",
             Self::KnowledgeSpace => "knowledge-space",
