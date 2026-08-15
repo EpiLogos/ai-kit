@@ -44,6 +44,7 @@
 //! |---|---|
 //! | What is the V2 semantic TUI state/application-service seam? | [`application`] |
 //! | How does the existing shared backend feed the V2 service? | [`palette_service`] |
+//! | What is the resolved Project world shown by Workspace? | [`project_world`] |
 //! | What does a key do? | [`app`], [`event`] |
 //! | Why is this row above that one? | [`search`] |
 //! | What would this toggle actually cost? | [`staging`] |
@@ -64,6 +65,7 @@ pub mod form;
 pub mod host;
 pub mod layout;
 pub mod palette_service;
+pub mod project_world;
 pub mod render;
 pub mod scope;
 pub mod search;
@@ -95,6 +97,11 @@ pub use form::{ArgForm, RunPreview};
 pub use host::{Escalation, TerminalProfile, UiHost};
 pub use layout::{Glyphs, Layout, Width};
 pub use palette_service::PaletteApplicationService;
+pub use project_world::{
+    ActorRuntimeWorld, CapabilityHorizon, DeclaredCapability, GenerationDisclosure,
+    InformationHorizon, ProjectWorldIdentity, ProjectWorldReadModel, ProjectWorldResource,
+    ProjectWorldResourceSet, ProjectionWorld, UnavailableCapability,
+};
 pub use scope::ScopeSelector;
 pub use search::{rank, Matcher, Row};
 pub use staging::{stage, StagedDiff, StagedProblem, StagedSet};
