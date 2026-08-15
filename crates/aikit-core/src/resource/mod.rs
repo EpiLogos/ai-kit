@@ -23,5 +23,5 @@ pub use model::{
 pub use refs::{OwnerRef, ProviderRef, ResourceRef, SourceRef, SourceRevision};
 pub use search::{
     ActionStageability, ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass,
-    ResourceSearchHit, ResourceSearchHitKind, ResourceSearchIndex,
+    ResourceRankingSignals, ResourceSearchHit, ResourceSearchHitKind, ResourceSearchIndex,
 };
