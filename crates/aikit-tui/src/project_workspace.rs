@@ -128,7 +128,7 @@ mod tests {
         DisclosureState, HorizonRequest,
     };
     use aikit_core::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
-    use aikit_core::resource::{ResourceDescriptor, ResourceKind, ResourceRecord};
+    use aikit_core::resource::{Eligibility, ResourceDescriptor, ResourceKind, ResourceRecord};
     use aikit_core::{
         ActorRuntimeDisclosure, CapabilityHorizonDisclosure, EffectiveRevisionDisclosure,
         InformationHorizonDisclosure, ProjectWorldReadModel, ProjectWorldResource,
@@ -140,12 +140,13 @@ mod tests {
     }
 
     fn world_with_source() -> ProjectWorldReadModel {
-        let source_record = ResourceRecord::new(ResourceDescriptor::new(
+        let mut source_record = ResourceRecord::new(ResourceDescriptor::new(
             rref("project:context-source:canon"),
             ResourceKind::ContextSource,
             "Design canon",
             "project design canon",
         ));
+        source_record.eligibility = Eligibility::Eligible;
         let resolved_source = ResolvedResource {
             resource: source_record.clone(),
             availability: Availability::Available,
