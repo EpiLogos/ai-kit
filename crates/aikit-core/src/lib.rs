@@ -7,7 +7,7 @@
 //! user + host + project scope chain + session space + task + target client
 //! ```
 //!
-//! Everything else in AIKit — the registry, the palette, multiplexer
+//! Everything else in AIKit — the registry, the palette, multiplexers,
 //! integrations, the hook bank, the capture pipeline — is a view or a consumer of
 //! that resolution.
 //!
@@ -30,6 +30,7 @@ pub mod context_source;
 pub mod duration;
 pub mod effects;
 pub mod error;
+pub mod familiarity;
 pub mod frecency;
 pub mod guidance;
 pub mod hooks;
@@ -93,6 +94,12 @@ pub use context_source::{
 };
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
+pub use familiarity::{
+    AccessibilityAssessment, AccessibilitySignal, AccessibilitySignalClass, FamiliarityContext,
+    FamiliarityObservation, FamiliaritySnapshot, FamiliaritySnapshotLoad, FamiliarityStore,
+    FamiliarityUse, FitnessEvidence, ForgetScope, RouteStepEvidence,
+    DEFAULT_FAMILIARITY_HALF_LIFE_MS, FAMILIARITY_SCHEMA_VERSION,
+};
 pub use frecency::{Candidate, Jump, Tiebreak};
 pub use guidance::{
     compose, estimate_tokens, Composition, CompositionEntry, CompositionRequest, FragmentStatus,
