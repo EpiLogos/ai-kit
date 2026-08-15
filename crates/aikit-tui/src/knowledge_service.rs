@@ -74,8 +74,7 @@ impl KnowledgeNavigationService for PaletteApplicationService<'_> {
                 action.action.clone(),
                 "contextual-action",
                 RelationDirection::Outgoing,
-                RelationOrigin::new(SourceAuthority::Generated)
-                    .in_lens("aikit-resource-index"),
+                RelationOrigin::new(SourceAuthority::Generated).in_lens("aikit-resource-index"),
             ))? {
                 break;
             }
@@ -95,16 +94,11 @@ impl KnowledgeNavigationService for PaletteApplicationService<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aikit_core::resource::{
-        ActionStageability, ContextualActionDescriptor, ResourceDescriptor, ResourceKind,
-        ResourceRecord, ResourceRef, ResourceSearchIndex,
-    };
-    use aikit_core::{ContextDescriptor, ResolvedView};
-    use aikit_tui_test_support::KnowledgeFixtureBackend;
+    use aikit_core::resource::ResourceRef;
 
-    // Compile-time-only home for the integration assertions lives in the public
-    // tests where the normal palette Fixture already exists. Keeping no duplicate
-    // fake resolver here prevents this module from acquiring a second semantics.
+    // Public integration tests exercise the service with the normal palette
+    // fixtures. This unit test intentionally verifies only the provider-neutral
+    // query contract so the module does not acquire a second fake resolver.
     #[test]
     fn relation_contract_types_are_provider_neutral() {
         let focus = ResourceRef::parse("project/aikit").unwrap();
