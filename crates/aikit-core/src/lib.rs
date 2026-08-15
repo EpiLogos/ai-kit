@@ -22,6 +22,7 @@ pub mod arg;
 pub mod capsule;
 pub mod catalog;
 pub mod composition;
+pub mod composition_view;
 pub mod context;
 pub mod context_resolution;
 pub mod context_source;
@@ -64,6 +65,10 @@ pub use composition::{
     HarnessCompositionRequest, LifetimeOwner, LifetimeOwnerKind, ProjectionBinding,
     RequirementStrength, ResolutionScope, RetractionMode, SurfaceDescriptor, SurfaceKind,
     TargetNativeComponentBinding, HARNESS_COMPOSITION_VERSION,
+};
+pub use composition_view::{
+    diff_harness_compositions, explain_composed_component, ComponentCompositionExplanation,
+    ContractRebinding, HarnessCompositionDiff, RequirementExplanation, RequirementResolution,
 };
 pub use context::{ContextBinding, ContextDescriptor, Isolation};
 pub use context_resolution::{
