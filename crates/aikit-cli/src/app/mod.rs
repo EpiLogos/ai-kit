@@ -39,8 +39,8 @@ use aikit_store::index::Index;
 use aikit_store::registry::{load_project_local, load_registry, RegistryProblem, Snapshot};
 use aikit_store::trust::{TrustSnapshot, TrustStore};
 
-use aikit_adapters::clients::agent_skills;
 use aikit_adapters::clients::broker::BrokerAdapter;
+use aikit_adapters::clients::agent_skills;
 use aikit_adapters::clients::claude::ClaudeAdapter;
 use aikit_adapters::clients::codex::CodexAdapter;
 
@@ -416,7 +416,7 @@ impl Service {
                 .ok_or_else(|| {
                     AikitError::new(
                         "session.unnamed",
-                        "no session was named and the working directory is not inside one",
+                        "no session was named and the working directory is not inside a project",
                     )
                 }),
         }
@@ -501,7 +501,8 @@ impl Service {
                 "session.spec_unreadable",
                 format!("could not read {}: {error}", path.display()),
             )
-            .with("path", path.display().to_string()))?;
+            .with("path", path.display().to_string())
+        })?;
         SessionSpec::from_toml_str(&text)?.compile()
     }
 
@@ -835,6 +836,7 @@ impl Service {
                 "capabilities.not_active",
                 format!("{id} is not active in this context"),
             )
+            .with("capability", id.to_string())
         })?;
         if capability.kind != Kind::Skill {
             return Err(AikitError::new(
@@ -1276,9 +1278,10 @@ impl AikitApplication for Service {
 
     fn run(&mut self, r: RunRequest) -> Result<RunHandle> {
         let id = self.find_runnable(&r.name, &self.view)?;
-        let capsule = self.catalog.get(&id).cloned().ok_or_else(|| {
-            AikitError::new("run.unknown_command", format!("{id} is not loaded"))
-        })?;
+        let capsule =
+            self.catalog.get(&id).cloned().ok_or_else(|| {
+                AikitError::new("run.unknown_command", format!("{id} is not loaded"))
+            })?;
 
         // Honour trust: an unreviewed executable must be confirmed before it
         // runs. This must be computed from the capsule's own trust, NOT from
@@ -1671,7 +1674,7 @@ fn subsequence_score(query: &str, haystack: &str) -> i32 {
         if let Some(&needle) = q.peek() {
             if needle == c {
                 score += match last {
-                    Some(prev) if prev + 1 == i => 3,
+                    Some(prev) if prev + 1 == i => 3, // contiguous
                     _ => 1,
                 };
                 last = Some(i);
@@ -1680,7 +1683,7 @@ fn subsequence_score(query: &str, haystack: &str) -> i32 {
         }
     }
     if q.peek().is_some() {
-        0
+        0 // not all query chars matched
     } else {
         score
     }
