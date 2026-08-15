@@ -67,6 +67,8 @@ Action field
 Context Sources
 retrieved material
 model/harness embodiment
+runtime Components and active HarnessComposition
+Surfaces through which the world is encountered
 Host/world state
 permissions and trust
 familiarity/history
@@ -75,7 +77,9 @@ current unresolved boundaries
 
 AIKit does not make claims about phenomenal subjectivity. It builds the inspectable operating relations from which an artificial actor can meaningfully orient and act.
 
-The design objective is not to stuff a synthetic mind into a harness. It is to make the actor's world, powers, boundaries, provenance, and history **objectively available to cognition**.
+The design objective is to make the actor's world, powers, boundaries, provenance, history, and embodied runtime composition **objectively available to cognition**.
+
+A sufficiently composable runtime also makes some of that embodiment revisable in operation: an authorised actor may inspect, stage, activate, retract, or rebind Components without losing Agent identity or confusing a target-native plugin with the semantic thing it exposes.
 
 ---
 
@@ -95,8 +99,8 @@ HUMAN / PROJECT SOURCES
         ┌────────────┼─────────────┐
         ▼            ▼             ▼
      HARNESS       FACTORY      WORKCELL
-  embodied loop   developmental   material
-                   semantics      execution
+ embodied runtime  developmental   material
+ + composition      semantics      execution
         │            │             │
         └────────────┼─────────────┘
                      ▼
@@ -120,6 +124,8 @@ AIKit owns the semantics and implementation of:
 - Capability selection and dependency resolution;
 - Action indexing and ActionSet exposure without Action ownership;
 - ContextSource eligibility and retrieval access;
+- Harness/component compatibility discovery and effective runtime-composition resolution;
+- Surface discovery and projection bindings without taking ownership of application UI/domain meaning;
 - trust and operational policy;
 - current availability and compatibility;
 - effective operational preference binding;
@@ -147,6 +153,8 @@ AIKit does not own:
 - Agent enduring identity;
 - Agency's semantic meaning where defined by Project/Factory actor systems;
 - application/domain Action meaning or implementation;
+- target-native Component/plugin implementation semantics;
+- harness service/event semantics;
 - Workcell provider planning and material execution;
 - harness loop semantics;
 - model inference;
@@ -155,7 +163,7 @@ AIKit does not own:
 - package-management or dotfile-management systems;
 - secrets as ordinary prose/configuration.
 
-AIKit may index, reference, resolve, retrieve, project, or invoke these things through stable provider contracts.
+AIKit may index, reference, resolve, retrieve, compose, project, or invoke these things through stable provider contracts.
 
 ---
 
@@ -175,7 +183,7 @@ OBSERVED
     discovered from present machine or external state
 
 DERIVED
-    indexed, inferred, ranked, or synthesised by AIKit
+    indexed, inferred, ranked, composed, or synthesised by AIKit
 
 LEARNED
     accumulated from use/evidence over time
@@ -194,7 +202,7 @@ A derived or learned observation may be proposed back to an authored source. It 
 
 V2 should index a wider field of typed resources while preserving source ownership.
 
-At minimum the architecture should be capable of representing references to:
+At minimum the architecture should be capable of representing references/descriptors for:
 
 ```text
 Capability
@@ -204,6 +212,9 @@ Agency / AgencyProfile
 ContextSource
 Model
 Harness
+Component
+Contract / service seam
+Surface
 Host
 Workcell offer / execution-world offer
 ProjectBinding
@@ -212,7 +223,9 @@ Generation
 Procedure
 ```
 
-Not every one of these must be AIKit-native canonical objects. Many are imported descriptors over externally owned identities.
+`HarnessComposition` is normally a derived resolution/read model over these resources and bindings rather than an independently authored canonical resource.
+
+Not every item above must be an AIKit-native canonical object. Many are imported descriptors over externally owned identities.
 
 The resource index answers:
 
@@ -223,17 +236,19 @@ who owns it?
 what revision is it?
 what scopes can refer to it?
 what can supply it?
+what does it require?
+what can it contribute or expose?
 what policies apply?
-how can it be retrieved or invoked?
+how can it be retrieved, activated, projected, or invoked?
 ```
 
 ---
 
 ## 9. Refs and identity
 
-V2 should prefer stable logical references over durable dependence on absolute filesystem paths.
+V2 should prefer stable logical references over durable dependence on absolute filesystem paths or target-native plugin/package IDs.
 
-A Project can move without changing Project identity. A ContextSource can be relocated without changing its semantic source identity. A Capability can have different local implementations while preserving its higher-level power identity where that relation is explicitly declared.
+A Project can move without changing Project identity. A ContextSource can be relocated without changing its semantic source identity. A Capability can have different local implementations while preserving its higher-level power identity where that relation is explicitly declared. An Action can acquire a new UI/tool projection without changing ActionRef. A Component can have target-specific implementations while preserving an explicitly declared Component identity.
 
 AIKit records must preserve:
 
@@ -242,13 +257,14 @@ AIKit records must preserve:
 - source revision/content hash;
 - local/remote locator where applicable;
 - provider identity;
+- target-native implementation identity where applicable;
 - operational bindings separately from logical identity.
 
 ---
 
-## 10. Capabilities, Skills, Tools, and Actions
+## 10. Capabilities, Skills, Tools, Actions, Components, and Surfaces
 
-The unified power language is:
+The unified power/composition language is:
 
 ### Capability
 
@@ -292,6 +308,39 @@ Capability ≠ Action
 
 AIKit indexes Actions and can expose ActionSets. It does not duplicate application semantics into an AIKit-only command ontology.
 
+### Component
+
+A composable unit that can declare runtime requirements and contribute providers, capabilities, projections, listeners, policies, context faculties, UI elements or other target-native effects to an environment.
+
+A Component is not synonymous with any one thing it contributes:
+
+```text
+Component ≠ Capability
+Component ≠ Action
+Component ≠ Provider
+Component ≠ Surface
+```
+
+Provider and consumer are frequently roles played by Components relative to Contracts. One Component may play several roles at once.
+
+### Surface
+
+An addressable locus of encounter or operation: for example a CLI, model-tool surface, conversation view, trajectory view, TUI region, web UI region, API, editor integration, or automation surface.
+
+Surface and Projection remain distinct:
+
+```text
+Surface
+    where/how encounter can occur
+
+Projection
+    how a particular semantic/resolved thing appears there
+```
+
+The same Action may be projected onto several Surfaces without multiplying its identity or handler. A Reading/status/trajectory view may also be projected onto a Surface without being misclassified as an Action.
+
+The full composition semantics, including Contracts, requirements/coeffects, contributions/effects, activation scope, lifetime ownership and `HarnessComposition`, are specified in `09-COMPOSABLE-RUNTIME-ENVIRONMENTS.md`.
+
 ---
 
 ## 11. Semantic affordance compression
@@ -307,12 +356,18 @@ A compact phrase can expose a large latent body of machinery:
 "What can I do?"
     → Capability/Action discovery
 
+"What body am I operating through?"
+    → Harness + HarnessComposition + active Components/Surfaces
+
+"What would mounting this change?"
+    → Component requirements + contributions + activation/lifetime explanation
+
 "Investigate this codebase structurally"
     → Skill + code-intelligence resources
 ```
 
-The actor should be able to reason about a capability before the capability's complete instructions are loaded.
+The actor should be able to reason about a capability or Component before its complete instructions/implementation are loaded.
 
-This is **progressive disclosure of praxis**, not merely context-window optimisation.
+This is **progressive disclosure of praxis and embodiment**, not merely context-window optimisation.
 
 ---
