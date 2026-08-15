@@ -36,7 +36,13 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
     let mut source_index = ContextSourceIndex::default();
     for record in ResourceIndex::resources(&resources) {
         if record.descriptor.kind == ResourceKind::ContextSource {
-            if let Ok(entry) = ContextSourceEntry::new(record.clone()) {
+            if let Ok(mut entry) = ContextSourceEntry::new(record.clone()) {
+                entry.disclosure.known_to_exist = true;
+                entry.disclosure.askable = true;
+                entry.disclosure.exists = matches!(
+                    aikit_core::resource_availability(record),
+                    aikit_core::Availability::Available
+                );
                 source_index.insert(entry);
             }
         }
@@ -68,12 +74,12 @@ fn project_ref(context: &aikit_core::ContextDescriptor) -> Result<ProjectRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aikit_core::capsule::{Capsule, Facets, Kind, Payload};
     use aikit_core::catalog::MemoryCatalog;
     use aikit_core::context::ContextDescriptor;
     use aikit_core::policy::ManagedPolicy;
     use aikit_core::resolve::{resolve, ResolveRequest};
-    use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
+    use aikit_core::scope::ScopeKind;
+    use aikit_core::trust::MemoryTrust;
     use std::path::PathBuf;
 
     struct Backend {
@@ -85,7 +91,7 @@ mod tests {
         fn context(&self) -> &ContextDescriptor { &self.context }
         fn view(&self) -> &aikit_core::ResolvedView { &self.view }
         fn documents(&self) -> Vec<aikit_core::SearchDoc> { Vec::new() }
-        fn capsule(&self, _id: &aikit_core::CapsuleId) -> Option<&Capsule> { None }
+        fn capsule(&self, _id: &aikit_core::CapsuleId) -> Option<&aikit_core::Capsule> { None }
         fn recent(&self) -> Vec<crate::RunIntent> { Vec::new() }
         fn preview(
             &self,
@@ -117,40 +123,18 @@ mod tests {
     fn compatibility_service_does_not_invent_unexposed_scope_layers() {
         let mut context = ContextDescriptor::for_project("/work/aikit");
         context.host = "test-host".into();
-        let capsule = Capsule {
-            id: "skill/rust/review".parse().unwrap(),
-            name: "Review".into(),
-            description: "review".into(),
-            kind: Kind::Skill,
-            payload: Payload::default(),
-            facets: Facets::default(),
-            requires: Vec::new(),
-            provides: Vec::new(),
-            conflicts: Vec::new(),
-            replaces: Vec::new(),
-            platform: Default::default(),
-            maturity: Default::default(),
-            effects: Default::default(),
-            blocked: false,
-            revision: Default::default(),
-            registry_source: Default::default(),
-        };
-        let mut catalog = MemoryCatalog::default();
-        catalog.insert(capsule);
-        let mut layer = ScopeLayer::new(
-            ScopeKind::Project,
-            LayerOrigin::new("/work/aikit/.aikit/project.toml"),
-            Default::default(),
-        );
-        layer.patch.enable.push("skill/rust/review".parse().unwrap());
+        let catalog = MemoryCatalog::default();
+        let trust = MemoryTrust::default();
         let view = resolve(
             &catalog,
-            ResolveRequest {
+            &trust,
+            &ResolveRequest {
                 context: context.clone(),
-                layers: vec![layer],
+                layers: Vec::new(),
                 policy: ManagedPolicy::default(),
             },
-        );
+        )
+        .unwrap();
         let backend = Backend { context, view };
 
         let world = project_world(&backend).unwrap();
