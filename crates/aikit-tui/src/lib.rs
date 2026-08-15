@@ -44,6 +44,7 @@
 //! |---|---|
 //! | What is the V2 semantic TUI state/application-service seam? | [`application`] |
 //! | How does the existing shared backend feed the V2 service? | [`palette_service`] |
+//! | How are already-resolved V2 Resources added to search? | [`navigation`] |
 //! | What is the resolved Project world shown by Workspace? | [`project_world`] |
 //! | What does a key do? | [`app`], [`event`] |
 //! | Why is this row above that one? | [`search`] |
@@ -64,6 +65,7 @@ pub mod event;
 pub mod form;
 pub mod host;
 pub mod layout;
+pub mod navigation;
 pub mod palette_service;
 pub mod project_world;
 pub mod render;
@@ -96,6 +98,7 @@ pub use event::{EventSource, PaletteEvent, ScriptedEvents};
 pub use form::{ArgForm, RunPreview};
 pub use host::{Escalation, TerminalProfile, UiHost};
 pub use layout::{Glyphs, Layout, Width};
+pub use navigation::resolved_navigation_index;
 pub use palette_service::PaletteApplicationService;
 pub use project_world::{
     ActorRuntimeWorld, CapabilityHorizon, DeclaredCapability, GenerationDisclosure,
