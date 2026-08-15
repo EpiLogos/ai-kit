@@ -18,6 +18,7 @@ ContextResolutionRequest {
     target?: TargetClient
     explicit_overrides?: ...
     required_capabilities?: CapabilityRequirement[]
+    required_components_or_contracts?: ...
     current_execution_conditions?: ...
 }
 ```
@@ -32,6 +33,10 @@ CapabilitySet
 ActionSet
 ContextSource horizon
 Model/Harness candidates or binding
+Component eligibility/selection
+Contract/provider bindings
+Surface/projection availability
+HarnessComposition where the target supports internal composition
 Host relation
 execution-world requirements/offers
 projection policy
@@ -40,11 +45,26 @@ retrieval/disclosure policy
 
 The exact serialized schema is a V2 implementation contract. The semantic separation is the important part.
 
+A rich composable target may therefore receive an inspectable body resolution such as:
+
+```text
+Harness
+  + selected Components
+  + satisfied Contract/provider relations
+  + Component requirements
+  + activation scopes/lifetimes
+  + Surface contributions
+  + canonical Action/Capability/Source projection bindings
+  = HarnessComposition
+```
+
+`HarnessComposition` remains derived operational state. It does not replace canonical Context, Agent, Agency, Project, Action, Capability, or Harness meaning.
+
 ---
 
-## 13. Scope precedence
+## 13. Scope precedence and activation scope
 
-The current specificity model remains a strong foundation:
+The current specificity model remains a strong foundation for **resolution precedence**:
 
 ```text
 managed policy constraints
@@ -57,11 +77,26 @@ managed policy constraints
     one-shot invocation
 ```
 
-V2 should extend what can be resolved through this algebra without creating a parallel precedence system for personal sources, Actions, Agents, or QL relations.
+V2 should extend what can be resolved through this algebra without creating a parallel precedence system for personal sources, Actions, Agents, Components, or QL relations.
 
-A source may live outside AIKit while entering resolution at the appropriate scope.
+A source or Component may live outside AIKit while entering resolution at the appropriate scope.
 
 Later/more-specific ordinary declarations may develop earlier ones. Managed denials and hard eligibility boundaries remain non-overridable through ordinary lower-scope preference.
+
+Composable runtimes add two related but distinct lifecycle questions:
+
+```text
+ResolutionScope
+    which declaration/scope caused this Component or binding to be selected?
+
+ActivationScope
+    for which Agent/Agency/session/task/runtime region is the contribution live?
+
+Lifetime owner
+    what owns the active registration and causes it to retract/rebuild?
+```
+
+These must not be collapsed. A Component can be selected because of Project scope, activated only for one AgentSession, and have its actual registration lifetime owned by a target-native plugin/runtime context.
 
 ---
 
@@ -75,17 +110,18 @@ availability
 policy
 platform compatibility
 dependencies/conflicts
+component/contract compatibility
 explicit authored preference
 contextual relevance
 fitness
 frecency
 ```
 
-Eligibility is determined by hard boundaries such as policy, trust, compatibility, and dependency satisfaction.
+Eligibility is determined by hard boundaries such as policy, trust, compatibility, dependency/Contract satisfaction, and target support.
 
 Preference and learned signals operate only among eligible possibilities unless an explicit interface is asking for diagnostics rather than selection.
 
-A human declaration that a resource is preferred never makes it trusted or available.
+A human declaration that a resource or Component is preferred never makes it trusted, available, compatible, or activatable.
 
 ---
 
@@ -117,6 +153,8 @@ ripgrep is available.
 Resolved binding:
 prefer GitNexus for this demand.
 ```
+
+The same law applies inside a composable harness. An authored preference for a trajectory inspector or filesystem faculty may resolve to one target-native Component/provider today and another tomorrow while the higher-level preference and canonical resource refs remain stable.
 
 AIKit may cache the resolved binding, but it must retain provenance back to the authored intent and current resource observations.
 
@@ -179,6 +217,8 @@ A selected knowledge item should be able to move from **leaf to local whole**: e
 
 The same provider-neutral navigation/application services should serve human TUI, CLI and agent surfaces. A richer visual relation view must therefore be a read-model projection over canonical refs and provider-owned relations rather than a TUI-only semantic store.
 
+The persistent `Space` / contextual `Frame` distinction also protects runtime composition from a level error: a target-native plugin `Context`, mounted Component, ActivationScope, or Surface is not automatically a WikiSpace, Project, or canonical Factory Context merely because it defines a local environment. Containment, federation, framing, composition, binding and projection remain distinct relations.
+
 ---
 
 ## 17. Five disclosure states
@@ -202,13 +242,13 @@ FOCUSED
     the actor has intentionally made it salient to the current act
 ```
 
-These states are orthogonal to operational capability states such as available/enabled/projected/loaded/invoked.
+These states are orthogonal to operational capability/composition states such as available/enabled/projected/loaded/invoked or mounted/retracted.
 
-A Skill may be enabled while not currently attended to. A source may be askable while none of its payload is loaded.
+A Skill may be enabled while not currently attended to. A source may be askable while none of its payload is loaded. A Component may be mounted while the Capability it exposes is never invoked.
 
 ---
 
-## 18. Operational capability states
+## 18. Operational capability and composition states
 
 V2 should preserve and generalise the current distinction between available, enabled, and loaded.
 
@@ -221,14 +261,26 @@ ELIGIBLE / AVAILABLE
         ↓
 ENABLED / RESOLVED
         ↓
-PROJECTED / BROKERED
+PROJECTED / BROKERED / SELECTED FOR COMPOSITION
         ↓
-LOADED / ACTIVE IN CLIENT
+LOADED / ACTIVE / MOUNTED IN CLIENT
         ↓
-INVOKED
+INVOKED / USED
 ```
 
 The UI and API must not imply one state merely because another is true.
+
+For a target-native Component, AIKit should additionally distinguish actual activation semantics where relevant:
+
+```text
+live-mounted / retractable
+next-session
+Generation-bound
+Procedure-mediated
+unsupported
+```
+
+These describe effect timing/lifecycle, not semantic authority.
 
 ---
 
@@ -256,9 +308,11 @@ MISSING
     expected material/power is absent; this is a defect or unmet dependency.
 ```
 
-These should initially guide explanation, retrieval, diagnostics, and agent-facing language. They should become hard enums only where implementation evidence shows that typing produces clear value.
+These should initially guide explanation, retrieval, diagnostics, composition and agent-facing language. They should become hard enums only where implementation evidence shows that typing produces clear value.
 
-The important capability is that an actor can distinguish **the meaning of its own non-knowing**.
+A missing required Contract/provider in a Component graph is `MISSING` or `BOUND` according to cause; an optional unselected Component may simply be `LATENT` or `IRRELEVANT`. The resolver should preserve the reason rather than flattening all unmounted state into "disabled".
+
+The important capability is that an actor can distinguish **the meaning of its own non-knowing and non-availability**.
 
 ---
 
@@ -282,13 +336,13 @@ DISCOVER / ASK
 RETRIEVE
     what matters now?
 
-LOAD / PROJECT
-    what actually enters this client/context?
+LOAD / PROJECT / MOUNT
+    what actually enters this client/context/body?
 
 FOCUS
     what becomes salient to the present activity?
 ```
 
-A broad horizon is a feature. Indiscriminate prompt inclusion is not.
+A broad horizon is a feature. Indiscriminate prompt inclusion or indiscriminate runtime mounting is not.
 
 ---
