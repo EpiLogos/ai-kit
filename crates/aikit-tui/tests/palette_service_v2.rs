@@ -42,6 +42,7 @@ fn production_adapter_previews_and_applies_through_the_same_backend_scope_writer
     };
     assert_eq!(preview.scope, ScopeKind::Project);
     assert_eq!(preview.staged, staged);
+    assert!(preview.summary.contains("Claude: live"));
     assert!(backend.applied.is_empty());
 
     let receipt = {
