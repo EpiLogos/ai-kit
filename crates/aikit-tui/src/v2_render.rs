@@ -1,7 +1,7 @@
 //! ResourceRef-native renderer for the resting V2 human shell.
 //!
 //! Quick and Workspace are presentations of [`TuiState`], not alternate semantic
-//! controllers. This renderer therefore knows only the application read model,
+//! controllers. This renderer therefore knows only application read models,
 //! stable selection, contextual Actions, Workspace section, staging and overlays.
 //! Capability-specific forms and run output continue to use the compatibility
 //! renderer while those operations are migrated to first-class V2 Actions.
@@ -18,9 +18,21 @@ use crate::application::{
     TuiState, WorkspaceSection,
 };
 use crate::layout::Layout;
+use crate::project_world::{ProjectWorldReadModel, ProjectWorldResourceSet};
 use crate::theme::Theme;
 
 pub fn draw(frame: &mut Frame, state: &TuiState) {
+    draw_with_project_world(frame, state, None);
+}
+
+/// Render the resting V2 shell with the application-service Project world when
+/// Workspace is expanded. Quick remains exactly the same presentation of
+/// `TuiState`; Workspace adds disclosure rather than creating another controller.
+pub fn draw_with_project_world(
+    frame: &mut Frame,
+    state: &TuiState,
+    project_world: Option<&ProjectWorldReadModel>,
+) {
     let theme = Theme::new();
     let area = frame.area();
     let title = match state.presentation {
@@ -42,7 +54,15 @@ pub fn draw(frame: &mut Frame, state: &TuiState) {
     let layout = Layout::for_width(inner.width);
     let panes = layout.split(inner);
     frame.render_widget(query_line(state, &theme), panes.query);
-    draw_resources(frame, state, &theme, panes.list);
+    if state.presentation == PresentationMode::Workspace {
+        if let Some(world) = project_world {
+            draw_workspace_section(frame, state, world, &theme, panes.list);
+        } else {
+            draw_resources(frame, state, &theme, panes.list);
+        }
+    } else {
+        draw_resources(frame, state, &theme, panes.list);
+    }
     if let Some(preview) = panes.preview {
         frame.render_widget(preview_pane(state, &theme), preview);
     }
@@ -86,6 +106,229 @@ fn query_line<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
         }
     }
     Paragraph::new(Line::from(spans))
+}
+
+fn draw_workspace_section(
+    frame: &mut Frame,
+    state: &TuiState,
+    world: &ProjectWorldReadModel,
+    theme: &Theme,
+    area: ratatui::layout::Rect,
+) {
+    match state.workspace_section {
+        WorkspaceSection::Projects => frame.render_widget(
+            Paragraph::new(project_lines(world, theme)).wrap(Wrap { trim: false }),
+            area,
+        ),
+        WorkspaceSection::Compose => frame.render_widget(
+            Paragraph::new(compose_lines(state, world, theme)).wrap(Wrap { trim: false }),
+            area,
+        ),
+        WorkspaceSection::Explore => draw_resources(frame, state, theme, area),
+        WorkspaceSection::Projection => frame.render_widget(
+            Paragraph::new(projection_lines(world, theme)).wrap(Wrap { trim: false }),
+            area,
+        ),
+        WorkspaceSection::History => frame.render_widget(
+            Paragraph::new(history_lines(state, world, theme)).wrap(Wrap { trim: false }),
+            area,
+        ),
+    }
+}
+
+fn project_lines<'a>(world: &'a ProjectWorldReadModel, theme: &Theme) -> Vec<Line<'a>> {
+    let mut lines = vec![
+        Line::from(Span::styled(world.project.label.clone(), theme.heading())),
+        Line::from(Span::styled(
+            world
+                .project
+                .root
+                .clone()
+                .unwrap_or_else(|| "no project root".into()),
+            theme.dim(),
+        )),
+        Line::from(""),
+        labelled("Focus", world.focus.as_deref().unwrap_or("unresolved"), theme),
+        labelled(
+            "Profiles",
+            if world.resolved_profiles.is_empty() {
+                "none resolved".to_string()
+            } else {
+                world.resolved_profiles.join(", ")
+            },
+            theme,
+        ),
+        labelled(
+            "Scopes",
+            world
+                .mutation_scopes
+                .iter()
+                .map(|scope| scope.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            theme,
+        ),
+    ];
+    append_resource_set(&mut lines, "Agent", &world.actor_runtime.agents, theme);
+    append_resource_set(&mut lines, "Agency", &world.actor_runtime.agencies, theme);
+    append_resource_set(&mut lines, "Host", &world.actor_runtime.hosts, theme);
+    append_resource_set(&mut lines, "Model", &world.actor_runtime.models, theme);
+    append_resource_set(&mut lines, "Harness", &world.actor_runtime.harnesses, theme);
+    if !world.warnings.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Warnings", theme.heading())));
+        for warning in &world.warnings {
+            lines.push(Line::from(Span::styled(format!("! {warning}"), theme.dim())));
+        }
+    }
+    lines
+}
+
+fn compose_lines<'a>(
+    state: &'a TuiState,
+    world: &'a ProjectWorldReadModel,
+    theme: &Theme,
+) -> Vec<Line<'a>> {
+    let horizon = &world.capability_horizon;
+    let mut lines = vec![
+        Line::from(Span::styled("Capability horizon", theme.heading())),
+        labelled("Declared", horizon.declared.len().to_string(), theme),
+        labelled("Effective", horizon.effective.len().to_string(), theme),
+        labelled("Unavailable", horizon.unavailable.len().to_string(), theme),
+        labelled("Staged", state.staged.len().to_string(), theme),
+    ];
+    for declared in &horizon.declared {
+        lines.push(Line::from(vec![
+            Span::styled(if declared.enabled { "+ " } else { "- " }, theme.accent()),
+            Span::styled(declared.resource.to_string(), theme.base()),
+            Span::styled(
+                format!(" · {} · {}", declared.scope.as_str(), declared.origin),
+                theme.dim(),
+            ),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("Information horizon", theme.heading())));
+    append_resource_set(
+        &mut lines,
+        "ContextSources",
+        &world.information_horizon.context_sources,
+        theme,
+    );
+    append_resource_set(
+        &mut lines,
+        "Knowledge spaces",
+        &world.information_horizon.knowledge_spaces,
+        theme,
+    );
+    append_resource_set(
+        &mut lines,
+        "Knowledge sources",
+        &world.information_horizon.knowledge_sources,
+        theme,
+    );
+    lines
+}
+
+fn projection_lines<'a>(world: &'a ProjectWorldReadModel, theme: &Theme) -> Vec<Line<'a>> {
+    let mut lines = vec![
+        Line::from(Span::styled("Projection targets", theme.heading())),
+        labelled(
+            "Targets",
+            if world.projection.targets.is_empty() {
+                "none".to_string()
+            } else {
+                world.projection.targets.join(", ")
+            },
+            theme,
+        ),
+        labelled(
+            "Generation",
+            world
+                .generation
+                .generation
+                .clone()
+                .or_else(|| world.generation.absence.clone())
+                .unwrap_or_else(|| "unresolved".into()),
+            theme,
+        ),
+        Line::from(""),
+        Line::from(Span::styled("Boundaries", theme.heading())),
+    ];
+    for boundary in &world.boundaries {
+        lines.push(Line::from(Span::styled(format!("• {boundary}"), theme.dim())));
+    }
+    append_resource_set(
+        &mut lines,
+        "Execution offers",
+        &world.actor_runtime.execution_offers,
+        theme,
+    );
+    lines
+}
+
+fn history_lines<'a>(
+    state: &'a TuiState,
+    world: &'a ProjectWorldReadModel,
+    theme: &Theme,
+) -> Vec<Line<'a>> {
+    let mut lines = vec![
+        Line::from(Span::styled("Changed ground", theme.heading())),
+        labelled("Project revision", world.revision.clone(), theme),
+        labelled(
+            "Generation",
+            world
+                .generation
+                .generation
+                .clone()
+                .or_else(|| world.generation.absence.clone())
+                .unwrap_or_else(|| "unresolved".into()),
+            theme,
+        ),
+        labelled("Staged now", state.staged.len().to_string(), theme),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Run/route History remains application-service owned; resource history is available through contextual Actions while the durable history provider is widened.",
+            theme.dim(),
+        )),
+    ];
+    if let Some(result) = state.action_result.as_ref() {
+        lines.push(Line::from(""));
+        lines.push(labelled("Last action", result.summary(), theme));
+    }
+    lines
+}
+
+fn labelled<'a>(label: &str, value: impl Into<String>, theme: &Theme) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(format!("{label}: "), theme.dim()),
+        Span::styled(value.into(), theme.base()),
+    ])
+}
+
+fn append_resource_set<'a>(
+    lines: &mut Vec<Line<'a>>,
+    label: &str,
+    set: &'a ProjectWorldResourceSet,
+    theme: &Theme,
+) {
+    if set.resources.is_empty() {
+        lines.push(labelled(
+            label,
+            set.absence.as_deref().unwrap_or("none").to_string(),
+            theme,
+        ));
+        return;
+    }
+    lines.push(labelled(
+        label,
+        set.resources
+            .iter()
+            .map(|resource| resource.label.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        theme,
+    ));
 }
 
 fn draw_resources(frame: &mut Frame, state: &TuiState, theme: &Theme, area: ratatui::layout::Rect) {
