@@ -168,6 +168,7 @@ pub fn resolve_fixture(fixture: &RegistryFixture, enable: &[&str]) -> ResolvedCo
     ResolvedContext {
         view,
         capsule_roots: load.catalog.capsule_roots(),
+        actor_bootstrap: None,
     }
 }
 
