@@ -40,7 +40,7 @@ pub fn render_managed_bootstrap(bootstrap: &ActorBootstrap) -> String {
     );
 
     body.push_str(&format!("- Bootstrap: `{}`\n", bootstrap.version));
-    body.push_str(&format!("- Project: `{}`\n", bootstrap.project.project));
+    body.push_str(&format!("- Project: `{}`\n", bootstrap.project.project.as_str()));
     if let Some(run) = &bootstrap.run {
         body.push_str(&format!("- Run: `{run}`\n"));
     }
@@ -122,19 +122,12 @@ pub fn render_managed_bootstrap(bootstrap: &ActorBootstrap) -> String {
     }
 
     if !bootstrap.warnings.is_empty() {
-        body.push_str("\n## Resolution warnings\n\n");
+        body.push_str("\n## Warnings\n\n");
         for warning in &bootstrap.warnings {
             body.push_str(&format!("- {warning}\n"));
         }
     }
 
-    body.push_str(
-        "\n## Operating rule\n\n\
-         Search broadly, disclose progressively, and retrieve payloads late. A Resource being \
-         addressable does not mean it is loaded; a Component being available does not mean it is \
-         mounted; a projected Surface does not change the canonical identity it represents. Re-orient \
-         through AIKit when Project, session, model, harness, Generation, or runtime-body state changes.\n",
-    );
     body
 }
 
@@ -148,15 +141,11 @@ fn reference_label(reference: &BootstrapReference) -> String {
         BootstrapReference::Missing {
             reference,
             expected,
-        } => format!("`{reference}` (missing; expected {})", expected.as_str()),
+        } => format!("`{reference}` (missing {expected:?})"),
         BootstrapReference::WrongKind {
             reference,
             expected,
             actual,
-        } => format!(
-            "`{reference}` (wrong kind: {}; expected {})",
-            actual.as_str(),
-            expected.as_str()
-        ),
+        } => format!("`{reference}` ({actual:?}; expected {expected:?})"),
     }
 }
