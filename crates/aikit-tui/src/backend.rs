@@ -36,7 +36,7 @@ use aikit_core::resource::{
     ActionStageability, ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass,
     ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
 };
-use aikit_core::scope::ScopeKind;
+use aikit_core::scope::{ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
 use aikit_core::Result;
 use aikit_store::inbox::{Candidate, CandidateState, PromotionEdits, Similarity};
@@ -256,6 +256,16 @@ pub trait PaletteBackend {
 
     /// The effective view for that context, right now.
     fn view(&self) -> &ResolvedView;
+
+    /// The authoritative ordered scope stack, when this application service owns it.
+    ///
+    /// `None` means the boundary genuinely cannot disclose the stack. It is not the
+    /// same as `Some(&[])`, which means the resolved context truly has no scope layers.
+    /// Project-world/bootstrap composition must preserve that distinction rather than
+    /// reconstructing scope provenance from partial selection-log evidence.
+    fn scope_layers(&self) -> Option<&[ScopeLayer]> {
+        None
+    }
 
     /// The V1 capability rows. They remain the compatibility source for the
     /// capability-specific presentation and execution forms.
