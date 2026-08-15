@@ -104,7 +104,7 @@ pub struct SurfaceController {
     host: UiHost,
     semantic: TuiState,
     runtime: TuiRuntime,
-    project_world: ProjectWorldReadModel,
+    project_world: Option<ProjectWorldReadModel>,
     palette: PaletteController,
     tree: TreeController,
 }
@@ -113,10 +113,7 @@ impl SurfaceController {
     pub fn new<B: SurfaceBackend>(backend: &mut B, request: SurfaceRequest) -> Result<Self> {
         let palette = PaletteController::new(backend, request.palette_request())?;
         let tree_state = backend.surface_tree()?;
-        let project_world = {
-            let service = PaletteApplicationService::new(backend);
-            service.project_world()?
-        };
+        let project_world = project_world_if_bound(backend)?;
         let semantic = TuiState {
             query: palette.state().query.clone(),
             read_model: compatibility_read_model(backend, &tree_state),
@@ -154,8 +151,8 @@ impl SurfaceController {
         &self.semantic
     }
 
-    pub fn project_world(&self) -> &ProjectWorldReadModel {
-        &self.project_world
+    pub fn project_world(&self) -> Option<&ProjectWorldReadModel> {
+        self.project_world.as_ref()
     }
 
     pub fn palette(&self) -> &PaletteController {
@@ -175,12 +172,11 @@ impl SurfaceController {
                     && !self.palette.state().in_manage_lane() =>
             {
                 let ambient = ambient_context(&self.palette.state().descriptor);
-                v2_render::draw_with_project_world(
-                    frame,
-                    &self.semantic,
-                    &ambient,
-                    &self.project_world,
-                )
+                if let Some(world) = self.project_world.as_ref() {
+                    v2_render::draw_with_project_world(frame, &self.semantic, &ambient, world)
+                } else {
+                    v2_render::draw_with_context(frame, &self.semantic, &ambient)
+                }
             }
             SurfaceMode::Palette => self.palette.draw(frame),
             SurfaceMode::Tree => self.tree.draw(frame),
@@ -816,10 +812,7 @@ impl SurfaceController {
             state.status = Some(Status::info(message));
         }
 
-        self.project_world = {
-            let service = PaletteApplicationService::new(backend);
-            service.project_world()?
-        };
+        self.project_world = project_world_if_bound(backend)?;
         self.replace_tree(backend.surface_tree()?, backend);
         let query = self.semantic.query.clone();
         self.dispatch_semantic(backend, UiAction::SetQuery(query))?;
@@ -1047,6 +1040,14 @@ impl SurfaceController {
         let index = first.saturating_add((row - list.y) as usize);
         (index < self.semantic.read_model.resources.len()).then_some(index)
     }
+}
+
+fn project_world_if_bound(backend: &mut dyn PaletteBackend) -> Result<Option<ProjectWorldReadModel>> {
+    if backend.context().project_root.is_none() {
+        return Ok(None);
+    }
+    let service = PaletteApplicationService::new(backend);
+    service.project_world().map(Some)
 }
 
 fn ambient_context(descriptor: &aikit_core::ContextDescriptor) -> AmbientContext {
