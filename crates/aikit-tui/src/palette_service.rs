@@ -15,7 +15,7 @@ use aikit_core::resource::{
     ResourceSearchIndex,
 };
 use aikit_core::{
-    AikitError, FamiliarityContext, FamiliarityObservation, Result,
+    AikitError, FamiliarityContext, FamiliarityObservation, FamiliarityUse, Result,
     DEFAULT_FAMILIARITY_HALF_LIFE_MS,
 };
 use serde_json::{json, to_string_pretty, to_value, Value};
@@ -226,26 +226,75 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
     }
 
     fn history(&self, resource: Option<&ResourceRef>) -> Result<Vec<HistoryEntry>> {
-        let wanted = resource.map(capsule_id).transpose()?;
-        Ok(self
+        let wanted_capsule = resource.and_then(|wanted| CapsuleId::parse(wanted.as_str()).ok());
+        let mut entries = self
             .backend
             .recent()
             .into_iter()
             .enumerate()
-            .filter(|(_, intent)| wanted.as_ref().is_none_or(|id| &intent.capsule == id))
+            .filter(|(_, intent)| match resource {
+                None => true,
+                Some(_) => wanted_capsule
+                    .as_ref()
+                    .is_some_and(|id| &intent.capsule == id),
+            })
             .map(|(index, intent)| {
                 let summary = intent
                     .redacted_argv()
                     .ok()
                     .filter(|argv| !argv.is_empty())
-                    .map(|argv| format!("{} · {}", intent.capsule, argv.join(" ")))
-                    .unwrap_or_else(|| intent.capsule.to_string());
+                    .map(|argv| format!("run · {} · {}", intent.capsule, argv.join(" ")))
+                    .unwrap_or_else(|| format!("run · {}", intent.capsule));
                 HistoryEntry {
                     id: format!("recent-{index}"),
                     summary,
                 }
             })
-            .collect())
+            .collect::<Vec<_>>();
+
+        if let Some(store) = self.backend.familiarity()? {
+            let mut observations = store.snapshot().observations;
+            observations.sort_by(|left, right| {
+                right
+                    .observed_at_ms
+                    .cmp(&left.observed_at_ms)
+                    .then_with(|| right.observation_id.cmp(&left.observation_id))
+            });
+            entries.extend(
+                observations
+                    .into_iter()
+                    .filter(|observation| {
+                        resource.is_none_or(|wanted| observation.destination == *wanted)
+                    })
+                    .map(|observation| {
+                        let route = match &observation.use_kind {
+                            FamiliarityUse::Destination => "destination".to_string(),
+                            FamiliarityUse::Route { route, steps } => {
+                                format!("route {route} · {} step{}", steps.len(), plural(steps.len()))
+                            }
+                        };
+                        let action = observation
+                            .source_action
+                            .as_ref()
+                            .map(|action| format!(" · action {action}"))
+                            .unwrap_or_default();
+                        let surface = observation
+                            .source_surface
+                            .as_ref()
+                            .map(|surface| format!(" · surface {surface}"))
+                            .unwrap_or_default();
+                        HistoryEntry {
+                            id: observation.observation_id,
+                            summary: format!(
+                                "use · {} · {route}{action}{surface}",
+                                observation.destination
+                            ),
+                        }
+                    }),
+            );
+        }
+
+        Ok(entries)
     }
 
     fn relations(&self, resource: &ResourceRef) -> Result<RelationReadModel> {
