@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use aikit_core::resource::ActionStageability;
+use aikit_core::ProjectWorldReadModel;
 
 use crate::application::{
     visible_contextual_actions, ActionOutcome, Overlay, PresentationMode, ResourceListItem,
@@ -19,6 +20,7 @@ use crate::application::{
 };
 use crate::layout::Layout;
 use crate::navigation::AmbientContext;
+use crate::project_workspace_render::project_world_lines;
 use crate::theme::Theme;
 
 pub fn draw(frame: &mut Frame, state: &TuiState) {
@@ -26,6 +28,28 @@ pub fn draw(frame: &mut Frame, state: &TuiState) {
 }
 
 pub fn draw_with_context(frame: &mut Frame, state: &TuiState, ambient: &AmbientContext) {
+    draw_shell(frame, state, ambient, None);
+}
+
+/// Render the live Workspace against the shared Project-world read model.
+///
+/// The world is presentation input only. Selection/staging remain in `TuiState`,
+/// and this function has no access to retrieval, resolver or mutation services.
+pub fn draw_with_project_world(
+    frame: &mut Frame,
+    state: &TuiState,
+    ambient: &AmbientContext,
+    world: &ProjectWorldReadModel,
+) {
+    draw_shell(frame, state, ambient, Some(world));
+}
+
+fn draw_shell(
+    frame: &mut Frame,
+    state: &TuiState,
+    ambient: &AmbientContext,
+    world: Option<&ProjectWorldReadModel>,
+) {
     let theme = Theme::new();
     let area = frame.area();
     let base_title = match state.presentation {
@@ -55,7 +79,7 @@ pub fn draw_with_context(frame: &mut Frame, state: &TuiState, ambient: &AmbientC
     frame.render_widget(query_line(state, &theme), panes.query);
     draw_resources(frame, state, &theme, panes.list);
     if let Some(preview) = panes.preview {
-        frame.render_widget(preview_pane(state, &theme), preview);
+        frame.render_widget(preview_pane(state, &theme, world), preview);
     }
     frame.render_widget(footer(state, &theme), panes.footer);
 }
@@ -170,7 +194,11 @@ fn resource_line<'a>(
     Line::from(spans)
 }
 
-fn preview_pane<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
+fn preview_pane<'a>(
+    state: &'a TuiState,
+    theme: &Theme,
+    world: Option<&ProjectWorldReadModel>,
+) -> Paragraph<'a> {
     if state.overlay == Some(Overlay::ConfirmApply) {
         let summary = state
             .preview
@@ -214,6 +242,32 @@ fn preview_pane<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
                 Line::from(Span::styled("Esc returns", theme.dim())),
             ])
             .wrap(Wrap { trim: false });
+        }
+    }
+
+    if state.presentation == PresentationMode::Workspace {
+        if let Some(world) = world {
+            let world_lines = project_world_lines(state, world);
+            if !world_lines.is_empty() {
+                let lines = world_lines
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, line)| {
+                        if index == 0 {
+                            Line::from(Span::styled(line, theme.heading()))
+                        } else if line.starts_with("Intent") {
+                            Line::from(Span::styled(line, theme.accent()))
+                        } else if line.starts_with("Effective") {
+                            Line::from(Span::styled(line, theme.base()))
+                        } else if line.starts_with("Boundary") {
+                            Line::from(Span::styled(line, theme.dim()))
+                        } else {
+                            Line::from(Span::raw(line))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                return Paragraph::new(lines).wrap(Wrap { trim: false });
+            }
         }
     }
 
