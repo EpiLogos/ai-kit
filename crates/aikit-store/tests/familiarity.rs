@@ -1,12 +1,10 @@
-use chrono::{TimeZone, Utc};
-
 use aikit_core::{
     FamiliarityContext, FamiliarityObservation, ForgetScope, ResourceRef,
     DEFAULT_FAMILIARITY_HALF_LIFE_MS, FAMILIARITY_SCHEMA_VERSION,
 };
 use aikit_store::{
     append_familiarity_observation, append_familiarity_reset, replay_familiarity, Event,
-    FamiliarityReplay, SqliteStore, FAMILIARITY_OBSERVATION_EVENT,
+    EventAction, FamiliarityReplay, Index, Timestamp, FAMILIARITY_OBSERVATION_EVENT,
 };
 
 fn r(raw: &str) -> ResourceRef {
@@ -14,7 +12,7 @@ fn r(raw: &str) -> ResourceRef {
 }
 
 #[test]
-fn observations_and_resets_replay_across_store_reopen() {
+fn observations_and_resets_replay_across_index_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("aikit.db");
     let destination = r("knowledge-node/auth");
@@ -27,17 +25,16 @@ fn observations_and_resets_replay_across_store_reopen() {
     };
 
     {
-        let store = SqliteStore::open(&db).unwrap();
+        let index = Index::open(&db).unwrap();
         // Unrelated durable events are ignored by familiarity replay.
-        store
-            .append_event(&Event::new(
-                "project.opened",
-                serde_json::json!({"project":"project/app"}),
-                Utc.timestamp_millis_opt(500).single().unwrap(),
-            ))
+        index
+            .record_event(
+                &Event::new(EventAction::RegistrySync)
+                    .at(Timestamp::from_nanos(500_000_000)),
+            )
             .unwrap();
         append_familiarity_observation(
-            &store,
+            &index,
             FamiliarityObservation::destination(
                 "trace/auth/1",
                 destination.clone(),
@@ -47,7 +44,7 @@ fn observations_and_resets_replay_across_store_reopen() {
         )
         .unwrap();
         append_familiarity_observation(
-            &store,
+            &index,
             FamiliarityObservation::destination(
                 "trace/session/1",
                 route_destination.clone(),
@@ -56,15 +53,11 @@ fn observations_and_resets_replay_across_store_reopen() {
             ),
         )
         .unwrap();
-        append_familiarity_reset(
-            &store,
-            ForgetScope::Destination(destination.clone()),
-            Utc.timestamp_millis_opt(3_000).single().unwrap(),
-        )
-        .unwrap();
+        append_familiarity_reset(&index, ForgetScope::Destination(destination.clone()), 3_000)
+            .unwrap();
     }
 
-    let reopened = SqliteStore::open(&db).unwrap();
+    let reopened = Index::open(&db).unwrap();
     let replay = replay_familiarity(&reopened).unwrap();
     let FamiliarityReplay::Loaded {
         store,
@@ -101,34 +94,33 @@ fn observations_and_resets_replay_across_store_reopen() {
 }
 
 #[test]
-fn unknown_persisted_schema_invalidates_the_whole_learned_replay_not_other_events() {
+fn unknown_persisted_schema_invalidates_only_learned_replay() {
     let dir = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(dir.path().join("aikit.db")).unwrap();
-    store
-        .append_event(&Event::new(
-            "project.opened",
-            serde_json::json!({"project":"project/app"}),
-            Utc.timestamp_millis_opt(500).single().unwrap(),
-        ))
-        .unwrap();
-    store
-        .append_event(&Event::new(
-            FAMILIARITY_OBSERVATION_EVENT,
-            serde_json::json!({
-                "schema": "aikit.familiarity/v1",
-                "observation": {
-                    "observation_id": "trace/old/1",
-                    "destination": "knowledge-node/auth",
-                    "context": {},
-                    "use_kind": {"kind":"destination"},
-                    "observed_at_ms": 1000
-                }
-            }),
-            Utc.timestamp_millis_opt(1_000).single().unwrap(),
-        ))
+    let index = Index::open(&dir.path().join("aikit.db")).unwrap();
+    index
+        .record_event(
+            &Event::new(EventAction::RegistrySync).at(Timestamp::from_nanos(500_000_000)),
+        )
         .unwrap();
 
-    match replay_familiarity(&store).unwrap() {
+    let mut old = Event::new(EventAction::ResourceUse).at(Timestamp::from_nanos(1_000_000_000));
+    old.arguments.insert(
+        "familiarity".into(),
+        serde_json::json!({
+            "schema": "aikit.familiarity/v1",
+            "observation": {
+                "observation_id": "trace/old/1",
+                "destination": "knowledge-node/auth",
+                "context": {},
+                "use_kind": {"kind":"destination"},
+                "observed_at_ms": 1000
+            }
+        })
+        .to_string(),
+    );
+    index.record_event(&old).unwrap();
+
+    match replay_familiarity(&index).unwrap() {
         FamiliarityReplay::Invalidated {
             found_schema,
             event_kind,
@@ -144,5 +136,7 @@ fn unknown_persisted_schema_invalidates_the_whole_learned_replay_not_other_event
         }
     }
 
-    assert_eq!(store.events_since(0).unwrap().len(), 2);
+    // Invalidation discards only learned influence. The unrelated event and the
+    // incompatible familiarity evidence both remain in the durable event stream.
+    assert_eq!(index.event_count().unwrap(), 2);
 }
