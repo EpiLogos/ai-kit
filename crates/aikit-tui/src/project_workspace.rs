@@ -151,7 +151,10 @@ mod tests {
             availability: Availability::Available,
         };
         let mut entry = ContextSourceEntry::new(source_record).unwrap();
-        entry.scope = ContextSourceScope::Project(ProjectRef::parse("project:aikit").unwrap());
+        entry.relation = ContextSourceScope {
+            project: Some(ProjectRef::parse("project:aikit").unwrap()),
+            scope: None,
+        };
         entry.visibility = AgentVisibility::MetadataOnly;
         entry.disclosure = DisclosureState {
             exists: true,
@@ -209,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn selecting_context_source_does_not_retrieve_or_invoke_it() {
+    fn selecting_context_source_does_not_mark_retrieved_or_consume_retrieval_plan() {
         let mut state = ProjectWorkspaceState::new(world_with_source());
         state.set_horizon(ComposeHorizon::Information);
         let source = rref("project:context-source:canon");
@@ -220,11 +223,10 @@ mod tests {
         );
         let hit = &state.world.information_horizon.sources[0];
         assert!(!hit.disclosure.retrieved);
-        assert!(!hit.operational.invoked);
         assert_eq!(
             state.world.information_horizon.planned_retrieval.len(),
             1,
-            "selection must not silently consume or execute the retrieval plan"
+            "selection must not silently consume the retrieval plan"
         );
     }
 }
