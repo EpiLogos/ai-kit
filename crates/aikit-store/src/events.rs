@@ -124,6 +124,12 @@ pub enum EventAction {
     TrustReview,
     RegistrySync,
     SessionUp,
+    /// An actor actually traversed/used an addressable Resource. This is
+    /// observational evidence only; it confers no trust, preference or authority.
+    ResourceUse,
+    /// Explicit removal of learned accessibility evidence. Canonical resources
+    /// and provider relations are unaffected.
+    FamiliarityReset,
     Gc,
 }
 
@@ -142,6 +148,8 @@ impl EventAction {
             EventAction::TrustReview => "trust-review",
             EventAction::RegistrySync => "registry-sync",
             EventAction::SessionUp => "session-up",
+            EventAction::ResourceUse => "resource-use",
+            EventAction::FamiliarityReset => "familiarity-reset",
             EventAction::Gc => "gc",
         }
     }
@@ -163,6 +171,8 @@ impl FromStr for EventAction {
             "trust-review" => EventAction::TrustReview,
             "registry-sync" => EventAction::RegistrySync,
             "session-up" => EventAction::SessionUp,
+            "resource-use" => EventAction::ResourceUse,
+            "familiarity-reset" => EventAction::FamiliarityReset,
             "gc" => EventAction::Gc,
             other => return err("event.unknown_action", format!("`{other}` is not an action")),
         })
