@@ -59,7 +59,9 @@ fn live_surface_uses_the_shared_project_world_read_model() {
     )
     .unwrap();
 
-    let world = surface.project_world();
+    let world = surface
+        .project_world()
+        .expect("a Project-bound surface must disclose its Project world");
     assert_eq!(world.project.project.as_str(), "project:payments");
     assert!(world
         .capability_horizon
@@ -71,6 +73,29 @@ fn live_surface_uses_the_shared_project_world_read_model() {
         .warnings
         .iter()
         .any(|warning| warning.contains("scope-layer stack")));
+}
+
+#[test]
+fn global_surface_remains_first_class_without_inventing_project_world() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut global = descriptor();
+    global.project_root = None;
+    global.project_id = None;
+    let mut backend = Fixture::new(
+        dir.path(),
+        vec![script("script/ops/deploy"), skill("skill/rust/review")],
+    )
+    .with_descriptor(global);
+    let mut surface = SurfaceController::new(
+        &mut backend,
+        SurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
+    )
+    .unwrap();
+
+    assert!(surface.project_world().is_none());
+    let output = rendered(&draw_width(&mut surface, 120, 24));
+    assert!(output.contains("AIKit · Workspace"));
+    assert!(!output.contains("Project world"));
 }
 
 #[test]
