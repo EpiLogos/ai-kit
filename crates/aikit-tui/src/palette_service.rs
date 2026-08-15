@@ -8,7 +8,9 @@
 //! remains available only to the V1 compatibility presentation.
 
 use aikit_core::id::CapsuleId;
-use aikit_core::resource::{ContextualActionDescriptor, ResourceRef};
+use aikit_core::resource::{
+    ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass, ResourceRef,
+};
 use aikit_core::{AikitError, Result};
 use serde_json::{json, to_string_pretty, to_value, Value};
 
@@ -18,8 +20,6 @@ use crate::application::{
     TuiApplicationService,
 };
 use crate::backend::{PaletteBackend, Toggle};
-use crate::navigation::resolved_navigation_index;
-use crate::project_world::ProjectWorldReadModel;
 use crate::staging::is_on;
 
 pub struct PaletteApplicationService<'a> {
@@ -38,19 +38,11 @@ impl<'a> PaletteApplicationService<'a> {
     pub fn backend_mut(&mut self) -> &mut dyn PaletteBackend {
         self.backend
     }
-
-    /// One coherent disclosure of the currently resolved Project world.
-    ///
-    /// This stays on the same application-service adapter as search, composition,
-    /// Explain and History: Workspace never reconstructs resolver state itself.
-    pub fn project_world(&self) -> ProjectWorldReadModel {
-        ProjectWorldReadModel::from_backend(self.backend)
-    }
 }
 
 impl TuiApplicationService for PaletteApplicationService<'_> {
     fn search(&self, query: &str) -> Result<ResourceListReadModel> {
-        let index = resolved_navigation_index(self.backend);
+        let index = self.backend.navigation_index();
         let resources = index
             .search(query, 256)
             .into_iter()
@@ -58,7 +50,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
                 resource: hit.resource,
                 kind: hit.kind,
                 label: hit.label,
-                summary: hit.summary,
+                summary: summary_with_navigation_evidence(hit.summary, &hit.navigation_evidence),
             })
             .collect();
         Ok(ResourceListReadModel {
@@ -87,7 +79,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
             }));
         }
 
-        let index = resolved_navigation_index(self.backend);
+        let index = self.backend.navigation_index();
         let hit = index
             .search(resource.as_str(), 256)
             .into_iter()
@@ -115,29 +107,27 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
     ) -> Result<CompositionPreview> {
         let toggles = toggles(staged)?;
         let projected = self.backend.preview(scope, &toggles)?;
-        let effect_lines = projected
-            .effects
-            .iter()
-            .map(|effect| effect.describe())
-            .collect::<Vec<_>>();
-        let effect_summary = if effect_lines.is_empty() {
-            "none".to_string()
+        let target_effects = if projected.effects.is_empty() {
+            "no target effects".to_string()
         } else {
-            effect_lines.join(" · ")
+            projected
+                .effects
+                .iter()
+                .map(|effect| effect.describe())
+                .collect::<Vec<_>>()
+                .join(", ")
         };
         Ok(CompositionPreview {
             revision: format!("{}:{}", projected.view.catalog_revision, projected.view.hash),
             scope,
             staged: staged.clone(),
             summary: format!(
-                "{} staged change{} -> {} active capability{}; {} client effect{}: {}",
+                "{} staged change{} -> {} active capability{}; target effects: {}",
                 staged.len(),
                 plural(staged.len()),
                 projected.view.active.len(),
                 plural(projected.view.active.len()),
-                projected.effects.len(),
-                plural(projected.effects.len()),
-                effect_summary,
+                target_effects,
             ),
         })
     }
@@ -218,7 +208,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
     }
 
     fn contextual_actions(&self, resource: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
-        let index = resolved_navigation_index(self.backend);
+        let index = self.backend.navigation_index();
         Ok(index.actions_for(resource).into_iter().cloned().collect())
     }
 
@@ -261,6 +251,30 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
             )),
         }
     }
+}
+
+fn summary_with_navigation_evidence(summary: String, evidence: &[NavigationEvidence]) -> String {
+    if evidence.is_empty() {
+        return summary;
+    }
+    let labels = evidence
+        .iter()
+        .map(|item| {
+            let class = match item.class {
+                NavigationEvidenceClass::CurrentContext => "current context",
+                NavigationEvidenceClass::ExplicitPin => "explicit pin",
+                NavigationEvidenceClass::Recent => "recent",
+                NavigationEvidenceClass::LearnedUsage => "learned usage",
+                NavigationEvidenceClass::ChangedProject => "changed project",
+            };
+            item.detail
+                .as_deref()
+                .map(|detail| format!("{class}: {detail}"))
+                .unwrap_or_else(|| class.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{summary} · evidence: {labels}")
 }
 
 fn capsule_id(resource: &ResourceRef) -> Result<CapsuleId> {

@@ -21,21 +21,22 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use aikit_core::error::AikitError;
 use aikit_core::id::CapsuleId;
 use aikit_core::resource::{ActionStageability, ResourceKind, ResourceRef};
-use aikit_core::Result;
+use aikit_core::{ProjectWorldReadModel, Result};
 
 use crate::app::{Mode, Status};
 use crate::application::{
-    keyboard_select, mouse_select, reduce_tui, selected_contextual_action, ActivationIntent,
-    Overlay, PresentationMode, RelationView, ResourceListItem, ResourceListReadModel, TuiRuntime,
-    TuiState, UiAction, WorkspaceSection,
+    keyboard_select, mouse_select, reduce_tui, selected_contextual_action,
+    visible_contextual_actions, ActivationIntent, Overlay, PresentationMode, RelationView,
+    ResourceListItem, ResourceListReadModel, TuiRuntime, TuiState, UiAction, WorkspaceSection,
 };
 use crate::backend::{PaletteBackend, Toggle};
 use crate::driver::{PaletteController, PaletteStep};
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::host::UiHost;
 use crate::layout::Layout;
+use crate::navigation::AmbientContext;
 use crate::palette_service::PaletteApplicationService;
-use crate::project_world::ProjectWorldReadModel;
+use crate::project_world_api::ProjectWorldApplicationService;
 use crate::scope::ScopeSelector;
 use crate::search::Row;
 use crate::tree::{Node, NodeKind, TreeEffect, TreeState};
@@ -102,20 +103,17 @@ pub struct SurfaceController {
     mode: SurfaceMode,
     host: UiHost,
     semantic: TuiState,
-    project_world: ProjectWorldReadModel,
     runtime: TuiRuntime,
+    project_world: Option<ProjectWorldReadModel>,
     palette: PaletteController,
     tree: TreeController,
 }
 
 impl SurfaceController {
     pub fn new<B: SurfaceBackend>(backend: &mut B, request: SurfaceRequest) -> Result<Self> {
-        // The resident V1 controllers are created only as compatibility
-        // presentations. Their initial effect pass is not accepted as V2 state;
-        // the canonical read model is immediately resolved again through
-        // TuiRuntime + TuiApplicationService below.
         let palette = PaletteController::new(backend, request.palette_request())?;
         let tree_state = backend.surface_tree()?;
+        let project_world = project_world_if_bound(backend)?;
         let semantic = TuiState {
             query: palette.state().query.clone(),
             read_model: compatibility_read_model(backend, &tree_state),
@@ -124,14 +122,13 @@ impl SurfaceController {
             relation_view: relation_view_for_mode(request.initial_mode),
             ..TuiState::default()
         };
-        let project_world = ProjectWorldReadModel::from_backend(backend);
         let tree = TreeController::new(tree_state, TreeRequest::new(request.host));
         let mut surface = Self {
             mode: request.initial_mode,
             host: request.host,
             semantic,
-            project_world,
             runtime: TuiRuntime::new(),
+            project_world,
             palette,
             tree,
         };
@@ -150,14 +147,12 @@ impl SurfaceController {
         self.mode
     }
 
-    /// The one semantic state shared by every presentation.
     pub fn semantic(&self) -> &TuiState {
         &self.semantic
     }
 
-    /// The same application-service Project disclosure rendered by Workspace.
-    pub fn project_world(&self) -> &ProjectWorldReadModel {
-        &self.project_world
+    pub fn project_world(&self) -> Option<&ProjectWorldReadModel> {
+        self.project_world.as_ref()
     }
 
     pub fn palette(&self) -> &PaletteController {
@@ -176,18 +171,18 @@ impl SurfaceController {
                 if self.palette.state().mode == Mode::Search
                     && !self.palette.state().in_manage_lane() =>
             {
-                v2_render::draw_with_project_world(
-                    frame,
-                    &self.semantic,
-                    Some(&self.project_world),
-                )
+                let ambient = ambient_context(&self.palette.state().descriptor);
+                if let Some(world) = self.project_world.as_ref() {
+                    v2_render::draw_with_project_world(frame, &self.semantic, &ambient, world)
+                } else {
+                    v2_render::draw_with_context(frame, &self.semantic, &ambient)
+                }
             }
             SurfaceMode::Palette => self.palette.draw(frame),
             SurfaceMode::Tree => self.tree.draw(frame),
         }
     }
 
-    /// Draw one production frame through a caller-owned terminal.
     pub fn draw_terminal<T>(&mut self, terminal: &mut Terminal<T>) -> Result<()>
     where
         T: Backend,
@@ -212,16 +207,12 @@ impl SurfaceController {
             SurfaceMode::Palette => {
                 if let Some(action) = self.quick_mouse_action(&event) {
                     self.dispatch_semantic(backend, action)?;
-                    self.project_semantic_to_palette(backend);
+                    self.project_semantic_to_presentations(backend);
                     return Ok(SurfaceStep::Continue);
                 }
                 if let Some(step) = self.handle_v2_palette_event(backend, &event)? {
                     return Ok(step);
                 }
-
-                // Capability-specific details/forms/run handoff remain on the
-                // compatibility controller. Search/stage/apply never reach this
-                // path in the resting V2 surface.
                 let step = self.palette.handle(backend, event)?;
                 self.capture_palette_semantics();
                 self.handle_palette_step(backend, step)
@@ -234,9 +225,6 @@ impl SurfaceController {
         }
     }
 
-    /// V2 owns ambiguous navigation before either compatibility presentation sees
-    /// it. Esc is only back/dismiss at the resting surface; clear and exit are
-    /// separate explicit commands.
     fn handle_explicit_navigation<B: SurfaceBackend>(
         &mut self,
         backend: &mut B,
@@ -280,9 +268,6 @@ impl SurfaceController {
         Ok(None)
     }
 
-    /// Translate the resting Quick/Workspace compatibility palette into the one
-    /// V2 action language. Keys not owned here are capability-specific legacy
-    /// interactions and are deliberately handed on.
     fn handle_v2_palette_event<B: SurfaceBackend>(
         &mut self,
         backend: &mut B,
@@ -303,20 +288,14 @@ impl SurfaceController {
 
         if self.semantic.action_query.is_some() {
             match key.code {
-                KeyCode::Up => {
-                    self.dispatch_semantic(backend, UiAction::SelectPreviousAction)?;
-                }
-                KeyCode::Down => {
-                    self.dispatch_semantic(backend, UiAction::SelectNextAction)?;
-                }
+                KeyCode::Up => self.dispatch_semantic(backend, UiAction::SelectPreviousAction)?,
+                KeyCode::Down => self.dispatch_semantic(backend, UiAction::SelectNextAction)?,
                 KeyCode::Backspace => {
                     let mut query = self.semantic.action_query.clone().unwrap_or_default();
                     query.pop();
                     self.dispatch_semantic(backend, UiAction::SetActionQuery(query))?;
                 }
-                KeyCode::Enter => {
-                    self.invoke_selected_contextual_action(backend, false)?;
-                }
+                KeyCode::Enter => self.invoke_selected_contextual_action(backend, false)?,
                 KeyCode::Char(' ') if !ctrl && !alt => {
                     self.invoke_selected_contextual_action(backend, true)?;
                 }
@@ -521,9 +500,7 @@ impl SurfaceController {
             .filter(|action| action.stageability == ActionStageability::Stageable)
             .collect::<Vec<_>>();
         match stageable.as_slice() {
-            [action] => {
-                self.dispatch_semantic(backend, UiAction::InvokeAction(action.action.clone()))?;
-            }
+            [action] => self.dispatch_semantic(backend, UiAction::InvokeAction(action.action.clone()))?,
             [] => {
                 self.semantic.status = Some(crate::application::UiStatus {
                     message: "the selected resource exposes no stageable action".into(),
@@ -656,8 +633,6 @@ impl SurfaceController {
         }
     }
 
-    /// Ingest compatibility state only after a capability-specific legacy gesture.
-    /// Resting search/stage/apply never get here because V2 consumed them first.
     fn capture_palette_semantics(&mut self) {
         self.semantic.query = self.palette.state().query.clone();
         self.apply_semantic(UiAction::SetMutationScope(self.palette.state().scope.current()));
@@ -758,9 +733,6 @@ impl SurfaceController {
         }
     }
 
-    /// Project the V2 search/staging state into the resident palette without
-    /// executing the V1 Search or Stage effects. The order comes from the V2
-    /// application-service read model; legacy rows only supply rendering metadata.
     fn project_semantic_to_palette<B: SurfaceBackend>(&mut self, backend: &mut B) {
         let docs: BTreeMap<CapsuleId, _> = backend
             .documents()
@@ -840,12 +812,12 @@ impl SurfaceController {
             state.status = Some(Status::info(message));
         }
 
+        self.project_world = project_world_if_bound(backend)?;
         self.replace_tree(backend.surface_tree()?, backend);
         let query = self.semantic.query.clone();
         self.dispatch_semantic(backend, UiAction::SetQuery(query))?;
         self.ensure_semantic_selection(backend)?;
         self.project_semantic_to_presentations(backend);
-        self.project_world = ProjectWorldReadModel::from_backend(backend);
         Ok(())
     }
 
@@ -874,8 +846,6 @@ impl SurfaceController {
         self.project_semantic_to_presentations(backend);
     }
 
-    /// Pure state-only actions remain cheap. Any action capable of producing an
-    /// application effect must go through `dispatch_semantic` instead.
     fn apply_semantic(&mut self, action: UiAction) {
         let state = std::mem::take(&mut self.semantic);
         self.semantic = reduce_tui(state, action).state;
@@ -935,14 +905,112 @@ impl SurfaceController {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if self.presentation_title_at(mouse.column, mouse.row) {
+                    return Some(UiAction::SetPresentation(match self.semantic.presentation {
+                        PresentationMode::Quick => PresentationMode::Workspace,
+                        PresentationMode::Workspace => PresentationMode::Quick,
+                    }));
+                }
+                if let Some(section) = self.workspace_section_at(mouse.column, mouse.row) {
+                    return Some(UiAction::SetWorkspaceSection(section));
+                }
+                if let Some(action) = self.contextual_action_at(mouse.column, mouse.row) {
+                    return Some(UiAction::InvokeAction(action));
+                }
                 let index = self.quick_row_at(mouse.column, mouse.row)?;
                 let resource = self.semantic.read_model.resource_at(index)?.clone();
                 Some(mouse_select(resource))
+            }
+            MouseEventKind::ScrollDown if self.semantic.action_query.is_some() => {
+                Some(UiAction::SelectNextAction)
+            }
+            MouseEventKind::ScrollUp if self.semantic.action_query.is_some() => {
+                Some(UiAction::SelectPreviousAction)
             }
             MouseEventKind::ScrollDown => Some(UiAction::SelectNext),
             MouseEventKind::ScrollUp => Some(UiAction::SelectPrevious),
             _ => None,
         }
+    }
+
+    fn presentation_title_at(&self, column: u16, row: u16) -> bool {
+        row == 0 && (1..22).contains(&column)
+    }
+
+    fn workspace_section_at(&self, column: u16, row: u16) -> Option<WorkspaceSection> {
+        if self.semantic.presentation != PresentationMode::Workspace {
+            return None;
+        }
+        let (cols, rows) = self.semantic.area;
+        if cols < 2 || rows < 2 {
+            return None;
+        }
+        let inner = Rect::new(1, 1, cols.saturating_sub(2), rows.saturating_sub(2));
+        let panes = Layout::for_width(inner.width).split(inner);
+        if row != panes.query.y {
+            return None;
+        }
+        let visible_query = if let Some(action_query) = self.semantic.action_query.as_ref() {
+            if action_query.is_empty() {
+                "search actions for selection"
+            } else {
+                action_query
+            }
+        } else if self.semantic.query.is_empty() {
+            "search resources and actions"
+        } else {
+            &self.semantic.query
+        };
+        let mut x = panes
+            .query
+            .x
+            .saturating_add(2)
+            .saturating_add(visible_query.chars().count() as u16)
+            .saturating_add(3);
+        for (index, section) in WorkspaceSection::ALL.iter().copied().enumerate() {
+            if index > 0 {
+                x = x.saturating_add(3);
+            }
+            let width = section.as_str().chars().count() as u16;
+            if column >= x && column < x.saturating_add(width) {
+                return Some(section);
+            }
+            x = x.saturating_add(width);
+        }
+        None
+    }
+
+    fn contextual_action_at(&self, column: u16, row: u16) -> Option<ResourceRef> {
+        if self.semantic.overlay.is_some() {
+            return None;
+        }
+        let selected = self.semantic.selected.as_ref()?;
+        if self.semantic.contextual_actions_for.as_ref() != Some(selected)
+            || self.semantic.contextual_actions.is_empty()
+        {
+            return None;
+        }
+        let (cols, rows) = self.semantic.area;
+        if cols < 2 || rows < 2 {
+            return None;
+        }
+        let inner = Rect::new(1, 1, cols.saturating_sub(2), rows.saturating_sub(2));
+        let panes = Layout::for_width(inner.width).split(inner);
+        let preview = panes.preview?;
+        if column < preview.x || column >= preview.x.saturating_add(preview.width) {
+            return None;
+        }
+        let action_start = preview.y.saturating_add(8);
+        if row < action_start {
+            return None;
+        }
+        let actions = if self.semantic.action_query.is_some() {
+            visible_contextual_actions(&self.semantic)
+        } else {
+            self.semantic.contextual_actions.clone()
+        };
+        let index = (row - action_start) as usize;
+        actions.get(index).map(|action| action.action.clone())
     }
 
     fn quick_row_at(&self, column: u16, row: u16) -> Option<usize> {
@@ -974,6 +1042,29 @@ impl SurfaceController {
     }
 }
 
+fn project_world_if_bound(backend: &mut dyn PaletteBackend) -> Result<Option<ProjectWorldReadModel>> {
+    if backend.context().project_root.is_none() {
+        return Ok(None);
+    }
+    let service = PaletteApplicationService::new(backend);
+    service.project_world().map(Some)
+}
+
+fn ambient_context(descriptor: &aikit_core::ContextDescriptor) -> AmbientContext {
+    AmbientContext {
+        project: descriptor
+            .project_root
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned()),
+        focus: descriptor.task.clone(),
+        profile: None,
+        agency: None,
+        host: (!descriptor.host.is_empty()).then(|| descriptor.host.clone()),
+        target: descriptor.targets.first().map(|target| target.as_str().to_string()),
+    }
+}
+
 fn presentation_for_host(host: UiHost) -> PresentationMode {
     match host {
         UiHost::Inline(_) => PresentationMode::Quick,
@@ -998,12 +1089,8 @@ fn resource_capsule_id(resource: &ResourceRef) -> Option<CapsuleId> {
 
 fn node_resource_ref(node: &Node) -> Option<ResourceRef> {
     match &node.kind {
-        NodeKind::Capability { id } | NodeKind::HookStep { capsule: id, .. } => {
-            capsule_resource_ref(id)
-        }
-        NodeKind::Root(_) | NodeKind::Set { .. } | NodeKind::Group { .. } | NodeKind::Entry { .. } => {
-            None
-        }
+        NodeKind::Capability { id } | NodeKind::HookStep { capsule: id, .. } => capsule_resource_ref(id),
+        NodeKind::Root(_) | NodeKind::Set { .. } | NodeKind::Group { .. } | NodeKind::Entry { .. } => None,
     }
 }
 
@@ -1090,7 +1177,6 @@ pub fn run_on_terminal<B: SurfaceBackend>(
     run_inner(backend, request, host)
 }
 
-/// Owns every terminal mode as soon as it is acquired.
 struct TerminalSession {
     raw: bool,
     alternate: bool,

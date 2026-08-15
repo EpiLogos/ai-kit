@@ -37,24 +37,6 @@
 //! semantic ResourceRef selection/staging/navigation state shared by Quick,
 //! Workspace, list, tree and future graph presentations. The older palette/tree
 //! models remain compatibility presentations while that state is adopted.
-//!
-//! ## Where to look
-//!
-//! | Question | Module |
-//! |---|---|
-//! | What is the V2 semantic TUI state/application-service seam? | [`application`] |
-//! | How does the existing shared backend feed the V2 service? | [`palette_service`] |
-//! | How are already-resolved V2 Resources added to search? | [`navigation`] |
-//! | What is the resolved Project world shown by Workspace? | [`project_world`] |
-//! | What does a key do? | [`app`], [`event`] |
-//! | Why is this row above that one? | [`search`] |
-//! | What would this toggle actually cost? | [`staging`] |
-//! | Where would a change be written, and what confirms it? | [`scope`] |
-//! | How is an argument form built from a manifest? | [`form`] |
-//! | What fits at this width? | [`layout`] |
-//! | Where does the palette appear? | [`host`] |
-//! | What does it look like? | [`render`], [`v2_render`], [`theme`] |
-//! | What does the palette need from the application? | [`backend`] |
 
 #![forbid(unsafe_code)]
 
@@ -67,7 +49,10 @@ pub mod host;
 pub mod layout;
 pub mod navigation;
 pub mod palette_service;
-pub mod project_world;
+pub mod project_workspace;
+pub mod project_workspace_render;
+pub mod project_world_api;
+pub mod project_world_service;
 pub mod render;
 pub mod scope;
 pub mod search;
@@ -98,13 +83,14 @@ pub use event::{EventSource, PaletteEvent, ScriptedEvents};
 pub use form::{ArgForm, RunPreview};
 pub use host::{Escalation, TerminalProfile, UiHost};
 pub use layout::{Glyphs, Layout, Width};
-pub use navigation::resolved_navigation_index;
-pub use palette_service::PaletteApplicationService;
-pub use project_world::{
-    ActorRuntimeWorld, CapabilityHorizon, DeclaredCapability, GenerationDisclosure,
-    InformationHorizon, ProjectWorldIdentity, ProjectWorldReadModel, ProjectWorldResource,
-    ProjectWorldResourceSet, ProjectionWorld, UnavailableCapability,
+pub use navigation::{
+    keyboard_invoke_action, keyboard_open_hit, keyboard_select_hit, keyboard_set_presentation,
+    mouse_invoke_action, mouse_open_hit, mouse_select_hit, mouse_set_presentation, stage_action,
+    AmbientContext, NavigationIntent,
 };
+pub use palette_service::PaletteApplicationService;
+pub use project_workspace::{ComposeHorizon, ProjectWorkspaceSelection, ProjectWorkspaceState};
+pub use project_world_api::ProjectWorldApplicationService;
 pub use scope::ScopeSelector;
 pub use search::{rank, Matcher, Row};
 pub use staging::{stage, StagedDiff, StagedProblem, StagedSet};
@@ -188,12 +174,6 @@ pub fn run_tree(
 }
 
 /// Open the palette, run it to completion, and return what it did.
-///
-/// Terminal setup and teardown happen here so that the outcome is delivered to a
-/// caller holding a restored terminal. The loop itself is
-/// [`driver::event_loop`], which is generic over the ratatui backend and the
-/// event source — that is what lets the end-to-end tests drive a real palette
-/// against a `TestBackend` and a scripted key sequence.
 pub fn run(app: &mut dyn PaletteBackend, request: PaletteRequest) -> aikit_core::Result<PaletteOutcome> {
     driver::run_on_terminal(app, request)
 }

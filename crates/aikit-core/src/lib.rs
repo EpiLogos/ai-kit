@@ -41,6 +41,7 @@ pub mod policy;
 pub mod procedure;
 pub mod profile;
 pub mod project;
+pub mod project_world;
 pub mod projection;
 pub mod ql;
 pub mod resolve;
@@ -123,6 +124,12 @@ pub use procedure::{
     RegistryOwnership, UndoRecord, UndoStep, WorldEdit,
 };
 pub use profile::{ConfigMerge, ConfigTable, PoolPatch, Profile};
+pub use project_world::{
+    disclose_project_world, ActorDisclosure, ActorRuntimeDisclosure, CapabilityHorizonDisclosure,
+    EffectiveRevisionDisclosure, InformationHorizonDisclosure, ProjectWorldReadModel,
+    ProjectWorldResource, ProjectionDisclosure, ResolutionBasisDisclosure,
+    ResourceEffectiveDisclosure, ResourceIntentDisclosure, PROJECT_WORLD_VERSION,
+};
 pub use projection::{
     target_label, ActivationEffect, MaterializationMode, ProjectionItem, ProjectionPlan,
     ResolvedContext, TargetAdapter, TargetCapabilities,

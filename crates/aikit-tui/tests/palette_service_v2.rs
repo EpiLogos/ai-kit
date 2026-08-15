@@ -2,9 +2,13 @@ mod common;
 
 use common::*;
 
+use aikit_core::projection::ActivationEffect;
 use aikit_core::scope::ScopeKind;
+use aikit_core::search::UsageStats;
+use aikit_core::TargetId;
 use aikit_tui::{
-    ActivationIntent, PaletteApplicationService, StagedChanges, TuiApplicationService,
+    ActivationIntent, ClientEffect, PaletteApplicationService, StagedChanges,
+    TuiApplicationService,
 };
 
 #[test]
@@ -24,7 +28,37 @@ fn production_adapter_searches_the_same_resolved_catalog_as_the_palette() {
 }
 
 #[test]
-fn production_adapter_previews_and_applies_through_the_same_backend_scope_writer() {
+fn zero_query_learned_usage_stays_labelled_as_evidence_not_preference() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = Fixture::new(
+        dir.path(),
+        vec![script("script/ops/deploy"), skill("skill/rust/review")],
+    );
+    backend.usage.insert(
+        cid("script/ops/deploy"),
+        UsageStats {
+            successful_runs: 7,
+            failed_runs: 0,
+            last_success_age: None,
+        },
+    );
+
+    let service = PaletteApplicationService::new(&mut backend);
+    let model = service.search("").unwrap();
+    let deploy = model
+        .resources
+        .iter()
+        .find(|item| item.resource.as_str() == "script/ops/deploy")
+        .expect("learned usage should make the destination visible at zero query");
+
+    assert!(deploy.summary.contains("evidence: learned usage"));
+    assert!(deploy.summary.contains("7 successful run(s)"));
+    assert!(!deploy.summary.contains("preferred"));
+    assert!(!deploy.summary.contains("trusted"));
+}
+
+#[test]
+fn production_adapter_previews_target_activation_semantics_before_apply() {
     let dir = tempfile::tempdir().unwrap();
     let mut backend = Fixture::new(
         dir.path(),
@@ -42,7 +76,8 @@ fn production_adapter_previews_and_applies_through_the_same_backend_scope_writer
     };
     assert_eq!(preview.scope, ScopeKind::Project);
     assert_eq!(preview.staged, staged);
-    assert!(preview.summary.contains("Claude: live"));
+    assert!(preview.summary.contains("target effects:"));
+    assert!(preview.summary.contains("live"));
     assert!(backend.applied.is_empty());
 
     let receipt = {
@@ -54,6 +89,32 @@ fn production_adapter_previews_and_applies_through_the_same_backend_scope_writer
     assert_eq!(backend.applied[0].0, ScopeKind::Project);
     assert_eq!(backend.applied[0].1.len(), 1);
     assert!(backend.applied[0].1[0].enable);
+}
+
+#[test]
+fn production_adapter_never_calls_restart_only_effect_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = Fixture::new(dir.path(), vec![skill("skill/rust/review")]);
+    backend.effects = vec![ClientEffect::new(
+        TargetId::claude_code(),
+        ActivationEffect::restart_client("Claude Code"),
+    )];
+    let mut staged = StagedChanges::default();
+    staged.stage(
+        aikit_core::resource::ResourceRef::parse("skill/rust/review").unwrap(),
+        ActivationIntent::Enable,
+    );
+
+    let preview = {
+        let service = PaletteApplicationService::new(&mut backend);
+        service
+            .preview_composition(ScopeKind::Project, &staged)
+            .unwrap()
+    };
+
+    assert!(preview.summary.contains("restart Claude Code"));
+    assert!(!preview.summary.contains(": live"));
+    assert!(backend.applied.is_empty());
 }
 
 #[test]
