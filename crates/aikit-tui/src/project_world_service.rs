@@ -1,46 +1,68 @@
-//! Project-world composition for the shared CLI/TUI application service.
+//! Project-world and actor-context composition for the shared CLI/TUI application service.
 //!
 //! The application service already exposes one resolved legacy view, its authoritative
 //! `ContextDescriptor`, the ResourceRef-native navigation index, and—where the concrete
 //! backend owns it—the ordered scope-layer stack through `PaletteBackend`.
 //!
-//! This adapter composes V2 `ContextResolution` from those same inputs rather than
-//! rebuilding resolution inside a renderer/controller. When a compatibility backend
-//! cannot expose scope layers, that absence remains explicit instead of being inferred
-//! from partial selection-log evidence.
+//! This module composes one V2 [`ContextResolution`] from those same inputs rather than
+//! rebuilding resolution inside a renderer/controller or target adapter. Project-world
+//! disclosure and thin actor bootstrap can therefore consume the same typed operational
+//! truth. When a compatibility backend cannot expose scope layers, that absence remains
+//! explicit instead of being inferred from partial selection-log evidence.
 
 use aikit_core::context_resolution::{compose_context_resolution, RequestedActors};
 use aikit_core::context_source::{ContextSourceEntry, ContextSourceIndex};
 use aikit_core::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
-use aikit_core::resource::{ResourceIndex, ResourceKind};
-use aikit_core::{disclose_project_world, ProjectWorldReadModel, Result};
+use aikit_core::resource::{ResourceKind, ResourceRef};
+use aikit_core::{
+    disclose_project_world, ContextResolution, ProjectWorldReadModel, Result,
+};
 
 use crate::PaletteBackend;
 
-pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadModel> {
+/// Compose the wider V2 operational Context from the same application service
+/// that already backs Quick/Workspace navigation and durable composition.
+///
+/// This is intentionally public inside the TUI/application crate so other
+/// application projections—most importantly the managed actor bootstrap—can
+/// consume the exact same resolved Project/Scope/Resource field without asking a
+/// harness adapter to reconstruct identity.
+pub fn context_resolution(backend: &dyn PaletteBackend) -> Result<ContextResolution> {
     let context = backend.context();
     let project_ref = project_ref(context)?;
     let constituent = ProjectConstituentRef::parse("source:working-tree")?;
     let binding = ProjectBinding::from_legacy_context(project_ref, constituent, context)?;
-
     let resources = backend.navigation_index();
-    let scope_layers = backend.scope_layers();
-    let resolution = compose_context_resolution(
+
+    let host = (!context.host.trim().is_empty())
+        .then(|| ResourceRef::parse(&format!("host/{}", context.host)))
+        .transpose()?;
+    let requested = RequestedActors {
+        host,
+        ..RequestedActors::default()
+    };
+
+    Ok(compose_context_resolution(
         backend.view(),
         binding,
-        scope_layers.unwrap_or(&[]),
+        backend.scope_layers().unwrap_or(&[]),
         &resources,
-        RequestedActors::default(),
-    );
+        requested,
+    ))
+}
+
+pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadModel> {
+    let resolution = context_resolution(backend)?;
 
     let mut source_index = ContextSourceIndex::default();
-    for record in ResourceIndex::resources(&resources) {
+    for resolved in &resolution.context_sources {
+        let record = &resolved.resource;
         if record.descriptor.kind == ResourceKind::ContextSource {
             if let Ok(mut entry) = ContextSourceEntry::new(record.clone()) {
                 entry.disclosure.known_to_exist = true;
                 entry.disclosure.askable = true;
                 entry.disclosure.exists = matches!(
-                    aikit_core::resource_availability(record),
+                    resolved.availability,
                     aikit_core::Availability::Available
                 );
                 source_index.insert(entry);
@@ -49,7 +71,7 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
     }
 
     let mut world = disclose_project_world(&resolution, &source_index, None);
-    if scope_layers.is_none() {
+    if backend.scope_layers().is_none() {
         world.warnings.push(
             "Project-world basis does not include the ordered scope-layer stack because this application-service boundary does not expose it; scope provenance is not reconstructed from partial evidence"
                 .into(),
@@ -78,6 +100,7 @@ mod tests {
     use super::*;
     use aikit_core::catalog::MemoryCatalog;
     use aikit_core::context::ContextDescriptor;
+    use aikit_core::context_resolution::ReferenceResolution;
     use aikit_core::policy::ManagedPolicy;
     use aikit_core::resolve::{resolve, ResolveRequest};
     use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
@@ -136,6 +159,21 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn shared_context_resolution_uses_the_current_host_resource() {
+        let mut context = ContextDescriptor::for_project("/work/aikit");
+        context.host = "test-host".into();
+        let view = resolved(&context, Vec::new());
+        let backend = Backend {
+            context,
+            view,
+            layers: Some(Vec::new()),
+        };
+
+        let resolution = context_resolution(&backend).unwrap();
+        assert!(matches!(resolution.host, Some(ReferenceResolution::Resolved { .. })));
     }
 
     #[test]
