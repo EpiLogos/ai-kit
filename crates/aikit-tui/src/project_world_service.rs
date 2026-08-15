@@ -26,12 +26,7 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
     let context = backend.context();
     let project_ref = project_ref(context)?;
     let constituent = ProjectConstituentRef::parse("source:working-tree")?;
-    let binding = ProjectBinding::from_legacy_context(
-        project_ref,
-        constituent,
-        context.project_id.clone(),
-        context.project_root.clone(),
-    )?;
+    let binding = ProjectBinding::from_legacy_context(project_ref, constituent, context)?;
 
     let resources = backend.navigation_index();
     let (profiles, scopes) = observed_resolution_basis(backend);
