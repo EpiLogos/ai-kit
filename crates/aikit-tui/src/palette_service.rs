@@ -58,7 +58,10 @@ impl<'a> PaletteApplicationService<'a> {
         Ok(index)
     }
 
-    fn learned_accessibility(&self, resource: &ResourceRef) -> Result<Option<aikit_core::AccessibilityAssessment>> {
+    fn learned_accessibility(
+        &self,
+        resource: &ResourceRef,
+    ) -> Result<Option<aikit_core::AccessibilityAssessment>> {
         Ok(self
             .backend
             .familiarity()?
@@ -255,7 +258,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
             "authoredPreference": explanation.preference,
             "annotations": record.descriptor.annotations,
             "ranking": hit.as_ref().map(|hit| &hit.ranking),
-            "navigationEvidence": hit.as_ref().map(|hit| &hit.navigation_evidence).unwrap_or(&Vec::new()),
+            "navigationEvidence": hit.as_ref().map(|hit| &hit.navigation_evidence),
             "contextualActions": contextual_actions,
             "learnedAccessibility": learned,
             "resolutionHash": self.backend.view().hash.to_string(),
@@ -368,6 +371,7 @@ impl TuiApplicationService for PaletteApplicationService<'_> {
                 "sources": explanation.sources,
                 "providers": explanation.providers,
                 "contextualActions": contextual_actions,
+                "related": resolver_related.clone(),
                 "resolverRelated": resolver_related,
             }),
         })
