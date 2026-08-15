@@ -18,7 +18,7 @@ Execution
     one concrete act
 ```
 
-AIKit can index Agent definitions and Agency profiles, resolve actor-facing resources, and produce a situated disclosure. It does not turn model or harness identity into Agent identity.
+AIKit can index Agent definitions and Agency profiles, resolve actor-facing resources, and produce a situated disclosure. It does not turn model, Harness, HarnessComposition, target-native Component, or session identity into Agent identity.
 
 ---
 
@@ -36,6 +36,9 @@ ContextDisclosure {
     scope_chain
     model
     harness
+    harness_composition?
+    active_components?
+    active_surfaces?
     host/world
     capabilities
     actions
@@ -57,9 +60,13 @@ Where am I?
 What matters?
 What can I do?
 What can I know?
+What body am I operating through?
+Which faculties/components are active and why?
 What is familiar?
 What remains open or unresolved?
 ```
+
+For a composition-capable target, disclosure should distinguish the enduring/situated actor from the presently constituted body through which that actor operates.
 
 ---
 
@@ -67,7 +74,7 @@ What remains open or unresolved?
 
 AIKit should support a small target-native bootstrap into harnesses.
 
-The seed is not a user profile, Project dump, or task procedure. It establishes that the wider objective-internal world exists and tells the agent how to encounter it.
+The seed is not a user profile, Project dump, task procedure, or full component manifest. It establishes that the wider objective-internal world exists and tells the agent how to encounter it.
 
 Conceptually:
 
@@ -76,25 +83,25 @@ You operate within an AIKit-resolved world.
 
 AIKit provides faculties for discovering your situated Agency,
 Project/Focus, available powers and Actions, information horizon,
-relevant prior operation, and current boundaries.
+relevant prior operation, current runtime embodiment, and boundaries.
 
-Capability descriptions may include questions they can answer.
-Use those faculties according to present need.
+Capability and Component descriptions may include questions they can answer
+or changes they can make available. Use those faculties according to present need.
 
 Distinguish what exists, what you know exists, what you can ask
-about, what you have retrieved, and what you have intentionally
-brought into Focus.
+about, what you have retrieved, what is active in your present body,
+and what you have intentionally brought into Focus.
 
-Re-orient when the material situation changes.
+Re-orient when the material or runtime situation changes.
 ```
 
 The exact language is an empirical design surface. The architectural requirement is its smallness and stability.
 
 ---
 
-## 24. Harness bootstrap and projection
+## 24. Harness bootstrap, composition, and projection
 
-Each harness adapter declares what it can receive:
+Each harness adapter declares what it can receive and what it can compose:
 
 - standing instruction mechanisms;
 - native Skills;
@@ -103,11 +110,16 @@ Each harness adapter declares what it can receive:
 - tool protocols;
 - session state;
 - subagent facilities;
-- target-specific filesystem/project surfaces.
+- target-specific filesystem/project surfaces;
+- target-native Component/plugin mechanisms where present;
+- service/Contract dependency seams where present;
+- activation/retraction lifecycle semantics;
+- UI/inspection/trajectory contribution surfaces where present;
+- runtime/loop replacement seams where present.
 
 AIKit uses the best supported seam while preserving the same semantic world.
 
-Possible projection modes include:
+Possible projection/activation modes include:
 
 ```text
 native projection
@@ -116,17 +128,23 @@ managed bootstrap
 session-scoped add-dir / equivalent
 generated target file
 hook-based disclosure
+component/plugin mounting
+surface contribution
+live target-native activation
+next-session composition
 ```
 
-No adapter may claim immediate activation where the harness only reloads on the next session.
+No adapter may claim immediate activation where the harness only reloads on the next session. No adapter may claim reversible live effects where the target cannot actually retract them.
+
+A composition-capable adapter should be able to project a resolved `HarnessComposition` while preserving canonical refs through target-native registrations.
 
 ---
 
-## 25. Authority modes for agent-facing files
+## 25. Authority modes for agent-facing files and runtime contributions
 
-Agent-facing files must not silently change authority class.
+Agent-facing files and target-native runtime registrations must not silently change authority class.
 
-Useful modes include:
+Useful file modes include:
 
 ```text
 AUTHORED SOURCE
@@ -142,9 +160,22 @@ MIXED / IMPORTING SURFACE
     authored file that explicitly imports/references managed content
 ```
 
-Generated material retains source refs, generation hash, target, scope, and overwrite policy.
+Runtime contributions should likewise retain whether they are:
 
-Generated projection never writes backwards into canonical authored source.
+```text
+TARGET-NATIVE
+    owned by the harness/component implementation
+
+PROJECTED
+    generated/bound from an externally owned canonical resource
+
+DERIVED
+    read-model/inspection state over canonical/runtime evidence
+```
+
+Generated material retains source refs, generation hash, target, scope, and overwrite policy. Projected runtime contributions retain the canonical ref they expose where applicable.
+
+Generated projection or target-native registration never writes backwards into canonical authored source merely because it is active.
 
 ---
 
@@ -169,13 +200,48 @@ Model disposition is empirical and contextual. It must not harden into personali
 
 ---
 
-## 27. Harnesses
+## 27. Harnesses and HarnessComposition
 
-A Harness is the embodied runtime surface through which a model receives context, maintains a session, invokes tools/capabilities, streams events, and interacts with the environment.
+A Harness is the embodied runtime technology through which a model receives context, maintains a session, invokes tools/capabilities, streams events, and interacts with the environment.
 
 AIKit resolves harness compatibility and projects into harness-native surfaces.
 
+A Harness need not be internally atomic. Rich targets may expose a composable body in which model adapters, loop drivers, tools, services, policies, persistence, context faculties, subagent facilities, observers and UI surfaces are themselves replaceable Components.
+
+For those targets AIKit should be able to derive an inspectable relation equivalent to:
+
+```text
+HarnessComposition
+    harness
+    model binding
+    Component bindings
+    Contract/provider bindings
+    Capability bindings
+    Action projections
+    ContextSource faculties
+    active Surfaces
+    ActivationScopes / lifetime state
+    target revision
+    Generation / provenance
+```
+
+This is the **resolved body**, not a second Harness identity.
+
+The same Agent/Agency may therefore operate through:
+
+```text
+Harness A + Composition A₀
+Harness A + Composition A₁
+Harness B + Composition B₀
+```
+
+without identity drift.
+
+Harnesses own their native mechanics. AIKit owns resolution, explanation, projection/binding and lifecycle truth about what it asked the target to activate. Target-native plugin/service semantics remain target-owned.
+
 Harnesses own their loop mechanics unless a harness explicitly exposes a swappable runtime seam. Experimental QL-native loops remain separate providers over such a seam.
+
+The full composition contract is in `09-COMPOSABLE-RUNTIME-ENVIRONMENTS.md`.
 
 ---
 
@@ -187,6 +253,7 @@ AIKit Host discovery owns observed machine facts such as:
 - installed binaries;
 - reachable services;
 - model/harness availability;
+- target-native component/plugin support where discoverable;
 - resource capacity;
 - current Workcell/provider availability;
 - network reachability where relevant.
@@ -205,17 +272,17 @@ The boundary is:
 
 ```text
 AIKit:
-"What should this actor be able to do here?"
+"What should this actor be able to do here, and what runtime body should expose it?"
 
 Workcell:
-"How can this deployment make that materially true?"
+"How can this deployment make the required material execution world true?"
 ```
 
 AIKit may index Workcell offers and current availability.
 
 It does not own provider planning, workspace creation, runtime/service binding, or the material Binding Graph.
 
-A resolved actor world can therefore produce an `ExecutionDemand` while Workcell produces the material execution world that satisfies it.
+A resolved actor world can therefore produce an `ExecutionDemand` while Workcell produces the material execution world that satisfies it. A harness Component may consume or expose a Workcell-backed faculty without becoming the owner of that material world.
 
 ---
 
@@ -223,17 +290,18 @@ A resolved actor world can therefore produce an `ExecutionDemand` while Workcell
 
 ## 30. AIKit memory is memory of operating relation
 
-AIKit should remember **how actors traverse the environment**, not become the canonical autobiographical memory store for every source domain.
+AIKit should remember **how actors traverse and compose the environment**, not become the canonical autobiographical memory store for every source domain.
 
 Three important classes are:
 
 ### Operational history
 
 ```text
-what resource was used
+what resource/component was used
 when
 where
 by which actor/context
+through which HarnessComposition where relevant
 ```
 
 ### Fitness evidence
@@ -247,7 +315,7 @@ under these conditions?
 
 ```text
 which routes through Projects, resources, capabilities, sources,
-models, and profiles have become well travelled?
+models, Components, Surfaces, and profiles have become well travelled?
 ```
 
 ---
@@ -272,10 +340,11 @@ This can improve:
 - autocomplete;
 - TUI ranking;
 - contextual retrieval proximity;
+- component/surface discovery where the user explicitly seeks composition;
 - explicit "what has worked here before?" queries;
 - deterministic tie-breaking among otherwise eligible candidates where policy permits.
 
-It does not need to become unsolicited capability suggestion.
+It does not need to become unsolicited capability or component suggestion.
 
 Signals remain separate:
 
@@ -295,21 +364,23 @@ availability
 AIKit should retain enough history to let an actor inspect change over time:
 
 ```text
-state S0
+state S0 / body B0
+  ↓ activity or composition change
+state S1 / body B1
   ↓ activity
-state S1
-  ↓ activity
-state S2
+state S2 / body B1
 ```
 
 Useful questions include:
 
 ```text
 What was true when this activity began?
+What body/components were active?
 What changed?
 What became familiar?
 What repeatedly failed?
 What source or Profile changed?
+What component/provider binding changed?
 What is easier to reach now?
 What remains unresolved?
 ```
@@ -342,6 +413,8 @@ Projects may expose AIKit-specific operating declarations for:
 - Context Sources;
 - agents/agencies;
 - model/harness requirements;
+- Component/Contract requirements or preferences where appropriate;
+- desired Surface/projection availability;
 - execution/world requirements;
 - source bindings.
 
@@ -358,6 +431,8 @@ AIKit should be able to route into a Project Map joining source/Git, code intell
 The Project Map remains an index over Project reality, not a replacement for the underlying sources.
 
 AIKit uses it as a high-value ContextSource/discovery provider.
+
+Runtime Component/Surface relations may be navigable alongside ProjectMap resources in a common relation read model, but composition, containment, federation, framing, binding and semantic edges retain distinct meanings.
 
 ---
 
@@ -381,6 +456,8 @@ retain previous
 
 A failed generation must never replace the previous active view.
 
+Where target-native Components are part of effective state, the intended composition and projection bindings participate in Generation provenance/hash when they materially affect the actor world. Live target activation may occur after Generation materialisation, but its observed activation state remains separately inspectable.
+
 ---
 
 ## 37. Projection provenance
@@ -390,12 +467,17 @@ Every materialised actor-facing view should be able to explain:
 ```text
 which source refs contributed
 which ProjectBinding / ProjectRef applied
-which Profiles and scopes applied
+which Profiles and ResolutionScopes applied
 which Agent/Agency applied
 which CapabilitySet and ActionSet applied
 which ContextSources were eligible/retrieved
-which privacy/egress decisions applied
 which model/harness target was used
+which Components were selected
+which Contract/provider bindings satisfied them
+which Surfaces/projections were contributed
+which ActivationScopes/lifetimes apply
+which target-native activation mode is in force
+which privacy/egress decisions applied
 which optional QL-derived readings contributed
 which adapter/version generated the target
 which generation hash is active
@@ -407,7 +489,7 @@ The explanation question grows from:
 
 into:
 
-> **why did this actor receive this world?**
+> **why did this actor receive this world and this body?**
 
 ---
 
@@ -418,16 +500,19 @@ Procedure remains the correct boundary for reviewable, forward-checked, reversib
 Use Procedure for operations such as:
 
 - adopting or editing foreign configuration;
-- installing target integrations;
+- installing target integrations or Components;
 - modifying user-owned external state;
 - invoking reproducibility/bootstrap mechanisms under agent control;
-- durable promotion of generated/learned material where appropriate.
+- durable promotion of generated/learned material where appropriate;
+- composition changes whose target effects exceed the target-native reversible activation boundary.
 
 Procedure does not become a generic workflow language.
 
+A permitted live mount/unmount inside a target-native reversible component lifecycle need not be inflated into a Procedure if it does not mutate external/user-owned durable state. The adapter must still record activation provenance and actual lifecycle semantics.
+
 ---
 
-## 39. Hooks
+## 39. Hooks and runtime events
 
 The existing hook phases remain useful:
 
@@ -446,13 +531,15 @@ V2 may use hooks for:
 
 Hooks do not become a hidden reasoning engine. They establish conditions, enforce policy, inject required orientation, or observe events.
 
+Composable harnesses may additionally expose native event/interception systems. AIKit should preserve their target semantics through adapters rather than forcing every event into the hook phase vocabulary. Durable execution/session events, live interception events, Component lifecycle events and Factory Event/Trace evidence remain distinguishable.
+
 ---
 
 # Part XI — Privacy and disclosure
 
 ## 40. Visibility is an explicit relation
 
-Filesystem readability must not imply model visibility.
+Filesystem readability must not imply model visibility or active Surface exposure.
 
 AIKit should distinguish, conceptually and eventually in policy:
 
@@ -463,12 +550,15 @@ AIKit-discoverable
 agent-retrievable
 Project-eligible
 provider-egress-permitted
-loaded into current client
+projected to target
+mounted/active in target
+visible on a human/agent Surface
+loaded into current client/model context
 ```
 
 These may not collapse to one boolean.
 
-A local agent-visible source is not automatically permitted to leave the machine for every external model provider.
+A local agent-visible source is not automatically permitted to leave the machine for every external model provider. A mounted UI Component is not automatically model-visible. A model-facing tool Surface is not automatically human-visible.
 
 ---
 
@@ -487,8 +577,8 @@ encrypted/reference-only
 
 Exact syntax is an implementation task.
 
-`never-agent-visible` payloads must remain outside the agent retrieval plane.
+`never-agent-visible` payloads must remain outside the agent retrieval plane even if a runtime Component can technically access the underlying filesystem.
 
-Secrets should be referenced through dedicated secret mechanisms rather than stored as ordinary source prose.
+Secrets should be referenced through dedicated secret mechanisms rather than stored as ordinary source prose/configuration.
 
 ---
