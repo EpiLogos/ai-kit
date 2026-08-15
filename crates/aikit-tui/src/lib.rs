@@ -50,6 +50,7 @@ pub mod layout;
 pub mod navigation;
 pub mod palette_service;
 pub mod project_workspace;
+pub mod project_workspace_render;
 pub mod project_world_api;
 pub mod project_world_service;
 pub mod render;
