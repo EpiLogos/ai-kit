@@ -1,6 +1,7 @@
+use aikit_core::resource::ResourceRef;
 use aikit_core::{
-    FamiliarityContext, FamiliarityObservation, ForgetScope, ResourceRef,
-    DEFAULT_FAMILIARITY_HALF_LIFE_MS, FAMILIARITY_SCHEMA_VERSION,
+    FamiliarityContext, FamiliarityObservation, ForgetScope, DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+    FAMILIARITY_SCHEMA_VERSION,
 };
 use aikit_store::{
     append_familiarity_observation, append_familiarity_reset, replay_familiarity, Event,
