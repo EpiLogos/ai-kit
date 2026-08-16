@@ -1,71 +1,68 @@
 # AI Kit V2 Pre-Local Acceptance Evidence
 
-**Status:** live evidence matrix for issue #60  
-**Rule:** only observed implementation/test/CI evidence is marked complete. `OPEN` means cloud-implementable work remains. `LOCAL` is reserved for a gate that genuinely requires the user's O:I/Central/Workcell/full-package installation or physical host/process/network/terminal environment.
+**Status:** final cloud-closure verification for issue #60  
+**Rule:** `COMPLETE` means the implementation and repository-owned evidence already exist on the V2 integration line. `OPEN` means a cloud-achievable acceptance obligation still remains. `LOCAL` is reserved for truth that requires the actual O:I/Central/Workcell package or physical host/process/network/terminal environment.
 
 ## Current integration line
 
-- PR: #58 — `feat(v2): converge the operational V2 integration line`
-- Branch: `agent/aikit-v2-integration`
-- PR remains draft until this matrix has no cloud-implementable `OPEN` rows.
-- V2 product law: `docs/v2/README.md` through `docs/v2/10-PERSISTENT-AGENCY-AND-MATERIAL-HOSTING.md` on this integration line.
+- PR #58 — `feat(v2): converge the operational V2 integration line`
+- branch `agent/aikit-v2-integration`
+- V2 product law: `docs/v2/README.md` through `docs/v2/10-PERSISTENT-AGENCY-AND-MATERIAL-HOSTING.md`
+- migration/legacy classification: `docs/v2/11-MIGRATION-CLOSURE-LEDGER.md`
+- PR remains draft until every cloud-achievable gate below is complete and exact-head CI is green.
 
-## Evidence matrix
+## Cloud-achievable evidence
 
-| Requirement | Implementation | Test / evidence | Exact commit | Status | Genuine local/external blocker |
-|---|---|---|---|---|---|
-| canonical Resource identity | `resource/*`, `ResourceRef`, `ResourceRecord`, `ResourceIndex` | V2 core/resource tests | inherited on #58 | COMPLETE | — |
-| ContextResolution application architecture | `context_resolution.rs`, projections, generation/lifecycle | core + integration tests | inherited on #58 | COMPLETE for current core; integrated #60 path still OPEN | — |
-| one TUI semantic state/reducer | `aikit-tui/src/application.rs`, `TuiState`, `TuiRuntime` | reducer + `v2_prelocal_acceptance.rs` | inherited on #58; stale test repaired `83f9d591…` | OPEN | Palette/Tree transitional implementations still need closure under #59 |
-| ResourceRef-native Quick/Workspace search | `resource/search.rs`, V2 application projection | TUI/CLI V2 tests | inherited on #58 | COMPLETE for shallow navigation | — |
-| contextual Actions | canonical Action resources + `ContextualActionDescriptor` | TUI action-search/staging acceptance | inherited on #58 | COMPLETE for current capability actions; multi-Surface runtime projection OPEN | — |
-| SemanticWiki native operation | OKF core/index/provider/application | core tests | `8f9d84f…` | COMPLETE | — |
-| SourcePool native provider | `knowledge_source_pool.rs` | core tests | prior #58 ancestry | COMPLETE | — |
-| real bkmr adapter | `aikit-adapters/src/bkmr.rs` | dedicated exact 7.6.7 CI lane | `992f232…`, repairs `ef02d4d5…` | COMPLETE — observed green on #58 CI after `83f9d591…` | — |
-| Git/source canonical CodeReference | `knowledge_code.rs` | core/adapter tests | prior #58 ancestry | COMPLETE | — |
-| real GitNexus | `aikit-adapters/src/gitnexus.rs` | exact GitNexus 1.6.9 CI: analyze/query/context/impact/trace/detect-changes/check | `78ec14b…`, contract repair `83f9d591…` | COMPLETE — observed green after `83f9d591…` | — |
-| federated ProjectMap | `project_map.rs` stable endpoints/reversible bindings | core federation tests | `609ae9e…` | COMPLETE as core primitive | — |
-| KnowledgeApplication federation | `knowledge_navigation.rs` over Wiki/Source/code/ProjectMap | core tests including bound cross-lens route and rejection of arbitrary jumps | `119d3853bc2ed33c58eb841e3a14e0e3723745e3` | IMPLEMENTED; CI verification pending | — |
-| Knowledge provider absence/degradation | provider status/absences + no silent identity fallback | core/adapter tests | prior #58 + `119d3853…` | IMPLEMENTED; full integrated acceptance OPEN | — |
-| KnowledgeRoute / ContextPack | core route/read/context projections | core tests | prior #58; strengthened `119d3853…` | IMPLEMENTED; persistence/reuse + shipped-surface acceptance OPEN | — |
-| familiarity evidence | `familiarity.rs`; route observation shape | familiarity tests + route test | prior #58 | OPEN | route history/reuse and real surface ingestion must be proven end-to-end |
-| optional QL/MEF | provider-optional design and carried QL provider work | existing QL tests | inherited on #58 | OPEN | #60 requires paired no-provider/present-provider integrated acceptance |
-| Explain | application/TUI explanation projections | current unit/TUI tests | inherited on #58 | OPEN | must cover provider absence, authored/effective, scopes, lifetimes, contributions, surfaces, familiarity, staged effects and target lifecycle in integrated flow |
-| History: Recent/Familiar/Changed/Generations/world/body/routes | current history/familiarity/generation pieces | partial tests | inherited on #58 | OPEN | one canonical history projection + restore/reuse acceptance incomplete |
-| Compose Profiles/Skill Sets/Skills/Capabilities/Actions/ContextSources | current resource/profile/context/staging services | partial tests | inherited on #58 | OPEN | full final Compose field and shared mutation path incomplete |
-| Compose Agent/Agency/Model/Harness/Host/HarnessComposition/Components/Contracts/Surfaces/targets | composition + bootstrap modules | partial core/adapter tests | prior #58 ancestry | OPEN | cloud frontier in #53/#27 remains to close |
-| durable mutation `stage → preview/explain → confirm → apply` | reducer/application mutation path | `v2_prelocal_acceptance.rs` | inherited + `83f9d591…` | IMPLEMENTED for capability composition; OPEN for full component/surface/projection path | — |
-| immutable Generation | generation/store lifecycle | core/store tests | inherited on #58 | COMPLETE at subsystem level; integrated #60 path OPEN | — |
-| reversible Procedure | `procedure.rs` | core tests | inherited on #58 | OPEN | integrated rollback/reuse proof required |
-| target lifecycle truth | projection/lifecycle + Harness adapters | adapter/core tests | inherited on #58 | OPEN | #53 multi-effect acceptance still required; DeepSeek must remain honest `NextSession` until control exists |
-| thin/static Harness | existing harness adapters | adapter tests | inherited on #58 | IMPLEMENTED; #60 integrated proof OPEN | — |
-| composition-capable Harness | `composition.rs`, `composition_view.rs`, DeepSeek fixture | core/adapter tests | prior #58 ancestry | OPEN | body history/diff, full surfaces, material seam acceptance incomplete |
-| actor bootstrap | `actor_bootstrap.rs` | core tests / #27 | prior #58 ancestry | OPEN | re-audit live #27 cloud acceptance and host restoration |
-| verification/evolution | verification/run/evolution modules | partial tests / #31 | prior #58 ancestry | OPEN | re-audit all cloud-completable child acceptance |
-| production Knowledge composition used by TUI/CLI/agent | core app + TUI `knowledge_service.rs` projection | no complete shipped-surface acceptance yet | — | OPEN | none; cloud-implementable |
-| one relation state → List/Tree/Graph projections | V2 relation model + transitional Tree | partial tests | inherited | OPEN | replace/delete Tree-specific semantic paths; add stable-selection/recenter/provenance acceptance |
-| keyboard/mouse semantic parity | reducer/input modules | partial TUI tests | inherited | OPEN | hosted semantic parity is cloud-testable; only final physical-terminal feel belongs local |
-| terminal narrow/medium/wide | V2 renderer | partial render tests | inherited | OPEN | cloud-testable dimensions before local visual acceptance |
-| performance budgets | search/render paths | existing benchmark/latency tests where present | inherited | OPEN | run/complete #60 budget evidence |
-| trust / eligibility / source ownership | trust + source policy models | core/adapter tests | inherited | IMPLEMENTED; integrated path OPEN | — |
-| provider degradation | SourcePool/Code/Knowledge status | core/adapter tests | prior + `119d3853…` | IMPLEMENTED; integrated path OPEN | — |
-| V1 semantic-controller deletion | #59 ledger | current repository still has replacement rows | this document + closure ledger | OPEN | none; mandatory cloud work |
-| strict clippy/dead-code | CI `V2 static contract — clippy + dead-code guards` | initial failures repaired `83f9d591…`, `ef02d4d5…` | latest | PENDING latest CI | — |
-| aikit-core CI | granular job | green after `83f9d591…`; new Knowledge commit pending | latest | PENDING latest CI | — |
-| aikit-store CI | granular job | observed green after `83f9d591…` | latest | COMPLETE for observed head; rerun pending latest | — |
-| aikit-adapters CI | granular job | observed green after `83f9d591…` | latest | COMPLETE for observed head; rerun pending latest | — |
-| aikit-tui CI | granular job | stale acceptance compile repaired `ef02d4d5…` | latest | PENDING latest CI | — |
-| aikit-cli CI | granular job | observed green after `83f9d591…` | latest | COMPLETE for observed head; rerun pending latest | — |
-| original macOS integration suite | existing workflow | prior failure reduced to same stale TUI compile error, repaired `ef02d4d5…` | latest | PENDING latest CI | — |
-| full integrated #60 acceptance scenario | not yet a single acceptance lane | required sequence from Project through restore/reuse and agent equivalent | — | OPEN | none; mandatory cloud work |
-| final local O:I/Central/Workcell package installation | outside this repo's hosted execution truth | physical package acceptance | — | LOCAL | requires actual user's full O:I package/machine |
-| actual Central/O:I/Workcell cross-product integration | external repositories/package | full-system acceptance | — | LOCAL after AI Kit cloud closure | requires converged external products/package |
-| physical host/process/network/tmux/cmux/GUI behavior not faithfully emulatable in CI | material environment | local acceptance | — | LOCAL | requires user's host(s), terminals, process/network topology |
-| Workcell-hosted material services | Workcell-owned provider materialisation | local/full-package acceptance | — | LOCAL | intentionally not implemented inside AI Kit |
+| Requirement | Canonical implementation / evidence | Status |
+|---|---|---|
+| one Resource identity | `ResourceRef` / `ResourceRecord` / `ResourceIndex`; selection and relation views preserve the same ref | COMPLETE |
+| one ContextResolution/application architecture | `context_resolution.rs`, project-world application service, `ApplicationService`; renderers do not resolve | COMPLETE |
+| one TUI state/reducer | `application.rs` `TuiState` + `TuiRuntime`; final `ApplicationSurfaceController` only | COMPLETE |
+| canonical Search / Context / Compose / Knowledge / Explain / History field | `project_workspace_render.rs`; `application_surface_prelocal_v2.rs` | COMPLETE |
+| explicit selection rather than query-owned cursor identity | reducer keeps search and `Select(ResourceRef)` distinct; final-surface tests explicitly select before actions/staging | COMPLETE at `f87d4bf…`, `d4c6c21…`, `43a9115…`, `ef52b71…` |
+| universal ResourceRef-native search | `resource/search.rs` + `ApplicationService::search` | COMPLETE |
+| contextual Actions | canonical Action resources / descriptors; text action lane and explicit stageability | COMPLETE |
+| one relation state → List / Tree / Graph | `RelationReadModel` + `RelationView`; mutable Tree controller deleted; final-surface identity test | COMPLETE |
+| SemanticWiki native provider | OKF objects/index/provider/application | COMPLETE |
+| native SourcePool | `knowledge_source_pool.rs`; Knowledge application tests | COMPLETE |
+| Git/source CodeReference | canonical code-reference provider model | COMPLETE |
+| real bkmr | adapter + dedicated real 7.6.7 CI lane | COMPLETE on previously observed PR-head CI; exact final head still required |
+| real GitNexus | adapter + dedicated 1.6.9 analyze/query/context/impact/trace/detect-changes/check lane | COMPLETE on previously observed PR-head CI; exact final head still required |
+| federated ProjectMap | stable endpoints and reversible bindings | COMPLETE |
+| one KnowledgeApplication across human/CLI/agent projections | core `KnowledgeApplication`; `aikit-tui/src/knowledge_service.rs` is a projection only | COMPLETE as architecture |
+| real Wiki → Source traversal | `knowledge_service.rs` contract test searches/reads Wiki resource and traverses to `source:spec` | COMPLETE |
+| KnowledgeRoute / ContextPack | canonical provider-neutral route/read/context contracts | COMPLETE |
+| route → familiarity evidence | `KnowledgeRoute::familiarity_observation`; `familiarity_v2.rs` preserves route/provider/lens/revision evidence | COMPLETE |
+| durable familiarity/history replay | `aikit-store/tests/familiarity.rs` reopens the database and replays observations/resets without changing canonical identity | COMPLETE |
+| familiarity has no authority over trust/eligibility/preference | `familiarity_v2.rs` | COMPLETE |
+| optional QL/MEF | `ql_provider_v2.rs`: disabled/no-provider parity; present, degraded, incompatible and required-provider cases | COMPLETE |
+| Explain | `ApplicationService::explain`; composition Explain exposes provider/scope/lifetime/surface evidence; Project-world Explain shows authored/effective state and revisions | COMPLETE at subsystem/application level |
+| History | Application history combines run/familiarity evidence; composition history diff covers mounts/retracts/rebinds/contributions/surfaces/body fingerprint; generation lineage exposed in Project world | COMPLETE at subsystem/application level |
+| Compose project horizon | Project-world Compose exposes capabilities/actions, information, actor/runtime and projection horizons from one read model | COMPLETE |
+| runtime composition grammar | canonical Component / Contract / Requirement / Provider contribution / Surface / HarnessComposition model | COMPLETE for #60 minimum |
+| action and non-action Surface projections | `composition_v2.rs` proves one Action across Surfaces without identity multiplication and non-Action Knowledge Surface behavior | COMPLETE |
+| provider binding/degradation | required/optional requirements, deterministic substitution and explicit degraded state in composition/Knowledge tests | COMPLETE |
+| independent resolution / activation / lifetime scopes | `composition_v2.rs` | COMPLETE |
+| thin/static Harness | empty composition is valid | COMPLETE |
+| composition-capable Harness and body identity/history | composition/body fingerprint and `composition_views_v2.rs` diff/Explain acceptance | COMPLETE for #60 minimum |
+| richer DSH/Cordis maximal conformance | child #65 by explicit #53 handoff; it extends the grammar rather than defining the #60 minimum | NOT A #60 BLOCKER |
+| actor bootstrap | `actor_bootstrap_v2.rs`: stable Project/Agent/Agency/Harness identity, model/host/session provenance, thin body, body/session replacement | COMPLETE |
+| durable mutation route | `StagedChanges` → preview/explain → separate confirm → apply; final surface acceptance drives the same route | COMPLETE |
+| immutable Generation | core/store generation lifecycle and apply receipts | COMPLETE at subsystem level |
+| reversible Procedure | `aikit-store/tests/procedure.rs`: real diff, apply, undo, drift refusal, rollback on failure, idempotent replay | COMPLETE |
+| truthful target lifecycle | projection/lifecycle contracts preserve actual activation effect; no invented immediate success | COMPLETE for cloud-testable contract |
+| trust / eligibility / source ownership | canonical trust/source/resource models and provider/application evidence | COMPLETE |
+| keyboard/mouse semantic parity | `mouse_context_v2.rs` routes both to the same semantic Actions/sections/presentation | COMPLETE |
+| narrow/medium/wide terminal behavior | final-surface render acceptance at 48/88/140 columns plus project-world narrow/wide tests | COMPLETE |
+| performance budgets | `performance.rs`: cold first frame <150ms, warm p95 <60ms, 5k-resource search p95 <16ms in release acceptance | COMPLETE as repository-owned budget |
+| V1 semantic-controller deletion/classification | #59 closure ledger: old Palette service/surface/reducer/driver/form/search and mutable Tree controller removed; retained package/CLI read compatibility explicitly classified | PENDING #59 exact-head closure |
+| strict clippy/dead-code and per-crate CI | repository CI | PENDING exact final head |
+| original integration suite | repository CI | PENDING exact final head |
+| **single integrated #60 route** | one repository-owned acceptance lane must bind the already-complete subsystems below into the mandated Project→Knowledge→Compose/runtime→apply→History/reuse→agent-equivalent chain | **OPEN** |
 
 ## Required single #60 acceptance route
 
-This row stays `OPEN` until one repository-owned test/lane proves the complete chain with no alternate V1 semantic path:
+Subsystem coverage is no longer the blocker. The remaining cloud obligation is a **coherent integration acceptance**, not another architecture. One repository-owned lane must prove that the same canonical identities/services can be carried through:
 
 ```text
 Project
@@ -75,22 +72,39 @@ Project
 → Explain
 → real relation traversal
 → KnowledgeRoute
-→ familiarity
+→ durable familiarity
 → Compose Profile / Skill Set / ContextSource
 → actor/runtime composition
 → inspect HarnessComposition
 → stage Component/Surface/projection change
-→ preview
+→ preview / explain
 → confirm
 → apply
-→ new immutable Generation / honest target state
+→ immutable Generation / honest target state
 → Explain + History
-→ restore/reuse previous Project world / body / route
-→ equivalent agent-facing operation
+→ restore/reuse prior Project world / body / route
+→ equivalent agent-facing projection/operation
 ```
 
-The same protocol must include paired no-QL and optional-QL runs; native SourcePool; real bkmr 7.6.7; current tested GitNexus; thin and composition-capable Harnesses; terminal width/input semantic tests; cloud-testable host restoration; performance; Procedure rollback; trust/eligibility/ownership; provider absence/degradation; and #59 dead-code proof.
+The lane may reuse the production fixtures and APIs already tested above; it must not create a test-only resolver, TUI-local store, alternate staging path or fake material success. Paired optional-QL/no-QL behavior, real bkmr/GitNexus, terminal/performance and rollback evidence may remain dedicated lanes if the integrated acceptance references the same contracts and exact-head CI executes all of them.
 
-## Current cloud closure statement
+## Deliberate downstream/local boundaries
 
-**Cloud closure is not yet complete.** The remaining `OPEN` rows are implementation work, not local blockers. In particular: production Knowledge instantiation across real surfaces, final TUI/Compose/Relations/Explain/History, runtime composition cloud frontier, actor/verification re-audit, legacy deletion, and the single integrated #60 acceptance lane still have to be completed before this matrix can reduce to `LOCAL` gates only.
+| Boundary | Status | Why it is not a cloud claim |
+|---|---|---|
+| actual O:I/Central/Workcell package installation | LOCAL | requires the assembled external package and user's installation |
+| actual cross-product O:I/Central/Workcell integration | LOCAL after AI Kit cloud closure | external repository/package truth |
+| physical host/process/network/tmux/cmux/GUI behavior not faithfully represented in CI | LOCAL | requires real host/process/network/terminal topology |
+| Workcell-hosted material services | LOCAL / external | Workcell owns provider materialisation; AI Kit must not fabricate it |
+| rich DSH/Cordis maximal-provider convergence | PARALLEL #65 | explicit child programme; consumes/extents the native grammar after its #60 minimum exists |
+| SessionSpace #61–#63 | DOWNSTREAM | must consume this converged product after #60; it is not permitted to become a parallel composition architecture |
+
+## Current closure statement
+
+Cloud closure is **not yet complete**. The stale matrix previously made many already-implemented subsystems look open; that has now been corrected. The remaining legitimate blockers are:
+
+1. close #59 on an exact green head, including the two stale deleted-controller CLI acceptance tests and the final core-search compatibility audit;
+2. add the single integrated #60 acceptance lane above;
+3. obtain green exact-head repository CI (static/dead-code, crates, real provider lanes and integration suite).
+
+Once those three items are complete, this ledger should contain only `LOCAL`, downstream, or explicitly parallel boundaries and #60 may close without waiting for SessionSpace or #65.
