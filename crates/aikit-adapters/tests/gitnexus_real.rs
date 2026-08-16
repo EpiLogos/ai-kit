@@ -17,7 +17,7 @@ fn git(root: &std::path::Path, args: &[&str]) {
 }
 
 #[test]
-fn real_gitnexus_current_cli_indexes_searches_contextualises_impacts_and_traces() {
+fn real_gitnexus_current_cli_indexes_searches_contextualises_impacts_traces_changes_and_checks() {
     let dir = tempdir().expect("temporary GitNexus fixture");
     let root = dir.path();
     fs::create_dir_all(root.join("src")).unwrap();
@@ -33,7 +33,11 @@ export function login(token: string): boolean {
 "#,
     )
     .unwrap();
-    fs::write(root.join("package.json"), r#"{"name":"aikit-gitnexus-fixture"}"#).unwrap();
+    fs::write(
+        root.join("package.json"),
+        r#"{"name":"aikit-gitnexus-fixture"}"#,
+    )
+    .unwrap();
     git(root, &["init", "-q"]);
     git(root, &["add", "."]);
     git(
@@ -77,6 +81,9 @@ export function login(token: string): boolean {
     assert!(before.capabilities.context);
     assert!(before.capabilities.impact);
     assert!(before.capabilities.trace);
+    assert!(before.capabilities.detect_changes);
+    assert!(before.capabilities.structural_check);
+    assert!(before.capabilities.cypher);
 
     let indexed = provider.index(root, true).expect("real GitNexus analyze");
     assert!(indexed.indexed);
@@ -111,4 +118,29 @@ export function login(token: string): boolean {
         .trace(&login, &validate)
         .expect("real GitNexus trace");
     assert!(trace.detail.is_object());
+
+    fs::write(
+        root.join("src/auth.ts"),
+        r#"export function validate(token: string): boolean {
+  return token.length > 3;
+}
+
+export function login(token: string): boolean {
+  return validate(token);
+}
+
+export function logout(): boolean {
+  return true;
+}
+"#,
+    )
+    .unwrap();
+    let changes = provider
+        .detect_changes("unstaged", None)
+        .expect("real GitNexus detect-changes");
+    assert!(changes.detail.is_object());
+    let structural = provider
+        .structural_check()
+        .expect("real GitNexus cycle check");
+    assert!(structural.detail.is_object());
 }
