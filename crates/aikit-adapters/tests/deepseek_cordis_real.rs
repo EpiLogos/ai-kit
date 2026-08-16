@@ -24,7 +24,9 @@ fn real_pinned_deepseek_cordis_web_activates_inside_session_space() {
         return;
     };
     let checkout = PathBuf::from(checkout);
-    assert!(checkout.join("examples/web-cordis/cordis.yml").is_file());
+    assert!(checkout
+        .join("packages/bundle/web-app/cordis.patch.yml")
+        .is_file());
 
     let live = deepseek_live_cordis_composition(DeepSeekShellProvider::Local).unwrap();
     assert_eq!(
