@@ -19,6 +19,10 @@ fn fixture() -> (tempfile::TempDir, Fixture) {
     (dir, backend)
 }
 
+fn key(code: KeyCode) -> PaletteEvent {
+    PaletteEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
 fn alt(code: KeyCode) -> PaletteEvent {
     PaletteEvent::Key(KeyEvent::new(code, KeyModifiers::ALT))
 }
@@ -103,6 +107,7 @@ fn wide_workspace_renders_context_compose_and_explain_from_one_world() {
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
     )
     .unwrap();
+    surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
 
     let context = rendered(&draw_width(&surface, 140, 30));
     assert!(context.contains("Context · resolved Project world"));
@@ -137,11 +142,12 @@ fn staged_composition_survives_field_navigation() {
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
     )
     .unwrap();
+    surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
     let selected = surface
         .semantic()
         .selected
         .clone()
-        .expect("review query should select the review capability");
+        .expect("explicit selection should choose the review capability");
 
     surface.handle(&mut backend, ctrl(KeyCode::Char(' '))).unwrap();
     assert_eq!(surface.semantic().staged.len(), 1);
@@ -163,6 +169,7 @@ fn narrow_workspace_progressively_discloses_project_world_without_a_second_contr
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
     )
     .unwrap();
+    surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
 
     let selected = surface.semantic().selected.clone();
     let context = rendered(&draw_width(&surface, 60, 24));
