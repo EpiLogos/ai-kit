@@ -3,11 +3,10 @@ mod common;
 use common::*;
 
 use aikit_core::resource::ResourceRef;
-use aikit_core::{RelationQuery, ScopeKind};
+use aikit_core::ScopeKind;
 use aikit_tui::{
-    selected_contextual_action, ActivationIntent, KnowledgeNavigationService,
-    PaletteApplicationService, PresentationMode, TuiApplicationService, TuiRuntime, TuiState,
-    UiAction,
+    selected_contextual_action, ActivationIntent, PaletteApplicationService, PresentationMode,
+    TuiApplicationService, TuiRuntime, TuiState, UiAction,
 };
 
 #[test]
@@ -108,18 +107,19 @@ fn resource_action_compose_explain_and_relations_share_one_identity_path() {
     assert_eq!(explanation["resource"], resource.as_str());
     assert!(explanation.get("resolutionHash").is_some());
 
-    let relations = service
-        .relation_view(RelationQuery::local(resource.clone()))
-        .unwrap();
-    assert_eq!(relations.query.focus, resource);
-    assert!(relations
-        .edges
-        .iter()
-        .any(|edge| edge.to.as_str() == "action/capability/explain"));
-    assert!(relations
-        .edges
-        .iter()
-        .any(|edge| edge.to.as_str() == "action/capability/toggle"));
+    let relations = service.relations(&resource).unwrap();
+    assert_eq!(relations.subject, resource);
+    let actions = relations.value["contextualActions"]
+        .as_array()
+        .expect("relation model must expose contextual Actions");
+    assert!(actions.iter().any(|action| {
+        action.get("action").and_then(|value| value.as_str())
+            == Some("action/capability/explain")
+    }));
+    assert!(actions.iter().any(|action| {
+        action.get("action").and_then(|value| value.as_str())
+            == Some("action/capability/toggle")
+    }));
 
     // The adapter held the one mutable backend borrow for the whole user flow;
     // once the application service is released we can prove exactly one durable

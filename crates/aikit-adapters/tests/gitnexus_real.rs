@@ -84,6 +84,7 @@ export function login(token: string): boolean {
     assert!(before.capabilities.detect_changes);
     assert!(before.capabilities.structural_check);
     assert!(before.capabilities.cypher);
+    assert!(!before.capabilities.structured_output);
 
     let indexed = provider.index(root, true).expect("real GitNexus analyze");
     assert!(indexed.indexed);
@@ -138,7 +139,8 @@ export function logout(): boolean {
     let changes = provider
         .detect_changes("unstaged", None)
         .expect("real GitNexus detect-changes");
-    assert!(changes.detail.is_object());
+    assert!(changes.detail.is_string());
+    assert!(!changes.detail.as_str().unwrap_or_default().trim().is_empty());
     let structural = provider
         .structural_check()
         .expect("real GitNexus cycle check");

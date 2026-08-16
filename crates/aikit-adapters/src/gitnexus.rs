@@ -97,6 +97,17 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
         })
     }
 
+    fn run_text(&self, args: &[String], code: &'static str) -> Result<String> {
+        let argv = self.argv(args);
+        Ok(self
+            .runner
+            .run(&argv)?
+            .require(&argv, code)?
+            .stdout
+            .trim()
+            .to_string())
+    }
+
     fn require_capability(&self, supported: bool, operation: &str) -> Result<()> {
         if !self.cli.available {
             return Err(AikitError::new(
@@ -218,13 +229,9 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
             structural_check: self.cli.available && self.cli.structural_check,
             cypher: self.cli.available && self.cli.cypher,
             pdg_impact: self.cli.available && self.cli.pdg_impact,
-            structured_output: self.cli.available
-                && self.cli.search
-                && self.cli.context
-                && self.cli.impact
-                && self.cli.trace
-                && self.cli.detect_changes
-                && self.cli.structural_check,
+            // GitNexus 1.6.9 intentionally renders direct-CLI detect-changes as
+            // human-readable text, so the complete direct surface is mixed-format.
+            structured_output: false,
         }
     }
 
@@ -354,10 +361,10 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
     fn detect_changes(&self, scope: &str, base_ref: Option<&str>) -> Result<CodeChanges> {
         self.require_capability(self.cli.detect_changes, "detect-changes")?;
         self.require_indexed()?;
-        if !matches!(scope, "unstaged" | "staged" | "all" | "branch") {
+        if !matches!(scope, "unstaged" | "staged" | "all" | "compare") {
             return Err(AikitError::new(
                 "knowledge.gitnexus_change_scope",
-                "GitNexus change scope must be unstaged, staged, all, or branch",
+                "GitNexus change scope must be unstaged, staged, all, or compare",
             )
             .with("scope", scope.to_string()));
         }
@@ -375,7 +382,11 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
             provider: self.provider.clone(),
             scope: scope.into(),
             base_ref: base_ref.map(str::to_string),
-            detail: self.run_json(&args, "knowledge.gitnexus_detect_changes_failed")?,
+            // Current upstream deliberately formats this direct-CLI operation for
+            // humans. Preserve that provider truth instead of pretending it is JSON.
+            detail: Value::String(
+                self.run_text(&args, "knowledge.gitnexus_detect_changes_failed")?,
+            ),
         })
     }
 
@@ -528,7 +539,7 @@ mod tests {
                 .on("context login", r#"{"symbol":{"name":"login"}}"#)
                 .on("impact login", r#"{"risk":"LOW"}"#)
                 .on("trace login validate", r#"{"status":"found","path":[]}"#)
-                .on("detect-changes", r#"{"changed_symbols":[],"affected_processes":[]}"#)
+                .on("detect-changes", "Changed symbols: 0\nAffected processes: 0\n")
                 .on("check --cycles --json", r#"{"status":"clean","cycles":[]}"#),
         )
     }
@@ -557,6 +568,7 @@ mod tests {
         assert!(status.capabilities.structural_check);
         assert!(status.capabilities.cypher);
         assert!(status.capabilities.pdg_impact);
+        assert!(!status.capabilities.structured_output);
     }
 
     #[test]
@@ -601,7 +613,8 @@ mod tests {
         provider.context(&login).unwrap();
         provider.impact(&login, "upstream").unwrap();
         provider.trace(&login, &validate).unwrap();
-        provider.detect_changes("branch", Some("main")).unwrap();
+        let changes = provider.detect_changes("compare", Some("main")).unwrap();
+        assert!(changes.detail.is_string());
         provider.structural_check().unwrap();
         let lines = observed.call_lines();
         assert!(lines.iter().any(|line| {
@@ -614,7 +627,7 @@ mod tests {
             line.contains("trace login validate --from-file src/auth.rs --to-file src/validate.rs --repo demo")
         }));
         assert!(lines.iter().any(|line| {
-            line.contains("detect-changes --scope branch --repo demo --base-ref main")
+            line.contains("detect-changes --scope compare --repo demo --base-ref main")
         }));
         assert!(lines.iter().any(|line| {
             line.contains("check --cycles --json --repo demo")

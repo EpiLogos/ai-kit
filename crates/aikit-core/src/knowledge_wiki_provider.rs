@@ -6,9 +6,7 @@ use crate::knowledge::{
     KnowledgeReading, KnowledgeRelationView, RelationDirection, RelationEdge, RelationNode,
     RelationOrigin, RelationQuery,
 };
-use crate::knowledge_wiki::{
-    WikiEdgeOrigin, WikiFrame, WikiObject, WikiProvenanceRef,
-};
+use crate::knowledge_wiki::{WikiEdgeOrigin, WikiFrame, WikiObject, WikiProvenanceRef};
 use crate::knowledge_wiki_index::{
     SemanticWikiIndex, WikiIndexStatus, WikiNeighbour, WikiRelationDirection, WikiSearchHit,
 };
@@ -141,10 +139,10 @@ impl<'a> SemanticWikiProvider<'a> {
                 if !seen_edges.insert(edge_key) {
                     continue;
                 }
-                if !view.nodes.iter().any(|node| node.resource == other) {
-                    if !view.push_node(self.relation_node(&other)?) {
-                        continue;
-                    }
+                if !view.nodes.iter().any(|node| node.resource == other)
+                    && !view.push_node(self.relation_node(&other)?)
+                {
+                    continue;
                 }
                 view.push_edge(RelationEdge::new(
                     from,

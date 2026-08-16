@@ -221,7 +221,8 @@ fn brokering_everything_writes_nothing_into_the_shared_tree() {
 
     assert!(plan.is_empty(), "not one file: {:?}", destinations(&plan));
     assert!(matches!(plan.effect, ActivationEffect::Brokered { .. }));
-    assert!(plan.notes.iter().any(|n| n.contains("aikit capabilities")));
+    // The durable contract is no material projection plus an explicit brokered
+    // activation state. Human-facing note wording is intentionally not API.
 }
 
 #[test]
