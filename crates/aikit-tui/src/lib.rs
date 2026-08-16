@@ -3,8 +3,7 @@
 //! V2 has one semantic authority: [`application::TuiState`] reduced by
 //! [`application::TuiRuntime`] against shared application services. Quick and
 //! Workspace, plus List/Tree/Graph relation presentations, are views of that
-//! state. Compatibility modules remain only while #59 migrates their remaining
-//! external callers; the shipped V2 surface is [`application_surface`].
+//! state. The shipped V2 surface is [`application_surface`].
 
 #![forbid(unsafe_code)]
 
@@ -19,7 +18,6 @@ pub mod host;
 pub mod knowledge_service;
 pub mod layout;
 pub mod navigation;
-pub mod palette_service;
 pub mod project_workspace;
 pub mod project_workspace_render;
 pub mod project_world_api;
@@ -28,13 +26,18 @@ pub mod render;
 pub mod scope;
 pub mod search;
 pub mod staging;
-pub mod surface;
 pub mod theme;
 pub mod tree;
 pub mod tree_driver;
 pub mod v2_render;
 
 pub mod driver;
+
+/// Name-only compatibility alias for the final surface while its source imports
+/// are migrated. It owns no Palette state or behavior.
+pub mod palette_service {
+    pub use crate::application_service::ApplicationService as PaletteApplicationService;
+}
 
 use aikit_core::id::{CapsuleId, GenerationId};
 use aikit_core::scope::ScopeKind;
