@@ -30,10 +30,12 @@ fn current_deepseek_adapter_upgrades_only_proven_cordis_web_components_to_live_m
         .collect();
     assert_eq!(observed, expected);
 
-    assert!(live.composition.component_bindings.iter().any(|binding| {
-        binding.component == r("component/deepseek/tool-bash")
-            && binding.activation_mode == CompositionActivationMode::NextSession
-    }));
+    for next_session in ["component/deepseek/tool-bash", "component/deepseek/agent-loop"] {
+        assert!(live.composition.component_bindings.iter().any(|binding| {
+            binding.component == r(next_session)
+                && binding.activation_mode == CompositionActivationMode::NextSession
+        }));
+    }
     assert!(live.composition.component_bindings.iter().all(|binding| {
         binding
             .implementation
