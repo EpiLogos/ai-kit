@@ -31,7 +31,20 @@ jobs:
         run: brew install tmux
 
       - name: Verify repository
-        run: bash scripts/verify
+        shell: bash
+        run: |
+          set +e
+          bash scripts/verify 2>&1 | tee /tmp/aikit-verify.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            tail -c 7000 /tmp/aikit-verify.log > /tmp/aikit-tail.log
+            message=$(cat /tmp/aikit-tail.log)
+            message=${message//'%'/'%25'}
+            message=${message//$'\r'/'%0D'}
+            message=${message//$'\n'/'%0A'}
+            echo "::error title=Repository verification failure::$message"
+          fi
+          exit "$status"
 
   v2-crate-tests:
     name: V2 crate — ${{ matrix.package }}
@@ -57,7 +70,20 @@ jobs:
           rustup default 1.88.0
 
       - name: Test ${{ matrix.package }}
-        run: cargo test --locked -p '${{ matrix.package }}' --all-targets --no-fail-fast -- --test-threads=1
+        shell: bash
+        run: |
+          set +e
+          cargo test --locked -p '${{ matrix.package }}' --all-targets --no-fail-fast -- --test-threads=1 2>&1 | tee /tmp/aikit-crate.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            tail -c 7000 /tmp/aikit-crate.log > /tmp/aikit-tail.log
+            message=$(cat /tmp/aikit-tail.log)
+            message=${message//'%'/'%25'}
+            message=${message//$'\r'/'%0D'}
+            message=${message//$'\n'/'%0A'}
+            echo "::error title=${{ matrix.package }} test failure::$message"
+          fi
+          exit "$status"
 
   v2-static:
     name: V2 static/dead-code gate
@@ -74,7 +100,20 @@ jobs:
           rustup default 1.88.0
 
       - name: Clippy all targets
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --locked --workspace --all-targets -- -D warnings 2>&1 | tee /tmp/aikit-clippy.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            tail -c 7000 /tmp/aikit-clippy.log > /tmp/aikit-tail.log
+            message=$(cat /tmp/aikit-tail.log)
+            message=${message//'%'/'%25'}
+            message=${message//$'\r'/'%0D'}
+            message=${message//$'\n'/'%0A'}
+            echo "::error title=Clippy failure::$message"
+          fi
+          exit "$status"
 
       - name: Release build
         run: cargo build --locked --workspace --release
