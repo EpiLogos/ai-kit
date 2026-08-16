@@ -76,6 +76,7 @@ fn mouse_and_keyboard_invoke_the_same_contextual_action_operation() {
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
     )
     .unwrap();
+    keyboard.handle(&mut keyboard_backend, PaletteEvent::Resize(120, 30)).unwrap();
     keyboard.handle(&mut keyboard_backend, key(KeyCode::Down)).unwrap();
     let _ = draw(&keyboard);
     keyboard
@@ -93,6 +94,9 @@ fn mouse_and_keyboard_invoke_the_same_contextual_action_operation() {
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
     )
     .unwrap();
+    mouse_surface
+        .handle(&mut mouse_backend, PaletteEvent::Resize(120, 30))
+        .unwrap();
     mouse_surface.handle(&mut mouse_backend, key(KeyCode::Down)).unwrap();
     let _ = draw(&mouse_surface);
     assert!(!mouse_surface.semantic().contextual_actions.is_empty());
