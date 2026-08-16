@@ -1,19 +1,25 @@
+mod common;
+
+use std::path::PathBuf;
+
 use aikit_core::actor_bootstrap::{project_actor_bootstrap, ActorBootstrapRequest};
 use aikit_core::composition::{
-    resolve_harness_composition, ComponentCatalog, ComponentContribution, ComponentDescriptor,
-    ComponentKind, ComponentSelection, CompositionActivationMode, ContractBinding,
-    HarnessComposition, HarnessCompositionRequest,
+    resolve_harness_composition, ActivationScope, ActivationScopeKind, ComponentDescriptor,
+    ComponentSelection, CompositionActivationMode, CompositionCatalog, HarnessComposition,
+    HarnessCompositionRequest, LifetimeOwner, LifetimeOwnerKind, ResolutionScope,
 };
 use aikit_core::context_resolution::{
     compose_context_resolution, ContextResolution, RequestedActors,
 };
-use aikit_core::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
-use aikit_core::resource::{
-    ResourceDescriptor, ResourceIndex, ResourceKind, ResourceRecord, ResourceRef,
+use aikit_core::project::{
+    ProjectBinding, ProjectBindingLocator, ProjectConstituentRef, ProjectRef,
 };
-use aikit_core::resolve::ResolvedView;
-use aikit_core::scope::ScopeLayer;
-use aikit_core::ContextDescriptor;
+use aikit_core::resource::{
+    MemoryResourceIndex, ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef,
+};
+use aikit_core::scope::ScopeKind;
+
+use common::{script, Fixture};
 
 fn r(raw: &str) -> ResourceRef {
     ResourceRef::parse(raw).unwrap()
@@ -24,15 +30,17 @@ fn resource(raw: &str, kind: ResourceKind) -> ResourceRecord {
 }
 
 fn resolution() -> ContextResolution {
-    let descriptor = ContextDescriptor::for_project("/work/test");
-    let project = ProjectRef::parse("project/test").unwrap();
-    let binding = ProjectBinding::from_legacy_context(
-        project,
-        ProjectConstituentRef::parse("source:working-tree").unwrap(),
-        &descriptor,
-    )
-    .unwrap();
-    let mut resources = ResourceIndex::default();
+    let deterministic = Fixture::new(vec![script("script/test/check")])
+        .resolve()
+        .expect("deterministic resolution");
+    let binding = ProjectBinding::new(
+        ProjectRef::parse("project/test").unwrap(),
+        ProjectConstituentRef::parse("constituent:working-tree").unwrap(),
+        ProjectBindingLocator::LocalDirectory {
+            path: PathBuf::from("/work/test"),
+        },
+    );
+    let mut resources = MemoryResourceIndex::default();
     for (raw, kind) in [
         ("agent:test", ResourceKind::Agent),
         ("agency:test", ResourceKind::Agency),
@@ -42,60 +50,38 @@ fn resolution() -> ContextResolution {
     ] {
         resources.insert(resource(raw, kind));
     }
-    let mut view = ResolvedView::empty(descriptor);
-    view.hash = "resolution-test".into();
     compose_context_resolution(
-        &view,
+        &deterministic,
         binding,
-        &[] as &[ScopeLayer],
+        &[],
         &resources,
         RequestedActors {
             agent: Some(r("agent:test")),
             agency: Some(r("agency:test")),
-            harness: Some(r("harness:test")),
-            model: Some(r("model:test")),
             host: Some(r("host:test-host")),
         },
     )
 }
 
-fn selection(resource: &str) -> ComponentSelection {
+fn selection(component: &str, session: &str) -> ComponentSelection {
     ComponentSelection {
-        resource: r(resource),
-        provider: None,
-        activation: CompositionActivationMode::NextSession,
-        binding: None,
+        component: r(component),
+        resolution_scope: ResolutionScope::new(ScopeKind::Project, "project profile"),
+        activation_scope: ActivationScope::new(ActivationScopeKind::AgentSession)
+            .with_reference(session),
+        lifetime_owner: LifetimeOwner::new(LifetimeOwnerKind::AgentSession)
+            .with_reference(session),
+        activation_mode: CompositionActivationMode::LiveMounted,
     }
 }
 
-fn body(components: &[&str]) -> HarnessComposition {
-    let mut catalog = ComponentCatalog::default();
-    catalog.insert_contract(aikit_core::composition::ContractDescriptor {
-        contract: r("contract:prompt-context"),
-        label: "prompt-context".into(),
-        description: "test contract".into(),
-        provider_kinds: Default::default(),
-    });
+fn body(components: &[&str], session: &str) -> HarnessComposition {
+    let mut catalog = CompositionCatalog::default();
     for component in components {
-        let mut descriptor = ComponentDescriptor::new(
-            r(component),
-            ComponentKind::Other("test".into()),
-            *component,
-        );
-        descriptor.contributions.push(ComponentContribution {
-            contract: r("contract:prompt-context"),
-            value: serde_json::json!({"component": component}),
-            surfaces: Vec::new(),
-        });
-        descriptor.bindings.push(ContractBinding {
-            contract: r("contract:prompt-context"),
-            provider: r(component),
-            surface: None,
-            metadata: Default::default(),
-        });
+        let mut descriptor = ComponentDescriptor::new(r(component));
         descriptor
             .activation_modes
-            .insert(CompositionActivationMode::NextSession);
+            .insert(CompositionActivationMode::LiveMounted);
         catalog.insert_component(descriptor);
     }
     resolve_harness_composition(
@@ -105,9 +91,12 @@ fn body(components: &[&str]) -> HarnessComposition {
             project: Some(r("project/test")),
             agent: Some(r("agent:test")),
             agency: Some(r("agency:test")),
-            session: Some("session/a".into()),
+            session: Some(session.into()),
             model: Some(r("model:test")),
-            selections: components.iter().map(|component| selection(component)).collect(),
+            selections: components
+                .iter()
+                .map(|component| selection(component, session))
+                .collect(),
             target_revision: Some("target-r1".into()),
             generation: Some("generation/1".into()),
         },
@@ -116,7 +105,7 @@ fn body(components: &[&str]) -> HarnessComposition {
 }
 
 fn bootstrap(
-    resolution: &aikit_core::ContextResolution,
+    resolution: &ContextResolution,
     body: Option<&HarnessComposition>,
     session: &str,
 ) -> aikit_core::ActorBootstrap {
@@ -136,28 +125,41 @@ fn bootstrap(
 #[test]
 fn bootstrap_is_thin_but_preserves_actor_provenance_and_runtime_body_pointer() {
     let resolution = resolution();
-    let body = body(&["component:a"]);
+    let body = body(&["component:a"], "session/a");
     let bootstrap = bootstrap(&resolution, Some(&body), "session/a");
 
-    assert_eq!(bootstrap.project, r("project/test"));
+    assert_eq!(bootstrap.project.project.as_str(), "project/test");
     assert_eq!(bootstrap.agent.as_ref().unwrap().resource(), &r("agent:test"));
     assert_eq!(bootstrap.agency.as_ref().unwrap().resource(), &r("agency:test"));
     assert_eq!(bootstrap.harness.as_ref().unwrap().resource(), &r("harness:test"));
     assert_eq!(bootstrap.model.as_ref().unwrap().resource(), &r("model:test"));
     assert_eq!(bootstrap.host.as_ref().unwrap().resource(), &r("host:test-host"));
     assert_eq!(bootstrap.agent_session.as_deref(), Some("session/a"));
-    assert_eq!(bootstrap.runtime_body.as_ref().unwrap().fingerprint, body.fingerprint);
-    assert_eq!(bootstrap.runtime_body.as_ref().unwrap().generation.as_deref(), Some("generation/1"));
-    assert_eq!(bootstrap.runtime_body.as_ref().unwrap().target_revision.as_deref(), Some("target-r1"));
-    assert!(bootstrap.context.resolution_hash.contains("resolution-test"));
+    assert_eq!(
+        bootstrap.runtime_body.as_ref().unwrap().fingerprint,
+        body.fingerprint
+    );
+    assert_eq!(
+        bootstrap.runtime_body.as_ref().unwrap().generation.as_deref(),
+        Some("generation/1")
+    );
+    assert_eq!(
+        bootstrap
+            .runtime_body
+            .as_ref()
+            .unwrap()
+            .target_revision
+            .as_deref(),
+        Some("target-r1")
+    );
     assert_eq!(bootstrap.run, Some(r("run/client-supplied")));
 }
 
 #[test]
 fn actor_identity_survives_session_and_body_replacement() {
     let resolution = resolution();
-    let first_body = body(&["component:a"]);
-    let second_body = body(&["component:a", "component:b"]);
+    let first_body = body(&["component:a"], "session/a");
+    let second_body = body(&["component:a", "component:b"], "session/b");
     let first = bootstrap(&resolution, Some(&first_body), "session/a");
     let second = bootstrap(&resolution, Some(&second_body), "session/b");
 
