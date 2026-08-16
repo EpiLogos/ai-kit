@@ -52,9 +52,9 @@ The read model preserves:
 Presence, visibility, connection establishment and live activation are independent from authority:
 
 ```text
-Component visible             != Capability granted
+Component visible              != Capability granted
 connection available/connected != Capability granted
-Capability granted            != Action authorised
+Capability granted             != Action authorised
 SessionSpace membership        != encounter/contact trust
 ```
 
@@ -115,24 +115,42 @@ AIKit interpretation is deliberately narrower than target vocabulary. Cordis `Co
 | desired body mutation | `StagedHarnessComposition` → preview → confirm → apply | integration-line `composition_mutation`; DSH staged-mutation test |
 | live runtime truth | `SessionSpaceActivationDriver` observation | `session_space.rs`; `deepseek_live.rs` |
 
-### Live Cordis activation
+### Live Cordis activation — current source, not stale demo assumptions
 
-The current upstream source publishes a real Cordis-hosted Web path:
+The exact current upstream Web bundle already mounts Cordis on both host and client sides. At revision `47f943859bef60e4160492346772ded9b24f765a`, `packages/bundle/web-app/cordis.patch.yml` inserts `cordis-host-runner` and `cordis-client-runner` as part of the ordinary Web composition, whose target-owned webserver defaults to `127.0.0.1:3080`.
+
+The repository also still contains `examples/web-cordis/cordis.yml`. That file describes itself as a patch overlay over the Web profile and tries to insert `cordis-host-runner` again. A clean exact-revision CI run proved that the old demo command:
 
 ```text
 node --import tsx apps/cli/src/bin.ts web --patch examples/web-cordis/cordis.yml
 ```
 
-and `examples/web-cordis/cordis.yml` inserts the target-owned Cordis host runner/tool into the normal DSH Web composition on `127.0.0.1:3081`.
+now fails before readiness with `duplicate loader entry id: cordis-host-runner`. AIKit therefore does **not** preserve that stale example seam. The live adapter follows the actual current Web composition:
 
-`deepseek_live_cordis_composition()` still resolves the same canonical #65 `CompositionCatalog` through `resolve_harness_composition`; it does not introduce a second resolver. The target adapter then strengthens only the Component bindings directly evidenced by that Cordis/Web profile to `LiveMounted`. Older/thin DSH bindings remain `NextSession` unless separately proved live.
+```text
+node --import tsx apps/cli/src/bin.ts web
+```
+
+and waits for the target-owned endpoint at `127.0.0.1:3080`.
+
+`deepseek_live_cordis_composition()` still resolves the same canonical #65 `CompositionCatalog` through `resolve_harness_composition`; it does not introduce a second resolver. The target adapter strengthens only Component bindings whose process-level presence is actually evidenced by the current Web/Cordis body:
+
+```text
+component/deepseek/profile-root
+component/deepseek/client-ui-slots
+component/deepseek/client-ui-conversation
+component/deepseek/client-ui-commands
+component/deepseek/client-ui-permission
+```
+
+`component/deepseek/agent-loop` deliberately remains `NextSession`: the current Web source moves the agent plane behind per-session agent presets, so a live host/Web process is not evidence that one AgentSession's loop is active. The older/thin tool bindings likewise remain `NextSession` until a target operation separately proves them live.
 
 `CordisProcessActivationDriver` starts the exact target-owned process, observes child-process health and the published endpoint, and only then returns `SessionSpaceActivationObservation::Active`. Process exit/startup failure cannot become ACTIVE.
 
 The repository has two proof levels:
 
-1. `session_space_live_v2` exercises the real child-process lifecycle deterministically and proves ACTIVE/teardown are provider-observation-driven rather than enum-only;
-2. the **Real DeepSeek Cordis SessionSpace activation** CI job checks out the exact upstream revision, installs its pinned workspace, runs the exact Cordis Web path through the same adapter, observes the live endpoint, then retracts the final live Component and confirms process teardown.
+1. `session_space_live_v2` exercises a real child-process lifecycle deterministically and proves ACTIVE/teardown are provider-observation-driven rather than enum-only;
+2. the **Real DeepSeek Cordis SessionSpace activation** CI job checks out the exact upstream revision, installs its pinned workspace, first proves bare `dsh web` itself reaches its target-owned endpoint, then runs that same process through the SessionSpace adapter and confirms ACTIVE plus final-provider teardown.
 
 The current process seam intentionally does **not** claim arbitrary in-process Cordis Fiber deletion from Rust. Partial Component retraction while sibling Components share the same Cordis process fails explicitly with `cordis.process.partial_retraction_unsupported` rather than counterfeiting successful live disposal. Whole-provider teardown is real; a finer Cordis control protocol remains a genuine future extension if needed.
 
@@ -181,7 +199,7 @@ ACP                            != A2A != MCP
 
 ### O:I PR #34 consumer boundary
 
-O:I PR #34 remains a consumer rather than an owner. Its desktop contribution model accepts AIKit-owned Component/Surface/target eligibility and lineage; the SessionSpace read model supplies those same stable UI-neutral fields without requiring desktop to activate Cordis or invent SessionSpace semantics.
+O:I PR #34 remains a consumer rather than an owner. Its desktop contribution model accepts AIKit-owned Component/Surface/target eligibility and lineage; the SessionSpace read model supplies the same UI-neutral runtime facts without requiring desktop to activate Cordis or invent SessionSpace semantics.
 
 No AIKit Skills move into O:I/Central and no O:I activation controller is introduced by this slice.
 
@@ -189,15 +207,15 @@ No AIKit Skills move into O:I/Central and no O:I activation controller is introd
 
 ### #61 / #62
 
-The executable semantic/runtime floor is now implemented: stable identity, explicit AgentSession binding, Component/Surface admission, provider-attributed live activation, connection state, isolation, provenance, authority separation, degradation, recomposition and close semantics. The parent programme remains open for broader durable persistence/restore and all provider projections (especially full mux migration) rather than being closed by one vertical slice.
+The executable semantic/runtime floor is implemented for this vertical slice: stable identity, explicit AgentSession binding, Component/Surface admission, provider-attributed live activation, connection state, isolation, provenance, authority separation, degradation, recomposition and close semantics. The parent programme remains open for its broader acceptance surface: richer multi-Project/Context binding and resolution provenance, provider/host/material bindings, focus/history/reconstruction services, persistence/restore, and the provider migrations owned by M2.
 
 ### #63
 
-The shared #66 adapter now participates in SessionSpace without another ACP stack. Full cmux/tmux open/reopen migration and IDE conformance remain separate acceptance fronts.
+The shared #66 adapter now participates in SessionSpace without another ACP stack. Full cmux/tmux open/reopen migration, multiple live AgentSession/provider fixtures and IDE conformance remain separate acceptance fronts.
 
 ### #65
 
-The previous universal “activate on next session” limitation is removed where the current DSH Cordis Web profile has an executable live path. `NextSession` remains only for bindings not yet supported by a live target operation. Fine-grained in-process Fiber retraction is not invented.
+The previous universal “activate on next session” limitation is removed only where the current DSH Web/Cordis composition has an executable live process path. Per-session agent-loop and thin/tool bindings remain `NextSession` until their own target activation seams prove otherwise. Fine-grained in-process Fiber retraction is not invented.
 
 ### #66
 
