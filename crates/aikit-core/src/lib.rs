@@ -49,6 +49,7 @@ pub mod policy;
 pub mod procedure;
 pub mod profile;
 pub mod project;
+pub mod project_map;
 pub mod project_world;
 pub mod projection;
 pub mod ql;
@@ -167,6 +168,10 @@ pub use procedure::{
     RegistryOwnership, UndoRecord, UndoStep, WorldEdit,
 };
 pub use profile::{ConfigMerge, ConfigTable, PoolPatch, Profile};
+pub use project_map::{
+    ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint, ProjectMapStep,
+    PROJECT_MAP_VERSION,
+};
 pub use project_world::{
     disclose_project_world, ActorDisclosure, ActorRuntimeDisclosure, CapabilityHorizonDisclosure,
     EffectiveRevisionDisclosure, InformationHorizonDisclosure, ProjectWorldReadModel,
