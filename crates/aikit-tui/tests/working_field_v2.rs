@@ -23,8 +23,9 @@ fn permission(owner: &str, meaning: &str) -> PermissionProjection {
 }
 
 fn fixture_field() -> TerminalWorkingField {
-    // #61/#62 remain deliberately post-#60. This is the contract-level current-world
-    // slot only; it must not be mistaken for a landed SessionSpace store/model.
+    // SessionSpace now has a live AIKit runtime/read-model boundary. This parity
+    // fixture keeps only the cross-product Surface statement; lifecycle detail is
+    // exercised by working_field_session_space_v2 rather than duplicated here.
     let session_space = WorkingFieldItem {
         subject: r("session-space/current"),
         semantic_kind: "SessionSpace".into(),
@@ -40,22 +41,21 @@ fn fixture_field() -> TerminalWorkingField {
                 surface: r("surface/oi/desktop"),
                 terminal_representation: false,
                 alternate_reason: Some(
-                    "O:I desktop PR #34 deliberately does not implement SessionSpace yet; this is a future peer-provider Surface".into(),
+                    "O:I desktop PR #34 consumes the AIKit-owned read model as a peer Surface host; it does not own SessionSpace activation".into(),
                 ),
             },
         ],
         contribution_kinds: BTreeSet::from([
             TerminalContributionKind::Reading,
+            TerminalContributionKind::Relation,
             TerminalContributionKind::CommandNavigation,
         ]),
         permission: permission(
             "ai-kit",
-            "future provider operations retain SessionSpace policy meaning; no authority is invented by this fixture",
+            "SessionSpace composition transfers reference/possibility, never ambient trust or Action authority",
         ),
-        provenance: vec!["EpiLogos/ai-kit#61/#62 post-#60 contract fixture".into()],
-        availability: WorkingFieldAvailability::ContractFixture {
-            live_gate: "#60 acceptance, then #61/#62 implementation".into(),
-        },
+        provenance: vec!["aikit.session-space/v1 live read model".into()],
+        availability: WorkingFieldAvailability::Available,
     };
 
     // Central PR #53 is now a real native producer. Preserve its actual read-model
@@ -156,10 +156,10 @@ fn fixture_field() -> TerminalWorkingField {
         },
     };
 
-    // #66 connection semantics are implemented, but no post-#60 live SessionSpace
-    // binding exists yet. Do not promote protocol operations into canonical Actions.
+    // #66's connection adapter now has an explicit AgentSession→SessionSpace
+    // bridge. Protocol operations still do not become canonical Actions.
     let agent_session = WorkingFieldItem {
-        subject: r("agent-session/fixture-acp"),
+        subject: r("agent-session/live-acp"),
         semantic_kind: "AgentSession".into(),
         owner: r("ai-kit"),
         actions: vec![],
@@ -170,16 +170,14 @@ fn fixture_field() -> TerminalWorkingField {
         }],
         contribution_kinds: BTreeSet::from([
             TerminalContributionKind::Reading,
-            TerminalContributionKind::ActionBinding,
+            TerminalContributionKind::Relation,
         ]),
         permission: permission(
             "ai-kit",
             "ACP permission requests retain transport-native provenance until an owning product explicitly governs/projects them",
         ),
-        provenance: vec!["aikit.connection-adapter/acp/v1 fixture from PR #68".into()],
-        availability: WorkingFieldAvailability::ContractFixture {
-            live_gate: "bind the shared adapter to a live AgentSession through the accepted post-#60 application path".into(),
-        },
+        provenance: vec!["aikit.connection-adapter/acp/v1 -> aikit.session-space/v1".into()],
+        availability: WorkingFieldAvailability::Available,
     };
 
     let rich_component = WorkingFieldItem {
@@ -264,27 +262,28 @@ fn parity_fixture_consumes_live_central_and_actuation_refs_without_reowning_them
 }
 
 #[test]
-fn genuinely_unlanded_dependencies_remain_explicit_contract_fixtures_without_fake_actions() {
+fn live_session_space_and_agent_session_replace_obsolete_contract_fixtures() {
     let field = fixture_field();
 
     let session_space = field.item(&r("session-space/current")).unwrap();
     assert!(session_space.actions.is_empty());
     assert!(matches!(
         &session_space.availability,
-        WorkingFieldAvailability::ContractFixture { .. }
+        WorkingFieldAvailability::Available
+    ));
+    assert!(session_space.provenance[0].contains("aikit.session-space/v1"));
+
+    let session = field.item(&r("agent-session/live-acp")).unwrap();
+    assert!(session.actions.is_empty());
+    assert!(matches!(
+        &session.availability,
+        WorkingFieldAvailability::Available
     ));
 
     let build = field.item(&r("factory.surface/build")).unwrap();
     assert!(build.actions.is_empty());
     assert!(matches!(
         &build.availability,
-        WorkingFieldAvailability::ContractFixture { .. }
-    ));
-
-    let session = field.item(&r("agent-session/fixture-acp")).unwrap();
-    assert!(session.actions.is_empty());
-    assert!(matches!(
-        &session.availability,
         WorkingFieldAvailability::ContractFixture { .. }
     ));
 }
