@@ -8,11 +8,14 @@
 
 use std::path::PathBuf;
 
+use aikit_core::capsule::Kind;
 use aikit_core::procedure::{Inverse, Plan, Procedure, ProcedureKind, WorldEdit};
 use aikit_core::projection::ProjectionItem;
 use aikit_core::{AikitError, Result};
 
-use aikit_adapters::clients::{broker::BrokerAdapter, claude::ClaudeAdapter, codex::CodexAdapter, ClientAdapter};
+use aikit_adapters::clients::{
+    broker::BrokerAdapter, claude::ClaudeAdapter, codex::CodexAdapter, ClientAdapter,
+};
 
 use crate::app::Service;
 
@@ -60,7 +63,9 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
                 // inverse is restoring the previous bytes — or removing the file
                 // when there were none.
                 let inverse = if target.exists() {
-                    Inverse::Restore { blob: aikit_core::procedure::BlobId::deferred() }
+                    Inverse::Restore {
+                        blob: aikit_core::procedure::BlobId::deferred(),
+                    }
                 } else {
                     Inverse::Remove
                 };
@@ -111,7 +116,16 @@ pub fn launch_command(service: &Service, client: &str) -> Result<Vec<String>> {
     Ok(argv)
 }
 
-/// What each client's projection would be, and whether it is installed.
+/// What each client's semantic projection would contain, the lower-level
+/// materialisation work required to realise it, and whether the client is
+/// installed.
+///
+/// `items` deliberately counts selected semantic resources, not filesystem
+/// operations. A managed actor bootstrap can add a second generated projection
+/// item for one selected Skill; reporting that as "2 items" makes a correctly
+/// Skill-Set-filtered projection look as though it leaked another capability.
+/// `materialization_items` exposes the adapter plan count separately for callers
+/// interested in the physical work.
 pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::Value>> {
     let rc = service.projection_context()?;
     let mut rows = Vec::new();
@@ -121,12 +135,19 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
         }
         let (adapter, config_dir) = adapter_for(service, client)?;
         let planned = adapter.plan(&rc);
+        let semantic_items = match client {
+            "claude" | "codex" => rc.view.active_of_kind(Kind::Skill).len(),
+            "broker" => rc.view.active.len(),
+            _ => unreachable!("client list and semantic count must evolve together"),
+        };
         rows.push(serde_json::json!({
             "client": client,
             "config_dir": config_dir.display().to_string(),
             "installed": config_dir.exists(),
             "effect": planned.as_ref().ok().map(|p| adapter.activation_effect(None, p).describe()),
-            "items": planned.as_ref().ok().map(|p| p.items.len()),
+            "items": planned.as_ref().ok().map(|_| semantic_items),
+            "materialization_items": planned.as_ref().ok().map(|p| p.items.len()),
+            "actor_bootstrap": rc.actor_bootstrap.is_some(),
             "notes": planned.as_ref().ok().map(|p| p.notes.clone()).unwrap_or_default(),
             "error": planned.as_ref().err().map(|e| e.message().to_string()),
         }));
