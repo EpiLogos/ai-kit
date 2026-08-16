@@ -133,7 +133,7 @@ fn mouse_and_keyboard_choose_the_same_workspace_section() {
     .unwrap();
     let _ = draw(&mouse_surface);
     mouse_surface
-        .handle(&mut mouse_backend, mouse(24, 1))
+        .handle(&mut mouse_backend, mouse(33, 1))
         .unwrap();
 
     assert_eq!(
