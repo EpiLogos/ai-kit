@@ -58,6 +58,9 @@ fn explicit_exit_is_refused_while_staged_intent_remains() {
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
     )
     .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
 
     surface
         .handle(
