@@ -51,14 +51,13 @@ use tempfile::TempDir;
 use aikit_core::catalog::Catalog;
 use aikit_core::context::Isolation;
 use aikit_core::id::{CapsuleId, ContextId, RegistrySource, SessionId};
-use aikit_core::platform::{MuxKind, TargetId};
+use aikit_core::platform::TargetId;
 use aikit_core::projection::{
     ActivationEffect, ProjectionItem, ProjectionPlan, ResolvedContext, TargetAdapter,
 };
 use aikit_core::resolve::ResolvedView;
 use aikit_core::session::{SessionPlan, SessionSpec};
 use aikit_core::trust::{TrustKey, TrustState};
-use aikit_core::Capsule;
 
 use aikit_adapters::clients::claude::ClaudeAdapter;
 use aikit_adapters::clients::codex::CodexAdapter;
@@ -319,16 +318,6 @@ fn git(repo: &Path, args: &[&str]) {
         .status()
         .expect("git runs");
     assert!(status.success(), "git {args:?} failed");
-}
-
-fn git_out(repo: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("git runs");
-    assert!(out.status.success(), "git {args:?} failed");
-    String::from_utf8_lossy(&out.stdout).to_string()
 }
 
 fn env_map(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
@@ -713,7 +702,7 @@ fn cmux_full_runner() -> ScriptedRunner {
         .on("rename-workspace", OK)
 }
 
-const CMUX_CAPABILITIES: &str = r#"{"version":"0.63.1","build":"78","commands":["new-window","new-workspace","new-split"],"features":{"workspaces":true,"workspace_groups":true,"windows":true,"panes":true}}"#;
+const CMUX_CAPABILITIES: &str = r#"{"version":"0.63.1","build":"78","commands":["new-window","new-workspace","new-split","list-panes","list-pane-surfaces","rename-tab"],"features":{"workspaces":true,"workspace_groups":true,"windows":true,"panes":true}}"#;
 const CMUX_NEW_WORKSPACE_3: &str = "OK workspace:3";
 const CMUX_NEW_WORKSPACE_4: &str = "OK workspace:4";
 const CMUX_NEW_SPLIT_5: &str = r#"{ "surface_ref": "surface:5", "pane_ref": "pane:4", "type": "terminal" }"#;
