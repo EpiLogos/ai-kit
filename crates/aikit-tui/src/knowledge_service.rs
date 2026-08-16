@@ -1,111 +1,156 @@
-//! Typed Knowledge Navigation application seam for V2 human surfaces.
+//! TUI-facing projection of the canonical V2 Knowledge application service.
 //!
-//! This module deliberately begins with the relations AIKit genuinely owns at
-//! the application boundary. Today that includes Resource identity and canonical
-//! contextual Action relations. Provider-native SemanticWiki, SourcePool and
-//! CodeIndex/GitNexus edges are **not** reconstructed from generic resolver
-//! adjacency; those providers can extend this same contract when their adapters
-//! exist.
+//! This module contains no provider semantics and no parallel relation store. The
+//! same [`aikit_core::KnowledgeApplication`] used by CLI/agent surfaces supplies
+//! search, read, relations, routes, context packs, explain and provider status;
+//! the TUI is only a consumer of those typed read models.
 
-use aikit_core::knowledge::{
-    KnowledgeRelationView, RelationDirection, RelationEdge, RelationNode, RelationOrigin,
-    RelationQuery,
+use aikit_core::{
+    KnowledgeAddress, KnowledgeApplication, KnowledgeContextPack, KnowledgeExplanation,
+    KnowledgeProviderStatus, KnowledgeReading, KnowledgeRelationView, KnowledgeRoute,
+    KnowledgeSearchResult, Result,
 };
-use aikit_core::resource::{ResourceIndex, SourceAuthority};
-use aikit_core::{AikitError, Result};
 
-use crate::palette_service::PaletteApplicationService;
-
-/// Provider-neutral relation expansion used by list/tree/graph presentations.
-///
-/// A presentation chooses how to draw the returned nodes and edges. It must not
-/// infer new relation kinds from position, indentation or provider payloads.
 pub trait KnowledgeNavigationService {
-    fn relation_view(&self, query: RelationQuery) -> Result<KnowledgeRelationView>;
+    fn knowledge_search(&self, query: &str, limit: usize) -> KnowledgeSearchResult;
+    fn knowledge_read(&self, address: &KnowledgeAddress) -> Result<KnowledgeReading>;
+    fn knowledge_relations(
+        &self,
+        address: &KnowledgeAddress,
+        depth: u8,
+        max_nodes: usize,
+        max_edges: usize,
+    ) -> Result<KnowledgeRelationView>;
+    fn knowledge_route(
+        &self,
+        query: Option<&str>,
+        addresses: &[KnowledgeAddress],
+    ) -> Result<KnowledgeRoute>;
+    fn knowledge_context_pack(
+        &self,
+        query: Option<&str>,
+        addresses: &[KnowledgeAddress],
+    ) -> KnowledgeContextPack;
+    fn knowledge_explain(&self, address: &KnowledgeAddress) -> Result<KnowledgeExplanation>;
+    fn knowledge_status(&self) -> KnowledgeProviderStatus;
 }
 
-impl KnowledgeNavigationService for PaletteApplicationService<'_> {
-    fn relation_view(&self, query: RelationQuery) -> Result<KnowledgeRelationView> {
-        query.validate()?;
-        let index = self.backend().navigation_index();
-        let focus = ResourceIndex::resource(&index, &query.focus).ok_or_else(|| {
-            AikitError::new(
-                "knowledge.focus_not_in_navigation_index",
-                format!("{} is not in the V2 Resource navigation field", query.focus),
-            )
-            .with("focus", query.focus.to_string())
-        })?;
+impl KnowledgeNavigationService for KnowledgeApplication<'_> {
+    fn knowledge_search(&self, query: &str, limit: usize) -> KnowledgeSearchResult {
+        self.search(query, limit)
+    }
 
-        let mut view = KnowledgeRelationView::focus_only(
-            query.clone(),
-            RelationNode::new(
-                focus.descriptor.id.clone(),
-                focus.descriptor.kind,
-                focus.descriptor.name.clone(),
-            ),
-        )?;
+    fn knowledge_read(&self, address: &KnowledgeAddress) -> Result<KnowledgeReading> {
+        self.read(address)
+    }
 
-        // Contextual Action applicability is a relation AIKit can state exactly:
-        // one canonical ActionRef is applicable to one selected subject Resource.
-        // It is a generated application projection over canonical Resources, not
-        // an authored Wiki/code/source edge.
-        let actions = index
-            .actions_for(&query.focus)
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        for action in actions {
-            let Some(action_record) = ResourceIndex::resource(&index, &action.action) else {
-                view.warnings.push(format!(
-                    "contextual Action {} is applicable but absent from the Resource index",
-                    action.action
-                ));
-                continue;
-            };
-            if !view.push_node(RelationNode::new(
-                action_record.descriptor.id.clone(),
-                action_record.descriptor.kind,
-                action_record.descriptor.name.clone(),
-            )) {
-                break;
-            }
-            if !view.push_edge(RelationEdge::new(
-                query.focus.clone(),
-                action.action.clone(),
-                "contextual-action",
-                RelationDirection::Outgoing,
-                RelationOrigin::new(SourceAuthority::Generated).in_lens("aikit-resource-index"),
-            ))? {
-                break;
-            }
-        }
+    fn knowledge_relations(
+        &self,
+        address: &KnowledgeAddress,
+        depth: u8,
+        max_nodes: usize,
+        max_edges: usize,
+    ) -> Result<KnowledgeRelationView> {
+        self.relations(address, depth, max_nodes, max_edges)
+    }
 
-        if view.edges.is_empty() {
-            view.warnings.push(
-                "no typed local relation expansion is available for this Resource; provider-native relations were not inferred"
-                    .to_string(),
-            );
-        }
+    fn knowledge_route(
+        &self,
+        query: Option<&str>,
+        addresses: &[KnowledgeAddress],
+    ) -> Result<KnowledgeRoute> {
+        self.route(query, addresses)
+    }
 
-        Ok(view)
+    fn knowledge_context_pack(
+        &self,
+        query: Option<&str>,
+        addresses: &[KnowledgeAddress],
+    ) -> KnowledgeContextPack {
+        self.context_pack(query, addresses)
+    }
+
+    fn knowledge_explain(&self, address: &KnowledgeAddress) -> Result<KnowledgeExplanation> {
+        self.explain(address)
+    }
+
+    fn knowledge_status(&self) -> KnowledgeProviderStatus {
+        self.status()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use aikit_core::resource::ResourceRef;
+    use std::collections::BTreeMap;
 
-    // Public integration tests exercise the service with the normal palette
-    // fixtures. This unit test intentionally verifies only the provider-neutral
-    // query contract so the module does not acquire a second fake resolver.
+    use aikit_core::{
+        FamiliarityContext, NativeSourcePoolProvider, ResourceRef, SemanticWikiIndex,
+        SemanticWikiProvider, SourceBinding, SourceMaterial, SourcePoolProvider, SourceRef,
+        SourceRevision, SourceVisibility,
+    };
+
+    use super::*;
+
     #[test]
-    fn relation_contract_types_are_provider_neutral() {
-        let focus = ResourceRef::parse("project/aikit").unwrap();
-        let query = RelationQuery::local(focus.clone());
-        assert_eq!(query.focus, focus);
-        assert_eq!(query.depth, aikit_core::DEFAULT_RELATION_DEPTH);
-        assert!(query.max_nodes > 0);
-        assert!(query.max_edges > 0);
+    fn tui_knowledge_contract_is_the_core_application_contract() {
+        let objects = aikit_core::parse_wiki_objects(
+            r#"{"objects":[
+              {"profile":"okf-wiki/v1","object":"space","ref":"wiki:space:root","revision":1,
+               "provenance":[],"title":"Root","parent_space_refs":[],"child_space_refs":[],
+               "node_refs":["wiki:node:auth"]},
+              {"profile":"okf-wiki/v1","object":"node","ref":"wiki:node:auth","revision":1,
+               "provenance":[{"source_ref":"source:spec"}],"type":"Concept","title":"Authentication",
+               "space_refs":["wiki:space:root"],"source_refs":["source:spec"]}
+            ]}"#,
+        )
+        .unwrap();
+        let index = SemanticWikiIndex::rebuild(objects).unwrap();
+        let material = vec![SourceMaterial {
+            binding: SourceBinding {
+                source: SourceRef::parse("source:spec").unwrap(),
+                revision: SourceRevision::parse("sha256:spec").unwrap(),
+                title: "Auth spec".into(),
+                tags: vec!["auth".into()],
+                visibility: SourceVisibility::Team,
+                owners: Vec::new(),
+                media_type: "text/markdown".into(),
+                locator: None,
+                metadata: BTreeMap::new(),
+            },
+            body: "Authentication rotates session tokens.".into(),
+        }];
+        let mut sources = NativeSourcePoolProvider::new();
+        sources.rebuild(&material).unwrap();
+        let app = KnowledgeApplication::new(FamiliarityContext {
+            project: Some(ResourceRef::parse("project:demo").unwrap()),
+            actor: None,
+            agency: None,
+            focus: None,
+        })
+        .with_wiki(SemanticWikiProvider::new(&index))
+        .with_source_pool(&sources, &material);
+
+        let service: &dyn KnowledgeNavigationService = &app;
+        let hits = service.knowledge_search("Authentication", 10);
+        assert!(hits
+            .hits
+            .iter()
+            .any(|hit| hit.resource.as_str() == "wiki:node:auth"));
+        let address = KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:auth").unwrap());
+        assert_eq!(
+            service
+                .knowledge_read(&address)
+                .unwrap()
+                .resource
+                .as_str(),
+            "wiki:node:auth"
+        );
+        assert!(service
+            .knowledge_relations(&address, 1, 16, 16)
+            .unwrap()
+            .nodes
+            .iter()
+            .any(|node| node.resource.as_str() == "source:spec"));
+        assert_eq!(service.knowledge_route(None, &[address]).unwrap().steps.len(), 1);
     }
 }
