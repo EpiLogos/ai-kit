@@ -36,6 +36,7 @@ pub mod guidance;
 pub mod hooks;
 pub mod id;
 pub mod knowledge;
+pub mod knowledge_code;
 pub mod knowledge_okf;
 pub mod knowledge_source_pool;
 pub mod knowledge_wiki;
@@ -125,6 +126,10 @@ pub use knowledge::{
     KnowledgeRoute, KnowledgeRouteStep, RelationDirection, RelationEdge, RelationNode,
     RelationOrigin, RelationQuery, DEFAULT_RELATION_DEPTH, DEFAULT_RELATION_EDGE_BUDGET,
     DEFAULT_RELATION_NODE_BUDGET,
+};
+pub use knowledge_code::{
+    CodeContext, CodeImpact, CodeIndexCapabilities, CodeIndexProvider, CodeIndexStatus,
+    CodeReference, CodeSearchHit, CodeTrace, GITNEXUS_TESTED_VERSION,
 };
 pub use knowledge_okf::{validate_okf, OkfDocument, OKF_VERSION};
 pub use knowledge_source_pool::{
