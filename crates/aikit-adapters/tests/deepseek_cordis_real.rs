@@ -35,8 +35,7 @@ fn real_pinned_deepseek_cordis_web_activates_inside_session_space() {
     let mut runtime = SessionSpaceRuntime::open(
         SessionSpaceDefinition::new(SessionSpaceRef::parse("session-space/deepseek-real").unwrap())
             .with_provenance(format!(
-                "real DeepSeek Harness Cordis acceptance @{}",
-                DEEPSEEK_HARNESS_UPSTREAM_REVISION
+                "real DeepSeek Harness Cordis acceptance @{DEEPSEEK_HARNESS_UPSTREAM_REVISION}"
             )),
     )
     .unwrap();
