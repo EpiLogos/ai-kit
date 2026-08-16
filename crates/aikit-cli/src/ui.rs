@@ -5,12 +5,16 @@
 //! reducer-native ApplicationSurface. No CLI path instantiates the retired
 //! Palette/Tree semantic controllers.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use aikit_core::id::{CapsuleId, GenerationId};
 use aikit_core::platform::MuxKind;
 use aikit_core::resolve::ResolvedView;
-use aikit_core::resource::ResourceSearchIndex;
+use aikit_core::resource::{
+    NavigationEvidence, NavigationEvidenceClass, ResourceDescriptor, ResourceKind, ResourceRecord,
+    ResourceRef, ResourceSearchIndex,
+};
 use aikit_core::scope::{ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
 use aikit_core::{FamiliarityObservation, FamiliarityStore, Result};
@@ -27,11 +31,13 @@ use aikit_tui::PaletteOutcome;
 
 use crate::app::Service;
 
-/// V2 surface decorator that gives the shared Service one additional operational
-/// responsibility: replaying and recording learned navigation evidence.
+/// V2 surface decorator that gives the shared Service two application-boundary
+/// responsibilities which must not leak into the deterministic capsule resolver:
+/// rebuilding learned navigation evidence and advertising real compositional
+/// Resources already selected by the loaded Project/scope stack.
 ///
-/// Familiarity is rebuildable evidence and therefore belongs at the
-/// host/application boundary rather than inside canonical resolution.
+/// It delegates every resolver/package/runtime operation to the existing Service;
+/// this is not a second application service or semantic store.
 struct V2SurfaceService<'a> {
     service: &'a mut Service,
 }
@@ -39,6 +45,58 @@ struct V2SurfaceService<'a> {
 impl<'a> V2SurfaceService<'a> {
     fn new(service: &'a mut Service) -> Self {
         Self { service }
+    }
+
+    fn composition_navigation_index(&self) -> ResourceSearchIndex {
+        let mut index = <Service as PaletteBackend>::navigation_index(self.service);
+
+        // Profiles are already part of the authoritative ordered scope stack.
+        // Advertising them as V2 Resources makes that existing composition intent
+        // selectable/searchable without turning ProfileId into a CapsuleId.
+        let mut profiles = BTreeSet::new();
+        if let Some(layers) = <Service as PaletteBackend>::scope_layers(self.service) {
+            for layer in layers {
+                profiles.extend(layer.patch.profiles.iter().cloned());
+                profiles.extend(layer.patch.uses.iter().map(|used| used.profile.clone()));
+            }
+        }
+        for profile in profiles {
+            if let Ok(id) = ResourceRef::parse(&profile.to_string()) {
+                let record = ResourceRecord::new(ResourceDescriptor::new(
+                    id,
+                    ResourceKind::Profile,
+                    profile.to_string(),
+                    "Profile selected by the resolved scope composition",
+                ));
+                index.insert_resource(
+                    record,
+                    vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                        .with_detail("profile selected by the active scope stack")],
+                );
+            }
+        }
+
+        // Project Skill Sets are authored project composition, not hidden package
+        // activation. Keep their own Resource identity so human and agent views can
+        // inspect the same selection without manufacturing Capability/Capsule ids.
+        for name in self.service.project_skill_sets() {
+            let Ok(id) = ResourceRef::parse(&format!("skill-set/{name}")) else {
+                continue;
+            };
+            let record = ResourceRecord::new(ResourceDescriptor::new(
+                id,
+                ResourceKind::SkillSet,
+                name.clone(),
+                "Skill Set selected by the current Project",
+            ));
+            index.insert_resource(
+                record,
+                vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                    .with_detail("skill set selected by the current Project")],
+            );
+        }
+
+        index
     }
 }
 
@@ -60,7 +118,7 @@ impl PaletteBackend for V2SurfaceService<'_> {
     }
 
     fn navigation_index(&self) -> ResourceSearchIndex {
-        <Service as PaletteBackend>::navigation_index(self.service)
+        self.composition_navigation_index()
     }
 
     fn familiarity(&self) -> Result<Option<FamiliarityStore>> {
