@@ -23,7 +23,6 @@ pub mod project_world_service;
 pub mod staging;
 pub mod theme;
 pub mod tree;
-pub mod tree_driver;
 pub mod v2_render;
 
 use aikit_core::id::{CapsuleId, GenerationId};
