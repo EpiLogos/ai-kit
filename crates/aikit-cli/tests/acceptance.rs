@@ -34,15 +34,11 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-#[cfg(target_os = "macos")]
-use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
-#[cfg(target_os = "macos")]
-use std::time::Instant;
 
 use assert_cmd::cargo::cargo_bin;
 use serde_json::Value;
@@ -135,68 +131,6 @@ fn make_executable(path: &Path) {
     let mut perms = fs::metadata(path).unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions(path, perms).unwrap();
-}
-
-#[cfg(target_os = "macos")]
-fn wait_for_pty_ui(child: &mut std::process::Child) -> std::thread::JoinHandle<Vec<u8>> {
-    let mut stdout = child.stdout.take().expect("PTY stdout is captured");
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut output = Vec::new();
-        let mut buffer = [0_u8; 4096];
-        let mut announced = false;
-        while let Ok(read) = stdout.read(&mut buffer) {
-            if read == 0 {
-                break;
-            }
-            output.extend_from_slice(&buffer[..read]);
-            if !announced
-                && output
-                    .windows(b"\x1b[?1000h".len())
-                    .any(|window| window == b"\x1b[?1000h")
-            {
-                announced = true;
-                let _ = ready_tx.send(());
-            }
-        }
-        output
-    });
-    ready_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("the PTY UI enables mouse capture after entering raw mode");
-    reader
-}
-
-#[cfg(target_os = "macos")]
-fn finish_pty(
-    mut child: std::process::Child,
-    stdout_reader: std::thread::JoinHandle<Vec<u8>>,
-) -> (std::process::ExitStatus, Vec<u8>, Vec<u8>) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut timed_out = false;
-    let status = loop {
-        if let Some(status) = child.try_wait().expect("the PTY child can be polled") {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            timed_out = true;
-            let _ = child.kill();
-            break child.wait().expect("the timed-out PTY child can be reaped");
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    };
-    let stdout = stdout_reader.join().expect("the PTY output reader exits");
-    let mut stderr = Vec::new();
-    if let Some(mut stream) = child.stderr.take() {
-        stream.read_to_end(&mut stderr).unwrap();
-    }
-    assert!(
-        !timed_out,
-        "the PTY child did not exit after the scripted interaction: stdout={:?} stderr={:?}",
-        String::from_utf8_lossy(&stdout),
-        String::from_utf8_lossy(&stderr)
-    );
-    (status, stdout, stderr)
 }
 
 /// Record a deliberate human trust review for the given capsules, keyed on the
