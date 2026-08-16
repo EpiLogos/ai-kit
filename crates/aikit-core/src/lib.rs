@@ -37,6 +37,7 @@ pub mod hooks;
 pub mod id;
 pub mod knowledge;
 pub mod knowledge_code;
+pub mod knowledge_navigation;
 pub mod knowledge_okf;
 pub mod knowledge_source_pool;
 pub mod knowledge_wiki;
@@ -131,6 +132,10 @@ pub use knowledge::{
 pub use knowledge_code::{
     CodeContext, CodeImpact, CodeIndexCapabilities, CodeIndexProvider, CodeIndexStatus,
     CodeReference, CodeSearchHit, CodeTrace, GITNEXUS_TESTED_VERSION,
+};
+pub use knowledge_navigation::{
+    KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation, KnowledgeProviderStatus,
+    KnowledgeSearchHit, KnowledgeSearchResult, SourcePoolBinding, KNOWLEDGE_APPLICATION_VERSION,
 };
 pub use knowledge_okf::{validate_okf, OkfDocument, OKF_VERSION};
 pub use knowledge_source_pool::{
