@@ -27,7 +27,7 @@ fn production_application_searches_the_resolved_resource_field() {
 }
 
 #[test]
-fn zero_query_learned_usage_stays_labelled_as_evidence_not_preference() {
+fn legacy_package_usage_stats_do_not_become_v2_navigation_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let mut backend = Fixture::new(
         dir.path(),
@@ -48,10 +48,12 @@ fn zero_query_learned_usage_stays_labelled_as_evidence_not_preference() {
         .resources
         .iter()
         .find(|item| item.resource.as_str() == "script/ops/deploy")
-        .expect("learned usage should make the destination visible at zero query");
+        .expect("resolved package-backed capabilities remain visible at zero query");
 
-    assert!(deploy.summary.contains("evidence: learned usage"));
-    assert!(deploy.summary.contains("7 successful run(s)"));
+    assert!(
+        !deploy.summary.contains("learned usage"),
+        "legacy SearchDoc/UsageStats must not leak into the canonical Resource field"
+    );
     assert!(!deploy.summary.contains("preferred"));
     assert!(!deploy.summary.contains("trusted"));
 }
