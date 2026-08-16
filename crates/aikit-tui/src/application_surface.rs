@@ -8,7 +8,7 @@
 
 use std::io;
 
-use aikit_core::resource::{ActionStageability, ResourceRef};
+use aikit_core::resource::ActionStageability;
 use aikit_core::{AikitError, ProjectWorldReadModel, Result};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
@@ -20,8 +20,8 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use crate::application::{
-    selected_contextual_action, visible_contextual_actions, Overlay, PresentationMode,
-    RelationReadModel, RelationView, TuiRuntime, TuiState, UiAction, WorkspaceSection,
+    selected_contextual_action, Overlay, PresentationMode, RelationReadModel, RelationView,
+    TuiApplicationService, TuiRuntime, TuiState, UiAction, WorkspaceSection,
 };
 use crate::backend::PaletteBackend;
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
@@ -75,11 +75,11 @@ pub enum ApplicationSurfaceStep {
 }
 
 pub struct ApplicationSurfaceController {
-    host: UiHost,
     semantic: TuiState,
     runtime: TuiRuntime,
     relation: Option<RelationReadModel>,
     project_world: Option<ProjectWorldReadModel>,
+    ambient: AmbientContext,
 }
 
 impl ApplicationSurfaceController {
@@ -87,6 +87,7 @@ impl ApplicationSurfaceController {
         backend: &mut B,
         request: ApplicationSurfaceRequest,
     ) -> Result<Self> {
+        let ambient = ambient_context(backend.context());
         let mut semantic = TuiState {
             presentation: if matches!(request.host, UiHost::Inline(_)) {
                 PresentationMode::Quick
@@ -110,11 +111,11 @@ impl ApplicationSurfaceController {
             project_world = service.project_world().ok();
         }
         let mut controller = Self {
-            host: request.host,
             semantic,
             runtime,
             relation: None,
             project_world,
+            ambient,
         };
         controller.refresh_relation(backend)?;
         Ok(controller)
@@ -146,7 +147,7 @@ impl ApplicationSurfaceController {
             {
                 self.handle_mouse(backend, mouse.column, mouse.row)?;
             }
-            PaletteEvent::Mouse(_) => {}
+            PaletteEvent::Mouse(_) | PaletteEvent::Idle => {}
             PaletteEvent::Key(key)
                 if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
             {
@@ -162,11 +163,10 @@ impl ApplicationSurfaceController {
     }
 
     pub fn draw(&self, frame: &mut ratatui::Frame) {
-        let ambient = AmbientContext::from_state(&self.semantic);
         if let Some(world) = &self.project_world {
-            v2_render::draw_with_project_world(frame, &self.semantic, &ambient, world);
+            v2_render::draw_with_project_world(frame, &self.semantic, &self.ambient, world);
         } else {
-            v2_render::draw_with_context(frame, &self.semantic, &ambient);
+            v2_render::draw_with_context(frame, &self.semantic, &self.ambient);
         }
         if self.semantic.presentation == PresentationMode::Workspace
             && self.semantic.workspace_section == WorkspaceSection::Explore
@@ -175,7 +175,10 @@ impl ApplicationSurfaceController {
         }
     }
 
-    pub fn draw_terminal<T: Backend>(&self, terminal: &mut Terminal<T>) -> Result<()> {
+    pub fn draw_terminal<T: Backend>(&self, terminal: &mut Terminal<T>) -> Result<()>
+    where
+        T::Error: std::fmt::Display,
+    {
         terminal
             .draw(|frame| self.draw(frame))
             .map(|_| ())
@@ -296,7 +299,12 @@ impl ApplicationSurfaceController {
         let (cols, rows) = self.semantic.area;
         let cols = cols.max(2);
         let rows = rows.max(2);
-        let inner = ratatui::layout::Rect::new(1, 1, cols.saturating_sub(2), rows.saturating_sub(2));
+        let inner = ratatui::layout::Rect::new(
+            1,
+            1,
+            cols.saturating_sub(2),
+            rows.saturating_sub(2),
+        );
         let panes = Layout::for_width(inner.width).split(inner);
         if column < panes.list.x
             || column >= panes.list.x.saturating_add(panes.list.width)
@@ -316,7 +324,7 @@ impl ApplicationSurfaceController {
         let Some(resource) = self.semantic.selected.clone() else {
             return Ok(());
         };
-        if self.semantic.staged.contains_key(&resource) {
+        if self.semantic.staged.get(&resource).is_some() {
             return self.dispatch(backend, UiAction::Unstage(resource));
         }
         let stageable = self
@@ -412,7 +420,10 @@ impl ApplicationSurfaceController {
             .borders(Borders::ALL)
             .title(format!(" Relations · {:?} ", self.semantic.relation_view));
         let lines = relation_lines(self.relation.as_ref(), self.semantic.relation_view, &theme);
-        frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), panes.list);
+        frame.render_widget(
+            Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+            panes.list,
+        );
     }
 }
 
@@ -454,15 +465,38 @@ fn relation_lines<'a>(
         )));
         return lines;
     }
+    let related_len = related.len();
     for (index, target) in related.into_iter().enumerate() {
         let text = match view {
-            RelationView::List => format!("{}", target),
-            RelationView::Tree => format!("{}─ {}", if index + 1 == related.len() { "└" } else { "├" }, target),
+            RelationView::List => target.to_string(),
+            RelationView::Tree => format!(
+                "{}─ {}",
+                if index + 1 == related_len { "└" } else { "├" },
+                target
+            ),
             RelationView::Graph => format!("{}  ──related──▶  {}", relation.subject, target),
         };
         lines.push(Line::from(Span::raw(text)));
     }
     lines
+}
+
+fn ambient_context(descriptor: &aikit_core::ContextDescriptor) -> AmbientContext {
+    AmbientContext {
+        project: descriptor
+            .project_root
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned()),
+        focus: descriptor.task.clone(),
+        profile: None,
+        agency: None,
+        host: (!descriptor.host.is_empty()).then(|| descriptor.host.clone()),
+        target: descriptor
+            .targets
+            .first()
+            .map(|target| target.as_str().to_string()),
+    }
 }
 
 pub fn event_loop<B, T, E>(
@@ -474,6 +508,7 @@ pub fn event_loop<B, T, E>(
 where
     B: PaletteBackend,
     T: Backend,
+    T::Error: std::fmt::Display,
     E: EventSource + ?Sized,
 {
     let mut controller = ApplicationSurfaceController::new(backend, request)?;
@@ -533,10 +568,9 @@ impl TerminalSession {
             .map_err(|error| terminal_setup_error("could not enter raw mode", error))?;
         session.raw = true;
         if fullscreen {
-            crossterm::execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen)
-                .map_err(|error| {
-                    terminal_setup_error("could not enter the alternate screen", error)
-                })?;
+            crossterm::execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen).map_err(
+                |error| terminal_setup_error("could not enter the alternate screen", error),
+            )?;
             session.alternate = true;
         }
         crossterm::execute!(io::stdout(), EnableMouseCapture)
