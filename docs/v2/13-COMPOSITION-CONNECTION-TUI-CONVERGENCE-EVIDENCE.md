@@ -1,16 +1,79 @@
 # V2 composition / connection / terminal-field convergence evidence
 
-**Scope:** #65, #66, #67  
+**Scope:** #61–#67  
 **Implementation PR:** #68  
-**Ordering law:** this document records the pre-#60-safe convergence state. It does not authorize #61–#63 SessionSpace implementation before #60 acceptance.
+**Current architectural cut:** AIKit now owns a provider-neutral `aikit.session-space/v1` runtime/read-model. Target adapters may strengthen eligible `HarnessComposition` bindings to live only when a real provider operation proves the stronger state.
 
 This ledger distinguishes three things which must not be blurred:
 
 1. **upstream target facts** verified from pinned primary source;
-2. **AIKit conformance/implementation facts** proved by repository code/tests;
-3. **live-integration gates** owned by work which has not landed yet.
+2. **AIKit semantic/runtime facts** proved by repository code/tests;
+3. **provider observations** required before an eligible Component becomes `Active`.
 
-## 1. Maximal composition specimen — DeepSeek Harness / Cordis
+## 1. SessionSpace semantic/runtime floor — #61 / #62
+
+`aikit-core::session_space` supplies one small UI-neutral runtime boundary rather than a new global application model.
+
+Stable/durable identity:
+
+- `SessionSpaceRef` is a canonical `session-space/...` `ResourceRef` and is independent of Project, AgentSession, mux, TUI and desktop identities;
+- `SessionSpaceDefinition` carries durable identity, Project membership and provenance;
+- runtime provider state remains ephemeral and is projected through `SessionSpaceReadModel`.
+
+Binding/lifecycle:
+
+```text
+SessionSpaceDefinition
+  -> SessionSpaceRuntime::open
+  -> explicit AgentSession binding
+  -> SessionSpaceLease (one binding epoch)
+  -> admit canonical HarnessComposition
+  -> eligible Components + contributed Surfaces
+  -> target/provider activation observation
+  -> active/degraded/unavailable runtime state
+  -> recomposition / connection changes
+  -> unbind / close
+```
+
+The lease epoch makes replacement explicit: rebinding an AgentSession invalidates stale mutation handles. Closing a space clears live AgentSession, connection, composition and Surface bindings; no process-global SessionSpace registry is introduced.
+
+The read model preserves:
+
+- SessionSpace identity/lifecycle/revision;
+- Project membership;
+- canonical AgentSession Ref separately from target/native session id;
+- Component and Surface identity;
+- provider attribution and provenance;
+- connection attribution;
+- explicit capability/action authority disclosure.
+
+### Authority law
+
+Presence, visibility, connection establishment and live activation are independent from authority:
+
+```text
+Component visible             != Capability granted
+connection available/connected != Capability granted
+Capability granted            != Action authorised
+SessionSpace membership        != encounter/contact trust
+```
+
+`SessionSpaceAuthorityState` therefore carries `capability_available`, `capability_granted` and `action_authorised` independently. SessionSpace never infers any of them from composition or connection state.
+
+### Executable adversarial coverage
+
+`crates/aikit-core/tests/session_space_v2.rs` proves at least:
+
+- two independent spaces can contain the same Component Ref without state bleed;
+- an AgentSession mutates a space only through the explicit current binding lease;
+- stale leases fail after rebinding and after close;
+- one Component contributes multiple Surfaces and Surface identity survives recomposition;
+- removed nested composition updates the read model rather than remaining silently active;
+- provider disappearance degrades active Component/Surface state;
+- connection presence never invents capability or Action authority;
+- `NextSession` descriptors cannot be counterfeited as live ACTIVE.
+
+## 2. Maximal composition specimen — DeepSeek Harness / Cordis — #65
 
 Pinned primary source:
 
@@ -50,34 +113,30 @@ AIKit interpretation is deliberately narrower than target vocabulary. Cordis `Co
 | trajectory/session reading | non-Action trajectory contribution | core + DSH base fixture |
 | replaceable loop | `ContributionKind::LoopRuntime` | DSH maximal fixture |
 | desired body mutation | `StagedHarnessComposition` → preview → confirm → apply | integration-line `composition_mutation`; DSH staged-mutation test |
+| live runtime truth | `SessionSpaceActivationDriver` observation | `session_space.rs`; `deepseek_live.rs` |
 
-### Activation truth
+### Live Cordis activation
 
-Cordis can own/retract effects in its own live Context/Fiber lifecycle, but AIKit does not currently possess a live Cordis control channel. Therefore the DSH conformance body remains `CompositionActivationMode::NextSession` even after AIKit stages/confirms a desired-body mutation.
-
-This separation is intentional:
+The current upstream source publishes a real Cordis-hosted Web path:
 
 ```text
-AIKit desired/effective composition truth
-    !=
-proof that a foreign target has already mounted/unmounted it live
+node --import tsx apps/cli/src/bin.ts web --patch examples/web-cordis/cordis.yml
 ```
 
-The native model can describe live retraction where a target proves it without falsely granting that capability to a target or adapter which has not proved it.
+and `examples/web-cordis/cordis.yml` inserts the target-owned Cordis host runner/tool into the normal DSH Web composition on `127.0.0.1:3081`.
 
-### Negative/thin-target floor
+`deepseek_live_cordis_composition()` still resolves the same canonical #65 `CompositionCatalog` through `resolve_harness_composition`; it does not introduce a second resolver. The target adapter then strengthens only the Component bindings directly evidenced by that Cordis/Web profile to `LiveMounted`. Older/thin DSH bindings remain `NextSession` unless separately proved live.
 
-The maximal specimen does not raise the minimum harness shape. Existing core conformance retains:
+`CordisProcessActivationDriver` starts the exact target-owned process, observes child-process health and the published endpoint, and only then returns `SessionSpaceActivationObservation::Active`. Process exit/startup failure cannot become ACTIVE.
 
-- valid empty/static HarnessComposition;
-- dependency-free Components;
-- optional requirement absence as explicit degradation;
-- required absence as structured failure;
-- `NextSession != LiveMounted`;
-- non-Action readings which remain non-Actions;
-- multi-Surface projection of one canonical ActionRef without identity multiplication.
+The repository has two proof levels:
 
-## 2. Interactive Agent connection — ACP plus classic shape
+1. `session_space_live_v2` exercises the real child-process lifecycle deterministically and proves ACTIVE/teardown are provider-observation-driven rather than enum-only;
+2. the **Real DeepSeek Cordis SessionSpace activation** CI job checks out the exact upstream revision, installs its pinned workspace, runs the exact Cordis Web path through the same adapter, observes the live endpoint, then retracts the final live Component and confirms process teardown.
+
+The current process seam intentionally does **not** claim arbitrary in-process Cordis Fiber deletion from Rust. Partial Component retraction while sibling Components share the same Cordis process fails explicitly with `cordis.process.partial_retraction_unsupported` rather than counterfeiting successful live disposal. Whole-provider teardown is real; a finer Cordis control protocol remains a genuine future extension if needed.
+
+## 3. Interactive Agent connection — ACP plus classic shape — #66 / #63
 
 Pinned primary protocol source:
 
@@ -100,64 +159,50 @@ ACP session resume/close      != transport reconnect/disconnect
 ACP                            != A2A != MCP
 ```
 
-The ACP implementation negotiates rather than presumes capability-gated session lifecycle support, preserves JSON-RPC request ids for bidirectional permission calls, orders streamed signals, coordinates permission cancellation with prompt cancellation, owns `session/close` request/response lifecycle, carries provenance, and reports reconnect as unsupported/degraded unless a real reconnect binding is known.
+`connection_into_session_space()` is the single bridge from the existing #66 normalised adapter state to `SessionSpaceConnection`. It rejects a `NativeSessionBinding` that lacks an explicit canonical AgentSession Ref, preserves native session id/protocol/provider provenance, maps lifecycle/degradation, and accepts authority only as explicit external input. No ACP operation is promoted to a canonical Action by the bridge.
 
-No generic `attach` operation is invented where stable ACP v1 does not define one.
+`session_space_live_v2` covers the negative unbound-native-session case and the positive ACP case with a visible-but-withheld capability/Action state.
 
-## 3. TUI / O:I working-field parity matrix
+## 4. TUI / O:I working-field parity — #67 / O:I #34
 
-`aikit.tui-working-field/v1` is a terminal read-model/presentation seam over product-owned semantics. It is not a second store/controller and selection returns to the existing `TuiState` reducer.
+`aikit.tui-working-field/v1` remains a terminal read-model/presentation seam over product-owned semantics. It is not a second store/controller and selection returns to the existing `TuiState` reducer.
 
-Status meanings:
+`working_field_from_session_space(&SessionSpaceReadModel)` now projects the same UI-neutral live state into the TUI:
 
-- **LIVE CONTRACT** — current producer code/contract was inspected and exact producer refs/revision are carried;
-- **AIKIT LIVE** — native AIKit application/composition material is already part of the current V2 surface;
-- **FIXTURE GATE** — deterministic contract fixture exists, but the producer/application dependency has not landed and no false live claim is made.
+- enclosing SessionSpace;
+- bound AgentSession;
+- active/eligible/degraded/unavailable Components;
+- contributed Surfaces, including explicit alternate rich Surfaces rather than pixel-counterfeit terminal copies;
+- Agent connection state;
+- separate capability/action authority meaning;
+- provider/source provenance.
 
-| Requirement / subject | Native owner | Shared Ref / contract | Desktop proof | TUI proof | Agent/CLI proof | Status / remaining gate |
-|---|---|---|---|---|---|---|
-| Project composition resources | AIKit | existing Profile / `skill-set/<name>` Resources | O:I consumes AIKit composition/readings through #68 | final V2 CLI surface advertises current Project Profiles and Skill Sets; working-field selection reuses `TuiState` | same `ResourceSearchIndex` / application service | **AIKIT LIVE** at integration `8eac20d7820086f63165f70c259c69dd7570513f` |
-| Central Personal | Central | `personal.show`; `control.propose-change`; `control.review-proposal`; `control.apply-proposal`; `personal.notify` | O:I PR #34 consumes Central PR #53 | `working_field_v2` carries exact refs, owner, provenance and permission meaning | Central remains Action handler/source owner | **LIVE CONTRACT** Central PR #53 @ `3f0551090ae39bcef260a27b1a9db0da4729d8a3`; live AIKit dispatcher integration still separate |
-| situated/root Agency | Actuation | `actuation.agency/v1`; executable root fixture `agency:root-position` | O:I PR #34 consumes Actuation PR #6 | `working_field_v2` carries exact Agency ref with no TUI-specific Agent subtype | Actuation `agencyReadModel` remains producer | **LIVE CONTRACT** Actuation PR #6 @ `b977939ec25c32b3dc8f5ed251b70e4c26933086` |
-| Factory Build | Software Factory | native #144/#145 Build read model/Actions (not yet published) | O:I PR #34 truthfully reports pending adapter | `factory.surface/build` fixture, no counterfeit Actions | none claimed | **FIXTURE GATE** — Factory #144/#145 |
-| current working world | AIKit / #61–#62 providers | SessionSpace contract | O:I PR #34 explicitly does not implement SessionSpace | `session-space/current` fixture only | none claimed | **FIXTURE GATE** — #60 acceptance, then #61/#62 |
-| interactive AgentSession connection | AIKit | `aikit.connection-adapter/v1` | desktop may consume later through shared application path | ACP/classic adapter is implemented; working-field AgentSession remains fixture | adapters are repository-owned and executable | **IMPLEMENTED ADAPTER / FIXTURE APPLICATION GATE** — bind after #60/#62; #63 consumes #66 rather than reimplementing ACP |
-| rich DSH Web contribution | DeepSeek Harness / Cordis | `surface/deepseek/web-conversation` | alternate rich Surface can be disclosed | explicit alternate-Surface reason; no fake terminal clone | composition/read-model remains inspectable | **LIVE CONFORMANCE SPECIMEN**, not a required suite dependency |
+`working_field_session_space_v2` proves ACTIVE and provider-loss degradation are rendered from the shared model. The earlier `session-space/current` / ACP contract fixtures were retired from the parity fixture; only genuinely unlanded dependencies such as Factory #144/#145 remain `ContractFixture`.
 
-### Parity law exercised
+### O:I PR #34 consumer boundary
 
-The fixture/test contract checks the parts which can be deterministic before the post-#60 integrations:
+O:I PR #34 remains a consumer rather than an owner. Its desktop contribution model accepts AIKit-owned Component/Surface/target eligibility and lineage; the SessionSpace read model supplies those same stable UI-neutral fields without requiring desktop to activate Cordis or invent SessionSpace semantics.
 
-```text
-same canonical Ref
-same native owner
-same product-owned Action refs where they exist
-same source/provenance
-same permission meaning
-explicit availability/degradation
-explicit alternate Surface when terminal rendering is not equivalent
-```
+No AIKit Skills move into O:I/Central and no O:I activation controller is introduced by this slice.
 
-It deliberately does **not** claim same Action handler invocation for Central/Factory until the native dispatcher/application binding exists. That remains a live integration gate, not something a fixture can honestly prove.
+## 5. Status and remaining closure fronts
 
-## 4. Remaining closure gates
+### #61 / #62
+
+The executable semantic/runtime floor is now implemented: stable identity, explicit AgentSession binding, Component/Surface admission, provider-attributed live activation, connection state, isolation, provenance, authority separation, degradation, recomposition and close semantics. The parent programme remains open for broader durable persistence/restore and all provider projections (especially full mux migration) rather than being closed by one vertical slice.
+
+### #63
+
+The shared #66 adapter now participates in SessionSpace without another ACP stack. Full cmux/tmux open/reopen migration and IDE conformance remain separate acceptance fronts.
 
 ### #65
 
-The maximal composition language and reusable nested-topology distinction are implemented and tested. A true live Cordis mount/retract proof would require a target control adapter; current conformance remains honest `NextSession`. This is not required to make Cordis a dependency.
+The previous universal “activate on next session” limitation is removed where the current DSH Cordis Web profile has an executable live path. `NextSession` remains only for bindings not yet supported by a live target operation. Fine-grained in-process Fiber retraction is not invented.
 
 ### #66
 
-The reusable protocol seam and ACP/classic implementations are executable. Product-level AgentSession/SessionSpace application binding is intentionally left to the ordered post-#60 path.
+ACP/classic connection semantics and the explicit AgentSession→SessionSpace bridge are executable. Broader provider-specific live ACP process acceptance may continue independently; the semantic bridge is no longer blocked on a missing SessionSpace.
 
 ### #67
 
-Full ticket closure remains blocked on the dependencies named by the ticket itself:
-
-- #60 acceptance;
-- #61/#62 SessionSpace implementation;
-- #63 application of the shared #66 adapter;
-- Factory #144/#145 Build read model/Actions;
-- shared external Action dispatch proving same handler/lineage from desktop and TUI.
-
-Until those land, the TUI may disclose and preserve current contracts but must not invent their state or authority.
+The TUI now consumes live SessionSpace state through the shared read model rather than a TUI-local SessionSpace fixture. Full ticket closure still includes the remaining product dependencies named by the ticket, notably Factory Build contribution and broader suite Action dispatch/host convergence.
