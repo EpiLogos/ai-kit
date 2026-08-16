@@ -2,12 +2,10 @@ mod common;
 
 use common::*;
 
-use aikit_core::Result;
+use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
 use aikit_tui::event::PaletteEvent;
 use aikit_tui::host::UiHost;
 use aikit_tui::layout::Layout;
-use aikit_tui::surface::{SurfaceBackend, SurfaceController, SurfaceRequest};
-use aikit_tui::tree::{TreeEffect, TreeState};
 use aikit_tui::{ActionOutcome, PresentationMode, WorkspaceSection};
 use crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -16,22 +14,13 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 
-impl SurfaceBackend for Fixture {
-    fn surface_tree(&self) -> Result<TreeState> {
-        Ok(TreeState::new(Vec::new()))
-    }
-
-    fn apply_tree_effect(&mut self, _effect: TreeEffect) -> Result<()> {
-        Ok(())
-    }
-}
-
-fn fixture() -> Fixture {
+fn fixture() -> (tempfile::TempDir, Fixture) {
     let dir = tempfile::tempdir().unwrap();
-    Fixture::new(
+    let backend = Fixture::new(
         dir.path(),
         vec![script("script/ops/deploy"), skill("skill/rust/review")],
-    )
+    );
+    (dir, backend)
 }
 
 fn key(code: KeyCode) -> PaletteEvent {
@@ -55,13 +44,17 @@ fn mouse(column: u16, row: u16) -> PaletteEvent {
     })
 }
 
-fn draw_width(surface: &mut SurfaceController, width: u16, height: u16) -> Terminal<TestBackend> {
+fn draw_width(
+    surface: &ApplicationSurfaceController,
+    width: u16,
+    height: u16,
+) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     surface.draw_terminal(&mut terminal).unwrap();
     terminal
 }
 
-fn draw(surface: &mut SurfaceController) -> Terminal<TestBackend> {
+fn draw(surface: &ApplicationSurfaceController) -> Terminal<TestBackend> {
     draw_width(surface, 120, 30)
 }
 
@@ -77,13 +70,13 @@ fn rendered(terminal: &Terminal<TestBackend>) -> String {
 
 #[test]
 fn mouse_and_keyboard_invoke_the_same_contextual_action_operation() {
-    let mut keyboard_backend = fixture();
-    let mut keyboard = SurfaceController::new(
+    let (_keyboard_dir, mut keyboard_backend) = fixture();
+    let mut keyboard = ApplicationSurfaceController::new(
         &mut keyboard_backend,
-        SurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
     )
     .unwrap();
-    let _ = draw(&mut keyboard);
+    let _ = draw(&keyboard);
     keyboard
         .handle(&mut keyboard_backend, key(KeyCode::Char(':')))
         .unwrap();
@@ -93,13 +86,13 @@ fn mouse_and_keyboard_invoke_the_same_contextual_action_operation() {
     let keyboard_result = keyboard.semantic().action_result.clone();
     assert!(keyboard_result.is_some());
 
-    let mut mouse_backend = fixture();
-    let mut mouse_surface = SurfaceController::new(
+    let (_mouse_dir, mut mouse_backend) = fixture();
+    let mut mouse_surface = ApplicationSurfaceController::new(
         &mut mouse_backend,
-        SurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
     )
     .unwrap();
-    let _ = draw(&mut mouse_surface);
+    let _ = draw(&mouse_surface);
     assert!(!mouse_surface.semantic().contextual_actions.is_empty());
 
     let inner = Rect::new(1, 1, 118, 28);
@@ -120,25 +113,25 @@ fn mouse_and_keyboard_invoke_the_same_contextual_action_operation() {
 
 #[test]
 fn mouse_and_keyboard_choose_the_same_workspace_section() {
-    let mut keyboard_backend = fixture();
-    let mut keyboard = SurfaceController::new(
+    let (_keyboard_dir, mut keyboard_backend) = fixture();
+    let mut keyboard = ApplicationSurfaceController::new(
         &mut keyboard_backend,
-        SurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
     )
     .unwrap();
-    let _ = draw(&mut keyboard);
+    let _ = draw(&keyboard);
     keyboard
         .handle(&mut keyboard_backend, alt(KeyCode::Right))
         .unwrap();
     assert_eq!(keyboard.semantic().workspace_section, WorkspaceSection::Compose);
 
-    let mut mouse_backend = fixture();
-    let mut mouse_surface = SurfaceController::new(
+    let (_mouse_dir, mut mouse_backend) = fixture();
+    let mut mouse_surface = ApplicationSurfaceController::new(
         &mut mouse_backend,
-        SurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
     )
     .unwrap();
-    let _ = draw(&mut mouse_surface);
+    let _ = draw(&mouse_surface);
     mouse_surface
         .handle(&mut mouse_backend, mouse(24, 1))
         .unwrap();
@@ -151,25 +144,25 @@ fn mouse_and_keyboard_choose_the_same_workspace_section() {
 
 #[test]
 fn mouse_and_keyboard_expand_and_collapse_the_same_presentation_state() {
-    let mut keyboard_backend = fixture();
-    let mut keyboard = SurfaceController::new(
+    let (_keyboard_dir, mut keyboard_backend) = fixture();
+    let mut keyboard = ApplicationSurfaceController::new(
         &mut keyboard_backend,
-        SurfaceRequest::new(UiHost::TmuxPopup),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup),
     )
     .unwrap();
-    let _ = draw(&mut keyboard);
+    let _ = draw(&keyboard);
     keyboard
         .handle(&mut keyboard_backend, ctrl(KeyCode::Char('w')))
         .unwrap();
     assert_eq!(keyboard.semantic().presentation, PresentationMode::Quick);
 
-    let mut mouse_backend = fixture();
-    let mut mouse_surface = SurfaceController::new(
+    let (_mouse_dir, mut mouse_backend) = fixture();
+    let mut mouse_surface = ApplicationSurfaceController::new(
         &mut mouse_backend,
-        SurfaceRequest::new(UiHost::TmuxPopup),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup),
     )
     .unwrap();
-    let _ = draw(&mut mouse_surface);
+    let _ = draw(&mouse_surface);
     mouse_surface
         .handle(&mut mouse_backend, mouse(2, 0))
         .unwrap();
@@ -182,13 +175,13 @@ fn mouse_and_keyboard_expand_and_collapse_the_same_presentation_state() {
 
 #[test]
 fn live_shell_title_exposes_truthful_ambient_context_without_invented_identity() {
-    let mut backend = fixture();
-    let mut surface = SurfaceController::new(
+    let (_dir, mut backend) = fixture();
+    let surface = ApplicationSurfaceController::new(
         &mut backend,
-        SurfaceRequest::new(UiHost::TmuxPopup),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup),
     )
     .unwrap();
-    let terminal = draw(&mut surface);
+    let terminal = draw(&surface);
     let output = rendered(&terminal);
 
     assert!(output.contains("AIKit · Workspace · Project: payments"));
@@ -200,13 +193,13 @@ fn live_shell_title_exposes_truthful_ambient_context_without_invented_identity()
 
 #[test]
 fn narrow_shell_keeps_compact_project_and_host_context_legible() {
-    let mut backend = fixture();
-    let mut surface = SurfaceController::new(
+    let (_dir, mut backend) = fixture();
+    let surface = ApplicationSurfaceController::new(
         &mut backend,
-        SurfaceRequest::new(UiHost::TmuxPopup),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup),
     )
     .unwrap();
-    let terminal = draw_width(&mut surface, 60, 20);
+    let terminal = draw_width(&surface, 60, 20);
     let output = rendered(&terminal);
 
     assert!(output.contains("AIKit · Workspace · payments · test-host"));
