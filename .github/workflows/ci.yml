@@ -176,6 +176,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          report_failure() {
+            tail -n 100 /tmp/deepseek-cordis.log > /tmp/deepseek-cordis-focus.log || true
+            message=$(cat /tmp/deepseek-cordis-focus.log)
+            message=${message//'%'/'%25'}; message=${message//$'\r'/'%0D'}; message=${message//$'\n'/'%0A'}
+            echo "::error title=Upstream DeepSeek Cordis launch failure::$message"
+          }
           node --import tsx apps/cli/src/bin.ts web --patch examples/web-cordis/cordis.yml > /tmp/deepseek-cordis.log 2>&1 &
           pid=$!
           cleanup() {
@@ -188,6 +194,7 @@ jobs:
             if ! kill -0 "$pid" 2>/dev/null; then
               echo 'DeepSeek Cordis process exited before readiness:'
               cat /tmp/deepseek-cordis.log
+              report_failure
               exit 1
             fi
             if (echo > /dev/tcp/127.0.0.1/3081) 2>/dev/null; then
@@ -199,6 +206,7 @@ jobs:
           if [ "$ready" -ne 1 ]; then
             echo 'DeepSeek Cordis process did not expose 127.0.0.1:3081:'
             cat /tmp/deepseek-cordis.log
+            report_failure
             exit 1
           fi
           echo 'DeepSeek Cordis Web endpoint is live at 127.0.0.1:3081'
