@@ -3,14 +3,14 @@ mod common;
 use common::*;
 
 use aikit_core::resource::ResourceRef;
-use aikit_tui::{PaletteApplicationService, TuiApplicationService};
+use aikit_tui::{ApplicationService, TuiApplicationService};
 
 #[test]
 fn capability_relation_read_model_uses_canonical_contextual_actions() {
     let dir = tempfile::tempdir().unwrap();
     let mut backend = Fixture::new(dir.path(), vec![skill("skill/rust/review")]);
     let focus = ResourceRef::parse("skill/rust/review").unwrap();
-    let service = PaletteApplicationService::new(&mut backend);
+    let service = ApplicationService::new(&mut backend);
 
     let view = service.relations(&focus).unwrap();
 
@@ -34,7 +34,7 @@ fn resource_without_typed_relations_does_not_invent_edges() {
     let dir = tempfile::tempdir().unwrap();
     let mut backend = Fixture::new(dir.path(), vec![skill("skill/rust/review")]);
     let host = ResourceRef::parse("host/test-host").unwrap();
-    let service = PaletteApplicationService::new(&mut backend);
+    let service = ApplicationService::new(&mut backend);
 
     let view = service.relations(&host).unwrap();
 
