@@ -198,7 +198,9 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
     let node = KnowledgeAddress::Wiki(r("wiki:node:auth"));
     let source = KnowledgeAddress::Source(SourceRef::parse("source:spec").unwrap());
     assert!(knowledge.search("Authentication", 10).hits.iter().any(|hit| hit.resource == r("wiki:node:auth")));
-    assert!(knowledge.explain(&node).unwrap().summary.contains("Authentication"));
+    let explanation = knowledge.explain(&node).unwrap();
+    assert!(explanation.summary.starts_with("node r1;"));
+    assert!(explanation.sources.contains(&SourceRef::parse("source:spec").unwrap()));
     let relations = knowledge.relations(&node, 1, 16, 16).unwrap();
     assert!(relations.nodes.iter().any(|related| related.resource == r("source:spec")));
     let route = knowledge
@@ -239,7 +241,6 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
         service.current_generation_properties().get("label").map(String::as_str),
         Some("prelocal-product-route")
     );
-    let generation_id = generation.id.to_string();
 
     // Compose actor/runtime -> inspect HarnessComposition -> stage Component /
     // Surface projection -> preview -> explicit confirm -> desired resolved body.
@@ -253,7 +254,7 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
         model: Some(r("model/deepseek/acceptance")),
         selections: Vec::new(),
         target_revision: Some("deepseek:acceptance-r1".into()),
-        generation: Some(generation_id.clone()),
+        generation: Some(generation.id.to_string()),
     };
     let before = resolve_harness_composition(&catalog, request).unwrap();
     let mut staged = StagedHarnessComposition::new();
@@ -266,7 +267,7 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
     );
     let desired = apply_confirmed_harness_composition(preview.confirm());
     assert_eq!(desired.state, CompositionState::Resolved);
-    assert_eq!(desired.generation.as_deref(), Some(generation_id.as_str()));
+    assert_eq!(desired.generation.as_deref(), Some(generation.id.to_string().as_str()));
 
     // Human and agent-facing projections are the same canonical Action identity,
     // not target-native replacements.
