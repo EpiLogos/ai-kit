@@ -33,12 +33,16 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
+#[cfg(target_os = "macos")]
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 use assert_cmd::cargo::cargo_bin;
 use serde_json::Value;
@@ -551,8 +555,6 @@ fn launch_status_pane(
 
 #[test]
 fn two_cmux_workspaces_for_the_same_project_carry_different_session_overlays() {
-    // Contract-level for the cmux topology (cmux is a GUI app with a JSON control
-    // socket and cannot be driven headlessly), plus the real binary for the effect.
     let home = fresh_home();
     trust(&home, &["skill/rust/rust-review", "skill/rust/unsafe-audit"]);
     let project = project_repo();
@@ -572,8 +574,6 @@ fn two_cmux_workspaces_for_the_same_project_carry_different_session_overlays() {
     );
     expect_ok(&o, &v, "enable unsafe-audit for cmux workspace two");
 
-    // cmux has no session environment, so each workspace carries its AIKit identity
-    // in the pane *command*. Two workspaces, two identities.
     let plan = plan_from_spec(
         r#"
 schema = 1
@@ -597,7 +597,6 @@ command = ["claude"]
     assert!(cmd_two.contains("AIKIT_SESSION_ID=ses_cmuxtwo"), "got: {cmd_two}");
     assert_ne!(cmd_one, cmd_two, "the two workspaces carry different overlays");
 
-    // And those identities really resolve to different overlays in the binary.
     let s1 = active_skills(
         &run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_cmuxone")], &["status", "--json"]).1,
     );
@@ -620,7 +619,6 @@ fn a_project_profile_change_does_not_mutate_another_projects_context() {
     let p1 = project_repo();
     let p2 = project_repo();
 
-    // Enable the skill at PROJECT scope in p1 only.
     let (o, v) = run_json(
         &home,
         p1.path(),
@@ -629,7 +627,6 @@ fn a_project_profile_change_does_not_mutate_another_projects_context() {
     );
     expect_ok(&o, &v, "enable rust-review in p1");
 
-    // p1 has it; p2 is untouched, both its context and its files.
     let s1 = active_skills(&run_json(&home, p1.path(), &[], &["status", "--json"]).1);
     let s2 = active_skills(&run_json(&home, p2.path(), &[], &["status", "--json"]).1);
     assert_eq!(s1, vec!["skill/rust/rust-review"]);
@@ -650,7 +647,6 @@ fn a_session_toggle_cannot_affect_a_non_child_context() {
     trust(&home, &["skill/rust/rust-review"]);
     let project = project_repo();
 
-    // Toggle the skill on in session `child` only.
     let (o, v) = run_json(
         &home,
         project.path(),
@@ -664,13 +660,11 @@ fn a_session_toggle_cannot_affect_a_non_child_context() {
     );
     assert_eq!(child, vec!["skill/rust/rust-review"], "the child session sees the toggle");
 
-    // A sibling session is not a child of the toggle.
     let sibling = active_skills(
         &run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_sibling")], &["status", "--json"]).1,
     );
     assert!(sibling.is_empty(), "a sibling session is not a child: {sibling:?}");
 
-    // Nor is the sessionless context in the same project.
     let sessionless = active_skills(&run_json(&home, project.path(), &[], &["status", "--json"]).1);
     assert!(
         sessionless.is_empty(),
@@ -688,7 +682,6 @@ fn the_same_portable_session_capsule_launches_in_tmux_and_cmux() {
     let home = fresh_home();
     let plan = compiled_rust_dev_plan(&home);
 
-    // --- tmux: for real ----------------------------------------------------
     let server = TmuxServer::start();
     let tmux = MuxTmux::new(SystemRunner::new()).with_socket(&server.socket);
     let binding = tmux.ensure_session(&plan, ReconcileMode::default()).unwrap();
@@ -711,7 +704,6 @@ fn the_same_portable_session_capsule_launches_in_tmux_and_cmux() {
     assert!(binding.surface_of("code", "tests").is_some());
     assert!(binding.surface_of("agent", "assistant").is_some());
 
-    // --- cmux: the identical plan, at the contract level -------------------
     let cmux = Cmux::new(cmux_full_runner()).with_identity(session_identity("ses_rustdev"));
     let cmux_binding = cmux.ensure_session(&plan, ReconcileMode::default()).unwrap();
 
@@ -732,11 +724,9 @@ fn the_same_portable_session_capsule_launches_in_tmux_and_cmux() {
     );
     assert!(cmux_binding.views.contains_key("code"));
     assert!(cmux_binding.views.contains_key("agent"));
-    // The same capsule produced a session in each multiplexer with its own geometry.
     assert_ne!(binding.kind, cmux_binding.kind);
 }
 
-/// Compile the seed `session/dev/rust-dev` capsule's portable spec into a plan.
 fn compiled_rust_dev_plan(fixture: &Fixture) -> SessionPlan {
     let load = load_registry(
         &fixture.home.registry(SEED_SOURCE),
@@ -768,8 +758,6 @@ fn a_failed_projection_leaves_the_previous_generation_active() {
     );
     expect_ok(&o, &v, "enable rust-review at project scope");
 
-    // Resolve through the shared engine and build a first, good generation whose
-    // Claude projection really lands.
     let service = Service::open(home.home.clone(), project.path(), no_env).unwrap();
     let view = service.resolved().clone();
     let roots = service.snapshot().capsule_roots();
@@ -789,8 +777,6 @@ fn a_failed_projection_leaves_the_previous_generation_active() {
         "the first generation is current"
     );
 
-    // Now a build whose projection cannot land: a link whose source payload is gone
-    // (the "capsule payload removed since indexing" case the store documents).
     let doomed = ProjectionPlan::new(TargetId::claude_code(), ActivationEffect::live()).with_item(
         ProjectionItem::link("/no/such/payload/rust-review", ".claude/skills/rust-review").unwrap(),
     );
@@ -799,7 +785,6 @@ fn a_failed_projection_leaves_the_previous_generation_active() {
         .expect_err("a projection with a missing source must fail to build");
     assert_eq!(err.code(), "generation.source_missing");
 
-    // The previous generation is still current, byte-for-byte untouched.
     assert_eq!(
         generation::current(&ctx_dir).unwrap().as_ref(),
         Some(&g1.id),
@@ -824,14 +809,11 @@ fn a_claude_session_receives_a_session_specific_skill_projection_after_restart()
     );
     expect_ok(&o, &v, "enable the skill in the Claude session");
 
-    // The binary confirms the skill is active in that session's context.
     let active = active_skills(
         &run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_claudehas")], &["status", "--json"]).1,
     );
     assert_eq!(active, vec!["skill/rust/rust-review"]);
 
-    // The Claude projection contains the skill; the immutable-generation pointer
-    // swap requires a client restart before a running process can claim it.
     let svc = Service::open(
         home.home.clone(),
         project.path(),
@@ -854,16 +836,11 @@ fn a_claude_session_receives_a_session_specific_skill_projection_after_restart()
         "the projection contains the session's skill"
     );
 
-    // Materialise it and prove the skill really lands, session-specific, on disk.
     let committed = GenerationBuilder::new()
         .build(&ctx_dir, &view, &[plan])
         .unwrap()
         .commit(None)
         .unwrap();
-    // Locate the projection via the store's own layout function rather than a
-    // hardcoded path, so the test is coupled to where a generation actually places
-    // a target's projection (see the integrator note on the `projections/claude`
-    // vs `projections/claude-code` inconsistency).
     let skill_md = ctx_dir
         .join("generations")
         .join(committed.id.as_str())
@@ -872,8 +849,6 @@ fn a_claude_session_receives_a_session_specific_skill_projection_after_restart()
     let body = fs::read_to_string(&skill_md).expect("the projected SKILL.md resolves");
     assert!(body.contains("name: rust-review"), "it is really the seed skill");
 
-    // A sibling Claude session that did not enable the skill gets a projection
-    // without it: the projection is session-specific, not global.
     let sibling = Service::open(
         home.home.clone(),
         project.path(),
@@ -901,8 +876,6 @@ fn an_isolated_codex_task_gets_an_isolated_projection_and_a_shared_task_falls_ba
     let home = fresh_home();
     trust(&home, &["skill/rust/rust-review"]);
     let project = project_repo();
-    // A session-scoped skill: a per-session delta, exactly the kind a shared tree
-    // must not silently leak to sibling tasks.
     let (o, v) = run_json(
         &home,
         project.path(),
@@ -911,7 +884,6 @@ fn an_isolated_codex_task_gets_an_isolated_projection_and_a_shared_task_falls_ba
     );
     expect_ok(&o, &v, "enable the session-only skill");
 
-    // The binary reports the two isolations honestly.
     let iso_w = run_json(
         &home,
         project.path(),
@@ -929,8 +901,6 @@ fn an_isolated_codex_task_gets_an_isolated_projection_and_a_shared_task_falls_ba
     .1;
     assert_eq!(iso_s["data"]["isolation"], "shared");
 
-    // Isolated branch: the task has its own tree, so Codex writes the skill natively
-    // and the effect is live.
     let svc_iso = Service::open(
         home.home.clone(),
         project.path(),
@@ -957,8 +927,6 @@ fn an_isolated_codex_task_gets_an_isolated_projection_and_a_shared_task_falls_ba
         "an isolated task writes its skill natively"
     );
 
-    // Shared branch: the task uses the session's tree, so Codex falls back and
-    // states why, and does not write the session-only skill into the shared tree.
     let svc_sh = Service::open(
         home.home.clone(),
         project.path(),
@@ -1003,8 +971,6 @@ fn a_hook_bypass_is_visible_and_recorded() {
     let home = fresh_home();
     trust(&home, &["hook/guard/project-boundary"]);
     let project = project_repo();
-    // A fixed context id, so the bypass ledger is the same ledger across the
-    // separate short-lived processes below.
     let ctx: &[(&str, &str)] = &[("AIKIT_CONTEXT_ID", "ctx_bypasscase")];
 
     let (o, v) = run_json(
@@ -1017,7 +983,6 @@ fn a_hook_bypass_is_visible_and_recorded() {
 
     let deny = br#"{"tool":"Bash","tool_input":{"command":"cat /etc/passwd"}}"#;
 
-    // 1. The gate denies a boundary-crossing tool call.
     let v = json_of(&aikit_stdin(
         &home,
         project.path(),
@@ -1028,7 +993,6 @@ fn a_hook_bypass_is_visible_and_recorded() {
     assert_eq!(v["data"]["allowed"], false, "the gate must deny: {v}");
     assert!(v["data"]["denial"].is_string(), "the denial is reported");
 
-    // 2. Issue a scoped, reasoned, single-use bypass.
     let (o, iv) = run_json(
         &home,
         project.path(),
@@ -1038,13 +1002,11 @@ fn a_hook_bypass_is_visible_and_recorded() {
     expect_ok(&o, &iv, "issue a bypass");
     assert!(iv["data"]["bypass_id"].is_string());
 
-    // 3. The bypass is VISIBLE in status, with its reason.
     let st = run_json(&home, project.path(), ctx, &["status", "--json"]).1;
     let open = st["data"]["bypasses"].as_array().unwrap();
     assert_eq!(open.len(), 1, "the open bypass is shown in status: {st}");
     assert_eq!(open[0]["reason"], "debugging a flake");
 
-    // 4. The very next event is let through and RECORDED as bypassed.
     let v = json_of(&aikit_stdin(
         &home,
         project.path(),
@@ -1055,8 +1017,6 @@ fn a_hook_bypass_is_visible_and_recorded() {
     assert_eq!(v["data"]["allowed"], true, "the bypass lets exactly one event through");
     assert_eq!(v["data"]["bypassed"], true, "and it is recorded as bypassed");
 
-    // 5. The token is spent: status shows none, and the gate denies again — a
-    //    bypass was a scoped token, never a global switch.
     let st = run_json(&home, project.path(), ctx, &["status", "--json"]).1;
     assert!(
         st["data"]["bypasses"].as_array().unwrap().is_empty(),
@@ -1081,8 +1041,6 @@ fn a_captured_secret_never_enters_the_ordinary_registry() {
     let home = fresh_home();
     let leaky = "#!/bin/sh\n# deploy helper\nexport AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\naws s3 sync ./dist s3://bucket\n";
 
-    // Capture runs the real pipeline (it is not wired into the CLI). The secret is
-    // scanned, redacted and quarantined before anything is written.
     let candidate_id = {
         let index = Index::open(&home.home.database()).unwrap();
         let inbox = Inbox::new(&home.home, &index);
@@ -1100,11 +1058,8 @@ fn a_captured_secret_never_enters_the_ordinary_registry() {
             "a quarantined capture lives in the quarantine queue"
         );
         outcome.candidate.id.clone()
-        // `index` is dropped here, before the binary opens the database.
     };
 
-    // Promotion of a quarantined candidate is refused by the real binary, so the
-    // secret never becomes a registry capsule.
     let cwd = TempDir::new().unwrap();
     let (out, v) = run_json(
         &home,
@@ -1142,8 +1097,6 @@ fn promotion_completes_without_hand_writing_a_manifest() {
         outcome.candidate.id.clone()
     };
 
-    // The user supplies only an id (and, implicitly, a description). No manifest is
-    // authored by hand.
     let cwd = TempDir::new().unwrap();
     let (out, v) = run_json(
         &home,
@@ -1164,7 +1117,6 @@ fn promotion_completes_without_hand_writing_a_manifest() {
         "it is generated, not hand-written"
     );
 
-    // And it is now a real, discoverable capsule in the registry.
     let read = run_json(
         &home,
         cwd.path(),
@@ -1185,7 +1137,6 @@ fn the_entire_cli_works_without_a_running_daemon() {
     let home = fresh_home();
     let project = project_repo();
 
-    // There is no daemon to start in the first place: no such subcommand exists.
     let no_daemon = aikit(&home, project.path(), &[], &["daemon"]);
     assert!(
         !no_daemon.status.success(),
@@ -1212,31 +1163,22 @@ fn the_entire_cli_works_without_a_running_daemon() {
         assert_eq!(v["ok"], true, "{args:?}: {v}");
     }
 
-    // A non-JSON command works from cold too.
     let shell = aikit(&home, project.path(), &[], &["shell", "init", "bash"]);
     assert!(shell.status.success());
     assert!(!shell.stdout.is_empty(), "the shell snippet is printed");
 
-    // No process is left holding this home's database open after a command returns:
-    // every invocation was a short-lived process, and coordination is SQLite plus
-    // per-context file locks, not a long-lived server. Scoped to this home's own
-    // database, so it is immune to sibling tests that run the same binary against
-    // their own homes.
     assert_eq!(
         processes_holding(&home.home.database()),
         0,
         "no aikit process outlived its command holding the home open; there is no daemon"
     );
 
-    // And no daemon artefact — a control socket or a pidfile — was ever created.
     assert!(
         !daemon_artifact_exists(&home.path),
         "no socket or pidfile under the home: there is nothing for a daemon to bind"
     );
 }
 
-/// How many live processes hold `path` open. Best-effort: if `lsof` is unavailable
-/// the check degrades to zero rather than failing a build for the wrong reason.
 fn processes_holding(path: &Path) -> usize {
     match Command::new("lsof").arg("-t").arg(path).output() {
         Ok(out) => String::from_utf8_lossy(&out.stdout)
@@ -1247,7 +1189,6 @@ fn processes_holding(path: &Path) -> usize {
     }
 }
 
-/// Would a daemon's socket or pidfile be found anywhere under the home?
 fn daemon_artifact_exists(root: &Path) -> bool {
     let Ok(entries) = fs::read_dir(root) else {
         return false;
@@ -1292,7 +1233,6 @@ fn aikit_task_spawn_review_creates_no_git_worktree_and_shares_the_session_tree()
         "a shared task runs in the session's own tree"
     );
 
-    // git knows of exactly one worktree — the main one.
     let list = git_out(project.path(), &["worktree", "list"]);
     assert_eq!(list.lines().count(), 1, "no second checkout was created: {list}");
 }
@@ -1334,7 +1274,6 @@ fn the_codex_projection_differs_between_a_shared_and_a_worktree_task_and_says_wh
     );
     expect_ok(&o, &v, "enable the session-only skill");
 
-    // Spawn both kinds of task through the real binary.
     let shared = run_json(&home, project.path(), &[], &["task", "spawn", "shared-review", "--json"]).1;
     let worked = run_json(
         &home,
@@ -1346,7 +1285,6 @@ fn the_codex_projection_differs_between_a_shared_and_a_worktree_task_and_says_wh
     let shared_dir = shared["data"]["directory"].as_str().unwrap().to_string();
     let wt_dir = worked["data"]["worktree"]["path"].as_str().unwrap().to_string();
 
-    // The worktree task owns its tree: Codex writes the skill natively and live.
     let svc_wt = Service::open(
         home.home.clone(),
         project.path(),
@@ -1369,8 +1307,6 @@ fn the_codex_projection_differs_between_a_shared_and_a_worktree_task_and_says_wh
     ));
     assert!(plan_wt.items.iter().any(|i| item_targets(i, "rust-review")));
 
-    // The shared task uses the session's tree: Codex falls back and says why,
-    // pointing at the `--worktree` that would change the answer.
     let svc_sh = Service::open(
         home.home.clone(),
         project.path(),
@@ -1414,16 +1350,13 @@ fn task_close_refuses_to_delete_a_dirty_worktree_without_force() {
     .1;
     let wt = v["data"]["worktree"]["path"].as_str().unwrap().to_string();
 
-    // Make the worktree unclean with an untracked file.
     fs::write(Path::new(&wt).join("scratch.txt"), "unsaved work\n").unwrap();
 
-    // A close without --force is refused, and the worktree is left intact.
     let (out, v) = run_json(&home, project.path(), &[], &["task", "close", "dirty", "--json"]);
     assert!(!out.status.success(), "a dirty worktree close must be refused");
     assert_eq!(v["error"]["code"], "task.worktree_dirty");
     assert!(Path::new(&wt).exists(), "a refused close leaves the worktree intact");
 
-    // With --force it is discarded.
     let (out, v) = run_json(
         &home,
         project.path(),
@@ -1454,7 +1387,6 @@ fn plan_from_spec(src: &str) -> SessionPlan {
     SessionSpec::from_toml_str(src).unwrap().compile().unwrap()
 }
 
-/// The recorded cmux call that delivered a pane command.
 fn command_line(cmux: &Cmux<ScriptedRunner>) -> String {
     cmux.runner()
         .call_lines()
@@ -1463,8 +1395,6 @@ fn command_line(cmux: &Cmux<ScriptedRunner>) -> String {
         .expect("cmux delivered a pane command")
 }
 
-/// A cmux that answers every command AIKit issues while building a session, from
-/// recorded responses shaped like the real control protocol.
 fn cmux_full_runner() -> ScriptedRunner {
     const OK: &str = r#"{ "ok": true }"#;
     ScriptedRunner::new()
@@ -1526,23 +1456,11 @@ const CMUX_IDENTIFY: &str = r#"{
   "cwd": "/work/payments"
 }"#;
 
-// ---------------------------------------------------------------------------
-// An unreviewed executable does not run unattended, even while inactive.
-//
-// The confirmation is what STANDARDS §6 requires of an unreviewed script. The
-// dangerous case is the *inactive* one — a script run ad hoc, or reached through
-// the broker by an agent, that no scope has reviewed — so the gate must key on
-// the capsule's own trust, never on whether it happens to be active.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn an_unreviewed_script_is_refused_without_confirmation_even_when_inactive() {
     let fixture = fresh_home();
     let repo = project_repo();
 
-    // `script/rust/cargo-nextest` is in the seed registry but reviewed by nobody,
-    // and no profile here enables it, so it is inactive. Running it by id must be
-    // refused before the payload is ever executed.
     let (out, v) = run_json(
         &fixture,
         repo.path(),
@@ -1554,7 +1472,6 @@ fn an_unreviewed_script_is_refused_without_confirmation_even_when_inactive() {
         v["error"]["code"], "trust.required",
         "the refusal must be the trust gate, not an execution error: {v}"
     );
-    // And it must have refused *before* running anything.
     assert!(
         !out.status.success(),
         "the process must exit non-zero when the gate refuses"
@@ -1566,9 +1483,6 @@ fn confirming_crosses_the_gate_so_the_failure_is_no_longer_about_trust() {
     let fixture = fresh_home();
     let repo = project_repo();
 
-    // With --confirm, the trust gate is satisfied. The payload may still fail
-    // (cargo nextest has nothing to run here), but the point is that the reason
-    // is no longer `trust.required`: the gate was crossed.
     let out = aikit(
         &fixture,
         repo.path(),
@@ -1597,8 +1511,6 @@ fn a_reviewed_script_needs_no_confirmation() {
     let repo = project_repo();
     trust(&fixture, &["script/rust/cargo-nextest"]);
 
-    // Reviewed: the gate does not fire, so any failure is about execution, never
-    // about trust — a human running a reviewed script is never nagged.
     let out = aikit(
         &fixture,
         repo.path(),
@@ -1613,10 +1525,6 @@ fn a_reviewed_script_needs_no_confirmation() {
         );
     }
 }
-
-// ===========================================================================
-// Phase E: authority, parameterised lenses, and the interactive tree
-// ===========================================================================
 
 #[cfg(unix)]
 #[test]
@@ -1801,8 +1709,6 @@ enable = ["script/acceptance/project-extra"]
 "#,
     )
     .unwrap();
-    // The fork is a live lens: changing the base after fork creation must flow
-    // through without copying or regenerating the project delta.
     fs::write(
         &base,
         r#"schema = 1
@@ -1964,8 +1870,6 @@ fn the_real_binary_completes_palette_tree_stage_palette_apply_in_one_lifecycle()
 
     let stdout_reader = wait_for_pty_ui(&mut child);
     let mut input = child.stdin.take().unwrap();
-    // Palette -> tree; kinds/ -> first kind -> first capability; stage; tree
-    // -> palette; review the exact staged diff; apply it.
     for bytes in [
         b"\x14".as_slice(),
         b"j",
@@ -1975,15 +1879,15 @@ fn the_real_binary_completes_palette_tree_stage_palette_apply_in_one_lifecycle()
         b"j",
         b" ",
         b"\x14",
-        b"\x05", // Ctrl-E opens the staged diff without applying.
-        b"\r",   // Enter applies only from that review screen.
+        b"\x05",
+        b"\r",
     ] {
         input.write_all(bytes).unwrap();
         input.flush().unwrap();
         std::thread::sleep(Duration::from_millis(75));
     }
     std::thread::sleep(Duration::from_millis(250));
-    input.write_all(b"\x11").unwrap(); // Ctrl-Q is the explicit exit action.
+    input.write_all(b"\x11").unwrap();
     drop(input);
 
     let (status, stdout, stderr) = finish_pty(child, stdout_reader);
@@ -2047,11 +1951,7 @@ fn the_real_binary_tree_applies_a_keyboard_staged_capability_through_a_pty() {
         .spawn()
         .expect("the real binary starts under a pseudo-terminal");
 
-    // Synchronise on mouse capture: it is emitted only after raw mode is active.
-    // `S` remains the printable apply fallback for PTY bridges that reserve
-    // Ctrl-S as terminal flow control.
     let stdout_reader = wait_for_pty_ui(&mut child);
-    // kinds/ → first kind → first capability; stage, apply.
     let mut input = child.stdin.take().unwrap();
     for key in [b"j".as_slice(), b"l", b"j", b"l", b"j", b" ", b"S"] {
         input.write_all(key).unwrap();
@@ -2059,7 +1959,7 @@ fn the_real_binary_tree_applies_a_keyboard_staged_capability_through_a_pty() {
         std::thread::sleep(Duration::from_millis(75));
     }
     std::thread::sleep(Duration::from_millis(250));
-    input.write_all(b"\x11").unwrap(); // Ctrl-Q exits from whichever resident surface remains.
+    input.write_all(b"\x11").unwrap();
     drop(input);
     let (pty_status, pty_stdout, pty_stderr) = finish_pty(child, stdout_reader);
     assert!(
@@ -2138,8 +2038,6 @@ fn the_real_binary_tree_applies_an_exact_mouse_staged_capability_through_a_pty()
 
     let stdout_reader = wait_for_pty_ui(&mut child);
     let mut input = child.stdin.take().unwrap();
-    // SGR mouse coordinates are one-based. Expand kinds/, expand its first
-    // (Skill) group, click rust-review's rendered checkbox, then click [apply].
     for event in [
         b"\x1b[<0;2;3M\x1b[<0;2;3m".as_slice(),
         b"\x1b[<0;4;4M\x1b[<0;4;4m",
@@ -2151,7 +2049,7 @@ fn the_real_binary_tree_applies_an_exact_mouse_staged_capability_through_a_pty()
         std::thread::sleep(Duration::from_millis(100));
     }
     std::thread::sleep(Duration::from_millis(250));
-    input.write_all(b"\x11").unwrap(); // Ctrl-Q is the explicit exit action.
+    input.write_all(b"\x11").unwrap();
     drop(input);
     let (status, stdout, stderr) = finish_pty(child, stdout_reader);
     assert!(
@@ -2245,9 +2143,6 @@ fn a_palette_run_outcome_executes_the_real_script_after_the_terminal_is_restored
 
     let stdout_reader = wait_for_pty_ui(&mut child);
     let mut input = child.stdin.take().unwrap();
-    // kinds/ -> Script -> the first (acceptance) script -> activate. The tree
-    // hands the exact id to the palette, which must open its natural action and
-    // then the CLI must execute the returned Run outcome.
     for key in [b"j".as_slice(), b"l", b"j", b"j", b"l", b"j", b"\r"] {
         input.write_all(key).unwrap();
         input.flush().unwrap();
