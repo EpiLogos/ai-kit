@@ -19,9 +19,10 @@
 | `resource/legacy.rs` Capsule→Resource shim | DELETE | source/package ingestion is no longer a canonical core-wide legacy API | `b38080e1a1a1e8fd007e6d6dcbfe0b7509411d02` physically deletes the file | COMPLETE |
 | generic V2 Resource→Capsule fallback | DELETE | only proven package-backed Capability translation is permitted | `application_service.rs` checks Resource index kind and backend package ownership before translation | COMPLETE |
 | `resource/search.rs` | STILL-CANONICAL | universal ResourceRef-native application search / contextual Actions / explainable familiarity ranking | `ResourceSearchIndex`, V2 application tests | COMPLETE |
-| `search.rs` Capsule query/ranking model | EXTERNAL-COMPATIBILITY | package/CLI compatibility only; not used as the V2 TUI/application search authority | V2 TUI local search removed at `abf9bb5aae63f21c6e08bfbe9e6e6a3788486595`; final surface uses `ApplicationService::search` | OPEN — verify remaining production callers are only CLI/package compatibility, then document or delete |
+| `search.rs` Capsule query/ranking model | EXTERNAL-COMPATIBILITY | package/CLI compatibility only; it is not consulted by canonical V2 navigation | `backend.rs::navigation_index` projects ResourceRecords directly from the resolved catalogue and explicitly does not consume `SearchDoc`; `22e409d67b3550d6c6d73d2fa5c9aae3c71e7274` proves legacy usage/SearchDoc evidence cannot manufacture V2 navigation identity | COMPLETE |
 | `ResolvedView` | STILL-CANONICAL | package activation/resolution substrate behind `ContextResolution`; not application identity | `ContextResolution` and Resource projections preserve ResourceRef identity above it | COMPLETE |
 | `ContextResolution`, Resource model, Generation, Procedure/lifecycle primitives | STILL-CANONICAL | canonical semantic/mutation substrate | V2 core/application tests | COMPLETE |
+| `HarnessComposition` grammar and staged runtime mutation | STILL-CANONICAL | one Component/Contract/Provider/Contribution/Surface grammar and one resolver; runtime staging mutates authored Component selections only | `composition_mutation.rs` reuses `resolve_harness_composition` and `diff_harness_compositions`; `composition_mutation_v2.rs` proves staged mount/retract, explicit confirm, stable ResourceRef projections and no invented live state | COMPLETE |
 | Knowledge / SemanticWiki / SourcePool / CodeReference / ProjectMap primitives | STILL-CANONICAL | federated provider-native Knowledge application | provider and V2 Knowledge acceptance | COMPLETE for migration classification; product acceptance remains in #60 |
 
 ## TUI / terminal surface
@@ -37,7 +38,8 @@
 | `tree_driver.rs` mutable Tree controller | REPLACE | one `TuiState` relation state projected as List/Tree/Graph | controller deleted at `f003e188ee8c920cb0d7f0fcfd207a661e84ba0a`; controller tests deleted at `4ba2d1d7c3869f58c7d7917cd5915fa336842072` | COMPLETE |
 | `tree.rs` mutable staging/reducer semantics | REPLACE | `TuiState`/`TuiRuntime`; relation projections in final surface | `eaf3e97800c297ccc70e8e4e2f2c006963389f23` trims mutation/reducer code and tests | COMPLETE |
 | `tree.rs` read-only hierarchy used by `aikit tree` | EXTERNAL-COMPATIBILITY | published human CLI read view only; no resolver, staging, mutation or V2 navigation authority | `tree_build.rs` builds it for `aikit tree`; mutable controller is gone | COMPLETE |
-| old TUI staging semantic owner (`StagedSet`/`stage`/Tree staging) | REPLACE | canonical `application::StagedChanges` → preview → confirmation → apply | `9459105a03e72157d97736c9c017e4733af79932` reduces `staging.rs` to package-state helper; final reducer acceptance proves the route | COMPLETE in TUI; CLI `diff` compatibility compile seam remains below |
+| old TUI staging semantic owner (`StagedSet`/Tree staging) | REPLACE | canonical `application::StagedChanges` → preview → confirmation → apply for the shipped V2 terminal surface | final reducer/surface acceptance proves the route; old mutable Tree staging is gone | COMPLETE |
+| `aikit diff` package preview adapter | EXTERNAL-COMPATIBILITY | read-only package toggle preview over the same immutable backend resolver; cannot apply and cannot accept generic V2 Resources | `4fd10ea22f7ddf1bdde4e23041cf23af59b55fb4` restores only `StagedSet`/`StagedDiff`/`stage` compatibility around `PaletteBackend::preview` and documents canonical V2 staging ownership | COMPLETE |
 | test-common helpers driving deleted Palette reducer/driver | DELETE | V2 surface/application fixtures | `95b55c8a8562049c8e4432dc010aafc65362d7ea` removes `AppState`/driver helpers | COMPLETE |
 | old Palette staging tests | DELETE | final-surface/reducer staging acceptance | `c6e00e3e258d0f961de174fa5b76cfe127cf21a4` deletes retired staging test | COMPLETE |
 | `application.rs` + `ApplicationService` + `ApplicationSurfaceController` | STILL-CANONICAL | one semantic UI/application authority | `v2_prelocal_acceptance.rs`, `application_surface_prelocal_v2.rs`, navigation/mouse/performance tests | COMPLETE |
@@ -51,35 +53,50 @@
 | `aikit tree` / `tree_build.rs` | EXTERNAL-COMPATIBILITY | read-only public hierarchy; must not become a second application state or mutation path | mutable Tree controller deleted; command only builds/renders read model | COMPLETE |
 | `PaletteBackend` type name | EXTERNAL-COMPATIBILITY | low-level package/runtime backend contract under `ApplicationService`; name is historical, semantics are not a Palette controller | final surface/service and tests use the same backend object; no Palette reducer/driver/service remains | COMPLETE — naming cleanup optional, not a second architecture |
 | `palette_run_intent.rs` test name | EXTERNAL-COMPATIBILITY | protects real run-intent semantics (mode/cwd/env), not Palette state | run intent is consumed by production backend/runtime | COMPLETE — rename optional |
-| `AikitApplication::stage` / `aikit diff` calling deleted TUI `StagedDiff/StagedSet/stage` | REPLACE | preserve `aikit diff` as a read-only preview projection over the same resolver/backend; do not restore a second mutation owner | exact-head CI #334 reports unresolved deleted staging symbols | OPEN — compile blocker; migrate thin CLI preview compatibility |
+| `AikitApplication::stage` / `aikit diff` | EXTERNAL-COMPATIBILITY | public package preview verb translated through the read-only adapter above | `4fd10ea22f7ddf1bdde4e23041cf23af59b55fb4`; core/TUI compile green on later head `f638125…` | COMPLETE |
 | Capsule-shaped CLI registry/package commands | EXTERNAL-COMPATIBILITY | explicit package/registry CLI vocabulary at the outer boundary; V2 application/TUI identity remains ResourceRef | package operations remain source/runtime operations rather than generic Resource identity | COMPLETE for #59 boundary classification |
-| agent-facing canonical Resource/Action operations | STILL-CANONICAL | same Resource/application services | V2 application contract | COMPLETE for migration classification; integrated #60 route remains separate |
+| agent-facing canonical Resource/Action operations | STILL-CANONICAL | same Resource/application/composition services; target-native Surface identity never replaces canonical identity | runtime composition acceptance projects one Action to TUI and AgentTool Surfaces with one ResourceRef | COMPLETE for migration classification; integrated #60 route remains separate |
 
 ## Tests / docs / provider boundaries
 
 | Item | Classification | Evidence | Status |
 |---|---|---|---|
-| tests whose only premise was Palette↔Tree semantic switching / Tree-owned staging / Palette-owned apply | DELETE | old controller/staging test deletions plus final-surface replacements | COMPLETE |
-| test-only imports keeping retired app/driver/form controllers compiled | DELETE | `95b55c8…` plus controller deletion commits | COMPLETE |
+| tests whose only premise was Palette↔Tree semantic switching / Tree-owned staging / Palette-owned apply | DELETE | old controller/staging test deletions plus final-surface replacements | **OPEN — two stale tests remain in `crates/aikit-cli/tests/acceptance.rs` and are the only exact-head CLI/static compile blockers** |
+| test-only imports keeping retired app/driver/form controllers compiled | DELETE | most removed at `95b55c8…`; exact-head CI identifies two remaining imports at acceptance.rs around lines 1744 and 1790 | OPEN — delete/migrate those two tests; do not restore retired modules |
 | generated GitNexus wiki treated as authored SemanticWiki | DELETE | prohibited by Knowledge authority design/tests | COMPLETE |
 | universal copied AI Kit knowledge graph | DELETE | federation architecture keeps provider-native authority | COMPLETE |
 | separate CLI/TUI/agent Knowledge stores | DELETE | canonical Knowledge composition is shared; no TUI-local semantic store | COMPLETE for migration classification |
 | physical/local provider truth | EXTERNAL-COMPATIBILITY | deliberately outside cloud migration closure; tracked by #60 local boundary | COMPLETE classification only |
 
+## Exact-head verification state
+
+At `f638125a64fbb158205e4aebe0c43559faf3b36f`:
+
+- `aikit-core` — green;
+- `aikit-store` — green;
+- `aikit-tui` — green;
+- `aikit-adapters` — green;
+- real bkmr provider lane — green;
+- real GitNexus provider lane — green;
+- `aikit-cli`, V2 static/dead-code and umbrella verify — blocked by the same two stale deleted-controller tests in the monolithic CLI acceptance file.
+
+The failure is not production-code linkage: compiler errors are unresolved imports of the intentionally deleted `aikit_tui::tree_driver` and `aikit_tui::surface` from those two tests.
+
 ## Current closure blockers
 
-At `95b55c8a8562049c8e4432dc010aafc65362d7ea`, the migration inventory has **two live verification items** rather than the former stale wall of OPEN rows:
+The migration inventory is otherwise terminally classified. The only #59 blocker is mechanical test cleanup plus the resulting exact-head rerun:
 
-1. migrate the `aikit diff` read-only preview off the deleted TUI staging API and get CLI/static/integration green;
-2. verify every remaining production caller of core `search.rs` is deliberately package/CLI compatibility (otherwise migrate/delete it).
+1. remove/migrate `the_interactive_tree_host_accepts_mouse_navigation_and_applies_staged_ids`;
+2. remove/migrate `a_real_skillset_failure_stays_inside_the_resident_tree_surface`;
+3. rerun exact-head CI and require CLI/static/integration green.
 
-CI is not considered evidence until the exact current PR head passes the repository-owned V2 static/dead-code gate, per-crate jobs, and real integration suite.
+No retired controller should be reintroduced to satisfy those tests.
 
 ## Closure rule
 
 #59 may close when:
 
-- the two blockers above are resolved/classified;
+- the two stale tests above no longer import deleted controllers;
 - exact-head CI is green for the cloud-achievable repository gates;
 - no `DELETE` or `REPLACE` row remains `OPEN`;
 - every retained compatibility surface is explicitly read-only/package/runtime/external and cannot own V2 identity, resolution, staging, mutation, or application navigation semantics.
