@@ -43,13 +43,23 @@ fn legacy_package_usage_stats_do_not_become_v2_navigation_evidence() {
     );
 
     let service = ApplicationService::new(&mut backend);
-    let model = service.search("").unwrap();
-    let deploy = model
-        .resources
-        .iter()
-        .find(|item| item.resource.as_str() == "script/ops/deploy")
-        .expect("resolved package-backed capabilities remain visible at zero query");
 
+    let zero_query = service.search("").unwrap();
+    assert!(
+        zero_query
+            .resources
+            .iter()
+            .all(|item| item.resource.as_str() != "script/ops/deploy"),
+        "legacy SearchDoc/UsageStats must not manufacture zero-query V2 navigation evidence"
+    );
+
+    let deploy = service
+        .search("deploy")
+        .unwrap()
+        .resources
+        .into_iter()
+        .find(|item| item.resource.as_str() == "script/ops/deploy")
+        .expect("resolved package-backed capability remains discoverable by canonical text search");
     assert!(
         !deploy.summary.contains("learned usage"),
         "legacy SearchDoc/UsageStats must not leak into the canonical Resource field"
