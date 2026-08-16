@@ -33,13 +33,17 @@ fn shipped_workspace_exposes_one_canonical_product_field() {
     );
 
     let (_dir, mut backend) = fixture();
-    let surface = ApplicationSurfaceController::new(
+    let mut surface = ApplicationSurfaceController::new(
         &mut backend,
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
     )
     .unwrap();
     assert_eq!(surface.semantic().presentation, PresentationMode::Workspace);
     assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Context");
+    assert!(surface.semantic().selected.is_none(), "search must not silently create semantic selection");
+    surface
+        .handle(&mut backend, key(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
     assert_eq!(
         surface.semantic().selected.as_ref().map(ResourceRef::as_str),
         Some("skill/rust/review")
@@ -54,6 +58,9 @@ fn final_surface_preserves_identity_across_field_navigation_and_relation_views()
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
     )
     .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
     let selected = surface.semantic().selected.clone();
 
     for expected in ["Compose", "Knowledge", "Explain", "History"] {
@@ -83,6 +90,9 @@ fn final_surface_owns_the_only_staging_preview_confirmation_apply_route() {
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
     )
     .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
 
     surface
         .handle(
