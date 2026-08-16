@@ -33,6 +33,55 @@ jobs:
       - name: Verify repository
         run: bash scripts/verify
 
+  v2-crate-tests:
+    name: V2 crate — ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - aikit-core
+          - aikit-store
+          - aikit-adapters
+          - aikit-tui
+          - aikit-cli
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Rust 1.88
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+
+      - name: Test ${{ matrix.package }}
+        run: cargo test --locked -p '${{ matrix.package }}' --all-targets --no-fail-fast -- --test-threads=1
+
+  v2-static:
+    name: V2 static/dead-code gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Rust 1.88 with clippy
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component clippy
+          rustup default 1.88.0
+
+      - name: Clippy all targets
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Release build
+        run: cargo build --locked --workspace --release
+
+      - name: Diff hygiene
+        run: git diff --check
+
   bkmr-real:
     name: Real bkmr 7.6.7 SourcePool conformance
     runs-on: ubuntu-latest
