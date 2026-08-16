@@ -5,6 +5,11 @@
 //! selection remains [`TuiState::selected`], ContextSource retrieval remains an
 //! explicit provider operation, and durable composition remains the existing
 //! staging -> preview -> confirm -> apply path.
+//!
+//! The public Workspace field is Search / Context / Compose / Explain / History /
+//! Knowledge. The older enum variant names are intentionally treated only as
+//! presentation slots while #59 removes the remaining V1 controllers; they no
+//! longer define product meaning.
 
 use aikit_core::context_resolution::Availability;
 use aikit_core::project::ProjectBindingLocator;
@@ -13,20 +18,36 @@ use aikit_core::{ContextSourceHit, ProjectWorldReadModel, ProjectWorldResource};
 
 use crate::application::{TuiState, WorkspaceSection};
 
-/// Section-specific Project-world lines. Empty means the generic selected-resource
-/// preview remains the better presentation for this Workspace section.
-pub fn project_world_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String> {
-    match state.workspace_section {
-        WorkspaceSection::Projects => project_lines(world),
-        WorkspaceSection::Compose => compose_lines(state, world),
-        WorkspaceSection::Projection => projection_lines(state, world),
-        WorkspaceSection::Explore | WorkspaceSection::History => Vec::new(),
+/// Canonical product label for each Workspace slot.
+///
+/// Search is the universal query field and therefore does not need its own
+/// `WorkspaceSection`; the five section slots complete the canonical six-field
+/// shell as Context / Compose / Explain / History / Knowledge.
+pub fn workspace_section_label(section: WorkspaceSection) -> &'static str {
+    match section {
+        WorkspaceSection::Projects => "Context",
+        WorkspaceSection::Compose => "Compose",
+        WorkspaceSection::Explore => "Knowledge",
+        WorkspaceSection::Projection => "Explain",
+        WorkspaceSection::History => "History",
     }
 }
 
-fn project_lines(world: &ProjectWorldReadModel) -> Vec<String> {
+/// Section-specific Project-world lines. Empty means another canonical read model
+/// (currently Knowledge relations) owns the presentation for this section.
+pub fn project_world_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String> {
+    match state.workspace_section {
+        WorkspaceSection::Projects => context_lines(world),
+        WorkspaceSection::Compose => compose_lines(state, world),
+        WorkspaceSection::Projection => explain_lines(state, world),
+        WorkspaceSection::History => history_lines(world),
+        WorkspaceSection::Explore => Vec::new(),
+    }
+}
+
+fn context_lines(world: &ProjectWorldReadModel) -> Vec<String> {
     let mut lines = vec![
-        "Project world".into(),
+        "Context · resolved Project world".into(),
         String::new(),
         format!("Project  {}", world.project.project.as_str()),
         format!("Binding  {}", locator_label(&world.project.locator)),
@@ -56,7 +77,7 @@ fn project_lines(world: &ProjectWorldReadModel) -> Vec<String> {
     ));
 
     if world.resolution_basis.scopes.is_empty() {
-        lines.push("Scopes   not exposed by compatibility service".into());
+        lines.push("Scopes   not exposed by application boundary".into());
     } else {
         lines.push(format!(
             "Scopes   {}",
@@ -82,7 +103,7 @@ fn project_lines(world: &ProjectWorldReadModel) -> Vec<String> {
             .map(|generation| format!(" · generation {generation}"))
             .unwrap_or_default(),
     ));
-    if let Some(warning) = world.warnings.first() {
+    for warning in &world.warnings {
         lines.push(format!("Boundary {warning}"));
     }
     lines
@@ -116,6 +137,22 @@ fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String>
         ),
     ];
 
+    if let Some(agent) = world.actor_runtime.agent.effective.as_ref() {
+        lines.push(format!("Agent         {}", agent.resource));
+    }
+    if let Some(agency) = world.actor_runtime.agency.effective.as_ref() {
+        lines.push(format!("Agency        {}", agency.resource));
+    }
+    for harness in &world.actor_runtime.harnesses {
+        lines.push(format!("Harness       {}", harness.resource));
+    }
+    for model in &world.actor_runtime.models {
+        lines.push(format!("Model         {}", model.resource));
+    }
+    for offer in &world.actor_runtime.execution_offers {
+        lines.push(format!("Execution     {}", offer.resource));
+    }
+
     if let Some(selected) = state.selected.as_ref() {
         if let Some(resource) = selected_world_resource(world, selected) {
             lines.push(String::new());
@@ -134,7 +171,7 @@ fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String>
     if !state.staged.is_empty() {
         lines.push(String::new());
         lines.push(format!(
-            "{} staged change{} · durable mutation still uses preview -> confirm -> apply",
+            "{} staged change{} · preview -> explain -> confirm -> apply",
             state.staged.len(),
             if state.staged.len() == 1 { "" } else { "s" },
         ));
@@ -142,53 +179,73 @@ fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String>
     lines
 }
 
-fn projection_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String> {
-    let targets = world
-        .projection
-        .targets
+fn explain_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String> {
+    let mut lines = vec!["Explain · authored intent and effective state".into(), String::new()];
+    let Some(selected) = state.selected.as_ref() else {
+        lines.push("Select a Resource to inspect its resolved intent/effective state.".into());
+        lines.push(format!("Resolution {}", world.effective_revision.resolution_hash));
+        return lines;
+    };
+
+    lines.push(format!("Resource       {selected}"));
+    if let Some(resource) = selected_world_resource(world, selected) {
+        lines.extend(resource_lines(resource));
+    } else if let Some(source) = world
+        .information_horizon
+        .sources
         .iter()
-        .map(|target| target.as_str())
-        .collect::<Vec<_>>();
+        .find(|source| &source.resource == selected)
+    {
+        lines.extend(context_source_lines(source));
+    } else {
+        lines.push("No Project-world resolution record for this shallow navigation Resource.".into());
+        lines.push("Use the contextual Explain Action for provider-specific detail.".into());
+    }
+
+    lines.push(String::new());
+    lines.push(format!("Catalog        {}", world.effective_revision.catalog_revision));
+    lines.push(format!("Resolution     {}", world.effective_revision.resolution_hash));
+    lines.push(format!(
+        "Generation     {}",
+        world
+            .effective_revision
+            .generation
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "not materialised".into()),
+    ));
+    for warning in &world.warnings {
+        lines.push(format!("Boundary       {warning}"));
+    }
+    lines
+}
+
+fn history_lines(world: &ProjectWorldReadModel) -> Vec<String> {
     let mut lines = vec![
-        "Projection".into(),
+        "History · effective world lineage".into(),
         String::new(),
+        format!("Catalog revision  {}", world.effective_revision.catalog_revision),
+        format!("Resolution hash   {}", world.effective_revision.resolution_hash),
         format!(
-            "Targets       {}",
-            if targets.is_empty() {
-                "none resolved".into()
-            } else {
-                targets.join(", ")
-            }
-        ),
-        format!(
-            "Effective     {} capability{}",
-            world.projection.active_capabilities.len(),
-            if world.projection.active_capabilities.len() == 1 {
-                ""
-            } else {
-                "s"
-            },
-        ),
-        format!(
-            "Generation    {}",
+            "Generation        {}",
             world
                 .effective_revision
                 .generation
                 .as_ref()
                 .map(ToString::to_string)
-                .unwrap_or_else(|| "not materialised in this read model".into()),
+                .unwrap_or_else(|| "none in this read model".into()),
         ),
-        format!("Catalog       {}", world.effective_revision.catalog_revision),
-        format!("Resolution    {}", world.effective_revision.resolution_hash),
+        format!("Active projection {} capabilities", world.projection.active_capabilities.len()),
     ];
-    if !state.staged.is_empty() {
-        lines.push(String::new());
-        lines.push(format!(
-            "{} staged change{} await composition preview",
-            state.staged.len(),
-            if state.staged.len() == 1 { "" } else { "s" },
-        ));
+    if world.warnings.is_empty() {
+        lines.push("Boundary          no degraded context disclosures".into());
+    } else {
+        for warning in &world.warnings {
+            lines.push(format!("Boundary          {warning}"));
+        }
     }
+    lines.push(String::new());
+    lines.push("Recent/familiar/route history remains application evidence, not a second resolver.".into());
     lines
 }
 
@@ -242,11 +299,7 @@ fn resource_lines(resource: &ProjectWorldResource) -> Vec<String> {
             "Effective     {} · {} provider{}",
             availability_label(&resource.effective.availability),
             resource.effective.providers.len(),
-            if resource.effective.providers.len() == 1 {
-                ""
-            } else {
-                "s"
-            },
+            if resource.effective.providers.len() == 1 { "" } else { "s" },
         ),
     ]
 }
