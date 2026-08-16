@@ -3,8 +3,6 @@
 //! Quick and Workspace are presentations of [`TuiState`], not alternate semantic
 //! controllers. This renderer therefore knows only the application read model,
 //! stable selection, contextual Actions, Workspace section, staging and overlays.
-//! Capability-specific forms and run output continue to use the compatibility
-//! renderer while those operations are migrated to first-class V2 Actions.
 
 use ratatui::layout::Alignment;
 use ratatui::text::{Line, Span};
@@ -20,7 +18,7 @@ use crate::application::{
 };
 use crate::layout::Layout;
 use crate::navigation::AmbientContext;
-use crate::project_workspace_render::project_world_lines;
+use crate::project_workspace_render::{project_world_lines, workspace_section_label};
 use crate::theme::Theme;
 
 pub fn draw(frame: &mut Frame, state: &TuiState) {
@@ -113,7 +111,7 @@ fn query_line<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
         vec![
             Span::styled("/ ", theme.accent()),
             if state.query.is_empty() {
-                Span::styled("search resources and actions", theme.dim())
+                Span::styled("Search resources and actions", theme.dim())
             } else {
                 Span::styled(state.query.clone(), theme.base())
             },
@@ -121,12 +119,11 @@ fn query_line<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
     };
     if state.presentation == PresentationMode::Workspace {
         spans.push(Span::raw("   "));
-        for (index, section) in WorkspaceSection::ALL.iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::styled(" · ", theme.dim()));
-            }
+        spans.push(Span::styled("Search", theme.accent()));
+        for section in WorkspaceSection::ALL.iter() {
+            spans.push(Span::styled(" · ", theme.dim()));
             spans.push(Span::styled(
-                section.as_str(),
+                workspace_section_label(*section),
                 if *section == state.workspace_section {
                     theme.selected()
                 } else {
@@ -194,7 +191,10 @@ fn resource_line<'a>(
             format!("{cursor}{staged_mark} "),
             if staged { theme.staged() } else { theme.accent() },
         ),
-        Span::styled(format!("{} ", pad(&kind, 20.min(kind.chars().count().max(8)))), theme.dim()),
+        Span::styled(
+            format!("{} ", pad(&kind, 20.min(kind.chars().count().max(8)))),
+            theme.dim(),
+        ),
         Span::styled(
             pad(&item.label, label_width),
             if selected { theme.selected() } else { theme.base() },
@@ -321,7 +321,10 @@ fn preview_pane<'a>(
             ]));
         }
         if actions.is_empty() && state.action_query.is_some() {
-            lines.push(Line::from(Span::styled("no matching contextual actions", theme.dim())));
+            lines.push(Line::from(Span::styled(
+                "no matching contextual actions",
+                theme.dim(),
+            )));
         }
     }
     Paragraph::new(lines).wrap(Wrap { trim: false })
@@ -361,8 +364,8 @@ fn footer<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
             .to_string()
     } else if state.presentation == PresentationMode::Workspace {
         format!(
-            "{} · {} result{} · {} staged · scope {} · Alt+←/→ sections · : actions · Ctrl+W Quick",
-            state.workspace_section.as_str(),
+            "{} · {} result{} · {} staged · scope {} · Alt+←/→ fields · : actions · Ctrl+W Quick",
+            workspace_section_label(state.workspace_section),
             state.read_model.resources.len(),
             if state.read_model.resources.len() == 1 { "" } else { "s" },
             state.staged.len(),
