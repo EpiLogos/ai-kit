@@ -59,6 +59,7 @@ pub mod resource;
 pub mod scope;
 pub mod search;
 pub mod session;
+pub mod session_space;
 pub mod skillset;
 pub mod surfacing;
 pub mod trust;
@@ -208,6 +209,13 @@ pub use search::{
 pub use session::{
     compile as compile_session, Attach, BackendSpec, Direction, Lifecycle, PaneSpec, PaneStep,
     Placement, Restart, SessionPlan, SessionSpec, Split, TaskSpec, ViewPlan, ViewSpec,
+};
+pub use session_space::{
+    SessionSpaceActivationDriver, SessionSpaceActivationObservation, SessionSpaceActivationRequest,
+    SessionSpaceActivationState, SessionSpaceAgentSession, SessionSpaceAuthorityState,
+    SessionSpaceComponent, SessionSpaceConnection, SessionSpaceConnectionState,
+    SessionSpaceDefinition, SessionSpaceLease, SessionSpaceLifecycle, SessionSpaceReadModel,
+    SessionSpaceRef, SessionSpaceRuntime, SessionSpaceSurface, SESSION_SPACE_VERSION,
 };
 pub use skillset::{SetMembership, SetProjection, SetProvenance, SkillSet, Withheld, WithheldReason};
 pub use surfacing::{plan_surfacing, DisplayContext, SurfacingPlan};
