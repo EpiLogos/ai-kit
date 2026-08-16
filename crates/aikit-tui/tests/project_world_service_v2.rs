@@ -3,7 +3,7 @@ mod common;
 use common::*;
 
 use aikit_core::project::ProjectBindingLocator;
-use aikit_tui::{PaletteApplicationService, ProjectWorldApplicationService};
+use aikit_tui::{ApplicationService, ProjectWorldApplicationService};
 
 #[test]
 fn shared_application_service_discloses_project_local_world_without_tui_resolution() {
@@ -18,7 +18,7 @@ fn shared_application_service_discloses_project_local_world_without_tui_resoluti
         .clone()
         .expect("fixture has a project root");
 
-    let service = PaletteApplicationService::new(&mut backend);
+    let service = ApplicationService::new(&mut backend);
     let world = service.project_world().unwrap();
 
     assert_eq!(world.context.project_root.as_ref(), Some(&expected_root));
