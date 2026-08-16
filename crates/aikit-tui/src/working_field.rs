@@ -8,7 +8,10 @@
 use std::collections::BTreeSet;
 
 use aikit_core::resource::ResourceRef;
-use aikit_core::{AikitError, Result};
+use aikit_core::{
+    AikitError, Result, SessionSpaceActivationState, SessionSpaceConnectionState,
+    SessionSpaceLifecycle, SessionSpaceReadModel, SurfaceKind,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::application::{reduce_tui, TuiReduction, TuiState, UiAction};
@@ -59,8 +62,8 @@ pub enum WorkingFieldAvailability {
 pub struct WorkingFieldItem {
     pub subject: ResourceRef,
     /// Native/public-contract kind label. This is deliberately not a new
-    /// ResourceKind taxonomy and can carry future product types such as
-    /// SessionSpace before AIKit owns an implementation for them.
+    /// ResourceKind taxonomy and can carry product/read-model types without
+    /// turning presentation vocabulary into ontology.
     pub semantic_kind: String,
     pub owner: ResourceRef,
     #[serde(default)]
@@ -94,8 +97,8 @@ impl WorkingFieldItem {
 pub struct TerminalWorkingField {
     pub version: String,
     pub revision: String,
-    /// Once #61/#62 land this may point at the current live SessionSpace. Before
-    /// that ordering gate it may be absent while contract fixtures remain usable.
+    /// Current live enclosing SessionSpace when this field is projected from the
+    /// SessionSpace read model. Other provider-owned field fixtures may omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enclosing_world: Option<ResourceRef>,
     pub items: Vec<WorkingFieldItem>,
@@ -166,6 +169,159 @@ impl TerminalWorkingField {
     }
 }
 
+/// Project the same UI-neutral SessionSpace runtime that desktop/other consumers
+/// can read into the existing TUI field. No SessionSpace semantics are rebuilt in
+/// the terminal layer.
+pub fn working_field_from_session_space(model: &SessionSpaceReadModel) -> Result<TerminalWorkingField> {
+    let aikit = r("ai-kit")?;
+    let tui_surface = r("surface/aikit/tui")?;
+    let mut items = Vec::new();
+
+    items.push(WorkingFieldItem {
+        subject: model.id.as_resource_ref().clone(),
+        semantic_kind: "SessionSpace".into(),
+        owner: aikit.clone(),
+        actions: vec![],
+        surfaces: vec![SurfaceProjection {
+            surface: tui_surface,
+            terminal_representation: true,
+            alternate_reason: None,
+        }],
+        contribution_kinds: BTreeSet::from([
+            TerminalContributionKind::Reading,
+            TerminalContributionKind::Relation,
+            TerminalContributionKind::CommandNavigation,
+        ]),
+        permission: PermissionProjection {
+            authority_owner: aikit.clone(),
+            policy_ref: None,
+            meaning: "SessionSpace composition transfers reference/possibility, never ambient trust or Action authority".into(),
+        },
+        provenance: model.provenance.clone(),
+        availability: match model.lifecycle {
+            SessionSpaceLifecycle::Open => WorkingFieldAvailability::Available,
+            SessionSpaceLifecycle::Closed => WorkingFieldAvailability::Unavailable {
+                reason: "SessionSpace is closed".into(),
+            },
+        },
+    });
+
+    for session in &model.agent_sessions {
+        items.push(WorkingFieldItem {
+            subject: session.agent_session.clone(),
+            semantic_kind: "AgentSession".into(),
+            owner: aikit.clone(),
+            actions: vec![],
+            surfaces: vec![],
+            contribution_kinds: BTreeSet::from([
+                TerminalContributionKind::Reading,
+                TerminalContributionKind::Relation,
+            ]),
+            permission: PermissionProjection {
+                authority_owner: aikit.clone(),
+                policy_ref: None,
+                meaning: "AgentSession binding supplies execution continuity only; it is not SessionSpace or ambient authority".into(),
+            },
+            provenance: session.provenance.clone(),
+            availability: WorkingFieldAvailability::Available,
+        });
+    }
+
+    for component in &model.components {
+        let owner = component.provider.clone().unwrap_or_else(|| aikit.clone());
+        let surfaces = model
+            .surfaces
+            .iter()
+            .filter(|surface| {
+                surface.agent_session == component.agent_session
+                    && surface.component.as_ref() == Some(&component.component)
+            })
+            .map(|surface| SurfaceProjection {
+                surface: surface.surface.clone(),
+                terminal_representation: matches!(
+                    surface.descriptor.kind,
+                    SurfaceKind::Tui | SurfaceKind::Cli
+                ),
+                alternate_reason: (!matches!(
+                    surface.descriptor.kind,
+                    SurfaceKind::Tui | SurfaceKind::Cli
+                ))
+                .then(|| {
+                    format!(
+                        "native {:?} Surface remains a peer projection; terminal shows its runtime state without cloning it",
+                        surface.descriptor.kind
+                    )
+                }),
+            })
+            .collect();
+        items.push(WorkingFieldItem {
+            subject: component.component.clone(),
+            semantic_kind: "Component".into(),
+            owner,
+            actions: vec![],
+            surfaces,
+            contribution_kinds: BTreeSet::from([
+                TerminalContributionKind::Reading,
+                TerminalContributionKind::Relation,
+                TerminalContributionKind::Inspector,
+            ]),
+            permission: PermissionProjection {
+                authority_owner: aikit.clone(),
+                policy_ref: None,
+                meaning: "Component/Surface presence and live activation do not grant Capability or Action authority".into(),
+            },
+            provenance: component.provenance.clone(),
+            availability: component_availability(component.state, component.reason.as_deref()),
+        });
+    }
+
+    for connection in &model.connections {
+        let authority = &connection.authority;
+        let meaning = match (
+            authority.capability_available,
+            authority.capability_granted,
+            authority.action.as_ref(),
+            authority.action_authorised,
+        ) {
+            (true, false, _, _) => "connection available; capability is visible but not granted",
+            (true, true, Some(_), false) => "capability granted; Action remains unauthorised",
+            (true, true, Some(_), true) => "capability granted and named Action authorised by its owning policy",
+            (true, true, None, _) => "capability granted; no Action authorisation is implied",
+            _ => "connection presence supplies no capability or Action authority",
+        };
+        items.push(WorkingFieldItem {
+            subject: connection.connection.clone(),
+            semantic_kind: "AgentConnection".into(),
+            owner: connection.provider.clone(),
+            actions: vec![],
+            surfaces: connection
+                .surface
+                .iter()
+                .cloned()
+                .map(|surface| SurfaceProjection {
+                    surface,
+                    terminal_representation: true,
+                    alternate_reason: None,
+                })
+                .collect(),
+            contribution_kinds: BTreeSet::from([
+                TerminalContributionKind::Reading,
+                TerminalContributionKind::Relation,
+            ]),
+            permission: PermissionProjection {
+                authority_owner: aikit.clone(),
+                policy_ref: None,
+                meaning: meaning.into(),
+            },
+            provenance: connection.provenance.clone(),
+            availability: connection_availability(connection.state, connection.reason.as_deref()),
+        });
+    }
+
+    TerminalWorkingField::new(format!("session-space/{}", model.revision), items)
+        .map(|field| field.with_enclosing_world(model.id.as_resource_ref().clone()))
+}
+
 /// Route working-field selection through the one existing semantic reducer. The
 /// field is a projection; it does not gain a second cursor/controller/store.
 pub fn select_working_field_subject(
@@ -180,4 +336,59 @@ pub fn select_working_field_subject(
         ));
     }
     Ok(reduce_tui(state, UiAction::Select(subject)))
+}
+
+fn component_availability(
+    state: SessionSpaceActivationState,
+    reason: Option<&str>,
+) -> WorkingFieldAvailability {
+    match state {
+        SessionSpaceActivationState::Active => WorkingFieldAvailability::Available,
+        SessionSpaceActivationState::Activating
+        | SessionSpaceActivationState::Degraded
+        | SessionSpaceActivationState::Eligible => WorkingFieldAvailability::Degraded {
+            reason: reason.unwrap_or(match state {
+                SessionSpaceActivationState::Eligible => "eligible but not live-active",
+                SessionSpaceActivationState::Activating => "live activation in progress",
+                _ => "live provider/component degraded",
+            }).into(),
+        },
+        SessionSpaceActivationState::Declared => WorkingFieldAvailability::Degraded {
+            reason: "declared but not eligible/active".into(),
+        },
+        SessionSpaceActivationState::Unavailable => WorkingFieldAvailability::Unavailable {
+            reason: reason.unwrap_or("component unavailable").into(),
+        },
+        SessionSpaceActivationState::Removed => WorkingFieldAvailability::Unavailable {
+            reason: reason.unwrap_or("component removed").into(),
+        },
+        SessionSpaceActivationState::Closed => WorkingFieldAvailability::Unavailable {
+            reason: reason.unwrap_or("SessionSpace/component closed").into(),
+        },
+    }
+}
+
+fn connection_availability(
+    state: SessionSpaceConnectionState,
+    reason: Option<&str>,
+) -> WorkingFieldAvailability {
+    match state {
+        SessionSpaceConnectionState::Connected | SessionSpaceConnectionState::Available => {
+            WorkingFieldAvailability::Available
+        }
+        SessionSpaceConnectionState::Connecting
+        | SessionSpaceConnectionState::Degraded
+        | SessionSpaceConnectionState::Disconnected => WorkingFieldAvailability::Degraded {
+            reason: reason.unwrap_or("connection is not currently healthy/connected").into(),
+        },
+        SessionSpaceConnectionState::Unavailable | SessionSpaceConnectionState::Closed => {
+            WorkingFieldAvailability::Unavailable {
+                reason: reason.unwrap_or("connection unavailable/closed").into(),
+            }
+        }
+    }
+}
+
+fn r(raw: &str) -> Result<ResourceRef> {
+    ResourceRef::parse(raw)
 }
