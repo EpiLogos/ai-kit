@@ -1,47 +1,16 @@
-//! The AIKit palette.
+//! AIKit's terminal application surfaces.
 //!
-//! It is a **palette, not a dashboard**. It opens, does one or a few things, and
-//! disappears. There is no persistent control-centre chrome, no background
-//! refresh loop, and no state that outlives the invocation — closing it returns
-//! the user to the work with the terminal exactly as they left it.
-//!
-//! ## What this crate refuses to do
-//!
-//! **It contains no resolver semantics.** Not a dependency rule, not a scope
-//! precedence rule, not a ranking formula. Every question of the form "what would
-//! happen if…" is asked of `aikit-core` through [`PaletteBackend`]. If the palette
-//! ever computed an answer that `aikit explain` would compute differently, the
-//! two front-ends would disagree about the same system, and the one that lies is
-//! whichever the user is looking at.
-//!
-//! It also does not shell out to `aikit --json`. The CLI and the palette share one
-//! application service; [`PaletteBackend`] is the shape of that service as the
-//! palette needs it.
-//!
-//! ## The architecture is unidirectional
-//!
-//! ```text
-//! event → Action → reduce → AppState → render
-//!            ▲                  │
-//!            └──── Effect ◄─────┘
-//! ```
-//!
-//! [`app::reduce`] is a pure function: state in, state and a list of effects out.
-//! Effects are the only things that touch the backend, and everything they learn
-//! comes back as another [`app::Action`]. That is why nearly every test in this
-//! crate is a reducer test — the interesting behaviour is reachable without a
-//! terminal, and the part that does need a terminal is [`render`], which is
-//! snapshot-tested against a real `TestBackend`.
-//!
-//! V2 builds on that proven reducer discipline with [`application::TuiState`]: one
-//! semantic ResourceRef selection/staging/navigation state shared by Quick,
-//! Workspace, list, tree and future graph presentations. The older palette/tree
-//! models remain compatibility presentations while that state is adopted.
+//! V2 has one semantic authority: [`application::TuiState`] reduced by
+//! [`application::TuiRuntime`] against shared application services. Quick and
+//! Workspace, plus List/Tree/Graph relation presentations, are views of that
+//! state. Compatibility modules remain only while #59 migrates their remaining
+//! external callers; the shipped V2 surface is [`application_surface`].
 
 #![forbid(unsafe_code)]
 
 pub mod app;
 pub mod application;
+pub mod application_surface;
 pub mod backend;
 pub mod event;
 pub mod form;
@@ -77,6 +46,9 @@ pub use application::{
     ResourceListReadModel, SelectionInvalidation, StagedChanges, TuiApplicationService,
     TuiReduction, TuiRuntime, TuiState, UiAction, UiEffect, UiStatus, WorkspaceSection,
 };
+pub use application_surface::{
+    ApplicationSurfaceController, ApplicationSurfaceRequest, ApplicationSurfaceStep,
+};
 pub use backend::{
     ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
 };
@@ -98,20 +70,15 @@ pub use search::{rank, Matcher, Row};
 pub use staging::{stage, StagedDiff, StagedProblem, StagedSet};
 pub use theme::Theme;
 
-/// How the CLI asks for a palette.
+/// Compatibility request for the pre-V2 palette entry point.
+///
+/// The shipped `aikit ui` path uses [`ApplicationSurfaceRequest`]. This remains
+/// temporarily for explicit compatibility consumers while #59 closes them.
 pub struct PaletteRequest {
     pub host: UiHost,
     pub initial_query: Option<String>,
-    /// Open the first exact result as soon as the initial search settles. The
-    /// tree uses this to hand a leaf directly to its natural palette action
-    /// (details, form, or run) without requiring a redundant second Enter.
     pub activate_initial: bool,
-    /// Exact capsule the tree handed to the palette. The visible query uses its
-    /// searchable path, while this typed identity prevents a fuzzy neighbour
-    /// from being activated by mistake.
     pub activation_target: Option<aikit_core::CapsuleId>,
-    /// Override the mutation scope the palette starts on. `None` means the
-    /// context's own default (see [`aikit_core::ContextDescriptor::default_mutation_scope`]).
     pub scope: Option<ScopeKind>,
 }
 
@@ -151,12 +118,7 @@ impl PaletteRequest {
     }
 }
 
-/// What the palette did before it closed.
-///
-/// `Run` hands back rather than executing because a foreground or `replace`
-/// execution mode needs the terminal the palette is currently holding: the caller
-/// tears the palette down and *then* runs the command, so the child inherits a
-/// clean terminal instead of a raw-mode one.
+/// What a terminal operation did before it closed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaletteOutcome {
     Closed,
@@ -166,8 +128,8 @@ pub enum PaletteOutcome {
     Promoted(CapsuleId),
 }
 
-/// Open the interactive organising tree and return the operation selected after
-/// the terminal has been restored.
+/// Compatibility entry point for the old standalone tree. New UI callers must
+/// select [`RelationView::Tree`] on [`ApplicationSurfaceRequest`] instead.
 pub fn run_tree(
     state: tree::TreeState,
     request: tree_driver::TreeRequest,
@@ -175,7 +137,8 @@ pub fn run_tree(
     tree_driver::run_on_terminal(state, request)
 }
 
-/// Open the palette, run it to completion, and return what it did.
+/// Compatibility entry point for the old palette. New UI callers use
+/// [`application_surface::run_on_terminal`].
 pub fn run(app: &mut dyn PaletteBackend, request: PaletteRequest) -> aikit_core::Result<PaletteOutcome> {
     driver::run_on_terminal(app, request)
 }
