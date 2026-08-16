@@ -145,3 +145,34 @@ jobs:
             echo "::error title=GitNexus conformance failure::$message"
           fi
           exit "$status"
+
+  deepseek-cordis-real:
+    name: Real DeepSeek Cordis SessionSpace activation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Rust 1.88
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.11.0"
+      - name: Checkout pinned DeepSeek Harness
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: 47f943859bef60e4160492346772ded9b24f765a
+          path: deepseek-harness
+      - name: Install pinned DeepSeek Harness workspace
+        working-directory: deepseek-harness
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.7.0 --activate
+          pnpm install --frozen-lockfile
+      - name: Run real Cordis activation through SessionSpace
+        env:
+          AIKIT_REQUIRE_DEEPSEEK_CORDIS_REAL: "1"
+          AIKIT_DEEPSEEK_HARNESS_CHECKOUT: ${{ github.workspace }}/deepseek-harness
+        run: cargo test --locked -p aikit-adapters --test deepseek_cordis_real -- --nocapture --test-threads=1
