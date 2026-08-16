@@ -138,16 +138,18 @@ fn semantic_selection_loads_contextual_actions_through_the_same_runtime() {
 fn preview_then_confirmation_then_apply_crosses_the_service_boundary_once() {
     let mut runtime = TuiRuntime::new();
     let mut service = FakeService::default();
-    let mut state = TuiState::default();
-    state.mutation_scope = Some(ScopeKind::Project);
-    state.read_model = ResourceListReadModel {
-        revision: "r1".into(),
-        resources: vec![ResourceListItem {
-            resource: resource(),
-            kind: ResourceKind::Capability,
-            label: "alpha".into(),
-            summary: "alpha".into(),
-        }],
+    let mut state = TuiState {
+        mutation_scope: Some(ScopeKind::Project),
+        read_model: ResourceListReadModel {
+            revision: "r1".into(),
+            resources: vec![ResourceListItem {
+                resource: resource(),
+                kind: ResourceKind::Capability,
+                label: "alpha".into(),
+                summary: "alpha".into(),
+            }],
+        },
+        ..Default::default()
     };
 
     state = runtime
