@@ -7,6 +7,7 @@ use aikit_tui::application::{Overlay, PresentationMode, RelationView, WorkspaceS
 use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
 use aikit_tui::event::PaletteEvent;
 use aikit_tui::host::UiHost;
+use aikit_tui::PaletteBackend;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
