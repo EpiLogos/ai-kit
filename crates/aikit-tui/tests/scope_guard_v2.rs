@@ -10,15 +10,17 @@ fn resource() -> ResourceRef {
 #[test]
 fn staged_changes_without_a_mutation_scope_cannot_preview_or_apply() {
     let resource = resource();
-    let mut state = TuiState::default();
-    state.read_model = ResourceListReadModel {
-        revision: "r1".into(),
-        resources: vec![ResourceListItem {
-            resource: resource.clone(),
-            kind: ResourceKind::Capability,
-            label: "scope guard".into(),
-            summary: "requires explicit mutation scope".into(),
-        }],
+    let mut state = TuiState {
+        read_model: ResourceListReadModel {
+            revision: "r1".into(),
+            resources: vec![ResourceListItem {
+                resource: resource.clone(),
+                kind: ResourceKind::Capability,
+                label: "scope guard".into(),
+                summary: "requires explicit mutation scope".into(),
+            }],
+        },
+        ..TuiState::default()
     };
     state
         .staged
