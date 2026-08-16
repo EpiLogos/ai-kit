@@ -10,7 +10,8 @@ use aikit_adapters::{
 use aikit_core::resource::ResourceRef;
 use aikit_core::{
     CompositionActivationMode, SessionSpaceActivationState, SessionSpaceAgentSession,
-    SessionSpaceAuthorityState, SessionSpaceDefinition, SessionSpaceRef, SessionSpaceRuntime,
+    SessionSpaceAuthorityState, SessionSpaceConnectionState, SessionSpaceDefinition,
+    SessionSpaceRef, SessionSpaceRuntime,
 };
 
 fn r(raw: &str) -> ResourceRef {
@@ -90,6 +91,87 @@ fn acp_connection_requires_explicit_agent_session_binding_and_preserves_withheld
     assert_eq!(connection.native_session_id.as_deref(), Some("native-1"));
     assert_eq!(connection.protocol, "acp/1");
     assert!(!connection.authority.has_authority());
+}
+
+#[test]
+fn acp_degradation_does_not_counterfeit_classic_harness_failure() {
+    let mut runtime = SessionSpaceRuntime::open(SessionSpaceDefinition::new(
+        SessionSpaceRef::parse("session-space/mixed-connections").unwrap(),
+    ))
+    .unwrap();
+    let lease = runtime
+        .bind_agent_session(SessionSpaceAgentSession {
+            agent_session: r("agent-session/mixed"),
+            harness: r("harness/mixed"),
+            native_session_id: None,
+            provider: None,
+            provenance: vec!["mixed connection fixture".into()],
+        })
+        .unwrap();
+
+    let acp = ConnectionDescriptor {
+        adapter_ref: r("connection-adapter/acp/v1"),
+        connection_ref: r("connection/acp/mixed"),
+        protocol: ConnectionProtocol {
+            family: ConnectionProtocolFamily::Acp,
+            version: "1".into(),
+        },
+        capabilities: ConnectionCapabilities::default(),
+        provenance: vec!["ACP provider".into()],
+    };
+    let classic = ConnectionDescriptor {
+        adapter_ref: r("connection-adapter/classic/process"),
+        connection_ref: r("connection/classic/mixed"),
+        protocol: ConnectionProtocol {
+            family: ConnectionProtocolFamily::ClassicProcess,
+            version: "1".into(),
+        },
+        capabilities: ConnectionCapabilities::default(),
+        provenance: vec!["classic process provider".into()],
+    };
+    let acp_binding = NativeSessionBinding::unbound("native-acp", SessionOpenMode::Attach)
+        .bind_agent_session(r("agent-session/mixed"));
+    let classic_binding = NativeSessionBinding::unbound("native-classic", SessionOpenMode::Attach)
+        .bind_agent_session(r("agent-session/mixed"));
+
+    runtime
+        .observe_connection(
+            &lease,
+            connection_into_session_space(
+                &acp,
+                ConnectionState::Degraded,
+                &acp_binding,
+                None,
+                None,
+                SessionSpaceAuthorityState::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    runtime
+        .observe_connection(
+            &lease,
+            connection_into_session_space(
+                &classic,
+                ConnectionState::Connected,
+                &classic_binding,
+                None,
+                None,
+                SessionSpaceAuthorityState::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let model = runtime.read_model();
+    assert!(model.connections.iter().any(|connection| {
+        connection.connection == r("connection/acp/mixed")
+            && connection.state == SessionSpaceConnectionState::Degraded
+    }));
+    assert!(model.connections.iter().any(|connection| {
+        connection.connection == r("connection/classic/mixed")
+            && connection.state == SessionSpaceConnectionState::Connected
+    }));
 }
 
 #[cfg(unix)]
