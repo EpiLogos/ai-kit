@@ -10,6 +10,7 @@
 
 pub mod app;
 pub mod application;
+pub mod application_service;
 pub mod application_surface;
 pub mod backend;
 pub mod event;
@@ -46,6 +47,7 @@ pub use application::{
     ResourceListReadModel, SelectionInvalidation, StagedChanges, TuiApplicationService,
     TuiReduction, TuiRuntime, TuiState, UiAction, UiEffect, UiStatus, WorkspaceSection,
 };
+pub use application_service::ApplicationService;
 pub use application_surface::{
     ApplicationSurfaceController, ApplicationSurfaceRequest, ApplicationSurfaceStep,
 };
