@@ -24,6 +24,7 @@ pub mod staging;
 pub mod theme;
 pub mod tree;
 pub mod v2_render;
+pub mod working_field;
 
 use aikit_core::id::{CapsuleId, GenerationId};
 
@@ -53,6 +54,11 @@ pub use navigation::{
 pub use project_workspace::{ComposeHorizon, ProjectWorkspaceSelection, ProjectWorkspaceState};
 pub use project_world_api::ProjectWorldApplicationService;
 pub use theme::Theme;
+pub use working_field::{
+    select_working_field_subject, PermissionProjection, SurfaceProjection,
+    TerminalContributionKind, TerminalWorkingField, WorkingFieldAvailability, WorkingFieldItem,
+    TERMINAL_WORKING_FIELD_VERSION,
+};
 
 /// Terminal application outcome.
 ///
