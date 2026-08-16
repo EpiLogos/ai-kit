@@ -226,17 +226,20 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
     assert_eq!(assessment.contextual_observations, 1);
 
     // Durable package composition -> immutable Generation on the real store.
-    let generation = service
-        .apply(ApplyRequest {
+    let generation = AikitApplication::apply(
+        &mut service,
+        ApplyRequest {
             scope: ScopeKind::Project,
             toggles: vec![],
             label: Some("prelocal-product-route".into()),
-        })
-        .unwrap();
+        },
+    )
+    .unwrap();
     assert_eq!(
         service.current_generation_properties().get("label").map(String::as_str),
         Some("prelocal-product-route")
     );
+    let generation_id = generation.id.to_string();
 
     // Compose actor/runtime -> inspect HarnessComposition -> stage Component /
     // Surface projection -> preview -> explicit confirm -> desired resolved body.
@@ -250,7 +253,7 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
         model: Some(r("model/deepseek/acceptance")),
         selections: Vec::new(),
         target_revision: Some("deepseek:acceptance-r1".into()),
-        generation: Some(generation.id.to_string()),
+        generation: Some(generation_id.clone()),
     };
     let before = resolve_harness_composition(&catalog, request).unwrap();
     let mut staged = StagedHarnessComposition::new();
@@ -263,7 +266,7 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
     );
     let desired = apply_confirmed_harness_composition(preview.confirm());
     assert_eq!(desired.state, CompositionState::Resolved);
-    assert_eq!(desired.generation.as_deref(), Some(generation.id.to_string().as_str()));
+    assert_eq!(desired.generation.as_deref(), Some(generation_id.as_str()));
 
     // Human and agent-facing projections are the same canonical Action identity,
     // not target-native replacements.
