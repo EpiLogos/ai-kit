@@ -49,6 +49,8 @@ pub struct CodeIndexCapabilities {
     pub trace: bool,
     pub detect_changes: bool,
     pub structural_check: bool,
+    pub cypher: bool,
+    pub pdg_impact: bool,
     pub structured_output: bool,
 }
 
@@ -101,6 +103,21 @@ pub struct CodeTrace {
     pub detail: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeChanges {
+    pub provider: ProviderRef,
+    pub scope: String,
+    #[serde(default)]
+    pub base_ref: Option<String>,
+    pub detail: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeStructuralCheck {
+    pub provider: ProviderRef,
+    pub detail: Value,
+}
+
 /// Derived code intelligence behind ProjectMap. Git/source remains canonical;
 /// implementations may rebuild/discard their indexes without changing code
 /// identity or SemanticWiki authority.
@@ -112,6 +129,8 @@ pub trait CodeIndexProvider {
     fn context(&self, reference: &CodeReference) -> Result<CodeContext>;
     fn impact(&self, reference: &CodeReference, direction: &str) -> Result<CodeImpact>;
     fn trace(&self, from: &CodeReference, to: &CodeReference) -> Result<CodeTrace>;
+    fn detect_changes(&self, scope: &str, base_ref: Option<&str>) -> Result<CodeChanges>;
+    fn structural_check(&self) -> Result<CodeStructuralCheck>;
 }
 
 /// Current upstream GitNexus CLI contract explicitly accepted by AIKit.
