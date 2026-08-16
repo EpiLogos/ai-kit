@@ -1,12 +1,13 @@
 use std::collections::BTreeSet;
 
+use aikit_core::resource::{ResourceKind, ResourceRef};
 use aikit_core::{
     apply_confirmed_harness_composition, preview_harness_composition_change,
     resolve_harness_composition, ActivationScope, ActivationScopeKind, ComponentContribution,
     ComponentDescriptor, ComponentSelection, CompositionActivationMode, CompositionCatalog,
     CompositionState, ContributionKind, HarnessCompositionRequest, LifetimeOwner,
-    LifetimeOwnerKind, ResolutionScope, ResourceKind, ResourceRef, RetractionMode, ScopeKind,
-    StagedHarnessComposition, SurfaceDescriptor, SurfaceKind,
+    LifetimeOwnerKind, ResolutionScope, RetractionMode, ScopeKind, StagedHarnessComposition,
+    SurfaceDescriptor, SurfaceKind,
 };
 
 fn r(raw: &str) -> ResourceRef {
