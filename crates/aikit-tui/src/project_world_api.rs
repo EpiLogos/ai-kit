@@ -1,20 +1,19 @@
-//! Focused application-service extension for the V2 Project/Context/Compose workspace.
+//! Project-world extension of the canonical V2 application service.
 //!
-//! This stays additive to the central TUI trait while #42 is being proven. The
-//! production implementation is still the same [`PaletteApplicationService`] used
-//! by search, contextual Actions and composition; Project-world disclosure is not
-//! reconstructed by a controller or renderer.
+//! Project/Context/Compose disclosure is produced from the same live backend used
+//! by Search, Actions and composition. Controllers and renderers consume this read
+//! model; they do not reconstruct context or own another resolver.
 
 use aikit_core::{ProjectWorldReadModel, Result};
 
-use crate::palette_service::PaletteApplicationService;
+use crate::application_service::ApplicationService;
 use crate::project_world_service;
 
 pub trait ProjectWorldApplicationService {
     fn project_world(&self) -> Result<ProjectWorldReadModel>;
 }
 
-impl ProjectWorldApplicationService for PaletteApplicationService<'_> {
+impl ProjectWorldApplicationService for ApplicationService<'_> {
     fn project_world(&self) -> Result<ProjectWorldReadModel> {
         project_world_service::project_world(self.backend())
     }
