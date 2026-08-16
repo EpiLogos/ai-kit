@@ -54,7 +54,7 @@ fn split_frontmatter(markdown: &str) -> Result<(&str, &str)> {
 
     let mut offset = 0usize;
     for line in rest.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+        let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.trim() == "---" {
             let yaml = &rest[..offset];
             let body = &rest[offset + line.len()..];

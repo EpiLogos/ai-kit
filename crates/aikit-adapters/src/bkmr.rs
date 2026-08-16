@@ -528,7 +528,7 @@ fn json_records(stdout: &str) -> Result<Vec<Map<String, Value>>> {
         Value::Object(mut object) => {
             for key in ["hits", "results", "bookmarks"] {
                 if let Some(Value::Array(values)) = object.remove(key) {
-                    return Ok(values.into_iter().filter_map(Value::as_object_owned).collect());
+                    return Ok(values.into_iter().filter_map(ValueObjectOwned::into_object).collect());
                 }
             }
             vec![Value::Object(object)]
@@ -537,16 +537,16 @@ fn json_records(stdout: &str) -> Result<Vec<Map<String, Value>>> {
     };
     Ok(candidates
         .into_iter()
-        .filter_map(Value::as_object_owned)
+        .filter_map(ValueObjectOwned::into_object)
         .collect())
 }
 
 trait ValueObjectOwned {
-    fn as_object_owned(self) -> Option<Map<String, Value>>;
+    fn into_object(self) -> Option<Map<String, Value>>;
 }
 
 impl ValueObjectOwned for Value {
-    fn as_object_owned(self) -> Option<Map<String, Value>> {
+    fn into_object(self) -> Option<Map<String, Value>> {
         match self {
             Value::Object(object) => Some(object),
             _ => None,
