@@ -55,9 +55,9 @@ pub use project_workspace::{ComposeHorizon, ProjectWorkspaceSelection, ProjectWo
 pub use project_world_api::ProjectWorldApplicationService;
 pub use theme::Theme;
 pub use working_field::{
-    select_working_field_subject, PermissionProjection, SurfaceProjection,
-    TerminalContributionKind, TerminalWorkingField, WorkingFieldAvailability, WorkingFieldItem,
-    TERMINAL_WORKING_FIELD_VERSION,
+    select_working_field_subject, working_field_from_session_space, PermissionProjection,
+    SurfaceProjection, TerminalContributionKind, TerminalWorkingField, WorkingFieldAvailability,
+    WorkingFieldItem, TERMINAL_WORKING_FIELD_VERSION,
 };
 
 /// Terminal application outcome.
