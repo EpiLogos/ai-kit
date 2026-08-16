@@ -27,10 +27,11 @@ fn model(revision: &str, refs: &[&str]) -> ResourceListReadModel {
 }
 
 fn state_with_model(refs: &[&str]) -> TuiState {
-    let mut state = TuiState::default();
-    state.read_model = model("r1", refs);
-    state.mutation_scope = Some(ScopeKind::Project);
-    state
+    TuiState {
+        read_model: model("r1", refs),
+        mutation_scope: Some(ScopeKind::Project),
+        ..Default::default()
+    }
 }
 
 #[test]
