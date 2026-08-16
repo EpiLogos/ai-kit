@@ -171,7 +171,7 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.7.0 --activate
           pnpm install --frozen-lockfile
-      - name: Prove exact upstream Cordis Web launch seam
+      - name: Prove current upstream Web/Cordis launch seam
         working-directory: deepseek-harness
         shell: bash
         run: |
@@ -180,9 +180,9 @@ jobs:
             tail -n 100 /tmp/deepseek-cordis.log > /tmp/deepseek-cordis-focus.log || true
             message=$(cat /tmp/deepseek-cordis-focus.log)
             message=${message//'%'/'%25'}; message=${message//$'\r'/'%0D'}; message=${message//$'\n'/'%0A'}
-            echo "::error title=Upstream DeepSeek Cordis launch failure::$message"
+            echo "::error title=Upstream DeepSeek Web/Cordis launch failure::$message"
           }
-          node --import tsx apps/cli/src/bin.ts web --patch examples/web-cordis/cordis.yml > /tmp/deepseek-cordis.log 2>&1 &
+          node --import tsx apps/cli/src/bin.ts web > /tmp/deepseek-cordis.log 2>&1 &
           pid=$!
           cleanup() {
             kill "$pid" 2>/dev/null || true
@@ -192,24 +192,24 @@ jobs:
           ready=0
           for _ in $(seq 1 100); do
             if ! kill -0 "$pid" 2>/dev/null; then
-              echo 'DeepSeek Cordis process exited before readiness:'
+              echo 'DeepSeek Web/Cordis process exited before readiness:'
               cat /tmp/deepseek-cordis.log
               report_failure
               exit 1
             fi
-            if (echo > /dev/tcp/127.0.0.1/3081) 2>/dev/null; then
+            if (echo > /dev/tcp/127.0.0.1/3080) 2>/dev/null; then
               ready=1
               break
             fi
             sleep 0.2
           done
           if [ "$ready" -ne 1 ]; then
-            echo 'DeepSeek Cordis process did not expose 127.0.0.1:3081:'
+            echo 'DeepSeek Web/Cordis process did not expose 127.0.0.1:3080:'
             cat /tmp/deepseek-cordis.log
             report_failure
             exit 1
           fi
-          echo 'DeepSeek Cordis Web endpoint is live at 127.0.0.1:3081'
+          echo 'DeepSeek Web/Cordis endpoint is live at 127.0.0.1:3080'
           cleanup
           trap - EXIT
       - name: Run real Cordis activation through SessionSpace
