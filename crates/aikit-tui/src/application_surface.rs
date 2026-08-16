@@ -1,10 +1,9 @@
 //! Final V2 terminal surface over one [`TuiState`] / [`TuiRuntime`] authority.
 //!
-//! The older Palette/Tree controllers are deliberately absent from this module.
-//! Quick and Workspace are presentations of the same semantic state and List /
-//! Tree / Graph are projections of one cached [`RelationReadModel`] returned by
-//! the application service. No renderer or relation presentation mutates product
-//! state.
+//! Quick and Workspace are presentations of the same semantic state. List / Tree /
+//! Graph are projections of one cached [`RelationReadModel`] returned by the same
+//! application service. Renderers and mouse hit-testing dispatch semantic Actions;
+//! they do not own resolver, selection, retrieval or mutation state.
 
 use std::io;
 
@@ -20,15 +19,17 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use crate::application::{
-    selected_contextual_action, Overlay, PresentationMode, RelationReadModel, RelationView,
-    TuiApplicationService, TuiRuntime, TuiState, UiAction, WorkspaceSection,
+    selected_contextual_action, visible_contextual_actions, Overlay, PresentationMode,
+    RelationReadModel, RelationView, TuiApplicationService, TuiRuntime, TuiState, UiAction,
+    WorkspaceSection,
 };
+use crate::application_service::ApplicationService;
 use crate::backend::PaletteBackend;
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::host::UiHost;
 use crate::layout::Layout;
 use crate::navigation::AmbientContext;
-use crate::palette_service::PaletteApplicationService;
+use crate::project_workspace_render::workspace_section_label;
 use crate::project_world_api::ProjectWorldApplicationService;
 use crate::theme::Theme;
 use crate::v2_render;
@@ -58,8 +59,7 @@ impl ApplicationSurfaceRequest {
         self
     }
 
-    /// Open the Explore section with a particular projection of the one relation
-    /// read model. This is the V2 meaning of an initial "tree" request.
+    /// Open Knowledge with one projection of the canonical relation read model.
     #[must_use]
     pub fn opening_relations(mut self, view: RelationView) -> Self {
         self.initial_relation_view = view;
@@ -102,7 +102,7 @@ impl ApplicationSurfaceController {
         let mut runtime = TuiRuntime::new();
         let project_world;
         {
-            let mut service = PaletteApplicationService::new(backend);
+            let mut service = ApplicationService::new(backend);
             semantic = runtime.step(
                 &mut service,
                 semantic,
@@ -197,7 +197,6 @@ impl ApplicationSurfaceController {
         if self.semantic.action_query.is_some() {
             return self.handle_action_key(backend, code, ctrl);
         }
-
         if ctrl && matches!(code, KeyCode::Char('c') | KeyCode::Char('q')) {
             return self.dispatch(backend, UiAction::Exit);
         }
@@ -208,11 +207,7 @@ impl ApplicationSurfaceController {
             return self.dispatch(backend, UiAction::SetQuery(String::new()));
         }
         if ctrl && code == KeyCode::Char('w') {
-            let presentation = match self.semantic.presentation {
-                PresentationMode::Quick => PresentationMode::Workspace,
-                PresentationMode::Workspace => PresentationMode::Quick,
-            };
-            return self.dispatch(backend, UiAction::SetPresentation(presentation));
+            return self.toggle_presentation(backend);
         }
         if alt && code == KeyCode::Left {
             return self.dispatch(backend, UiAction::PreviousWorkspaceSection);
@@ -245,23 +240,22 @@ impl ApplicationSurfaceController {
             return self.stage_selected(backend);
         }
         match code {
-            KeyCode::Up => return self.dispatch(backend, UiAction::SelectPrevious),
-            KeyCode::Down => return self.dispatch(backend, UiAction::SelectNext),
-            KeyCode::Char(':') => return self.dispatch(backend, UiAction::BeginActionSearch),
-            KeyCode::Enter => return self.open_selected_action(backend),
+            KeyCode::Up => self.dispatch(backend, UiAction::SelectPrevious),
+            KeyCode::Down => self.dispatch(backend, UiAction::SelectNext),
+            KeyCode::Char(':') => self.dispatch(backend, UiAction::BeginActionSearch),
+            KeyCode::Enter => self.open_selected_action(backend),
             KeyCode::Backspace if !self.semantic.query.is_empty() => {
                 let mut query = self.semantic.query.clone();
                 query.pop();
-                return self.dispatch(backend, UiAction::SetQuery(query));
+                self.dispatch(backend, UiAction::SetQuery(query))
             }
             KeyCode::Char(character) if !ctrl && !alt => {
                 let mut query = self.semantic.query.clone();
                 query.push(character);
-                return self.dispatch(backend, UiAction::SetQuery(query));
+                self.dispatch(backend, UiAction::SetQuery(query))
             }
-            _ => {}
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     fn handle_action_key<B: PaletteBackend>(
@@ -299,6 +293,13 @@ impl ApplicationSurfaceController {
         let (cols, rows) = self.semantic.area;
         let cols = cols.max(2);
         let rows = rows.max(2);
+
+        // The title itself is the compact/expanded affordance. It changes only
+        // PresentationMode on the same TuiState.
+        if row == 0 {
+            return self.toggle_presentation(backend);
+        }
+
         let inner = ratatui::layout::Rect::new(
             1,
             1,
@@ -306,18 +307,46 @@ impl ApplicationSurfaceController {
             rows.saturating_sub(2),
         );
         let panes = Layout::for_width(inner.width).split(inner);
-        if column < panes.list.x
-            || column >= panes.list.x.saturating_add(panes.list.width)
-            || row < panes.list.y
-            || row >= panes.list.y.saturating_add(panes.list.height)
-        {
-            return Ok(());
+
+        if self.semantic.presentation == PresentationMode::Workspace && row == panes.query.y {
+            if let Some(section) = workspace_tab_hit(&self.semantic, panes.query.x, column) {
+                return self.dispatch(backend, UiAction::SetWorkspaceSection(section));
+            }
         }
-        let index = usize::from(row.saturating_sub(panes.list.y));
-        if let Some(item) = self.semantic.read_model.resources.get(index) {
-            return self.dispatch(backend, UiAction::Select(item.resource.clone()));
+
+        if let Some(preview) = panes.preview {
+            if column >= preview.x
+                && column < preview.x.saturating_add(preview.width)
+                && row >= preview.y.saturating_add(8)
+                && row < preview.y.saturating_add(preview.height)
+            {
+                let action_index = usize::from(row.saturating_sub(preview.y).saturating_sub(8));
+                let actions = visible_contextual_actions(&self.semantic);
+                if let Some(action) = actions.get(action_index) {
+                    return self.dispatch(backend, UiAction::InvokeAction(action.action.clone()));
+                }
+            }
+        }
+
+        if column >= panes.list.x
+            && column < panes.list.x.saturating_add(panes.list.width)
+            && row >= panes.list.y
+            && row < panes.list.y.saturating_add(panes.list.height)
+        {
+            let index = usize::from(row.saturating_sub(panes.list.y));
+            if let Some(item) = self.semantic.read_model.resources.get(index) {
+                return self.dispatch(backend, UiAction::Select(item.resource.clone()));
+            }
         }
         Ok(())
+    }
+
+    fn toggle_presentation<B: PaletteBackend>(&mut self, backend: &mut B) -> Result<()> {
+        let presentation = match self.semantic.presentation {
+            PresentationMode::Quick => PresentationMode::Workspace,
+            PresentationMode::Workspace => PresentationMode::Quick,
+        };
+        self.dispatch(backend, UiAction::SetPresentation(presentation))
     }
 
     fn stage_selected<B: PaletteBackend>(&mut self, backend: &mut B) -> Result<()> {
@@ -386,7 +415,7 @@ impl ApplicationSurfaceController {
 
     fn dispatch<B: PaletteBackend>(&mut self, backend: &mut B, action: UiAction) -> Result<()> {
         {
-            let mut service = PaletteApplicationService::new(backend);
+            let mut service = ApplicationService::new(backend);
             self.semantic = self.runtime.step(&mut service, self.semantic.clone(), action)?;
             self.project_world = service.project_world().ok();
         }
@@ -398,7 +427,7 @@ impl ApplicationSurfaceController {
             self.relation = None;
             return Ok(());
         };
-        let service = PaletteApplicationService::new(backend);
+        let service = ApplicationService::new(backend);
         self.relation = service.relations(&subject).ok();
         Ok(())
     }
@@ -425,6 +454,35 @@ impl ApplicationSurfaceController {
             panes.list,
         );
     }
+}
+
+fn workspace_tab_hit(state: &TuiState, query_x: u16, column: u16) -> Option<WorkspaceSection> {
+    let displayed_query = if let Some(action_query) = state.action_query.as_ref() {
+        if action_query.is_empty() {
+            "search actions for selection"
+        } else {
+            action_query
+        }
+    } else if state.query.is_empty() {
+        "Search resources and actions"
+    } else {
+        &state.query
+    };
+    let mut cursor = query_x
+        .saturating_add(2)
+        .saturating_add(u16::try_from(displayed_query.chars().count()).unwrap_or(u16::MAX))
+        .saturating_add(3)
+        .saturating_add(6); // `Search`
+    for section in WorkspaceSection::ALL {
+        cursor = cursor.saturating_add(3); // ` · `
+        let label = workspace_section_label(section);
+        let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+        if column >= cursor && column < cursor.saturating_add(width) {
+            return Some(section);
+        }
+        cursor = cursor.saturating_add(width);
+    }
+    None
 }
 
 fn relation_lines<'a>(
