@@ -152,7 +152,7 @@ fn colon_search_invokes_stageable_action_without_applying() {
 }
 
 #[test]
-fn space_uses_the_stageable_contextual_action_and_second_space_unstages() {
+fn ctrl_space_uses_the_stageable_action_while_fuzzy_search_remains_active() {
     let mut backend = fixture();
     let mut surface = SurfaceController::new(
         &mut backend,
@@ -160,12 +160,16 @@ fn space_uses_the_stageable_contextual_action_and_second_space_unstages() {
     )
     .unwrap();
 
-    surface.handle(&mut backend, key(KeyCode::Char(' '))).unwrap();
+    // Plain Space is text while the fuzzy query is non-empty. Explicit staging is
+    // Ctrl+Space/Insert so search and mutation grammar never conflict.
+    surface.handle(&mut backend, ctrl(KeyCode::Char(' '))).unwrap();
     assert_eq!(surface.semantic().staged.len(), 1);
+    assert_eq!(surface.semantic().query, "deploy");
     assert!(!backend.view().is_active(&cid("script/ops/deploy")));
 
-    surface.handle(&mut backend, key(KeyCode::Char(' '))).unwrap();
+    surface.handle(&mut backend, ctrl(KeyCode::Char(' '))).unwrap();
     assert!(surface.semantic().staged.is_empty());
+    assert_eq!(surface.semantic().query, "deploy");
 }
 
 #[test]
@@ -202,7 +206,7 @@ fn compose_preview_confirm_apply_refreshes_the_resolved_project_world() {
     .unwrap();
     let resource = rref("script/ops/deploy");
 
-    surface.handle(&mut backend, key(KeyCode::Char(' '))).unwrap();
+    surface.handle(&mut backend, ctrl(KeyCode::Char(' '))).unwrap();
     assert_eq!(
         surface.semantic().staged.get(&resource),
         Some(aikit_tui::ActivationIntent::Enable)
