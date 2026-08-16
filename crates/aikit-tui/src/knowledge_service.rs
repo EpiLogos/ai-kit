@@ -83,10 +83,10 @@ impl KnowledgeNavigationService for KnowledgeApplication<'_> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use aikit_core::resource::{ResourceRef, SourceRef, SourceRevision};
     use aikit_core::{
-        FamiliarityContext, NativeSourcePoolProvider, ResourceRef, SemanticWikiIndex,
-        SemanticWikiProvider, SourceBinding, SourceMaterial, SourcePoolProvider, SourceRef,
-        SourceRevision, SourceVisibility,
+        FamiliarityContext, NativeSourcePoolProvider, SemanticWikiIndex, SemanticWikiProvider,
+        SourceBinding, SourceMaterial, SourcePoolProvider, SourceVisibility,
     };
 
     use super::*;

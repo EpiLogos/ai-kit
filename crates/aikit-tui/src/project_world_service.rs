@@ -14,9 +14,7 @@ use aikit_core::context_resolution::{compose_context_resolution, RequestedActors
 use aikit_core::context_source::{ContextSourceEntry, ContextSourceIndex};
 use aikit_core::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
 use aikit_core::resource::{ResourceKind, ResourceRef};
-use aikit_core::{
-    disclose_project_world, ContextResolution, ProjectWorldReadModel, Result,
-};
+use aikit_core::{disclose_project_world, ContextResolution, ProjectWorldReadModel, Result};
 
 use crate::PaletteBackend;
 
@@ -61,10 +59,8 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
             if let Ok(mut entry) = ContextSourceEntry::new(record.clone()) {
                 entry.disclosure.known_to_exist = true;
                 entry.disclosure.askable = true;
-                entry.disclosure.exists = matches!(
-                    resolved.availability,
-                    aikit_core::Availability::Available
-                );
+                entry.disclosure.exists =
+                    matches!(resolved.availability, aikit_core::Availability::Available);
                 source_index.insert(entry);
             }
         }
@@ -82,7 +78,7 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
 
 fn project_ref(context: &aikit_core::ContextDescriptor) -> Result<ProjectRef> {
     if let Some(id) = &context.project_id {
-        return ProjectRef::parse(&format!("project:{}", id));
+        return ProjectRef::parse(&format!("project:{id}"));
     }
     if let Some(name) = context
         .project_root
@@ -114,12 +110,24 @@ mod tests {
     }
 
     impl PaletteBackend for Backend {
-        fn context(&self) -> &ContextDescriptor { &self.context }
-        fn view(&self) -> &aikit_core::ResolvedView { &self.view }
-        fn scope_layers(&self) -> Option<&[ScopeLayer]> { self.layers.as_deref() }
-        fn documents(&self) -> Vec<aikit_core::SearchDoc> { Vec::new() }
-        fn capsule(&self, _id: &aikit_core::CapsuleId) -> Option<&aikit_core::Capsule> { None }
-        fn recent(&self) -> Vec<crate::RunIntent> { Vec::new() }
+        fn context(&self) -> &ContextDescriptor {
+            &self.context
+        }
+        fn view(&self) -> &aikit_core::ResolvedView {
+            &self.view
+        }
+        fn scope_layers(&self) -> Option<&[ScopeLayer]> {
+            self.layers.as_deref()
+        }
+        fn documents(&self) -> Vec<aikit_core::SearchDoc> {
+            Vec::new()
+        }
+        fn capsule(&self, _id: &aikit_core::CapsuleId) -> Option<&aikit_core::Capsule> {
+            None
+        }
+        fn recent(&self) -> Vec<crate::RunIntent> {
+            Vec::new()
+        }
         fn preview(
             &self,
             _scope: ScopeKind,
@@ -140,7 +148,9 @@ mod tests {
         fn open_source(&mut self, _id: &aikit_core::CapsuleId) -> Result<PathBuf> {
             Err(aikit_core::AikitError::new("test.open", "unused"))
         }
-        fn promotion_drafts(&self) -> Vec<crate::PromotionDraft> { Vec::new() }
+        fn promotion_drafts(&self) -> Vec<crate::PromotionDraft> {
+            Vec::new()
+        }
         fn promote(&mut self, _draft: &crate::PromotionDraft) -> Result<aikit_core::CapsuleId> {
             Err(aikit_core::AikitError::new("test.promote", "unused"))
         }
@@ -173,7 +183,10 @@ mod tests {
         };
 
         let resolution = context_resolution(&backend).unwrap();
-        assert!(matches!(resolution.host, Some(ReferenceResolution::Resolved { .. })));
+        assert!(matches!(
+            resolution.host,
+            Some(ReferenceResolution::Resolved { .. })
+        ));
     }
 
     #[test]
