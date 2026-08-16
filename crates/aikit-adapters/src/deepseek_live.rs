@@ -19,9 +19,9 @@ use aikit_core::{
     SessionSpaceActivationDriver, SessionSpaceActivationObservation, SessionSpaceActivationRequest,
 };
 
+use crate::composition_topology::ComponentContainment;
 use crate::deepseek_harness::{DeepSeekShellProvider, DEEPSEEK_HARNESS_UPSTREAM_REVISION};
 use crate::deepseek_maximal::{deepseek_maximal_conformance, DeepSeekMaximalConformance};
-use crate::ComponentContainment;
 
 pub const DEEPSEEK_CORDIS_WEB_PORT: u16 = 3081;
 
@@ -290,27 +290,34 @@ impl SessionSpaceActivationDriver for CordisProcessActivationDriver {
         request: &SessionSpaceActivationRequest,
     ) -> Result<SessionSpaceActivationObservation> {
         Self::validate_target(request)?;
-        self.active_components.remove(&request.component.component);
-        if self.active_components.is_empty() {
-            self.stop_all()?;
+        if !self.active_components.contains(&request.component.component) {
             return Ok(SessionSpaceActivationObservation::Unavailable {
                 provider: self.spec.provider.clone(),
-                reason: "Cordis provider stopped after final live Component retraction".into(),
+                reason: "Component was not active in the Cordis provider process".into(),
                 provenance: self.spec.provenance.clone(),
             });
         }
+        if self.active_components.len() > 1 {
+            // The process seam proves composition activation and whole-provider teardown.
+            // It does not prove arbitrary in-process Cordis Fiber disposal from Rust.
+            // Refuse to counterfeit that stronger operation while siblings remain live.
+            return Err(AikitError::new(
+                "cordis.process.partial_retraction_unsupported",
+                format!(
+                    "cannot prove live retraction of {} through the process seam while {} sibling Components remain active",
+                    request.component.component,
+                    self.active_components.len() - 1
+                ),
+            ));
+        }
 
-        // The process seam proves composition activation and whole-provider teardown.
-        // It does not prove arbitrary in-process Cordis Fiber disposal from Rust.
-        // Refuse to counterfeit that stronger operation while siblings remain live.
-        Err(AikitError::new(
-            "cordis.process.partial_retraction_unsupported",
-            format!(
-                "cannot prove live retraction of {} through the process seam while {} sibling Components remain active",
-                request.component.component,
-                self.active_components.len()
-            ),
-        ))
+        self.active_components.remove(&request.component.component);
+        self.stop_all()?;
+        Ok(SessionSpaceActivationObservation::Unavailable {
+            provider: self.spec.provider.clone(),
+            reason: "Cordis provider stopped after final live Component retraction".into(),
+            provenance: self.spec.provenance.clone(),
+        })
     }
 }
 
