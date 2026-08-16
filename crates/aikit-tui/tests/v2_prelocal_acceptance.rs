@@ -5,7 +5,7 @@ use common::*;
 use aikit_core::resource::ResourceRef;
 use aikit_core::ScopeKind;
 use aikit_tui::{
-    selected_contextual_action, ActivationIntent, PaletteApplicationService, PresentationMode,
+    selected_contextual_action, ActivationIntent, ApplicationService, PresentationMode,
     TuiApplicationService, TuiRuntime, TuiState, UiAction,
 };
 
@@ -19,7 +19,7 @@ fn resource_action_compose_explain_and_relations_share_one_identity_path() {
     let resource = ResourceRef::parse("skill/rust/review").unwrap();
 
     {
-        let mut service = PaletteApplicationService::new(&mut backend);
+        let mut service = ApplicationService::new(&mut backend);
         let mut runtime = TuiRuntime::new();
         let mut state = TuiState::default();
 
@@ -103,10 +103,11 @@ fn resource_action_compose_explain_and_relations_share_one_identity_path() {
             .is_some_and(|status| status.message.contains("applied generation")));
 
         // Explain and relation navigation still resolve the same stable ResourceRef
-        // after mutation rather than falling back to view-row identity.
+        // after mutation rather than falling back to package identity.
         let explanation = service.explain(&resource).unwrap();
         assert_eq!(explanation["resource"], resource.as_str());
         assert!(explanation.get("resolutionHash").is_some());
+        assert!(explanation["packageCapabilityState"].is_object());
 
         let relations = service.relations(&resource).unwrap();
         assert_eq!(relations.subject, resource);
