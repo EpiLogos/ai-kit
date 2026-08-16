@@ -14,6 +14,7 @@ use crate::knowledge_source_pool::{
     SourceMaterial, SourcePoolProvider, SourceProviderStatus, SourceSearchMode,
 };
 use crate::knowledge_wiki_provider::{SemanticWikiProvider, SemanticWikiProviderStatus};
+use crate::project_map::{ProjectLens, ProjectMap, ProjectMapEndpoint, ProjectMapStep};
 use crate::resource::{ProviderRef, ResourceKind, ResourceRef, SourceAuthority, SourceRef};
 use crate::{AikitError, Result};
 
@@ -25,12 +26,15 @@ pub enum KnowledgeAddress {
     Wiki(ResourceRef),
     Source(SourceRef),
     Code(CodeReference),
+    /// Stable endpoint in the ProjectMap federation when the endpoint is not
+    /// materialised through a richer native provider address in this process.
+    ProjectMap(ResourceRef),
 }
 
 impl KnowledgeAddress {
     pub fn resource_ref(&self) -> ResourceRef {
         match self {
-            Self::Wiki(resource) => resource.clone(),
+            Self::Wiki(resource) | Self::ProjectMap(resource) => resource.clone(),
             Self::Source(source) => ResourceRef::parse(source.as_str())
                 .expect("SourceRef validation is compatible with ResourceRef validation"),
             Self::Code(reference) => reference.resource_ref(),
@@ -68,6 +72,7 @@ pub struct KnowledgeProviderStatus {
     pub sources: Vec<SourceProviderStatus>,
     #[serde(default)]
     pub code: Option<crate::knowledge_code::CodeIndexStatus>,
+    pub project_map: bool,
     #[serde(default)]
     pub absences: Vec<String>,
 }
@@ -93,12 +98,14 @@ pub struct SourcePoolBinding<'a> {
 ///
 /// This is federation, not a universal graph: providers retain their relation,
 /// ranking and identity semantics. The application only normalises addressability,
-/// degradation, operational routes and Context projection.
+/// degradation, explicit ProjectMap cross-lens bindings, operational routes and
+/// Context projection.
 pub struct KnowledgeApplication<'a> {
     context: FamiliarityContext,
     wiki: Option<SemanticWikiProvider<'a>>,
     sources: Vec<SourcePoolBinding<'a>>,
     code: Option<&'a dyn CodeIndexProvider>,
+    project_map: Option<&'a ProjectMap>,
 }
 
 impl<'a> KnowledgeApplication<'a> {
@@ -108,6 +115,7 @@ impl<'a> KnowledgeApplication<'a> {
             wiki: None,
             sources: Vec::new(),
             code: None,
+            project_map: None,
         }
     }
 
@@ -133,6 +141,12 @@ impl<'a> KnowledgeApplication<'a> {
         self
     }
 
+    #[must_use]
+    pub fn with_project_map(mut self, project_map: &'a ProjectMap) -> Self {
+        self.project_map = Some(project_map);
+        self
+    }
+
     pub fn status(&self) -> KnowledgeProviderStatus {
         let wiki = self.wiki.as_ref().map(SemanticWikiProvider::status);
         let sources = self
@@ -151,11 +165,15 @@ impl<'a> KnowledgeApplication<'a> {
         if code.is_none() {
             absences.push("ProjectMap CodeIndex provider absent".into());
         }
+        if self.project_map.is_none() {
+            absences.push("ProjectMap federation absent".into());
+        }
         KnowledgeProviderStatus {
             version: KNOWLEDGE_APPLICATION_VERSION.into(),
             wiki,
             sources,
             code,
+            project_map: self.project_map.is_some(),
             absences,
         }
     }
@@ -258,6 +276,33 @@ impl<'a> KnowledgeApplication<'a> {
             absences.push("ProjectMap code search unavailable: provider absent".into());
         }
 
+        if let Some(project_map) = self.project_map {
+            let needle = query.to_lowercase();
+            hits.extend(project_map.endpoints().filter_map(|endpoint| {
+                let label = endpoint
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| endpoint.resource.to_string());
+                let searchable = format!("{} {} {:?}", endpoint.resource, label, endpoint.lens)
+                    .to_lowercase();
+                if !needle.is_empty() && !searchable.contains(&needle) {
+                    return None;
+                }
+                Some(KnowledgeSearchHit {
+                    address: KnowledgeAddress::ProjectMap(endpoint.resource.clone()),
+                    resource: endpoint.resource.clone(),
+                    kind: endpoint.kind,
+                    label,
+                    score: if endpoint.resource.as_str() == query { 1.25 } else { 0.4 },
+                    snippet: format!("explicit {:?} ProjectMap endpoint", endpoint.lens),
+                    provider: endpoint.provider.clone().unwrap_or_else(project_map_provider),
+                    authority: endpoint.authority,
+                })
+            }));
+        } else {
+            absences.push("ProjectMap endpoint search unavailable: federation absent".into());
+        }
+
         hits.sort_by(|left, right| {
             right
                 .score
@@ -320,6 +365,20 @@ impl<'a> KnowledgeApplication<'a> {
                     why_selected: "selected from derived ProjectMap code intelligence".into(),
                 })
             }
+            KnowledgeAddress::ProjectMap(resource) => {
+                let endpoint = self.project_map_endpoint(resource)?;
+                Ok(KnowledgeReading {
+                    resource: resource.clone(),
+                    provider: endpoint.provider.clone().or_else(|| Some(project_map_provider())),
+                    lens: Some(project_lens_name(endpoint.lens).into()),
+                    revision: endpoint.revision.clone(),
+                    freshness: None,
+                    authority: endpoint.authority,
+                    content: endpoint.label.clone(),
+                    evidence: Vec::new(),
+                    why_selected: "selected from an explicit ProjectMap federation endpoint".into(),
+                })
+            }
         }
     }
 
@@ -330,17 +389,22 @@ impl<'a> KnowledgeApplication<'a> {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
-        match address {
+        let mut view = match address {
             KnowledgeAddress::Wiki(resource) => {
-                self.wiki_relations(resource.clone(), depth, max_nodes, max_edges)
+                self.wiki_relations(resource.clone(), depth, max_nodes, max_edges)?
             }
             KnowledgeAddress::Source(source) => {
-                self.source_relations(source, max_nodes, max_edges)
+                self.source_relations(source, max_nodes, max_edges)?
             }
             KnowledgeAddress::Code(reference) => {
-                self.code_relations(reference, max_nodes, max_edges)
+                self.code_relations(reference, max_nodes, max_edges)?
             }
-        }
+            KnowledgeAddress::ProjectMap(resource) => {
+                self.project_map_relations(resource, depth, max_nodes, max_edges)?
+            }
+        };
+        self.augment_project_map_relations(address.resource_ref(), &mut view)?;
+        Ok(view)
     }
 
     pub fn explain(&self, address: &KnowledgeAddress) -> Result<KnowledgeExplanation> {
@@ -391,6 +455,25 @@ impl<'a> KnowledgeApplication<'a> {
                     detail: Some(context.detail),
                 })
             }
+            KnowledgeAddress::ProjectMap(resource) => {
+                let endpoint = self.project_map_endpoint(resource)?;
+                let bindings = self
+                    .project_map
+                    .expect("endpoint lookup proves ProjectMap is present")
+                    .neighbours(resource);
+                Ok(KnowledgeExplanation {
+                    address: address.clone(),
+                    provider: endpoint.provider.clone().or_else(|| Some(project_map_provider())),
+                    authority: endpoint.authority,
+                    summary: format!(
+                        "explicit {:?} ProjectMap endpoint; {} cross-lens binding(s)",
+                        endpoint.lens,
+                        bindings.len()
+                    ),
+                    sources: Vec::new(),
+                    detail: serde_json::to_value(bindings).ok(),
+                })
+            }
         }
     }
 
@@ -420,23 +503,55 @@ impl<'a> KnowledgeApplication<'a> {
         }
         for (index, address) in addresses.iter().enumerate() {
             let (provider, authority, revision) = self.route_metadata(address)?;
+            let transition = if index == 0 {
+                None
+            } else {
+                Some(self.transition_between(&addresses[index - 1], address)?)
+            };
             route.steps.push(KnowledgeRouteStep {
                 resource: address.resource_ref(),
                 provider,
-                lens: Some(
-                    match address {
-                        KnowledgeAddress::Wiki(_) => "semantic-wiki",
-                        KnowledgeAddress::Source(_) => "source-pool",
-                        KnowledgeAddress::Code(_) => "code-index",
-                    }
-                    .into(),
-                ),
-                transition: (index > 0).then(|| "knowledge-route".into()),
+                lens: Some(self.address_lens(address)?.into()),
+                transition,
                 revision,
                 authority,
             });
         }
         Ok(route)
+    }
+
+    /// Traverse an explicit bounded ProjectMap path without copying provider
+    /// graphs into AIKit. Intermediate endpoints remain ProjectMap addresses;
+    /// the caller-provided endpoints retain their richer provider addresses.
+    pub fn route_via_project_map(
+        &self,
+        query: Option<&str>,
+        from: KnowledgeAddress,
+        to: KnowledgeAddress,
+        max_hops: usize,
+    ) -> Result<KnowledgeRoute> {
+        let map = self.project_map.ok_or_else(|| provider_absent("ProjectMap federation"))?;
+        let from_ref = from.resource_ref();
+        let to_ref = to.resource_ref();
+        let path = map.route(&from_ref, &to_ref, max_hops).ok_or_else(|| {
+            AikitError::new(
+                "knowledge.project_map_route_missing",
+                format!("no explicit ProjectMap route from {from_ref} to {to_ref}"),
+            )
+        })?;
+        if path.is_empty() {
+            return self.route(query, &[from]);
+        }
+
+        let mut addresses = vec![from];
+        for (index, step) in path.iter().enumerate() {
+            if index + 1 == path.len() {
+                addresses.push(to.clone());
+            } else {
+                addresses.push(KnowledgeAddress::ProjectMap(step.to.clone()));
+            }
+        }
+        self.route(query, &addresses)
     }
 
     pub fn context_pack(
@@ -480,6 +595,93 @@ impl<'a> KnowledgeApplication<'a> {
                 .find(|material| &material.binding.source == source)
                 .map(|material| (binding, material))
         })
+    }
+
+    fn project_map_endpoint(&self, resource: &ResourceRef) -> Result<&ProjectMapEndpoint> {
+        self.project_map
+            .ok_or_else(|| provider_absent("ProjectMap federation"))?
+            .endpoint(resource)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "knowledge.project_map_endpoint_missing",
+                    format!("ProjectMap endpoint {resource} is absent"),
+                )
+            })
+    }
+
+    fn address_lens(&self, address: &KnowledgeAddress) -> Result<&'static str> {
+        Ok(match address {
+            KnowledgeAddress::Wiki(_) => "semantic-wiki",
+            KnowledgeAddress::Source(_) => "source-pool",
+            KnowledgeAddress::Code(_) => "code-index",
+            KnowledgeAddress::ProjectMap(resource) => {
+                project_lens_name(self.project_map_endpoint(resource)?.lens)
+            }
+        })
+    }
+
+    fn transition_between(
+        &self,
+        from: &KnowledgeAddress,
+        to: &KnowledgeAddress,
+    ) -> Result<String> {
+        let from_ref = from.resource_ref();
+        let to_ref = to.resource_ref();
+        if from_ref == to_ref {
+            return Ok("same-resource".into());
+        }
+
+        if let Some(project_map) = self.project_map {
+            if let Some(step) = project_map
+                .neighbours(&from_ref)
+                .into_iter()
+                .find(|step| step.to == to_ref)
+            {
+                return Ok(format!("project-map:{}", step.relation));
+            }
+        }
+
+        match (from, to) {
+            (KnowledgeAddress::Wiki(left), KnowledgeAddress::Wiki(right)) => {
+                let wiki = self.wiki.as_ref().ok_or_else(|| provider_absent("SemanticWiki"))?;
+                if let Some(neighbour) = wiki
+                    .neighbours(left, usize::MAX)
+                    .into_iter()
+                    .find(|neighbour| neighbour.resource == *right)
+                {
+                    return Ok(neighbour.relation);
+                }
+            }
+            (KnowledgeAddress::Wiki(wiki_ref), KnowledgeAddress::Source(source)) => {
+                let wiki = self.wiki.as_ref().ok_or_else(|| provider_absent("SemanticWiki"))?;
+                if wiki.sources(wiki_ref).contains(source) {
+                    return Ok("source".into());
+                }
+            }
+            (KnowledgeAddress::Source(source), KnowledgeAddress::Wiki(wiki_ref)) => {
+                let wiki = self.wiki.as_ref().ok_or_else(|| provider_absent("SemanticWiki"))?;
+                if wiki.sources(wiki_ref).contains(source) {
+                    return Ok("source".into());
+                }
+            }
+            (KnowledgeAddress::Code(left), KnowledgeAddress::Code(right)) => {
+                let view = self.code_relations(left, 256, 512)?;
+                if let Some(edge) = view.edges.iter().find(|edge| {
+                    (edge.from == left.resource_ref() && edge.to == right.resource_ref())
+                        || (edge.to == left.resource_ref() && edge.from == right.resource_ref())
+                }) {
+                    return Ok(edge.relation.clone());
+                }
+            }
+            _ => {}
+        }
+
+        Err(AikitError::new(
+            "knowledge.route_unbound_transition",
+            format!(
+                "no provider-native or explicit ProjectMap transition binds {from_ref} to {to_ref}"
+            ),
+        ))
     }
 
     fn wiki_relations(
@@ -659,6 +861,80 @@ impl<'a> KnowledgeApplication<'a> {
         Ok(view)
     }
 
+    fn project_map_relations(
+        &self,
+        resource: &ResourceRef,
+        depth: u8,
+        max_nodes: usize,
+        max_edges: usize,
+    ) -> Result<KnowledgeRelationView> {
+        let endpoint = self.project_map_endpoint(resource)?;
+        let query = RelationQuery {
+            focus: resource.clone(),
+            depth,
+            max_nodes,
+            max_edges,
+            filters: Vec::new(),
+        };
+        KnowledgeRelationView::focus_only(
+            query,
+            RelationNode::new(
+                resource.clone(),
+                endpoint.kind,
+                endpoint.label.clone().unwrap_or_else(|| resource.to_string()),
+            ),
+        )
+    }
+
+    fn augment_project_map_relations(
+        &self,
+        focus: ResourceRef,
+        view: &mut KnowledgeRelationView,
+    ) -> Result<()> {
+        let Some(project_map) = self.project_map else {
+            view.warnings
+                .push("ProjectMap federation absent; cross-lens bindings unavailable".into());
+            return Ok(());
+        };
+        for step in project_map.neighbours(&focus) {
+            let Some(endpoint) = project_map.endpoint(&step.to) else {
+                continue;
+            };
+            if !view.push_node(RelationNode::new(
+                step.to.clone(),
+                endpoint.kind,
+                endpoint
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| step.to.to_string()),
+            )) {
+                continue;
+            }
+            let origin = project_map_origin(&step);
+            let edge = if step.reversed {
+                RelationEdge::new(
+                    step.to.clone(),
+                    focus.clone(),
+                    step.relation,
+                    RelationDirection::Incoming,
+                    origin,
+                )
+            } else {
+                RelationEdge::new(
+                    focus.clone(),
+                    step.to,
+                    step.relation,
+                    RelationDirection::Outgoing,
+                    origin,
+                )
+            };
+            if !view.push_edge(edge)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn route_metadata(
         &self,
         address: &KnowledgeAddress,
@@ -696,6 +972,14 @@ impl<'a> KnowledgeApplication<'a> {
                     reference.revision.as_ref().map(ToString::to_string),
                 ))
             }
+            KnowledgeAddress::ProjectMap(resource) => {
+                let endpoint = self.project_map_endpoint(resource)?;
+                Ok((
+                    endpoint.provider.clone().or_else(|| Some(project_map_provider())),
+                    endpoint.authority,
+                    endpoint.revision.clone(),
+                ))
+            }
         }
     }
 }
@@ -705,6 +989,31 @@ fn provider_absent(name: &str) -> AikitError {
         "knowledge.provider_absent",
         format!("{name} provider is absent from this Project world"),
     )
+}
+
+fn project_map_provider() -> ProviderRef {
+    ProviderRef::parse("provider/project-map/federation")
+        .expect("static ProjectMap federation provider ref must be valid")
+}
+
+fn project_lens_name(lens: ProjectLens) -> &'static str {
+    match lens {
+        ProjectLens::Git => "git",
+        ProjectLens::Code => "code",
+        ProjectLens::SemanticWiki => "semantic-wiki",
+        ProjectLens::SourcePool => "source-pool",
+        ProjectLens::Canon => "canon",
+        ProjectLens::Run => "run",
+        ProjectLens::Decision => "decision",
+        ProjectLens::Verification => "verification",
+        ProjectLens::Evolution => "evolution",
+    }
+}
+
+fn project_map_origin(step: &ProjectMapStep) -> RelationOrigin {
+    let mut origin = RelationOrigin::new(step.authority).in_lens("project-map");
+    origin.provider = step.provider.clone().or_else(|| Some(project_map_provider()));
+    origin
 }
 
 fn code_string(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
@@ -726,6 +1035,7 @@ mod tests {
     };
     use crate::knowledge_wiki::{parse_wiki_objects, WikiObject};
     use crate::knowledge_wiki_index::SemanticWikiIndex;
+    use crate::project_map::{ProjectMapBinding, ProjectMapEndpoint};
     use crate::resource::SourceRevision;
 
     use super::*;
@@ -761,6 +1071,23 @@ mod tests {
                 metadata: BTreeMap::new(),
             },
             body: "Authentication sessions rotate tokens.".into(),
+        }
+    }
+
+    fn endpoint(
+        resource: &str,
+        lens: ProjectLens,
+        kind: ResourceKind,
+        authority: SourceAuthority,
+    ) -> ProjectMapEndpoint {
+        ProjectMapEndpoint {
+            resource: ResourceRef::parse(resource).unwrap(),
+            kind,
+            lens,
+            authority,
+            provider: None,
+            revision: None,
+            label: Some(resource.to_string()),
         }
     }
 
@@ -807,6 +1134,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(route.steps.len(), 2);
+        assert_eq!(route.steps[1].transition.as_deref(), Some("source"));
         assert!(route.familiarity_observation("event:route", 42).is_ok());
         let pack =
             app.context_pack(Some("Authentication"), &[wiki_address, source_address]);
@@ -817,6 +1145,101 @@ mod tests {
             .absences
             .iter()
             .any(|value| value.contains("CodeIndex")));
+    }
+
+    #[test]
+    fn project_map_bindings_are_native_cross_lens_route_transitions() {
+        let index = wiki();
+        let wiki_provider = SemanticWikiProvider::new(&index);
+        let material = vec![material()];
+        let mut native = NativeSourcePoolProvider::new();
+        native.rebuild(&material).unwrap();
+        let mut project_map = ProjectMap::new();
+        for endpoint in [
+            endpoint(
+                "wiki:node:auth",
+                ProjectLens::SemanticWiki,
+                ResourceKind::KnowledgeNode,
+                SourceAuthority::Authored,
+            ),
+            endpoint(
+                "source:spec",
+                ProjectLens::SourcePool,
+                ResourceKind::KnowledgeSource,
+                SourceAuthority::Observed,
+            ),
+            endpoint(
+                "canon:auth-design",
+                ProjectLens::Canon,
+                ResourceKind::KnowledgeNode,
+                SourceAuthority::Authored,
+            ),
+        ] {
+            project_map.add_endpoint(endpoint).unwrap();
+        }
+        project_map
+            .bind(ProjectMapBinding {
+                from: ResourceRef::parse("wiki:node:auth").unwrap(),
+                to: ResourceRef::parse("source:spec").unwrap(),
+                relation: "supported-by".into(),
+                reversible: true,
+                authority: SourceAuthority::Authored,
+                provider: None,
+                provenance: vec![],
+            })
+            .unwrap();
+        project_map
+            .bind(ProjectMapBinding {
+                from: ResourceRef::parse("source:spec").unwrap(),
+                to: ResourceRef::parse("canon:auth-design").unwrap(),
+                relation: "constrains".into(),
+                reversible: true,
+                authority: SourceAuthority::Authored,
+                provider: None,
+                provenance: vec![],
+            })
+            .unwrap();
+
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(wiki_provider)
+            .with_source_pool(&native, &material)
+            .with_project_map(&project_map);
+        let wiki_address =
+            KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:auth").unwrap());
+        let canon_address =
+            KnowledgeAddress::ProjectMap(ResourceRef::parse("canon:auth-design").unwrap());
+        let route = app
+            .route_via_project_map(Some("auth design"), wiki_address.clone(), canon_address, 2)
+            .unwrap();
+        assert_eq!(route.steps.len(), 3);
+        assert_eq!(
+            route.steps[1].transition.as_deref(),
+            Some("project-map:supported-by")
+        );
+        assert_eq!(
+            route.steps[2].transition.as_deref(),
+            Some("project-map:constrains")
+        );
+
+        let relations = app.relations(&wiki_address, 1, 16, 16).unwrap();
+        assert!(relations.edges.iter().any(|edge| {
+            edge.relation == "supported-by"
+                && edge.origin.lens.as_deref() == Some("project-map")
+        }));
+        assert!(app.status().project_map);
+    }
+
+    #[test]
+    fn arbitrary_cross_lens_jumps_are_rejected_without_explicit_binding() {
+        let index = wiki();
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(SemanticWikiProvider::new(&index));
+        let wiki_address =
+            KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:auth").unwrap());
+        let unrelated =
+            KnowledgeAddress::ProjectMap(ResourceRef::parse("canon:unbound").unwrap());
+        let error = app.route(None, &[wiki_address, unrelated]).unwrap_err();
+        assert_eq!(error.code(), "knowledge.provider_absent");
     }
 
     #[test]
