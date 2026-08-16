@@ -1,10 +1,12 @@
-//! Live DeepSeek Harness/Cordis activation over the exact upstream process seam.
+//! Live DeepSeek Harness/Cordis activation over the exact current upstream process seam.
 //!
-//! The upstream source currently proves a real Cordis-hosted Web path through
-//! `node --import tsx apps/cli/src/bin.ts web --patch examples/web-cordis/cordis.yml`.
-//! AIKit does not reimplement Cordis. This adapter starts/stops that target-owned
-//! process, waits for its target-owned Web endpoint, and only then reports a
-//! SessionSpace Component as live.
+//! At the pinned source revision the ordinary `dsh web` bundle already mounts
+//! `cordis-host-runner` and `cordis-client-runner`. The repository's older
+//! `examples/web-cordis/cordis.yml` overlay now duplicates `cordis-host-runner`
+//! and fails fast, so AIKit deliberately follows the current bundle rather than
+//! preserving that stale demo seam. This adapter starts/stops the target-owned
+//! Web/Cordis process, waits for its target-owned endpoint, and only then reports
+//! a SessionSpace Component as live.
 
 use std::collections::BTreeSet;
 use std::net::{SocketAddr, TcpStream};
@@ -23,19 +25,18 @@ use crate::composition_topology::ComponentContainment;
 use crate::deepseek_harness::{DeepSeekShellProvider, DEEPSEEK_HARNESS_UPSTREAM_REVISION};
 use crate::deepseek_maximal::{deepseek_maximal_conformance, DeepSeekMaximalConformance};
 
-pub const DEEPSEEK_CORDIS_WEB_PORT: u16 = 3081;
+pub const DEEPSEEK_CORDIS_WEB_PORT: u16 = 3080;
 
 /// Components for which the current maximal conformance adapter has direct
-/// target evidence inside the shipped Cordis/Web composition. The older thin
-/// components remain at their resolver-declared activation mode unless separately
-/// proven live; this avoids upgrading the whole graph by association.
+/// process-level evidence inside the shipped Web/Cordis composition. Agent-loop
+/// remains a per-session/preset concern and therefore stays at its resolver
+/// activation mode until an actual AgentSession activation proves it live.
 pub const DEEPSEEK_LIVE_CORDIS_COMPONENTS: &[&str] = &[
     "component/deepseek/profile-root",
     "component/deepseek/client-ui-slots",
     "component/deepseek/client-ui-conversation",
     "component/deepseek/client-ui-commands",
     "component/deepseek/client-ui-permission",
-    "component/deepseek/agent-loop",
 ];
 
 pub struct DeepSeekLiveComposition {
@@ -91,8 +92,8 @@ pub struct CordisProcessSpec {
 }
 
 impl CordisProcessSpec {
-    /// Exact current upstream Cordis Web demo path. The caller supplies a checkout
-    /// at the pinned revision; AIKit does not vendor or fork the target runtime.
+    /// Exact current upstream Web/Cordis process path. The caller supplies a
+    /// checkout at the pinned revision; AIKit does not vendor or fork Cordis.
     pub fn deepseek_web(source_checkout: impl AsRef<Path>) -> Self {
         Self {
             provider: r("provider/deepseek/cordis-web"),
@@ -102,16 +103,15 @@ impl CordisProcessSpec {
                 "tsx".into(),
                 "apps/cli/src/bin.ts".into(),
                 "web".into(),
-                "--patch".into(),
-                "examples/web-cordis/cordis.yml".into(),
             ],
             working_directory: source_checkout.as_ref().to_path_buf(),
             readiness: Some(SocketAddr::from(([127, 0, 0, 1], DEEPSEEK_CORDIS_WEB_PORT))),
             startup_timeout: Duration::from_secs(20),
             provenance: vec![
                 format!("deepseek-ai/deepseek-harness@{DEEPSEEK_HARNESS_UPSTREAM_REVISION}"),
-                "scripts/demo-cordis.mjs:web -> dsh web --patch examples/web-cordis/cordis.yml"
+                "packages/bundle/web-app/cordis.patch.yml:cordis-host-runner+cordis-client-runner"
                     .into(),
+                "apps/cli/src/bin.ts web (default target-owned Web/Cordis bundle)".into(),
             ],
         }
     }
