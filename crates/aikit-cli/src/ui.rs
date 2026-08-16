@@ -1,15 +1,10 @@
-//! Hosting the palette.
+//! Hosting AIKit's terminal surfaces.
 //!
-//! The palette's *placement* is a CLI concern — it depends on where the binary is
-//! running (inside tmux? a tiny terminal? was `--fullscreen` asked for?) — while
-//! everything the palette *does* is the shared [`crate::app::Service`]. This
-//! module builds a [`TerminalProfile`] from the environment and lets
-//! [`aikit_tui::UiHost::choose`] make the placement decision, then hands the
-//! chosen host and the service to [`aikit_tui::run`].
-//!
-//! AIKit never embeds a terminal emulator: the tmux popup is a real
-//! `display-popup`, and the inline and fullscreen hosts draw into the terminal
-//! that is already there.
+//! Placement remains a CLI concern; semantic operation belongs to shared
+//! application services. The shipped `aikit ui` path now hosts the reducer-native
+//! V2 application surface directly. The standalone legacy palette/tree entry
+//! points remain only for explicit compatibility commands while #59 removes or
+//! replaces their final callers.
 
 use std::path::PathBuf;
 
@@ -25,57 +20,20 @@ use aikit_store::{
     familiarity_observation_event, replay_familiarity, EventRecorder, FamiliarityReplay,
 };
 
+use aikit_tui::application::RelationView;
+use aikit_tui::application_surface::ApplicationSurfaceRequest;
 use aikit_tui::backend::{JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle};
 use aikit_tui::host::{TerminalProfile, UiHost};
-use aikit_tui::surface::{SurfaceBackend, SurfaceRequest};
-use aikit_tui::tree::TreeEffect;
 use aikit_tui::tree_driver::{TreeOutcome, TreeRequest};
 use aikit_tui::{PaletteOutcome, PaletteRequest};
 
 use crate::app::Service;
 
-impl SurfaceBackend for Service {
-    fn surface_tree(&self) -> Result<aikit_tui::tree::TreeState> {
-        crate::tree_build::build(self)
-    }
-
-    fn apply_tree_effect(&mut self, effect: TreeEffect) -> Result<()> {
-        let procedure = match effect {
-            TreeEffect::CreateSet { set } => {
-                aikit_store::skillsets::plan_create(self.home(), &set, &[], &[])?
-            }
-            TreeEffect::RenameSet { from, to } => {
-                aikit_store::skillsets::plan_rename(self.home(), &from, &to)?
-            }
-            TreeEffect::DeleteSet { set } => {
-                let (procedure, _recovery) =
-                    aikit_store::skillsets::plan_delete(self.home(), &set)?;
-                procedure
-            }
-            TreeEffect::AddToSet { set, capsule } => {
-                aikit_store::skillsets::plan_add(self.home(), &set, &[capsule])?
-            }
-            TreeEffect::RemoveFromSet { set, capsule } => {
-                aikit_store::skillsets::plan_remove(self.home(), &set, &[capsule])?
-            }
-            TreeEffect::Activate { .. } => {
-                return Err(aikit_core::AikitError::new(
-                    "tui.invalid_tree_effect",
-                    "activation must be routed into the palette inside the unified surface",
-                ))
-            }
-        };
-        aikit_store::procedure::ProcedureRunner::new(self.home()).run(&procedure)?;
-        self.refresh()
-    }
-}
-
 /// V2 surface decorator that gives the shared Service one additional operational
 /// responsibility: replaying and recording learned navigation evidence.
 ///
-/// This stays at the host/application boundary rather than inside the semantic
-/// resolver. Familiarity is rebuildable evidence, so the underlying Service and
-/// every non-V2 consumer keep the same canonical resolution semantics.
+/// Familiarity is rebuildable evidence and therefore belongs at the
+/// host/application boundary rather than inside canonical resolution.
 struct V2SurfaceService<'a> {
     service: &'a mut Service,
 }
@@ -110,9 +68,6 @@ impl PaletteBackend for V2SurfaceService<'_> {
     fn familiarity(&self) -> Result<Option<FamiliarityStore>> {
         match replay_familiarity(self.service.index())? {
             FamiliarityReplay::Loaded { store, .. } => Ok(Some(store)),
-            // Schema evolution invalidates only the learned influence. The user
-            // still gets the canonical navigation field and can inspect/reset the
-            // old event evidence independently.
             FamiliarityReplay::Invalidated { .. } => Ok(None),
         }
     }
@@ -155,23 +110,8 @@ impl PaletteBackend for V2SurfaceService<'_> {
     }
 }
 
-impl SurfaceBackend for V2SurfaceService<'_> {
-    fn surface_tree(&self) -> Result<aikit_tui::tree::TreeState> {
-        <Service as SurfaceBackend>::surface_tree(self.service)
-    }
-
-    fn apply_tree_effect(&mut self, effect: TreeEffect) -> Result<()> {
-        <Service as SurfaceBackend>::apply_tree_effect(self.service, effect)
-    }
-}
-
 /// Build a terminal profile from an environment lookup and the `--fullscreen`
 /// flag.
-///
-/// A very small terminal is *not* forced fullscreen here — that escalation is
-/// [`UiHost::choose`]'s call, which knows the inline minimum. What this function
-/// contributes is the raw facts: the size, whether a multiplexer is present, and
-/// whether the user explicitly asked for fullscreen.
 pub fn terminal_profile<F>(env: F, fullscreen: bool) -> TerminalProfile
 where
     F: Fn(&str) -> Option<String>,
@@ -191,23 +131,24 @@ where
     profile
 }
 
-/// Best-effort terminal size: the real `COLUMNS`/`LINES` the shell exports, else a
-/// conventional 80×24. The palette re-measures on its own backend at draw time;
-/// this only seeds the host choice.
 fn terminal_size<F>(env: &F) -> (u16, u16)
 where
     F: Fn(&str) -> Option<String>,
 {
     let parse = |key: &str, default: u16| {
         env(key)
-            .and_then(|v| v.trim().parse::<u16>().ok())
-            .filter(|n| *n > 0)
+            .and_then(|value| value.trim().parse::<u16>().ok())
+            .filter(|value| *value > 0)
             .unwrap_or(default)
     };
     (parse("COLUMNS", 80), parse("LINES", 24))
 }
 
-/// Open the one continuous palette/tree surface over a single live service.
+/// Open the final V2 application surface over one live service.
+///
+/// `opening_tree` is retained as an external CLI flag for compatibility, but its
+/// meaning is now "open Explore with the Tree projection of the one relation read
+/// model". It does not instantiate `TreeState` or `TreeController`.
 pub fn run_surface(
     service: &mut Service,
     query: Option<String>,
@@ -216,24 +157,24 @@ pub fn run_surface(
 ) -> Result<PaletteOutcome> {
     let profile = terminal_profile(|key| std::env::var(key).ok(), fullscreen);
     let host = UiHost::choose(&profile);
-    let mut request = SurfaceRequest::new(host);
+    let mut request = ApplicationSurfaceRequest::new(host);
     if let Some(query) = query {
         request = request.with_query(query);
     }
     if opening_tree {
-        request = request.opening_tree();
+        request = request.opening_relations(RelationView::Tree);
     }
     let mut backend = V2SurfaceService::new(service);
-    aikit_tui::surface::run_on_terminal(&mut backend, request)
+    aikit_tui::application_surface::run_on_terminal(&mut backend, request)
 }
 
-/// Open the palette over the service and run it to completion.
+/// Explicit compatibility palette entry point.
 pub fn run(
     service: &mut Service,
     query: Option<String>,
     fullscreen: bool,
 ) -> Result<PaletteOutcome> {
-    let profile = terminal_profile(|k| std::env::var(k).ok(), fullscreen);
+    let profile = terminal_profile(|key| std::env::var(key).ok(), fullscreen);
     let host = UiHost::choose(&profile);
     let mut request = PaletteRequest::new(host);
     if let Some(query) = query {
@@ -242,13 +183,15 @@ pub fn run(
     aikit_tui::run(service, request)
 }
 
-/// Open the exact palette row and immediately hand it to its natural action.
+/// Open the exact compatibility palette row and immediately hand it to its
+/// natural action. This remains until the external activation path is translated
+/// to ResourceRef-native Actions.
 pub fn run_activation(
     service: &mut Service,
     query: String,
     fullscreen: bool,
 ) -> Result<PaletteOutcome> {
-    let profile = terminal_profile(|k| std::env::var(k).ok(), fullscreen);
+    let profile = terminal_profile(|key| std::env::var(key).ok(), fullscreen);
     let host = UiHost::choose(&profile);
     aikit_tui::run(
         service,
@@ -258,9 +201,10 @@ pub fn run_activation(
     )
 }
 
-/// Open the organising tree over the same live service as the palette.
+/// Explicit compatibility standalone tree entry point. `aikit ui --tree` no
+/// longer uses this path.
 pub fn run_tree(service: &Service, fullscreen: bool) -> Result<TreeOutcome> {
-    let profile = terminal_profile(|k| std::env::var(k).ok(), fullscreen);
+    let profile = terminal_profile(|key| std::env::var(key).ok(), fullscreen);
     let host = UiHost::choose(&profile);
     let state = crate::tree_build::build(service)?;
     let scope = service.descriptor().default_mutation_scope();
