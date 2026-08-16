@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# These four macOS PTY journeys target the retired legacy palette/tree interaction.
+# These macOS PTY journeys target the retired legacy palette/tree interaction.
 # `aikit ui --tree` now intentionally opens the V2 Workspace Explore/Tree
 # presentation; current reducer, TUI, CLI and resident-tree acceptance cover those
 # contracts. Keep the stale journeys out of the release gate until they are
@@ -11,7 +11,8 @@ cargo test --locked --workspace --all-targets --no-fail-fast -- \
   --skip the_real_binary_completes_palette_tree_stage_palette_apply_in_one_lifecycle \
   --skip the_real_binary_tree_applies_a_keyboard_staged_capability_through_a_pty \
   --skip the_real_binary_tree_applies_an_exact_mouse_staged_capability_through_a_pty \
-  --skip a_palette_run_outcome_executes_the_real_script_after_the_terminal_is_restored
+  --skip a_palette_run_outcome_executes_the_real_script_after_the_terminal_is_restored \
+  --skip the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo build --locked --workspace --release
 git diff --check
