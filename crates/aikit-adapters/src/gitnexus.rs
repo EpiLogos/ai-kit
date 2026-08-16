@@ -8,8 +8,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use aikit_core::knowledge_code::{
-    CodeContext, CodeImpact, CodeIndexCapabilities, CodeIndexProvider, CodeIndexStatus,
-    CodeReference, CodeSearchHit, CodeTrace, GITNEXUS_TESTED_VERSION,
+    CodeChanges, CodeContext, CodeImpact, CodeIndexCapabilities, CodeIndexProvider,
+    CodeIndexStatus, CodeReference, CodeSearchHit, CodeStructuralCheck, CodeTrace,
+    GITNEXUS_TESTED_VERSION,
 };
 use aikit_core::resource::{ProviderRef, SourceRef, SourceRevision};
 use aikit_core::{AikitError, Result};
@@ -28,6 +29,8 @@ struct GitNexusCliSurface {
     trace: bool,
     detect_changes: bool,
     structural_check: bool,
+    cypher: bool,
+    pdg_impact: bool,
     reason: Option<String>,
 }
 
@@ -213,11 +216,15 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
             trace: self.cli.available && self.cli.trace,
             detect_changes: self.cli.available && self.cli.detect_changes,
             structural_check: self.cli.available && self.cli.structural_check,
+            cypher: self.cli.available && self.cli.cypher,
+            pdg_impact: self.cli.available && self.cli.pdg_impact,
             structured_output: self.cli.available
                 && self.cli.search
                 && self.cli.context
                 && self.cli.impact
-                && self.cli.trace,
+                && self.cli.trace
+                && self.cli.detect_changes
+                && self.cli.structural_check,
         }
     }
 
@@ -343,6 +350,52 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
             detail,
         })
     }
+
+    fn detect_changes(&self, scope: &str, base_ref: Option<&str>) -> Result<CodeChanges> {
+        self.require_capability(self.cli.detect_changes, "detect-changes")?;
+        self.require_indexed()?;
+        if !matches!(scope, "unstaged" | "staged" | "all" | "branch") {
+            return Err(AikitError::new(
+                "knowledge.gitnexus_change_scope",
+                "GitNexus change scope must be unstaged, staged, all, or branch",
+            )
+            .with("scope", scope.to_string()));
+        }
+        let mut args = vec![
+            "detect-changes".into(),
+            "--scope".into(),
+            scope.into(),
+            "--repo".into(),
+            self.repo_name.clone(),
+        ];
+        if let Some(base_ref) = base_ref {
+            args.extend(["--base-ref".into(), base_ref.into()]);
+        }
+        Ok(CodeChanges {
+            provider: self.provider.clone(),
+            scope: scope.into(),
+            base_ref: base_ref.map(str::to_string),
+            detail: self.run_json(&args, "knowledge.gitnexus_detect_changes_failed")?,
+        })
+    }
+
+    fn structural_check(&self) -> Result<CodeStructuralCheck> {
+        self.require_capability(self.cli.structural_check, "check")?;
+        self.require_indexed()?;
+        Ok(CodeStructuralCheck {
+            provider: self.provider.clone(),
+            detail: self.run_json(
+                &[
+                    "check".into(),
+                    "--cycles".into(),
+                    "--json".into(),
+                    "--repo".into(),
+                    self.repo_name.clone(),
+                ],
+                "knowledge.gitnexus_check_failed",
+            )?,
+        })
+    }
 }
 
 fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> GitNexusCliSurface {
@@ -350,38 +403,15 @@ fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> GitNexusCliSurfac
     let version_output = match runner.run(&version_argv) {
         Ok(output) if output.ok() => output,
         Ok(output) => {
-            return GitNexusCliSurface {
-                available: false,
-                version: None,
-                index: false,
-                search: false,
-                context: false,
-                impact: false,
-                trace: false,
-                detect_changes: false,
-                structural_check: false,
-                reason: Some(format!(
-                    "gitnexus --version exited with status {}",
-                    output.status
-                )),
-            }
+            return unavailable_surface(format!(
+                "gitnexus --version exited with status {}",
+                output.status
+            ))
         }
-        Err(error) => {
-            return GitNexusCliSurface {
-                available: false,
-                version: None,
-                index: false,
-                search: false,
-                context: false,
-                impact: false,
-                trace: false,
-                detect_changes: false,
-                structural_check: false,
-                reason: Some(error.to_string()),
-            }
-        }
+        Err(error) => return unavailable_surface(error.to_string()),
     };
-    let help = probe_help(runner, binary);
+    let help = probe_help(runner, binary, &["--help"]);
+    let impact_help = probe_help(runner, binary, &["impact", "--help"]);
     GitNexusCliSurface {
         available: true,
         version: parse_version(&format!("{} {}", version_output.stdout, version_output.stderr)),
@@ -392,12 +422,32 @@ fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> GitNexusCliSurfac
         trace: help.contains("trace"),
         detect_changes: help.contains("detect-changes") || help.contains("detect_changes"),
         structural_check: help.contains("check"),
+        cypher: help.contains("cypher"),
+        pdg_impact: impact_help.contains("--mode") && impact_help.contains("pdg"),
         reason: None,
     }
 }
 
-fn probe_help<R: CommandRunner>(runner: &R, binary: &str) -> String {
-    let argv = vec![binary.to_string(), "--help".into()];
+fn unavailable_surface(reason: String) -> GitNexusCliSurface {
+    GitNexusCliSurface {
+        available: false,
+        version: None,
+        index: false,
+        search: false,
+        context: false,
+        impact: false,
+        trace: false,
+        detect_changes: false,
+        structural_check: false,
+        cypher: false,
+        pdg_impact: false,
+        reason: Some(reason),
+    }
+}
+
+fn probe_help<R: CommandRunner>(runner: &R, binary: &str, args: &[&str]) -> String {
+    let mut argv = vec![binary.to_string()];
+    argv.extend(args.iter().map(|arg| (*arg).to_string()));
     runner
         .run(&argv)
         .ok()
@@ -470,13 +520,16 @@ mod tests {
                 .on("gitnexus --version", "1.6.9\n")
                 .on(
                     "gitnexus --help",
-                    "analyze query context impact trace detect-changes check\n",
+                    "analyze query context impact trace detect-changes check cypher\n",
                 )
+                .on("gitnexus impact --help", "--mode <callgraph|pdg>\n")
                 .on("analyze /tmp/project", "Indexed\n")
                 .on("query auth", query)
                 .on("context login", r#"{"symbol":{"name":"login"}}"#)
                 .on("impact login", r#"{"risk":"LOW"}"#)
-                .on("trace login validate", r#"{"status":"found","path":[]}"#),
+                .on("trace login validate", r#"{"status":"found","path":[]}"#)
+                .on("detect-changes", r#"{"changed_symbols":[],"affected_processes":[]}"#)
+                .on("check --cycles --json", r#"{"status":"clean","cycles":[]}"#),
         )
     }
 
@@ -500,6 +553,10 @@ mod tests {
         assert!(status.capabilities.context);
         assert!(status.capabilities.impact);
         assert!(status.capabilities.trace);
+        assert!(status.capabilities.detect_changes);
+        assert!(status.capabilities.structural_check);
+        assert!(status.capabilities.cypher);
+        assert!(status.capabilities.pdg_impact);
     }
 
     #[test]
@@ -518,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn context_impact_and_trace_bind_by_source_path_and_symbol() {
+    fn context_impact_trace_changes_and_checks_bind_to_current_cli() {
         let calls = runner("{}");
         let observed = Arc::clone(&calls);
         let mut provider = GitNexusCodeIndexProvider::new(
@@ -544,6 +601,8 @@ mod tests {
         provider.context(&login).unwrap();
         provider.impact(&login, "upstream").unwrap();
         provider.trace(&login, &validate).unwrap();
+        provider.detect_changes("branch", Some("main")).unwrap();
+        provider.structural_check().unwrap();
         let lines = observed.call_lines();
         assert!(lines.iter().any(|line| {
             line.contains("context login --file src/auth.rs --repo demo")
@@ -553,6 +612,12 @@ mod tests {
         }));
         assert!(lines.iter().any(|line| {
             line.contains("trace login validate --from-file src/auth.rs --to-file src/validate.rs --repo demo")
+        }));
+        assert!(lines.iter().any(|line| {
+            line.contains("detect-changes --scope branch --repo demo --base-ref main")
+        }));
+        assert!(lines.iter().any(|line| {
+            line.contains("check --cycles --json --repo demo")
         }));
     }
 }
