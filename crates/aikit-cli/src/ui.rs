@@ -1,10 +1,9 @@
-//! Hosting AIKit's terminal surfaces.
+//! Hosting AIKit's terminal application surface.
 //!
-//! Placement remains a CLI concern; semantic operation belongs to shared
-//! application services. The shipped `aikit ui` path now hosts the reducer-native
-//! V2 application surface directly. The standalone legacy palette/tree entry
-//! points remain only for explicit compatibility commands while #59 removes or
-//! replaces their final callers.
+//! Placement remains a CLI concern; semantic operation belongs to the shared V2
+//! application service. Every interactive CLI entry point delegates to the same
+//! reducer-native ApplicationSurface. No CLI path instantiates the retired
+//! Palette/Tree semantic controllers.
 
 use std::path::PathBuf;
 
@@ -14,7 +13,7 @@ use aikit_core::resolve::ResolvedView;
 use aikit_core::resource::ResourceSearchIndex;
 use aikit_core::scope::{ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
-use aikit_core::{AikitError, FamiliarityObservation, FamiliarityStore, Result};
+use aikit_core::{FamiliarityObservation, FamiliarityStore, Result};
 
 use aikit_store::{
     familiarity_observation_event, replay_familiarity, EventRecorder, FamiliarityReplay,
@@ -24,10 +23,7 @@ use aikit_tui::application::RelationView;
 use aikit_tui::application_surface::ApplicationSurfaceRequest;
 use aikit_tui::backend::{JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle};
 use aikit_tui::host::{TerminalProfile, UiHost};
-use aikit_tui::surface::SurfaceBackend;
-use aikit_tui::tree::{TreeEffect, TreeState};
-use aikit_tui::tree_driver::{TreeOutcome, TreeRequest};
-use aikit_tui::{PaletteOutcome, PaletteRequest};
+use aikit_tui::PaletteOutcome;
 
 use crate::app::Service;
 
@@ -112,47 +108,6 @@ impl PaletteBackend for V2SurfaceService<'_> {
     }
 }
 
-/// Compatibility bridge for the resident legacy tree controller.
-///
-/// The final `aikit ui` path does not use this controller, but the explicit
-/// compatibility surface still delegates to the same live tree builder and the
-/// same reversible skill-set Procedures rather than acquiring a second mutation
-/// implementation.
-impl SurfaceBackend for Service {
-    fn surface_tree(&self) -> Result<TreeState> {
-        crate::tree_build::build(self)
-    }
-
-    fn apply_tree_effect(&mut self, effect: TreeEffect) -> Result<()> {
-        let procedure = match effect {
-            TreeEffect::CreateSet { set } => {
-                aikit_store::skillsets::plan_create(self.home(), &set, &[], &[])?
-            }
-            TreeEffect::RenameSet { from, to } => {
-                aikit_store::skillsets::plan_rename(self.home(), &from, &to)?
-            }
-            TreeEffect::DeleteSet { set } => {
-                let (procedure, _) = aikit_store::skillsets::plan_delete(self.home(), &set)?;
-                procedure
-            }
-            TreeEffect::AddToSet { set, capsule } => {
-                aikit_store::skillsets::plan_add(self.home(), &set, &[capsule])?
-            }
-            TreeEffect::RemoveFromSet { set, capsule } => {
-                aikit_store::skillsets::plan_remove(self.home(), &set, &[capsule])?
-            }
-            TreeEffect::Activate { capsule } => {
-                return Err(AikitError::new(
-                    "surface.activation_not_tree_mutation",
-                    format!("{capsule} activation is handled by the palette action lane"),
-                ));
-            }
-        };
-        aikit_store::procedure::ProcedureRunner::new(self.home()).run(&procedure)?;
-        Ok(())
-    }
-}
-
 /// Build a terminal profile from an environment lookup and the `--fullscreen`
 /// flag.
 pub fn terminal_profile<F>(env: F, fullscreen: bool) -> TerminalProfile
@@ -189,9 +144,9 @@ where
 
 /// Open the final V2 application surface over one live service.
 ///
-/// `opening_tree` is retained as an external CLI flag for compatibility, but its
-/// meaning is now "open Explore with the Tree projection of the one relation read
-/// model". It does not instantiate `TreeState` or `TreeController`.
+/// `opening_tree` is retained as a user-facing CLI option, but its meaning is
+/// "open Knowledge with the Tree projection of the one relation read model". It
+/// does not instantiate TreeState or a separate tree controller.
 pub fn run_surface(
     service: &mut Service,
     query: Option<String>,
@@ -211,60 +166,12 @@ pub fn run_surface(
     aikit_tui::application_surface::run_on_terminal(&mut backend, request)
 }
 
-/// Explicit compatibility palette entry point.
+/// Compatibility helper for callers that historically asked to "open the
+/// palette". The behavior is now exactly the final ApplicationSurface.
 pub fn run(
     service: &mut Service,
     query: Option<String>,
     fullscreen: bool,
 ) -> Result<PaletteOutcome> {
-    let profile = terminal_profile(|key| std::env::var(key).ok(), fullscreen);
-    let host = UiHost::choose(&profile);
-    let mut request = PaletteRequest::new(host);
-    if let Some(query) = query {
-        request = request.with_query(query);
-    }
-    aikit_tui::run(service, request)
-}
-
-/// Open the exact compatibility palette row and immediately hand it to its
-/// natural action. This remains until the external activation path is translated
-/// to ResourceRef-native Actions.
-pub fn run_activation(
-    service: &mut Service,
-    query: String,
-    fullscreen: bool,
-) -> Result<PaletteOutcome> {
-    let profile = terminal_profile(|key| std::env::var(key).ok(), fullscreen);
-    let host = UiHost::choose(&profile);
-    aikit_tui::run(
-        service,
-        PaletteRequest::new(host)
-            .with_query(query)
-            .activating_initial(),
-    )
-}
-
-/// Explicit compatibility standalone tree entry point. `aikit ui --tree` no
-/// longer uses this path.
-pub fn run_tree(service: &Service, fullscreen: bool) -> Result<TreeOutcome> {
-    let profile = terminal_profile(|key| std::env::var(key).ok(), fullscreen);
-    let host = UiHost::choose(&profile);
-    let state = crate::tree_build::build(service)?;
-    let scope = service.descriptor().default_mutation_scope();
-    let mut request = TreeRequest::new(host);
-    if scope.requires_confirmation_to_write() {
-        request = request.with_apply_confirmation(
-            format!("Write staged changes to the {scope} profile?"),
-            match scope {
-                aikit_core::scope::ScopeKind::Global => {
-                    "The User Baseline Profile applies at lowest precedence in every AIKit context."
-                }
-                aikit_core::scope::ScopeKind::Project => {
-                    "<repo>/.aikit/profile.toml is committed and affects every collaborator."
-                }
-                _ => "This change is durable.",
-            },
-        );
-    }
-    aikit_tui::run_tree(state, request)
+    run_surface(service, query, fullscreen, false)
 }
