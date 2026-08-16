@@ -14,7 +14,7 @@ use aikit_core::resolve::ResolvedView;
 use aikit_core::resource::ResourceSearchIndex;
 use aikit_core::scope::{ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
-use aikit_core::{FamiliarityObservation, FamiliarityStore, Result};
+use aikit_core::{AikitError, FamiliarityObservation, FamiliarityStore, Result};
 
 use aikit_store::{
     familiarity_observation_event, replay_familiarity, EventRecorder, FamiliarityReplay,
@@ -24,6 +24,8 @@ use aikit_tui::application::RelationView;
 use aikit_tui::application_surface::ApplicationSurfaceRequest;
 use aikit_tui::backend::{JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle};
 use aikit_tui::host::{TerminalProfile, UiHost};
+use aikit_tui::surface::SurfaceBackend;
+use aikit_tui::tree::{TreeEffect, TreeState};
 use aikit_tui::tree_driver::{TreeOutcome, TreeRequest};
 use aikit_tui::{PaletteOutcome, PaletteRequest};
 
@@ -107,6 +109,47 @@ impl PaletteBackend for V2SurfaceService<'_> {
 
     fn open_source(&mut self, id: &CapsuleId) -> Result<PathBuf> {
         <Service as PaletteBackend>::open_source(self.service, id)
+    }
+}
+
+/// Compatibility bridge for the resident legacy tree controller.
+///
+/// The final `aikit ui` path does not use this controller, but the explicit
+/// compatibility surface still delegates to the same live tree builder and the
+/// same reversible skill-set Procedures rather than acquiring a second mutation
+/// implementation.
+impl SurfaceBackend for Service {
+    fn surface_tree(&self) -> Result<TreeState> {
+        crate::tree_build::build(self)
+    }
+
+    fn apply_tree_effect(&mut self, effect: TreeEffect) -> Result<()> {
+        let procedure = match effect {
+            TreeEffect::CreateSet { set } => {
+                aikit_store::skillsets::plan_create(self.home(), &set, &[], &[])?
+            }
+            TreeEffect::RenameSet { from, to } => {
+                aikit_store::skillsets::plan_rename(self.home(), &from, &to)?
+            }
+            TreeEffect::DeleteSet { set } => {
+                let (procedure, _) = aikit_store::skillsets::plan_delete(self.home(), &set)?;
+                procedure
+            }
+            TreeEffect::AddToSet { set, capsule } => {
+                aikit_store::skillsets::plan_add(self.home(), &set, &[capsule])?
+            }
+            TreeEffect::RemoveFromSet { set, capsule } => {
+                aikit_store::skillsets::plan_remove(self.home(), &set, &[capsule])?
+            }
+            TreeEffect::Activate { capsule } => {
+                return Err(AikitError::new(
+                    "surface.activation_not_tree_mutation",
+                    format!("{capsule} activation is handled by the palette action lane"),
+                ));
+            }
+        };
+        aikit_store::procedure::ProcedureRunner::new(self.home()).run(&procedure)?;
+        Ok(())
     }
 }
 
