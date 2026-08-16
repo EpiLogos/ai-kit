@@ -152,10 +152,13 @@ fn explicit_exit_is_refused_while_staged_intent_remains() {
     )
     .unwrap();
 
+    // Non-empty fuzzy search retains ordinary text semantics for Space. Explicit
+    // staging uses Ctrl+Space/Insert and therefore cannot be confused with query
+    // editing.
     surface
         .handle(
             &mut backend,
-            key(KeyCode::Char(' '), KeyModifiers::NONE),
+            key(KeyCode::Char(' '), KeyModifiers::CONTROL),
         )
         .unwrap();
     assert!(!surface.semantic().staged.is_empty());
