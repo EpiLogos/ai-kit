@@ -226,13 +226,15 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
     assert_eq!(assessment.contextual_observations, 1);
 
     // Durable package composition -> immutable Generation on the real store.
-    let generation = service
-        .apply(ApplyRequest {
+    let generation = AikitApplication::apply(
+        &mut service,
+        ApplyRequest {
             scope: ScopeKind::Project,
             toggles: vec![],
             label: Some("prelocal-product-route".into()),
-        })
-        .unwrap();
+        },
+    )
+    .unwrap();
     assert_eq!(
         service.current_generation_properties().get("label").map(String::as_str),
         Some("prelocal-product-route")
