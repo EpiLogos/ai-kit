@@ -1,13 +1,13 @@
 //! V2 typed resource and provider foundation.
 //!
-//! The legacy capsule resolver remains the proven activation mechanism. This
-//! module widens the indexed operational field without claiming ownership of the
-//! external semantics it references.
+//! `ResourceRef` / `ResourceRecord` own application identity. Package formats such
+//! as Capsule remain source/catalog concerns and may be translated only at their
+//! ingestion boundary; canonical resource semantics do not depend on a Capsule
+//! conversion shim.
 
 mod action_search;
 mod factory;
 mod index;
-mod legacy;
 mod model;
 mod refs;
 mod search;
