@@ -3,7 +3,6 @@
 mod common;
 
 use common::plan_from;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use aikit_adapters::mux::tmux::Tmux;
