@@ -149,7 +149,7 @@ mod tests {
             resolution.host,
             Some(ReferenceResolution::Resolved { .. })
         ));
-        assert_eq!(resolution.project_binding.project.to_string(), "project:aikit");
+        assert_eq!(resolution.project_binding.project.as_str(), "project:aikit");
     }
 
     #[test]
