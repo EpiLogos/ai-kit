@@ -16,7 +16,7 @@
 //!   registries/<name>/capsules/... profiles/...
 //!   profiles/<group>/<name>.toml
 //!   inbox/{ready,quarantine,rejected}/
-//!   state/{aikit.sqlite3,contexts/,sessions/,locks/,trust/}
+//!   state/{aikit.sqlite3,contexts/,sessions/,locks/,trust/,credentials/}
 //!   cache/
 //!   logs/events.jsonl
 //! ```
@@ -148,6 +148,12 @@ impl AikitHome {
         self.state().join("trust")
     }
 
+    /// Provider-neutral credential binding metadata. Raw secrets never live here;
+    /// native providers retain them in their own secure stores.
+    pub fn credentials(&self) -> PathBuf {
+        self.state().join("credentials")
+    }
+
     pub fn event_log(&self) -> PathBuf {
         self.logs().join("events.jsonl")
     }
@@ -204,6 +210,7 @@ impl AikitHome {
             self.sessions(),
             self.locks(),
             self.trust_dir(),
+            self.credentials(),
             self.cache(),
             self.logs(),
         ] {
