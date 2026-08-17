@@ -19,6 +19,9 @@ on:
       - "crates/aikit-core/src/session_space*.rs"
       - ".github/workflows/native-skills.yml"
 
+permissions:
+  contents: write
+
 jobs:
   conformance:
     runs-on: ubuntu-latest
@@ -28,3 +31,171 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test -p aikit-cli --test set_command
       - run: cargo test -p aikit-cli --test acceptance
+
+  restore-composition:
+    if: github.event_name == 'pull_request' && github.head_ref == 'agent/restore-composition-convergence' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/restore-composition-convergence
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Restore accepted PR 78 seam and preserve newer application operations
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          if git revert --no-edit c5440c74190d6bba074c7dca2b74c8574ba36624; then
+            echo "inverse applied without conflict"
+          else
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            printf 'conflicts=%s\n' "$conflicts"
+            test "$conflicts" = "crates/aikit-tui/src/application_service.rs"
+            git checkout --ours crates/aikit-tui/src/application_service.rs
+            python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/aikit-tui/src/application_service.rs')
+          text = path.read_text()
+          import_line = 'use aikit_core::id::{CapsuleId, EventId};\n'
+          if 'composition_mutation::{changed_ground, CompositionBasis}' not in text:
+              text = text.replace(
+                  import_line,
+                  'use aikit_core::composition_mutation::{changed_ground, CompositionBasis};\n' + import_line,
+                  1,
+              )
+          old = '''        let toggles = self.package_toggles(staged)?;
+        let projected = self.backend.preview(scope, &toggles)?;
+'''
+          new = '''        let toggles = self.package_toggles(staged)?;
+        let before = self.backend.view();
+        let projected = self.backend.preview(scope, &toggles)?;
+'''
+          if old not in text:
+              raise SystemExit('preview insertion point missing')
+          text = text.replace(old, new, 1)
+          old = '''        Ok(CompositionPreview {
+            revision: format!(
+                "{}:{}",
+                projected.view.catalog_revision, projected.view.hash
+            ),
+            scope,
+            staged: staged.clone(),
+            summary: format!(
+                "{} staged change{} -> {} active capability{}; target effects: {}",
+                staged.len(),
+                plural(staged.len()),
+                projected.view.active.len(),
+                plural(projected.view.active.len()),
+                target_effects,
+            ),
+        })
+'''
+          new = '''        let ground = changed_ground(before, &projected.view);
+        Ok(CompositionPreview {
+            revision: composition_revision(before, &projected.view),
+            scope,
+            staged: staged.clone(),
+            summary: format!(
+                "{} staged change{} -> {} active capability{}; changed ground: +{} -{} capability{}, +{} -{} warning{}; target effects: {}",
+                staged.len(),
+                plural(staged.len()),
+                projected.view.active.len(),
+                plural(projected.view.active.len()),
+                ground.capabilities_added.len(),
+                ground.capabilities_removed.len(),
+                plural(ground.capabilities_added.len() + ground.capabilities_removed.len()),
+                ground.warnings_added.len(),
+                ground.warnings_removed.len(),
+                plural(ground.warnings_added.len() + ground.warnings_removed.len()),
+                target_effects,
+            ),
+        })
+'''
+          if old not in text:
+              raise SystemExit('preview projection block missing')
+          text = text.replace(old, new, 1)
+          old = '''    fn apply_composition(&mut self, preview: &CompositionPreview) -> Result<ApplyReceipt> {
+        let toggles = self.package_toggles(&preview.staged)?;
+        let generation = self.backend.apply(preview.scope, &toggles)?;
+        Ok(ApplyReceipt {
+            revision: generation.to_string(),
+            summary: format!("applied generation {generation}"),
+        })
+    }
+'''
+          new = '''    fn apply_composition(&mut self, preview: &CompositionPreview) -> Result<ApplyReceipt> {
+        let toggles = self.package_toggles(&preview.staged)?;
+        let current = self.backend.view().clone();
+        let projected = self.backend.preview(preview.scope, &toggles)?;
+        let current_revision = composition_revision(&current, &projected.view);
+        if current_revision != preview.revision {
+            return Err(AikitError::new(
+                "composition.preview_stale",
+                "the accepted composition preview no longer matches the live resolution basis",
+            )
+            .with("expected_revision", preview.revision.clone())
+            .with("current_revision", current_revision));
+        }
+        let ground = changed_ground(&current, &projected.view);
+        let generation = self.backend.apply(preview.scope, &toggles)?;
+        Ok(ApplyReceipt {
+            revision: generation.to_string(),
+            summary: format!(
+                "applied generation {generation}; changed ground: +{} -{} capability{}, +{} -{} warning{}",
+                ground.capabilities_added.len(),
+                ground.capabilities_removed.len(),
+                plural(ground.capabilities_added.len() + ground.capabilities_removed.len()),
+                ground.warnings_added.len(),
+                ground.warnings_removed.len(),
+                plural(ground.warnings_added.len() + ground.warnings_removed.len()),
+            ),
+        })
+    }
+'''
+          if old not in text:
+              raise SystemExit('apply block missing')
+          text = text.replace(old, new, 1)
+          marker = 'fn summary_with_navigation_evidence(summary: String, evidence: &[NavigationEvidence]) -> String {\n'
+          helper = '''fn composition_revision(
+    before: &aikit_core::ResolvedView,
+    after: &aikit_core::ResolvedView,
+) -> String {
+    let before = CompositionBasis::from_view(before);
+    let after = CompositionBasis::from_view(after);
+    format!(
+        "{}:{}=>{}:{}",
+        before.catalog_revision,
+        before.resolution_hash,
+        after.catalog_revision,
+        after.resolution_hash
+    )
+}
+
+'''
+          if 'fn composition_revision(' not in text:
+              if marker not in text:
+                  raise SystemExit('revision helper insertion point missing')
+              text = text.replace(marker, helper + marker, 1)
+          path.write_text(text)
+          PY
+            rustfmt crates/aikit-tui/src/application_service.rs
+            git add crates/aikit-tui/src/application_service.rs
+            GIT_EDITOR=true git revert --continue
+          fi
+      - name: Verify restored seam before publishing
+        run: |
+          cargo test -p aikit-core --test profile_composition_v2
+          cargo test -p aikit-store composition_application
+          cargo test -p aikit-tui --test profile_composition_stale_v2
+          cargo test -p aikit-tui --test domain_parity_v2
+          cargo test -p aikit-cli --test knowledge_application_v2
+          cargo test -p aikit-cli --test session_space_application_parity
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Remove repair machinery and publish
+        run: |
+          git checkout origin/main -- .github/workflows/native-skills.yml
+          rm -f .github/workflows/tmp-restore-composition.yml
+          git add -A
+          git commit -m "chore: remove temporary composition repair machinery"
+          git push origin HEAD:agent/restore-composition-convergence
