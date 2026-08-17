@@ -61,7 +61,6 @@ pub mod search;
 pub mod session;
 pub mod session_space;
 pub mod session_space_contribution;
-pub mod session_space_observation;
 pub mod skillset;
 pub mod surfacing;
 pub mod trust;
