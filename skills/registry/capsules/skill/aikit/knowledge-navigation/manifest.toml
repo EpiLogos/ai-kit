@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/knowledge-navigation"
+kind = "skill"
+name = "AIKit Context and Knowledge Navigation"
+description = "Operate AIKit Context, knowledge-source pools, navigation, ProjectMap/wiki and progressive retrieval."
+maturity = "stable"
+tags = ["aikit", "context", "knowledge"]
+
+[skill]
+root = "payload"

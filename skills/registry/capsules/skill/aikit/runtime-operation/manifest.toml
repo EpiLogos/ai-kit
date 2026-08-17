@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/runtime-operation"
+kind = "skill"
+name = "AIKit models, harnesses and SessionSpace"
+description = "Inspect and operate eligible models, harness composition, sessions and SessionSpace through AIKit's resolved execution surfaces."
+maturity = "stable"
+tags = ["aikit", "models", "harness", "session-space"]
+
+[skill]
+root = "payload"

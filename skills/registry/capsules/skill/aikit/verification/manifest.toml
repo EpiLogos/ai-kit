@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/verification"
+kind = "skill"
+name = "AIKit verification and conformance"
+description = "Run AIKit structural, resolution, projection, provider and application conformance with inspectable provenance."
+maturity = "stable"
+tags = ["aikit", "verification", "conformance"]
+
+[skill]
+root = "payload"

@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/operation"
+kind = "skill"
+name = "AIKit operation and Wayfinder"
+description = "Operate AIKit context, resolution, Wayfinder and projection surfaces without bypassing trust or authority."
+maturity = "stable"
+tags = ["aikit", "operation", "wayfinder"]
+
+[skill]
+root = "payload"

@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/provider-authoring"
+kind = "skill"
+name = "AIKit provider SDK authoring"
+description = "Author AIKit providers/adapters through public contracts with registry, trust and conformance evidence."
+maturity = "stable"
+tags = ["aikit", "provider", "sdk"]
+
+[skill]
+root = "payload"
