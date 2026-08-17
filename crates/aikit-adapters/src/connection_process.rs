@@ -124,7 +124,7 @@ impl ConnectionProcess {
                 format!("target `{}` closed stdout", self.argv.join(" ")),
             ));
         }
-        Ok(line.trim_end_matches(['\r', '\n']).to_string())
+        Ok(line.trim_end_matches(|c| c == '\r' || c == '\n').to_string())
     }
 
     pub fn is_running(&mut self) -> Result<bool> {
@@ -137,6 +137,36 @@ impl ConnectionProcess {
                     format!("could not inspect `{}`: {error}", self.argv.join(" ")),
                 )
             })
+    }
+
+    /// Interrupt a real classic child without changing connection semantics into
+    /// process semantics. The adapter decides that a command means `interrupt`;
+    /// this transport maps that command to the host's ordinary SIGINT mechanism.
+    #[cfg(unix)]
+    pub fn interrupt(&mut self) -> Result<()> {
+        if !self.is_running()? {
+            return Err(AikitError::new(
+                "connection.process.disconnected",
+                format!("target `{}` is not running", self.argv.join(" ")),
+            ));
+        }
+        let status = Command::new("kill")
+            .arg("-INT")
+            .arg(self.child.id().to_string())
+            .status()
+            .map_err(|error| {
+                AikitError::new(
+                    "connection.process.interrupt_failed",
+                    format!("could not signal `{}`: {error}", self.argv.join(" ")),
+                )
+            })?;
+        if !status.success() {
+            return Err(AikitError::new(
+                "connection.process.interrupt_failed",
+                format!("SIGINT for `{}` exited with {status}", self.argv.join(" ")),
+            ));
+        }
+        Ok(())
     }
 
     /// Terminate the transport process. This says nothing about canonical
