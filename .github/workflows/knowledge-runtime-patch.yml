@@ -20,12 +20,21 @@ jobs:
         uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt
+      - name: Align guarded patch with current ResourceSearchIndex
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('.github/scripts/knowledge_runtime_patch.py')
+          text = p.read_text()
+          start = text.index('# --- core: expose current canonical shallow records')
+          end = text.index('# --- durable operational Knowledge history')
+          p.write_text(text[:start] + text[end:])
+          PY
       - name: Apply production Knowledge integration
         run: python .github/scripts/knowledge_runtime_patch.py
       - name: Format touched Rust files only
         run: |
           rustfmt --edition 2021 \
-            crates/aikit-core/src/resource/search.rs \
             crates/aikit-store/src/events.rs \
             crates/aikit-store/src/knowledge_history.rs \
             crates/aikit-store/src/lib.rs \
