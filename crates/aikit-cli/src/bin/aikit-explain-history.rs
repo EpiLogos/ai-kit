@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use aikit_cli::app::Service;
 use aikit_core::resource::ResourceRef;
-use aikit_core::{AikitError, Result};
+use aikit_core::{AikitError, GenerationId, Result};
 use aikit_tui::{ApplicationService, ExplainHistoryApplicationService};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -30,6 +30,8 @@ enum Command {
         #[arg(long)]
         resource: Option<String>,
     },
+    /// Compare two committed Generation worlds from their immutable locks.
+    CompareGenerations { before: String, after: String },
 }
 
 fn main() {
@@ -58,6 +60,12 @@ fn run() -> Result<()> {
             let resource = resource.as_deref().map(ResourceRef::parse).transpose()?;
             emit(&application.history_evidence(resource.as_ref())?)
         }
+        Command::CompareGenerations { before, after } => emit(
+            &application.compare_generation_evidence(
+                &GenerationId::parse(&before)?,
+                &GenerationId::parse(&after)?,
+            )?,
+        ),
     }
 }
 
