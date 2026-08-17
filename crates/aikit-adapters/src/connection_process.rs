@@ -124,7 +124,7 @@ impl ConnectionProcess {
                 format!("target `{}` closed stdout", self.argv.join(" ")),
             ));
         }
-        Ok(line.trim_end_matches(|c| c == '\r' || c == '\n').to_string())
+        Ok(line.trim_end_matches(['\r', '\n']).to_string())
     }
 
     pub fn is_running(&mut self) -> Result<bool> {
