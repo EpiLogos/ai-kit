@@ -148,13 +148,21 @@ fn durable_mutations_history_and_provider_loss_share_one_authority() {
     let detached_agent = store.apply(&detach_agent).unwrap();
     assert!(!detached_agent.after.agent_sessions.contains_key(&agent));
 
-    let comparison = store
+    let broad_comparison = store
         .compare_history(&space, agent_receipt.sequence, detached_agent.sequence)
         .unwrap();
-    assert!(comparison.agent_session_intent_changed);
-    assert!(comparison.surface_intent_changed);
-    assert!(comparison.native_reference_changed);
-    assert!(comparison.focus_changed);
+    assert!(broad_comparison.agent_session_intent_changed);
+    assert!(broad_comparison.native_reference_changed);
+    assert!(!broad_comparison.focus_changed);
+
+    let surface_comparison = store
+        .compare_history(
+            &space,
+            surface_receipt.sequence,
+            detached_surface.sequence,
+        )
+        .unwrap();
+    assert!(surface_comparison.surface_intent_changed);
 
     let explanation =
         explain_session_space_with_receipts(&store, &space, Some(returned)).unwrap();
