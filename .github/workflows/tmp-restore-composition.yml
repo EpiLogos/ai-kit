@@ -34,14 +34,9 @@ jobs:
           from pathlib import Path
           path = Path('crates/aikit-tui/src/application_service.rs')
           text = path.read_text()
-
           old = 'use aikit_core::id::{CapsuleId, EventId};\n'
-          new = 'use aikit_core::composition_mutation::{changed_ground, CompositionBasis};\n' + old
           if 'composition_mutation::{changed_ground, CompositionBasis}' not in text:
-              if old not in text:
-                  raise SystemExit('composition import insertion point missing')
-              text = text.replace(old, new, 1)
-
+              text = text.replace(old, 'use aikit_core::composition_mutation::{changed_ground, CompositionBasis};\n' + old, 1)
           old = '''        let toggles = self.package_toggles(staged)?;
         let projected = self.backend.preview(scope, &toggles)?;
         let target_effects = if projected.effects.is_empty() {
@@ -51,10 +46,8 @@ jobs:
         let projected = self.backend.preview(scope, &toggles)?;
         let target_effects = if projected.effects.is_empty() {
 '''
-          if old not in text:
-              raise SystemExit('preview before insertion point missing')
+          if old not in text: raise SystemExit('preview insertion point missing')
           text = text.replace(old, new, 1)
-
           old = '''        Ok(CompositionPreview {
             revision: format!(
                 "{}:{}",
@@ -79,24 +72,16 @@ jobs:
             staged: staged.clone(),
             summary: format!(
                 "{} staged change{} -> {} active capability{}; changed ground: +{} -{} capability{}, +{} -{} warning{}; target effects: {}",
-                staged.len(),
-                plural(staged.len()),
-                projected.view.active.len(),
-                plural(projected.view.active.len()),
-                ground.capabilities_added.len(),
-                ground.capabilities_removed.len(),
+                staged.len(), plural(staged.len()), projected.view.active.len(), plural(projected.view.active.len()),
+                ground.capabilities_added.len(), ground.capabilities_removed.len(),
                 plural(ground.capabilities_added.len() + ground.capabilities_removed.len()),
-                ground.warnings_added.len(),
-                ground.warnings_removed.len(),
-                plural(ground.warnings_added.len() + ground.warnings_removed.len()),
-                target_effects,
+                ground.warnings_added.len(), ground.warnings_removed.len(),
+                plural(ground.warnings_added.len() + ground.warnings_removed.len()), target_effects,
             ),
         })
 '''
-          if old not in text:
-              raise SystemExit('preview projection block missing')
+          if old not in text: raise SystemExit('preview projection block missing')
           text = text.replace(old, new, 1)
-
           old = '''    fn apply_composition(&mut self, preview: &CompositionPreview) -> Result<ApplyReceipt> {
         let toggles = self.package_toggles(&preview.staged)?;
         let generation = self.backend.apply(preview.scope, &toggles)?;
@@ -108,10 +93,6 @@ jobs:
 '''
           new = '''    fn apply_composition(&mut self, preview: &CompositionPreview) -> Result<ApplyReceipt> {
         let toggles = self.package_toggles(&preview.staged)?;
-
-        // Re-run the exact canonical preview immediately before mutation. The
-        // revision contains both before and projected-after bases, so provider,
-        // catalog or resolution drift cannot be applied from a stale acceptance.
         let current = self.backend.view().clone();
         let projected = self.backend.preview(preview.scope, &toggles)?;
         let current_revision = composition_revision(&current, &projected.view);
@@ -129,22 +110,17 @@ jobs:
             revision: generation.to_string(),
             summary: format!(
                 "applied generation {generation}; changed ground: +{} -{} capability{}, +{} -{} warning{}",
-                ground.capabilities_added.len(),
-                ground.capabilities_removed.len(),
+                ground.capabilities_added.len(), ground.capabilities_removed.len(),
                 plural(ground.capabilities_added.len() + ground.capabilities_removed.len()),
-                ground.warnings_added.len(),
-                ground.warnings_removed.len(),
+                ground.warnings_added.len(), ground.warnings_removed.len(),
                 plural(ground.warnings_added.len() + ground.warnings_removed.len()),
             ),
         })
     }
 '''
-          if old not in text:
-              raise SystemExit('apply composition block missing')
+          if old not in text: raise SystemExit('apply block missing')
           text = text.replace(old, new, 1)
-
-          marker = '''fn summary_with_navigation_evidence(summary: String, evidence: &[NavigationEvidence]) -> String {
-'''
+          marker = 'fn summary_with_navigation_evidence(summary: String, evidence: &[NavigationEvidence]) -> String {\n'
           helper = '''fn composition_revision(
     before: &aikit_core::ResolvedView,
     after: &aikit_core::ResolvedView,
@@ -153,19 +129,15 @@ jobs:
     let after = CompositionBasis::from_view(after);
     format!(
         "{}:{}=>{}:{}",
-        before.catalog_revision,
-        before.resolution_hash,
-        after.catalog_revision,
-        after.resolution_hash
+        before.catalog_revision, before.resolution_hash,
+        after.catalog_revision, after.resolution_hash
     )
 }
 
 '''
           if 'fn composition_revision(' not in text:
-              if marker not in text:
-                  raise SystemExit('composition revision insertion point missing')
+              if marker not in text: raise SystemExit('revision helper insertion point missing')
               text = text.replace(marker, helper + marker, 1)
-
           path.write_text(text)
           PY
             rustfmt crates/aikit-tui/src/application_service.rs
@@ -181,9 +153,10 @@ jobs:
           cargo test -p aikit-cli --test knowledge_application_v2
           cargo test -p aikit-cli --test session_space_application_parity
           cargo clippy --workspace --all-targets -- -D warnings
-      - name: Remove helper and publish repair
+      - name: Remove repair machinery and publish
         run: |
-          rm .github/workflows/tmp-restore-composition.yml
+          git checkout origin/main -- .github/workflows/native-skills.yml
+          rm -f .github/workflows/tmp-restore-composition.yml
           git add -A
-          git commit -m "fix(v2): restore accepted composition application seam"
+          git commit -m "chore: remove temporary composition repair machinery"
           git push origin HEAD:agent/restore-composition-convergence
