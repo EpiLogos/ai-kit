@@ -45,6 +45,16 @@ crossterm = "0.29"
 nucleo-matcher = "0.3"
 unicode-width = "0.2"
 
+# Credential providers. `keyring` v1 selects only the native store for each
+# target (Keychain / Secret Service / Credential Manager). The fallback crypto
+# is used only on Linux when Secret Service is unavailable and the operator
+# explicitly chooses encrypted local storage.
+keyring = { version = "4.1.5", default-features = true }
+argon2 = "0.5.3"
+chacha20poly1305 = "0.11"
+getrandom = "0.4.3"
+base64 = "0.22.1"
+
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
