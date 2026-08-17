@@ -17,6 +17,7 @@ pub mod cli;
 pub mod client;
 mod cmux_config;
 pub mod collate;
+pub mod credential;
 pub mod discover;
 pub mod doctor;
 pub mod env;
