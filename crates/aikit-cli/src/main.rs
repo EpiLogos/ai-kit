@@ -1344,7 +1344,8 @@ fn executable_path(name: &str) -> Option<String> {
 }
 
 fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
-    use aikit_core::{ForgetScope, KnowledgeAddress, ResourceRef, SourceRef};
+    use aikit_core::resource::{ResourceRef, SourceRef};
+    use aikit_core::{ForgetScope, KnowledgeAddress};
 
     let mut service = Service::discover(cwd)?;
     let mut warnings = diagnostic_warnings(&service);
@@ -1421,7 +1422,8 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
 }
 
 fn parse_knowledge_address(raw: &str) -> Result<aikit_core::KnowledgeAddress> {
-    use aikit_core::{KnowledgeAddress, ResourceRef, SourceRef};
+    use aikit_core::resource::{ResourceRef, SourceRef};
+    use aikit_core::KnowledgeAddress;
 
     let raw = raw.trim();
     if raw.starts_with('{') {

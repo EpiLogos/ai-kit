@@ -1,7 +1,8 @@
 use std::fs;
 
 use aikit_cli::app::Service;
-use aikit_core::{ForgetScope, KnowledgeAddress, ResourceRef, DEFAULT_FAMILIARITY_HALF_LIFE_MS};
+use aikit_core::resource::ResourceRef;
+use aikit_core::{ForgetScope, KnowledgeAddress, DEFAULT_FAMILIARITY_HALF_LIFE_MS};
 use aikit_store::AikitHome;
 use aikit_tui::application::TuiApplicationService;
 use aikit_tui::application_service::ApplicationService;
