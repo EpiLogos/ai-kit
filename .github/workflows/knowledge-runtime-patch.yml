@@ -32,15 +32,46 @@ jobs:
           PY
       - name: Apply production Knowledge integration
         run: python .github/scripts/knowledge_runtime_patch.py
-      - name: Align imports with canonical resource module
+      - name: Align canonical resource-module imports
         run: |
           python - <<'PY'
           from pathlib import Path
+
           p = Path('crates/aikit-store/src/knowledge_history.rs')
           text = p.read_text()
           text = text.replace(
               '    AikitError, FamiliarityContext, KnowledgeContextPack, KnowledgeRoute, KnowledgeRouteStep,\n    ProviderRef, ResourceRef, Result,\n};',
               '    AikitError, FamiliarityContext, KnowledgeContextPack, KnowledgeRoute, KnowledgeRouteStep, Result,\n};\nuse aikit_core::resource::{ProviderRef, ResourceRef};'
+          )
+          p.write_text(text)
+
+          p = Path('crates/aikit-cli/src/knowledge_runtime.rs')
+          text = p.read_text()
+          text = text.replace(
+              '    KnowledgeOperations, KnowledgeRoute, ProjectMap, ResourceRef, Result, SemanticWikiIndex,\n    SemanticWikiProvider,\n};',
+              '    KnowledgeOperations, KnowledgeRoute, ProjectMap, Result, SemanticWikiIndex,\n    SemanticWikiProvider,\n};\nuse aikit_core::resource::{ResourceRef, SourceRef};'
+          )
+          text = text.replace('aikit_core::SourceRef::parse(value)?', 'SourceRef::parse(value)?')
+          p.write_text(text)
+
+          p = Path('crates/aikit-cli/src/app/mod.rs')
+          text = p.read_text().replace(
+              'aikit_core::ResourceRef::parse("surface/aikit/tui")',
+              'aikit_core::resource::ResourceRef::parse("surface/aikit/tui")'
+          )
+          p.write_text(text)
+
+          p = Path('crates/aikit-cli/src/main.rs')
+          text = p.read_text().replace(
+              'aikit_core::ResourceRef::parse("surface/aikit/cli")?',
+              'aikit_core::resource::ResourceRef::parse("surface/aikit/cli")?'
+          )
+          p.write_text(text)
+
+          p = Path('crates/aikit-cli/tests/knowledge_runtime_v2.rs')
+          text = p.read_text().replace(
+              'use aikit_core::{KnowledgeAddress, ResourceRef};',
+              'use aikit_core::KnowledgeAddress;\nuse aikit_core::resource::ResourceRef;'
           )
           p.write_text(text)
           PY
