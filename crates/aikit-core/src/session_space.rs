@@ -5,17 +5,19 @@
 //! distinct from Project, Context, AgentSession, HarnessComposition and any mux /
 //! desktop / terminal projection.
 //!
-//! The runtime in this module owns only AIKit semantic state. A target adapter is
-//! required to prove live activation through [`SessionSpaceActivationDriver`]
-//! before a `LiveMounted` Component can become `Active`.
+//! The runtime in this module owns SessionSpace bindings and observed runtime
+//! readings only. Canonical Project membership is explicit, canonical Surface
+//! identity remains `SurfaceDescriptor`, and admitted `HarnessComposition` bodies
+//! remain resolver-owned desired state. A target adapter is required to prove live
+//! activation through [`SessionSpaceActivationDriver`] before a `LiveMounted`
+//! Component can become `Active`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::composition::{
-    ComponentBinding, CompositionActivationMode, CompositionState, HarnessComposition,
-    SurfaceDescriptor,
+    ComponentBinding, CompositionActivationMode, HarnessComposition, SurfaceDescriptor,
 };
 use crate::resource::ResourceRef;
 use crate::{AikitError, Result};
@@ -51,7 +53,10 @@ impl std::fmt::Display for SessionSpaceRef {
 }
 
 /// Durable, serializable identity/membership declaration. Runtime provider state
-/// is intentionally not persisted here.
+/// is intentionally not persisted here. `projects` is authored SessionSpace
+/// membership; observing a Project on an admitted HarnessComposition never mutates
+/// it. Rich Project/Context-resolution bindings are an application-layer extension
+/// of this explicit relation, not an implicit resolver side effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSpaceDefinition {
     pub version: String,
@@ -72,6 +77,8 @@ impl SessionSpaceDefinition {
         }
     }
 
+    /// Add an explicit authored Project membership relation. This method does not
+    /// resolve Context and is never called implicitly by composition admission.
     #[must_use]
     pub fn with_project(mut self, project: ResourceRef) -> Self {
         self.projects.insert(project);
@@ -168,6 +175,8 @@ pub struct SessionSpaceLease {
     epoch: u64,
 }
 
+/// Observed runtime reading for one canonical Component ref in an AgentSession.
+/// This is not a second Component identity or descriptor family.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSpaceComponent {
     pub agent_session: ResourceRef,
@@ -177,14 +186,21 @@ pub struct SessionSpaceComponent {
     pub state: SessionSpaceActivationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ResourceRef>,
+    /// Exact resolver-owned body against which the latest provider observation was
+    /// made. A changed body fingerprint invalidates prior activation evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_composition_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default)]
     pub provenance: Vec<String>,
 }
 
+/// SessionSpace-local *reading* over the canonical `SurfaceDescriptor`. The
+/// descriptor and ResourceRef remain the Surface identity; this wrapper adds only
+/// AgentSession attribution and observed runtime state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSpaceSurface {
+pub struct SessionSpaceSurfaceReading {
     pub agent_session: ResourceRef,
     pub surface: ResourceRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -229,7 +245,7 @@ pub struct SessionSpaceReadModel {
     #[serde(default)]
     pub components: Vec<SessionSpaceComponent>,
     #[serde(default)]
-    pub surfaces: Vec<SessionSpaceSurface>,
+    pub surfaces: Vec<SessionSpaceSurfaceReading>,
     #[serde(default)]
     pub connections: Vec<SessionSpaceConnection>,
     #[serde(default)]
@@ -249,6 +265,13 @@ pub struct SessionSpaceActivationRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionSpaceActivationObservation {
     Active {
+        provider: ResourceRef,
+        provenance: Vec<String>,
+    },
+    /// Provider-confirmed successful live deactivation. The Component remains in
+    /// the admitted desired composition and therefore returns to `Eligible`; only
+    /// recomposition can make the canonical membership `Removed`.
+    Deactivated {
         provider: ResourceRef,
         provenance: Vec<String>,
     },
@@ -301,9 +324,11 @@ pub struct SessionSpaceRuntime {
     revision: u64,
     next_epoch: u64,
     agent_sessions: BTreeMap<ResourceRef, (SessionSpaceAgentSession, u64)>,
+    /// Resolver-owned desired bodies. SessionSpace never rewrites their fields to
+    /// encode target observation; observed state lives in `components`/`surfaces`.
     compositions: BTreeMap<ResourceRef, HarnessComposition>,
     components: BTreeMap<SessionComponentKey, SessionSpaceComponent>,
-    surfaces: BTreeMap<SessionSurfaceKey, SessionSpaceSurface>,
+    surfaces: BTreeMap<SessionSurfaceKey, SessionSpaceSurfaceReading>,
     connections: BTreeMap<ResourceRef, SessionSpaceConnection>,
 }
 
@@ -400,28 +425,39 @@ impl SessionSpaceRuntime {
                 ));
             }
         }
-        if let Some(project) = &composition.project {
-            self.definition.projects.insert(project.clone());
-        }
 
+        // Project membership is explicit authored SessionSpace state. A resolved
+        // Harness body may carry Project provenance without silently binding that
+        // Project into this space.
         let session = lease.agent_session.clone();
+        let previous_fingerprint = self
+            .compositions
+            .get(&session)
+            .map(|current| current.fingerprint.as_str());
+        let same_body = previous_fingerprint == Some(composition.fingerprint.as_str());
         let new_components: BTreeSet<_> = composition
             .component_bindings
             .iter()
             .map(|component| component.component.clone())
             .collect();
+        let new_surfaces: BTreeSet<_> = composition
+            .surfaces
+            .iter()
+            .map(|surface| surface.resource.clone())
+            .collect();
+
         for (key, component) in &mut self.components {
             if key.agent_session == session && !new_components.contains(&key.component) {
                 component.state = SessionSpaceActivationState::Removed;
-                component.reason = Some("removed by SessionSpace recomposition".into());
+                component.provider = None;
+                component.observed_composition_fingerprint = None;
+                component.reason = Some("removed by canonical HarnessComposition recomposition".into());
             }
         }
-        self.surfaces.retain(|key, surface| {
-            key.agent_session != session
-                || surface
-                    .component
-                    .as_ref()
-                    .is_none_or(|component| new_components.contains(component))
+        // Surface membership follows the canonical resolved body exactly. Runtime
+        // deactivation never deletes a Surface reading; recomposition may.
+        self.surfaces.retain(|key, _| {
+            key.agent_session != session || new_surfaces.contains(&key.surface)
         });
 
         for component in &composition.component_bindings {
@@ -435,18 +471,31 @@ impl SessionSpaceRuntime {
                 .filter(|absence| absence.component == component.component && absence.required)
                 .map(|absence| absence.reason.clone())
                 .collect();
-            let prior_active = self
-                .components
-                .get(&key)
-                .is_some_and(|existing| existing.state == SessionSpaceActivationState::Active);
+            let prior = self.components.get(&key).cloned();
+            let preserve_observation = same_body
+                && prior.as_ref().is_some_and(|existing| {
+                    existing.observed_composition_fingerprint.as_deref()
+                        == Some(composition.fingerprint.as_str())
+                });
             let state = if !blocked.is_empty() {
                 SessionSpaceActivationState::Unavailable
-            } else if prior_active {
-                SessionSpaceActivationState::Active
+            } else if preserve_observation {
+                prior
+                    .as_ref()
+                    .map_or(SessionSpaceActivationState::Eligible, |existing| existing.state)
             } else {
+                // A changed canonical body invalidates provider activation evidence
+                // until the provider observes that exact new fingerprint.
                 SessionSpaceActivationState::Eligible
             };
-            let provenance = component_provenance(&composition, component);
+            let mut provenance = component_provenance(&composition, component);
+            if preserve_observation {
+                if let Some(existing) = &prior {
+                    provenance.extend(existing.provenance.iter().cloned());
+                    provenance.sort();
+                    provenance.dedup();
+                }
+            }
             self.components.insert(
                 key,
                 SessionSpaceComponent {
@@ -455,8 +504,23 @@ impl SessionSpaceRuntime {
                     harness: composition.harness.clone(),
                     activation_mode: component.activation_mode,
                     state,
-                    provider: None,
-                    reason: (!blocked.is_empty()).then(|| blocked.join("; ")),
+                    provider: preserve_observation
+                        .then(|| prior.as_ref().and_then(|existing| existing.provider.clone()))
+                        .flatten(),
+                    observed_composition_fingerprint: preserve_observation
+                        .then(|| {
+                            prior.as_ref().and_then(|existing| {
+                                existing.observed_composition_fingerprint.clone()
+                            })
+                        })
+                        .flatten(),
+                    reason: if !blocked.is_empty() {
+                        Some(blocked.join("; "))
+                    } else if preserve_observation {
+                        prior.as_ref().and_then(|existing| existing.reason.clone())
+                    } else {
+                        None
+                    },
                     provenance,
                 },
             );
@@ -479,7 +543,7 @@ impl SessionSpaceRuntime {
                 .map_or(SessionSpaceActivationState::Declared, |component| component.state);
             self.surfaces.insert(
                 key,
-                SessionSpaceSurface {
+                SessionSpaceSurfaceReading {
                     agent_session: session.clone(),
                     surface: surface.resource.clone(),
                     component: surface.owner_component.clone(),
@@ -584,9 +648,12 @@ impl SessionSpaceRuntime {
                 return Err(error);
             }
         };
-        let state = self.apply_activation_observation(&key, observation);
+        let state = self.apply_activation_observation(
+            &key,
+            &request.composition_fingerprint,
+            observation,
+        );
         self.refresh_surface_states(&lease.agent_session);
-        self.refresh_composition_state(&lease.agent_session);
         self.bump_revision();
         Ok(state)
     }
@@ -656,22 +723,17 @@ impl SessionSpaceRuntime {
                 .collect(),
         };
         let observation = driver.deactivate(&request)?;
-        let state = self.apply_activation_observation(&key, observation);
-        if let Some(runtime_component) = self.components.get_mut(&key) {
-            runtime_component.state = SessionSpaceActivationState::Removed;
-            runtime_component.reason = Some("live component retracted".into());
-        }
-        self.surfaces.retain(|surface_key, surface| {
-            surface_key.agent_session != lease.agent_session
-                || surface.component.as_ref() != Some(component)
-        });
-        self.refresh_composition_state(&lease.agent_session);
+        let state = self.apply_activation_observation(
+            &key,
+            &request.composition_fingerprint,
+            observation,
+        );
+        // Deactivation changes observed live truth only. The canonical desired
+        // composition still contains this Component and its Surfaces; only an
+        // admitted recomposition may remove those membership relations.
+        self.refresh_surface_states(&lease.agent_session);
         self.bump_revision();
-        Ok(if state == SessionSpaceActivationState::Closed {
-            SessionSpaceActivationState::Closed
-        } else {
-            SessionSpaceActivationState::Removed
-        })
+        Ok(state)
     }
 
     pub fn observe_connection(
@@ -763,7 +825,6 @@ impl SessionSpaceRuntime {
             .collect();
         for session in sessions {
             self.refresh_surface_states(&session);
-            self.refresh_composition_state(&session);
         }
         self.bump_revision();
         Ok(())
@@ -842,6 +903,7 @@ impl SessionSpaceRuntime {
     fn apply_activation_observation(
         &mut self,
         key: &SessionComponentKey,
+        composition_fingerprint: &str,
         observation: SessionSpaceActivationObservation,
     ) -> SessionSpaceActivationState {
         let component = self
@@ -855,6 +917,19 @@ impl SessionSpaceRuntime {
             } => {
                 component.state = SessionSpaceActivationState::Active;
                 component.provider = Some(provider);
+                component.observed_composition_fingerprint =
+                    Some(composition_fingerprint.to_string());
+                component.reason = None;
+                component.provenance.extend(provenance);
+            }
+            SessionSpaceActivationObservation::Deactivated {
+                provider,
+                provenance,
+            } => {
+                component.state = SessionSpaceActivationState::Eligible;
+                component.provider = Some(provider);
+                component.observed_composition_fingerprint =
+                    Some(composition_fingerprint.to_string());
                 component.reason = None;
                 component.provenance.extend(provenance);
             }
@@ -865,6 +940,8 @@ impl SessionSpaceRuntime {
             } => {
                 component.state = SessionSpaceActivationState::Degraded;
                 component.provider = Some(provider);
+                component.observed_composition_fingerprint =
+                    Some(composition_fingerprint.to_string());
                 component.reason = Some(reason);
                 component.provenance.extend(provenance);
             }
@@ -875,10 +952,14 @@ impl SessionSpaceRuntime {
             } => {
                 component.state = SessionSpaceActivationState::Unavailable;
                 component.provider = Some(provider);
+                component.observed_composition_fingerprint =
+                    Some(composition_fingerprint.to_string());
                 component.reason = Some(reason);
                 component.provenance.extend(provenance);
             }
         }
+        component.provenance.sort();
+        component.provenance.dedup();
         component.state
     }
 
@@ -897,24 +978,6 @@ impl SessionSpaceRuntime {
                     })
                 })
                 .map_or(SessionSpaceActivationState::Declared, |component| component.state);
-        }
-    }
-
-    fn refresh_composition_state(&mut self, agent_session: &ResourceRef) {
-        let all_active = self
-            .components
-            .iter()
-            .filter(|(key, component)| {
-                &key.agent_session == agent_session
-                    && component.state != SessionSpaceActivationState::Removed
-            })
-            .all(|(_, component)| component.state == SessionSpaceActivationState::Active);
-        if let Some(composition) = self.compositions.get_mut(agent_session) {
-            composition.state = if all_active {
-                CompositionState::ObservedActive
-            } else {
-                CompositionState::Resolved
-            };
         }
     }
 

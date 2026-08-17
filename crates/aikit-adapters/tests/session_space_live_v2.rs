@@ -2,16 +2,17 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use aikit_adapters::{
-    connection_into_session_space, deepseek_live_cordis_composition, ConnectionCapabilities,
-    ConnectionDescriptor, ConnectionProtocol, ConnectionProtocolFamily, ConnectionState,
-    CordisProcessActivationDriver, CordisProcessSpec, DeepSeekShellProvider, NativeSessionBinding,
-    SessionOpenMode, DEEPSEEK_HARNESS_UPSTREAM_REVISION, DEEPSEEK_LIVE_CORDIS_COMPONENTS,
+    connection_into_session_space, deepseek_live_cordis_composition, deepseek_maximal_conformance,
+    ConnectionCapabilities, ConnectionDescriptor, ConnectionProtocol, ConnectionProtocolFamily,
+    ConnectionState, CordisProcessActivationDriver, CordisProcessSpec, DeepSeekShellProvider,
+    NativeSessionBinding, SessionOpenMode, DEEPSEEK_HARNESS_UPSTREAM_REVISION,
+    DEEPSEEK_LIVE_CORDIS_COMPONENTS,
 };
 use aikit_core::resource::ResourceRef;
 use aikit_core::{
-    CompositionActivationMode, SessionSpaceActivationState, SessionSpaceAgentSession,
-    SessionSpaceAuthorityState, SessionSpaceConnectionState, SessionSpaceDefinition,
-    SessionSpaceRef, SessionSpaceRuntime,
+    resolve_harness_composition, CompositionActivationMode, SessionSpaceActivationState,
+    SessionSpaceAgentSession, SessionSpaceAuthorityState, SessionSpaceConnectionState,
+    SessionSpaceDefinition, SessionSpaceRef, SessionSpaceRuntime,
 };
 
 fn r(raw: &str) -> ResourceRef {
@@ -19,8 +20,16 @@ fn r(raw: &str) -> ResourceRef {
 }
 
 #[test]
-fn current_deepseek_adapter_upgrades_only_proven_cordis_web_components_to_live_mounted() {
+fn current_deepseek_adapter_resolves_proven_live_modes_into_the_canonical_fingerprint() {
+    let baseline_specimen = deepseek_maximal_conformance(DeepSeekShellProvider::Local).specimen;
+    let baseline = resolve_harness_composition(
+        &baseline_specimen.catalog,
+        baseline_specimen.request,
+    )
+    .unwrap();
+
     let live = deepseek_live_cordis_composition(DeepSeekShellProvider::Local).unwrap();
+    let repeated = deepseek_live_cordis_composition(DeepSeekShellProvider::Local).unwrap();
     let expected: BTreeSet<_> = DEEPSEEK_LIVE_CORDIS_COMPONENTS.iter().copied().collect();
     let observed: BTreeSet<_> = live
         .composition
@@ -44,6 +53,15 @@ fn current_deepseek_adapter_upgrades_only_proven_cordis_web_components_to_live_m
             .and_then(|implementation| implementation.revision.as_deref())
             == Some(DEEPSEEK_HARNESS_UPSTREAM_REVISION)
     }));
+
+    assert_ne!(
+        live.composition.fingerprint, baseline.fingerprint,
+        "target-proven activation modes are canonical resolver inputs and must change body identity"
+    );
+    assert_eq!(
+        live.composition.fingerprint, repeated.composition.fingerprint,
+        "identical explicit target evidence must resolve deterministically"
+    );
 }
 
 #[test]
@@ -178,6 +196,7 @@ fn acp_degradation_does_not_counterfeit_classic_harness_failure() {
 #[test]
 fn session_space_active_transition_is_backed_by_a_real_provider_process_lifecycle() {
     let live = deepseek_live_cordis_composition(DeepSeekShellProvider::Local).unwrap();
+    let body_fingerprint = live.composition.fingerprint.clone();
     let mut runtime = SessionSpaceRuntime::open(SessionSpaceDefinition::new(
         SessionSpaceRef::parse("session-space/process-proof").unwrap(),
     ))
@@ -203,26 +222,50 @@ fn session_space_active_transition_is_backed_by_a_real_provider_process_lifecycl
         provenance: vec!["real child-process lifecycle fixture".into()],
     };
     let mut driver = CordisProcessActivationDriver::new(spec);
-    let component = r("component/deepseek/profile-root");
+    let component = r("component/deepseek/client-ui-conversation");
     let state = runtime
         .activate_component(&lease, &component, &mut driver)
         .unwrap();
     assert_eq!(state, SessionSpaceActivationState::Active);
     assert!(driver.is_running().unwrap());
+    let active_model = runtime.read_model();
+    let active = active_model
+        .components
+        .iter()
+        .find(|reading| reading.component == component)
+        .unwrap();
+    assert_eq!(active.state, SessionSpaceActivationState::Active);
     assert_eq!(
-        runtime
-            .read_model()
-            .components
-            .iter()
-            .find(|reading| reading.component == component)
-            .unwrap()
-            .state,
-        SessionSpaceActivationState::Active
+        active.observed_composition_fingerprint.as_deref(),
+        Some(body_fingerprint.as_str())
     );
+    let contributed_surfaces = active_model
+        .surfaces
+        .iter()
+        .filter(|surface| surface.component.as_ref() == Some(&component))
+        .count();
+    assert!(contributed_surfaces > 0);
 
     let state = runtime
         .deactivate_component(&lease, &component, &mut driver)
         .unwrap();
-    assert_eq!(state, SessionSpaceActivationState::Removed);
+    assert_eq!(
+        state,
+        SessionSpaceActivationState::Eligible,
+        "provider deactivation changes observed live truth; it is not canonical recomposition"
+    );
     assert!(!driver.is_running().unwrap());
+    let deactivated = runtime.read_model();
+    assert!(deactivated.components.iter().any(|reading| {
+        reading.component == component && reading.state == SessionSpaceActivationState::Eligible
+    }));
+    assert_eq!(
+        deactivated
+            .surfaces
+            .iter()
+            .filter(|surface| surface.component.as_ref() == Some(&component))
+            .count(),
+        contributed_surfaces,
+        "desired Surface membership survives provider deactivation"
+    );
 }
