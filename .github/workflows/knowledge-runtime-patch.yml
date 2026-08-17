@@ -1,0 +1,51 @@
+name: Knowledge runtime patch
+
+on:
+  push:
+    branches:
+      - agent/knowledge-navigation-production-runtime-v2
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[knowledge-runtime-applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: agent/knowledge-navigation-production-runtime-v2
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt
+      - name: Apply production Knowledge integration
+        run: python .github/scripts/knowledge_runtime_patch.py
+      - name: Format touched Rust files only
+        run: |
+          rustfmt --edition 2021 \
+            crates/aikit-core/src/resource/search.rs \
+            crates/aikit-store/src/events.rs \
+            crates/aikit-store/src/knowledge_history.rs \
+            crates/aikit-store/src/lib.rs \
+            crates/aikit-cli/src/knowledge_runtime.rs \
+            crates/aikit-cli/src/lib.rs \
+            crates/aikit-cli/src/cli.rs \
+            crates/aikit-cli/src/main.rs \
+            crates/aikit-cli/src/app/mod.rs \
+            crates/aikit-tui/src/backend.rs \
+            crates/aikit-tui/src/application_service.rs \
+            crates/aikit-cli/tests/knowledge_runtime_v2.rs
+      - name: Focused compile and tests
+        run: |
+          cargo test -p aikit-store knowledge_history --locked
+          cargo test -p aikit-cli --test knowledge_runtime_v2 --locked
+          cargo test -p aikit-tui --lib --locked
+      - name: Commit implementation
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'feat(knowledge): bind production Knowledge runtime [knowledge-runtime-applied]'
+          git push origin HEAD:agent/knowledge-navigation-production-runtime-v2
