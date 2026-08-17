@@ -20,7 +20,8 @@ use aikit_core::resource::{
 };
 use aikit_core::{
     FamiliarityContext, ForgetScope, KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation,
-    KnowledgeProviderStatus, KnowledgeSearchResult, KnowledgeSources, Result,
+    KnowledgeProviderStatus, KnowledgeRankingEvidence, KnowledgeSearchResult, KnowledgeSources,
+    Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS,
 };
 use aikit_store::{
     append_familiarity_observation, append_familiarity_reset, KnowledgeApplicationReceipt,
