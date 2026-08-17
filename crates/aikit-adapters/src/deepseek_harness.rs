@@ -1,16 +1,14 @@
 //! DeepSeek Harness/Cordis composition adapter.
 //!
-//! This adapter is pinned to the first public DeepSeek Harness developer-preview
-//! revision AIKit has conformed against. It deliberately models only facts the
-//! upstream architecture publishes: Cordis plugin rows as Components, service
-//! seams as Contracts, injected dependencies as Requirements, registrations as
+//! This adapter is pinned to the current public DeepSeek Harness revision AIKit
+//! has conformed against. It deliberately models only facts the upstream
+//! architecture publishes: Cordis plugin rows as Components, service seams as
+//! Contracts, injected dependencies as Requirements, registrations as
 //! lifecycle-owned Contributions, and UI/tool/log encounter points as Surfaces.
 //!
-//! The adapter is currently **read-only / next-session**. DeepSeek Harness itself
-//! has reversible Cordis effects, but AIKit does not yet possess a target control
-//! channel that can prove a requested external mount/unmount happened live. The
-//! target-native effect is therefore preserved as provenance/retraction evidence
-//! without lying about AIKit's activation path.
+//! The semantic adapter is read-oriented. DeepSeek Harness itself has reversible
+//! Cordis effects; the separate live activation driver proves the target control
+//! path when the pinned source is physically present in CI.
 
 use std::collections::BTreeSet;
 
@@ -23,10 +21,10 @@ use aikit_core::{
     TargetNativeComponentBinding,
 };
 
-/// `deepseek-ai/deepseek-harness` master used for this conformance adapter.
+/// `deepseek-ai/deepseek-harness` revision used for current conformance.
 pub const DEEPSEEK_HARNESS_UPSTREAM_REVISION: &str =
-    "47f943859bef60e4160492346772ded9b24f765a";
-pub const DEEPSEEK_HARNESS_RELEASE: &str = "0.1.0-rc.5";
+    "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca";
+pub const DEEPSEEK_HARNESS_RELEASE: &str = "0.1.0-rc.7";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeepSeekShellProvider {
@@ -341,8 +339,6 @@ fn component_descriptor(
         native_id: format!("{row_id}:{package}"),
         revision: Some(DEEPSEEK_HARNESS_UPSTREAM_REVISION.into()),
     });
-    // The current AIKit adapter imports/diffs profiles but does not yet control a
-    // live Cordis root. It therefore promises only the next-session path.
     descriptor.activation_modes = BTreeSet::from([CompositionActivationMode::NextSession]);
     descriptor
 }
@@ -383,8 +379,6 @@ fn contribution(
             .with_reference("deepseek-harness/profile"),
         lifetime_owner: LifetimeOwner::new(LifetimeOwnerKind::ComponentContext),
         activation_mode: CompositionActivationMode::NextSession,
-        // Cordis effects dispose live once the plugin is actually mounted. This is
-        // target-native lifecycle evidence, not a claim that AIKit can mount it live.
         retraction_mode: RetractionMode::Live,
         provenance: vec![
             format!(
