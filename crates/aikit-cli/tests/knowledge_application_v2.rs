@@ -216,11 +216,9 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
         .iter()
         .find(|hit| hit.resource.as_str() == "source:paper:authentication")
         .unwrap();
-    let ranking_after_forget = source_after_forget.ranking.as_ref().unwrap();
-    assert!(ranking_after_forget.route.is_none());
-    assert_eq!(
-        ranking_after_forget.navigation_score, ranking_after_forget.provider_score,
-        "forget removes learned ranking influence without changing provider relevance"
+    assert!(
+        source_after_forget.ranking.is_none(),
+        "forget removes the only learned ranking signal instead of retaining inert learned metadata"
     );
     let learned = PaletteBackend::familiarity(&service)
         .unwrap()
