@@ -249,21 +249,19 @@ fn capsule_refs(
         .collect()
 }
 
-fn changed_map_keys<K, V>(
-    before: &BTreeMap<K, V>,
-    after: &BTreeMap<K, V>,
-) -> impl Iterator<Item = K>
+fn changed_map_keys<K, V>(before: &BTreeMap<K, V>, after: &BTreeMap<K, V>) -> Vec<K>
 where
     K: Ord + Clone,
     V: PartialEq,
 {
-    let keys = before
+    before
         .keys()
         .chain(after.keys())
         .cloned()
-        .collect::<BTreeSet<_>>();
-    keys.into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .filter(|key| before.get(key) != after.get(key))
+        .collect()
 }
 
 fn changed_target_effects(before: &GenerationMetadata, after: &GenerationMetadata) -> Vec<String> {
@@ -312,9 +310,6 @@ mod tests {
     fn changed_map_keys_reports_add_remove_and_value_change() {
         let before = BTreeMap::from([("a", 1), ("b", 2), ("c", 3)]);
         let after = BTreeMap::from([("b", 20), ("c", 3), ("d", 4)]);
-        assert_eq!(
-            changed_map_keys(&before, &after).collect::<Vec<_>>(),
-            vec!["a", "b", "d"]
-        );
+        assert_eq!(changed_map_keys(&before, &after), vec!["a", "b", "d"]);
     }
 }
