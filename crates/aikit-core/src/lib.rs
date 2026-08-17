@@ -47,6 +47,7 @@ pub mod knowledge_wiki;
 pub mod knowledge_wiki_index;
 pub mod knowledge_wiki_provider;
 pub mod lifecycle;
+pub mod model_runtime;
 pub mod platform;
 pub mod policy;
 pub mod procedure;
