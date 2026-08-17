@@ -2,13 +2,13 @@
 //!
 //! This module contains no provider semantics and no parallel relation store. The
 //! same [`aikit_core::KnowledgeApplication`] used by CLI/agent surfaces supplies
-//! search, read, relations, routes, context packs, explain and provider status;
+//! search, read, relations, routes, context packs, sources, explain and history;
 //! the TUI is only a consumer of those typed read models.
 
 use aikit_core::{
     KnowledgeAddress, KnowledgeApplication, KnowledgeContextPack, KnowledgeExplanation,
-    KnowledgeProviderStatus, KnowledgeReading, KnowledgeRelationView, KnowledgeRoute,
-    KnowledgeSearchResult, Result,
+    KnowledgeOperations, KnowledgeProviderStatus, KnowledgeReading, KnowledgeRelationView,
+    KnowledgeRoute, KnowledgeSearchResult, KnowledgeSources, Result,
 };
 
 pub trait KnowledgeNavigationService {
@@ -31,17 +31,19 @@ pub trait KnowledgeNavigationService {
         query: Option<&str>,
         addresses: &[KnowledgeAddress],
     ) -> KnowledgeContextPack;
+    fn knowledge_sources(&self, address: &KnowledgeAddress) -> Result<KnowledgeSources>;
     fn knowledge_explain(&self, address: &KnowledgeAddress) -> Result<KnowledgeExplanation>;
+    fn knowledge_history<'b>(&self, routes: &'b [KnowledgeRoute]) -> Vec<&'b KnowledgeRoute>;
     fn knowledge_status(&self) -> KnowledgeProviderStatus;
 }
 
 impl KnowledgeNavigationService for KnowledgeApplication<'_> {
     fn knowledge_search(&self, query: &str, limit: usize) -> KnowledgeSearchResult {
-        self.search(query, limit)
+        KnowledgeOperations::search(self, query, limit)
     }
 
     fn knowledge_read(&self, address: &KnowledgeAddress) -> Result<KnowledgeReading> {
-        self.read(address)
+        KnowledgeOperations::read(self, address)
     }
 
     fn knowledge_relations(
@@ -51,7 +53,7 @@ impl KnowledgeNavigationService for KnowledgeApplication<'_> {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
-        self.relations(address, depth, max_nodes, max_edges)
+        KnowledgeOperations::relations(self, address, depth, max_nodes, max_edges)
     }
 
     fn knowledge_route(
@@ -59,7 +61,7 @@ impl KnowledgeNavigationService for KnowledgeApplication<'_> {
         query: Option<&str>,
         addresses: &[KnowledgeAddress],
     ) -> Result<KnowledgeRoute> {
-        self.route(query, addresses)
+        KnowledgeOperations::route(self, query, addresses)
     }
 
     fn knowledge_context_pack(
@@ -67,15 +69,23 @@ impl KnowledgeNavigationService for KnowledgeApplication<'_> {
         query: Option<&str>,
         addresses: &[KnowledgeAddress],
     ) -> KnowledgeContextPack {
-        self.context_pack(query, addresses)
+        KnowledgeOperations::frame(self, query, addresses)
+    }
+
+    fn knowledge_sources(&self, address: &KnowledgeAddress) -> Result<KnowledgeSources> {
+        KnowledgeOperations::sources(self, address)
     }
 
     fn knowledge_explain(&self, address: &KnowledgeAddress) -> Result<KnowledgeExplanation> {
-        self.explain(address)
+        KnowledgeOperations::explain(self, address)
+    }
+
+    fn knowledge_history<'b>(&self, routes: &'b [KnowledgeRoute]) -> Vec<&'b KnowledgeRoute> {
+        KnowledgeOperations::history(self, routes)
     }
 
     fn knowledge_status(&self) -> KnowledgeProviderStatus {
-        self.status()
+        KnowledgeOperations::status(self)
     }
 }
 
@@ -151,6 +161,22 @@ mod tests {
             .nodes
             .iter()
             .any(|node| node.resource.as_str() == "source:spec"));
-        assert_eq!(service.knowledge_route(None, &[address]).unwrap().steps.len(), 1);
+        assert!(service
+            .knowledge_sources(&address)
+            .unwrap()
+            .sources
+            .iter()
+            .any(|source| source.as_str() == "source:spec"));
+        let route = service
+            .knowledge_route(None, std::slice::from_ref(&address))
+            .unwrap();
+        assert_eq!(route.steps.len(), 1);
+        assert_eq!(service.knowledge_history(std::slice::from_ref(&route)).len(), 1);
+        assert_eq!(
+            service
+                .knowledge_context_pack(None, std::slice::from_ref(&address))
+                .selected,
+            vec![ResourceRef::parse("wiki:node:auth").unwrap()]
+        );
     }
 }
