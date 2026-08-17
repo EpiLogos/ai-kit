@@ -80,8 +80,7 @@ pub fn compare_generation_worlds(
         return Err(AikitError::new(
             "history.generation_context_mismatch",
             format!(
-                "cannot compare Generations {} and {} from different Context identities",
-                before, after
+                "cannot compare Generations {before} and {after} from different Context identities"
             ),
         ));
     }
@@ -209,7 +208,7 @@ fn load_generation(
     if !is_generation(&path) {
         return Err(AikitError::new(
             "history.generation_not_found",
-            format!("{} is not a committed Generation for Context {context}", id),
+            format!("{id} is not a committed Generation for Context {context}"),
         ));
     }
     let metadata = read_metadata(&path)?;
@@ -306,7 +305,7 @@ fn plural(count: usize) -> &'static str {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test)]
     fn changed_map_keys_reports_add_remove_and_value_change() {
         let before = BTreeMap::from([("a", 1), ("b", 2), ("c", 3)]);
         let after = BTreeMap::from([("b", 20), ("c", 3), ("d", 4)]);
