@@ -60,6 +60,7 @@ pub mod scope;
 pub mod search;
 pub mod session;
 pub mod session_space;
+pub mod session_space_contribution;
 pub mod skillset;
 pub mod surfacing;
 pub mod trust;
@@ -216,6 +217,12 @@ pub use session_space::{
     SessionSpaceComponent, SessionSpaceConnection, SessionSpaceConnectionState,
     SessionSpaceDefinition, SessionSpaceLease, SessionSpaceLifecycle, SessionSpaceReadModel,
     SessionSpaceRef, SessionSpaceRuntime, SessionSpaceSurface, SESSION_SPACE_VERSION,
+};
+pub use session_space_contribution::{
+    SessionSpaceContributionDefinition, SessionSpaceContributionRef,
+    SessionSpaceContributionRegistration, SessionSpaceContributionRegistry,
+    SessionSpaceContributionRegistryReadModel, SessionSpaceContributionRemoval,
+    SESSION_SPACE_CONTRIBUTION_REGISTRY_VERSION, SESSION_SPACE_CONTRIBUTION_VERSION,
 };
 pub use skillset::{SetMembership, SetProjection, SetProvenance, SkillSet, Withheld, WithheldReason};
 pub use surfacing::{plan_surfacing, DisplayContext, SurfacingPlan};
