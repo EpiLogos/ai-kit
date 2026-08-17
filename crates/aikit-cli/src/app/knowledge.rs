@@ -15,10 +15,12 @@ use aikit_core::knowledge_wiki::{parse_wiki_objects, OkfWikiBundle, WikiObject};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
 use aikit_core::knowledge_wiki_provider::SemanticWikiProvider;
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
-use aikit_core::resource::{ResourceIndex, ResourceKind, ResourceRef, SourceAuthority, SourceRef};
+use aikit_core::resource::{
+    ProviderRef, ResourceIndex, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
+};
 use aikit_core::{
-    AikitError, FamiliarityContext, ForgetScope, KnowledgeAddress, KnowledgeApplication,
-    KnowledgeExplanation, KnowledgeProviderStatus, KnowledgeSearchResult, KnowledgeSources, Result,
+    FamiliarityContext, ForgetScope, KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation,
+    KnowledgeProviderStatus, KnowledgeSearchResult, KnowledgeSources, Result,
 };
 use aikit_store::{
     append_familiarity_observation, append_familiarity_reset, KnowledgeApplicationReceipt,
@@ -381,7 +383,7 @@ impl Service {
                     kind,
                     lens: ProjectLens::SemanticWiki,
                     authority: SourceAuthority::Authored,
-                    provider: Some(aikit_core::ProviderRef::parse(
+                    provider: Some(ProviderRef::parse(
                         aikit_core::NATIVE_SEMANTIC_WIKI_PROVIDER,
                     )?),
                     revision: Some(object.revision().to_string()),
@@ -396,9 +398,7 @@ impl Service {
                 kind: ResourceKind::KnowledgeSource,
                 lens: ProjectLens::SourcePool,
                 authority: SourceAuthority::Observed,
-                provider: Some(aikit_core::ProviderRef::parse(
-                    "provider/source-pool/native",
-                )?),
+                provider: Some(ProviderRef::parse("provider/source-pool/native")?),
                 revision: Some(item.binding.revision.to_string()),
                 label: Some(item.binding.title.clone()),
             })?;
@@ -436,7 +436,7 @@ impl Service {
                         relation: "source".into(),
                         reversible: true,
                         authority: SourceAuthority::Authored,
-                        provider: Some(aikit_core::ProviderRef::parse(
+                        provider: Some(ProviderRef::parse(
                             aikit_core::NATIVE_SEMANTIC_WIKI_PROVIDER,
                         )?),
                         provenance: Vec::new(),
