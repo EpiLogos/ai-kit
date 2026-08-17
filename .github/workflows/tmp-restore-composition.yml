@@ -39,3 +39,4 @@ jobs:
           git add -A
           git commit -m "fix(v2): restore accepted composition application seam"
           git push origin HEAD:agent/restore-composition-convergence
+# trigger
