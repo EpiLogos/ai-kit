@@ -65,10 +65,7 @@ pub fn live_activation_history_evidence(
 
     Ok(HistoryEvidence {
         schema: EXPLAIN_HISTORY_VERSION.into(),
-        id: format!(
-            "live-activation:{}:{}:{}:{observed_at_unix_ms}",
-            space, agent_session, component
-        ),
+        id: format!("live-activation:{space}:{agent_session}:{component}:{observed_at_unix_ms}"),
         kind: HistoryKind::LiveActivation,
         subject: component.clone(),
         authorities: vec![SourceAuthority::Observed],
