@@ -1438,6 +1438,84 @@ impl PaletteBackend for Service {
         aikit_store::append_familiarity_observation(&self.index, observation)
     }
 
+    fn knowledge_search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Option<aikit_core::KnowledgeSearchResult>> {
+        Service::knowledge_search(self, query, limit).map(Some)
+    }
+
+    fn knowledge_address(
+        &self,
+        resource: &aikit_core::ResourceRef,
+    ) -> Result<Option<aikit_core::KnowledgeAddress>> {
+        Service::knowledge_address(self, resource)
+    }
+
+    fn knowledge_read(
+        &self,
+        address: &aikit_core::KnowledgeAddress,
+    ) -> Result<Option<aikit_core::KnowledgeReading>> {
+        Service::knowledge_read(self, address).map(Some)
+    }
+
+    fn knowledge_relations(
+        &self,
+        address: &aikit_core::KnowledgeAddress,
+        depth: u8,
+        max_nodes: usize,
+        max_edges: usize,
+    ) -> Result<Option<aikit_core::KnowledgeRelationView>> {
+        Service::knowledge_relations(self, address, depth, max_nodes, max_edges).map(Some)
+    }
+
+    fn knowledge_route(
+        &mut self,
+        query: Option<&str>,
+        addresses: &[aikit_core::KnowledgeAddress],
+    ) -> Result<Option<aikit_core::KnowledgeRoute>> {
+        Service::knowledge_route(self, query, addresses).map(Some)
+    }
+
+    fn knowledge_frame(
+        &mut self,
+        query: Option<&str>,
+        addresses: &[aikit_core::KnowledgeAddress],
+    ) -> Result<Option<aikit_core::KnowledgeContextPack>> {
+        Service::knowledge_frame(self, query, addresses).map(Some)
+    }
+
+    fn knowledge_sources(
+        &self,
+        address: &aikit_core::KnowledgeAddress,
+    ) -> Result<Option<aikit_core::KnowledgeSources>> {
+        Service::knowledge_sources(self, address).map(Some)
+    }
+
+    fn knowledge_explain(
+        &self,
+        address: &aikit_core::KnowledgeAddress,
+    ) -> Result<Option<aikit_core::KnowledgeExplanation>> {
+        Service::knowledge_explain(self, address).map(Some)
+    }
+
+    fn knowledge_history(
+        &self,
+        resource: Option<&aikit_core::ResourceRef>,
+    ) -> Result<Vec<aikit_store::KnowledgeApplicationReceipt>> {
+        Service::knowledge_history(self, resource)
+    }
+
+    fn knowledge_status(&self) -> Result<Option<aikit_core::KnowledgeProviderStatus>> {
+        Service::knowledge_status(self).map(Some)
+    }
+
+    fn knowledge_forget(&mut self, scope: aikit_core::ForgetScope) -> Result<bool> {
+        Service::knowledge_forget(self, scope)?;
+        Ok(true)
+    }
+
     fn documents(&self) -> Vec<SearchDoc> {
         self.view
             .catalog_index

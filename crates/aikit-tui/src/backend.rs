@@ -31,11 +31,16 @@ use aikit_core::session_space_application::{
     AgentSessionContinuityEvidence, SessionSpaceAuthoredState, SessionSpaceMutation,
     SessionSpaceNativeObservation, SessionSpacePreview, SessionSpaceReconstructionReport,
 };
-use aikit_core::{FamiliarityObservation, FamiliarityStore, Result};
+use aikit_core::{
+    FamiliarityObservation, FamiliarityStore, ForgetScope, KnowledgeAddress, KnowledgeContextPack,
+    KnowledgeExplanation, KnowledgeProviderStatus, KnowledgeReading, KnowledgeRelationView,
+    KnowledgeRoute, KnowledgeSearchResult, KnowledgeSources, Result,
+};
 use aikit_store::inbox::{Candidate, CandidateState, PromotionEdits, Similarity};
 use aikit_store::{
-    explain_session_space_with_receipts, AikitHome, SessionSpaceApplicationStore,
-    SessionSpaceExplainEvidence, SessionSpaceHistoryComparison, SessionSpaceReceipt,
+    explain_session_space_with_receipts, AikitHome, KnowledgeApplicationReceipt,
+    SessionSpaceApplicationStore, SessionSpaceExplainEvidence, SessionSpaceHistoryComparison,
+    SessionSpaceReceipt,
 };
 
 /// The mask a secret wears everywhere it is displayed.
@@ -190,7 +195,8 @@ impl PromotionDraft {
     }
 
     pub fn withheld_reason(&self) -> Option<String> {
-        if self.candidate.state == CandidateState::Quarantined || !self.candidate.findings.is_empty()
+        if self.candidate.state == CandidateState::Quarantined
+            || !self.candidate.findings.is_empty()
         {
             let what = self
                 .candidate
@@ -259,8 +265,10 @@ pub trait PaletteBackend {
             .map(|intent| intent.capsule)
             .collect();
         let mut index = ResourceSearchIndex::default();
-        let current = vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
-            .with_detail("part of the resolved operating context")];
+        let current = vec![
+            NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                .with_detail("part of the resolved operating context"),
+        ];
         let mut project_subject = None;
         let mut capability_subjects = Vec::new();
 
@@ -423,6 +431,77 @@ pub trait PaletteBackend {
         Ok(())
     }
 
+    // Knowledge operations deliberately live on the same shared application seam
+    // as CLI/TUI. Defaults preserve deterministic fake backends; production owns
+    // materialisation and returns Some(..) for the supported operation family.
+    fn knowledge_search(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Option<KnowledgeSearchResult>> {
+        Ok(None)
+    }
+
+    fn knowledge_address(&self, _resource: &ResourceRef) -> Result<Option<KnowledgeAddress>> {
+        Ok(None)
+    }
+
+    fn knowledge_read(&self, _address: &KnowledgeAddress) -> Result<Option<KnowledgeReading>> {
+        Ok(None)
+    }
+
+    fn knowledge_relations(
+        &self,
+        _address: &KnowledgeAddress,
+        _depth: u8,
+        _max_nodes: usize,
+        _max_edges: usize,
+    ) -> Result<Option<KnowledgeRelationView>> {
+        Ok(None)
+    }
+
+    fn knowledge_route(
+        &mut self,
+        _query: Option<&str>,
+        _addresses: &[KnowledgeAddress],
+    ) -> Result<Option<KnowledgeRoute>> {
+        Ok(None)
+    }
+
+    fn knowledge_frame(
+        &mut self,
+        _query: Option<&str>,
+        _addresses: &[KnowledgeAddress],
+    ) -> Result<Option<KnowledgeContextPack>> {
+        Ok(None)
+    }
+
+    fn knowledge_sources(&self, _address: &KnowledgeAddress) -> Result<Option<KnowledgeSources>> {
+        Ok(None)
+    }
+
+    fn knowledge_explain(
+        &self,
+        _address: &KnowledgeAddress,
+    ) -> Result<Option<KnowledgeExplanation>> {
+        Ok(None)
+    }
+
+    fn knowledge_history(
+        &self,
+        _resource: Option<&ResourceRef>,
+    ) -> Result<Vec<KnowledgeApplicationReceipt>> {
+        Ok(Vec::new())
+    }
+
+    fn knowledge_status(&self) -> Result<Option<KnowledgeProviderStatus>> {
+        Ok(None)
+    }
+
+    fn knowledge_forget(&mut self, _scope: ForgetScope) -> Result<bool> {
+        Ok(false)
+    }
+
     // SessionSpace application operations deliberately live on the shared backend
     // seam. They all resolve to the same canonical store and never rerun Project,
     // ContextResolution or provider semantics.
@@ -453,7 +532,10 @@ pub trait PaletteBackend {
         session_space_store(self.application_home())?.stage(space, intent)
     }
 
-    fn session_space_apply(&mut self, preview: &SessionSpacePreview) -> Result<SessionSpaceReceipt> {
+    fn session_space_apply(
+        &mut self,
+        preview: &SessionSpacePreview,
+    ) -> Result<SessionSpaceReceipt> {
         session_space_store(self.application_home())?.apply(preview)
     }
 
@@ -467,8 +549,11 @@ pub trait PaletteBackend {
         from_sequence: u64,
         to_sequence: u64,
     ) -> Result<SessionSpaceHistoryComparison> {
-        session_space_store(self.application_home())?
-            .compare_history(space, from_sequence, to_sequence)
+        session_space_store(self.application_home())?.compare_history(
+            space,
+            from_sequence,
+            to_sequence,
+        )
     }
 
     fn session_space_stage_restore(

@@ -105,7 +105,13 @@ impl Service {
             result.absences.extend(runtime.absences.clone());
             Ok(result)
         })?;
-        self.knowledge_store().remember_search_hits(&result.hits)?;
+        let mut result = result;
+        if let Err(error) = self.knowledge_store().remember_search_hits(&result.hits) {
+            result.absences.push(format!(
+                "Knowledge address cache unavailable; live search results remain valid: {}",
+                error.message()
+            ));
+        }
         Ok(result)
     }
 
