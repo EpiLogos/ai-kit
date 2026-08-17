@@ -56,6 +56,7 @@ pub mod generation;
 pub mod home;
 pub mod inbox;
 pub mod index;
+pub mod knowledge_application;
 pub mod locks;
 pub mod procedure;
 pub mod registry;
@@ -78,14 +79,18 @@ pub use familiarity::{
     familiarity_reset_event, replay_familiarity, FamiliarityReplay, FAMILIARITY_OBSERVATION_EVENT,
     FAMILIARITY_RESET_EVENT,
 };
-pub use generation::{CommittedGeneration, GenerationBuilder, GenerationMetadata, StagedGeneration};
+pub use generation::{
+    CommittedGeneration, GenerationBuilder, GenerationMetadata, StagedGeneration,
+};
 pub use home::AikitHome;
 pub use inbox::{Candidate, CandidateState, Capture, Inbox, PromotionEdits, Similarity};
 pub use index::{CapsuleFilter, CapsuleRow, Facets, Index, ReindexReport};
-pub use locks::{ContextLock, LockOptions};
-pub use procedure::{
-    plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner,
+pub use knowledge_application::{
+    KnowledgeApplicationReceipt, KnowledgeApplicationStore, KnowledgeHistoryOperation,
+    KNOWLEDGE_APPLICATION_STORE_VERSION,
 };
+pub use locks::{ContextLock, LockOptions};
+pub use procedure::{plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner};
 pub use registry::{load_project_local, load_registry, RegistryLoad, RegistryProblem, Snapshot};
 pub use scan::{Finding, Scanner};
 pub use session_space_application::{

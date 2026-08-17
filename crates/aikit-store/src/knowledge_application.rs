@@ -6,6 +6,7 @@
 //! retain provider/lens/revision/authority evidence already present on those
 //! operation results; they never become a second semantic graph.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -13,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRoute};
 use aikit_core::resource::ResourceRef;
-use aikit_core::{AikitError, FamiliarityContext, Result};
+use aikit_core::{AikitError, FamiliarityContext, KnowledgeAddress, KnowledgeSearchHit, Result};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
@@ -45,15 +46,17 @@ pub struct KnowledgeApplicationReceipt {
 impl KnowledgeApplicationReceipt {
     pub fn touches(&self, resource: &ResourceRef) -> bool {
         self.route.as_ref().is_some_and(|route| {
-            route.route == *resource
-                || route.steps.iter().any(|step| step.resource == *resource)
+            route.route == *resource || route.steps.iter().any(|step| step.resource == *resource)
         }) || self.frame.as_ref().is_some_and(|frame| {
             frame.selected.iter().any(|candidate| candidate == resource)
                 || frame.routes.iter().any(|route| {
                     route.route == *resource
                         || route.steps.iter().any(|step| step.resource == *resource)
                 })
-                || frame.readings.iter().any(|reading| reading.resource == *resource)
+                || frame
+                    .readings
+                    .iter()
+                    .any(|reading| reading.resource == *resource)
         })
     }
 }
@@ -64,6 +67,10 @@ struct KnowledgeApplicationState {
     next_sequence: u64,
     #[serde(default)]
     receipts: Vec<KnowledgeApplicationReceipt>,
+    /// Rebuildable provider-address bindings observed from live Knowledge search.
+    /// Canonical ResourceRef/provider truth remains outside this cache.
+    #[serde(default)]
+    addresses: BTreeMap<ResourceRef, KnowledgeAddress>,
 }
 
 impl Default for KnowledgeApplicationState {
@@ -72,6 +79,7 @@ impl Default for KnowledgeApplicationState {
             schema: KNOWLEDGE_APPLICATION_STORE_VERSION.into(),
             next_sequence: 1,
             receipts: Vec::new(),
+            addresses: BTreeMap::new(),
         }
     }
 }
@@ -86,15 +94,26 @@ impl KnowledgeApplicationStore {
         Self { home }
     }
 
+    pub fn remember_search_hits(&self, hits: &[KnowledgeSearchHit]) -> Result<()> {
+        let mut state = self.load()?;
+        for hit in hits {
+            state
+                .addresses
+                .insert(hit.resource.clone(), hit.address.clone());
+        }
+        self.save(&state)
+    }
+
+    pub fn address(&self, resource: &ResourceRef) -> Result<Option<KnowledgeAddress>> {
+        Ok(self.load()?.addresses.get(resource).cloned())
+    }
+
     pub fn append_route(&self, route: KnowledgeRoute) -> Result<KnowledgeApplicationReceipt> {
         let context = route.context.clone();
         self.append(KnowledgeHistoryOperation::Route, context, Some(route), None)
     }
 
-    pub fn append_frame(
-        &self,
-        frame: KnowledgeContextPack,
-    ) -> Result<KnowledgeApplicationReceipt> {
+    pub fn append_frame(&self, frame: KnowledgeContextPack) -> Result<KnowledgeApplicationReceipt> {
         let context = frame.context.clone();
         self.append(KnowledgeHistoryOperation::Frame, context, None, Some(frame))
     }
@@ -149,7 +168,8 @@ impl KnowledgeApplicationStore {
         if !path.exists() {
             return Ok(KnowledgeApplicationState::default());
         }
-        let bytes = fs::read(&path).map_err(|error| io_error("knowledge.history_read_failed", &path, error))?;
+        let bytes = fs::read(&path)
+            .map_err(|error| io_error("knowledge.history_read_failed", &path, error))?;
         let state: KnowledgeApplicationState = serde_json::from_slice(&bytes).map_err(|error| {
             AikitError::new(
                 "knowledge.history_decode_failed",

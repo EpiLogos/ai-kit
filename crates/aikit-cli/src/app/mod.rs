@@ -22,10 +22,10 @@ use aikit_core::context::ContextDescriptor;
 use aikit_core::id::{CapsuleId, GenerationId, SessionId};
 use aikit_core::platform::TargetId;
 use aikit_core::policy::ManagedPolicy;
+use aikit_core::profile::SkillUsageOverlayPatch;
 use aikit_core::projection::{
     ActivationEffect, ProjectionItem, ProjectionPlan, ResolvedContext, TargetAdapter,
 };
-use aikit_core::profile::SkillUsageOverlayPatch;
 use aikit_core::resolve::{resolve_diagnostic, ResolveRequest as CoreResolveRequest, ResolvedView};
 use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
@@ -39,8 +39,8 @@ use aikit_store::index::Index;
 use aikit_store::registry::{load_project_local, load_registry, RegistryProblem, Snapshot};
 use aikit_store::trust::{TrustSnapshot, TrustStore};
 
-use aikit_adapters::clients::broker::BrokerAdapter;
 use aikit_adapters::clients::agent_skills;
+use aikit_adapters::clients::broker::BrokerAdapter;
 use aikit_adapters::clients::claude::ClaudeAdapter;
 use aikit_adapters::clients::codex::CodexAdapter;
 
@@ -51,6 +51,8 @@ pub use aikit_tui::staging::StagedDiff;
 
 use crate::discover::{self, DiscoveredProject};
 use crate::run::{self, RunReport};
+
+mod knowledge;
 
 // ---------------------------------------------------------------------------
 // Request / response types for the CLI-facing trait
@@ -219,6 +221,7 @@ pub struct Service {
     policy: ManagedPolicy,
     view: ResolvedView,
     invocation_cwd: PathBuf,
+    knowledge_runtime: std::cell::RefCell<Option<knowledge::KnowledgeRuntime>>,
 }
 
 impl Service {
@@ -312,11 +315,8 @@ impl Service {
         home.ensure_layout()?;
         let default_store = env("HOME").map(|path| PathBuf::from(path).join(".aikit"));
         let additional_stores: Vec<&Path> = default_store.as_deref().into_iter().collect();
-        let project = discover::discover_project_with_home_excluding(
-            &home,
-            cwd,
-            &additional_stores,
-        )?;
+        let project =
+            discover::discover_project_with_home_excluding(&home, cwd, &additional_stores)?;
         let project_root = project.as_ref().map(|p| p.root.clone());
 
         let descriptor = match &project_root {
@@ -347,6 +347,7 @@ impl Service {
             policy,
             view,
             invocation_cwd: cwd.to_path_buf(),
+            knowledge_runtime: std::cell::RefCell::new(None),
         })
     }
 
@@ -599,6 +600,7 @@ impl Service {
             &self.layers,
             &self.policy,
         )?;
+        self.invalidate_knowledge_runtime();
         Ok(())
     }
 
@@ -844,16 +846,12 @@ impl Service {
                 format!("{id} is {}, not a skill", capability.kind.as_str()),
             ));
         }
-        let root = self
-            .catalog
-            .capsule_roots()
-            .remove(id)
-            .ok_or_else(|| {
-                AikitError::new(
-                    "run.source_missing",
-                    format!("{id} has no payload on this machine"),
-                )
-            })?;
+        let root = self.catalog.capsule_roots().remove(id).ok_or_else(|| {
+            AikitError::new(
+                "run.source_missing",
+                format!("{id} has no payload on this machine"),
+            )
+        })?;
         let payload_root = capability
             .config
             .get("root")
@@ -1237,6 +1235,7 @@ impl AikitApplication for Service {
             &self.layers,
             &self.policy,
         )?;
+        self.invalidate_knowledge_runtime();
 
         // 3. Build and commit a generation. A failed build never replaces the
         //    live one — that guarantee lives in the store; here we honour the

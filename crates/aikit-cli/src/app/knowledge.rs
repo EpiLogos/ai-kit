@@ -66,9 +66,11 @@ impl Service {
 
     fn knowledge_context(&self) -> FamiliarityContext {
         FamiliarityContext {
-            project: self.descriptor.project_id.as_ref().and_then(|project| {
-                ResourceRef::parse(&format!("project/{project}")).ok()
-            }),
+            project: self
+                .descriptor
+                .project_id
+                .as_ref()
+                .and_then(|project| ResourceRef::parse(&format!("project/{project}")).ok()),
             actor: None,
             agency: None,
             focus: self.descriptor.task.clone(),
@@ -88,7 +90,9 @@ impl Service {
             *self.knowledge_runtime.borrow_mut() = Some(runtime);
         }
         let runtime = self.knowledge_runtime.borrow();
-        let runtime = runtime.as_ref().expect("Knowledge runtime was materialised");
+        let runtime = runtime
+            .as_ref()
+            .expect("Knowledge runtime was materialised");
         let application = runtime.application(self.knowledge_context());
         operation(runtime, application)
     }
@@ -136,7 +140,10 @@ impl Service {
         })
     }
 
-    pub fn knowledge_read(&self, address: &KnowledgeAddress) -> Result<aikit_core::KnowledgeReading> {
+    pub fn knowledge_read(
+        &self,
+        address: &KnowledgeAddress,
+    ) -> Result<aikit_core::KnowledgeReading> {
         self.with_knowledge(|_, application| application.read(address))
     }
 
@@ -160,7 +167,10 @@ impl Service {
         let route = self.with_knowledge(|_, application| application.route(query, addresses))?;
         self.knowledge_store().append_route(route.clone())?;
         let observation = route
-            .familiarity_observation(format!("knowledge-route-use/{}", ulid::Ulid::new()), now_ms())?
+            .familiarity_observation(
+                format!("knowledge-route-use/{}", aikit_core::EventId::generate()),
+                now_ms(),
+            )?
             .from_surface(ResourceRef::parse("surface/aikit/knowledge")?);
         append_familiarity_observation(&self.index, observation)?;
         Ok(route)
@@ -267,7 +277,9 @@ impl Service {
                         absences.push(format!("bkmr SourcePool degraded: {}", error.message()));
                     }
                 } else {
-                    absences.push("bkmr SourcePool configured but provider executable is unavailable".into());
+                    absences.push(
+                        "bkmr SourcePool configured but provider executable is unavailable".into(),
+                    );
                 }
                 bkmr = Some(provider);
             } else {
@@ -312,7 +324,10 @@ impl Service {
 
     fn active_provider_config(&self, id: &str) -> Option<&aikit_core::ConfigTable> {
         let id = aikit_core::CapsuleId::parse(id).ok()?;
-        self.view.active.get(&id).map(|capability| &capability.config)
+        self.view
+            .active
+            .get(&id)
+            .map(|capability| &capability.config)
     }
 
     fn build_project_map(
@@ -353,7 +368,9 @@ impl Service {
 
         if let Some(index) = wiki {
             for resource in index.discover() {
-                let object = index.resolve(&resource).expect("discovered Wiki ref resolves");
+                let object = index
+                    .resolve(&resource)
+                    .expect("discovered Wiki ref resolves");
                 let kind = match object {
                     WikiObject::Space(_) => ResourceKind::KnowledgeSpace,
                     WikiObject::Frame(_) => ResourceKind::KnowledgeFrame,
@@ -379,7 +396,9 @@ impl Service {
                 kind: ResourceKind::KnowledgeSource,
                 lens: ProjectLens::SourcePool,
                 authority: SourceAuthority::Observed,
-                provider: Some(aikit_core::ProviderRef::parse("provider/source-pool/native")?),
+                provider: Some(aikit_core::ProviderRef::parse(
+                    "provider/source-pool/native",
+                )?),
                 revision: Some(item.binding.revision.to_string()),
                 label: Some(item.binding.title.clone()),
             })?;
@@ -452,7 +471,10 @@ fn discover_material(
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(error) => {
-                absences.push(format!("Knowledge discovery could not read {}: {error}", dir.display()));
+                absences.push(format!(
+                    "Knowledge discovery could not read {}: {error}",
+                    dir.display()
+                ));
                 continue;
             }
         };
