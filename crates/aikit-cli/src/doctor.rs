@@ -7,8 +7,11 @@
 //! other world mutation — `doctor --fix` is a front-end over the one engine, not a
 //! second safety story.
 
+use aikit_adapters::NativeSecureStoreProvider;
+use aikit_core::credential::{CredentialRef, SecretProvider};
 use aikit_core::procedure::{Inverse, Plan, Procedure, ProcedureKind, WorldEdit};
 use aikit_core::{AikitError, Result};
+use aikit_store::CredentialBindingStore;
 
 use crate::app::Service;
 
@@ -129,6 +132,7 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
         ("profiles", home.profiles()),
         ("inbox", home.inbox()),
         ("state", home.state()),
+        ("credential binding state", home.credentials()),
     ] {
         if !path.exists() {
             findings.push(
@@ -141,6 +145,51 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
                 .fixable(Fix::CreateDir { path }),
             );
         }
+    }
+
+    // Credential provider visibility. Probe with an intentionally unbound
+    // identity: NoEntry proves the native store initialized without asking doctor
+    // to know any operator secret or model-specific credential requirements.
+    let probe = CredentialRef::new("credential:aikit/doctor-probe")?;
+    let native = NativeSecureStoreProvider::new();
+    let descriptor = native.descriptor(&probe);
+    findings.push(
+        Finding::new(
+            "credential.native-provider",
+            if descriptor.available {
+                Severity::Note
+            } else {
+                Severity::Warning
+            },
+            format!(
+                "native credential provider {} is {}",
+                descriptor.provider_kind,
+                if descriptor.available { "available" } else { "unavailable" }
+            ),
+        )
+        .with_detail(format!(
+            "tier=os-secure-store; headless_capable={}; materialisation=provider-native-lease; provenance={}",
+            descriptor.headless_capable, descriptor.binding_provenance
+        )),
+    );
+
+    for binding in CredentialBindingStore::new(home).list()? {
+        findings.push(
+            Finding::new(
+                "credential.binding",
+                Severity::Note,
+                format!(
+                    "{} resolves through {:?}",
+                    binding.credential_ref.as_str(), binding.provider_tier
+                ),
+            )
+            .with_detail(format!(
+                "provider={}; materialisation={:?}; provenance={}",
+                binding.provider_ref.as_str(),
+                binding.materialisation,
+                binding.binding_provenance
+            )),
+        );
     }
 
     // Open bypasses are meant to be short-lived and visible.
