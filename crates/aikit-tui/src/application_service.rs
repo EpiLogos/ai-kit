@@ -14,9 +14,11 @@ use aikit_core::resource::{
     ResourceKind, ResourceRef, ResourceSearchIndex,
 };
 use aikit_core::{
-    AikitError, FamiliarityContext, FamiliarityObservation, FamiliarityUse, Result,
-    DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+    AikitError, FamiliarityContext, FamiliarityObservation, FamiliarityUse, ForgetScope,
+    KnowledgeAddress, KnowledgeContextPack, KnowledgeProviderStatus, KnowledgeReading,
+    KnowledgeRoute, KnowledgeSources, Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS,
 };
+use aikit_store::KnowledgeHistoryOperation;
 use serde_json::{json, to_string_pretty, to_value, Value};
 
 use crate::application::{
@@ -151,7 +153,7 @@ impl<'a> ApplicationService<'a> {
 impl TuiApplicationService for ApplicationService<'_> {
     fn search(&self, query: &str) -> Result<ResourceListReadModel> {
         let index = self.navigation_index()?;
-        let resources = index
+        let mut resources = index
             .search(query, 256)
             .into_iter()
             .map(|hit| ResourceListItem {
@@ -160,7 +162,25 @@ impl TuiApplicationService for ApplicationService<'_> {
                 label: hit.label,
                 summary: summary_with_navigation_evidence(hit.summary, &hit.navigation_evidence),
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if let Some(knowledge) = self.backend.knowledge_search(query, 256)? {
+            for hit in knowledge.hits {
+                if resources.iter().any(|item| item.resource == hit.resource) {
+                    continue;
+                }
+                let provider = hit
+                    .provider
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "provider-neutral".into());
+                resources.push(ResourceListItem {
+                    resource: hit.resource,
+                    kind: hit.kind,
+                    label: hit.label,
+                    summary: format!("{} · {provider} · {:?}", hit.snippet, hit.authority),
+                });
+            }
+        }
         Ok(ResourceListReadModel {
             revision: format!(
                 "aikit.resource-search/v2:{}:{}:{}",
@@ -173,6 +193,18 @@ impl TuiApplicationService for ApplicationService<'_> {
     }
 
     fn context_disclosure(&self, resource: &ResourceRef) -> Result<Value> {
+        if let Some(address) = self.backend.knowledge_address(resource)? {
+            if let Some(reading) = self.backend.knowledge_read(&address)? {
+                return Ok(json!({
+                    "resource": resource.as_str(),
+                    "knowledgeAddress": address,
+                    "reading": reading,
+                    "context": to_value(self.backend.context()).map_err(json_error)?,
+                    "catalogRevision": self.backend.view().catalog_revision,
+                    "resolutionHash": self.backend.view().hash.to_string(),
+                }));
+            }
+        }
         let index = self.navigation_index()?;
         let hit = index
             .search(resource.as_str(), 256)
@@ -185,17 +217,15 @@ impl TuiApplicationService for ApplicationService<'_> {
                 )
             })?;
 
-        let package_state = self
-            .package_capability_id(resource)?
-            .map(|capsule| {
-                let view = self.backend.view();
-                json!({
-                    "active": view.is_active(&capsule),
-                    "declaredEnabled": view.is_declared_enabled(&capsule),
-                    "available": !view.unavailable.contains_key(&capsule),
-                    "runnable": view.can_run(&capsule),
-                })
-            });
+        let package_state = self.package_capability_id(resource)?.map(|capsule| {
+            let view = self.backend.view();
+            json!({
+                "active": view.is_active(&capsule),
+                "declaredEnabled": view.is_declared_enabled(&capsule),
+                "available": !view.unavailable.contains_key(&capsule),
+                "runnable": view.can_run(&capsule),
+            })
+        });
 
         Ok(json!({
             "resource": resource.as_str(),
@@ -229,7 +259,10 @@ impl TuiApplicationService for ApplicationService<'_> {
                 .join(", ")
         };
         Ok(CompositionPreview {
-            revision: format!("{}:{}", projected.view.catalog_revision, projected.view.hash),
+            revision: format!(
+                "{}:{}",
+                projected.view.catalog_revision, projected.view.hash
+            ),
             scope,
             staged: staged.clone(),
             summary: format!(
@@ -254,6 +287,18 @@ impl TuiApplicationService for ApplicationService<'_> {
 
     fn explain(&self, resource: &ResourceRef) -> Result<Value> {
         let learned = self.learned_accessibility(resource)?;
+        if let Some(address) = self.backend.knowledge_address(resource)? {
+            if let Some(explanation) = self.backend.knowledge_explain(&address)? {
+                return Ok(json!({
+                    "resource": resource.as_str(),
+                    "knowledgeAddress": address,
+                    "knowledge": explanation,
+                    "learnedAccessibility": learned,
+                    "catalogRevision": self.backend.view().catalog_revision,
+                    "resolutionHash": self.backend.view().hash.to_string(),
+                }));
+            }
+        }
         let index = self.navigation_index()?;
         let record = ResourceIndex::resource(&index, resource).ok_or_else(|| {
             AikitError::new(
@@ -312,28 +357,69 @@ impl TuiApplicationService for ApplicationService<'_> {
             .flatten();
         let mut entries = self
             .backend
-            .recent()
+            .knowledge_history(resource)?
             .into_iter()
-            .enumerate()
-            .filter(|(_, intent)| match resource {
-                None => true,
-                Some(_) => wanted_capsule
-                    .as_ref()
-                    .is_some_and(|id| &intent.capsule == id),
-            })
-            .map(|(index, intent)| {
-                let summary = intent
-                    .redacted_argv()
-                    .ok()
-                    .filter(|argv| !argv.is_empty())
-                    .map(|argv| format!("run · {} · {}", intent.capsule, argv.join(" ")))
-                    .unwrap_or_else(|| format!("run · {}", intent.capsule));
+            .map(|receipt| {
+                let summary = match receipt.operation {
+                    KnowledgeHistoryOperation::Route => receipt
+                        .route
+                        .as_ref()
+                        .map(|route| {
+                            format!(
+                                "knowledge route · {} · {} step{}",
+                                route.route,
+                                route.steps.len(),
+                                plural(route.steps.len())
+                            )
+                        })
+                        .unwrap_or_else(|| "knowledge route receipt".into()),
+                    KnowledgeHistoryOperation::Frame => receipt
+                        .frame
+                        .as_ref()
+                        .map(|frame| {
+                            format!(
+                                "knowledge frame · {} reading{} · {} route{} · {} absence{}",
+                                frame.readings.len(),
+                                plural(frame.readings.len()),
+                                frame.routes.len(),
+                                plural(frame.routes.len()),
+                                frame.absences.len(),
+                                plural(frame.absences.len())
+                            )
+                        })
+                        .unwrap_or_else(|| "knowledge frame receipt".into()),
+                };
                 HistoryEntry {
-                    id: format!("recent-{index}"),
+                    id: receipt.receipt_id,
                     summary,
                 }
             })
             .collect::<Vec<_>>();
+        entries.extend(
+            self.backend
+                .recent()
+                .into_iter()
+                .enumerate()
+                .filter(|(_, intent)| match resource {
+                    None => true,
+                    Some(_) => wanted_capsule
+                        .as_ref()
+                        .is_some_and(|id| &intent.capsule == id),
+                })
+                .map(|(index, intent)| {
+                    let summary = intent
+                        .redacted_argv()
+                        .ok()
+                        .filter(|argv| !argv.is_empty())
+                        .map(|argv| format!("run · {} · {}", intent.capsule, argv.join(" ")))
+                        .unwrap_or_else(|| format!("run · {}", intent.capsule));
+                    HistoryEntry {
+                        id: format!("recent-{index}"),
+                        summary,
+                    }
+                })
+                .collect::<Vec<_>>(),
+        );
 
         if let Some(store) = self.backend.familiarity()? {
             let mut observations = store.snapshot().observations;
@@ -353,7 +439,11 @@ impl TuiApplicationService for ApplicationService<'_> {
                         let route = match &observation.use_kind {
                             FamiliarityUse::Destination => "destination".to_string(),
                             FamiliarityUse::Route { route, steps } => {
-                                format!("route {route} · {} step{}", steps.len(), plural(steps.len()))
+                                format!(
+                                    "route {route} · {} step{}",
+                                    steps.len(),
+                                    plural(steps.len())
+                                )
                             }
                         };
                         let action = observation
@@ -381,6 +471,14 @@ impl TuiApplicationService for ApplicationService<'_> {
     }
 
     fn relations(&self, resource: &ResourceRef) -> Result<RelationReadModel> {
+        if let Some(address) = self.backend.knowledge_address(resource)? {
+            if let Some(view) = self.backend.knowledge_relations(&address, 2, 256, 512)? {
+                return Ok(RelationReadModel {
+                    subject: resource.clone(),
+                    value: to_value(view).map_err(json_error)?,
+                });
+            }
+        }
         let index = self.navigation_index()?;
         let record = ResourceIndex::resource(&index, resource).ok_or_else(|| {
             AikitError::new(
@@ -419,11 +517,46 @@ impl TuiApplicationService for ApplicationService<'_> {
         })
     }
 
+    fn knowledge_read(&self, address: &KnowledgeAddress) -> Result<Option<KnowledgeReading>> {
+        self.backend.knowledge_read(address)
+    }
+
+    fn knowledge_route(
+        &mut self,
+        query: Option<&str>,
+        addresses: &[KnowledgeAddress],
+    ) -> Result<Option<KnowledgeRoute>> {
+        self.backend.knowledge_route(query, addresses)
+    }
+
+    fn knowledge_frame(
+        &mut self,
+        query: Option<&str>,
+        addresses: &[KnowledgeAddress],
+    ) -> Result<Option<KnowledgeContextPack>> {
+        self.backend.knowledge_frame(query, addresses)
+    }
+
+    fn knowledge_sources(&self, address: &KnowledgeAddress) -> Result<Option<KnowledgeSources>> {
+        self.backend.knowledge_sources(address)
+    }
+
+    fn knowledge_status(&self) -> Result<Option<KnowledgeProviderStatus>> {
+        self.backend.knowledge_status()
+    }
+
+    fn knowledge_forget(&mut self, scope: ForgetScope) -> Result<bool> {
+        self.backend.knowledge_forget(scope)
+    }
+
     fn observe_resource_use(&mut self, resource: &ResourceRef) -> Result<()> {
         self.record_destination_use(resource.clone())
     }
 
-    fn contextual_actions(&self, resource: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
+    fn contextual_actions(
+        &self,
+        resource: &ResourceRef,
+    ) -> Result<Vec<ContextualActionDescriptor>> {
         let index = self.navigation_index()?;
         Ok(index.actions_for(resource).into_iter().cloned().collect())
     }
@@ -475,9 +608,10 @@ impl TuiApplicationService for ApplicationService<'_> {
 
 fn familiarity_context(context: &aikit_core::ContextDescriptor) -> FamiliarityContext {
     FamiliarityContext {
-        project: context.project_id.as_ref().and_then(|project| {
-            ResourceRef::parse(&format!("project/{project}")).ok()
-        }),
+        project: context
+            .project_id
+            .as_ref()
+            .and_then(|project| ResourceRef::parse(&format!("project/{project}")).ok()),
         actor: None,
         agency: None,
         focus: context.task.clone(),
@@ -523,5 +657,9 @@ fn json_error(error: serde_json::Error) -> AikitError {
 }
 
 fn plural(count: usize) -> &'static str {
-    if count == 1 { "" } else { "s" }
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }

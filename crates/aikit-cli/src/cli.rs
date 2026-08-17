@@ -62,6 +62,8 @@ pub enum Command {
     Ui(UiArgs),
     /// Search the catalogue for capabilities.
     Search(SearchArgs),
+    /// Navigate provider-neutral project knowledge through the shared application faculty.
+    Knowledge(KnowledgeCmd),
     /// Show the effective view for the current context.
     Status(StatusArgs),
     /// Explain why a capability is or is not active.
@@ -573,6 +575,93 @@ pub struct SearchArgs {
     #[arg(long, default_value_t = 50)]
     pub limit: usize,
 }
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCmd {
+    #[command(subcommand)]
+    pub command: KnowledgeSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KnowledgeSub {
+    Search(KnowledgeSearchArgs),
+    Read(KnowledgeAddressArgs),
+    Relations(KnowledgeRelationsArgs),
+    Route(KnowledgeRouteArgs),
+    Frame(KnowledgeRouteArgs),
+    Sources(KnowledgeAddressArgs),
+    Explain(KnowledgeAddressArgs),
+    History(KnowledgeHistoryArgs),
+    Status(KnowledgeStatusArgs),
+    Forget(KnowledgeForgetCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeSearchArgs {
+    #[arg(value_name = "QUERY", default_value = "")]
+    pub query: String,
+    #[arg(long, default_value_t = 50)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeAddressArgs {
+    /// Typed address JSON from `knowledge search`, or `wiki=REF`, `source=REF`, `project=REF`.
+    #[arg(value_name = "ADDRESS")]
+    pub address: String,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeRelationsArgs {
+    #[arg(value_name = "ADDRESS")]
+    pub address: String,
+    #[arg(long, default_value_t = 2)]
+    pub depth: u8,
+    #[arg(long, default_value_t = 256)]
+    pub max_nodes: usize,
+    #[arg(long, default_value_t = 512)]
+    pub max_edges: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeRouteArgs {
+    #[arg(long)]
+    pub query: Option<String>,
+    #[arg(value_name = "ADDRESS", required = true)]
+    pub addresses: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeHistoryArgs {
+    #[arg(value_name = "RESOURCE")]
+    pub resource: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeStatusArgs {}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeForgetCmd {
+    #[command(subcommand)]
+    pub command: KnowledgeForgetSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KnowledgeForgetSub {
+    Destination(KnowledgeForgetResourceArgs),
+    Route(KnowledgeForgetResourceArgs),
+    Project(KnowledgeForgetResourceArgs),
+    All(KnowledgeForgetAllArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeForgetResourceArgs {
+    #[arg(value_name = "RESOURCE")]
+    pub resource: String,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeForgetAllArgs {}
 
 #[derive(Debug, Args)]
 pub struct StatusArgs {

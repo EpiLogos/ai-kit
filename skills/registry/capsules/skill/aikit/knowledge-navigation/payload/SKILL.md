@@ -22,6 +22,8 @@ history
 
 Provider status/degradation is an accompanying disclosure surface, not a replacement for any operation above.
 
+The production CLI exposes the same faculty as `aikit knowledge search|read|relations|route|frame|sources|explain|history|status|forget`. Search returns typed addresses that can be passed back as JSON; `wiki=REF`, `source=REF` and `project=REF` are convenience forms for stable address classes.
+
 ## Procedure
 
 1. Read the current Context as operative world + information horizon + focus; distinguish what is addressable from what is already loaded.
@@ -30,7 +32,7 @@ Provider status/degradation is an accompanying disclosure surface, not a replace
 4. Use `relations` for bounded provider-native neighbourhoods and `route` for the ordered path actually traversed. A repeated route may become familiar but never becomes a Wiki/code/source relation, trust signal or authored preference.
 5. Use `frame`/context-pack projection to collect selected refs, ordered route, readings, source evidence, revision/freshness, explanations and explicit absences for the current act. A frame is derived retrieval material, not a new canonical ContextSource.
 6. Use `sources` and `explain` to preserve provider/lens/authority/provenance distinctions. Keep authored, observed, derived and learned evidence distinguishable.
-7. Use `history` to recover prior destinations/routes in the same Project/actor/Focus context without manufacturing provider graph history.
+7. Use `history` to recover durable AIKit-owned route/frame receipts in the same Project/actor/Focus context without manufacturing provider graph history. `forget` resets learned familiarity influence only; it does not erase canonical Resource identity, provider truth or the operation audit trail.
 8. When a provider is absent/degraded, return that state honestly and use other eligible sources only if the effective context authorises them. Baseline address/fuzzy navigation must remain useful without rich providers or QL/MEF.
 
 ## Verification

@@ -172,6 +172,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Ui(a)) => open_surface(cwd, a.query, a.fullscreen, a.tree),
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
+        Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
         Some(Command::Status(a)) => cmd_status(cwd, a),
         Some(Command::Explain(a)) => cmd_explain(cwd, a),
         Some(Command::Run(a)) => cmd_run(cwd, a),
@@ -229,9 +230,7 @@ fn cmd_skill(cwd: &std::path::Path, command: SkillCmd) -> Result<Reply> {
                 inherit: !args.no_inherit,
                 description: args.description,
                 guidance,
-                reviewed_against: args
-                    .reviewed_against
-                    .map(Revision::from_raw),
+                reviewed_against: args.reviewed_against.map(Revision::from_raw),
             };
             overlay.validate(&id)?;
             let applied = service.set_skill_usage_overlay(&id, scope, &overlay)?;
@@ -348,7 +347,10 @@ fn cmd_project(cwd: &std::path::Path, command: ProjectCmd) -> Result<Reply> {
             let matched = aikit_cli::projects::resolve(service.home(), cwd)?.ok_or_else(|| {
                 AikitError::new(
                     "project.not_matched",
-                    format!("{} is not matched by a Project Specification", cwd.display()),
+                    format!(
+                        "{} is not matched by a Project Specification",
+                        cwd.display()
+                    ),
                 )
             })?;
             Ok(reply(
@@ -461,12 +463,8 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
             ))
         }
         SourceSub::Promote(args) => {
-            let (snapshot, trusted) = skill_sources::promote(
-                home,
-                &args.id,
-                args.trust,
-                &args.trust_skills,
-            )?;
+            let (snapshot, trusted) =
+                skill_sources::promote(home, &args.id, args.trust, &args.trust_skills)?;
             Ok(reply(
                 &service,
                 jval!({
@@ -1343,6 +1341,112 @@ fn executable_path(name: &str) -> Option<String> {
                 .display()
                 .to_string()
         })
+}
+
+fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
+    use aikit_core::{ForgetScope, KnowledgeAddress, ResourceRef, SourceRef};
+
+    let mut service = Service::discover(cwd)?;
+    let mut warnings = diagnostic_warnings(&service);
+    let data = match c.command {
+        KnowledgeSub::Search(a) => {
+            let result = service.knowledge_search(&a.query, a.limit)?;
+            warnings.extend(result.absences.clone());
+            jval!(result)
+        }
+        KnowledgeSub::Read(a) => {
+            let address = parse_knowledge_address(&a.address)?;
+            jval!(service.knowledge_read(&address)?)
+        }
+        KnowledgeSub::Relations(a) => {
+            let address = parse_knowledge_address(&a.address)?;
+            jval!(service.knowledge_relations(&address, a.depth, a.max_nodes, a.max_edges)?)
+        }
+        KnowledgeSub::Route(a) => {
+            let addresses = a
+                .addresses
+                .iter()
+                .map(|raw| parse_knowledge_address(raw))
+                .collect::<Result<Vec<_>>>()?;
+            jval!(service.knowledge_route(a.query.as_deref(), &addresses)?)
+        }
+        KnowledgeSub::Frame(a) => {
+            let addresses = a
+                .addresses
+                .iter()
+                .map(|raw| parse_knowledge_address(raw))
+                .collect::<Result<Vec<_>>>()?;
+            let frame = service.knowledge_frame(a.query.as_deref(), &addresses)?;
+            warnings.extend(frame.absences.clone());
+            jval!(frame)
+        }
+        KnowledgeSub::Sources(a) => {
+            let address = parse_knowledge_address(&a.address)?;
+            jval!(service.knowledge_sources(&address)?)
+        }
+        KnowledgeSub::Explain(a) => {
+            let address = parse_knowledge_address(&a.address)?;
+            jval!(service.knowledge_explain(&address)?)
+        }
+        KnowledgeSub::History(a) => {
+            let resource = a.resource.as_deref().map(ResourceRef::parse).transpose()?;
+            jval!(service.knowledge_history(resource.as_ref())?)
+        }
+        KnowledgeSub::Status(_) => {
+            let status = service.knowledge_status()?;
+            warnings.extend(status.absences.clone());
+            jval!(status)
+        }
+        KnowledgeSub::Forget(a) => {
+            let scope = match a.command {
+                KnowledgeForgetSub::Destination(a) => {
+                    ForgetScope::Destination(ResourceRef::parse(&a.resource)?)
+                }
+                KnowledgeForgetSub::Route(a) => {
+                    ForgetScope::Route(ResourceRef::parse(&a.resource)?)
+                }
+                KnowledgeForgetSub::Project(a) => {
+                    ForgetScope::Project(ResourceRef::parse(&a.resource)?)
+                }
+                KnowledgeForgetSub::All(_) => ForgetScope::All,
+            };
+            service.knowledge_forget(scope.clone())?;
+            jval!({
+                "forgot": scope,
+                "preserved": ["canonical-resource-identity", "provider-truth", "knowledge-operation-history"]
+            })
+        }
+    };
+    Ok(reply(&service, data, warnings))
+}
+
+fn parse_knowledge_address(raw: &str) -> Result<aikit_core::KnowledgeAddress> {
+    use aikit_core::{KnowledgeAddress, ResourceRef, SourceRef};
+
+    let raw = raw.trim();
+    if raw.starts_with('{') {
+        return serde_json::from_str(raw).map_err(|error| {
+            AikitError::new(
+                "knowledge.invalid_address",
+                format!("invalid typed Knowledge address JSON: {error}"),
+            )
+            .with("address", raw)
+        });
+    }
+    if let Some(value) = raw.strip_prefix("wiki=") {
+        return Ok(KnowledgeAddress::Wiki(ResourceRef::parse(value)?));
+    }
+    if let Some(value) = raw.strip_prefix("source=") {
+        return Ok(KnowledgeAddress::Source(SourceRef::parse(value)?));
+    }
+    if let Some(value) = raw.strip_prefix("project=") {
+        return Ok(KnowledgeAddress::ProjectMap(ResourceRef::parse(value)?));
+    }
+    Err(AikitError::new(
+        "knowledge.invalid_address",
+        "Knowledge address must be typed JSON from search, or wiki=REF, source=REF, project=REF",
+    )
+    .with("address", raw))
 }
 
 fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
@@ -2584,9 +2688,7 @@ fn resolve_scope(service: &Service, scope: Option<&str>) -> Result<ScopeKind> {
 fn parse_scope(raw: &str) -> Result<ScopeKind> {
     ScopeKind::ALL
         .into_iter()
-        .find(|scope| {
-            scope.as_str() == raw || (*scope == ScopeKind::Global && raw == "user")
-        })
+        .find(|scope| scope.as_str() == raw || (*scope == ScopeKind::Global && raw == "user"))
         .ok_or_else(|| {
             AikitError::new("cli.usage", format!("`{raw}` is not a scope"))
                 .with("scope", raw.to_string())
