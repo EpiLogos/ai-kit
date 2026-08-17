@@ -62,6 +62,7 @@ pub mod procedure;
 pub mod registry;
 pub mod scan;
 pub mod session_space_application;
+pub mod session_space_evidence;
 pub mod skillsets;
 pub mod state;
 pub mod template;
@@ -95,6 +96,9 @@ pub use scan::{Finding, Scanner};
 pub use session_space_application::{
     SessionSpaceApplicationStore, SessionSpaceHistoryComparison, SessionSpaceReceipt,
     SESSION_SPACE_STORE_VERSION,
+};
+pub use session_space_evidence::{
+    explain_session_space_with_receipts, SessionSpaceExplainEvidence,
 };
 pub use state::{ContextRecord, SessionRecord, SessionState, StateStore};
 pub use template::{plan_instantiation, ParamValues};
