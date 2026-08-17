@@ -1,52 +1,31 @@
-//! Project-world and actor-context composition for the shared CLI/TUI application service.
+//! Project-world projection for the shared V2 application service.
 //!
-//! The application service already exposes one resolved legacy view, its authoritative
-//! `ContextDescriptor`, the ResourceRef-native navigation index, and—where the concrete
-//! backend owns it—the ordered scope-layer stack through `PaletteBackend`.
-//!
-//! This module composes one V2 [`ContextResolution`] from those same inputs rather than
-//! rebuilding resolution inside a renderer/controller or target adapter. Project-world
-//! disclosure and thin actor bootstrap can therefore consume the same typed operational
-//! truth. When a compatibility backend cannot expose scope layers, that absence remains
-//! explicit instead of being inferred from partial selection-log evidence.
+//! The domain operation that composes ProjectBinding, Host, ordered scope
+//! provenance and the ResourceRef-native field is core-owned. This module is only
+//! the TUI/backend adapter plus disclosure of ContextSource horizon state.
 
-use aikit_core::context_resolution::{compose_context_resolution, RequestedActors};
 use aikit_core::context_source::{ContextSourceEntry, ContextSourceIndex};
-use aikit_core::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
-use aikit_core::resource::{ResourceKind, ResourceRef};
-use aikit_core::{disclose_project_world, ContextResolution, ProjectWorldReadModel, Result};
+use aikit_core::resource::ResourceKind;
+use aikit_core::{
+    application_context_resolution, disclose_project_world, ContextResolution,
+    ProjectWorldReadModel, Result,
+};
 
 use crate::PaletteBackend;
 
-/// Compose the wider V2 operational Context from the same application service
-/// that already backs Quick/Workspace navigation and durable composition.
+/// Obtain the canonical application ContextResolution from the current backend.
 ///
-/// This is intentionally public inside the TUI/application crate so other
-/// application projections—most importantly the managed actor bootstrap—can
-/// consume the exact same resolved Project/Scope/Resource field without asking a
-/// harness adapter to reconstruct identity.
+/// The retained `PaletteBackend` name is a compatibility seam only. Project/Host
+/// identity and scope composition are resolved in `aikit-core`, so the renderer
+/// cannot become a semantic boundary around Context.
 pub fn context_resolution(backend: &dyn PaletteBackend) -> Result<ContextResolution> {
-    let context = backend.context();
-    let project_ref = project_ref(context)?;
-    let constituent = ProjectConstituentRef::parse("source:working-tree")?;
-    let binding = ProjectBinding::from_legacy_context(project_ref, constituent, context)?;
     let resources = backend.navigation_index();
-
-    let host = (!context.host.trim().is_empty())
-        .then(|| ResourceRef::parse(&format!("host/{}", context.host)))
-        .transpose()?;
-    let requested = RequestedActors {
-        host,
-        ..RequestedActors::default()
-    };
-
-    Ok(compose_context_resolution(
+    application_context_resolution(
+        backend.context(),
         backend.view(),
-        binding,
         backend.scope_layers().unwrap_or(&[]),
         &resources,
-        requested,
-    ))
+    )
 }
 
 pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadModel> {
@@ -74,21 +53,6 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
         );
     }
     Ok(world)
-}
-
-fn project_ref(context: &aikit_core::ContextDescriptor) -> Result<ProjectRef> {
-    if let Some(id) = &context.project_id {
-        return ProjectRef::parse(&format!("project:{id}"));
-    }
-    if let Some(name) = context
-        .project_root
-        .as_ref()
-        .and_then(|root| root.file_name())
-        .map(|name| name.to_string_lossy())
-    {
-        return ProjectRef::parse(&format!("project:{name}"));
-    }
-    ProjectRef::parse("project:unbound-context")
 }
 
 #[cfg(test)]
@@ -157,11 +121,9 @@ mod tests {
     }
 
     fn resolved(context: &ContextDescriptor, layers: Vec<ScopeLayer>) -> aikit_core::ResolvedView {
-        let catalog = MemoryCatalog::default();
-        let trust = MemoryTrust::default();
         resolve(
-            &catalog,
-            &trust,
+            &MemoryCatalog::default(),
+            &MemoryTrust::default(),
             &ResolveRequest {
                 context: context.clone(),
                 layers,
@@ -172,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_context_resolution_uses_the_current_host_resource() {
+    fn tui_adapter_uses_core_application_context_resolution() {
         let mut context = ContextDescriptor::for_project("/work/aikit");
         context.host = "test-host".into();
         let view = resolved(&context, Vec::new());
@@ -187,6 +149,7 @@ mod tests {
             resolution.host,
             Some(ReferenceResolution::Resolved { .. })
         ));
+        assert_eq!(resolution.project_binding.project.to_string(), "project:aikit");
     }
 
     #[test]
