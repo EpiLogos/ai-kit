@@ -34,6 +34,7 @@ pub mod duration;
 pub mod effects;
 pub mod error;
 pub mod explain_history;
+pub mod explain_history_actions;
 pub mod familiarity;
 pub mod frecency;
 pub mod guidance;
@@ -131,6 +132,10 @@ pub use explain_history::{
     harness_composition_history_evidence, EvidenceProvenance, ExplainEvidence, ExplainFact,
     HistoryEvidence, HistoryKind, HistoryReadModel, HistoryRecoverability,
     EXPLAIN_HISTORY_VERSION,
+};
+pub use explain_history_actions::{
+    explain_history_action_resources, explain_history_actions_for, EXPLAIN_ACTION_REF,
+    HISTORY_ACTION_REF,
 };
 pub use familiarity::{
     AccessibilityAssessment, AccessibilitySignal, AccessibilitySignalClass, FamiliarityContext,
