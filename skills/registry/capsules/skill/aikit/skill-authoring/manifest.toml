@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/skill-authoring"
+kind = "skill"
+name = "AIKit Skill authoring"
+description = "Write, validate and promote high-quality managed Skills without confusing source, projection, trust or fitness."
+maturity = "stable"
+tags = ["aikit", "skills", "authoring"]
+
+[skill]
+root = "payload"

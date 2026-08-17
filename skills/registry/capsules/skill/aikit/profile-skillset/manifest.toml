@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/profile-skillset"
+kind = "skill"
+name = "AIKit Profile and SkillSet management"
+description = "Inspect, stage, preview and apply Profile/SkillSet changes through AIKit's existing resolution machinery."
+maturity = "stable"
+tags = ["aikit", "profile", "skillset"]
+
+[skill]
+root = "payload"

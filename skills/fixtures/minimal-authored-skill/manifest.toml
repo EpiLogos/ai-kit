@@ -1,0 +1,9 @@
+schema = 1
+id = "skill/aikit-fixture/inspect-source"
+kind = "skill"
+name = "Inspect managed source"
+description = "Minimal fixture authored by the AIKit Skill-authoring procedure."
+maturity = "experimental"
+
+[skill]
+root = "payload"

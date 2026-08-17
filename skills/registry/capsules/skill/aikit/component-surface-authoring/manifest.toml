@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/component-surface-authoring"
+kind = "skill"
+name = "AIKit Component, Surface and working-environment authoring"
+description = "Author Components, Surfaces and SessionSpace contributions through the public contribution/provider lifecycle."
+maturity = "stable"
+tags = ["aikit", "component", "surface", "session-space"]
+
+[skill]
+root = "payload"

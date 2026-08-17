@@ -1,0 +1,30 @@
+name: Native Skills
+
+on:
+  pull_request:
+    paths:
+      - "skills/**"
+      - "scripts/verify-native-skills.py"
+      - "crates/aikit-core/src/skillset.rs"
+      - "crates/aikit-core/src/profile.rs"
+      - "crates/aikit-core/src/session_space*.rs"
+      - ".github/workflows/native-skills.yml"
+  push:
+    branches: [main]
+    paths:
+      - "skills/**"
+      - "scripts/verify-native-skills.py"
+      - "crates/aikit-core/src/skillset.rs"
+      - "crates/aikit-core/src/profile.rs"
+      - "crates/aikit-core/src/session_space*.rs"
+      - ".github/workflows/native-skills.yml"
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/verify-native-skills.py
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p aikit-cli --test set_command
+      - run: cargo test -p aikit-cli --test acceptance

@@ -1,0 +1,16 @@
+schema = 1
+
+[[skillset]]
+semantic_ref = "aikit:operator"
+directory = "aikit-operator"
+description = "Day-one AIKit operation over existing Wayfinder/foundation machinery."
+
+[[skillset]]
+semantic_ref = "aikit:project-author"
+directory = "aikit-project-author"
+description = "AIKit project/Profile/Skill authoring competence."
+
+[[skillset]]
+semantic_ref = "aikit:extension-developer"
+directory = "aikit-extension-developer"
+description = "AIKit provider, Component and Surface extension competence."
