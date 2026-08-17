@@ -1,0 +1,37 @@
+name: Knowledge compile fix
+
+on:
+  push:
+    branches:
+      - agent/knowledge-navigation-production-closure
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/knowledge-navigation-production-closure
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: python3 scripts/knowledge_compile_fix.py
+      - run: |
+          rm scripts/knowledge_compile_fix.py
+          rm .github/workflows/knowledge-compile-fix.yml
+          rustfmt --edition 2021 crates/aikit-store/src/knowledge_application.rs
+      - run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "fix(knowledge): use current ULID generation API"
+          git push origin HEAD:agent/knowledge-navigation-production-closure
+      - run: cargo check -p aikit-core -p aikit-store -p aikit-cli
+      - run: |
+          cargo test -p aikit-core knowledge --lib
+          cargo test -p aikit-store knowledge_application --lib
