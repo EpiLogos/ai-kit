@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{AikitError, Result};
@@ -17,6 +19,12 @@ impl ProjectRef {
     pub fn as_str(&self) -> &str { &self.0 }
 }
 
+impl fmt::Display for ProjectRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ProjectConstituentRef(String);
@@ -33,4 +41,10 @@ impl ProjectConstituentRef {
     }
 
     pub fn as_str(&self) -> &str { &self.0 }
+}
+
+impl fmt::Display for ProjectConstituentRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
