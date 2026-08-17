@@ -232,3 +232,4 @@ jobs:
           git add crates/aikit-core/src/knowledge_navigation.rs crates/aikit-store/src/knowledge_application.rs .github/workflows/tmp-knowledge-address-law.yml
           git commit -m "fix(v2): preserve provider-native Knowledge addresses"
           git push origin HEAD:agent/knowledge-navigation-production-closure
+# trigger after workflow exists on branch
