@@ -65,6 +65,7 @@ mod tests {
     use crate::context_resolution::ReferenceResolution;
     use crate::policy::ManagedPolicy;
     use crate::resolve::{resolve, ResolveRequest};
+    use crate::resource::{ResourceDescriptor, ResourceKind, ResourceRecord};
     use crate::scope::{LayerOrigin, ScopeKind, ScopeLayer};
     use crate::trust::MemoryTrust;
 
@@ -86,14 +87,16 @@ mod tests {
         let mut context = ContextDescriptor::for_project("/work/aikit");
         context.host = "test-host".into();
         let view = resolved(&context, Vec::new());
+        let mut resources = ResourceSearchIndex::default();
+        resources.insert_resource(ResourceRecord::new(ResourceDescriptor::new(
+            ResourceRef::parse("host/test-host").unwrap(),
+            ResourceKind::Host,
+            "test-host",
+            "test host",
+        )));
 
-        let resolution = application_context_resolution(
-            &context,
-            &view,
-            &[],
-            &ResourceSearchIndex::default(),
-        )
-        .unwrap();
+        let resolution =
+            application_context_resolution(&context, &view, &[], &resources).unwrap();
 
         assert!(matches!(
             resolution.host,
