@@ -33,6 +33,7 @@ fn real_pinned_deepseek_cordis_web_activates_inside_session_space() {
         live.composition.target_revision.as_deref(),
         Some(DEEPSEEK_HARNESS_UPSTREAM_REVISION)
     );
+    let body_fingerprint = live.composition.fingerprint.clone();
 
     let mut runtime = SessionSpaceRuntime::open(
         SessionSpaceDefinition::new(SessionSpaceRef::parse("session-space/deepseek-real").unwrap())
@@ -70,14 +71,25 @@ fn real_pinned_deepseek_cordis_web_activates_inside_session_space() {
         active.provider.as_ref(),
         Some(&r("provider/deepseek/cordis-web"))
     );
+    assert_eq!(
+        active.observed_composition_fingerprint.as_deref(),
+        Some(body_fingerprint.as_str())
+    );
     assert!(active
         .provenance
         .iter()
         .any(|source| source.contains(DEEPSEEK_HARNESS_UPSTREAM_REVISION)));
 
-    let removed = runtime
+    let deactivated = runtime
         .deactivate_component(&lease, &component, &mut driver)
         .unwrap();
-    assert_eq!(removed, SessionSpaceActivationState::Removed);
+    assert_eq!(
+        deactivated,
+        SessionSpaceActivationState::Eligible,
+        "provider teardown must not counterfeit canonical recomposition"
+    );
     assert!(!driver.is_running().unwrap());
+    assert!(runtime.read_model().surfaces.iter().any(|surface| {
+        surface.component.as_ref() == Some(&component)
+    }));
 }
