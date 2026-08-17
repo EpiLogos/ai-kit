@@ -3,10 +3,11 @@ mod common;
 use std::fs;
 
 use aikit_core::catalog::Catalog;
+use aikit_core::resource::SourceAuthority;
 use aikit_core::trust::MemoryTrust;
 use aikit_core::{
     ContextDescriptor, LayerOrigin, PoolPatch, RegistrySource, ResolveRequest, ScopeKind,
-    ScopeLayer, SourceAuthority, TrustState,
+    ScopeLayer, TrustState,
 };
 use aikit_store::{compare_generation_worlds, registry, AikitHome, GenerationBuilder};
 use common::{cid, RegistryFixture};
@@ -116,9 +117,6 @@ fn arbitrary_historical_comparison_is_inspection_not_generic_restore() {
         .unwrap()
         .id;
 
-    // Build a second distinct immutable receipt by changing a cosmetic target plan
-    // is deliberately not needed here: comparing one exact world to itself proves
-    // the comparison read does not manufacture change or recovery semantics.
     let comparison =
         compare_generation_worlds(&home, &context.context_id, &before, &before).unwrap();
     assert!(comparison.is_noop());
