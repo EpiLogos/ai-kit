@@ -25,6 +25,8 @@ Use the shared SessionSpace application operation for:
 
 CLI, TUI and agent surfaces may render these differently, but they must use the same canonical refs, typed intent, preview, basis, apply authority, receipt and read model.
 
+The production structured CLI is `aikit-session-space`. Its `create` and `stage` commands are write-free and return a serialised preview. `apply --preview-json <JSON|@FILE>` is the mutation boundary. `stage --intent-json <JSON|@FILE>` accepts the same typed `SessionSpaceMutation` used by the canonical Service, so agent operation does not need a separate command ontology for bind/unbind, attachment or focus intent. `list`, `show`, `open`, `discover`, `history`, `compare`, `restore-preview`, `reconstruct`, `reconcile` and `explain` are read/stage projections over that same authority.
+
 ## Identity and authority invariants
 
 Preserve these distinctions at all times:
