@@ -15,6 +15,7 @@ pub mod event;
 pub mod host;
 pub mod knowledge_service;
 pub mod layout;
+pub mod model_roster_surface;
 pub mod navigation;
 pub mod project_workspace;
 pub mod project_workspace_render;
@@ -46,6 +47,7 @@ pub use event::{EventSource, PaletteEvent, ScriptedEvents};
 pub use host::{Escalation, TerminalProfile, UiHost};
 pub use knowledge_service::KnowledgeNavigationService;
 pub use layout::{Glyphs, Layout, Width};
+pub use model_roster_surface::model_roster_matrix;
 pub use navigation::{
     keyboard_invoke_action, keyboard_open_hit, keyboard_select_hit, keyboard_set_presentation,
     mouse_invoke_action, mouse_open_hit, mouse_select_hit, mouse_set_presentation, stage_action,
