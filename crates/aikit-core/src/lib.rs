@@ -28,6 +28,7 @@ pub mod composition_view;
 pub mod context;
 pub mod context_resolution;
 pub mod context_source;
+pub mod credential;
 pub mod duration;
 pub mod effects;
 pub mod error;
@@ -109,6 +110,12 @@ pub use context_source::{
     ContextSourceReadRequest, ContextSourceRetrieval, ContextSourceScope, DisclosureState,
     ExternalEgress, Freshness, HorizonRequest, ProviderReadResult, RetrievalTarget, SearchAudience,
     StructuredAbsence, CONTEXT_SOURCE_INDEX_VERSION,
+};
+pub use credential::{
+    resolve_credential, CredentialBindingState, CredentialProviderRejection, CredentialRef,
+    CredentialResolution, CredentialResolutionRequest, ProviderResolutionExplanation,
+    SecretMaterialisationClass, SecretProviderDescriptor, SecretProviderRef, SecretProviderTier,
+    SecretRequirement, SecretRequirementRef, CREDENTIAL_RESOLUTION_VERSION,
 };
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
