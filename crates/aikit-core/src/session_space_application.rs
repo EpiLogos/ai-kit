@@ -22,6 +22,8 @@ use crate::{AikitError, Result};
 
 pub const SESSION_SPACE_APPLICATION_VERSION: &str = "aikit.session-space-application/v1";
 
+/// Stable, content-addressed reference to the evidence basis of one canonical
+/// ContextResolution. It is evidence, not a second resolver identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ContextResolutionRef(ResourceRef);
@@ -107,6 +109,7 @@ fn reference_identity(resolution: &ReferenceResolution) -> ResourceRef {
     }
 }
 
+/// Exact Project membership plus independent ContextResolution evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSpaceProjectContextBinding {
     pub project: ProjectRef,
@@ -121,8 +124,7 @@ impl SessionSpaceProjectContextBinding {
             return Err(AikitError::new(
                 "session_space.project_context_mismatch",
                 format!(
-                    "Project {} cannot bind ContextResolution {} owned by {}",
-                    project,
+                    "Project {project} cannot bind ContextResolution {} owned by {}",
                     context.reference,
                     context.project()
                 ),
@@ -190,6 +192,8 @@ pub struct SessionSpaceFocus {
     pub provenance: Vec<String>,
 }
 
+/// Canonical durable SessionSpace semantic state. The embedded definition stays
+/// the existing SessionSpace identity/project-membership declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSpaceAuthoredState {
     pub version: String,
@@ -253,8 +257,7 @@ impl SessionSpaceAuthoredState {
                 return Err(AikitError::new(
                     "session_space.project_context_mismatch",
                     format!(
-                        "Project {} is paired with ContextResolution for {}",
-                        project,
+                        "Project {project} is paired with ContextResolution for {}",
                         context.project()
                     ),
                 ));
@@ -263,7 +266,7 @@ impl SessionSpaceAuthoredState {
             if !self.definition.projects.contains(&membership) {
                 return Err(AikitError::new(
                     "session_space.project_context_without_membership",
-                    format!("Project {} has Context evidence but is not a member", project),
+                    format!("Project {project} has Context evidence but is not a member"),
                 ));
             }
         }
@@ -286,7 +289,7 @@ pub enum SessionSpaceMutation {
         label: Option<String>,
     },
     BindProjectContext {
-        binding: SessionSpaceProjectContextBinding,
+        binding: Box<SessionSpaceProjectContextBinding>,
     },
     UnbindProjectContext {
         project: ProjectRef,
@@ -329,7 +332,7 @@ pub enum SessionSpaceOperation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<ProjectRef>,
     },
-    Mutate { intent: SessionSpaceMutation },
+    Mutate { intent: Box<SessionSpaceMutation> },
     Reconcile { space: SessionSpaceRef },
     Reconstruct { space: SessionSpaceRef },
     Explain { space: SessionSpaceRef },
@@ -368,13 +371,13 @@ pub fn stage_session_space(
             return Err(AikitError::new(
                 "session_space.already_exists",
                 format!("SessionSpace {id} already exists"),
-            ))
+            ));
         }
         (_, None) => {
             return Err(AikitError::new(
                 "session_space.not_found",
                 "SessionSpace mutation requires an existing authored state",
-            ))
+            ));
         }
         (_, Some(state)) => (state.id().clone(), Some(state.basis()?), state.clone()),
     };
@@ -555,6 +558,8 @@ pub struct SessionSpaceNativeObservation {
     pub reason: Option<String>,
 }
 
+/// Explicit proof supplied by the AgentSession owner. Transport/provider
+/// reconnection is intentionally insufficient by itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSessionContinuityEvidence {
     pub agent_session: ResourceRef,
@@ -590,6 +595,7 @@ pub struct SessionSpaceReconstructionReport {
     pub space: SessionSpaceRef,
     pub semantic_revision: u64,
     pub relations: Vec<ReconstructionRelation>,
+    /// Provider window/pane/layout geometry is observation, never canonical.
     pub provider_native_detail: ReconstructionStatus,
 }
 
@@ -817,11 +823,13 @@ mod tests {
             state = stage_session_space(
                 Some(&state),
                 SessionSpaceMutation::BindProjectContext {
-                    binding: SessionSpaceProjectContextBinding::new(
-                        project,
-                        evidence(name, origin, hash),
-                    )
-                    .unwrap(),
+                    binding: Box::new(
+                        SessionSpaceProjectContextBinding::new(
+                            project,
+                            evidence(name, origin, hash),
+                        )
+                        .unwrap(),
+                    ),
                 },
             )
             .unwrap()
