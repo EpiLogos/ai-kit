@@ -1425,6 +1425,20 @@ impl PaletteBackend for Service {
         Some(&self.layers)
     }
 
+    fn familiarity(&self) -> Result<Option<aikit_core::FamiliarityStore>> {
+        match aikit_store::replay_familiarity(&self.index)? {
+            aikit_store::FamiliarityReplay::Loaded { store, .. } => Ok(Some(store)),
+            aikit_store::FamiliarityReplay::Invalidated { .. } => Ok(None),
+        }
+    }
+
+    fn record_familiarity(
+        &mut self,
+        observation: aikit_core::FamiliarityObservation,
+    ) -> Result<()> {
+        aikit_store::append_familiarity_observation(&self.index, observation)
+    }
+
     fn documents(&self) -> Vec<SearchDoc> {
         self.view
             .catalog_index
