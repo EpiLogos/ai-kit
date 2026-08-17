@@ -1,6 +1,7 @@
 skill/aikit/operation
 skill/aikit/knowledge-navigation
 skill/aikit/runtime-operation
+skill/aikit/session-space
 skill/aikit/verification
 skill/aikit/profile-skillset
 skill/aikit/skill-authoring
