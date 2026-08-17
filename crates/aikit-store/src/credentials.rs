@@ -118,12 +118,13 @@ impl CredentialBindingStore {
                     format!("could not read {}: {error}", entry.path().display()),
                 )
             })?;
-            let state = serde_json::from_slice(&bytes).map_err(|error| {
-                AikitError::new(
-                    "credential.binding_invalid",
-                    format!("invalid credential binding {}: {error}", entry.path().display()),
-                )
-            })?;
+            let state: CredentialBindingState =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    AikitError::new(
+                        "credential.binding_invalid",
+                        format!("invalid credential binding {}: {error}", entry.path().display()),
+                    )
+                })?;
             bindings.push(state);
         }
         bindings.sort_by(|a, b| a.credential_ref.cmp(&b.credential_ref));
