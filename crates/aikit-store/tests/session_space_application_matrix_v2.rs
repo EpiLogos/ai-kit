@@ -179,5 +179,5 @@ fn durable_mutations_history_and_provider_loss_share_one_authority() {
         .stage_restore(&space, surface_receipt.sequence)
         .unwrap();
     assert!(restore_preview.proposed.surfaces.contains_key(&surface));
-    assert!(store.load(&space).unwrap().surfaces.get(&surface).is_none());
+    assert!(!store.load(&space).unwrap().surfaces.contains_key(&surface));
 }
