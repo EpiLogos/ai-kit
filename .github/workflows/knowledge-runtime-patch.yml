@@ -32,6 +32,18 @@ jobs:
           PY
       - name: Apply production Knowledge integration
         run: python .github/scripts/knowledge_runtime_patch.py
+      - name: Align imports with canonical resource module
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('crates/aikit-store/src/knowledge_history.rs')
+          text = p.read_text()
+          text = text.replace(
+              '    AikitError, FamiliarityContext, KnowledgeContextPack, KnowledgeRoute, KnowledgeRouteStep,\n    ProviderRef, ResourceRef, Result,\n};',
+              '    AikitError, FamiliarityContext, KnowledgeContextPack, KnowledgeRoute, KnowledgeRouteStep, Result,\n};\nuse aikit_core::resource::{ProviderRef, ResourceRef};'
+          )
+          p.write_text(text)
+          PY
       - name: Format touched Rust files only
         run: |
           rustfmt --edition 2021 \
