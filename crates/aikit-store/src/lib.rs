@@ -40,6 +40,7 @@
 //! | What was recorded, and what was deliberately not? | [`events`] |
 //! | How is learned accessibility rebuilt? | [`familiarity`] |
 //! | How are existing authorities projected into Explain/History? | [`history_evidence`] |
+//! | How are recorded Procedures exposed without inventing apply state? | [`procedure_history`] |
 //! | Why was this capture held back? | [`scan`], [`inbox`] |
 //! | How does a capture become a capsule? | [`inbox`] |
 //! | Why did my hand-formatted profile survive a toggle? | [`edit`] |
@@ -60,6 +61,7 @@ pub mod inbox;
 pub mod index;
 pub mod locks;
 pub mod procedure;
+pub mod procedure_history;
 pub mod registry;
 pub mod scan;
 pub mod session_space_application;
@@ -92,6 +94,7 @@ pub use locks::{ContextLock, LockOptions};
 pub use procedure::{
     plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner,
 };
+pub use procedure_history::procedure_history_evidence;
 pub use registry::{load_project_local, load_registry, RegistryLoad, RegistryProblem, Snapshot};
 pub use scan::{Finding, Scanner};
 pub use session_space_application::{
