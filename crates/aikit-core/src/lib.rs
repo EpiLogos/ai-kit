@@ -216,7 +216,7 @@ pub use session_space::{
     SessionSpaceActivationState, SessionSpaceAgentSession, SessionSpaceAuthorityState,
     SessionSpaceComponent, SessionSpaceConnection, SessionSpaceConnectionState,
     SessionSpaceDefinition, SessionSpaceLease, SessionSpaceLifecycle, SessionSpaceReadModel,
-    SessionSpaceRef, SessionSpaceRuntime, SessionSpaceSurface, SESSION_SPACE_VERSION,
+    SessionSpaceRef, SessionSpaceRuntime, SessionSpaceSurfaceReading, SESSION_SPACE_VERSION,
 };
 pub use session_space_contribution::{
     SessionSpaceContributionDefinition, SessionSpaceContributionRef,
