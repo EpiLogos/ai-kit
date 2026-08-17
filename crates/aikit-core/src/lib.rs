@@ -51,6 +51,7 @@ pub mod knowledge_wiki_index;
 pub mod knowledge_wiki_provider;
 pub mod lifecycle;
 pub mod live_activation_history;
+pub mod model_runtime;
 pub mod platform;
 pub mod policy;
 pub mod procedure;
@@ -135,8 +136,8 @@ pub use explain_history::{
     EXPLAIN_HISTORY_VERSION,
 };
 pub use explain_history_actions::{
-    explain_history_action_resources, explain_history_actions_for, EXPLAIN_ACTION_REF,
-    HISTORY_ACTION_REF,
+    explain_history_action_resources, explain_history_actions_for,
+    install_explain_history_actions, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
 };
 pub use familiarity::{
     AccessibilityAssessment, AccessibilitySignal, AccessibilitySignalClass, FamiliarityContext,
@@ -172,9 +173,7 @@ pub use knowledge_navigation::{
     KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation, KnowledgeProviderStatus,
     KnowledgeSearchHit, KnowledgeSearchResult, SourcePoolBinding, KNOWLEDGE_APPLICATION_VERSION,
 };
-pub use knowledge_operations::{
-    KnowledgeOperations, KnowledgeSources, KNOWLEDGE_OPERATIONS_VERSION,
-};
+pub use knowledge_operations::{KnowledgeOperations, KnowledgeSources, KNOWLEDGE_OPERATIONS_VERSION};
 pub use knowledge_okf::{validate_okf, OkfDocument, OKF_VERSION};
 pub use knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceBinding, SourceHit, SourceMaterial,
