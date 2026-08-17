@@ -49,7 +49,7 @@ unicode-width = "0.2"
 # target (Keychain / Secret Service / Credential Manager). The fallback crypto
 # is used only on Linux when Secret Service is unavailable and the operator
 # explicitly chooses encrypted local storage.
-keyring = { version = "4.1.5", default-features = true }
+keyring = { version = "=4.1.5", default-features = true }
 argon2 = "0.5.3"
 chacha20poly1305 = "0.11"
 getrandom = "0.4.3"
