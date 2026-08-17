@@ -97,9 +97,14 @@ impl KnowledgeApplicationStore {
     pub fn remember_search_hits(&self, hits: &[KnowledgeSearchHit]) -> Result<()> {
         let mut state = self.load()?;
         for hit in hits {
-            state
-                .addresses
-                .insert(hit.resource.clone(), hit.address.clone());
+            match state.addresses.get(&hit.resource) {
+                Some(current) if !prefer_address(&hit.address, current) => {}
+                _ => {
+                    state
+                        .addresses
+                        .insert(hit.resource.clone(), hit.address.clone());
+                }
+            }
         }
         self.save(&state)
     }
@@ -216,6 +221,15 @@ impl KnowledgeApplicationStore {
     }
 }
 
+fn prefer_address(candidate: &KnowledgeAddress, incumbent: &KnowledgeAddress) -> bool {
+    match (candidate, incumbent) {
+        (KnowledgeAddress::ProjectMap(_), KnowledgeAddress::ProjectMap(_)) => true,
+        (KnowledgeAddress::ProjectMap(_), _) => false,
+        (_, KnowledgeAddress::ProjectMap(_)) => true,
+        _ => true,
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -232,11 +246,54 @@ fn io_error(code: &'static str, path: &std::path::Path, error: std::io::Error) -
 mod tests {
     use super::*;
     use aikit_core::knowledge::{KnowledgeReading, KnowledgeRouteStep};
-    use aikit_core::resource::SourceAuthority;
+    use aikit_core::resource::{ProviderRef, ResourceKind, SourceAuthority};
     use tempfile::TempDir;
 
     fn r(raw: &str) -> ResourceRef {
         ResourceRef::parse(raw).unwrap()
+    }
+
+    #[test]
+    fn address_cache_never_downgrades_a_native_address_to_project_map() {
+        let temp = TempDir::new().unwrap();
+        let store = KnowledgeApplicationStore::new(AikitHome::at(temp.path()));
+        let resource = r("wiki:node:auth");
+        let native = KnowledgeSearchHit {
+            address: KnowledgeAddress::Wiki(resource.clone()),
+            resource: resource.clone(),
+            kind: ResourceKind::KnowledgeNode,
+            label: "Auth".into(),
+            score: 1.0,
+            snippet: String::new(),
+            provider: ProviderRef::parse("provider/wiki/test").unwrap(),
+            authority: SourceAuthority::Authored,
+            ranking: None,
+        };
+        let projection = KnowledgeSearchHit {
+            address: KnowledgeAddress::ProjectMap(resource.clone()),
+            provider: ProviderRef::parse("provider/project-map/federation").unwrap(),
+            score: 1.25,
+            ..native.clone()
+        };
+
+        store.remember_search_hits(&[native.clone()]).unwrap();
+        store.remember_search_hits(&[projection]).unwrap();
+        assert_eq!(store.address(&resource).unwrap(), Some(native.address));
+
+        let other = r("canon:auth");
+        let fallback = KnowledgeSearchHit {
+            address: KnowledgeAddress::ProjectMap(other.clone()),
+            resource: other.clone(),
+            kind: ResourceKind::KnowledgeNode,
+            label: "Canon".into(),
+            score: 0.4,
+            snippet: String::new(),
+            provider: ProviderRef::parse("provider/project-map/federation").unwrap(),
+            authority: SourceAuthority::Authored,
+            ranking: None,
+        };
+        store.remember_search_hits(&[fallback.clone()]).unwrap();
+        assert_eq!(store.address(&other).unwrap(), Some(fallback.address));
     }
 
     #[test]
