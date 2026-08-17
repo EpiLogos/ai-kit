@@ -319,6 +319,19 @@ impl<'a> KnowledgeApplication<'a> {
             absences.push("ProjectMap endpoint search unavailable: federation absent".into());
         }
 
+        // ProjectMap is a federation fallback, not a richer operational
+        // address. If a provider-native hit for the same canonical ResourceRef
+        // is already present, keep that native address while leaving provider
+        // relevance to rank distinct resources and duplicate native providers.
+        let native_resources = hits
+            .iter()
+            .filter(|hit| !matches!(hit.address, KnowledgeAddress::ProjectMap(_)))
+            .map(|hit| hit.resource.to_string())
+            .collect::<HashSet<_>>();
+        hits.retain(|hit| {
+            !matches!(hit.address, KnowledgeAddress::ProjectMap(_))
+                || !native_resources.contains(&hit.resource.to_string())
+        });
         hits.sort_by(|left, right| {
             right
                 .score
@@ -1244,6 +1257,33 @@ mod tests {
                 && edge.origin.lens.as_deref() == Some("project-map")
         }));
         assert!(app.status().project_map);
+    }
+
+    #[test]
+    fn search_prefers_provider_native_address_over_project_map_projection() {
+        let index = wiki();
+        let wiki_provider = SemanticWikiProvider::new(&index);
+        let mut project_map = ProjectMap::new();
+        project_map
+            .add_endpoint(endpoint(
+                "wiki:node:auth",
+                ProjectLens::SemanticWiki,
+                ResourceKind::KnowledgeNode,
+                SourceAuthority::Authored,
+            ))
+            .unwrap();
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(wiki_provider)
+            .with_project_map(&project_map);
+
+        let result = app.search("wiki:node:auth", 10);
+        let hit = result
+            .hits
+            .iter()
+            .find(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .expect("Wiki resource is discoverable");
+        assert!(matches!(hit.address, KnowledgeAddress::Wiki(_)));
+        assert_ne!(hit.provider, project_map_provider());
     }
 
     #[test]
