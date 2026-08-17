@@ -1344,8 +1344,8 @@ fn executable_path(name: &str) -> Option<String> {
 }
 
 fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
-    use aikit_core::resource::{ResourceRef, SourceRef};
-    use aikit_core::{ForgetScope, KnowledgeAddress};
+    use aikit_core::resource::ResourceRef;
+    use aikit_core::ForgetScope;
 
     let mut service = Service::discover(cwd)?;
     let mut warnings = diagnostic_warnings(&service);
