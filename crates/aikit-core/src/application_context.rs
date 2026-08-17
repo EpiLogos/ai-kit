@@ -31,7 +31,7 @@ pub fn application_context_resolution(
         .then(|| ResourceRef::parse(&format!("host/{}", context.host)))
         .transpose()?;
 
-    compose_context_resolution(
+    Ok(compose_context_resolution(
         view,
         binding,
         scope_layers,
@@ -40,7 +40,7 @@ pub fn application_context_resolution(
             host,
             ..RequestedActors::default()
         },
-    )
+    ))
 }
 
 fn project_ref(context: &ContextDescriptor) -> Result<ProjectRef> {
@@ -88,12 +88,15 @@ mod tests {
         context.host = "test-host".into();
         let view = resolved(&context, Vec::new());
         let mut resources = ResourceSearchIndex::default();
-        resources.insert_resource(ResourceRecord::new(ResourceDescriptor::new(
-            ResourceRef::parse("host/test-host").unwrap(),
-            ResourceKind::Host,
-            "test-host",
-            "test host",
-        )));
+        resources.insert_resource(
+            ResourceRecord::new(ResourceDescriptor::new(
+                ResourceRef::parse("host/test-host").unwrap(),
+                ResourceKind::Host,
+                "test-host",
+                "test host",
+            )),
+            vec![],
+        );
 
         let resolution =
             application_context_resolution(&context, &view, &[], &resources).unwrap();
@@ -102,7 +105,7 @@ mod tests {
             resolution.host,
             Some(ReferenceResolution::Resolved { .. })
         ));
-        assert_eq!(resolution.project_binding.project.to_string(), "project:aikit");
+        assert_eq!(resolution.project_binding.project.as_str(), "project:aikit");
     }
 
     #[test]
