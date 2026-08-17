@@ -96,8 +96,11 @@ impl SessionSpaceApplicationStore {
             return Ok(Vec::new());
         }
         let mut states = Vec::new();
-        for entry in fs::read_dir(&root).map_err(|error| io_error("session_space.list_failed", &root, &error))? {
-            let entry = entry.map_err(|error| io_error("session_space.list_failed", &root, &error))?;
+        for entry in fs::read_dir(&root)
+            .map_err(|error| io_error("session_space.list_failed", &root, &error))?
+        {
+            let entry =
+                entry.map_err(|error| io_error("session_space.list_failed", &root, &error))?;
             let path = entry.path().join("state.json");
             if !path.is_file() {
                 continue;
@@ -124,7 +127,11 @@ impl SessionSpaceApplicationStore {
         self.load_file(space).map(|file| file.receipts)
     }
 
-    pub fn stage(&self, space: Option<&SessionSpaceRef>, intent: SessionSpaceMutation) -> Result<SessionSpacePreview> {
+    pub fn stage(
+        &self,
+        space: Option<&SessionSpaceRef>,
+        intent: SessionSpaceMutation,
+    ) -> Result<SessionSpacePreview> {
         let current = match space {
             Some(space) => Some(self.load(space)?),
             None => None,
@@ -152,8 +159,6 @@ impl SessionSpaceApplicationStore {
         let current = existing.as_ref().map(|file| &file.state);
         validate_basis(preview.basis.as_ref(), current)?;
 
-        // Re-preview from current state, rather than trusting a caller-supplied
-        // `proposed` body. This is the preview/apply parity check.
         let fresh = stage_session_space(current, preview.intent.clone())?;
         if fresh.proposed != preview.proposed || fresh.changed != preview.changed {
             return Err(AikitError::new(
@@ -193,7 +198,11 @@ impl SessionSpaceApplicationStore {
 
     /// Stage restoration from one exact prior receipt through the same current
     /// basis/preview/apply authority. History never writes canonical state itself.
-    pub fn stage_restore(&self, space: &SessionSpaceRef, sequence: u64) -> Result<SessionSpacePreview> {
+    pub fn stage_restore(
+        &self,
+        space: &SessionSpaceRef,
+        sequence: u64,
+    ) -> Result<SessionSpacePreview> {
         let file = self.load_file(space)?;
         let target = file
             .receipts
@@ -282,7 +291,8 @@ impl SessionSpaceApplicationStore {
     }
 
     fn read_file_at(&self, path: &Path) -> Result<SessionSpaceCanonicalFile> {
-        let bytes = fs::read(path).map_err(|error| io_error("session_space.read_failed", path, &error))?;
+        let bytes = fs::read(path)
+            .map_err(|error| io_error("session_space.read_failed", path, &error))?;
         let file: SessionSpaceCanonicalFile = serde_json::from_slice(&bytes).map_err(|error| {
             AikitError::new(
                 "session_space.invalid_state",
@@ -305,7 +315,9 @@ impl SessionSpaceApplicationStore {
     }
 
     fn write_file(&self, path: &Path, file: &SessionSpaceCanonicalFile) -> Result<()> {
-        let parent = path.parent().expect("SessionSpace state path always has a parent");
+        let parent = path
+            .parent()
+            .expect("SessionSpace state path always has a parent");
         create_dir_all(parent)?;
         let encoded = serde_json::to_vec_pretty(file).map_err(|error| {
             AikitError::new(
@@ -324,7 +336,8 @@ impl SessionSpaceApplicationStore {
             .write_all(&encoded)
             .and_then(|_| output.sync_all())
             .map_err(|error| io_error("session_space.write_failed", &temp, &error))?;
-        fs::rename(&temp, path).map_err(|error| io_error("session_space.commit_failed", path, &error))
+        fs::rename(&temp, path)
+            .map_err(|error| io_error("session_space.commit_failed", path, &error))
     }
 }
 
@@ -438,7 +451,7 @@ mod tests {
             .unwrap();
         store.apply(&intervening).unwrap();
         let error = store.apply(&stale).unwrap_err();
-        assert_eq!(error.code, "session_space.preview_stale");
+        assert_eq!(error.code(), "session_space.preview_stale");
         assert!(store.load(&id).unwrap().focus.is_none());
     }
 
@@ -465,7 +478,9 @@ mod tests {
 
         let reopened = SessionSpaceApplicationStore::new(AikitHome::at(dir.path()));
         let state = reopened.load(&id).unwrap();
-        assert!(state.surfaces.contains_key(&ResourceRef::parse("surface/editor").unwrap()));
+        assert!(state
+            .surfaces
+            .contains_key(&ResourceRef::parse("surface/editor").unwrap()));
         assert_eq!(reopened.history(&id).unwrap().len(), 2);
     }
 
