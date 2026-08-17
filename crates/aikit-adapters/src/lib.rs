@@ -15,6 +15,7 @@ pub mod mux;
 pub mod okf;
 pub mod runner;
 pub mod session_space_connection;
+pub mod session_space_observation;
 pub mod shells;
 
 pub use agent_connection::{
@@ -46,3 +47,7 @@ pub use interactive_connection::{
 };
 pub use okf::{parse_okf_markdown, render_okf_markdown};
 pub use session_space_connection::connection_into_session_space;
+pub use session_space_observation::{
+    SessionSpaceFileObservationProvider, SessionSpaceObservationError,
+    SESSION_SPACE_OBSERVATION_FILE_VERSION,
+};
