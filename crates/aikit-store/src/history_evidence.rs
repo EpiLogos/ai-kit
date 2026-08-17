@@ -15,7 +15,7 @@ use aikit_core::{
     HistoryKind, HistoryReadModel, HistoryRecoverability, Result, EXPLAIN_HISTORY_VERSION,
 };
 
-use crate::generation::{is_generation, read_metadata, GENERATIONS};
+use crate::generation::{is_generation, read_lock, read_metadata, GENERATIONS};
 use crate::{AikitHome, SessionSpaceApplicationStore, SessionSpaceReceipt};
 
 /// Read immutable generation evidence for one canonical Context. A previous
@@ -48,7 +48,14 @@ pub fn generation_history_evidence(
             continue;
         }
         let metadata = read_metadata(&path)?;
+        let resolved = read_lock(&path)?;
         let subject = ResourceRef::parse(&format!("generation/{}", metadata.generation_id))?;
+        let mut canonical_refs = BTreeSet::new();
+        canonical_refs.insert(subject.clone());
+        if let Some(project) = resolved.context.project_id.as_ref() {
+            canonical_refs.insert(ResourceRef::parse(&format!("project/{project}"))?);
+        }
+
         let mut details = BTreeMap::new();
         details.insert("context".into(), metadata.context_id.clone());
         details.insert("resolutionHash".into(), metadata.resolution_hash.clone());
@@ -58,6 +65,9 @@ pub fn generation_history_evidence(
             "materialization".into(),
             format!("{:?}", metadata.materialization),
         );
+        if let Some(project) = resolved.context.project_id.as_ref() {
+            details.insert("project".into(), project.to_string());
+        }
         if let Some(base) = &metadata.base_generation {
             details.insert("baseGeneration".into(), base.to_string());
         }
@@ -88,7 +98,7 @@ pub fn generation_history_evidence(
                 "generation {} · resolution {} · catalog {}",
                 metadata.generation_id, metadata.resolution_hash, metadata.catalog_revision
             ),
-            canonical_refs: vec![subject],
+            canonical_refs: canonical_refs.into_iter().collect(),
             provenance: Vec::new(),
             recoverability: HistoryRecoverability::InspectOnly,
             details,
@@ -269,7 +279,10 @@ mod tests {
         let before = store.load(&space).unwrap();
         let restore_preview = store.stage_restore(&space, 0).unwrap();
         assert_eq!(store.load(&space).unwrap(), before);
-        assert!(matches!(restore_preview.intent, SessionSpaceMutation::Restore { .. }));
+        assert!(matches!(
+            restore_preview.intent,
+            SessionSpaceMutation::Restore { .. }
+        ));
     }
 
     #[test]
