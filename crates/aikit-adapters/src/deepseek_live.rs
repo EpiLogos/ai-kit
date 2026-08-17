@@ -45,33 +45,47 @@ pub struct DeepSeekLiveComposition {
     pub live_components: BTreeSet<ResourceRef>,
 }
 
-/// Resolve the existing #65 specimen through the one canonical composition
-/// resolver, then strengthen only target-owned lifecycle truth for the Cordis/Web
-/// components the live adapter can actually materialise. Component/Surface/
-/// provider identity and every resolver-owned binding remain unchanged.
+/// Resolve the live-capable #65 specimen through the one canonical composition
+/// resolver. Target evidence changes the adapter-owned catalogue/request inputs
+/// *before* resolution so the canonical body fingerprint/history includes the
+/// final activation modes. Resolver output is never rewritten afterward.
 pub fn deepseek_live_cordis_composition(
     shell: DeepSeekShellProvider,
 ) -> Result<DeepSeekLiveComposition> {
     let DeepSeekMaximalConformance {
-        specimen,
+        mut specimen,
         containments,
     } = deepseek_maximal_conformance(shell);
-    let mut composition = resolve_harness_composition(&specimen.catalog, specimen.request)?;
     let live_components: BTreeSet<_> = DEEPSEEK_LIVE_CORDIS_COMPONENTS
         .iter()
         .map(|component| r(component))
         .collect();
 
-    for binding in &mut composition.component_bindings {
-        if live_components.contains(&binding.component) {
-            binding.activation_mode = CompositionActivationMode::LiveMounted;
-        }
-    }
-    for contribution in &mut composition.contributions {
-        if live_components.contains(&contribution.component) {
+    // The target adapter owns this conformance fact, but the canonical resolver
+    // owns the resulting body. Advertise LiveMounted on descriptors/contributions
+    // and select that mode before resolution; never post-mutate a resolved body.
+    for component in &live_components {
+        let mut descriptor = specimen.catalog.component(component).cloned().ok_or_else(|| {
+            AikitError::new(
+                "cordis.composition.component_absent",
+                format!("live Cordis component {component} is absent from the conformance catalog"),
+            )
+        })?;
+        descriptor
+            .activation_modes
+            .insert(CompositionActivationMode::LiveMounted);
+        for contribution in &mut descriptor.contributions {
             contribution.activation_mode = CompositionActivationMode::LiveMounted;
         }
+        specimen.catalog.insert_component(descriptor);
     }
+    for selection in &mut specimen.request.selections {
+        if live_components.contains(&selection.component) {
+            selection.activation_mode = CompositionActivationMode::LiveMounted;
+        }
+    }
+
+    let composition = resolve_harness_composition(&specimen.catalog, specimen.request)?;
 
     Ok(DeepSeekLiveComposition {
         composition,
@@ -291,9 +305,8 @@ impl SessionSpaceActivationDriver for CordisProcessActivationDriver {
     ) -> Result<SessionSpaceActivationObservation> {
         Self::validate_target(request)?;
         if !self.active_components.contains(&request.component.component) {
-            return Ok(SessionSpaceActivationObservation::Unavailable {
+            return Ok(SessionSpaceActivationObservation::Deactivated {
                 provider: self.spec.provider.clone(),
-                reason: "Component was not active in the Cordis provider process".into(),
                 provenance: self.spec.provenance.clone(),
             });
         }
@@ -313,10 +326,11 @@ impl SessionSpaceActivationDriver for CordisProcessActivationDriver {
 
         self.active_components.remove(&request.component.component);
         self.stop_all()?;
-        Ok(SessionSpaceActivationObservation::Unavailable {
+        let mut provenance = self.spec.provenance.clone();
+        provenance.push("Cordis provider stopped after final live Component deactivation".into());
+        Ok(SessionSpaceActivationObservation::Deactivated {
             provider: self.spec.provider.clone(),
-            reason: "Cordis provider stopped after final live Component retraction".into(),
-            provenance: self.spec.provenance.clone(),
+            provenance,
         })
     }
 }
