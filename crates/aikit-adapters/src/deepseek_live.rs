@@ -8,17 +8,18 @@
 //! Web/Cordis process, waits for its target-owned endpoint, and only then reports
 //! a SessionSpace Component as live.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aikit_core::resource::ResourceRef;
 use aikit_core::{
     resolve_harness_composition, AikitError, CompositionActivationMode, HarnessComposition, Result,
     SessionSpaceActivationDriver, SessionSpaceActivationObservation, SessionSpaceActivationRequest,
+    SessionSpaceRef,
 };
 
 use crate::composition_topology::ComponentContainment;
@@ -131,13 +132,61 @@ impl CordisProcessSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CordisActivationOperation {
+    Activate,
+    Deactivate,
+}
+
+impl CordisActivationOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Activate => "activate",
+            Self::Deactivate => "deactivate",
+        }
+    }
+}
+
+/// Finite authority accepted by the actual target-process adapter.
+///
+/// The grant is issued/resolved outside this provider adapter. AIKit consumes it
+/// at the last privileged seam before process start/stop and binds it to the exact
+/// SessionSpace, AgentSession, Harness, Component, composition fingerprint and
+/// pinned target implementation revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CordisActivationGrant {
+    pub grant_ref: String,
+    pub authority_ref: String,
+    pub operation: CordisActivationOperation,
+    pub space: SessionSpaceRef,
+    pub agent_session: ResourceRef,
+    pub harness: ResourceRef,
+    pub component: ResourceRef,
+    pub composition_fingerprint: String,
+    pub implementation_revision: String,
+    pub expires_at_unix_ms: u64,
+    pub max_uses: u32,
+}
+
+#[derive(Debug, Clone)]
+struct StoredCordisActivationGrant {
+    grant: CordisActivationGrant,
+    uses: u32,
+    revoked: bool,
+}
+
 /// Process-owning adapter for the target's real Cordis runtime. One process may
 /// substantiate several AIKit Component readings, but it remains one target-owned
 /// provider; ACP/AgentSession and SessionSpace identities stay separate.
+///
+/// `LiveMounted` eligibility and SessionSpace admission are intentionally not
+/// sufficient to reach `Command::spawn`: an exact finite activation grant must be
+/// registered first by the authority-owning control path.
 pub struct CordisProcessActivationDriver {
     spec: CordisProcessSpec,
     child: Option<Child>,
     active_components: BTreeSet<ResourceRef>,
+    activation_grants: BTreeMap<String, StoredCordisActivationGrant>,
 }
 
 impl CordisProcessActivationDriver {
@@ -146,6 +195,7 @@ impl CordisProcessActivationDriver {
             spec,
             child: None,
             active_components: BTreeSet::new(),
+            activation_grants: BTreeMap::new(),
         }
     }
 
@@ -155,6 +205,63 @@ impl CordisProcessActivationDriver {
 
     pub fn provider(&self) -> &ResourceRef {
         &self.spec.provider
+    }
+
+    pub fn register_activation_grant(&mut self, grant: CordisActivationGrant) -> Result<()> {
+        if grant.grant_ref.trim().is_empty() || grant.authority_ref.trim().is_empty() {
+            return Err(AikitError::new(
+                "cordis.activation.invalid_authority",
+                "Cordis activation grant requires stable grant and authority refs",
+            ));
+        }
+        if grant.max_uses == 0 || grant.expires_at_unix_ms <= now_unix_ms()? {
+            return Err(AikitError::new(
+                "cordis.activation.invalid_authority_lifetime",
+                "Cordis activation grant must be live and have a non-zero use budget",
+            ));
+        }
+        if grant.implementation_revision != DEEPSEEK_HARNESS_UPSTREAM_REVISION {
+            return Err(AikitError::new(
+                "cordis.activation.authority_revision_mismatch",
+                format!(
+                    "Cordis activation grant must bind pinned DeepSeek Harness revision {DEEPSEEK_HARNESS_UPSTREAM_REVISION}"
+                ),
+            ));
+        }
+        let key = activation_grant_key(grant.operation, &grant.component);
+        if self.activation_grants.contains_key(&key) {
+            return Err(AikitError::new(
+                "cordis.activation.authority_already_registered",
+                format!(
+                    "authority for {} {} is already registered",
+                    grant.operation.as_str(), grant.component
+                ),
+            ));
+        }
+        self.activation_grants.insert(
+            key,
+            StoredCordisActivationGrant {
+                grant,
+                uses: 0,
+                revoked: false,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn revoke_activation_grant(&mut self, grant_ref: &str) -> Result<()> {
+        let stored = self
+            .activation_grants
+            .values_mut()
+            .find(|stored| stored.grant.grant_ref == grant_ref)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "cordis.activation.authority_absent",
+                    format!("unknown Cordis activation grant `{grant_ref}`"),
+                )
+            })?;
+        stored.revoked = true;
+        Ok(())
     }
 
     pub fn is_running(&mut self) -> Result<bool> {
@@ -277,6 +384,60 @@ impl CordisProcessActivationDriver {
         }
         Ok(())
     }
+
+    fn consume_activation_grant(
+        &mut self,
+        operation: CordisActivationOperation,
+        request: &SessionSpaceActivationRequest,
+    ) -> Result<String> {
+        let key = activation_grant_key(operation, &request.component.component);
+        let stored = self.activation_grants.get_mut(&key).ok_or_else(|| {
+            AikitError::new(
+                "cordis.activation.authority_required",
+                format!(
+                    "{} {} denied before target process side effect: exact activation authority is required",
+                    operation.as_str(), request.component.component
+                ),
+            )
+        })?;
+        if stored.revoked {
+            return Err(AikitError::new(
+                "cordis.activation.authority_revoked",
+                format!("Cordis activation grant `{}` is revoked", stored.grant.grant_ref),
+            ));
+        }
+        if now_unix_ms()? >= stored.grant.expires_at_unix_ms {
+            return Err(AikitError::new(
+                "cordis.activation.authority_expired",
+                format!("Cordis activation grant `{}` is expired", stored.grant.grant_ref),
+            ));
+        }
+        let implementation_revision = request
+            .component
+            .implementation
+            .as_ref()
+            .and_then(|implementation| implementation.revision.as_deref());
+        if stored.grant.space != request.space
+            || stored.grant.agent_session != request.agent_session
+            || stored.grant.harness != request.harness
+            || stored.grant.component != request.component.component
+            || stored.grant.composition_fingerprint != request.composition_fingerprint
+            || implementation_revision != Some(stored.grant.implementation_revision.as_str())
+        {
+            return Err(AikitError::new(
+                "cordis.activation.authority_target_mismatch",
+                "Cordis activation authority is stale, substituted, or belongs to another runtime identity",
+            ));
+        }
+        if stored.uses >= stored.grant.max_uses {
+            return Err(AikitError::new(
+                "cordis.activation.authority_exhausted",
+                format!("Cordis activation grant `{}` is exhausted", stored.grant.grant_ref),
+            ));
+        }
+        stored.uses += 1;
+        Ok(stored.grant.authority_ref.clone())
+    }
 }
 
 impl SessionSpaceActivationDriver for CordisProcessActivationDriver {
@@ -285,13 +446,14 @@ impl SessionSpaceActivationDriver for CordisProcessActivationDriver {
         request: &SessionSpaceActivationRequest,
     ) -> Result<SessionSpaceActivationObservation> {
         Self::validate_target(request)?;
+        let authority_ref = self.consume_activation_grant(CordisActivationOperation::Activate, request)?;
         self.ensure_started()?;
         self.active_components
             .insert(request.component.component.clone());
         let mut provenance = self.spec.provenance.clone();
         provenance.push(format!(
-            "provider process confirmed live while activating {}",
-            request.component.component
+            "provider process confirmed live while activating {} under authority {}",
+            request.component.component, authority_ref
         ));
         Ok(SessionSpaceActivationObservation::Active {
             provider: self.spec.provider.clone(),
@@ -324,10 +486,14 @@ impl SessionSpaceActivationDriver for CordisProcessActivationDriver {
             ));
         }
 
+        let authority_ref =
+            self.consume_activation_grant(CordisActivationOperation::Deactivate, request)?;
         self.active_components.remove(&request.component.component);
         self.stop_all()?;
         let mut provenance = self.spec.provenance.clone();
-        provenance.push("Cordis provider stopped after final live Component deactivation".into());
+        provenance.push(format!(
+            "Cordis provider stopped after final live Component deactivation under authority {authority_ref}"
+        ));
         Ok(SessionSpaceActivationObservation::Deactivated {
             provider: self.spec.provider.clone(),
             provenance,
@@ -339,6 +505,22 @@ impl Drop for CordisProcessActivationDriver {
     fn drop(&mut self) {
         let _ = self.stop_all();
     }
+}
+
+fn activation_grant_key(operation: CordisActivationOperation, component: &ResourceRef) -> String {
+    format!("{}|{}", operation.as_str(), component)
+}
+
+fn now_unix_ms() -> Result<u64> {
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| {
+        AikitError::new("cordis.activation.clock", format!("system clock error: {error}"))
+    })?;
+    u64::try_from(duration.as_millis()).map_err(|_| {
+        AikitError::new(
+            "cordis.activation.clock",
+            "system time exceeds u64 milliseconds",
+        )
+    })
 }
 
 fn process_error(error: std::io::Error) -> AikitError {
