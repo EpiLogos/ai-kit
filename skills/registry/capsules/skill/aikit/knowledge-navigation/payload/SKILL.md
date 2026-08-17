@@ -18,6 +18,8 @@ frame / context pack
 sources
 explain
 history
+status
+forget
 ```
 
 Provider status/degradation is an accompanying disclosure surface, not a replacement for any operation above.
