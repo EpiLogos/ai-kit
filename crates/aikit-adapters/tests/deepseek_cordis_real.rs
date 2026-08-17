@@ -53,7 +53,7 @@ fn real_pinned_deepseek_cordis_web_activates_inside_session_space() {
         .unwrap();
     runtime.admit_composition(&lease, live.composition).unwrap();
 
-    let component = r("component/deepseek/profile-root");
+    let component = r("component/deepseek/client-ui-conversation");
     let mut driver = CordisProcessActivationDriver::deepseek_web(&checkout);
     let state = runtime
         .activate_component(&lease, &component, &mut driver)
@@ -79,6 +79,9 @@ fn real_pinned_deepseek_cordis_web_activates_inside_session_space() {
         .provenance
         .iter()
         .any(|source| source.contains(DEEPSEEK_HARNESS_UPSTREAM_REVISION)));
+    assert!(read_model.surfaces.iter().any(|surface| {
+        surface.component.as_ref() == Some(&component)
+    }));
 
     let deactivated = runtime
         .deactivate_component(&lease, &component, &mut driver)
