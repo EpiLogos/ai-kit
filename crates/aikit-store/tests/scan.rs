@@ -34,7 +34,10 @@ fn a_github_personal_access_token_is_found() {
     let findings = scan(text);
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].family, Family::TokenPrefix);
-    assert_eq!(&text[findings[0].range.clone()], "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8");
+    assert_eq!(
+        &text[findings[0].range.clone()],
+        "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    );
 }
 
 #[test]
@@ -121,7 +124,9 @@ fn every_common_private_key_header_is_recognized() {
 
 #[test]
 fn a_public_key_is_not_a_private_key() {
-    assert!(!finds("-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkq\n-----END PUBLIC KEY-----"));
+    assert!(!finds(
+        "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkq\n-----END PUBLIC KEY-----"
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +149,9 @@ fn an_authorization_header_is_found_however_it_is_spelled() {
 
 #[test]
 fn the_word_authorization_on_its_own_is_not_a_finding() {
-    assert!(!finds("See the Authorization section of the README for how to log in."));
+    assert!(!finds(
+        "See the Authorization section of the README for how to log in."
+    ));
     assert!(!finds("Authorization: see docs"));
 }
 
@@ -161,13 +168,18 @@ fn a_dot_env_secret_assignment_is_found_even_when_the_value_is_dull() {
         .filter(|f| f.family == Family::EnvAssignment)
         .collect();
 
-    assert_eq!(env.len(), 1, "only the password line is a secret: {findings:#?}");
+    assert_eq!(
+        env.len(),
+        1,
+        "only the password line is a secret: {findings:#?}"
+    );
     assert!(text[env[0].range.clone()].contains("DATABASE_PASSWORD"));
 }
 
 #[test]
 fn ordinary_environment_variables_are_left_alone() {
-    let text = "AWS_REGION=us-east-1\nRUST_LOG=debug\nNODE_ENV=production\nPORT=3000\nHOME=/home/me";
+    let text =
+        "AWS_REGION=us-east-1\nRUST_LOG=debug\nNODE_ENV=production\nPORT=3000\nHOME=/home/me";
     assert!(!finds(text), "{:#?}", scan(text));
 }
 
@@ -194,13 +206,21 @@ fn an_obvious_placeholder_is_not_reported_as_a_secret() {
 #[test]
 fn a_high_entropy_value_assigned_to_a_secret_sounding_name_is_found() {
     let text = "let session_secret = \"Zq7Z+kP3nW9xR2vTbLcF8yJmA4sD6gHu\";";
-    assert!(families(text).contains(&Family::HighEntropy), "{:#?}", scan(text));
+    assert!(
+        families(text).contains(&Family::HighEntropy),
+        "{:#?}",
+        scan(text)
+    );
 }
 
 #[test]
 fn a_json_credential_field_is_found() {
     let text = r#"{"client_id": "aikit", "client_secret": "9vX2pQ7wR4zT6yU1iO3pA5sD8fG0hJ2k"}"#;
-    assert!(families(text).contains(&Family::HighEntropy), "{:#?}", scan(text));
+    assert!(
+        families(text).contains(&Family::HighEntropy),
+        "{:#?}",
+        scan(text)
+    );
 }
 
 #[test]
@@ -245,7 +265,9 @@ let url = "https://example.com/api/v2/resources?include=metadata&limit=100";
 
 #[test]
 fn a_uuid_is_not_a_secret() {
-    assert!(!finds("request_id = \"3f2504e0-4f89-11d3-9a0c-0305e82c3301\""));
+    assert!(!finds(
+        "request_id = \"3f2504e0-4f89-11d3-9a0c-0305e82c3301\""
+    ));
     assert!(!finds("container_id: 4a1e2b7c8d9f0a1b2c3d4e5f60718293"));
 }
 

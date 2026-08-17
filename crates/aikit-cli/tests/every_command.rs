@@ -129,10 +129,7 @@ fn every_read_only_command_succeeds_on_a_fresh_machine() {
 
     for args in READ_ONLY {
         let (ok, envelope) = run(home.path(), project.path(), args);
-        assert!(
-            ok,
-            "aikit {args:?} failed on a fresh machine: {envelope}"
-        );
+        assert!(ok, "aikit {args:?} failed on a fresh machine: {envelope}");
         assert_eq!(envelope["ok"], Value::Bool(true), "{args:?}: {envelope}");
     }
 }

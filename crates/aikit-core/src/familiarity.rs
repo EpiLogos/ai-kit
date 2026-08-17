@@ -428,9 +428,7 @@ impl FamiliarityStore {
                     route: observed, ..
                 } if observed == route
             ),
-            ForgetScope::Project(project) => {
-                observation.context.project.as_ref() != Some(project)
-            }
+            ForgetScope::Project(project) => observation.context.project.as_ref() != Some(project),
             ForgetScope::All => false,
         });
         before - self.observations.len()
@@ -463,5 +461,7 @@ fn contexts_match(requested: &FamiliarityContext, observed: &FamiliarityContext)
 }
 
 fn optional_axis_matches<T: Eq>(requested: &Option<T>, observed: &Option<T>) -> bool {
-    requested.as_ref().is_none_or(|value| observed.as_ref() == Some(value))
+    requested
+        .as_ref()
+        .is_none_or(|value| observed.as_ref() == Some(value))
 }

@@ -92,11 +92,31 @@ pub enum NativeSecureStoreStatus {
 /// The `keyring` v1 adapter is intentionally narrow: on macOS it selects
 /// Keychain Services, on Linux Secret Service, and on Windows Credential
 /// Manager. AIKit never serializes the retrieved secret.
-pub struct NativeSecureStoreProvider;
+pub struct NativeSecureStoreProvider {
+    bound_credentials: BTreeSet<CredentialRef>,
+}
 
 impl NativeSecureStoreProvider {
     pub fn new() -> Self {
-        Self
+        Self {
+            bound_credentials: BTreeSet::new(),
+        }
+    }
+
+    /// Construct from safe binding metadata. Checking whether a credential is
+    /// bound must never materialise the secret from the native store.
+    pub fn with_binding(binding: Option<&CredentialBindingState>) -> Self {
+        let mut provider = Self::new();
+        if let Some(binding) = binding.filter(|binding| {
+            binding.provider_tier == SecretProviderTier::OsSecureStore
+                && binding.provider_ref.as_str() == native_provider_ref()
+                && !binding.revoked
+        }) {
+            provider
+                .bound_credentials
+                .insert(binding.credential_ref.clone());
+        }
+        provider
     }
 
     fn entry(credential_ref: &CredentialRef) -> std::result::Result<Entry, KeyringError> {
@@ -104,13 +124,16 @@ impl NativeSecureStoreProvider {
     }
 
     pub fn status(&self, credential_ref: &CredentialRef) -> NativeSecureStoreStatus {
-        let Ok(entry) = Self::entry(credential_ref) else {
+        // Initialising an Entry determines whether the platform backend exists,
+        // but deliberately does not retrieve credential material. Binding
+        // presence comes from AIKit's provider-neutral metadata record.
+        if Self::entry(credential_ref).is_err() {
             return NativeSecureStoreStatus::Unavailable;
-        };
-        match entry.get_password() {
-            Ok(_) => NativeSecureStoreStatus::Bound,
-            Err(KeyringError::NoEntry) => NativeSecureStoreStatus::Unbound,
-            Err(_) => NativeSecureStoreStatus::Unavailable,
+        }
+        if self.bound_credentials.contains(credential_ref) {
+            NativeSecureStoreStatus::Bound
+        } else {
+            NativeSecureStoreStatus::Unbound
         }
     }
 
@@ -182,9 +205,14 @@ impl SecretProvider for NativeSecureStoreProvider {
         }
     }
 
-    fn binding_state(&self, credential_ref: &CredentialRef) -> Result<Option<CredentialBindingState>> {
-        Ok((self.status(credential_ref) == NativeSecureStoreStatus::Bound)
-            .then(|| self.state(credential_ref)))
+    fn binding_state(
+        &self,
+        credential_ref: &CredentialRef,
+    ) -> Result<Option<CredentialBindingState>> {
+        Ok(
+            (self.status(credential_ref) == NativeSecureStoreStatus::Bound)
+                .then(|| self.state(credential_ref)),
+        )
     }
 
     fn bind(
@@ -237,11 +265,39 @@ impl SecretProvider for NativeSecureStoreProvider {
 pub struct EnvironmentImportProvider {
     credential_ref: CredentialRef,
     env_var: String,
+    source_available: bool,
     value: Option<SecretValue>,
     provenance: String,
 }
 
 impl EnvironmentImportProvider {
+    /// Discover a declared environment route without reading its secret value.
+    /// Existence is intentionally not probed here: the route is discoverable,
+    /// while actual source presence is tested only after explicit `--from-env`.
+    pub fn discover(
+        credential_ref: CredentialRef,
+        env_var: impl Into<String>,
+        project_env: Option<&Path>,
+    ) -> Result<Self> {
+        let env_var = env_var.into();
+        if env_var.trim().is_empty() {
+            return Err(provider_error(
+                "credential.env_var_invalid",
+                "environment variable name must not be empty",
+            ));
+        }
+        let provenance = project_env
+            .map(|path| format!("project-env:{}#{env_var}", path.display()))
+            .unwrap_or_else(|| format!("shell-env:{env_var}"));
+        Ok(Self {
+            credential_ref,
+            env_var,
+            source_available: true,
+            value: None,
+            provenance,
+        })
+    }
+
     pub fn from_process(
         credential_ref: CredentialRef,
         env_var: impl Into<String>,
@@ -261,6 +317,7 @@ impl EnvironmentImportProvider {
                     credential_ref,
                     provenance: format!("shell-env:{env_var}"),
                     env_var,
+                    source_available: true,
                     value: Some(SecretValue::new(value)?),
                 });
             }
@@ -281,6 +338,7 @@ impl EnvironmentImportProvider {
             credential_ref,
             provenance: format!("shell-env:{env_var}"),
             env_var,
+            source_available: false,
             value: None,
         })
     }
@@ -292,11 +350,13 @@ impl EnvironmentImportProvider {
         value: Option<String>,
     ) -> Result<Self> {
         let env_var = env_var.into();
+        let source_available = value.is_some();
         let value = value.map(SecretValue::new).transpose()?;
         Ok(Self {
             credential_ref,
             provenance: format!("shell-env:{env_var}"),
             env_var,
+            source_available,
             value,
         })
     }
@@ -321,7 +381,7 @@ impl EnvironmentImportProvider {
 
 impl SecretProvider for EnvironmentImportProvider {
     fn descriptor(&self, credential_ref: &CredentialRef) -> SecretProviderDescriptor {
-        let bound = credential_ref == &self.credential_ref && self.value.is_some();
+        let bound = credential_ref == &self.credential_ref && self.source_available;
         SecretProviderDescriptor {
             provider_ref: SecretProviderRef::new("provider:explicit-environment-import")
                 .expect("static provider ref is valid"),
@@ -348,7 +408,10 @@ impl SecretProvider for EnvironmentImportProvider {
         }
     }
 
-    fn binding_state(&self, credential_ref: &CredentialRef) -> Result<Option<CredentialBindingState>> {
+    fn binding_state(
+        &self,
+        credential_ref: &CredentialRef,
+    ) -> Result<Option<CredentialBindingState>> {
         Ok((credential_ref == &self.credential_ref && self.value.is_some()).then(|| self.state()))
     }
 
@@ -368,8 +431,7 @@ impl SecretProvider for EnvironmentImportProvider {
         credential_ref: &CredentialRef,
         class: SecretMaterialisationClass,
     ) -> Result<Option<SecretValue>> {
-        if credential_ref != &self.credential_ref
-            || class != SecretMaterialisationClass::ProcessEnv
+        if credential_ref != &self.credential_ref || class != SecretMaterialisationClass::ProcessEnv
         {
             return Ok(None);
         }
@@ -510,12 +572,13 @@ mod encrypted_fallback {
                     ))
                 }
             };
-            let envelope: EncryptedCredentialEnvelope = serde_json::from_slice(&bytes).map_err(|error| {
-                provider_error(
-                    "credential.encrypted_fallback_invalid",
-                    format!("invalid encrypted fallback envelope: {error}"),
-                )
-            })?;
+            let envelope: EncryptedCredentialEnvelope =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    provider_error(
+                        "credential.encrypted_fallback_invalid",
+                        format!("invalid encrypted fallback envelope: {error}"),
+                    )
+                })?;
             if envelope.version != FALLBACK_VERSION || envelope.credential_ref != *credential_ref {
                 return Err(provider_error(
                     "credential.encrypted_fallback_invalid",
@@ -523,10 +586,16 @@ mod encrypted_fallback {
                 ));
             }
             let salt = STANDARD.decode(envelope.salt).map_err(|error| {
-                provider_error("credential.encrypted_fallback_invalid", format!("invalid salt: {error}"))
+                provider_error(
+                    "credential.encrypted_fallback_invalid",
+                    format!("invalid salt: {error}"),
+                )
             })?;
             let nonce = STANDARD.decode(envelope.nonce).map_err(|error| {
-                provider_error("credential.encrypted_fallback_invalid", format!("invalid nonce: {error}"))
+                provider_error(
+                    "credential.encrypted_fallback_invalid",
+                    format!("invalid nonce: {error}"),
+                )
             })?;
             if nonce.len() != 24 {
                 return Err(provider_error(
@@ -576,8 +645,8 @@ mod encrypted_fallback {
                 tier: SecretProviderTier::ExplicitEncryptedFallback,
                 available: true,
                 headless_capable: self.headless_capable,
-                assurance: "local ciphertext encrypted with Argon2id-derived XChaCha20-Poly1305 key"
-                    .into(),
+                assurance:
+                    "local ciphertext encrypted with Argon2id-derived XChaCha20-Poly1305 key".into(),
                 degradation: Some(
                     "used only by explicit operator choice when Secret Service is unavailable"
                         .into(),
@@ -598,8 +667,14 @@ mod encrypted_fallback {
             }
         }
 
-        fn binding_state(&self, credential_ref: &CredentialRef) -> Result<Option<CredentialBindingState>> {
-            Ok(self.path(credential_ref).is_file().then(|| self.state(credential_ref)))
+        fn binding_state(
+            &self,
+            credential_ref: &CredentialRef,
+        ) -> Result<Option<CredentialBindingState>> {
+            Ok(self
+                .path(credential_ref)
+                .is_file()
+                .then(|| self.state(credential_ref)))
         }
 
         fn bind(
@@ -766,8 +841,8 @@ mod tests {
             Some("fixture-token".into()),
         )
         .unwrap();
-        let result = resolve_registered_credential(requirement(credential), &[&env], true, false)
-            .unwrap();
+        let result =
+            resolve_registered_credential(requirement(credential), &[&env], true, false).unwrap();
         assert!(!result.selected());
         assert_eq!(
             result.provider_explanations[0].rejection,
@@ -784,8 +859,8 @@ mod tests {
             Some("fixture-token".into()),
         )
         .unwrap();
-        let result = resolve_registered_credential(requirement(credential), &[&env], true, true)
-            .unwrap();
+        let result =
+            resolve_registered_credential(requirement(credential), &[&env], true, true).unwrap();
         assert_eq!(
             result.selected_provider_tier,
             Some(SecretProviderTier::ExplicitEnvironmentImport)
@@ -805,7 +880,10 @@ mod tests {
         )
         .unwrap();
         let state = env.binding_state(&credential).unwrap().unwrap();
-        assert_eq!(state.provider_tier, SecretProviderTier::ExplicitEnvironmentImport);
+        assert_eq!(
+            state.provider_tier,
+            SecretProviderTier::ExplicitEnvironmentImport
+        );
         assert!(state.binding_provenance.contains("project-env:"));
     }
 }

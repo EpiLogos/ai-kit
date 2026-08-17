@@ -85,7 +85,10 @@ fn selection_alone_is_not_learned_but_opening_is() {
             UiAction::Select(resource.clone()),
         )
         .unwrap();
-    assert!(service.observed.is_empty(), "cursor selection is not resource use");
+    assert!(
+        service.observed.is_empty(),
+        "cursor selection is not resource use"
+    );
 
     let state = runtime
         .step(&mut service, state, UiAction::OpenSelection)

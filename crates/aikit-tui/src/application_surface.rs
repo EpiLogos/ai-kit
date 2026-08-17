@@ -222,7 +222,10 @@ impl ApplicationSurfaceController {
                 RelationView::Graph => RelationView::List,
             };
             self.dispatch(backend, UiAction::SetRelationView(view))?;
-            self.dispatch(backend, UiAction::SetPresentation(PresentationMode::Workspace))?;
+            self.dispatch(
+                backend,
+                UiAction::SetPresentation(PresentationMode::Workspace),
+            )?;
             return self.dispatch(
                 backend,
                 UiAction::SetWorkspaceSection(WorkspaceSection::Explore),
@@ -300,12 +303,8 @@ impl ApplicationSurfaceController {
             return self.toggle_presentation(backend);
         }
 
-        let inner = ratatui::layout::Rect::new(
-            1,
-            1,
-            cols.saturating_sub(2),
-            rows.saturating_sub(2),
-        );
+        let inner =
+            ratatui::layout::Rect::new(1, 1, cols.saturating_sub(2), rows.saturating_sub(2));
         let panes = Layout::for_width(inner.width).split(inner);
 
         if self.semantic.presentation == PresentationMode::Workspace && row == panes.query.y {
@@ -372,7 +371,8 @@ impl ApplicationSurfaceController {
             }
             _ => {
                 self.semantic.status = Some(crate::application::UiStatus {
-                    message: "multiple stageable actions are available; press : and choose one".into(),
+                    message: "multiple stageable actions are available; press : and choose one"
+                        .into(),
                 });
                 Ok(())
             }
@@ -416,7 +416,9 @@ impl ApplicationSurfaceController {
     fn dispatch<B: PaletteBackend>(&mut self, backend: &mut B, action: UiAction) -> Result<()> {
         {
             let mut service = ApplicationService::new(backend);
-            self.semantic = self.runtime.step(&mut service, self.semantic.clone(), action)?;
+            self.semantic = self
+                .runtime
+                .step(&mut service, self.semantic.clone(), action)?;
             self.project_world = service.project_world().ok();
         }
         self.refresh_relation(backend)
@@ -450,7 +452,9 @@ impl ApplicationSurfaceController {
             .title(format!(" Relations · {:?} ", self.semantic.relation_view));
         let lines = relation_lines(self.relation.as_ref(), self.semantic.relation_view, &theme);
         frame.render_widget(
-            Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false }),
             panes.list,
         );
     }
@@ -529,7 +533,11 @@ fn relation_lines<'a>(
             RelationView::List => target.to_string(),
             RelationView::Tree => format!(
                 "{}─ {}",
-                if index + 1 == related_len { "└" } else { "├" },
+                if index + 1 == related_len {
+                    "└"
+                } else {
+                    "├"
+                },
                 target
             ),
             RelationView::Graph => format!("{}  ──related──▶  {}", relation.subject, target),

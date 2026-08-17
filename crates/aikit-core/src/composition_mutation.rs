@@ -44,9 +44,9 @@ impl StagedHarnessComposition {
         // One staged answer per Component identity. Re-staging replaces the prior
         // answer rather than creating ordering-sensitive duplicate intent.
         self.mutations.retain(|mutation| match mutation {
-            HarnessCompositionMutation::Select { selection: existing } => {
-                existing.component != selection.component
-            }
+            HarnessCompositionMutation::Select {
+                selection: existing,
+            } => existing.component != selection.component,
             HarnessCompositionMutation::Retract { component } => component != &selection.component,
         });
         self.mutations
@@ -56,7 +56,9 @@ impl StagedHarnessComposition {
     pub fn retract(&mut self, component: ResourceRef) {
         self.mutations.retain(|mutation| match mutation {
             HarnessCompositionMutation::Select { selection } => selection.component != component,
-            HarnessCompositionMutation::Retract { component: existing } => existing != &component,
+            HarnessCompositionMutation::Retract {
+                component: existing,
+            } => existing != &component,
         });
         self.mutations
             .push(HarnessCompositionMutation::Retract { component });

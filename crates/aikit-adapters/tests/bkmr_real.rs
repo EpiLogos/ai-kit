@@ -20,8 +20,7 @@ fn source(
     SourceMaterial {
         binding: SourceBinding {
             source: SourceRef::parse(id).expect("fixture source ref"),
-            revision: SourceRevision::parse(&format!("revision:{id}"))
-                .expect("fixture revision"),
+            revision: SourceRevision::parse(&format!("revision:{id}")).expect("fixture revision"),
             title: title.into(),
             tags: tags.iter().map(|tag| (*tag).into()).collect(),
             visibility,
@@ -60,7 +59,8 @@ fn real_bkmr_767_preserves_refs_capabilities_and_privacy_membrane() {
     .expect("valid source pool");
     let material = vec![shared.clone(), private.clone()];
 
-    let mut provider = BkmrSourcePoolProvider::new(SystemRunner::new(), dir.path().join("bkmr.db"), false);
+    let mut provider =
+        BkmrSourcePoolProvider::new(SystemRunner::new(), dir.path().join("bkmr.db"), false);
     let status = provider.status();
     if !status.available {
         assert!(
@@ -71,7 +71,10 @@ fn real_bkmr_767_preserves_refs_capabilities_and_privacy_membrane() {
         return;
     }
 
-    assert_eq!(status.version.as_deref(), Some(BKMR_GLADE_CONFORMANCE_VERSION));
+    assert_eq!(
+        status.version.as_deref(),
+        Some(BKMR_GLADE_CONFORMANCE_VERSION)
+    );
     assert_eq!(
         status.tested_version.as_deref(),
         Some(BKMR_GLADE_CONFORMANCE_VERSION)
@@ -87,8 +90,13 @@ fn real_bkmr_767_preserves_refs_capabilities_and_privacy_membrane() {
     let frank_material = material_for_actor(&pool, &material, Some("frank"), true)
         .expect("privacy-filtered provider material");
     assert_eq!(frank_material.len(), 1);
-    assert_eq!(frank_material[0].binding.source.as_str(), "source:astronomy");
-    provider.rebuild(&frank_material).expect("build frank provider view");
+    assert_eq!(
+        frank_material[0].binding.source.as_str(),
+        "source:astronomy"
+    );
+    provider
+        .rebuild(&frank_material)
+        .expect("build frank provider view");
 
     let hits = provider
         .search("quasars", SourceSearchMode::Fulltext, &[], 20)
@@ -122,16 +130,20 @@ fn real_bkmr_767_preserves_refs_capabilities_and_privacy_membrane() {
         .expect("non-matching tag search")
         .is_empty());
 
-    provider.rebuild(&frank_material).expect("rebuild provider view");
+    provider
+        .rebuild(&frank_material)
+        .expect("rebuild provider view");
     let rebuilt = provider
         .search("quasars", SourceSearchMode::Fulltext, &[], 20)
         .expect("search after rebuild");
     assert_eq!(rebuilt[0].source.as_str(), "source:astronomy");
 
-    let alex_material = material_for_actor(&pool, &material, Some("alex"), true)
-        .expect("alex provider material");
+    let alex_material =
+        material_for_actor(&pool, &material, Some("alex"), true).expect("alex provider material");
     assert_eq!(alex_material.len(), 2);
-    provider.rebuild(&alex_material).expect("build alex provider view");
+    provider
+        .rebuild(&alex_material)
+        .expect("build alex provider view");
     let private_hits = provider
         .search("narwhal", SourceSearchMode::Fulltext, &[], 20)
         .expect("alex private search");

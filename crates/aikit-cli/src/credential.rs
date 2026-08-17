@@ -3,7 +3,9 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use aikit_adapters::{EnvironmentImportProvider, NativeSecureStoreProvider, NativeSecureStoreStatus};
+use aikit_adapters::{
+    EnvironmentImportProvider, NativeSecureStoreProvider, NativeSecureStoreStatus,
+};
 use aikit_core::credential::{
     resolve_registered_credential, CredentialBindingState, CredentialProviderRejection,
     CredentialRef, CredentialResolution, SecretMaterialisationClass, SecretProvider,
@@ -61,17 +63,26 @@ fn requirement(request: &CredentialRequest) -> Result<SecretRequirement> {
 }
 
 pub fn inspect(home: &AikitHome, request: &CredentialRequest) -> Result<CredentialInspection> {
-    let native = NativeSecureStoreProvider::new();
+    let persisted_binding = CredentialBindingStore::new(home).load(&request.credential)?;
+    let native = NativeSecureStoreProvider::with_binding(persisted_binding.as_ref());
     let native_descriptor = native.descriptor(&request.credential);
     let env = request
         .env_var
         .as_ref()
         .map(|env_var| {
-            EnvironmentImportProvider::from_process(
-                request.credential.clone(),
-                env_var.clone(),
-                request.project_env.as_deref(),
-            )
+            if request.from_env {
+                EnvironmentImportProvider::from_process(
+                    request.credential.clone(),
+                    env_var.clone(),
+                    request.project_env.as_deref(),
+                )
+            } else {
+                EnvironmentImportProvider::discover(
+                    request.credential.clone(),
+                    env_var.clone(),
+                    request.project_env.as_deref(),
+                )
+            }
         })
         .transpose()?;
 
@@ -87,9 +98,13 @@ pub fn inspect(home: &AikitHome, request: &CredentialRequest) -> Result<Credenti
     )?;
     let env_available = env
         .as_ref()
-        .and_then(|provider| provider.binding_state(&request.credential).transpose())
-        .transpose()?
-        .is_some();
+        .map(|provider| {
+            provider
+                .descriptor(&request.credential)
+                .supported_credentials
+                .contains(&request.credential)
+        })
+        .unwrap_or(false);
     let persisted_binding = CredentialBindingStore::new(home).load(&request.credential)?;
     Ok(CredentialInspection {
         resolution,
@@ -145,9 +160,13 @@ fn selected_outcome(
     newly_bound: bool,
 ) -> Result<CredentialSetupOutcome> {
     let selected = resolution.selected_provider_ref.as_ref().ok_or_else(|| {
-        AikitError::new("credential.unresolved", "credential resolution selected no provider")
+        AikitError::new(
+            "credential.unresolved",
+            "credential resolution selected no provider",
+        )
     })?;
-    let native = NativeSecureStoreProvider::new();
+    let stored_binding = CredentialBindingStore::new(home).load(&request.credential)?;
+    let native = NativeSecureStoreProvider::with_binding(stored_binding.as_ref());
     let binding = if selected.as_str().starts_with("provider:os-secure-store/") {
         native.binding_state(&request.credential)?.ok_or_else(|| {
             AikitError::new(
@@ -176,12 +195,17 @@ fn selected_outcome(
     } else {
         return Err(AikitError::new(
             "credential.provider_unknown",
-            format!("selected provider {} is not wired into this setup flow", selected.as_str()),
+            format!(
+                "selected provider {} is not wired into this setup flow",
+                selected.as_str()
+            ),
         ));
     };
     // Persist only durable provider bindings. Environment import is deliberately
     // transient and must be explicitly selected again on a later invocation.
-    if binding.provider_tier != aikit_core::credential::SecretProviderTier::ExplicitEnvironmentImport {
+    if binding.provider_tier
+        != aikit_core::credential::SecretProviderTier::ExplicitEnvironmentImport
+    {
         CredentialBindingStore::new(home).save(&binding)?;
     }
     Ok(CredentialSetupOutcome {
@@ -202,12 +226,9 @@ fn bind_native(home: &AikitHome, request: &CredentialRequest) -> Result<Credenti
     let secret = read_secret("Secret: ")?;
     let binding = native.bind(&request.credential, &secret)?;
     CredentialBindingStore::new(home).save(&binding)?;
-    let resolution = resolve_registered_credential(
-        requirement(request)?,
-        &[&native],
-        false,
-        false,
-    )?;
+    let rebound_native = NativeSecureStoreProvider::with_binding(Some(&binding));
+    let resolution =
+        resolve_registered_credential(requirement(request)?, &[&rebound_native], false, false)?;
     Ok(CredentialSetupOutcome {
         resolution,
         binding,
@@ -227,12 +248,8 @@ fn explicit_env(home: &AikitHome, request: &CredentialRequest) -> Result<Credent
         env_var.clone(),
         request.project_env.as_deref(),
     )?;
-    let resolution = resolve_registered_credential(
-        requirement(request)?,
-        &[&env],
-        request.headless,
-        true,
-    )?;
+    let resolution =
+        resolve_registered_credential(requirement(request)?, &[&env], request.headless, true)?;
     if !resolution.selected() {
         return Err(AikitError::new(
             "credential.env_missing",
@@ -268,12 +285,8 @@ fn bind_encrypted_fallback(
     );
     let binding = provider.bind(&request.credential, &secret)?;
     CredentialBindingStore::new(home).save(&binding)?;
-    let resolution = resolve_registered_credential(
-        requirement(request)?,
-        &[&provider],
-        false,
-        false,
-    )?;
+    let resolution =
+        resolve_registered_credential(requirement(request)?, &[&provider], false, false)?;
     Ok(CredentialSetupOutcome {
         resolution,
         binding,
@@ -318,9 +331,7 @@ fn rejection_name(rejection: &CredentialProviderRejection) -> &'static str {
         CredentialProviderRejection::Unavailable => "unavailable",
         CredentialProviderRejection::NotHeadlessCapable => "not-headless-capable",
         CredentialProviderRejection::CredentialNotBound => "credential-not-bound",
-        CredentialProviderRejection::NoPermittedMaterialisation => {
-            "no-permitted-materialisation"
-        }
+        CredentialProviderRejection::NoPermittedMaterialisation => "no-permitted-materialisation",
         CredentialProviderRejection::EnvironmentImportNotExplicitlyAllowed => {
             "environment-import-not-explicitly-allowed"
         }
@@ -381,7 +392,10 @@ fn read_secret(label: &str) -> Result<SecretValue> {
 }
 
 fn io_error(error: io::Error) -> AikitError {
-    AikitError::new("credential.io_failed", format!("credential prompt I/O failed: {error}"))
+    AikitError::new(
+        "credential.io_failed",
+        format!("credential prompt I/O failed: {error}"),
+    )
 }
 
 #[cfg(test)]
@@ -393,12 +407,9 @@ mod tests {
     #[test]
     fn headless_error_preserves_exact_unbound_reason() {
         let credential = CredentialRef::new("credential:test/headless").unwrap();
-        let env = EnvironmentImportProvider::from_value(
-            credential.clone(),
-            "AIKIT_MISSING_TOKEN",
-            None,
-        )
-        .unwrap();
+        let env =
+            EnvironmentImportProvider::from_value(credential.clone(), "AIKIT_MISSING_TOKEN", None)
+                .unwrap();
         let request = CredentialRequest {
             credential,
             consumer_ref: "harness:test".into(),

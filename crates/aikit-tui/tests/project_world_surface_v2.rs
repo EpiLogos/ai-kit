@@ -115,7 +115,10 @@ fn wide_workspace_renders_context_compose_and_explain_from_one_world() {
     assert!(context.contains("Scopes   not exposed by application boundary"));
 
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
-    assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Compose");
+    assert_eq!(
+        workspace_section_label(surface.semantic().workspace_section),
+        "Compose"
+    );
     let compose = rendered(&draw_width(&surface, 140, 30));
     assert!(compose.contains("Compose · resolved Project world"));
     assert!(compose.contains("Capabilities"));
@@ -127,7 +130,10 @@ fn wide_workspace_renders_context_compose_and_explain_from_one_world() {
 
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
-    assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Explain");
+    assert_eq!(
+        workspace_section_label(surface.semantic().workspace_section),
+        "Explain"
+    );
     let explain = rendered(&draw_width(&surface, 140, 30));
     assert!(explain.contains("Explain · authored intent and effective state"));
     assert!(explain.contains("Catalog"));
@@ -149,7 +155,9 @@ fn staged_composition_survives_field_navigation() {
         .clone()
         .expect("explicit selection should choose the review capability");
 
-    surface.handle(&mut backend, ctrl(KeyCode::Char(' '))).unwrap();
+    surface
+        .handle(&mut backend, ctrl(KeyCode::Char(' ')))
+        .unwrap();
     assert_eq!(surface.semantic().staged.len(), 1);
     assert!(surface.semantic().staged.get(&selected).is_some());
 

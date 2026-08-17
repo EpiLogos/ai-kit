@@ -148,11 +148,7 @@ mod tests {
             .any(|hit| hit.resource.as_str() == "wiki:node:auth"));
         let address = KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:auth").unwrap());
         assert_eq!(
-            service
-                .knowledge_read(&address)
-                .unwrap()
-                .resource
-                .as_str(),
+            service.knowledge_read(&address).unwrap().resource.as_str(),
             "wiki:node:auth"
         );
         assert!(service
@@ -171,7 +167,12 @@ mod tests {
             .knowledge_route(None, std::slice::from_ref(&address))
             .unwrap();
         assert_eq!(route.steps.len(), 1);
-        assert_eq!(service.knowledge_history(std::slice::from_ref(&route)).len(), 1);
+        assert_eq!(
+            service
+                .knowledge_history(std::slice::from_ref(&route))
+                .len(),
+            1
+        );
         assert_eq!(
             service
                 .knowledge_context_pack(None, std::slice::from_ref(&address))

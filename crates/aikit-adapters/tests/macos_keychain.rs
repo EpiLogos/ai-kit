@@ -35,10 +35,7 @@ fn macos_keychain_round_trip_skip_if_unavailable() {
     assert!(state.binding_provenance.contains("macos-keychain"));
 
     let materialised = provider
-        .materialise(
-            &credential,
-            SecretMaterialisationClass::ProviderNativeLease,
-        )
+        .materialise(&credential, SecretMaterialisationClass::ProviderNativeLease)
         .unwrap()
         .unwrap();
     assert_eq!(materialised.expose(), secret.expose());

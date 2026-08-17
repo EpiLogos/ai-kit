@@ -190,7 +190,8 @@ impl PromotionDraft {
     }
 
     pub fn withheld_reason(&self) -> Option<String> {
-        if self.candidate.state == CandidateState::Quarantined || !self.candidate.findings.is_empty()
+        if self.candidate.state == CandidateState::Quarantined
+            || !self.candidate.findings.is_empty()
         {
             let what = self
                 .candidate
@@ -259,8 +260,10 @@ pub trait PaletteBackend {
             .map(|intent| intent.capsule)
             .collect();
         let mut index = ResourceSearchIndex::default();
-        let current = vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
-            .with_detail("part of the resolved operating context")];
+        let current = vec![
+            NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                .with_detail("part of the resolved operating context"),
+        ];
         let mut project_subject = None;
         let mut capability_subjects = Vec::new();
 
@@ -453,7 +456,10 @@ pub trait PaletteBackend {
         session_space_store(self.application_home())?.stage(space, intent)
     }
 
-    fn session_space_apply(&mut self, preview: &SessionSpacePreview) -> Result<SessionSpaceReceipt> {
+    fn session_space_apply(
+        &mut self,
+        preview: &SessionSpacePreview,
+    ) -> Result<SessionSpaceReceipt> {
         session_space_store(self.application_home())?.apply(preview)
     }
 
@@ -467,8 +473,11 @@ pub trait PaletteBackend {
         from_sequence: u64,
         to_sequence: u64,
     ) -> Result<SessionSpaceHistoryComparison> {
-        session_space_store(self.application_home())?
-            .compare_history(space, from_sequence, to_sequence)
+        session_space_store(self.application_home())?.compare_history(
+            space,
+            from_sequence,
+            to_sequence,
+        )
     }
 
     fn session_space_stage_restore(

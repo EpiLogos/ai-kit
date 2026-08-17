@@ -22,10 +22,10 @@ use aikit_core::context::ContextDescriptor;
 use aikit_core::id::{CapsuleId, GenerationId, SessionId};
 use aikit_core::platform::TargetId;
 use aikit_core::policy::ManagedPolicy;
+use aikit_core::profile::SkillUsageOverlayPatch;
 use aikit_core::projection::{
     ActivationEffect, ProjectionItem, ProjectionPlan, ResolvedContext, TargetAdapter,
 };
-use aikit_core::profile::SkillUsageOverlayPatch;
 use aikit_core::resolve::{resolve_diagnostic, ResolveRequest as CoreResolveRequest, ResolvedView};
 use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
@@ -39,8 +39,8 @@ use aikit_store::index::Index;
 use aikit_store::registry::{load_project_local, load_registry, RegistryProblem, Snapshot};
 use aikit_store::trust::{TrustSnapshot, TrustStore};
 
-use aikit_adapters::clients::broker::BrokerAdapter;
 use aikit_adapters::clients::agent_skills;
+use aikit_adapters::clients::broker::BrokerAdapter;
 use aikit_adapters::clients::claude::ClaudeAdapter;
 use aikit_adapters::clients::codex::CodexAdapter;
 
@@ -312,11 +312,8 @@ impl Service {
         home.ensure_layout()?;
         let default_store = env("HOME").map(|path| PathBuf::from(path).join(".aikit"));
         let additional_stores: Vec<&Path> = default_store.as_deref().into_iter().collect();
-        let project = discover::discover_project_with_home_excluding(
-            &home,
-            cwd,
-            &additional_stores,
-        )?;
+        let project =
+            discover::discover_project_with_home_excluding(&home, cwd, &additional_stores)?;
         let project_root = project.as_ref().map(|p| p.root.clone());
 
         let descriptor = match &project_root {
@@ -844,16 +841,12 @@ impl Service {
                 format!("{id} is {}, not a skill", capability.kind.as_str()),
             ));
         }
-        let root = self
-            .catalog
-            .capsule_roots()
-            .remove(id)
-            .ok_or_else(|| {
-                AikitError::new(
-                    "run.source_missing",
-                    format!("{id} has no payload on this machine"),
-                )
-            })?;
+        let root = self.catalog.capsule_roots().remove(id).ok_or_else(|| {
+            AikitError::new(
+                "run.source_missing",
+                format!("{id} has no payload on this machine"),
+            )
+        })?;
         let payload_root = capability
             .config
             .get("root")

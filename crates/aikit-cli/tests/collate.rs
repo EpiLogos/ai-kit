@@ -9,8 +9,8 @@
 use std::fs;
 use std::path::Path;
 
-use aikit_store::channel::{InboxChannel, InboxKind};
 use aikit_cli::collate::{self, ForeignRootRef};
+use aikit_store::channel::{InboxChannel, InboxKind};
 use aikit_store::index::Index;
 
 fn index(dir: &Path) -> Index {
@@ -21,9 +21,17 @@ fn index(dir: &Path) -> Index {
 /// is byte-for-byte unchanged.
 fn walk_contents(root: &Path) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
-    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
         if entry.file_type().is_file() {
-            let rel = entry.path().strip_prefix(root).unwrap().display().to_string();
+            let rel = entry
+                .path()
+                .strip_prefix(root)
+                .unwrap()
+                .display()
+                .to_string();
             out.push((rel, fs::read(entry.path()).unwrap()));
         }
     }
@@ -35,7 +43,9 @@ fn walk_contents(root: &Path) -> Vec<(String, Vec<u8>)> {
 fn skill(root: &Path, name: &str, version: Option<&str>, body: &str) {
     let dir = root.join(name);
     fs::create_dir_all(&dir).unwrap();
-    let version_line = version.map(|v| format!("version: {v}\n")).unwrap_or_default();
+    let version_line = version
+        .map(|v| format!("version: {v}\n"))
+        .unwrap_or_default();
     fs::write(
         dir.join("SKILL.md"),
         format!("---\nname: {name}\ndescription: The {name} skill.\n{version_line}---\n\n{body}\n"),
@@ -64,8 +74,18 @@ fn the_same_skill_in_two_roots_with_different_contents_is_a_conflict() {
     fs::create_dir_all(&codex).unwrap();
     fs::create_dir_all(&cache).unwrap();
 
-    skill(&codex, "superpowers", Some("4.2.0"), "the older instructions");
-    skill(&cache, "superpowers", Some("6.1.1"), "the newer instructions");
+    skill(
+        &codex,
+        "superpowers",
+        Some("4.2.0"),
+        "the older instructions",
+    );
+    skill(
+        &cache,
+        "superpowers",
+        Some("6.1.1"),
+        "the newer instructions",
+    );
     // A skill present in only one root is not a conflict.
     skill(&codex, "solitary", None, "alone");
 
@@ -76,7 +96,10 @@ fn the_same_skill_in_two_roots_with_different_contents_is_a_conflict() {
         .iter()
         .find(|c| c.name == "superpowers")
         .expect("superpowers is clustered");
-    assert!(conflict.is_conflict(), "two distinct contents is a conflict");
+    assert!(
+        conflict.is_conflict(),
+        "two distinct contents is a conflict"
+    );
     assert_eq!(conflict.distinct_contents(), 2);
     assert_eq!(
         conflict.versions(),
@@ -157,7 +180,11 @@ fn conflicts_are_filed_to_the_inbox_and_name_where_each_version_lives() {
     // The body answers "which version, where" — the question collate exists for.
     assert!(item.body.contains("4.2.0"), "body: {}", item.body);
     assert!(item.body.contains("6.1.1"), "body: {}", item.body);
-    assert!(item.body.contains("@codex"), "body names the root: {}", item.body);
+    assert!(
+        item.body.contains("@codex"),
+        "body names the root: {}",
+        item.body
+    );
     assert!(item.body.contains("@cache"));
 
     // Re-collating an unchanged machine does not nag.
@@ -224,16 +251,35 @@ fn a_plugin_installed_at_two_versions_is_a_conflict_and_backups_are_not() {
         for s in skills {
             let sd = dir.join("skills").join(s);
             fs::create_dir_all(&sd).unwrap();
-            fs::write(sd.join("SKILL.md"), format!("---\nname: {s}\ndescription: d.\n---\n")).unwrap();
+            fs::write(
+                sd.join("SKILL.md"),
+                format!("---\nname: {s}\ndescription: d.\n---\n"),
+            )
+            .unwrap();
         }
     };
 
     // Two LIVE installations at different versions.
     plugin("codex/superpowers", "superpowers", "4.2.0", &["a", "b"]);
-    plugin("claude/plugins/cache/official/superpowers/6.1.1", "superpowers", "6.1.1", &["a"]);
+    plugin(
+        "claude/plugins/cache/official/superpowers/6.1.1",
+        "superpowers",
+        "6.1.1",
+        &["a"],
+    );
     // Transient copies that must be ignored.
-    plugin("codex/.tmp/plugins-backup-XYZ/repo/plugins/superpowers", "superpowers", "5.1.0", &["a"]);
-    plugin("codex/.tmp/plugins-clone-ABC/plugins/superpowers", "superpowers", "5.1.3", &["a"]);
+    plugin(
+        "codex/.tmp/plugins-backup-XYZ/repo/plugins/superpowers",
+        "superpowers",
+        "5.1.0",
+        &["a"],
+    );
+    plugin(
+        "codex/.tmp/plugins-clone-ABC/plugins/superpowers",
+        "superpowers",
+        "5.1.3",
+        &["a"],
+    );
     // A plugin at a single version is not a conflict.
     plugin("codex/lonely", "lonely", "1.0.0", &[]);
 
@@ -244,7 +290,11 @@ fn a_plugin_installed_at_two_versions_is_a_conflict_and_backups_are_not() {
     );
 
     let conflicts = collate::plugin_conflicts(observed);
-    assert_eq!(conflicts.len(), 1, "only superpowers conflicts: {conflicts:?}");
+    assert_eq!(
+        conflicts.len(),
+        1,
+        "only superpowers conflicts: {conflicts:?}"
+    );
     let sp = &conflicts[0];
     assert_eq!(sp.name, "superpowers");
     assert_eq!(
@@ -252,7 +302,14 @@ fn a_plugin_installed_at_two_versions_is_a_conflict_and_backups_are_not() {
         vec!["4.2.0".to_string(), "6.1.1".to_string()],
         "the live versions, and only those"
     );
-    assert_eq!(sp.installations.iter().find(|i| i.version.as_deref() == Some("4.2.0")).unwrap().skills, 2);
+    assert_eq!(
+        sp.installations
+            .iter()
+            .find(|i| i.version.as_deref() == Some("4.2.0"))
+            .unwrap()
+            .skills,
+        2
+    );
 
     // And it reaches the user as one inbox item naming both.
     let index = index(tmp.path());

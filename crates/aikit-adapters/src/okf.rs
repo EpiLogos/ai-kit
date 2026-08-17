@@ -91,7 +91,9 @@ mod tests {
             "knowledge.okf_missing_frontmatter"
         );
         assert_eq!(
-            parse_okf_markdown("---\ntype: [\n---\n").unwrap_err().code(),
+            parse_okf_markdown("---\ntype: [\n---\n")
+                .unwrap_err()
+                .code(),
             "knowledge.okf_invalid_yaml"
         );
     }

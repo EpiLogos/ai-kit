@@ -185,17 +185,15 @@ impl TuiApplicationService for ApplicationService<'_> {
                 )
             })?;
 
-        let package_state = self
-            .package_capability_id(resource)?
-            .map(|capsule| {
-                let view = self.backend.view();
-                json!({
-                    "active": view.is_active(&capsule),
-                    "declaredEnabled": view.is_declared_enabled(&capsule),
-                    "available": !view.unavailable.contains_key(&capsule),
-                    "runnable": view.can_run(&capsule),
-                })
-            });
+        let package_state = self.package_capability_id(resource)?.map(|capsule| {
+            let view = self.backend.view();
+            json!({
+                "active": view.is_active(&capsule),
+                "declaredEnabled": view.is_declared_enabled(&capsule),
+                "available": !view.unavailable.contains_key(&capsule),
+                "runnable": view.can_run(&capsule),
+            })
+        });
 
         Ok(json!({
             "resource": resource.as_str(),
@@ -229,7 +227,10 @@ impl TuiApplicationService for ApplicationService<'_> {
                 .join(", ")
         };
         Ok(CompositionPreview {
-            revision: format!("{}:{}", projected.view.catalog_revision, projected.view.hash),
+            revision: format!(
+                "{}:{}",
+                projected.view.catalog_revision, projected.view.hash
+            ),
             scope,
             staged: staged.clone(),
             summary: format!(
@@ -353,7 +354,11 @@ impl TuiApplicationService for ApplicationService<'_> {
                         let route = match &observation.use_kind {
                             FamiliarityUse::Destination => "destination".to_string(),
                             FamiliarityUse::Route { route, steps } => {
-                                format!("route {route} · {} step{}", steps.len(), plural(steps.len()))
+                                format!(
+                                    "route {route} · {} step{}",
+                                    steps.len(),
+                                    plural(steps.len())
+                                )
                             }
                         };
                         let action = observation
@@ -423,7 +428,10 @@ impl TuiApplicationService for ApplicationService<'_> {
         self.record_destination_use(resource.clone())
     }
 
-    fn contextual_actions(&self, resource: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
+    fn contextual_actions(
+        &self,
+        resource: &ResourceRef,
+    ) -> Result<Vec<ContextualActionDescriptor>> {
         let index = self.navigation_index()?;
         Ok(index.actions_for(resource).into_iter().cloned().collect())
     }
@@ -475,9 +483,10 @@ impl TuiApplicationService for ApplicationService<'_> {
 
 fn familiarity_context(context: &aikit_core::ContextDescriptor) -> FamiliarityContext {
     FamiliarityContext {
-        project: context.project_id.as_ref().and_then(|project| {
-            ResourceRef::parse(&format!("project/{project}")).ok()
-        }),
+        project: context
+            .project_id
+            .as_ref()
+            .and_then(|project| ResourceRef::parse(&format!("project/{project}")).ok()),
         actor: None,
         agency: None,
         focus: context.task.clone(),
@@ -523,5 +532,9 @@ fn json_error(error: serde_json::Error) -> AikitError {
 }
 
 fn plural(count: usize) -> &'static str {
-    if count == 1 { "" } else { "s" }
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }

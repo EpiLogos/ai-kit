@@ -108,7 +108,9 @@ impl SecretProviderDescriptor {
             ("binding_provenance", self.binding_provenance.as_str()),
         ] {
             if value.trim().is_empty() {
-                return Err(invalid(format!("secret provider {label} must not be empty")));
+                return Err(invalid(format!(
+                    "secret provider {label} must not be empty"
+                )));
             }
         }
         if self.supported_materialisation.is_empty() {
@@ -220,7 +222,10 @@ pub fn resolve_credential(request: CredentialResolutionRequest) -> Result<Creden
         });
 
         if rejection.is_none() {
-            eligible.push((provider, materialisation.expect("eligible provider has materialisation")));
+            eligible.push((
+                provider,
+                materialisation.expect("eligible provider has materialisation"),
+            ));
         }
     }
 
@@ -328,10 +333,16 @@ pub struct CredentialBindingState {
 pub trait SecretProvider {
     fn descriptor(&self, credential_ref: &CredentialRef) -> SecretProviderDescriptor;
 
-    fn binding_state(&self, credential_ref: &CredentialRef) -> Result<Option<CredentialBindingState>>;
+    fn binding_state(
+        &self,
+        credential_ref: &CredentialRef,
+    ) -> Result<Option<CredentialBindingState>>;
 
-    fn bind(&self, credential_ref: &CredentialRef, secret: &SecretValue)
-        -> Result<CredentialBindingState>;
+    fn bind(
+        &self,
+        credential_ref: &CredentialRef,
+        secret: &SecretValue,
+    ) -> Result<CredentialBindingState>;
 
     fn materialise(
         &self,
@@ -436,7 +447,10 @@ mod tests {
             result.selected_provider_ref.unwrap().as_str(),
             "provider:keychain"
         );
-        assert_eq!(result.selected_provider_tier, Some(SecretProviderTier::OsSecureStore));
+        assert_eq!(
+            result.selected_provider_tier,
+            Some(SecretProviderTier::OsSecureStore)
+        );
     }
 
     #[test]
@@ -478,7 +492,10 @@ mod tests {
         .unwrap();
 
         assert!(result.selected());
-        assert_eq!(result.selected_provider_tier, Some(SecretProviderTier::ExplicitEnvironmentImport));
+        assert_eq!(
+            result.selected_provider_tier,
+            Some(SecretProviderTier::ExplicitEnvironmentImport)
+        );
         assert_eq!(
             result.degradation.as_deref(),
             Some("operator-supplied headless environment import")
@@ -528,7 +545,10 @@ mod tests {
         };
 
         assert_eq!(base.credential_ref, rotated.credential_ref);
-        assert_ne!(base.revision_or_lease_class, rotated.revision_or_lease_class);
+        assert_ne!(
+            base.revision_or_lease_class,
+            rotated.revision_or_lease_class
+        );
     }
 
     #[test]
@@ -570,15 +590,26 @@ mod tests {
             self.descriptor.clone()
         }
 
-        fn binding_state(&self, _credential_ref: &CredentialRef) -> Result<Option<CredentialBindingState>> {
+        fn binding_state(
+            &self,
+            _credential_ref: &CredentialRef,
+        ) -> Result<Option<CredentialBindingState>> {
             Ok(None)
         }
 
-        fn bind(&self, _credential_ref: &CredentialRef, _secret: &SecretValue) -> Result<CredentialBindingState> {
+        fn bind(
+            &self,
+            _credential_ref: &CredentialRef,
+            _secret: &SecretValue,
+        ) -> Result<CredentialBindingState> {
             Err(invalid("fake provider cannot bind"))
         }
 
-        fn materialise(&self, _credential_ref: &CredentialRef, _class: SecretMaterialisationClass) -> Result<Option<SecretValue>> {
+        fn materialise(
+            &self,
+            _credential_ref: &CredentialRef,
+            _class: SecretMaterialisationClass,
+        ) -> Result<Option<SecretValue>> {
             Ok(None)
         }
     }
@@ -593,7 +624,8 @@ mod tests {
         descriptor.supported_credentials.clear();
         let provider = FakeProvider { descriptor };
 
-        let result = resolve_registered_credential(requirement(), &[&provider], true, false).unwrap();
+        let result =
+            resolve_registered_credential(requirement(), &[&provider], true, false).unwrap();
         assert!(!result.selected());
         assert_eq!(
             result.provider_explanations[0].rejection,

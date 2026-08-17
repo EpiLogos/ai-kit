@@ -108,7 +108,11 @@ mod tests {
     fn fuzzy_query_searches_label_description_id_and_keywords() {
         let actions = vec![
             action("action/project/open", "Open workspace", &["enter"]),
-            action("action/project/explain", "Explain project", &["why", "provenance"]),
+            action(
+                "action/project/explain",
+                "Explain project",
+                &["why", "provenance"],
+            ),
         ];
         let results = search_contextual_actions(&actions, "prov");
         assert_eq!(results.len(), 1);

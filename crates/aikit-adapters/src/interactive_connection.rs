@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agent_connection::{
-    AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest,
-    ClassicProcessConnectionAdapter, ConnectionCommand, ConnectionDegradation,
-    ConnectionDescriptor, ConnectionSignal, ConnectionSignalKind, NativePermissionChoice,
-    NativePermissionRequest, PromptRequest, SessionOpenRequest,
+    AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest, ClassicProcessConnectionAdapter,
+    ConnectionCommand, ConnectionDegradation, ConnectionDescriptor, ConnectionSignal,
+    ConnectionSignalKind, NativePermissionChoice, NativePermissionRequest, PromptRequest,
+    SessionOpenRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

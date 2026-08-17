@@ -63,7 +63,9 @@ pub fn deepseek_maximal_conformance(shell: DeepSeekShellProvider) -> DeepSeekMax
         "client-ui-slots",
         "@deepseek-ai/dsh-client-ui-slots",
     );
-    slots.provisions.push(r("contract/deepseek/client-ui-slots"));
+    slots
+        .provisions
+        .push(r("contract/deepseek/client-ui-slots"));
     specimen.catalog.add_provider(
         ContractProvider::available(r("contract/deepseek/client-ui-slots"), ui_slots.clone())
             .supplied_by(ui_slots.clone()),
@@ -81,9 +83,9 @@ pub fn deepseek_maximal_conformance(shell: DeepSeekShellProvider) -> DeepSeekMax
         "client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-conversation",
     );
-    conversation.requirements.push(
-        ComponentRequirement::required(r("contract/deepseek/client-ui-slots")).reactive(),
-    );
+    conversation
+        .requirements
+        .push(ComponentRequirement::required(r("contract/deepseek/client-ui-slots")).reactive());
     conversation.supported_surfaces.push(web_surface.clone());
     conversation.contributions.push(contribution(
         "contribution/deepseek/ui-conversation/main",
@@ -107,9 +109,9 @@ pub fn deepseek_maximal_conformance(shell: DeepSeekShellProvider) -> DeepSeekMax
         "client-ui-commands",
         "@deepseek-ai/dsh-client-ui-commands",
     );
-    commands.requirements.push(
-        ComponentRequirement::required(r("contract/deepseek/client-ui-slots")).reactive(),
-    );
+    commands
+        .requirements
+        .push(ComponentRequirement::required(r("contract/deepseek/client-ui-slots")).reactive());
     commands.supported_surfaces.push(web_surface.clone());
     commands.contributions.push(contribution(
         "contribution/deepseek/ui-commands/discovery",
@@ -133,9 +135,9 @@ pub fn deepseek_maximal_conformance(shell: DeepSeekShellProvider) -> DeepSeekMax
         "client-ui-permission",
         "@deepseek-ai/dsh-client-ui-permission",
     );
-    permission.requirements.push(
-        ComponentRequirement::required(r("contract/deepseek/client-ui-slots")).reactive(),
-    );
+    permission
+        .requirements
+        .push(ComponentRequirement::required(r("contract/deepseek/client-ui-slots")).reactive());
     permission.supported_surfaces.push(web_surface.clone());
     permission.contributions.extend([
         contribution(
@@ -170,7 +172,9 @@ pub fn deepseek_maximal_conformance(shell: DeepSeekShellProvider) -> DeepSeekMax
         "agent-loop",
         "@deepseek-ai/dsh-agent-loop",
     );
-    loop_component.provisions.push(r("contract/deepseek/agent-loop"));
+    loop_component
+        .provisions
+        .push(r("contract/deepseek/agent-loop"));
     loop_component.contributions.push(contribution(
         "contribution/deepseek/agent-loop/runtime",
         &agent_loop,
@@ -193,7 +197,11 @@ pub fn deepseek_maximal_conformance(shell: DeepSeekShellProvider) -> DeepSeekMax
     ));
 
     let mut containments = vec![
-        contains(&root, "component/deepseek/tools", "Cordis profile plugin tree"),
+        contains(
+            &root,
+            "component/deepseek/tools",
+            "Cordis profile plugin tree",
+        ),
         contains(
             &root,
             "component/deepseek/system-prompt",
@@ -249,11 +257,7 @@ pub fn deepseek_maximal_conformance(shell: DeepSeekShellProvider) -> DeepSeekMax
     }
 }
 
-fn native_component(
-    resource: ResourceRef,
-    row_id: &str,
-    native_id: &str,
-) -> ComponentDescriptor {
+fn native_component(resource: ResourceRef, row_id: &str, native_id: &str) -> ComponentDescriptor {
     let mut descriptor = ComponentDescriptor::new(resource);
     descriptor.implementation = Some(TargetNativeComponentBinding {
         implementation_target: "deepseek-ai/deepseek-harness".into(),

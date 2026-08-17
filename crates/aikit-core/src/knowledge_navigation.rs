@@ -252,8 +252,8 @@ impl<'a> KnowledgeApplication<'a> {
             let status = code.status();
             if status.available && status.indexed && status.capabilities.search {
                 match code.search(query, limit) {
-                    Ok(code_hits) => hits.extend(code_hits.into_iter().map(|hit| {
-                        KnowledgeSearchHit {
+                    Ok(code_hits) => {
+                        hits.extend(code_hits.into_iter().map(|hit| KnowledgeSearchHit {
                             address: KnowledgeAddress::Code(hit.reference.clone()),
                             resource: hit.resource,
                             kind: ResourceKind::CodeReference,
@@ -262,15 +262,16 @@ impl<'a> KnowledgeApplication<'a> {
                             snippet: hit.snippet,
                             provider: hit.provider,
                             authority: SourceAuthority::Derived,
-                        }
-                    })),
+                        }))
+                    }
                     Err(error) => absences.push(format!(
                         "ProjectMap code search degraded: {}",
                         error.message()
                     )),
                 }
             } else {
-                absences.push("ProjectMap code search unavailable: index absent or degraded".into());
+                absences
+                    .push("ProjectMap code search unavailable: index absent or degraded".into());
             }
         } else {
             absences.push("ProjectMap code search unavailable: provider absent".into());
@@ -283,8 +284,8 @@ impl<'a> KnowledgeApplication<'a> {
                     .label
                     .clone()
                     .unwrap_or_else(|| endpoint.resource.to_string());
-                let searchable = format!("{} {} {:?}", endpoint.resource, label, endpoint.lens)
-                    .to_lowercase();
+                let searchable =
+                    format!("{} {} {:?}", endpoint.resource, label, endpoint.lens).to_lowercase();
                 if !needle.is_empty() && !searchable.contains(&needle) {
                     return None;
                 }
@@ -293,9 +294,16 @@ impl<'a> KnowledgeApplication<'a> {
                     resource: endpoint.resource.clone(),
                     kind: endpoint.kind,
                     label,
-                    score: if endpoint.resource.as_str() == query { 1.25 } else { 0.4 },
+                    score: if endpoint.resource.as_str() == query {
+                        1.25
+                    } else {
+                        0.4
+                    },
                     snippet: format!("explicit {:?} ProjectMap endpoint", endpoint.lens),
-                    provider: endpoint.provider.clone().unwrap_or_else(project_map_provider),
+                    provider: endpoint
+                        .provider
+                        .clone()
+                        .unwrap_or_else(project_map_provider),
                     authority: endpoint.authority,
                 })
             }));
@@ -346,7 +354,9 @@ impl<'a> KnowledgeApplication<'a> {
                 })
             }
             KnowledgeAddress::Code(reference) => {
-                let code = self.code.ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
+                let code = self
+                    .code
+                    .ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
                 let context = code.context(reference)?;
                 Ok(KnowledgeReading {
                     resource: reference.resource_ref(),
@@ -355,12 +365,14 @@ impl<'a> KnowledgeApplication<'a> {
                     revision: reference.revision.as_ref().map(ToString::to_string),
                     freshness: None,
                     authority: SourceAuthority::Derived,
-                    content: Some(serde_json::to_string_pretty(&context.detail).map_err(|error| {
-                        AikitError::new(
-                            "knowledge.code_context_serialization",
-                            format!("could not render code context: {error}"),
-                        )
-                    })?),
+                    content: Some(serde_json::to_string_pretty(&context.detail).map_err(
+                        |error| {
+                            AikitError::new(
+                                "knowledge.code_context_serialization",
+                                format!("could not render code context: {error}"),
+                            )
+                        },
+                    )?),
                     evidence: vec![reference.source.clone()],
                     why_selected: "selected from derived ProjectMap code intelligence".into(),
                 })
@@ -369,7 +381,10 @@ impl<'a> KnowledgeApplication<'a> {
                 let endpoint = self.project_map_endpoint(resource)?;
                 Ok(KnowledgeReading {
                     resource: resource.clone(),
-                    provider: endpoint.provider.clone().or_else(|| Some(project_map_provider())),
+                    provider: endpoint
+                        .provider
+                        .clone()
+                        .or_else(|| Some(project_map_provider())),
                     lens: Some(project_lens_name(endpoint.lens).into()),
                     revision: endpoint.revision.clone(),
                     freshness: None,
@@ -410,7 +425,10 @@ impl<'a> KnowledgeApplication<'a> {
     pub fn explain(&self, address: &KnowledgeAddress) -> Result<KnowledgeExplanation> {
         match address {
             KnowledgeAddress::Wiki(resource) => {
-                let wiki = self.wiki.as_ref().ok_or_else(|| provider_absent("SemanticWiki"))?;
+                let wiki = self
+                    .wiki
+                    .as_ref()
+                    .ok_or_else(|| provider_absent("SemanticWiki"))?;
                 let explanation = wiki.explain(resource)?;
                 Ok(KnowledgeExplanation {
                     address: address.clone(),
@@ -428,7 +446,10 @@ impl<'a> KnowledgeApplication<'a> {
             }
             KnowledgeAddress::Source(source) => {
                 let (binding, material) = self.source_material(source).ok_or_else(|| {
-                    AikitError::new("knowledge.source_missing", format!("Source {source} is absent"))
+                    AikitError::new(
+                        "knowledge.source_missing",
+                        format!("Source {source} is absent"),
+                    )
                 })?;
                 Ok(KnowledgeExplanation {
                     address: address.clone(),
@@ -443,14 +464,17 @@ impl<'a> KnowledgeApplication<'a> {
                 })
             }
             KnowledgeAddress::Code(reference) => {
-                let code = self.code.ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
+                let code = self
+                    .code
+                    .ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
                 let context = code.context(reference)?;
                 Ok(KnowledgeExplanation {
                     address: address.clone(),
                     provider: Some(context.provider),
                     authority: SourceAuthority::Derived,
-                    summary: "Git/source is canonical; ProjectMap code graph is derived intelligence"
-                        .into(),
+                    summary:
+                        "Git/source is canonical; ProjectMap code graph is derived intelligence"
+                            .into(),
                     sources: vec![reference.source.clone()],
                     detail: Some(context.detail),
                 })
@@ -463,7 +487,10 @@ impl<'a> KnowledgeApplication<'a> {
                     .neighbours(resource);
                 Ok(KnowledgeExplanation {
                     address: address.clone(),
-                    provider: endpoint.provider.clone().or_else(|| Some(project_map_provider())),
+                    provider: endpoint
+                        .provider
+                        .clone()
+                        .or_else(|| Some(project_map_provider())),
                     authority: endpoint.authority,
                     summary: format!(
                         "explicit {:?} ProjectMap endpoint; {} cross-lens binding(s)",
@@ -530,7 +557,9 @@ impl<'a> KnowledgeApplication<'a> {
         to: KnowledgeAddress,
         max_hops: usize,
     ) -> Result<KnowledgeRoute> {
-        let map = self.project_map.ok_or_else(|| provider_absent("ProjectMap federation"))?;
+        let map = self
+            .project_map
+            .ok_or_else(|| provider_absent("ProjectMap federation"))?;
         let from_ref = from.resource_ref();
         let to_ref = to.resource_ref();
         let path = map.route(&from_ref, &to_ref, max_hops).ok_or_else(|| {
@@ -620,11 +649,7 @@ impl<'a> KnowledgeApplication<'a> {
         })
     }
 
-    fn transition_between(
-        &self,
-        from: &KnowledgeAddress,
-        to: &KnowledgeAddress,
-    ) -> Result<String> {
+    fn transition_between(&self, from: &KnowledgeAddress, to: &KnowledgeAddress) -> Result<String> {
         let from_ref = from.resource_ref();
         let to_ref = to.resource_ref();
         if from_ref == to_ref {
@@ -643,7 +668,10 @@ impl<'a> KnowledgeApplication<'a> {
 
         match (from, to) {
             (KnowledgeAddress::Wiki(left), KnowledgeAddress::Wiki(right)) => {
-                let wiki = self.wiki.as_ref().ok_or_else(|| provider_absent("SemanticWiki"))?;
+                let wiki = self
+                    .wiki
+                    .as_ref()
+                    .ok_or_else(|| provider_absent("SemanticWiki"))?;
                 if let Some(neighbour) = wiki
                     .neighbours(left, usize::MAX)
                     .into_iter()
@@ -653,13 +681,19 @@ impl<'a> KnowledgeApplication<'a> {
                 }
             }
             (KnowledgeAddress::Wiki(wiki_ref), KnowledgeAddress::Source(source)) => {
-                let wiki = self.wiki.as_ref().ok_or_else(|| provider_absent("SemanticWiki"))?;
+                let wiki = self
+                    .wiki
+                    .as_ref()
+                    .ok_or_else(|| provider_absent("SemanticWiki"))?;
                 if wiki.sources(wiki_ref).contains(source) {
                     return Ok("source".into());
                 }
             }
             (KnowledgeAddress::Source(source), KnowledgeAddress::Wiki(wiki_ref)) => {
-                let wiki = self.wiki.as_ref().ok_or_else(|| provider_absent("SemanticWiki"))?;
+                let wiki = self
+                    .wiki
+                    .as_ref()
+                    .ok_or_else(|| provider_absent("SemanticWiki"))?;
                 if wiki.sources(wiki_ref).contains(source) {
                     return Ok("source".into());
                 }
@@ -691,7 +725,10 @@ impl<'a> KnowledgeApplication<'a> {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
-        let wiki = self.wiki.as_ref().ok_or_else(|| provider_absent("SemanticWiki"))?;
+        let wiki = self
+            .wiki
+            .as_ref()
+            .ok_or_else(|| provider_absent("SemanticWiki"))?;
         let query = RelationQuery {
             focus: focus.clone(),
             depth,
@@ -729,7 +766,10 @@ impl<'a> KnowledgeApplication<'a> {
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
         self.source_material(source).ok_or_else(|| {
-            AikitError::new("knowledge.source_missing", format!("Source {source} is absent"))
+            AikitError::new(
+                "knowledge.source_missing",
+                format!("Source {source} is absent"),
+            )
         })?;
         let focus = ResourceRef::parse(source.as_str())?;
         let query = RelationQuery {
@@ -741,7 +781,11 @@ impl<'a> KnowledgeApplication<'a> {
         };
         let mut view = KnowledgeRelationView::focus_only(
             query,
-            RelationNode::new(focus.clone(), ResourceKind::KnowledgeSource, source.to_string()),
+            RelationNode::new(
+                focus.clone(),
+                ResourceKind::KnowledgeSource,
+                source.to_string(),
+            ),
         )?;
         let Some(wiki) = &self.wiki else {
             view.warnings
@@ -752,13 +796,19 @@ impl<'a> KnowledgeApplication<'a> {
             if !wiki.sources(&resource).contains(source) {
                 continue;
             }
-            let object = wiki.resolve(&resource).expect("discovered Wiki ref resolves");
+            let object = wiki
+                .resolve(&resource)
+                .expect("discovered Wiki ref resolves");
             let kind = match object {
                 crate::knowledge_wiki::WikiObject::Space(_) => ResourceKind::KnowledgeSpace,
                 crate::knowledge_wiki::WikiObject::Frame(_) => ResourceKind::KnowledgeFrame,
                 _ => ResourceKind::KnowledgeNode,
             };
-            if !view.push_node(RelationNode::new(resource.clone(), kind, resource.to_string())) {
+            if !view.push_node(RelationNode::new(
+                resource.clone(),
+                kind,
+                resource.to_string(),
+            )) {
                 continue;
             }
             let _ = view.push_edge(RelationEdge::new(
@@ -780,7 +830,9 @@ impl<'a> KnowledgeApplication<'a> {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
-        let code = self.code.ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
+        let code = self
+            .code
+            .ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
         let context = code.context(reference)?;
         let focus = reference.resource_ref();
         let query = RelationQuery {
@@ -816,8 +868,7 @@ impl<'a> KnowledgeApplication<'a> {
                     let Some(object) = value.as_object() else {
                         continue;
                     };
-                    let Some(path) = code_string(object, &["filePath", "file_path", "path"])
-                    else {
+                    let Some(path) = code_string(object, &["filePath", "file_path", "path"]) else {
                         continue;
                     };
                     let related = CodeReference {
@@ -881,7 +932,10 @@ impl<'a> KnowledgeApplication<'a> {
             RelationNode::new(
                 resource.clone(),
                 endpoint.kind,
-                endpoint.label.clone().unwrap_or_else(|| resource.to_string()),
+                endpoint
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| resource.to_string()),
             ),
         )
     }
@@ -941,7 +995,10 @@ impl<'a> KnowledgeApplication<'a> {
     ) -> Result<(Option<ProviderRef>, SourceAuthority, Option<String>)> {
         match address {
             KnowledgeAddress::Wiki(resource) => {
-                let wiki = self.wiki.as_ref().ok_or_else(|| provider_absent("SemanticWiki"))?;
+                let wiki = self
+                    .wiki
+                    .as_ref()
+                    .ok_or_else(|| provider_absent("SemanticWiki"))?;
                 let object = wiki.resolve(resource).ok_or_else(|| {
                     AikitError::new(
                         "knowledge.wiki_object_missing",
@@ -956,7 +1013,10 @@ impl<'a> KnowledgeApplication<'a> {
             }
             KnowledgeAddress::Source(source) => {
                 let (binding, material) = self.source_material(source).ok_or_else(|| {
-                    AikitError::new("knowledge.source_missing", format!("Source {source} is absent"))
+                    AikitError::new(
+                        "knowledge.source_missing",
+                        format!("Source {source} is absent"),
+                    )
                 })?;
                 Ok((
                     Some(binding.provider.status().provider),
@@ -965,7 +1025,9 @@ impl<'a> KnowledgeApplication<'a> {
                 ))
             }
             KnowledgeAddress::Code(reference) => {
-                let code = self.code.ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
+                let code = self
+                    .code
+                    .ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
                 Ok((
                     Some(code.status().provider),
                     SourceAuthority::Derived,
@@ -975,7 +1037,10 @@ impl<'a> KnowledgeApplication<'a> {
             KnowledgeAddress::ProjectMap(resource) => {
                 let endpoint = self.project_map_endpoint(resource)?;
                 Ok((
-                    endpoint.provider.clone().or_else(|| Some(project_map_provider())),
+                    endpoint
+                        .provider
+                        .clone()
+                        .or_else(|| Some(project_map_provider())),
                     endpoint.authority,
                     endpoint.revision.clone(),
                 ))
@@ -1012,7 +1077,10 @@ fn project_lens_name(lens: ProjectLens) -> &'static str {
 
 fn project_map_origin(step: &ProjectMapStep) -> RelationOrigin {
     let mut origin = RelationOrigin::new(step.authority).in_lens("project-map");
-    origin.provider = step.provider.clone().or_else(|| Some(project_map_provider()));
+    origin.provider = step
+        .provider
+        .clone()
+        .or_else(|| Some(project_map_provider()));
     origin
 }
 
@@ -1113,8 +1181,7 @@ mod tests {
             .hits
             .iter()
             .any(|hit| hit.resource.as_str() == "wiki:node:auth"));
-        let wiki_address =
-            KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:auth").unwrap());
+        let wiki_address = KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:auth").unwrap());
         let source_address = KnowledgeAddress::Source(SourceRef::parse("source:spec").unwrap());
         assert!(app
             .read(&source_address)
@@ -1136,8 +1203,7 @@ mod tests {
         assert_eq!(route.steps.len(), 2);
         assert_eq!(route.steps[1].transition.as_deref(), Some("source"));
         assert!(route.familiarity_observation("event:route", 42).is_ok());
-        let pack =
-            app.context_pack(Some("Authentication"), &[wiki_address, source_address]);
+        let pack = app.context_pack(Some("Authentication"), &[wiki_address, source_address]);
         assert_eq!(pack.readings.len(), 2);
         assert_eq!(app.history(&[route]).len(), 1);
         assert!(app
@@ -1204,8 +1270,7 @@ mod tests {
             .with_wiki(wiki_provider)
             .with_source_pool(&native, &material)
             .with_project_map(&project_map);
-        let wiki_address =
-            KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:auth").unwrap());
+        let wiki_address = KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:auth").unwrap());
         let canon_address =
             KnowledgeAddress::ProjectMap(ResourceRef::parse("canon:auth-design").unwrap());
         let route = app
@@ -1223,8 +1288,7 @@ mod tests {
 
         let relations = app.relations(&wiki_address, 1, 16, 16).unwrap();
         assert!(relations.edges.iter().any(|edge| {
-            edge.relation == "supported-by"
-                && edge.origin.lens.as_deref() == Some("project-map")
+            edge.relation == "supported-by" && edge.origin.lens.as_deref() == Some("project-map")
         }));
         assert!(app.status().project_map);
     }
@@ -1234,10 +1298,8 @@ mod tests {
         let index = wiki();
         let app = KnowledgeApplication::new(FamiliarityContext::default())
             .with_wiki(SemanticWikiProvider::new(&index));
-        let wiki_address =
-            KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:auth").unwrap());
-        let unrelated =
-            KnowledgeAddress::ProjectMap(ResourceRef::parse("canon:unbound").unwrap());
+        let wiki_address = KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:auth").unwrap());
+        let unrelated = KnowledgeAddress::ProjectMap(ResourceRef::parse("canon:unbound").unwrap());
         let error = app.route(None, &[wiki_address, unrelated]).unwrap_err();
         assert_eq!(error.code(), "knowledge.provider_absent");
     }

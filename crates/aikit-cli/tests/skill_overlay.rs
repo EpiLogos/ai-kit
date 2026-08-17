@@ -18,7 +18,10 @@ fn scene(root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let home = root.join("home");
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
-    write(&project.join(".aikit/profile.toml"), "schema = 1\n# keep me\n");
+    write(
+        &project.join(".aikit/profile.toml"),
+        "schema = 1\n# keep me\n",
+    );
     write(
         &home.join("registries/personal/capsules/skill/test/wayfinder/manifest.toml"),
         r#"schema = 1
@@ -91,7 +94,9 @@ fn guidance_can_be_set_inspected_and_cleared_at_user_scope() {
     assert_eq!(reply["data"]["scope"], "global");
     assert!(reply["data"]["effects"].as_array().is_some_and(|effects| {
         effects.iter().any(|effect| effect["target"] == "codex")
-            && effects.iter().any(|effect| effect["target"] == "claude-code")
+            && effects
+                .iter()
+                .any(|effect| effect["target"] == "claude-code")
     }));
 
     let global = fs::read_to_string(home.join("scopes/global/profile.toml")).unwrap();
@@ -106,11 +111,7 @@ fn guidance_can_be_set_inspected_and_cleared_at_user_scope() {
         Some("Treat this as authoritative orienting augmentation.")
     );
 
-    let (shown, reply) = run(
-        &home,
-        &project,
-        &["skill", "overlay", "show", SKILL],
-    );
+    let (shown, reply) = run(&home, &project, &["skill", "overlay", "show", SKILL]);
     assert!(shown.status.success(), "show failed: {reply}");
     assert_eq!(reply["data"]["overlays"].as_array().unwrap().len(), 1);
     assert_eq!(reply["data"]["overlays"][0]["scope"], "global");
@@ -224,17 +225,13 @@ fn show_keeps_a_stale_review_pin_visible_until_the_user_reviews_the_update() {
     );
     assert!(set.status.success(), "set failed: {reply}");
 
-    let (shown, reply) = run(
-        &home,
-        &project,
-        &["skill", "overlay", "show", SKILL],
-    );
+    let (shown, reply) = run(&home, &project, &["skill", "overlay", "show", SKILL]);
     assert!(shown.status.success(), "show failed: {reply}");
     assert!(reply["warnings"].as_array().is_some_and(|warnings| {
         warnings.iter().any(|warning| {
-            warning
-                .as_str()
-                .is_some_and(|text| text.contains("review the augmentation against the updated source"))
+            warning.as_str().is_some_and(|text| {
+                text.contains("review the augmentation against the updated source")
+            })
         })
     }));
 
@@ -242,9 +239,9 @@ fn show_keeps_a_stale_review_pin_visible_until_the_user_reviews_the_update() {
     assert!(status.status.success(), "status failed: {reply}");
     assert!(reply["warnings"].as_array().is_some_and(|warnings| {
         warnings.iter().any(|warning| {
-            warning
-                .as_str()
-                .is_some_and(|text| text.contains("review the augmentation against the updated source"))
+            warning.as_str().is_some_and(|text| {
+                text.contains("review the augmentation against the updated source")
+            })
         })
     }));
 }
@@ -263,7 +260,10 @@ fn a_trusted_source_projects_the_same_effective_skill_to_codex_claude_and_broker
     let upstream = "---\nname: wayfinder\ndescription: Plans long work.\ndisable-model-invocation: true\n---\n\n# Wayfinder\n\nUpstream body.\n";
     let skill_root = source.join("skills/engineering/wayfinder");
     write(&skill_root.join("SKILL.md"), upstream);
-    write(&skill_root.join("references/tracker.md"), "Tracker reference.\n");
+    write(
+        &skill_root.join("references/tracker.md"),
+        "Tracker reference.\n",
+    );
     write(&skill_root.join("scripts/check.sh"), "#!/bin/sh\nexit 0\n");
     #[cfg(unix)]
     {
@@ -276,10 +276,7 @@ fn a_trusted_source_projects_the_same_effective_skill_to_codex_claude_and_broker
     }
     git(&source, &["init", "--quiet"]);
     git(&source, &["config", "user.name", "AIKit test"]);
-    git(
-        &source,
-        &["config", "user.email", "aikit@example.invalid"],
-    );
+    git(&source, &["config", "user.email", "aikit@example.invalid"]);
     git(&source, &["add", "."]);
     git(&source, &["commit", "--quiet", "-m", "wayfinder v1"]);
     let first_commit = git(&source, &["rev-parse", "HEAD"]);
@@ -305,20 +302,10 @@ fn a_trusted_source_projects_the_same_effective_skill_to_codex_claude_and_broker
     let (promoted, reply) = run(
         &home,
         &project,
-        &[
-            "source",
-            "promote",
-            "mattpocock",
-            "--trust-skill",
-            managed,
-        ],
+        &["source", "promote", "mattpocock", "--trust-skill", managed],
     );
     assert!(promoted.status.success(), "promotion failed: {reply}");
-    let (enabled, reply) = run(
-        &home,
-        &project,
-        &["enable", managed, "--scope", "global"],
-    );
+    let (enabled, reply) = run(&home, &project, &["enable", managed, "--scope", "global"]);
     assert!(enabled.status.success(), "enable failed: {reply}");
     let (_, explained) = run(&home, &project, &["explain", managed]);
     let first_revision = explained["data"]["revision"].as_str().unwrap();
@@ -342,7 +329,10 @@ fn a_trusted_source_projects_the_same_effective_skill_to_codex_claude_and_broker
             first_revision,
         ],
     );
-    assert!(set_global.status.success(), "global overlay failed: {global_reply}");
+    assert!(
+        set_global.status.success(),
+        "global overlay failed: {global_reply}"
+    );
     let global_generation = global_reply["data"]["generation"].as_str().unwrap();
     assert!(global_reply["data"]["effects"]
         .as_array()
@@ -363,7 +353,10 @@ fn a_trusted_source_projects_the_same_effective_skill_to_codex_claude_and_broker
             "This project's maps may carry execution when Notes explicitly say so.",
         ],
     );
-    assert!(set_project.status.success(), "project overlay failed: {project_reply}");
+    assert!(
+        set_project.status.success(),
+        "project overlay failed: {project_reply}"
+    );
     assert_ne!(
         project_reply["data"]["generation"].as_str().unwrap(),
         global_generation,
@@ -371,14 +364,12 @@ fn a_trusted_source_projects_the_same_effective_skill_to_codex_claude_and_broker
     );
     let context = project_reply["context"]["context_id"].as_str().unwrap();
     let current = home.join("state/contexts").join(context).join("current");
-    let claude = fs::read_to_string(
-        current.join("projections/claude/.claude/skills/wayfinder/SKILL.md"),
-    )
-    .unwrap();
-    let codex = fs::read_to_string(
-        current.join("projections/codex/.agents/skills/wayfinder/SKILL.md"),
-    )
-    .unwrap();
+    let claude =
+        fs::read_to_string(current.join("projections/claude/.claude/skills/wayfinder/SKILL.md"))
+            .unwrap();
+    let codex =
+        fs::read_to_string(current.join("projections/codex/.agents/skills/wayfinder/SKILL.md"))
+            .unwrap();
     assert_eq!(claude, codex);
     assert!(claude.contains("authoritative orienting augmentation"));
     assert!(claude.contains("This project's maps may carry execution"));
@@ -386,9 +377,7 @@ fn a_trusted_source_projects_the_same_effective_skill_to_codex_claude_and_broker
     assert!(claude.contains("disable-model-invocation: true"));
     assert_eq!(
         fs::read_to_string(
-            current.join(
-                "projections/claude/.claude/skills/wayfinder/references/tracker.md"
-            )
+            current.join("projections/claude/.claude/skills/wayfinder/references/tracker.md")
         )
         .unwrap(),
         "Tracker reference.\n"
@@ -396,11 +385,17 @@ fn a_trusted_source_projects_the_same_effective_skill_to_codex_claude_and_broker
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let projected = current
-            .join("projections/claude/.claude/skills/wayfinder/scripts/check.sh");
-        assert_ne!(fs::metadata(projected).unwrap().permissions().mode() & 0o111, 0);
+        let projected =
+            current.join("projections/claude/.claude/skills/wayfinder/scripts/check.sh");
+        assert_ne!(
+            fs::metadata(projected).unwrap().permissions().mode() & 0o111,
+            0
+        );
     }
-    assert_eq!(fs::read_to_string(skill_root.join("SKILL.md")).unwrap(), upstream);
+    assert_eq!(
+        fs::read_to_string(skill_root.join("SKILL.md")).unwrap(),
+        upstream
+    );
 
     let (_, explanation) = run(&home, &project, &["explain", managed]);
     let overlays = explanation["data"]["skill_usage_overlays"]
@@ -414,10 +409,16 @@ fn a_trusted_source_projects_the_same_effective_skill_to_codex_claude_and_broker
 
     let (read, reply) = run(&home, &project, &["capabilities", "read", managed]);
     assert!(read.status.success(), "broker read failed: {reply}");
-    assert_eq!(reply["data"]["instructions"].as_str(), Some(claude.as_str()));
+    assert_eq!(
+        reply["data"]["instructions"].as_str(),
+        Some(claude.as_str())
+    );
 
     let (applied, sibling_reply) = run(&home, &sibling, &["apply"]);
-    assert!(applied.status.success(), "sibling apply failed: {sibling_reply}");
+    assert!(
+        applied.status.success(),
+        "sibling apply failed: {sibling_reply}"
+    );
     let sibling_context = sibling_reply["context"]["context_id"].as_str().unwrap();
     let sibling_current = home
         .join("state/contexts")
@@ -440,24 +441,21 @@ fn a_trusted_source_projects_the_same_effective_skill_to_codex_claude_and_broker
     for args in [
         vec!["source", "set-revision", "mattpocock", &second_commit],
         vec!["source", "sync", "mattpocock"],
-        vec![
-            "source",
-            "promote",
-            "mattpocock",
-            "--trust-skill",
-            managed,
-        ],
+        vec!["source", "promote", "mattpocock", "--trust-skill", managed],
     ] {
         let (output, reply) = run(&home, &sibling, &args);
         assert!(output.status.success(), "source update failed: {reply}");
     }
     let (shown, reply) = run(&home, &sibling, &["skill", "overlay", "show", managed]);
-    assert!(shown.status.success(), "updated overlay show failed: {reply}");
+    assert!(
+        shown.status.success(),
+        "updated overlay show failed: {reply}"
+    );
     assert!(reply["warnings"].as_array().is_some_and(|warnings| {
         warnings.iter().any(|warning| {
-            warning
-                .as_str()
-                .is_some_and(|text| text.contains("review the augmentation against the updated source"))
+            warning.as_str().is_some_and(|text| {
+                text.contains("review the augmentation against the updated source")
+            })
         })
     }));
 }

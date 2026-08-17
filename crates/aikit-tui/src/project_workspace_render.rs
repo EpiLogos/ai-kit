@@ -180,10 +180,16 @@ fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String>
 }
 
 fn explain_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String> {
-    let mut lines = vec!["Explain · authored intent and effective state".into(), String::new()];
+    let mut lines = vec![
+        "Explain · authored intent and effective state".into(),
+        String::new(),
+    ];
     let Some(selected) = state.selected.as_ref() else {
         lines.push("Select a Resource to inspect its resolved intent/effective state.".into());
-        lines.push(format!("Resolution {}", world.effective_revision.resolution_hash));
+        lines.push(format!(
+            "Resolution {}",
+            world.effective_revision.resolution_hash
+        ));
         return lines;
     };
 
@@ -198,13 +204,21 @@ fn explain_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String>
     {
         lines.extend(context_source_lines(source));
     } else {
-        lines.push("No Project-world resolution record for this shallow navigation Resource.".into());
+        lines.push(
+            "No Project-world resolution record for this shallow navigation Resource.".into(),
+        );
         lines.push("Use the contextual Explain Action for provider-specific detail.".into());
     }
 
     lines.push(String::new());
-    lines.push(format!("Catalog        {}", world.effective_revision.catalog_revision));
-    lines.push(format!("Resolution     {}", world.effective_revision.resolution_hash));
+    lines.push(format!(
+        "Catalog        {}",
+        world.effective_revision.catalog_revision
+    ));
+    lines.push(format!(
+        "Resolution     {}",
+        world.effective_revision.resolution_hash
+    ));
     lines.push(format!(
         "Generation     {}",
         world
@@ -224,8 +238,14 @@ fn history_lines(world: &ProjectWorldReadModel) -> Vec<String> {
     let mut lines = vec![
         "History · effective world lineage".into(),
         String::new(),
-        format!("Catalog revision  {}", world.effective_revision.catalog_revision),
-        format!("Resolution hash   {}", world.effective_revision.resolution_hash),
+        format!(
+            "Catalog revision  {}",
+            world.effective_revision.catalog_revision
+        ),
+        format!(
+            "Resolution hash   {}",
+            world.effective_revision.resolution_hash
+        ),
         format!(
             "Generation        {}",
             world
@@ -235,7 +255,10 @@ fn history_lines(world: &ProjectWorldReadModel) -> Vec<String> {
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "none in this read model".into()),
         ),
-        format!("Active projection {} capabilities", world.projection.active_capabilities.len()),
+        format!(
+            "Active projection {} capabilities",
+            world.projection.active_capabilities.len()
+        ),
     ];
     if world.warnings.is_empty() {
         lines.push("Boundary          no degraded context disclosures".into());
@@ -245,7 +268,9 @@ fn history_lines(world: &ProjectWorldReadModel) -> Vec<String> {
         }
     }
     lines.push(String::new());
-    lines.push("Recent/familiar/route history remains application evidence, not a second resolver.".into());
+    lines.push(
+        "Recent/familiar/route history remains application evidence, not a second resolver.".into(),
+    );
     lines
 }
 
@@ -273,7 +298,12 @@ fn resource_lines(resource: &ProjectWorldResource) -> Vec<String> {
         .intent
         .preference
         .as_ref()
-        .map(|preference| format!("preferred rank {} via {}", preference.rank, preference.source))
+        .map(|preference| {
+            format!(
+                "preferred rank {} via {}",
+                preference.rank, preference.source
+            )
+        })
         .unwrap_or_else(|| "no authored preference".into());
     let authorities = resource
         .intent
@@ -299,7 +329,11 @@ fn resource_lines(resource: &ProjectWorldResource) -> Vec<String> {
             "Effective     {} · {} provider{}",
             availability_label(&resource.effective.availability),
             resource.effective.providers.len(),
-            if resource.effective.providers.len() == 1 { "" } else { "s" },
+            if resource.effective.providers.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
         ),
     ]
 }

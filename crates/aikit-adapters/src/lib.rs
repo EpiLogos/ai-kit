@@ -23,23 +23,23 @@ pub mod shells;
 pub mod working_environment;
 
 pub use agent_connection::{
-    AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest,
-    ClassicProcessConnectionAdapter, ConnectionCapabilities, ConnectionCommand,
-    ConnectionDegradation, ConnectionDescriptor, ConnectionProtocol, ConnectionProtocolFamily,
-    ConnectionSignal, ConnectionSignalKind, ConnectionState, NativePermissionChoice,
-    NativePermissionRequest, NativeSessionBinding, PromptRequest, SessionOpenMode,
-    SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION, AGENT_CONNECTION_ADAPTER_VERSION,
+    AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest, ClassicProcessConnectionAdapter,
+    ConnectionCapabilities, ConnectionCommand, ConnectionDegradation, ConnectionDescriptor,
+    ConnectionProtocol, ConnectionProtocolFamily, ConnectionSignal, ConnectionSignalKind,
+    ConnectionState, NativePermissionChoice, NativePermissionRequest, NativeSessionBinding,
+    PromptRequest, SessionOpenMode, SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION,
+    AGENT_CONNECTION_ADAPTER_VERSION,
 };
 pub use composition_topology::{
     resolve_component_topology, ComponentContainment, HarnessCompositionTopology,
     HARNESS_COMPOSITION_TOPOLOGY_VERSION,
 };
 pub use connection_process::ConnectionProcess;
+#[cfg(target_os = "linux")]
+pub use credential_provider::LinuxEncryptedFallbackProvider;
 pub use credential_provider::{
     EnvironmentImportProvider, NativeSecureStoreProvider, NativeSecureStoreStatus,
 };
-#[cfg(target_os = "linux")]
-pub use credential_provider::LinuxEncryptedFallbackProvider;
 pub use deepseek_harness::{
     deepseek_harness_conformance, DeepSeekHarnessConformance, DeepSeekShellProvider,
     DEEPSEEK_HARNESS_RELEASE, DEEPSEEK_HARNESS_UPSTREAM_REVISION,

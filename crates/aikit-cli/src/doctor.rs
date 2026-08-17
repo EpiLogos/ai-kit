@@ -89,8 +89,12 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
     // silently smaller than the user thinks.
     for problem in service.load_warnings() {
         findings.push(
-            Finding::new("registry.load", Severity::Error, "a registry file did not load")
-                .with_detail(problem),
+            Finding::new(
+                "registry.load",
+                Severity::Error,
+                "a registry file did not load",
+            )
+            .with_detail(problem),
         );
     }
 
@@ -119,9 +123,15 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
             Finding::new(
                 "trust.unreviewed",
                 Severity::Warning,
-                format!("{unreviewed} capabilit{} awaiting review", if unreviewed == 1 { "y is" } else { "ies are" }),
+                format!(
+                    "{unreviewed} capabilit{} awaiting review",
+                    if unreviewed == 1 { "y is" } else { "ies are" }
+                ),
             )
-            .with_detail("review them with `aikit inbox`, or run one ad hoc with `aikit run <id> --confirm`".to_string()),
+            .with_detail(
+                "review them with `aikit inbox`, or run one ad hoc with `aikit run <id> --confirm`"
+                    .to_string(),
+            ),
         );
     }
 
@@ -180,7 +190,8 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
                 Severity::Note,
                 format!(
                     "{} resolves through {:?}",
-                    binding.credential_ref.as_str(), binding.provider_tier
+                    binding.credential_ref.as_str(),
+                    binding.provider_tier
                 ),
             )
             .with_detail(format!(
@@ -238,7 +249,11 @@ pub fn plan_fixes(service: &Service, findings: &[Finding]) -> Result<Option<Proc
     if !any {
         return Ok(None);
     }
-    aikit_store::procedure::plan_procedure(service.home(), ProcedureKind::DoctorFix { checks: vec![] }, plan)
-        .map(Some)
-        .map_err(|e: AikitError| e)
+    aikit_store::procedure::plan_procedure(
+        service.home(),
+        ProcedureKind::DoctorFix { checks: vec![] },
+        plan,
+    )
+    .map(Some)
+    .map_err(|e: AikitError| e)
 }

@@ -122,7 +122,10 @@ impl CredentialBindingStore {
                 serde_json::from_slice(&bytes).map_err(|error| {
                     AikitError::new(
                         "credential.binding_invalid",
-                        format!("invalid credential binding {}: {error}", entry.path().display()),
+                        format!(
+                            "invalid credential binding {}: {error}",
+                            entry.path().display()
+                        ),
                     )
                 })?;
             bindings.push(state);
@@ -174,7 +177,10 @@ mod tests {
         };
 
         store.save(&state).unwrap();
-        assert_eq!(store.load(&state.credential_ref).unwrap(), Some(state.clone()));
+        assert_eq!(
+            store.load(&state.credential_ref).unwrap(),
+            Some(state.clone())
+        );
         assert_eq!(store.list().unwrap(), vec![state]);
 
         let raw = fs::read_dir(home.credentials())

@@ -51,10 +51,7 @@ impl AikitHome {
     /// The pure half of [`Self::discover`], so the precedence rule is testable
     /// without mutating the process environment — which is a global, and which
     /// two tests running in parallel would fight over.
-    pub fn from_env_values(
-        aikit_home: Option<&OsStr>,
-        user_home: Option<&OsStr>,
-    ) -> Result<Self> {
+    pub fn from_env_values(aikit_home: Option<&OsStr>, user_home: Option<&OsStr>) -> Result<Self> {
         if let Some(explicit) = aikit_home.filter(|v| !v.is_empty()) {
             return Ok(Self::at(PathBuf::from(explicit)));
         }

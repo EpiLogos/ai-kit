@@ -62,7 +62,11 @@ pub fn render_credential_setup_panel(view: &CredentialSetupView) -> String {
         if let Some(env_var) = &view.env_var {
             lines.push(format!(
                 "Explicit environment import: --from-env --env-var {env_var} ({})",
-                if view.env_available { "present" } else { "not present" }
+                if view.env_available {
+                    "present"
+                } else {
+                    "not present"
+                }
             ));
         }
         return lines.join("\n");
@@ -73,7 +77,11 @@ pub fn render_credential_setup_panel(view: &CredentialSetupView) -> String {
     if let Some(env_var) = &view.env_var {
         lines.push(format!(
             "  [2] Import explicitly from {env_var} (--from-env) · {} · lowest tier",
-            if view.env_available { "present" } else { "not present" }
+            if view.env_available {
+                "present"
+            } else {
+                "not present"
+            }
         ));
     } else {
         lines.push("  [2] Import explicitly from a named environment variable (--from-env --env-var NAME) · lowest tier".into());
