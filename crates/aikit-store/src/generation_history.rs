@@ -156,8 +156,6 @@ pub fn compare_generation_worlds(
         id: format!("generation-comparison:{before}:{after}"),
         kind: HistoryKind::Generation,
         subject: generation_ref(after)?,
-        // The two worlds are Generated receipts; the comparison is a Derived
-        // read over those immutable receipts.
         authorities: vec![SourceAuthority::Generated, SourceAuthority::Derived],
         occurred_at_unix_ms: Some(
             after_metadata.created_at.as_nanos().max(0) as u128 / 1_000_000,
@@ -170,9 +168,6 @@ pub fn compare_generation_worlds(
         ),
         canonical_refs: canonical_refs.into_iter().collect(),
         provenance: Vec::new(),
-        // AIKit has a narrow current<->previous rollback primitive, but this
-        // arbitrary historical comparison deliberately does not advertise that as
-        // a generic restore path that could bypass current policy/resolution.
         recoverability: HistoryRecoverability::InspectOnly,
         details,
     };
@@ -305,7 +300,7 @@ fn plural(count: usize) -> &'static str {
 mod tests {
     use super::*;
 
-    #[test)]
+    #[test]
     fn changed_map_keys_reports_add_remove_and_value_change() {
         let before = BTreeMap::from([("a", 1), ("b", 2), ("c", 3)]);
         let after = BTreeMap::from([("b", 20), ("c", 3), ("d", 4)]);
