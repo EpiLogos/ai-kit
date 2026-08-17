@@ -38,6 +38,7 @@
 //! | Why did two panes not corrupt each other? | [`locks`], [`generation`] |
 //! | What actually lands in `current/`? | [`generation`] |
 //! | What was recorded, and what was deliberately not? | [`events`] |
+//! | Where is safe credential binding metadata persisted? | [`credentials`] |
 //! | How is learned accessibility rebuilt? | [`familiarity`] |
 //! | Why was this capture held back? | [`scan`], [`inbox`] |
 //! | How does a capture become a capsule? | [`inbox`] |
@@ -48,6 +49,7 @@
 #![forbid(unsafe_code)]
 
 pub mod channel;
+pub mod credentials;
 pub mod curator;
 pub mod edit;
 pub mod events;
@@ -70,6 +72,7 @@ pub mod trust;
 // The modules stay the documented home of each type; these are the names the
 // four consuming crates would otherwise import a dozen `use` lines to reach.
 pub use channel::{Evidence, InboxChannel, InboxItem, InboxKind, InboxState, NewItem};
+pub use credentials::{CredentialBindingStore, CREDENTIAL_BINDING_STORE_VERSION};
 pub use curator::{curate, detect_drift, report_drift, CurationReport, Drift};
 pub use edit::{OverlayDocument, ProfileDocument};
 pub use events::{Event, EventAction, EventRecorder, Outcome, Timestamp};
