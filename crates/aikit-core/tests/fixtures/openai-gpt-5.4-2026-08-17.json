@@ -1,0 +1,47 @@
+{
+  "schema_version": "aikit.provider-catalog-observation/v1",
+  "observation_kind": "provider_catalog",
+  "source": "https://developers.openai.com/api/docs/models/gpt-5.4",
+  "observed_at": "2026-08-17T09:18:00+01:00",
+  "provider_ref": "provider:openai",
+  "model_ref": "model:gpt-5.4",
+  "model_variant": "gpt-5.4-2026-03-05",
+  "freshness": "point-in-time; refresh before using as current catalog truth",
+  "pricing": {
+    "currency": "USD",
+    "unit": "1m-tokens",
+    "input": 2.50,
+    "cached_input": 0.25,
+    "output": 15.00,
+    "long_context_rule": "For GPT-5.4 and GPT-5.4 Pro, prompts above 272K input tokens are priced at 2x input and 1.5x output for the full session; regional processing has a 10% uplift."
+  },
+  "context": {
+    "context_window_tokens": 1050000,
+    "max_output_tokens": 128000
+  },
+  "modalities": {
+    "text_input": true,
+    "text_output": true,
+    "image_input": true,
+    "audio": false,
+    "video": false
+  },
+  "features": {
+    "reasoning": true,
+    "function_calling": true,
+    "structured_outputs": true
+  },
+  "tools": [
+    "web-search",
+    "file-search",
+    "image-generation",
+    "code-interpreter",
+    "hosted-shell",
+    "apply-patch",
+    "skills",
+    "computer-use",
+    "mcp",
+    "tool-search"
+  ],
+  "interpretation": "Provider observation only. This is not authored preference, learned fitness, availability/authorisation for a concrete account, or a canonical Model quality score."
+}
