@@ -70,7 +70,7 @@ The blocker for selector mutation is precise: an authored selector identity/prov
 | authored Profile | `aikit-core::profile`; scope documents in store | `PoolPatch`, Profile files | `StagedProfileComposition` | authored copy + resolver | existing scope writer + Generation authority | Generation + warnings/effects | existing enable/disable/apply | shared composition preview/apply | `aikit-profile-skillset-management` |
 | effective Profile | resolver output | `ResolvedView`, `ProfileCompositionReadModel` | never directly staged | canonical resolver only | **never a write authority** | catalog revision + resolution hash | yes | yes | yes |
 | Project -> SkillSet selection | Project specification owner | `ProjectSkillSetRelationReadModel` | `StagedProjectSkillSetSelections` | union over authored/inherited/effective input | existing Project specification writer; Procedure migration still open | Project source revision currently, richer receipt open | Project commands exist | read/stage model available; durable apply still open | Skill documents the distinction |
-| SkillSet -> Capability membership | `aikit-core::skillset` + `aikit-store::skillsets` | membership + `project(set, ResolvedView)` | `StagedSkillSetRelations` | resolver-backed profile preview + Procedure diff | `aikit-store::composition_application` -> existing SkillSet Procedure runner | structured Procedure receipt + undo | existing `aikit set add/remove`; shared store seam reusable | application adapter can consume same store seam; full gesture wiring open | native Skill consumes the same relation semantics |
+| SkillSet -> Capability membership | `aikit-core::skillset` + `aikit-store::skillsets` | membership + `project(set, ResolvedView)` | `StagedSkillSetRelations` | resolver-backed profile preview + exact Procedure diff | `aikit-store::composition_application` -> reviewed SkillSet Procedure -> existing Procedure runner | structured Procedure receipt + undo | existing `aikit set add/remove`; shared store seam reusable | application adapter can consume same store seam; full gesture wiring open | native Skill consumes the same relation semantics |
 | capability changed ground | resolver | `ChangedGround` | n/a | `changed_ground(before, after)` | n/a | structured before/after evidence | compatibility diff projects it | production composition preview/apply projects it | native Skill names required fields |
 | HarnessComposition | `aikit-core::composition` | resolver/read model | `StagedHarnessComposition` | canonical composition resolver | target/provider owner after confirmed desired body | fingerprint/diff; target history separate | application path | existing Compose surfaces | actor bootstrap/runtime operations |
 | ContextSource horizon | `aikit-core::context_source` / provider | descriptor-only horizon/explain | no authored selector mutation yet | read-only horizon only | retrieval remains provider-owned, selector writer undefined | provider/source provenance | knowledge/context commands | Project-world/Compose reads | agent can discover/retrieve via provider operation |
@@ -104,14 +104,14 @@ It provides:
 
 ```text
 SkillSetRelationMutation
-  -> Procedure-backed diff preview (no write)
+  -> exact Procedure-backed diff preview (no write)
   -> membership basis recheck
-  -> immutable Procedure identity recheck
-  -> ProcedureRunner apply
+  -> run the same reviewed Procedure
+       (content digest + isolation + inverses + world preconditions preserved)
   -> structured receipt + undo evidence
 ```
 
-If membership changes after preview, apply returns `composition.preview_stale` before applying the accepted mutation.
+Procedure ids are execution identities, not semantic content hashes. The preview therefore retains the actual planned `Procedure`; apply does not re-plan and compare a newly minted id. If membership changed after preview, apply returns `composition.preview_stale` before running it. If the underlying file/world changed in another way, `ProcedureRunner` rechecks the reviewed Procedure's world preconditions and refuses stale mutation through its existing procedure-precondition safety law.
 
 The store does not resolve effective state. Resolution remains core/application work; the store only makes accepted authored intent durable.
 
@@ -132,12 +132,14 @@ The compatibility `aikit diff` staging module still exists because published CLI
 
 ## 7. Native Skill parity
 
-The #73 first-party `aikit-profile-skillset-management` Skill consumes the shared operation vocabulary directly:
+The #73 first-party `aikit-profile-skillset-management` Skill consumes the shared operation vocabulary directly. It explicitly distinguishes Project -> SkillSet selection from SkillSet -> Capability membership and requires an agent to stop rather than bypass shared authority when a relation has not yet acquired a canonical preview/apply owner.
+
+It covers:
 
 - inspect authored and effective state;
 - record resolver basis;
 - stage typed source intent;
-- preview through the canonical resolver;
+- preview through the canonical resolver or exact store-owned Procedure diff as applicable;
 - inspect changed ground and degradation;
 - reject stale previews;
 - apply only through AIKit-owned mutation authority;
