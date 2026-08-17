@@ -146,7 +146,7 @@ pub fn session_space_history_evidence(
 }
 
 pub fn session_space_receipt_evidence(receipt: &SessionSpaceReceipt) -> Result<HistoryEvidence> {
-    let subject = ResourceRef::parse(receipt.space.as_str())?;
+    let subject = receipt.space.as_resource_ref().clone();
     let mut canonical_refs = BTreeSet::new();
     canonical_refs.insert(subject.clone());
     collect_session_space_refs(&receipt.after, &mut canonical_refs)?;
