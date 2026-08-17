@@ -6,8 +6,8 @@
 //! without manufacturing per-Surface/per-kind Action identities.
 
 use crate::resource::{
-    ActionStageability, ContextualActionDescriptor, ResourceDescriptor, ResourceKind,
-    ResourceRecord, ResourceRef,
+    ActionStageability, ContextualActionDescriptor, ResourceDescriptor, ResourceIndex,
+    ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
 };
 use crate::Result;
 
@@ -54,6 +54,31 @@ pub fn explain_history_actions_for(
     ])
 }
 
+/// Install the two common Actions into one already-resolved navigation field and
+/// relate them to every subject that existed at the time of installation.
+///
+/// The subject snapshot is taken **before** the Action resources are inserted, so
+/// this helper does not recursively manufacture Explain/History-on-Explain rows.
+/// Calling it repeatedly is idempotent because the ResourceSearchIndex is keyed by
+/// canonical ResourceRef and contextual Action relation.
+pub fn install_explain_history_actions(index: &mut ResourceSearchIndex) -> Result<()> {
+    let subjects = ResourceIndex::resources(index)
+        .into_iter()
+        .map(|record| record.descriptor.id.clone())
+        .filter(|id| id.as_str() != EXPLAIN_ACTION_REF && id.as_str() != HISTORY_ACTION_REF)
+        .collect::<Vec<_>>();
+
+    for record in explain_history_action_resources()? {
+        index.insert_resource(record, Vec::new());
+    }
+    for subject in subjects {
+        for action in explain_history_actions_for(&subject)? {
+            index.insert_action(action)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +107,38 @@ mod tests {
             .all(|record| record.descriptor.kind == ResourceKind::Action));
         assert_eq!(records[0].descriptor.id.as_str(), EXPLAIN_ACTION_REF);
         assert_eq!(records[1].descriptor.id.as_str(), HISTORY_ACTION_REF);
+    }
+
+    #[test]
+    fn install_relates_one_action_identity_to_every_existing_subject() {
+        let project = ResourceRef::parse("project/app").unwrap();
+        let component = ResourceRef::parse("component/editor").unwrap();
+        let mut index = ResourceSearchIndex::default();
+        for (id, kind, name) in [
+            (project.clone(), ResourceKind::Project, "App"),
+            (component.clone(), ResourceKind::Component, "Editor"),
+        ] {
+            index.insert_resource(
+                ResourceRecord::new(ResourceDescriptor::new(id, kind, name, "fixture")),
+                Vec::new(),
+            );
+        }
+
+        install_explain_history_actions(&mut index).unwrap();
+        install_explain_history_actions(&mut index).unwrap();
+
+        assert_eq!(index.actions_for(&project).len(), 2);
+        assert_eq!(index.actions_for(&component).len(), 2);
+        assert!(index
+            .actions_for(&project)
+            .iter()
+            .any(|action| action.action.as_str() == EXPLAIN_ACTION_REF));
+        assert!(index
+            .actions_for(&project)
+            .iter()
+            .any(|action| action.action.as_str() == HISTORY_ACTION_REF));
+        assert_eq!(ResourceIndex::resources(&index).len(), 4);
+        assert!(index.actions_for(&ResourceRef::parse(EXPLAIN_ACTION_REF).unwrap()).is_empty());
+        assert!(index.actions_for(&ResourceRef::parse(HISTORY_ACTION_REF).unwrap()).is_empty());
     }
 }
