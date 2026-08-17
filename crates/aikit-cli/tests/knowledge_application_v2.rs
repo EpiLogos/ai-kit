@@ -201,6 +201,24 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
             relations.value["query"]["focus"],
             "wiki:node:authentication"
         );
+        let edges = relations.value["edges"]
+            .as_array()
+            .expect("final TUI relation read model contains provider-bearing edges");
+        let source_edge = edges
+            .iter()
+            .find(|edge| {
+                edge["from"] == "wiki:node:authentication"
+                    && edge["to"] == "source:paper:authentication"
+                    && edge["relation"] == "source"
+            })
+            .expect("SemanticWiki source edge reaches the final TUI relation service");
+        assert_eq!(source_edge["origin"]["lens"], "semantic-wiki");
+        assert!(
+            source_edge["origin"]["provider"]
+                .as_str()
+                .is_some_and(|provider| !provider.is_empty()),
+            "provider identity survives the application relation projection"
+        );
 
         assert!(TuiApplicationService::knowledge_forget(
             &mut tui,
