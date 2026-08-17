@@ -1,8 +1,5 @@
 name: Temporary restore accepted composition convergence
 on:
-  push:
-    branches:
-      - agent/restore-composition-convergence
   pull_request:
     branches:
       - main
@@ -15,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: agent/restore-composition-convergence
+          ref: ${{ github.head_ref }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Restore accepted PR 78 seam and preserve newer application operations
@@ -159,4 +156,4 @@ jobs:
           rm -f .github/workflows/tmp-restore-composition.yml
           git add -A
           git commit -m "chore: remove temporary composition repair machinery"
-          git push origin HEAD:agent/restore-composition-convergence
+          git push origin HEAD:${{ github.head_ref }}
