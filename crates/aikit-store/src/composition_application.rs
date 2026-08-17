@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use aikit_core::composition_mutation::SkillSetRelationMutation;
 use aikit_core::id::CapsuleId;
 use aikit_core::skillset::SkillSet;
-use aikit_core::{AikitError, ProcedureId, Result};
+use aikit_core::{AikitError, Procedure, ProcedureId, Result};
 
 use crate::home::AikitHome;
 use crate::procedure::{ProcedureDiff, ProcedureRunner};
@@ -19,10 +19,14 @@ use crate::skillsets;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillSetRelationProcedurePreview {
     pub mutation: SkillSetRelationMutation,
-    pub procedure: ProcedureId,
+    /// The exact immutable/reversible plan the caller reviewed. Procedure ids are
+    /// execution identities, so apply must not re-plan and compare a newly minted
+    /// id; the reviewed plan already carries content digest + world preconditions.
+    pub procedure: Procedure,
     pub diff: ProcedureDiff,
     /// Membership identity observed when preview was produced. This closes the
-    /// review/apply interval independently of the effective-resolution basis.
+    /// review/apply interval semantically; Procedure preconditions close it at the
+    /// filesystem/world boundary.
     pub membership_basis: Vec<CapsuleId>,
 }
 
@@ -58,7 +62,7 @@ pub fn preview_skillset_relation_mutation(
     let diff = runner.diff(&procedure)?;
     Ok(SkillSetRelationProcedurePreview {
         mutation,
-        procedure: procedure.id,
+        procedure,
         diff,
         membership_basis: member_ids(&current),
     })
@@ -67,13 +71,14 @@ pub fn preview_skillset_relation_mutation(
 /// Apply an accepted membership preview through the canonical Procedure runner.
 ///
 /// The SkillSet is re-read first; if membership changed since preview, the
-/// accepted mutation is stale and must be previewed again. Procedure execution
-/// remains reversible and records its own immutable plan/digest/undo journal.
+/// accepted mutation is stale and must be previewed again. The *same Procedure*
+/// that was diffed/reviewed is then run, so its content digest, isolation choice,
+/// inverses and world preconditions remain the reviewed apply authority.
 pub fn apply_skillset_relation_mutation(
     home: &AikitHome,
     preview: SkillSetRelationProcedurePreview,
 ) -> Result<SkillSetRelationProcedureReceipt> {
-    let (set_name, capability, add) = mutation_parts(&preview.mutation);
+    let (set_name, _, _) = mutation_parts(&preview.mutation);
     let current = skillsets::load(home, set_name)?;
     if member_ids(&current) != preview.membership_basis {
         return Err(AikitError::new(
@@ -83,23 +88,7 @@ pub fn apply_skillset_relation_mutation(
         .with("skill_set", set_name.to_string()));
     }
 
-    // Re-plan from the still-matching source state and insist on the same
-    // immutable Procedure identity the caller reviewed.
-    let procedure = if add {
-        skillsets::plan_add(home, set_name, std::slice::from_ref(capability))?
-    } else {
-        skillsets::plan_remove(home, set_name, std::slice::from_ref(capability))?
-    };
-    if procedure.id != preview.procedure {
-        return Err(AikitError::new(
-            "composition.preview_stale",
-            "SkillSet Procedure identity changed after preview",
-        )
-        .with("skill_set", set_name.to_string())
-        .with("expected_procedure", preview.procedure.to_string())
-        .with("current_procedure", procedure.id.to_string()));
-    }
-
+    let procedure = preview.procedure;
     let outcome = ProcedureRunner::new(home).run(&procedure)?;
     let resulting = skillsets::load(home, set_name)?;
     Ok(SkillSetRelationProcedureReceipt {
@@ -140,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_is_write_free_and_apply_uses_a_reversible_procedure() {
+    fn preview_is_write_free_and_apply_uses_the_exact_reviewed_reversible_procedure() {
         let dir = tempdir().unwrap();
         let home = AikitHome::at(dir.path().join("aikit"));
         skillsets::create(&home, "operator", &[id("skill/a")], &[]).unwrap();
@@ -150,6 +139,8 @@ mod tests {
         };
 
         let preview = preview_skillset_relation_mutation(&home, mutation).unwrap();
+        let reviewed_procedure = preview.procedure.id.clone();
+        let reviewed_digest = preview.procedure.digest.clone();
         let before = skillsets::load(&home, "operator").unwrap();
         assert!(!before.members.contains_key(&id("skill/b")));
         assert!(!preview.diff.is_empty());
@@ -160,8 +151,10 @@ mod tests {
             after.members.get(&id("skill/b")),
             Some(&SetMembership::Explicit)
         );
+        assert_eq!(receipt.procedure, reviewed_procedure);
         assert_eq!(receipt.applied_edits, 1);
         assert!(receipt.undo.contains(receipt.procedure.as_str()));
+        assert!(!reviewed_digest.as_str().is_empty());
     }
 
     #[test]
