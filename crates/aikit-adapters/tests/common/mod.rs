@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use aikit_core::actor_bootstrap::ActorBootstrap;
 use aikit_core::capsule::{Capsule, Kind};
 use aikit_core::catalog::MemoryCatalog;
 use aikit_core::context::{ContextDescriptor, Isolation};
@@ -179,6 +180,7 @@ pub struct ContextBuilder {
     session: Vec<String>,
     isolation: Isolation,
     roots: BTreeMap<CapsuleId, PathBuf>,
+    actor_bootstrap: Option<ActorBootstrap>,
 }
 
 impl ContextBuilder {
@@ -189,12 +191,19 @@ impl ContextBuilder {
             session: Vec::new(),
             isolation: Isolation::Shared,
             roots: BTreeMap::new(),
+            actor_bootstrap: None,
         }
     }
 
     #[must_use]
     pub fn isolation(mut self, isolation: Isolation) -> Self {
         self.isolation = isolation;
+        self
+    }
+
+    #[must_use]
+    pub fn actor_bootstrap(mut self, bootstrap: ActorBootstrap) -> Self {
+        self.actor_bootstrap = Some(bootstrap);
         self
     }
 
@@ -263,6 +272,7 @@ impl ContextBuilder {
         ResolvedContext {
             view,
             capsule_roots: self.roots,
+            actor_bootstrap: self.actor_bootstrap,
         }
     }
 }
@@ -301,9 +311,6 @@ pub fn write_agent_skill(base: &Path, name: &str, description: &str) -> PathBuf 
 }
 
 /// Write a capsule's `payload/` directory as a valid Agent Skill.
-///
-/// The frontmatter name is the skill's own; the *export* name comes from the
-/// capsule id, which is what lets two registries ship a `code-review` each.
 pub fn write_payload_skill(capsule_root: &Path, skill_name: &str, description: &str) -> PathBuf {
     let payload = capsule_root.join("payload");
     std::fs::create_dir_all(payload.join("scripts")).unwrap();
@@ -326,11 +333,6 @@ pub fn write_payload_skill(capsule_root: &Path, skill_name: &str, description: &
 }
 
 /// Write a projection plan's items to disk.
-///
-/// The real materializer lives in `aikit-store`, which this crate deliberately
-/// does not depend on. This is a test-local stand-in that exists so a golden-tree
-/// assertion can be about an actual directory rather than about a list of
-/// intentions.
 pub fn materialize(items: &[aikit_core::projection::ProjectionItem], root: &Path) {
     use aikit_core::projection::ProjectionItem;
 
@@ -351,34 +353,36 @@ pub fn materialize(items: &[aikit_core::projection::ProjectionItem], root: &Path
                 std::fs::create_dir_all(target.parent().unwrap()).unwrap();
                 std::fs::write(&target, contents).unwrap();
             }
-            // Neither reaches the filesystem: a shim's directory is the
-            // generation's `bin/`, and an env var is not a file at all. The real
-            // materializer in aikit-store handles both.
             ProjectionItem::Shim { .. } | ProjectionItem::Env { .. } => {}
         }
     }
 }
 
-/// Every path under `root`, relative and sorted, for golden-tree assertions.
+/// Return the exact materialized tree beneath `root`, relative to `root`.
+/// Directories are represented with a trailing slash and the result is sorted so
+/// golden projection tests are deterministic across filesystems.
 pub fn tree_of(root: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    collect(root, root, &mut out);
-    out.sort();
-    out
-}
+    fn visit(root: &Path, current: &Path, entries: &mut Vec<String>) {
+        let mut children = std::fs::read_dir(current)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .collect::<Vec<_>>();
+        children.sort_by_key(|entry| entry.file_name());
 
-fn collect(base: &Path, dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let relative = path.strip_prefix(base).unwrap().display().to_string();
-        if path.is_dir() && !path.is_symlink() {
-            out.push(format!("{relative}/"));
-            collect(base, &path, out);
-        } else {
-            out.push(relative);
+        for entry in children {
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                entries.push(format!("{}/", relative.display()));
+                visit(root, &path, entries);
+            } else {
+                entries.push(relative.display().to_string());
+            }
         }
     }
+
+    let mut entries = Vec::new();
+    visit(root, root, &mut entries);
+    entries.sort();
+    entries
 }

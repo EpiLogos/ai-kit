@@ -14,6 +14,11 @@
 //! the reason [`aikit_core::context::Isolation`] exists, and each adapter answers
 //! it explicitly rather than by accident.
 //!
+//! The V2 managed actor bootstrap follows the same rule. Both clients receive the
+//! same generated Agent Skill representation of the already-resolved bootstrap;
+//! the adapter is still responsible for proving that its native skill surface is
+//! private enough for the context-specific seed.
+//!
 //! ## Why `install` returns a `Result`
 //!
 //! Merging into a client's existing settings requires reading them, and reading
@@ -22,6 +27,7 @@
 //! failure is propagated instead of swallowed.
 
 pub mod agent_skills;
+mod bootstrap;
 pub mod broker;
 pub mod claude;
 pub mod codex;

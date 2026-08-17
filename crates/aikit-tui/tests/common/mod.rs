@@ -1,10 +1,9 @@
-//! Fixtures for the palette tests.
+//! Fixtures for the V2 application-surface tests.
 //!
 //! Everything here is built from real manifest text through
 //! `Capsule::from_toml_str` and resolved by the real `aikit_core::resolve`, so a
-//! palette test that says "this row is unavailable because trust withheld it" is
-//! asserting on the resolver's actual answer rather than on a hand-written enum a
-//! future change to the resolver would not disturb.
+//! surface test asserting availability or trust still exercises the resolver's
+//! actual answer. No fixture helper drives a retired Palette/Tree controller.
 
 #![allow(dead_code)]
 
@@ -32,11 +31,9 @@ use aikit_store::events::Timestamp;
 use aikit_store::inbox::{Candidate, CandidateState, PromotionEdits, Similarity, SimilarityBasis};
 use aikit_store::scan::{Family, Finding};
 
-use aikit_tui::app::{Action, AppState, ManageAction};
 use aikit_tui::backend::{
     ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
 };
-use aikit_tui::driver::step;
 
 pub fn cid(s: &str) -> CapsuleId {
     CapsuleId::parse(s).unwrap()
@@ -157,12 +154,9 @@ pub fn descriptor() -> ContextDescriptor {
 // ---------------------------------------------------------------------------
 
 /// A [`PaletteBackend`] backed by the real resolver and a real overlay file on
-/// disk.
-///
-/// The overlay file is the point. "Staging never mutates anything" is only worth
-/// asserting against something that *could* have been mutated, so the fixture
-/// writes its scope layers to a TOML file in a temporary directory and the tests
-/// compare its bytes before and after.
+/// disk. `PaletteBackend` is currently only the compatibility name of the shared
+/// application backend contract; tests interact through `ApplicationService` and
+/// `ApplicationSurfaceController`.
 pub struct Fixture {
     pub catalog: MemoryCatalog,
     pub trust: MemoryTrust,
@@ -308,10 +302,6 @@ impl Fixture {
             .map(|(kind, patch)| ScopeLayer {
                 kind: *kind,
                 depth: 0,
-                // A stable, repo-relative label rather than the temporary
-                // directory: an origin is what the palette shows a user, and a
-                // snapshot containing `/var/folders/…/.tmpAbC123/` would be a
-                // snapshot of this machine rather than of the palette.
                 origin: LayerOrigin::new(format!(".aikit/{}.toml", kind.as_str())),
                 patch: patch.clone(),
             })
@@ -352,7 +342,6 @@ impl Fixture {
             .expect("the fixture's own layers must resolve");
     }
 
-    /// The layer a set of staged toggles would add at `scope`.
     fn toggle_layer(&self, scope: ScopeKind, toggles: &[Toggle]) -> ScopeLayer {
         let mut patch = self.layers.get(&scope).cloned().unwrap_or_default();
         for toggle in toggles {
@@ -439,7 +428,7 @@ impl PaletteBackend for Fixture {
 }
 
 // ---------------------------------------------------------------------------
-// Promotion fixtures
+// Promotion fixtures retained for tests that exercise backend/package boundaries.
 // ---------------------------------------------------------------------------
 
 fn candidate(id: &str, title: &str, state: CandidateState, findings: Vec<Finding>) -> Candidate {
@@ -458,7 +447,6 @@ fn candidate(id: &str, title: &str, state: CandidateState, findings: Vec<Finding
     }
 }
 
-/// A capture the scanner passed, with a neighbour worth mentioning.
 pub fn ready_draft() -> PromotionDraft {
     let candidate = candidate(
         "cnd_READY000000000000000000",
@@ -487,7 +475,6 @@ pub fn ready_draft() -> PromotionDraft {
     ])
 }
 
-/// A capture the scanner held back.
 pub fn quarantined_draft() -> PromotionDraft {
     let candidate = candidate(
         "cnd_HELD0000000000000000000",
@@ -511,20 +498,6 @@ pub fn quarantined_draft() -> PromotionDraft {
     .with_body(vec!["export GH_TOKEN=ghp_REALSECRETVALUE".into()])
 }
 
-/// Walk the palette into the promotion view the way a user would.
-pub fn enter_promotion(backend: &mut Fixture, state: AppState) -> AppState {
-    let mut state = step(backend, state, Action::Input(':'));
-    while state
-        .selected_manage_row()
-        .map(|action| action != ManageAction::ReviewCaptures)
-        .unwrap_or(false)
-    {
-        state = step(backend, state, Action::MoveDown);
-    }
-    step(backend, state, Action::Enter)
-}
-
-/// The values a filled form would carry, for tests that need one.
 pub fn values(pairs: &[(&str, aikit_core::arg::ArgValue)]) -> ArgValues {
     pairs
         .iter()

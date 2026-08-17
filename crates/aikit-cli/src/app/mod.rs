@@ -721,9 +721,21 @@ impl Service {
                 ));
             }
         }
+
+        let actor_bootstrap = if self.descriptor.project_root.is_some() {
+            let resolution = aikit_tui::project_world_service::context_resolution(self)?;
+            Some(aikit_core::project_actor_bootstrap(
+                &resolution,
+                aikit_core::ActorBootstrapRequest::default(),
+            )?)
+        } else {
+            None
+        };
+
         Ok(ResolvedContext {
             view,
             capsule_roots: self.catalog.capsule_roots(),
+            actor_bootstrap,
         })
     }
 
@@ -1407,6 +1419,10 @@ impl PaletteBackend for Service {
 
     fn view(&self) -> &ResolvedView {
         &self.view
+    }
+
+    fn scope_layers(&self) -> Option<&[ScopeLayer]> {
+        Some(&self.layers)
     }
 
     fn documents(&self) -> Vec<SearchDoc> {

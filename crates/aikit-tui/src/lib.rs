@@ -1,146 +1,63 @@
-//! The AIKit palette.
+//! AIKit's V2 terminal application surface.
 //!
-//! It is a **palette, not a dashboard**. It opens, does one or a few things, and
-//! disappears. There is no persistent control-centre chrome, no background
-//! refresh loop, and no state that outlives the invocation — closing it returns
-//! the user to the work with the terminal exactly as they left it.
-//!
-//! ## What this crate refuses to do
-//!
-//! **It contains no resolver semantics.** Not a dependency rule, not a scope
-//! precedence rule, not a ranking formula. Every question of the form "what would
-//! happen if…" is asked of `aikit-core` through [`PaletteBackend`]. If the palette
-//! ever computed an answer that `aikit explain` would compute differently, the
-//! two front-ends would disagree about the same system, and the one that lies is
-//! whichever the user is looking at.
-//!
-//! It also does not shell out to `aikit --json`. The CLI and the palette share one
-//! application service; [`PaletteBackend`] is the shape of that service as the
-//! palette needs it.
-//!
-//! ## The architecture is unidirectional
-//!
-//! ```text
-//! event → Action → reduce → AppState → render
-//!            ▲                  │
-//!            └──── Effect ◄─────┘
-//! ```
-//!
-//! [`app::reduce`] is a pure function: state in, state and a list of effects out.
-//! Effects are the only things that touch the backend, and everything they learn
-//! comes back as another [`app::Action`]. That is why nearly every test in this
-//! crate is a reducer test — the interesting behaviour is reachable without a
-//! terminal, and the part that does need a terminal is [`render`], which is
-//! snapshot-tested against a real `TestBackend`.
-//!
-//! ## Where to look
-//!
-//! | Question | Module |
-//! |---|---|
-//! | What does a key do? | [`app`], [`event`] |
-//! | Why is this row above that one? | [`search`] |
-//! | What would this toggle actually cost? | [`staging`] |
-//! | Where would a change be written, and what confirms it? | [`scope`] |
-//! | How is an argument form built from a manifest? | [`form`] |
-//! | What fits at this width? | [`layout`] |
-//! | Where does the palette appear? | [`host`] |
-//! | What does it look like? | [`render`], [`theme`] |
-//! | What does the palette need from the application? | [`backend`] |
+//! There is one semantic authority: [`application::TuiState`] reduced by
+//! [`application::TuiRuntime`] against [`application_service::ApplicationService`].
+//! Quick/Workspace and List/Tree/Graph are presentations of that state, not
+//! alternate controllers.
 
 #![forbid(unsafe_code)]
 
-pub mod app;
+pub mod application;
+pub mod application_service;
+pub mod application_surface;
 pub mod backend;
 pub mod event;
-pub mod form;
 pub mod host;
+pub mod knowledge_service;
 pub mod layout;
-pub mod render;
-pub mod scope;
-pub mod search;
+pub mod navigation;
+pub mod project_workspace;
+pub mod project_workspace_render;
+pub mod project_world_api;
+pub mod project_world_service;
 pub mod staging;
-pub mod surface;
 pub mod theme;
 pub mod tree;
-pub mod tree_driver;
-
-pub mod driver;
+pub mod v2_render;
 
 use aikit_core::id::{CapsuleId, GenerationId};
-use aikit_core::scope::ScopeKind;
 
-pub use app::{reduce, Action, AppState, Effect, ManageAction, Mode, Reduction};
+pub use application::{
+    keyboard_select, mouse_select, reduce_tui, selected_contextual_action, unresolved_staged,
+    ActionOutcome, ActivationIntent, ApplyReceipt, CompositionPreview, HistoryEntry,
+    NavigationPoint, Overlay, PresentationMode, RelationReadModel, RelationView, ResourceListItem,
+    ResourceListReadModel, SelectionInvalidation, StagedChanges, TuiApplicationService,
+    TuiReduction, TuiRuntime, TuiState, UiAction, UiEffect, UiStatus, WorkspaceSection,
+};
+pub use application_service::ApplicationService;
+pub use application_surface::{
+    ApplicationSurfaceController, ApplicationSurfaceRequest, ApplicationSurfaceStep,
+};
 pub use backend::{
     ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
 };
 pub use event::{EventSource, PaletteEvent, ScriptedEvents};
-pub use form::{ArgForm, RunPreview};
 pub use host::{Escalation, TerminalProfile, UiHost};
+pub use knowledge_service::KnowledgeNavigationService;
 pub use layout::{Glyphs, Layout, Width};
-pub use scope::ScopeSelector;
-pub use search::{rank, Matcher, Row};
-pub use staging::{stage, StagedDiff, StagedProblem, StagedSet};
+pub use navigation::{
+    keyboard_invoke_action, keyboard_open_hit, keyboard_select_hit, keyboard_set_presentation,
+    mouse_invoke_action, mouse_open_hit, mouse_select_hit, mouse_set_presentation, stage_action,
+    AmbientContext, NavigationIntent,
+};
+pub use project_workspace::{ComposeHorizon, ProjectWorkspaceSelection, ProjectWorkspaceState};
+pub use project_world_api::ProjectWorldApplicationService;
 pub use theme::Theme;
 
-/// How the CLI asks for a palette.
-pub struct PaletteRequest {
-    pub host: UiHost,
-    pub initial_query: Option<String>,
-    /// Open the first exact result as soon as the initial search settles. The
-    /// tree uses this to hand a leaf directly to its natural palette action
-    /// (details, form, or run) without requiring a redundant second Enter.
-    pub activate_initial: bool,
-    /// Exact capsule the tree handed to the palette. The visible query uses its
-    /// searchable path, while this typed identity prevents a fuzzy neighbour
-    /// from being activated by mistake.
-    pub activation_target: Option<aikit_core::CapsuleId>,
-    /// Override the mutation scope the palette starts on. `None` means the
-    /// context's own default (see [`aikit_core::ContextDescriptor::default_mutation_scope`]).
-    pub scope: Option<ScopeKind>,
-}
-
-impl PaletteRequest {
-    pub fn new(host: UiHost) -> Self {
-        Self {
-            host,
-            initial_query: None,
-            activate_initial: false,
-            activation_target: None,
-            scope: None,
-        }
-    }
-
-    #[must_use]
-    pub fn with_query(mut self, query: impl Into<String>) -> Self {
-        self.initial_query = Some(query.into());
-        self
-    }
-
-    #[must_use]
-    pub fn activating_initial(mut self) -> Self {
-        if let Some(query) = self.initial_query.as_deref() {
-            if let Ok(target) = query.parse::<aikit_core::CapsuleId>() {
-                self.initial_query = Some(target.path().to_string());
-                self.activation_target = Some(target);
-                self.activate_initial = true;
-            }
-        }
-        self
-    }
-
-    #[must_use]
-    pub fn with_scope(mut self, scope: ScopeKind) -> Self {
-        self.scope = Some(scope);
-        self
-    }
-}
-
-/// What the palette did before it closed.
+/// Terminal application outcome.
 ///
-/// `Run` hands back rather than executing because a foreground or `replace`
-/// execution mode needs the terminal the palette is currently holding: the caller
-/// tears the palette down and *then* runs the command, so the child inherits a
-/// clean terminal instead of a raw-mode one.
+/// The extra variants remain only until the CLI's historical post-palette match is
+/// migrated; the final V2 ApplicationSurface itself emits `Closed` only.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaletteOutcome {
     Closed,
@@ -148,24 +65,4 @@ pub enum PaletteOutcome {
     Run(RunIntent),
     Applied(GenerationId),
     Promoted(CapsuleId),
-}
-
-/// Open the interactive organising tree and return the operation selected after
-/// the terminal has been restored.
-pub fn run_tree(
-    state: tree::TreeState,
-    request: tree_driver::TreeRequest,
-) -> aikit_core::Result<tree_driver::TreeOutcome> {
-    tree_driver::run_on_terminal(state, request)
-}
-
-/// Open the palette, run it to completion, and return what it did.
-///
-/// Terminal setup and teardown happen here so that the outcome is delivered to a
-/// caller holding a restored terminal. The loop itself is
-/// [`driver::event_loop`], which is generic over the ratatui backend and the
-/// event source — that is what lets the end-to-end tests drive a real palette
-/// against a `TestBackend` and a scripted key sequence.
-pub fn run(app: &mut dyn PaletteBackend, request: PaletteRequest) -> aikit_core::Result<PaletteOutcome> {
-    driver::run_on_terminal(app, request)
 }

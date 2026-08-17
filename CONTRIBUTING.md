@@ -19,14 +19,15 @@ boundary prevents safe external control.
 
 ## Verification
 
-Run the same gates as CI:
+Run the same repository-owned operation as CI:
 
 ```sh
-cargo test --locked --workspace --all-targets --no-fail-fast
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo build --locked --workspace --release
-git diff --check
+bash scripts/verify
 ```
+
+It runs the workspace test suite, clippy with warnings denied, the release build,
+and `git diff --check`. Keep this operation and the CI invocation aligned rather
+than duplicating verification semantics in workflow YAML.
 
 The repository contains older formatting that is being cleaned incrementally.
 Format files you materially change, but do not mix a repository-wide mechanical

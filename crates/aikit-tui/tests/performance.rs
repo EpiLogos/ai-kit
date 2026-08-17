@@ -1,57 +1,25 @@
-//! Release-build responsiveness gates for the real popup controller.
+//! Release-build responsiveness gates for the final V2 application surface.
 //!
-//! Discovery and fixture construction happen outside the clock. The first-frame
-//! samples cover controller creation, initial ranking, tree construction, and a
-//! real Ratatui draw. Search samples exercise the production matcher over 5,000
-//! documents while reusing its scratch storage exactly as the popup does.
+//! Fixture construction happens outside the clock. First-frame samples cover
+//! ApplicationSurface creation, ResourceRef-native ranking, Project-world
+//! composition and a real Ratatui draw. Search samples exercise the canonical
+//! ApplicationService over 5,000 resources.
 
 mod common;
 
 use std::time::{Duration, Instant};
 
-use aikit_core::capsule::Kind;
-use aikit_core::scope::ScopeKind;
-use aikit_core::search::{parse_query, DocStatus, SearchDoc, UsageStats};
-use aikit_core::trust::TrustState;
-use aikit_core::Result;
+use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
 use aikit_tui::host::UiHost;
-use aikit_tui::search::Matcher;
-use aikit_tui::surface::{SurfaceBackend, SurfaceController, SurfaceRequest};
-use aikit_tui::tree::{Node, NodeKind, Root, TreeEffect, TreeState};
-use aikit_tui::PaletteBackend;
+use aikit_tui::{ApplicationService, TuiApplicationService};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
-use common::{cid, script, Fixture};
+use common::{script, Fixture};
 
 const COLD_BUDGET: Duration = Duration::from_millis(150);
 const WARM_BUDGET: Duration = Duration::from_millis(60);
 const SEARCH_BUDGET: Duration = Duration::from_millis(16);
-
-impl SurfaceBackend for Fixture {
-    fn surface_tree(&self) -> Result<TreeState> {
-        let children = self
-            .view()
-            .catalog_index
-            .keys()
-            .map(|id| {
-                Node::leaf(
-                    NodeKind::Capability { id: id.clone() },
-                    id.leaf().to_string(),
-                )
-            })
-            .collect();
-        Ok(TreeState::new(vec![Node::branch(
-            NodeKind::Root(Root::Kinds),
-            "performance catalog",
-            children,
-        )]))
-    }
-
-    fn apply_tree_effect(&mut self, _effect: TreeEffect) -> Result<()> {
-        Ok(())
-    }
-}
 
 fn percentile(samples: &[Duration], numerator: usize, denominator: usize) -> Duration {
     let mut ordered = samples.to_vec();
@@ -80,7 +48,7 @@ fn release_only() -> bool {
 }
 
 #[test]
-fn popup_first_frame_meets_cold_and_warm_budgets() {
+fn application_first_frame_meets_cold_and_warm_budgets() {
     if !release_only() {
         return;
     }
@@ -90,10 +58,10 @@ fn popup_first_frame_meets_cold_and_warm_budgets() {
         .map(|index| script(&format!("script/performance/tool-{index:04}")))
         .collect();
     let mut backend = Fixture::new(directory.path(), capsules);
-    let request = SurfaceRequest::new(UiHost::TmuxPopup).with_query("tool");
+    let request = ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("tool");
 
     let cold_started = Instant::now();
-    let mut surface = SurfaceController::new(&mut backend, request.clone()).unwrap();
+    let surface = ApplicationSurfaceController::new(&mut backend, request).unwrap();
     let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
     surface.draw_terminal(&mut terminal).unwrap();
     let cold = cold_started.elapsed();
@@ -105,64 +73,45 @@ fn popup_first_frame_meets_cold_and_warm_budgets() {
         surface.draw_terminal(&mut terminal).unwrap();
         warm.push(started.elapsed());
     }
-    report("warm popup first frame", &warm);
-    eprintln!("cold popup first frame: {cold:?}");
+    report("warm application first frame", &warm);
+    eprintln!("cold application first frame: {cold:?}");
 
     assert!(
         cold < COLD_BUDGET,
-        "cold popup first frame took {cold:?}; budget is {COLD_BUDGET:?}"
+        "cold application first frame took {cold:?}; budget is {COLD_BUDGET:?}"
     );
     let warm_p95 = percentile(&warm, 95, 100);
     assert!(
         warm_p95 < WARM_BUDGET,
-        "warm popup p95 took {warm_p95:?}; budget is {WARM_BUDGET:?}"
+        "warm application p95 took {warm_p95:?}; budget is {WARM_BUDGET:?}"
     );
 }
 
 #[test]
-fn five_thousand_document_search_meets_the_keystroke_budget() {
+fn five_thousand_resource_search_meets_the_keystroke_budget() {
     if !release_only() {
         return;
     }
 
-    let docs: Vec<SearchDoc> = (0..5_000)
-        .map(|index| SearchDoc {
-            id: cid(&format!("script/performance/tool-{index:04}")),
-            kind: Kind::Script,
-            name: format!("tool-{index:04}"),
-            description: format!("Operate production service shard {index:04} safely"),
-            tags: vec!["performance".into(), format!("shard-{}", index % 100)],
-            exports: vec![format!("operate-{index:04}")],
-            status: DocStatus::Inactive,
-            scope: Some(ScopeKind::Project),
-            trust: TrustState::Reviewed,
-            in_current_project: true,
-            in_active_context: false,
-            runnable: true,
-            usage: UsageStats::default(),
-        })
+    let directory = tempfile::tempdir().unwrap();
+    let capsules = (0..5_000)
+        .map(|index| script(&format!("script/performance/tool-{index:04}")))
         .collect();
-    let queries = [
-        "operate-0042",
-        "production 281",
-        "tool-49",
-        "shard-17",
-        "service shard 8",
-    ];
-    let mut matcher = Matcher::new();
+    let mut backend = Fixture::new(directory.path(), capsules);
+    let service = ApplicationService::new(&mut backend);
+    let queries = ["tool-0042", "tool-0281", "tool-49", "performance/tool-17", "tool-0008"];
     let mut samples = Vec::with_capacity(50);
 
     for query in queries.into_iter().cycle().take(50) {
-        let parsed = parse_query(query);
         let started = Instant::now();
-        let rows = matcher.rank(&parsed, &docs);
+        let rows = service.search(query).unwrap();
         samples.push(started.elapsed());
         assert!(
-            !rows.is_empty(),
+            !rows.resources.is_empty(),
             "performance query `{query}` matched nothing"
         );
     }
-    report("5,000-document search step", &samples);
+    report("5,000-resource application search step", &samples);
 
     let search_p95 = percentile(&samples, 95, 100);
     assert!(

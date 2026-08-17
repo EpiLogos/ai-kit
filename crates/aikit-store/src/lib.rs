@@ -38,6 +38,7 @@
 //! | Why did two panes not corrupt each other? | [`locks`], [`generation`] |
 //! | What actually lands in `current/`? | [`generation`] |
 //! | What was recorded, and what was deliberately not? | [`events`] |
+//! | How is learned accessibility rebuilt? | [`familiarity`] |
 //! | Why was this capture held back? | [`scan`], [`inbox`] |
 //! | How does a capture become a capsule? | [`inbox`] |
 //! | Why did my hand-formatted profile survive a toggle? | [`edit`] |
@@ -49,6 +50,7 @@ pub mod channel;
 pub mod curator;
 pub mod edit;
 pub mod events;
+pub mod familiarity;
 pub mod generation;
 pub mod home;
 pub mod inbox;
@@ -68,6 +70,11 @@ pub use channel::{Evidence, InboxChannel, InboxItem, InboxKind, InboxState, NewI
 pub use curator::{curate, detect_drift, report_drift, CurationReport, Drift};
 pub use edit::{OverlayDocument, ProfileDocument};
 pub use events::{Event, EventAction, EventRecorder, Outcome, Timestamp};
+pub use familiarity::{
+    append_familiarity_observation, append_familiarity_reset, familiarity_observation_event,
+    familiarity_reset_event, replay_familiarity, FamiliarityReplay, FAMILIARITY_OBSERVATION_EVENT,
+    FAMILIARITY_RESET_EVENT,
+};
 pub use generation::{CommittedGeneration, GenerationBuilder, GenerationMetadata, StagedGeneration};
 pub use home::AikitHome;
 pub use inbox::{Candidate, CandidateState, Capture, Inbox, PromotionEdits, Similarity};

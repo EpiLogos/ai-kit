@@ -182,7 +182,7 @@ fn render_effective_skill(
         encoded = without_marker.to_string();
     }
 
-    let mut rendered = format!("---\n{}---\n{}", encoded, body);
+    let mut rendered = format!("---\n{encoded}---\n{body}");
     if !rendered.ends_with('\n') {
         rendered.push('\n');
     }

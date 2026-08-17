@@ -419,6 +419,7 @@ fn skill_context(isolation: Isolation) -> ResolvedContext {
     ResolvedContext {
         view,
         capsule_roots: roots,
+        actor_bootstrap: None,
     }
 }
 

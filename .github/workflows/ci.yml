@@ -17,27 +17,131 @@ jobs:
     name: Real integration suite
     runs-on: macos-15
     timeout-minutes: 30
-
     steps:
-      - name: Check out source
-        uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@v7.0.1
       - name: Install Rust 1.88
         run: |
           rustup toolchain install 1.88.0 --profile minimal --component clippy
           rustup default 1.88.0
-
       - name: Install tmux
         run: brew install tmux
+      - name: Verify repository
+        shell: bash
+        run: |
+          set +e
+          bash scripts/verify 2>&1 | tee /tmp/aikit.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E '(^error(\[|:)|^warning:|^failures:|^test result:|^thread .*panicked|^  left:|^ right:|^note:|^help:|^  -->|^   -->)' /tmp/aikit.log | tail -n 100 > /tmp/aikit-focus.log || true
+            message=$(cat /tmp/aikit-focus.log)
+            message=${message//'%'/'%25'}; message=${message//$'\r'/'%0D'}; message=${message//$'\n'/'%0A'}
+            echo "::error title=Repository verification failure::$message"
+          fi
+          exit "$status"
 
-      - name: Test every target
-        run: cargo test --locked --workspace --all-targets --no-fail-fast -- --test-threads=1
+  v2-crate-tests:
+    name: V2 crate — ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [aikit-core, aikit-store, aikit-adapters, aikit-tui, aikit-cli]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Rust 1.88
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - name: Test ${{ matrix.package }}
+        shell: bash
+        run: |
+          set +e
+          cargo test --locked -p '${{ matrix.package }}' --all-targets --no-fail-fast -- --test-threads=1 2>&1 | tee /tmp/aikit.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E '(^error(\[|:)|^warning:|^failures:|^test result:|^thread .*panicked|^  left:|^ right:|^note:|^help:|^  -->|^   -->)' /tmp/aikit.log | tail -n 100 > /tmp/aikit-focus.log || true
+            message=$(cat /tmp/aikit-focus.log)
+            message=${message//'%'/'%25'}; message=${message//$'\r'/'%0D'}; message=${message//$'\n'/'%0A'}
+            echo "::error title=${{ matrix.package }} test failure::$message"
+          fi
+          exit "$status"
 
-      - name: Deny compiler warnings
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
-      - name: Build the release profile
+  v2-static:
+    name: V2 static/dead-code gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Rust 1.88 with clippy
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component clippy
+          rustup default 1.88.0
+      - name: Clippy all targets
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --locked --workspace --all-targets -- -D warnings 2>&1 | tee /tmp/aikit.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E '(^error(\[|:)|^warning:|^note:|^help:|^  -->|^   -->)' /tmp/aikit.log | tail -n 120 > /tmp/aikit-focus.log || true
+            message=$(cat /tmp/aikit-focus.log)
+            message=${message//'%'/'%25'}; message=${message//$'\r'/'%0D'}; message=${message//$'\n'/'%0A'}
+            echo "::error title=Clippy failure::$message"
+          fi
+          exit "$status"
+      - name: Release build
         run: cargo build --locked --workspace --release
-
-      - name: Check patch whitespace
+      - name: Diff hygiene
         run: git diff --check
+
+  bkmr-real:
+    name: Real bkmr 7.6.7 SourcePool conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Rust 1.88
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install 'bkmr==7.6.7'
+      - run: bkmr --version
+      - name: Run real SourcePool conformance
+        env:
+          AIKIT_REQUIRE_BKMR_REAL: "1"
+        run: cargo test --locked -p aikit-adapters --test bkmr_real -- --nocapture --test-threads=1
+
+  gitnexus-real:
+    name: Real GitNexus 1.6.9 ProjectMap conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Rust 1.88
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.11.0"
+      - run: npm install --global 'gitnexus@1.6.9'
+      - run: gitnexus --version
+      - name: Run real ProjectMap code-index conformance
+        shell: bash
+        env:
+          AIKIT_REQUIRE_GITNEXUS_REAL: "1"
+        run: |
+          set +e
+          cargo test --locked -p aikit-adapters --test gitnexus_real -- --nocapture --test-threads=1 2>&1 | tee /tmp/aikit.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E '(^error(\[|:)|^failures:|^test result:|^thread .*panicked|^  left:|^ right:|^note:|^help:)' /tmp/aikit.log | tail -n 100 > /tmp/aikit-focus.log || true
+            message=$(cat /tmp/aikit-focus.log)
+            message=${message//'%'/'%25'}; message=${message//$'\r'/'%0D'}; message=${message//$'\n'/'%0A'}
+            echo "::error title=GitNexus conformance failure::$message"
+          fi
+          exit "$status"

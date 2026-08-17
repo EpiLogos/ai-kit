@@ -34,6 +34,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::actor_bootstrap::ActorBootstrap;
 use crate::context::Isolation;
 use crate::error::{err, AikitError, Result};
 use crate::id::CapsuleId;
@@ -357,11 +358,9 @@ impl ProjectionItem {
                 path.display(),
                 blake3::hash(contents.as_bytes()).to_hex()
             ),
-            ProjectionItem::Shim {
-                name,
-                capsule,
-                export,
-            } => format!("shim|{name}|{capsule}|{export}"),
+            ProjectionItem::Shim { name, capsule, export } => {
+                format!("shim|{name}|{capsule}|{export}")
+            }
             // The VALUE is part of the identity: pointing a context at a different
             // database is a different projection, not a cosmetic relabel.
             ProjectionItem::Env { name, value } => format!("env|{name}|{value}"),
@@ -493,14 +492,18 @@ impl ProjectionPlan {
 // Adapters
 // ---------------------------------------------------------------------------
 
-/// A resolved view plus where each capsule's files live.
+/// A resolved view plus where each capsule's files live and, when V2 actor
+/// cognition has been projected, the small managed bootstrap seed shared by
+/// harness adapters.
 ///
 /// The roots are supplied by the store: core does not know a registry path and
-/// must not guess one.
+/// must not guess one. The bootstrap is likewise already resolved: adapters only
+/// choose a target-native representation and never reconstruct actor identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedContext {
     pub view: ResolvedView,
     pub capsule_roots: BTreeMap<CapsuleId, PathBuf>,
+    pub actor_bootstrap: Option<ActorBootstrap>,
 }
 
 impl ResolvedContext {
@@ -508,12 +511,19 @@ impl ResolvedContext {
         Self {
             view,
             capsule_roots: BTreeMap::new(),
+            actor_bootstrap: None,
         }
     }
 
     #[must_use]
     pub fn with_root(mut self, capsule: CapsuleId, root: impl Into<PathBuf>) -> Self {
         self.capsule_roots.insert(capsule, root.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_actor_bootstrap(mut self, bootstrap: ActorBootstrap) -> Self {
+        self.actor_bootstrap = Some(bootstrap);
         self
     }
 
