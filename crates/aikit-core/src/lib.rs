@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 
 pub mod actor_bootstrap;
+pub mod application_context;
 pub mod arg;
 pub mod capsule;
 pub mod catalog;
@@ -73,6 +74,7 @@ pub use actor_bootstrap::{
     HarnessCompositionPointer, ResourceSetSummary, RuntimeBodyInspection, ACTOR_BOOTSTRAP_VERSION,
     BOOTSTRAP_RESOURCE_SAMPLE_LIMIT,
 };
+pub use application_context::application_context_resolution;
 pub use capsule::{
     BypassPolicy, Capsule, Facets, Facing, FailurePolicy, HookPhase, Kind, LanguageFacet, Maturity,
     Payload, Requirement, Surface,
