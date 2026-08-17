@@ -107,7 +107,7 @@ impl SessionSpaceApplicationStore {
             }
             states.push(self.read_file_at(&path)?.state);
         }
-        states.sort_by(|left, right| left.id().to_string().cmp(&right.id().to_string()));
+        states.sort_by_key(|left| left.id().to_string());
         Ok(states)
     }
 
@@ -211,7 +211,7 @@ impl SessionSpaceApplicationStore {
             .ok_or_else(|| {
                 AikitError::new(
                     "session_space.history_not_found",
-                    format!("SessionSpace {} has no receipt sequence {sequence}", space),
+                    format!("SessionSpace {space} has no receipt sequence {sequence}"),
                 )
             })?;
         stage_session_space(
@@ -276,7 +276,7 @@ impl SessionSpaceApplicationStore {
         if !path.is_file() {
             return Err(AikitError::new(
                 "session_space.not_found",
-                format!("SessionSpace {} has no canonical state", space),
+                format!("SessionSpace {space} has no canonical state"),
             )
             .with("path", path.display().to_string()));
         }
@@ -352,7 +352,7 @@ fn receipt_at<'a>(
         .ok_or_else(|| {
             AikitError::new(
                 "session_space.history_not_found",
-                format!("SessionSpace {} has no receipt sequence {sequence}", space),
+                format!("SessionSpace {space} has no receipt sequence {sequence}"),
             )
         })
 }
