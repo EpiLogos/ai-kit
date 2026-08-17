@@ -14,10 +14,10 @@ fn r(raw: &str) -> ResourceRef {
 
 #[test]
 fn current_upstream_specimen_preserves_plugin_injection_effect_and_surface_relations() {
-    assert_eq!(DEEPSEEK_HARNESS_RELEASE, "0.1.0-rc.5");
+    assert_eq!(DEEPSEEK_HARNESS_RELEASE, "0.1.0-rc.7");
     assert_eq!(
         DEEPSEEK_HARNESS_UPSTREAM_REVISION,
-        "47f943859bef60e4160492346772ded9b24f765a"
+        "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca"
     );
 
     let specimen = deepseek_harness_conformance(DeepSeekShellProvider::Local);
