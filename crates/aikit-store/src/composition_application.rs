@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn preview_is_write_free_and_apply_uses_a_reversible_procedure() {
         let dir = tempdir().unwrap();
-        let home = AikitHome::new(dir.path().join("aikit"));
+        let home = AikitHome::at(dir.path().join("aikit"));
         skillsets::create(&home, "operator", &[id("skill/a")], &[]).unwrap();
         let mutation = SkillSetRelationMutation::Add {
             skill_set: "operator".into(),
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn accepted_preview_is_rejected_after_membership_drift() {
         let dir = tempdir().unwrap();
-        let home = AikitHome::new(dir.path().join("aikit"));
+        let home = AikitHome::at(dir.path().join("aikit"));
         skillsets::create(&home, "operator", &[id("skill/a")], &[]).unwrap();
         let preview = preview_skillset_relation_mutation(
             &home,
