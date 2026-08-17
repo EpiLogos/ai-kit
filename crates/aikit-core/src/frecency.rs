@@ -116,11 +116,7 @@ impl Candidate {
     ///
     /// Returned so the UI can *show* why one row beat another, which is the whole
     /// point of keeping the tiebreak ordered rather than blending it into a number.
-    pub fn deciding_tiebreak(
-        &self,
-        other: &Self,
-        half_life: std::time::Duration,
-    ) -> Option<Tiebreak> {
+    pub fn deciding_tiebreak(&self, other: &Self, half_life: std::time::Duration) -> Option<Tiebreak> {
         if self.exact_export_name != other.exact_export_name {
             return Some(Tiebreak::ExactExportName);
         }
@@ -141,8 +137,7 @@ impl Candidate {
 }
 
 /// The one tunable, stated as a documented half-life rather than a magic constant.
-pub const DEFAULT_HALF_LIFE: std::time::Duration =
-    std::time::Duration::from_secs(14 * 24 * 60 * 60);
+pub const DEFAULT_HALF_LIFE: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 60 * 60);
 
 /// Rank candidates: by score, then down the ordered tiebreak ladder.
 ///
@@ -156,7 +151,11 @@ pub fn rank(candidates: &mut [Candidate], half_life: std::time::Duration) {
 /// The comparison `rank` uses. Higher is better, so this is a *descending* order.
 pub fn compare(a: &Candidate, b: &Candidate, half_life: std::time::Duration) -> Ordering {
     // Match quality first, and alone.
-    match b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal) {
+    match b
+        .score
+        .partial_cmp(&a.score)
+        .unwrap_or(Ordering::Equal)
+    {
         Ordering::Equal => {}
         other => return other,
     }

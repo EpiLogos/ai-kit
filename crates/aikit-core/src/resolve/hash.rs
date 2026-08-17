@@ -38,11 +38,7 @@ impl ResolutionHash {
         // rendered as 64 hex chars, so a 16-char prefix always exists and is
         // always a valid generation id. `char_indices` keeps that true even if
         // the length invariant were ever loosened, rather than panicking.
-        let end = self
-            .0
-            .char_indices()
-            .nth(16)
-            .map_or(self.0.len(), |(b, _)| b);
+        let end = self.0.char_indices().nth(16).map_or(self.0.len(), |(b, _)| b);
         crate::id::GenerationId::parse(&format!("gen_{}", &self.0[..end]))
             .expect("a hex hash prefix is always a valid generation id")
     }
@@ -66,7 +62,10 @@ pub fn resolution_hash(
     context: &ContextDescriptor,
     policy: &ManagedPolicy,
     active: &std::collections::BTreeMap<CapsuleId, ActiveCapability>,
-    skill_usage_overlays: &std::collections::BTreeMap<CapsuleId, Vec<AppliedSkillUsageOverlay>>,
+    skill_usage_overlays: &std::collections::BTreeMap<
+        CapsuleId,
+        Vec<AppliedSkillUsageOverlay>,
+    >,
 ) -> ResolutionHash {
     let mut canonical = String::with_capacity(256 + active.len() * 128);
     canonical.push_str(HASH_DOMAIN);

@@ -48,8 +48,16 @@ pub trait KnowledgeOperations {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView>;
-    fn route(&self, query: Option<&str>, addresses: &[KnowledgeAddress]) -> Result<KnowledgeRoute>;
-    fn frame(&self, query: Option<&str>, addresses: &[KnowledgeAddress]) -> KnowledgeContextPack;
+    fn route(
+        &self,
+        query: Option<&str>,
+        addresses: &[KnowledgeAddress],
+    ) -> Result<KnowledgeRoute>;
+    fn frame(
+        &self,
+        query: Option<&str>,
+        addresses: &[KnowledgeAddress],
+    ) -> KnowledgeContextPack;
     fn sources(&self, address: &KnowledgeAddress) -> Result<KnowledgeSources>;
     fn explain(&self, address: &KnowledgeAddress) -> Result<KnowledgeExplanation>;
     fn history<'b>(&self, routes: &'b [KnowledgeRoute]) -> Vec<&'b KnowledgeRoute>;
@@ -75,11 +83,19 @@ impl KnowledgeOperations for KnowledgeApplication<'_> {
         KnowledgeApplication::relations(self, address, depth, max_nodes, max_edges)
     }
 
-    fn route(&self, query: Option<&str>, addresses: &[KnowledgeAddress]) -> Result<KnowledgeRoute> {
+    fn route(
+        &self,
+        query: Option<&str>,
+        addresses: &[KnowledgeAddress],
+    ) -> Result<KnowledgeRoute> {
         KnowledgeApplication::route(self, query, addresses)
     }
 
-    fn frame(&self, query: Option<&str>, addresses: &[KnowledgeAddress]) -> KnowledgeContextPack {
+    fn frame(
+        &self,
+        query: Option<&str>,
+        addresses: &[KnowledgeAddress],
+    ) -> KnowledgeContextPack {
         KnowledgeApplication::context_pack(self, query, addresses)
     }
 

@@ -124,12 +124,16 @@ impl<'a> SemanticWikiProvider<'a> {
             for neighbour in self.index.neighbours(&current, remaining) {
                 let other = neighbour.resource.clone();
                 let (from, to, direction) = match neighbour.direction {
-                    WikiRelationDirection::Outgoing => {
-                        (current.clone(), other.clone(), RelationDirection::Outgoing)
-                    }
-                    WikiRelationDirection::Incoming => {
-                        (other.clone(), current.clone(), RelationDirection::Incoming)
-                    }
+                    WikiRelationDirection::Outgoing => (
+                        current.clone(),
+                        other.clone(),
+                        RelationDirection::Outgoing,
+                    ),
+                    WikiRelationDirection::Incoming => (
+                        other.clone(),
+                        current.clone(),
+                        RelationDirection::Incoming,
+                    ),
                 };
                 let edge_key = format!("{}\0{}\0{}", from, to, neighbour.edge_ref);
                 if !seen_edges.insert(edge_key) {
@@ -317,10 +321,7 @@ mod tests {
         assert_eq!(provider.discover().len(), 4);
         assert_eq!(provider.search("Alpha", 10).len(), 1);
         let alpha = ResourceRef::parse("wiki:node:a").unwrap();
-        assert_eq!(
-            provider.read(&alpha).unwrap().revision.as_deref(),
-            Some("2")
-        );
+        assert_eq!(provider.read(&alpha).unwrap().revision.as_deref(), Some("2"));
         assert_eq!(provider.sources(&alpha)[0].as_str(), "source:canon");
         assert_eq!(provider.provenance(&alpha).len(), 1);
         assert_eq!(provider.explain(&alpha).unwrap().relations.len(), 1);
@@ -331,9 +332,7 @@ mod tests {
         let index = fixture();
         let provider = SemanticWikiProvider::new(&index);
         let view = provider
-            .relations(RelationQuery::local(
-                ResourceRef::parse("wiki:node:a").unwrap(),
-            ))
+            .relations(RelationQuery::local(ResourceRef::parse("wiki:node:a").unwrap()))
             .unwrap();
         assert_eq!(view.nodes.len(), 2);
         assert_eq!(view.edges.len(), 1);

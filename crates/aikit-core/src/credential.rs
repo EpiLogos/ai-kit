@@ -107,9 +107,7 @@ impl SecretProviderDescriptor {
             ("binding_provenance", self.binding_provenance.as_str()),
         ] {
             if value.trim().is_empty() {
-                return Err(invalid(format!(
-                    "secret provider {label} must not be empty"
-                )));
+                return Err(invalid(format!("secret provider {label} must not be empty")));
             }
         }
         if self.supported_materialisation.is_empty() {
@@ -220,10 +218,7 @@ pub fn resolve_credential(request: CredentialResolutionRequest) -> Result<Creden
         });
 
         if rejection.is_none() {
-            eligible.push((
-                provider,
-                materialisation.expect("eligible provider has materialisation"),
-            ));
+            eligible.push((provider, materialisation.expect("eligible provider has materialisation")));
         }
     }
 
@@ -445,10 +440,7 @@ mod tests {
         };
 
         assert_eq!(base.credential_ref, rotated.credential_ref);
-        assert_ne!(
-            base.revision_or_lease_class,
-            rotated.revision_or_lease_class
-        );
+        assert_ne!(base.revision_or_lease_class, rotated.revision_or_lease_class);
     }
 
     #[test]

@@ -50,6 +50,7 @@ pub enum PathKind {
     Directory,
 }
 
+
 /// A literal default value as written in TOML.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -152,10 +153,7 @@ impl ArgSpec {
         if self.is_secret() && self.default.is_some() {
             return err(
                 "arg.invalid_spec",
-                format!(
-                    "`{}` is a secret and must not carry a literal default",
-                    self.name
-                ),
+                format!("`{}` is a secret and must not carry a literal default", self.name),
             );
         }
         if let Some(p) = &self.pattern {
@@ -171,8 +169,7 @@ impl ArgSpec {
 
     /// Validate and normalize a user-supplied value.
     pub fn coerce(&self, raw: &str) -> Result<ArgValue> {
-        let invalid =
-            |msg: String| AikitError::new("arg.invalid_value", msg).with("arg", &self.name);
+        let invalid = |msg: String| AikitError::new("arg.invalid_value", msg).with("arg", &self.name);
 
         if let Some(p) = &self.pattern {
             let re = regex::Regex::new(p).map_err(|e| invalid(format!("invalid pattern: {e}")))?;
@@ -204,9 +201,9 @@ impl ArgSpec {
                 self.check_range(n).map_err(invalid)?;
                 ArgValue::Float(n)
             }
-            ArgType::Duration => ArgValue::Duration(
-                HumanDuration::parse(raw).map_err(|e| invalid(e.message().into()))?,
-            ),
+            ArgType::Duration => {
+                ArgValue::Duration(HumanDuration::parse(raw).map_err(|e| invalid(e.message().into()))?)
+            }
             ArgType::Enum => {
                 if !self.choices.iter().any(|c| c == raw) {
                     return Err(invalid(format!(

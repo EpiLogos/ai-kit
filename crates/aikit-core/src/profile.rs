@@ -36,9 +36,7 @@ pub struct SkillUsageOverlayPatch {
 
 impl SkillUsageOverlayPatch {
     pub fn has_content(&self) -> bool {
-        self.description
-            .as_ref()
-            .is_some_and(|v| !v.trim().is_empty())
+        self.description.as_ref().is_some_and(|v| !v.trim().is_empty())
             || self.guidance.as_ref().is_some_and(|v| !v.trim().is_empty())
     }
 
@@ -853,7 +851,8 @@ guidance = "Use the {{owner}} issue tracker as the shared map."
         let bindings = BTreeMap::from([("owner".into(), Literal::String("team".into()))]);
 
         let patch = profile.resolve_patch(&bindings).unwrap();
-        let overlay = &patch.skill_overlays[&CapsuleId::parse("skill/team/wayfinder").unwrap()];
+        let overlay = &patch.skill_overlays
+            [&CapsuleId::parse("skill/team/wayfinder").unwrap()];
         assert_eq!(
             overlay.description.as_deref(),
             Some("Prefer for team work spanning agent sessions.")

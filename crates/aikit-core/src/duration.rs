@@ -55,10 +55,7 @@ impl HumanDuration {
                 );
             }
             let value: u64 = digits.parse().map_err(|_| {
-                AikitError::new(
-                    "duration.malformed",
-                    format!("`{raw}` has an unparseable number"),
-                )
+                AikitError::new("duration.malformed", format!("`{raw}` has an unparseable number"))
             })?;
             digits.clear();
             saw_unit = true;

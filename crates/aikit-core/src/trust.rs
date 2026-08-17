@@ -58,6 +58,7 @@ pub enum TrustState {
     Superseded,
 }
 
+
 impl TrustState {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -117,12 +118,7 @@ impl FromStr for TrustState {
             "trusted" => TrustState::Trusted,
             "blocked" => TrustState::Blocked,
             "superseded" => TrustState::Superseded,
-            other => {
-                return err(
-                    "trust.unknown_state",
-                    format!("`{other}` is not a trust state"),
-                )
-            }
+            other => return err("trust.unknown_state", format!("`{other}` is not a trust state")),
         })
     }
 }
@@ -156,7 +152,11 @@ pub trait TrustOracle {
     /// have no standing ledger return `None` and get ordinary per-revision
     /// behaviour, which is safe but means a block can be cleared by an edit; a
     /// persistent oracle must override this.
-    fn standing_verdict(&self, source: &RegistrySource, capsule: &CapsuleId) -> Option<TrustState> {
+    fn standing_verdict(
+        &self,
+        source: &RegistrySource,
+        capsule: &CapsuleId,
+    ) -> Option<TrustState> {
         let _ = (source, capsule);
         None
     }
@@ -238,7 +238,8 @@ impl MemoryTrust {
 
     /// Refuse a capsule for every revision, present and future.
     pub fn block(&mut self, source: RegistrySource, capsule: CapsuleId) {
-        self.standing.insert((source, capsule), TrustState::Blocked);
+        self.standing
+            .insert((source, capsule), TrustState::Blocked);
     }
 
     /// Stop asking about a capsule without refusing it.
@@ -283,7 +284,11 @@ impl TrustOracle for MemoryTrust {
         self.entries.get(key).copied().unwrap_or_default()
     }
 
-    fn standing_verdict(&self, source: &RegistrySource, capsule: &CapsuleId) -> Option<TrustState> {
+    fn standing_verdict(
+        &self,
+        source: &RegistrySource,
+        capsule: &CapsuleId,
+    ) -> Option<TrustState> {
         self.standing
             .get(&(source.clone(), capsule.clone()))
             .copied()

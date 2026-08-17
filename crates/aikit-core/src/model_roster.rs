@@ -112,10 +112,7 @@ impl FitnessScope {
 }
 
 fn same_optional_ref(scope: &Option<ResourceRef>, demand: &Option<ResourceRef>) -> bool {
-    scope
-        .as_ref()
-        .map(|v| Some(v) == demand.as_ref())
-        .unwrap_or(true)
+    scope.as_ref().map(|v| Some(v) == demand.as_ref()).unwrap_or(true)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -197,11 +194,7 @@ impl ModelRosterCandidate {
         let relevant: Vec<f64> = self
             .observed_fitness
             .iter()
-            .filter(|observation| {
-                observation
-                    .scope
-                    .applies_to(demand, &self.harness_composition)
-            })
+            .filter(|observation| observation.scope.applies_to(demand, &self.harness_composition))
             .map(|observation| observation.score)
             .collect();
         if relevant.is_empty() {
@@ -281,19 +274,17 @@ pub fn rank_model_roster(
         .map(|candidate| evaluate(&demand, policy, candidate))
         .collect();
 
-    entries.sort_by(
-        |a, b| match (a.explanation.eligible, b.explanation.eligible) {
-            (true, false) => Ordering::Less,
-            (false, true) => Ordering::Greater,
-            (true, true) => b
-                .explanation
-                .policy_score
-                .partial_cmp(&a.explanation.policy_score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.model.as_str().cmp(b.model.as_str())),
-            (false, false) => a.model.as_str().cmp(b.model.as_str()),
-        },
-    );
+    entries.sort_by(|a, b| match (a.explanation.eligible, b.explanation.eligible) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (true, true) => b
+            .explanation
+            .policy_score
+            .partial_cmp(&a.explanation.policy_score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.model.as_str().cmp(b.model.as_str())),
+        (false, false) => a.model.as_str().cmp(b.model.as_str()),
+    });
 
     let winner = entries
         .iter()
@@ -333,30 +324,10 @@ fn evaluate(
     let mut failed = Vec::new();
     gate(candidate.available, "available", &mut passed, &mut failed);
     gate(candidate.authorised, "authorised", &mut passed, &mut failed);
-    gate(
-        candidate.provider_usable,
-        "provider-usable",
-        &mut passed,
-        &mut failed,
-    );
-    gate(
-        candidate.policy_allowed,
-        "policy-allowed",
-        &mut passed,
-        &mut failed,
-    );
-    gate(
-        candidate.contract_compatible,
-        "contract-compatible",
-        &mut passed,
-        &mut failed,
-    );
-    gate(
-        candidate.harness_compatible,
-        "harness-compatible",
-        &mut passed,
-        &mut failed,
-    );
+    gate(candidate.provider_usable, "provider-usable", &mut passed, &mut failed);
+    gate(candidate.policy_allowed, "policy-allowed", &mut passed, &mut failed);
+    gate(candidate.contract_compatible, "contract-compatible", &mut passed, &mut failed);
+    gate(candidate.harness_compatible, "harness-compatible", &mut passed, &mut failed);
     for capability in &demand.required_capabilities {
         gate(
             effective_capabilities.contains(capability),
@@ -398,21 +369,13 @@ fn evaluate(
         );
     }
 
-    let estimated_cost = candidate
-        .price
-        .as_ref()
-        .and_then(|p| p.estimate_usd(demand));
+    let estimated_cost = candidate.price.as_ref().and_then(|p| p.estimate_usd(demand));
     if policy == ModelRankingPolicy::QualityUnderBudget {
         let budget_ok = match (demand.cost_ceiling_usd, estimated_cost) {
             (Some(ceiling), Some(cost)) => cost <= ceiling,
             _ => false,
         };
-        gate(
-            budget_ok,
-            "known-cost-within-budget",
-            &mut passed,
-            &mut failed,
-        );
+        gate(budget_ok, "known-cost-within-budget", &mut passed, &mut failed);
     }
 
     let task = candidate.task_fitness.get(&demand.use_type).copied();
@@ -423,9 +386,7 @@ fn evaluate(
     let profile = candidate.profile_fit;
     let observed = candidate.observed_fit_for(demand);
     let reliability = candidate.reliability;
-    let latency = candidate
-        .latency_ms
-        .map(|ms| 1.0 / (1.0 + ms as f64 / 1000.0));
+    let latency = candidate.latency_ms.map(|ms| 1.0 / (1.0 + ms as f64 / 1000.0));
     let local_inspectability = Some(
         [
             candidate.access.local_placement,
@@ -456,20 +417,10 @@ fn evaluate(
         component("task-fit", task, None, &candidate.provenance),
         component("role-fit", role, None, &candidate.provenance),
         component("profile-fit", profile, None, &candidate.provenance),
-        component(
-            "observed-fit",
-            observed,
-            None,
-            &fitness_provenance(candidate, demand),
-        ),
+        component("observed-fit", observed, None, &fitness_provenance(candidate, demand)),
         component("reliability", reliability, None, &candidate.provenance),
         component("latency", latency, None, &candidate.provenance),
-        component(
-            "local-inspectability",
-            local_inspectability,
-            None,
-            &candidate.access.provenance,
-        ),
+        component("local-inspectability", local_inspectability, None, &candidate.access.provenance),
     ];
 
     let policy_score = if failed.is_empty() {
@@ -483,11 +434,7 @@ fn evaluate(
             ModelRankingPolicy::ProfileFit => profile.or(Some(0.0)),
             ModelRankingPolicy::QualityUnderBudget => blend(
                 &mut components,
-                &[
-                    ("task-fit", 0.55),
-                    ("observed-fit", 0.30),
-                    ("reliability", 0.15),
-                ],
+                &[("task-fit", 0.55), ("observed-fit", 0.30), ("reliability", 0.15)],
             ),
             ModelRankingPolicy::Balanced => blend(
                 &mut components,
@@ -543,12 +490,7 @@ fn gate(ok: bool, name: &str, passed: &mut Vec<String>, failed: &mut Vec<String>
     }
 }
 
-fn component(
-    name: &str,
-    value: Option<f64>,
-    weight: Option<f64>,
-    provenance: &[String],
-) -> RankingComponent {
+fn component(name: &str, value: Option<f64>, weight: Option<f64>, provenance: &[String]) -> RankingComponent {
     RankingComponent {
         name: name.to_string(),
         value,
@@ -561,11 +503,7 @@ fn fitness_provenance(candidate: &ModelRosterCandidate, demand: &ModelRosterDema
     candidate
         .observed_fitness
         .iter()
-        .filter(|observation| {
-            observation
-                .scope
-                .applies_to(demand, &candidate.harness_composition)
-        })
+        .filter(|observation| observation.scope.applies_to(demand, &candidate.harness_composition))
         .flat_map(|observation| observation.provenance.clone())
         .collect()
 }
@@ -574,10 +512,7 @@ fn blend(components: &mut [RankingComponent], weights: &[(&str, f64)]) -> Option
     let mut score = 0.0;
     let mut weight_used = 0.0;
     for (name, weight) in weights {
-        if let Some(component) = components
-            .iter_mut()
-            .find(|component| component.name == *name)
-        {
+        if let Some(component) = components.iter_mut().find(|component| component.name == *name) {
             component.weight = Some(*weight);
             if let Some(value) = component.value {
                 score += value * weight;
@@ -592,12 +527,8 @@ fn blend(components: &mut [RankingComponent], weights: &[(&str, f64)]) -> Option
 mod tests {
     use super::*;
 
-    fn r(value: &str) -> ResourceRef {
-        ResourceRef::parse(value).unwrap()
-    }
-    fn p(value: &str) -> ProviderRef {
-        ProviderRef::parse(value).unwrap()
-    }
+    fn r(value: &str) -> ResourceRef { ResourceRef::parse(value).unwrap() }
+    fn p(value: &str) -> ProviderRef { ProviderRef::parse(value).unwrap() }
 
     fn demand(use_type: &str) -> ModelRosterDemand {
         ModelRosterDemand {
@@ -617,61 +548,24 @@ mod tests {
         }
     }
 
-    fn candidate(
-        id: &str,
-        input: Option<f64>,
-        output: Option<f64>,
-        coding: f64,
-        research: f64,
-    ) -> ModelRosterCandidate {
+    fn candidate(id: &str, input: Option<f64>, output: Option<f64>, coding: f64, research: f64) -> ModelRosterCandidate {
         ModelRosterCandidate {
-            model: r(id),
-            variant: id.into(),
-            provider: p("provider:example"),
-            provider_revision: None,
-            available: true,
-            authorised: true,
-            provider_usable: true,
-            policy_allowed: true,
-            contract_compatible: true,
-            harness_compatible: true,
-            harness_composition: Some("pi+tools/v1".into()),
+            model: r(id), variant: id.into(), provider: p("provider:example"), provider_revision: None,
+            available: true, authorised: true, provider_usable: true, policy_allowed: true,
+            contract_compatible: true, harness_compatible: true, harness_composition: Some("pi+tools/v1".into()),
             native_capabilities: BTreeSet::from(["reasoning".into(), "text".into()]),
-            harness_capabilities: BTreeSet::new(),
-            profile_skills: BTreeSet::from(["rust-method".into()]),
-            modalities: BTreeSet::from(["text".into()]),
-            tool_support: BTreeSet::new(),
-            contracts: BTreeSet::new(),
-            task_fitness: BTreeMap::from([
-                ("coding".into(), coding),
-                ("research".into(), research),
-            ]),
-            role_fitness: BTreeMap::from([("agency:builder".into(), coding)]),
-            profile_fit: Some(coding),
-            authored_preference: None,
-            frecency: None,
-            latency_ms: Some(500),
-            reliability: Some(0.99),
+            harness_capabilities: BTreeSet::new(), profile_skills: BTreeSet::from(["rust-method".into()]),
+            modalities: BTreeSet::from(["text".into()]), tool_support: BTreeSet::new(), contracts: BTreeSet::new(),
+            task_fitness: BTreeMap::from([("coding".into(), coding), ("research".into(), research)]),
+            role_fitness: BTreeMap::from([("agency:builder".into(), coding)]), profile_fit: Some(coding),
+            authored_preference: None, frecency: None, latency_ms: Some(500), reliability: Some(0.99),
             context_window_tokens: Some(1_000_000),
-            price: input.zip(output).map(|(i, o)| ModelPriceObservation {
-                source: "provider-price-page".into(),
-                provider: p("provider:example"),
-                model_variant: id.into(),
-                currency: "USD".into(),
-                unit: "1m-tokens".into(),
-                input_per_unit: Some(i),
-                cached_input_per_unit: None,
-                output_per_unit: Some(o),
-                cache_write_per_unit: None,
-                other_charges: BTreeMap::new(),
-                observed_at: "2026-08-17T09:30:00+01:00".into(),
-                source_revision: None,
-                freshness_note: Some("point-in-time provider observation".into()),
+            price: input.zip(output).map(|(i,o)| ModelPriceObservation {
+                source:"provider-price-page".into(), provider:p("provider:example"), model_variant:id.into(), currency:"USD".into(), unit:"1m-tokens".into(),
+                input_per_unit:Some(i), cached_input_per_unit:None, output_per_unit:Some(o), cache_write_per_unit:None,
+                other_charges:BTreeMap::new(), observed_at:"2026-08-17T09:30:00+01:00".into(), source_revision:None, freshness_note:Some("point-in-time provider observation".into())
             }),
-            exact_spend: Vec::new(),
-            observed_fitness: Vec::new(),
-            access: ModelAccessProfileView::default(),
-            provenance: vec!["fixture".into()],
+            exact_spend:Vec::new(), observed_fitness:Vec::new(), access:ModelAccessProfileView::default(), provenance:vec!["fixture".into()]
         }
     }
 
@@ -679,82 +573,26 @@ mod tests {
     fn cheapest_and_task_fit_can_choose_different_models() {
         let cheap = candidate("model:cheap", Some(0.2), Some(1.0), 0.55, 0.70);
         let strong = candidate("model:strong", Some(2.5), Some(15.0), 0.95, 0.80);
-        assert_eq!(
-            rank_model_roster(
-                demand("coding"),
-                ModelRankingPolicy::CheapestEligible,
-                vec![cheap.clone(), strong.clone()]
-            )
-            .entries[0]
-                .model,
-            cheap.model
-        );
-        assert_eq!(
-            rank_model_roster(
-                demand("coding"),
-                ModelRankingPolicy::TaskFit,
-                vec![cheap, strong.clone()]
-            )
-            .entries[0]
-                .model,
-            strong.model
-        );
+        assert_eq!(rank_model_roster(demand("coding"), ModelRankingPolicy::CheapestEligible, vec![cheap.clone(), strong.clone()]).entries[0].model, cheap.model);
+        assert_eq!(rank_model_roster(demand("coding"), ModelRankingPolicy::TaskFit, vec![cheap, strong.clone()]).entries[0].model, strong.model);
     }
 
     #[test]
     fn use_type_changes_ranking() {
         let a = candidate("model:a", Some(1.0), Some(2.0), 0.95, 0.40);
         let b = candidate("model:b", Some(1.0), Some(2.0), 0.60, 0.90);
-        assert_eq!(
-            rank_model_roster(
-                demand("coding"),
-                ModelRankingPolicy::TaskFit,
-                vec![a.clone(), b.clone()]
-            )
-            .entries[0]
-                .model,
-            a.model
-        );
-        assert_eq!(
-            rank_model_roster(
-                demand("research"),
-                ModelRankingPolicy::TaskFit,
-                vec![a, b.clone()]
-            )
-            .entries[0]
-                .model,
-            b.model
-        );
+        assert_eq!(rank_model_roster(demand("coding"), ModelRankingPolicy::TaskFit, vec![a.clone(), b.clone()]).entries[0].model, a.model);
+        assert_eq!(rank_model_roster(demand("research"), ModelRankingPolicy::TaskFit, vec![a, b.clone()]).entries[0].model, b.model);
     }
 
     #[test]
     fn profile_and_agency_are_contextual_not_global_quality() {
         let mut a = candidate("model:a", Some(1.0), Some(2.0), 0.8, 0.8);
         let mut b = candidate("model:b", Some(1.0), Some(2.0), 0.8, 0.8);
-        a.profile_fit = Some(0.9);
-        b.profile_fit = Some(0.4);
-        assert_eq!(
-            rank_model_roster(
-                demand("coding"),
-                ModelRankingPolicy::ProfileFit,
-                vec![a.clone(), b.clone()]
-            )
-            .entries[0]
-                .model,
-            a.model
-        );
-        a.profile_fit = Some(0.2);
-        b.profile_fit = Some(0.95);
-        assert_eq!(
-            rank_model_roster(
-                demand("coding"),
-                ModelRankingPolicy::ProfileFit,
-                vec![a, b.clone()]
-            )
-            .entries[0]
-                .model,
-            b.model
-        );
+        a.profile_fit = Some(0.9); b.profile_fit = Some(0.4);
+        assert_eq!(rank_model_roster(demand("coding"), ModelRankingPolicy::ProfileFit, vec![a.clone(), b.clone()]).entries[0].model, a.model);
+        a.profile_fit = Some(0.2); b.profile_fit = Some(0.95);
+        assert_eq!(rank_model_roster(demand("coding"), ModelRankingPolicy::ProfileFit, vec![a, b.clone()]).entries[0].model, b.model);
     }
 
     #[test]
@@ -764,91 +602,40 @@ mod tests {
         let mut denied = candidate("model:denied", Some(0.01), Some(0.01), 1.0, 1.0);
         denied.authorised = false;
         let good = candidate("model:good", Some(10.0), Some(20.0), 0.5, 0.5);
-        let roster = rank_model_roster(
-            demand("coding"),
-            ModelRankingPolicy::CheapestEligible,
-            vec![missing, denied, good.clone()],
-        );
+        let roster = rank_model_roster(demand("coding"), ModelRankingPolicy::CheapestEligible, vec![missing, denied, good.clone()]);
         assert_eq!(roster.entries[0].model, good.model);
-        assert!(
-            roster
-                .entries
-                .iter()
-                .filter(|e| !e.explanation.eligible)
-                .count()
-                == 2
-        );
+        assert!(roster.entries.iter().filter(|e| !e.explanation.eligible).count() == 2);
     }
 
     #[test]
     fn missing_price_is_unknown_not_free() {
         let unknown = candidate("model:unknown", None, None, 0.8, 0.8);
         let known = candidate("model:known", Some(10.0), Some(20.0), 0.8, 0.8);
-        let roster = rank_model_roster(
-            demand("coding"),
-            ModelRankingPolicy::CheapestEligible,
-            vec![unknown.clone(), known.clone()],
-        );
+        let roster = rank_model_roster(demand("coding"), ModelRankingPolicy::CheapestEligible, vec![unknown.clone(), known.clone()]);
         assert_eq!(roster.entries[0].model, known.model);
-        let entry = roster
-            .entries
-            .iter()
-            .find(|e| e.model == unknown.model)
-            .unwrap();
-        assert!(entry
-            .explanation
-            .missing_data
-            .contains(&"catalog-price-unknown".into()));
+        let entry = roster.entries.iter().find(|e| e.model == unknown.model).unwrap();
+        assert!(entry.explanation.missing_data.contains(&"catalog-price-unknown".into()));
         assert_eq!(entry.explanation.estimated_cost_usd, None);
     }
 
     #[test]
     fn observed_fitness_is_used_only_when_scope_matches() {
         let mut model = candidate("model:scoped", Some(1.0), Some(2.0), 0.4, 0.4);
-        model.observed_fitness.push(FitnessObservation {
-            score: 0.99,
-            scope: FitnessScope {
-                use_type: Some("research".into()),
-                ..Default::default()
-            },
-            observed_at: "now".into(),
-            provider_revision: None,
-            provenance: vec!["run:research".into()],
-        });
-        let coding = rank_model_roster(
-            demand("coding"),
-            ModelRankingPolicy::Balanced,
-            vec![model.clone()],
-        );
+        model.observed_fitness.push(FitnessObservation { score:0.99, scope:FitnessScope { use_type:Some("research".into()), ..Default::default() }, observed_at:"now".into(), provider_revision:None, provenance:vec!["run:research".into()] });
+        let coding = rank_model_roster(demand("coding"), ModelRankingPolicy::Balanced, vec![model.clone()]);
         assert_eq!(coding.entries[0].explanation.observed_fitness_used, None);
-        let research = rank_model_roster(
-            demand("research"),
-            ModelRankingPolicy::Balanced,
-            vec![model],
-        );
-        assert_eq!(
-            research.entries[0].explanation.observed_fitness_used,
-            Some(0.99)
-        );
+        let research = rank_model_roster(demand("research"), ModelRankingPolicy::Balanced, vec![model]);
+        assert_eq!(research.entries[0].explanation.observed_fitness_used, Some(0.99));
     }
 
     #[test]
     fn authored_preference_and_frecency_remain_separate_from_fitness() {
         let mut preferred = candidate("model:preferred", Some(1.0), Some(2.0), 0.2, 0.2);
-        preferred.authored_preference = Some(100);
-        preferred.frecency = Some(999.0);
+        preferred.authored_preference = Some(100); preferred.frecency = Some(999.0);
         let fit = candidate("model:fit", Some(1.0), Some(2.0), 0.9, 0.9);
-        let roster = rank_model_roster(
-            demand("coding"),
-            ModelRankingPolicy::TaskFit,
-            vec![preferred.clone(), fit.clone()],
-        );
+        let roster = rank_model_roster(demand("coding"), ModelRankingPolicy::TaskFit, vec![preferred.clone(), fit.clone()]);
         assert_eq!(roster.entries[0].model, fit.model);
-        let p = roster
-            .entries
-            .iter()
-            .find(|e| e.model == preferred.model)
-            .unwrap();
+        let p = roster.entries.iter().find(|e| e.model == preferred.model).unwrap();
         assert_eq!(p.explanation.authored_preference, Some(100));
         assert_eq!(p.explanation.frecency, Some(999.0));
     }
@@ -856,52 +643,23 @@ mod tests {
     #[test]
     fn provider_replacement_does_not_change_model_identity_and_access_axes_stay_visible() {
         let mut a = candidate("model:stable", Some(1.0), Some(2.0), 0.8, 0.8);
-        a.provider = p("provider:a");
-        a.access = ModelAccessProfileView {
-            inference_access: true,
-            control_access: false,
-            interior_access: true,
-            local_placement: true,
-            ..Default::default()
-        };
-        let mut b = a.clone();
-        b.provider = p("provider:b");
-        b.provider_revision = Some("replacement".into());
+        a.provider = p("provider:a"); a.access = ModelAccessProfileView { inference_access:true, control_access:false, interior_access:true, local_placement:true, ..Default::default() };
+        let mut b = a.clone(); b.provider = p("provider:b"); b.provider_revision = Some("replacement".into());
         assert_eq!(a.model, b.model);
         assert_ne!(a.provider, b.provider);
-        let roster = rank_model_roster(
-            demand("coding"),
-            ModelRankingPolicy::LocalInspectability,
-            vec![b],
-        );
-        assert!(
-            roster.entries[0].access.inference_access
-                && roster.entries[0].access.interior_access
-                && !roster.entries[0].access.control_access
-        );
+        let roster = rank_model_roster(demand("coding"), ModelRankingPolicy::LocalInspectability, vec![b]);
+        assert!(roster.entries[0].access.inference_access && roster.entries[0].access.interior_access && !roster.entries[0].access.control_access);
     }
 
     #[test]
     fn explanation_reconstructs_winner_and_independence_is_explicit() {
         let a = candidate("model:a", Some(1.0), Some(2.0), 0.9, 0.9);
         let b = candidate("model:b", Some(1.0), Some(2.0), 0.7, 0.7);
-        let mut d = demand("coding");
-        d.independence_from.insert(a.model.clone());
-        let roster = rank_model_roster(
-            d,
-            ModelRankingPolicy::IndependentReviewer,
-            vec![a.clone(), b.clone()],
-        );
+        let mut d = demand("coding"); d.independence_from.insert(a.model.clone());
+        let roster = rank_model_roster(d, ModelRankingPolicy::IndependentReviewer, vec![a.clone(), b.clone()]);
         assert_eq!(roster.entries[0].model, b.model);
         let rejected = roster.entries.iter().find(|e| e.model == a.model).unwrap();
-        assert!(rejected
-            .explanation
-            .failed_gates
-            .contains(&"independent-reviewer".into()));
-        assert!(roster.entries[0]
-            .explanation
-            .components
-            .iter()
-            .any(|c| c.name == "task-fit"));
+        assert!(rejected.explanation.failed_gates.contains(&"independent-reviewer".into()));
+        assert!(roster.entries[0].explanation.components.iter().any(|c| c.name == "task-fit"));
     }
 }

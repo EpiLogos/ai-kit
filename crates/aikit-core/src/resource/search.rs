@@ -52,10 +52,7 @@ pub struct NavigationEvidence {
 
 impl NavigationEvidence {
     pub fn new(class: NavigationEvidenceClass) -> Self {
-        Self {
-            class,
-            detail: None,
-        }
+        Self { class, detail: None }
     }
 
     #[must_use]
@@ -262,7 +259,8 @@ impl ResourceSearchIndex {
                 detail.push_str(&format!("; contextual fitness {fitness:.0}/1000"));
             }
             indexed.evidence.push(
-                NavigationEvidence::new(NavigationEvidenceClass::LearnedUsage).with_detail(detail),
+                NavigationEvidence::new(NavigationEvidenceClass::LearnedUsage)
+                    .with_detail(detail),
             );
             indexed.familiarity = Some(assessment);
         }
@@ -429,7 +427,8 @@ fn resource_hit(indexed: &IndexedResource, score: i64) -> ResourceSearchHit {
             learned_observations: familiarity.map_or(0, |value| value.observations),
             learned_contextual_observations: familiarity
                 .map_or(0, |value| value.contextual_observations),
-            learned_frecency_milli: familiarity.map_or(0, |value| quantise_milli(value.frecency)),
+            learned_frecency_milli: familiarity
+                .map_or(0, |value| quantise_milli(value.frecency)),
             learned_contextual_frecency_milli: familiarity
                 .map_or(0, |value| quantise_milli(value.contextual_frecency)),
             learned_contextual_fitness_milli: familiarity
@@ -470,12 +469,7 @@ fn compare_hits(left: &ResourceSearchHit, right: &ResourceSearchHit) -> std::cmp
                 .ranking
                 .learned_contextual_fitness_milli
                 .unwrap_or_default()
-                .cmp(
-                    &left
-                        .ranking
-                        .learned_contextual_fitness_milli
-                        .unwrap_or_default(),
-                )
+                .cmp(&left.ranking.learned_contextual_fitness_milli.unwrap_or_default())
         })
         .then_with(|| {
             right
@@ -575,7 +569,10 @@ mod tests {
 
         assert_eq!(ResourceIndex::resources(&index).len(), 1);
         assert_eq!(
-            ResourceIndex::resource(&index, &id).unwrap().descriptor.id,
+            ResourceIndex::resource(&index, &id)
+                .unwrap()
+                .descriptor
+                .id,
             id
         );
     }

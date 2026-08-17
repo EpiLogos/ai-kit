@@ -39,13 +39,8 @@ pub struct ResolvedResource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum ReferenceResolution {
-    Resolved {
-        resource: Box<ResolvedResource>,
-    },
-    Missing {
-        reference: ResourceRef,
-        expected: ResourceKind,
-    },
+    Resolved { resource: Box<ResolvedResource> },
+    Missing { reference: ResourceRef, expected: ResourceKind },
     WrongKind {
         reference: ResourceRef,
         expected: ResourceKind,
@@ -155,12 +150,7 @@ pub fn compose_context_resolution(
             });
     }
     for values in grouped.values_mut() {
-        values.sort_by(|left, right| {
-            left.resource
-                .descriptor
-                .id
-                .cmp(&right.resource.descriptor.id)
-        });
+        values.sort_by(|left, right| left.resource.descriptor.id.cmp(&right.resource.descriptor.id));
     }
 
     let profiles = profiles(deterministic, scope_layers);
@@ -268,9 +258,7 @@ pub fn availability(record: &ResourceRecord) -> Availability {
     for source in &record.descriptor.sources {
         match &source.state {
             SourceState::Available => available = true,
-            SourceState::Unresolved => {
-                unresolved.push(format!("source {} unresolved", source.source))
-            }
+            SourceState::Unresolved => unresolved.push(format!("source {} unresolved", source.source)),
             SourceState::Unavailable { reason } => {
                 unavailable.push(format!("source {} unavailable: {reason}", source.source))
             }
@@ -295,9 +283,7 @@ pub fn availability(record: &ResourceRecord) -> Availability {
     if !unresolved.is_empty() {
         unresolved.extend(unavailable);
         unresolved.sort();
-        return Availability::Unresolved {
-            reasons: unresolved,
-        };
+        return Availability::Unresolved { reasons: unresolved };
     }
     if !unavailable.is_empty() {
         unavailable.sort();
@@ -322,13 +308,7 @@ fn profiles(deterministic: &ResolvedView, scope_layers: &[ScopeLayer]) -> Vec<Pr
     let mut profiles = BTreeSet::new();
     for layer in scope_layers {
         profiles.extend(layer.patch.profiles.iter().cloned());
-        profiles.extend(
-            layer
-                .patch
-                .uses
-                .iter()
-                .map(|profile| profile.profile.clone()),
-        );
+        profiles.extend(layer.patch.uses.iter().map(|profile| profile.profile.clone()));
     }
     profiles.extend(
         deterministic
