@@ -3,7 +3,7 @@ use aikit_core::{
     CompositionActivationMode, SessionSpaceActivationState, SessionSpaceAgentSession,
     SessionSpaceAuthorityState, SessionSpaceComponent, SessionSpaceConnection,
     SessionSpaceConnectionState, SessionSpaceLifecycle, SessionSpaceReadModel, SessionSpaceRef,
-    SessionSpaceSurface, SurfaceDescriptor, SurfaceKind, SESSION_SPACE_VERSION,
+    SessionSpaceSurfaceReading, SurfaceDescriptor, SurfaceKind, SESSION_SPACE_VERSION,
 };
 use aikit_tui::{working_field_from_session_space, WorkingFieldAvailability};
 
@@ -32,11 +32,12 @@ fn model(component_state: SessionSpaceActivationState) -> SessionSpaceReadModel 
             activation_mode: CompositionActivationMode::LiveMounted,
             state: component_state,
             provider: Some(r("provider/deepseek/cordis-web")),
+            observed_composition_fingerprint: Some("sha256:live-field-body".into()),
             reason: (component_state == SessionSpaceActivationState::Degraded)
                 .then(|| "Cordis provider disappeared".into()),
             provenance: vec!["deepseek-ai/deepseek-harness@47f9438".into()],
         }],
-        surfaces: vec![SessionSpaceSurface {
+        surfaces: vec![SessionSpaceSurfaceReading {
             agent_session: r("agent-session/live"),
             surface: r("surface/deepseek/web-conversation"),
             component: Some(r("component/deepseek/client-ui-conversation")),
