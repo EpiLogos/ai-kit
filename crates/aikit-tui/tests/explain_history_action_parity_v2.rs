@@ -1,6 +1,5 @@
-use aikit_core::{
-    explain_history_actions_for, ResourceRef, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
-};
+use aikit_core::resource::ResourceRef;
+use aikit_core::{explain_history_actions_for, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF};
 use aikit_tui::{
     keyboard_invoke_action, mouse_invoke_action, stage_action, NavigationIntent,
 };
