@@ -1,0 +1,41 @@
+name: Temporary restore accepted composition convergence
+on:
+  push:
+    branches:
+      - agent/restore-composition-convergence
+permissions:
+  contents: write
+jobs:
+  restore:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/restore-composition-convergence
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Revert branch-local removal of already-accepted PR 78 seam
+        run: |
+          set +e
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git revert --no-edit c5440c74190d6bba074c7dca2b74c8574ba36624
+          code=$?
+          echo "revert_exit=$code"
+          git status --short
+          git diff --name-only --diff-filter=U
+          exit $code
+      - name: Verify restored composition seam
+        run: |
+          cargo test -p aikit-core --test profile_composition_v2
+          cargo test -p aikit-store composition_application
+          cargo test -p aikit-tui --test profile_composition_stale_v2
+          cargo test -p aikit-tui --test domain_parity_v2
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Remove helper and publish repair
+        run: |
+          rm .github/workflows/tmp-restore-composition.yml
+          git add -A
+          git commit -m "fix(v2): restore accepted composition application seam"
+          git push origin HEAD:agent/restore-composition-convergence
