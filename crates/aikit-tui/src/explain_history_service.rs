@@ -1,8 +1,9 @@
 //! Typed Explain/History reads over the same backend used by the V2 TUI.
 //!
 //! This is an application projection, not a TUI history controller. It performs
-//! no writes and owns no evidence. Generation, familiarity and SessionSpace data
-//! are read from their existing authorities and classified by `aikit-core`.
+//! no writes and owns no evidence. Generation, familiarity, Procedure and
+//! SessionSpace data are read from their existing authorities and classified by
+//! `aikit-core`.
 
 use std::collections::BTreeMap;
 
@@ -14,7 +15,7 @@ use aikit_core::{
     Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS, EXPLAIN_HISTORY_VERSION,
 };
 use aikit_store::{
-    familiarity_history_evidence_model, generation_history_evidence,
+    familiarity_history_evidence_model, generation_history_evidence, procedure_history_evidence,
     session_space_history_evidence, SessionSpaceApplicationStore,
 };
 
@@ -153,6 +154,7 @@ impl ExplainHistoryApplicationService for ApplicationService<'_> {
                 home,
                 &backend.context().context_id,
             )?);
+            entries.extend(procedure_history_evidence(home)?);
 
             // SessionSpace receipts are indexed by canonical relations at read
             // time, not copied into an aggregate history store. This means a
