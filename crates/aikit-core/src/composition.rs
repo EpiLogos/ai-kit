@@ -13,9 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::resource::ResourceKind;
+use crate::resource::ResourceRef;
 use crate::scope::ScopeKind;
 use crate::{AikitError, Result};
-use crate::resource::ResourceRef;
 
 pub const HARNESS_COMPOSITION_VERSION: &str = "aikit.harness-composition/v2";
 
@@ -375,8 +375,12 @@ pub struct CompositionCatalog {
 }
 
 impl CompositionCatalog {
-    pub fn insert_component(&mut self, component: ComponentDescriptor) -> Option<ComponentDescriptor> {
-        self.components.insert(component.resource.clone(), component)
+    pub fn insert_component(
+        &mut self,
+        component: ComponentDescriptor,
+    ) -> Option<ComponentDescriptor> {
+        self.components
+            .insert(component.resource.clone(), component)
     }
 
     pub fn insert_surface(&mut self, surface: SurfaceDescriptor) -> Option<SurfaceDescriptor> {
@@ -530,7 +534,10 @@ pub fn resolve_harness_composition(
         if pair[0].component == pair[1].component {
             return Err(AikitError::new(
                 "composition.duplicate_component",
-                format!("component {} was selected more than once", pair[0].component),
+                format!(
+                    "component {} was selected more than once",
+                    pair[0].component
+                ),
             ));
         }
     }
@@ -550,11 +557,16 @@ pub fn resolve_harness_composition(
         let descriptor = catalog.component(&selection.component).ok_or_else(|| {
             AikitError::new(
                 "composition.unknown_component",
-                format!("selected component {} is not present in the composition catalog", selection.component),
+                format!(
+                    "selected component {} is not present in the composition catalog",
+                    selection.component
+                ),
             )
         })?;
         if !descriptor.activation_modes.is_empty()
-            && !descriptor.activation_modes.contains(&selection.activation_mode)
+            && !descriptor
+                .activation_modes
+                .contains(&selection.activation_mode)
         {
             return Err(AikitError::new(
                 "composition.unsupported_activation_mode",
@@ -643,7 +655,10 @@ pub fn resolve_harness_composition(
                 let surface = catalog.surface(surface_ref).ok_or_else(|| {
                     AikitError::new(
                         "composition.unknown_surface",
-                        format!("contribution {} references unknown surface {surface_ref}", contribution.id),
+                        format!(
+                            "contribution {} references unknown surface {surface_ref}",
+                            contribution.id
+                        ),
                     )
                 })?;
                 surfaces.insert(surface.resource.clone(), surface.clone());

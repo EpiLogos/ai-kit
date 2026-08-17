@@ -100,12 +100,14 @@ impl Service {
     }
 
     pub fn knowledge_search(&self, query: &str, limit: usize) -> Result<KnowledgeSearchResult> {
-        let result = self.with_knowledge(|runtime, application| {
-            let mut result = application.search(query, limit);
+        let candidate_limit = if limit == 0 { 0 } else { limit.max(256) };
+        let mut result = self.with_knowledge(|runtime, application| {
+            let mut result = application.search(query, candidate_limit);
             result.absences.extend(runtime.absences.clone());
             Ok(result)
         })?;
-        let mut result = result;
+        self.apply_learned_accessibility(query, &mut result)?;
+        result.hits.truncate(limit);
         if let Err(error) = self.knowledge_store().remember_search_hits(&result.hits) {
             result.absences.push(format!(
                 "Knowledge address cache unavailable; live search results remain valid: {}",
@@ -113,6 +115,87 @@ impl Service {
             ));
         }
         Ok(result)
+    }
+
+    fn apply_learned_accessibility(
+        &self,
+        query: &str,
+        result: &mut KnowledgeSearchResult,
+    ) -> Result<()> {
+        let Some(store) = PaletteBackend::familiarity(self)? else {
+            return Ok(());
+        };
+        if store.is_empty() {
+            return Ok(());
+        }
+        let context = self.knowledge_context();
+        let now = now_ms();
+        let history = self.knowledge_store().history(Some(&context), None)?;
+        let mut influenced = false;
+        for hit in &mut result.hits {
+            let destination = store.assess_destination(
+                &hit.resource,
+                &context,
+                now,
+                DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+            );
+            let route = history
+                .iter()
+                .filter_map(|receipt| receipt.route.as_ref())
+                .filter(|route| route.destination() == Some(&hit.resource))
+                .map(|route| {
+                    store.assess_route(
+                        &route.route,
+                        &hit.resource,
+                        &context,
+                        now,
+                        DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+                    )
+                })
+                .filter(|assessment| !assessment.is_empty())
+                .max_by(|left, right| {
+                    left.contextual_frecency
+                        .total_cmp(&right.contextual_frecency)
+                        .then_with(|| left.frecency.total_cmp(&right.frecency))
+                });
+            let learned = destination.contextual_frecency
+                + route
+                    .as_ref()
+                    .map(|assessment| assessment.contextual_frecency)
+                    .unwrap_or_default();
+            // Bounded, monotonic application boost. It can re-order eligible fuzzy
+            // candidates but can never change provider score or eligibility.
+            let boost = (learned.ln_1p() * 0.08).min(0.35);
+            influenced |= boost > 0.0;
+            hit.ranking = Some(KnowledgeRankingEvidence {
+                provider_score: hit.score,
+                navigation_score: hit.score + boost,
+                destination,
+                route,
+            });
+        }
+        if influenced {
+            result.hits.sort_by(|left, right| {
+                exact_knowledge_hit(left, query)
+                    .cmp(&exact_knowledge_hit(right, query))
+                    .reverse()
+                    .then_with(|| {
+                        let left_score = left
+                            .ranking
+                            .as_ref()
+                            .map(|ranking| ranking.navigation_score)
+                            .unwrap_or(left.score);
+                        let right_score = right
+                            .ranking
+                            .as_ref()
+                            .map(|ranking| ranking.navigation_score)
+                            .unwrap_or(right.score);
+                        right_score.total_cmp(&left_score)
+                    })
+                    .then_with(|| left.resource.cmp(&right.resource))
+            });
+        }
+        Ok(())
     }
 
     pub fn knowledge_address(&self, resource: &ResourceRef) -> Result<Option<KnowledgeAddress>> {
@@ -207,7 +290,23 @@ impl Service {
     }
 
     pub fn knowledge_explain(&self, address: &KnowledgeAddress) -> Result<KnowledgeExplanation> {
-        self.with_knowledge(|_, application| application.explain(address))
+        let mut explanation = self.with_knowledge(|_, application| application.explain(address))?;
+        // Explain keeps provider-native detail and learned ranking evidence separate.
+        let resource = address.resource_ref();
+        let ranking = self
+            .knowledge_search(resource.as_str(), 256)?
+            .hits
+            .into_iter()
+            .find(|hit| hit.resource == resource)
+            .and_then(|hit| hit.ranking);
+        if let Some(ranking) = ranking {
+            explanation.detail = Some(serde_json::json!({
+                "provider": explanation.detail,
+                "ranking": ranking,
+                "signalClasses": ["provider-relevance", "frecency", "context"]
+            }));
+        }
+        Ok(explanation)
     }
 
     pub fn knowledge_history(
@@ -576,4 +675,10 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or_default()
+}
+
+fn exact_knowledge_hit(hit: &aikit_core::KnowledgeSearchHit, query: &str) -> bool {
+    !query.is_empty()
+        && (hit.resource.as_str().eq_ignore_ascii_case(query)
+            || hit.label.eq_ignore_ascii_case(query))
 }

@@ -1,9 +1,7 @@
 use std::fs;
 
 use aikit_cli::app::Service;
-use aikit_core::{
-    ForgetScope, KnowledgeAddress, ResourceRef, DEFAULT_FAMILIARITY_HALF_LIFE_MS,
-};
+use aikit_core::{ForgetScope, KnowledgeAddress, ResourceRef, DEFAULT_FAMILIARITY_HALF_LIFE_MS};
 use aikit_store::AikitHome;
 use aikit_tui::application::TuiApplicationService;
 use aikit_tui::application_service::ApplicationService;
@@ -73,12 +71,45 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
             .clone();
 
         let route = service
-            .knowledge_route(Some("authentication evidence"), &[wiki.clone(), source.clone()])
+            .knowledge_route(
+                Some("authentication evidence"),
+                &[wiki.clone(), source.clone()],
+            )
             .unwrap();
         assert_eq!(route.steps.len(), 2);
         assert_eq!(route.steps[0].lens.as_deref(), Some("semantic-wiki"));
         assert_eq!(route.steps[1].lens.as_deref(), Some("source-pool"));
         assert_eq!(route.steps[1].transition.as_deref(), Some("source"));
+
+        let repeated = service
+            .knowledge_route(
+                Some("authentication evidence"),
+                &[wiki.clone(), source.clone()],
+            )
+            .unwrap();
+        assert_eq!(
+            repeated.route, route.route,
+            "identical traversal has stable route identity"
+        );
+
+        let learned = service.knowledge_search("authentication", 50).unwrap();
+        let learned_source = learned
+            .hits
+            .iter()
+            .find(|hit| hit.resource.as_str() == "source:paper:authentication")
+            .expect("learned SourcePool destination remains discoverable");
+        let ranking = learned_source
+            .ranking
+            .as_ref()
+            .expect("production search discloses learned ranking separately");
+        assert_eq!(
+            ranking
+                .route
+                .as_ref()
+                .map(|assessment| assessment.observations),
+            Some(2)
+        );
+        assert!(ranking.navigation_score > ranking.provider_score);
 
         let frame = service
             .knowledge_frame(Some("authentication evidence"), &[wiki.clone(), source])
@@ -103,7 +134,11 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
     {
         let service = open_service(&temp);
         let history = service.knowledge_history(None).unwrap();
-        assert_eq!(history.len(), 2, "route and frame receipts survive reopen");
+        assert_eq!(
+            history.len(),
+            3,
+            "two route uses and the frame survive reopen"
+        );
         let learned = PaletteBackend::familiarity(&service)
             .unwrap()
             .expect("route use is replayed from the production familiarity stream");
@@ -114,7 +149,7 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
             u64::MAX,
             DEFAULT_FAMILIARITY_HALF_LIFE_MS,
         );
-        assert_eq!(assessment.observations, 1);
+        assert_eq!(assessment.observations, 2);
     }
 
     {
@@ -130,9 +165,8 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
             .iter()
             .any(|item| item.resource.as_str() == "source:paper:authentication"));
 
-        let address = KnowledgeAddress::Wiki(
-            ResourceRef::parse("wiki:node:authentication").unwrap(),
-        );
+        let address =
+            KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:authentication").unwrap());
         let reading = TuiApplicationService::knowledge_read(&tui, &address)
             .unwrap()
             .expect("final TUI uses production Knowledge read");
@@ -142,7 +176,10 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
             &ResourceRef::parse("wiki:node:authentication").unwrap(),
         )
         .unwrap();
-        assert_eq!(relations.value["query"]["focus"], "wiki:node:authentication");
+        assert_eq!(
+            relations.value["query"]["focus"],
+            "wiki:node:authentication"
+        );
 
         assert!(TuiApplicationService::knowledge_forget(
             &mut tui,
@@ -152,6 +189,18 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
     }
 
     let service = open_service(&temp);
+    let search_after_forget = service.knowledge_search("authentication", 50).unwrap();
+    let source_after_forget = search_after_forget
+        .hits
+        .iter()
+        .find(|hit| hit.resource.as_str() == "source:paper:authentication")
+        .unwrap();
+    let ranking_after_forget = source_after_forget.ranking.as_ref().unwrap();
+    assert!(ranking_after_forget.route.is_none());
+    assert_eq!(
+        ranking_after_forget.navigation_score, ranking_after_forget.provider_score,
+        "forget removes learned ranking influence without changing provider relevance"
+    );
     let learned = PaletteBackend::familiarity(&service)
         .unwrap()
         .expect("familiarity store remains readable after reset");
@@ -162,10 +211,13 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
         u64::MAX,
         DEFAULT_FAMILIARITY_HALF_LIFE_MS,
     );
-    assert_eq!(assessment.observations, 0, "forget removes learned route influence");
+    assert_eq!(
+        assessment.observations, 0,
+        "forget removes learned route influence"
+    );
     assert_eq!(
         service.knowledge_history(None).unwrap().len(),
-        2,
+        3,
         "forget does not erase Knowledge audit receipts"
     );
 }

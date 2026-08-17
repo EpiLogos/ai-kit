@@ -1448,7 +1448,7 @@ impl PaletteBackend for Service {
 
     fn knowledge_address(
         &self,
-        resource: &aikit_core::ResourceRef,
+        resource: &aikit_core::resource::ResourceRef,
     ) -> Result<Option<aikit_core::KnowledgeAddress>> {
         Service::knowledge_address(self, resource)
     }
@@ -1502,7 +1502,7 @@ impl PaletteBackend for Service {
 
     fn knowledge_history(
         &self,
-        resource: Option<&aikit_core::ResourceRef>,
+        resource: Option<&aikit_core::resource::ResourceRef>,
     ) -> Result<Vec<aikit_store::KnowledgeApplicationReceipt>> {
         Service::knowledge_history(self, resource)
     }

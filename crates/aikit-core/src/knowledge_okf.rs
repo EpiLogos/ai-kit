@@ -72,9 +72,8 @@ pub fn validate_okf(metadata: &Map<String, Value>) -> Result<()> {
             .as_str()
             .is_some_and(|value| matches!(value, "draft" | "stable" | "deprecated"));
         if !valid {
-            findings.push(
-                "status: must be one of draft, stable, deprecated (OKF v0.2)".to_string(),
-            );
+            findings
+                .push("status: must be one of draft, stable, deprecated (OKF v0.2)".to_string());
         }
     }
 

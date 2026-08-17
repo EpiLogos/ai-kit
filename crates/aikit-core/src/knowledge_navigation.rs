@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::familiarity::FamiliarityContext;
+use crate::familiarity::{AccessibilityAssessment, FamiliarityContext};
 use crate::knowledge::{
     KnowledgeContextPack, KnowledgeReading, KnowledgeRelationView, KnowledgeRoute,
     KnowledgeRouteStep, RelationDirection, RelationEdge, RelationNode, RelationOrigin,
@@ -48,11 +48,26 @@ pub struct KnowledgeSearchHit {
     pub resource: ResourceRef,
     pub kind: ResourceKind,
     pub label: String,
+    /// Provider-native relevance score. Learned accessibility never overwrites it.
     pub score: f64,
     #[serde(default)]
     pub snippet: String,
     pub provider: ProviderRef,
     pub authority: SourceAuthority,
+    /// Application-level learned-ease evidence and combined ordering score.
+    /// This is absent in provider-native results and attached only by an eligible
+    /// application consumer after provider/trust/privacy filtering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranking: Option<KnowledgeRankingEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeRankingEvidence {
+    pub provider_score: f64,
+    pub navigation_score: f64,
+    pub destination: AccessibilityAssessment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<AccessibilityAssessment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -205,6 +220,7 @@ impl<'a> KnowledgeApplication<'a> {
                     snippet: hit.summary,
                     provider: wiki.status().provider,
                     authority: SourceAuthority::Authored,
+                    ranking: None,
                 }
             }));
         } else {
@@ -238,6 +254,7 @@ impl<'a> KnowledgeApplication<'a> {
                         snippet: hit.snippet,
                         provider: hit.provider,
                         authority: SourceAuthority::Observed,
+                        ranking: None,
                     }
                 })),
                 Err(error) => absences.push(format!(
@@ -262,6 +279,7 @@ impl<'a> KnowledgeApplication<'a> {
                             snippet: hit.snippet,
                             provider: hit.provider,
                             authority: SourceAuthority::Derived,
+                            ranking: None,
                         }))
                     }
                     Err(error) => absences.push(format!(
@@ -305,6 +323,7 @@ impl<'a> KnowledgeApplication<'a> {
                         .clone()
                         .unwrap_or_else(project_map_provider),
                     authority: endpoint.authority,
+                    ranking: None,
                 })
             }));
         } else {
