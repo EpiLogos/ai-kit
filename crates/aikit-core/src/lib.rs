@@ -23,6 +23,7 @@ pub mod arg;
 pub mod capsule;
 pub mod catalog;
 pub mod composition;
+pub mod composition_explain_history;
 pub mod composition_mutation;
 pub mod composition_view;
 pub mod context;
@@ -89,6 +90,9 @@ pub use composition::{
     HarnessCompositionRequest, LifetimeOwner, LifetimeOwnerKind, ProjectionBinding,
     RequirementStrength, ResolutionScope, RetractionMode, SurfaceDescriptor, SurfaceKind,
     TargetNativeComponentBinding, HARNESS_COMPOSITION_VERSION,
+};
+pub use composition_explain_history::{
+    explain_harness_component, explain_harness_composition_preview,
 };
 pub use composition_mutation::{
     apply_confirmed_harness_composition, preview_harness_composition_change,
