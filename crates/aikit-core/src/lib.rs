@@ -32,6 +32,7 @@ pub mod credential;
 pub mod duration;
 pub mod effects;
 pub mod error;
+pub mod explain_history;
 pub mod familiarity;
 pub mod frecency;
 pub mod guidance;
@@ -121,6 +122,12 @@ pub use credential::{
 };
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
+pub use explain_history::{
+    explain_resource_evidence, familiarity_history_evidence,
+    harness_composition_history_evidence, EvidenceProvenance, ExplainEvidence, ExplainFact,
+    HistoryEvidence, HistoryKind, HistoryReadModel, HistoryRecoverability,
+    EXPLAIN_HISTORY_VERSION,
+};
 pub use familiarity::{
     AccessibilityAssessment, AccessibilitySignal, AccessibilitySignalClass, FamiliarityContext,
     FamiliarityObservation, FamiliaritySnapshot, FamiliaritySnapshotLoad, FamiliarityStore,
