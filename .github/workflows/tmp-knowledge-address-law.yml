@@ -1,0 +1,234 @@
+name: Temporary Knowledge address law patch
+on:
+  push:
+    branches:
+      - agent/knowledge-navigation-production-closure
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/knowledge-navigation-production-closure
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Apply provider-native address law
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          core = Path('crates/aikit-core/src/knowledge_navigation.rs')
+          text = core.read_text()
+          text = text.replace('use std::collections::HashSet;', 'use std::collections::HashMap;', 1)
+
+          old = '''        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.resource.cmp(&right.resource))
+        });
+        let mut seen = HashSet::new();
+        hits.retain(|hit| seen.insert(hit.resource.to_string()));
+        hits.truncate(limit);
+'''
+          new = '''        // ProjectMap endpoints federate provider-native resources but do not
+        // replace their richer operational addresses. Collapse duplicate
+        // canonical ResourceRefs first, preferring a native Wiki/Source/Code
+        // address over the ProjectMap fallback for that same resource. Provider
+        // relevance still decides between duplicate hits at the same address
+        // class and remains the ordering signal across distinct resources.
+        let mut by_resource = HashMap::new();
+        for hit in hits {
+            let key = hit.resource.to_string();
+            match by_resource.entry(key) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(hit);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if prefer_search_hit(&hit, entry.get()) {
+                        entry.insert(hit);
+                    }
+                }
+            }
+        }
+        let mut hits = by_resource.into_values().collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.resource.cmp(&right.resource))
+        });
+        hits.truncate(limit);
+'''
+          if old not in text:
+              raise SystemExit('core dedup block not found')
+          text = text.replace(old, new, 1)
+
+          marker = '''fn provider_absent(name: &str) -> AikitError {
+'''
+          helper = '''fn prefer_search_hit(candidate: &KnowledgeSearchHit, incumbent: &KnowledgeSearchHit) -> bool {
+    match (&candidate.address, &incumbent.address) {
+        (KnowledgeAddress::ProjectMap(_), KnowledgeAddress::ProjectMap(_)) => {
+            candidate.score > incumbent.score
+        }
+        (KnowledgeAddress::ProjectMap(_), _) => false,
+        (_, KnowledgeAddress::ProjectMap(_)) => true,
+        _ => candidate.score > incumbent.score,
+    }
+}
+
+'''
+          if marker not in text:
+              raise SystemExit('provider_absent marker not found')
+          text = text.replace(marker, helper + marker, 1)
+
+          test_marker = '''    #[test]
+    fn arbitrary_cross_lens_jumps_are_rejected_without_explicit_binding() {
+'''
+          test = '''    #[test]
+    fn provider_native_search_address_wins_over_project_map_projection_for_same_resource() {
+        let index = wiki();
+        let wiki_provider = SemanticWikiProvider::new(&index);
+        let mut project_map = ProjectMap::new();
+        project_map
+            .add_endpoint(endpoint(
+                "wiki:node:auth",
+                ProjectLens::SemanticWiki,
+                ResourceKind::KnowledgeNode,
+                SourceAuthority::Authored,
+            ))
+            .unwrap();
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(wiki_provider)
+            .with_project_map(&project_map);
+
+        let result = app.search("wiki:node:auth", 10);
+        let hit = result
+            .hits
+            .iter()
+            .find(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .expect("canonical Wiki resource is discoverable");
+        assert!(matches!(hit.address, KnowledgeAddress::Wiki(_)));
+        assert_ne!(
+            hit.provider,
+            project_map_provider(),
+            "ProjectMap federation must not replace a live provider-native address"
+        );
+    }
+
+'''
+          if test_marker not in text:
+              raise SystemExit('core test marker not found')
+          text = text.replace(test_marker, test + test_marker, 1)
+          core.write_text(text)
+
+          store = Path('crates/aikit-store/src/knowledge_application.rs')
+          text = store.read_text()
+          old = '''        for hit in hits {
+            state
+                .addresses
+                .insert(hit.resource.clone(), hit.address.clone());
+        }
+'''
+          new = '''        for hit in hits {
+            match state.addresses.get(&hit.resource) {
+                Some(current) if !prefer_address(&hit.address, current) => {}
+                _ => {
+                    state
+                        .addresses
+                        .insert(hit.resource.clone(), hit.address.clone());
+                }
+            }
+        }
+'''
+          if old not in text:
+              raise SystemExit('store cache block not found')
+          text = text.replace(old, new, 1)
+
+          marker = '''fn now_ms() -> u64 {
+'''
+          helper = '''fn prefer_address(candidate: &KnowledgeAddress, incumbent: &KnowledgeAddress) -> bool {
+    match (candidate, incumbent) {
+        (KnowledgeAddress::ProjectMap(_), KnowledgeAddress::ProjectMap(_)) => true,
+        (KnowledgeAddress::ProjectMap(_), _) => false,
+        (_, KnowledgeAddress::ProjectMap(_)) => true,
+        _ => true,
+    }
+}
+
+'''
+          if marker not in text:
+              raise SystemExit('store now_ms marker not found')
+          text = text.replace(marker, helper + marker, 1)
+
+          test_marker = '''    #[test]
+    fn route_and_frame_receipts_survive_reopen_and_filter_by_resource() {
+'''
+          test = '''    #[test]
+    fn address_cache_never_downgrades_a_native_address_to_project_map() {
+        let temp = TempDir::new().unwrap();
+        let store = KnowledgeApplicationStore::new(AikitHome::at(temp.path()));
+        let resource = r("wiki:node:auth");
+        let native = KnowledgeSearchHit {
+            address: KnowledgeAddress::Wiki(resource.clone()),
+            resource: resource.clone(),
+            kind: aikit_core::resource::ResourceKind::KnowledgeNode,
+            label: "Auth".into(),
+            score: 1.0,
+            snippet: String::new(),
+            provider: aikit_core::resource::ProviderRef::parse("provider/wiki/test").unwrap(),
+            authority: SourceAuthority::Authored,
+            ranking: None,
+        };
+        let projection = KnowledgeSearchHit {
+            address: KnowledgeAddress::ProjectMap(resource.clone()),
+            provider: aikit_core::resource::ProviderRef::parse("provider/project-map/federation")
+                .unwrap(),
+            score: 1.25,
+            ..native.clone()
+        };
+
+        store.remember_search_hits(&[native.clone()]).unwrap();
+        store.remember_search_hits(&[projection]).unwrap();
+        assert_eq!(store.address(&resource).unwrap(), Some(native.address));
+
+        let other = r("canon:auth");
+        let fallback = KnowledgeSearchHit {
+            address: KnowledgeAddress::ProjectMap(other.clone()),
+            resource: other.clone(),
+            kind: aikit_core::resource::ResourceKind::KnowledgeNode,
+            label: "Canon".into(),
+            score: 0.4,
+            snippet: String::new(),
+            provider: aikit_core::resource::ProviderRef::parse("provider/project-map/federation")
+                .unwrap(),
+            authority: SourceAuthority::Authored,
+            ranking: None,
+        };
+        store.remember_search_hits(&[fallback.clone()]).unwrap();
+        assert_eq!(store.address(&other).unwrap(), Some(fallback.address));
+    }
+
+'''
+          if test_marker not in text:
+              raise SystemExit('store test marker not found')
+          text = text.replace(test_marker, test + test_marker, 1)
+          store.write_text(text)
+          PY
+      - name: Format changed Rust files
+        run: rustfmt crates/aikit-core/src/knowledge_navigation.rs crates/aikit-store/src/knowledge_application.rs
+      - name: Prove focused address laws
+        run: |
+          cargo test -p aikit-core provider_native_search_address_wins_over_project_map_projection_for_same_resource
+          cargo test -p aikit-store address_cache_never_downgrades_a_native_address_to_project_map
+          cargo test -p aikit-cli --test knowledge_application_v2
+      - name: Commit patch and remove helper
+        run: |
+          rm .github/workflows/tmp-knowledge-address-law.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/aikit-core/src/knowledge_navigation.rs crates/aikit-store/src/knowledge_application.rs .github/workflows/tmp-knowledge-address-law.yml
+          git commit -m "fix(v2): preserve provider-native Knowledge addresses"
+          git push origin HEAD:agent/knowledge-navigation-production-closure
