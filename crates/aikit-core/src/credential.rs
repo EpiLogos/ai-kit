@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -158,6 +159,7 @@ pub struct CredentialResolution {
     pub consumer_ref: String,
     pub purpose: String,
     pub selected_provider_ref: Option<SecretProviderRef>,
+    pub selected_provider_tier: Option<SecretProviderTier>,
     pub selected_materialisation: Option<SecretMaterialisationClass>,
     pub assurance: Option<String>,
     pub degradation: Option<String>,
@@ -229,17 +231,24 @@ pub fn resolve_credential(request: CredentialResolutionRequest) -> Result<Creden
             .then_with(|| a.provider_ref.cmp(&b.provider_ref))
     });
 
-    let (selected_provider_ref, selected_materialisation, assurance, degradation, provenance) =
-        match eligible.into_iter().next() {
-            Some((provider, class)) => (
-                Some(provider.provider_ref),
-                Some(class),
-                Some(provider.assurance),
-                provider.degradation,
-                Some(provider.binding_provenance),
-            ),
-            None => (None, None, None, None, None),
-        };
+    let (
+        selected_provider_ref,
+        selected_provider_tier,
+        selected_materialisation,
+        assurance,
+        degradation,
+        provenance,
+    ) = match eligible.into_iter().next() {
+        Some((provider, class)) => (
+            Some(provider.provider_ref),
+            Some(provider.tier),
+            Some(class),
+            Some(provider.assurance),
+            provider.degradation,
+            Some(provider.binding_provenance),
+        ),
+        None => (None, None, None, None, None, None),
+    };
 
     Ok(CredentialResolution {
         version: CREDENTIAL_RESOLUTION_VERSION,
@@ -248,6 +257,7 @@ pub fn resolve_credential(request: CredentialResolutionRequest) -> Result<Creden
         consumer_ref: request.requirement.consumer_ref,
         purpose: request.requirement.purpose,
         selected_provider_ref,
+        selected_provider_tier,
         selected_materialisation,
         assurance,
         degradation,
@@ -268,16 +278,86 @@ fn materialisation_rank(class: &SecretMaterialisationClass) -> u8 {
     }
 }
 
+/// Raw material handed between a provider and the one materialisation operation
+/// that needs it. It is deliberately neither `Serialize` nor `Clone`; its `Debug`
+/// representation is always redacted so it cannot enter a read model or log by
+/// accident.
+pub struct SecretValue(String);
+
+impl SecretValue {
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(invalid("secret value must not be empty"));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretValue(<redacted>)")
+    }
+}
+
 /// Safe binding state. Rotation/replacement changes provider state while `CredentialRef` stays stable.
+/// This is intentionally descriptive metadata only; secret material is never a field of this type.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CredentialBindingState {
     pub credential_ref: CredentialRef,
     pub provider_ref: SecretProviderRef,
+    pub provider_tier: SecretProviderTier,
+    pub materialisation: SecretMaterialisationClass,
     pub binding_provenance: String,
     pub revision_or_lease_class: Option<String>,
     pub expires_at: Option<String>,
     pub revoked: bool,
     pub metadata: BTreeMap<String, String>,
+}
+
+/// Provider-neutral operational seam behind the credential resolution contract.
+///
+/// `aikit-core` remains I/O-free: implementations live in adapter crates. The
+/// descriptor is the only input to deterministic resolution; binding and
+/// materialisation happen only after a provider has been selected or explicitly
+/// invoked by the operator.
+pub trait SecretProvider {
+    fn descriptor(&self, credential_ref: &CredentialRef) -> SecretProviderDescriptor;
+
+    fn binding_state(&self, credential_ref: &CredentialRef) -> Result<Option<CredentialBindingState>>;
+
+    fn bind(&self, credential_ref: &CredentialRef, secret: &SecretValue)
+        -> Result<CredentialBindingState>;
+
+    fn materialise(
+        &self,
+        credential_ref: &CredentialRef,
+        class: SecretMaterialisationClass,
+    ) -> Result<Option<SecretValue>>;
+}
+
+/// Resolve against live providers without letting their I/O leak into the
+/// deterministic resolution algorithm.
+pub fn resolve_registered_credential(
+    requirement: SecretRequirement,
+    providers: &[&dyn SecretProvider],
+    headless: bool,
+    allow_from_env: bool,
+) -> Result<CredentialResolution> {
+    let credential_ref = requirement.credential_ref.clone();
+    resolve_credential(CredentialResolutionRequest {
+        requirement,
+        providers: providers
+            .iter()
+            .map(|provider| provider.descriptor(&credential_ref))
+            .collect(),
+        headless,
+        allow_from_env,
+    })
 }
 
 #[cfg(test)]
@@ -296,6 +376,7 @@ mod tests {
             purpose: "provider inference".into(),
             permitted_materialisation: [
                 SecretMaterialisationClass::CredentialBroker,
+                SecretMaterialisationClass::ProviderNativeLease,
                 SecretMaterialisationClass::ProcessEnv,
             ]
             .into_iter()
@@ -343,7 +424,7 @@ mod tests {
                 provider(
                     "provider:keychain",
                     SecretProviderTier::OsSecureStore,
-                    [SecretMaterialisationClass::ProcessEnv],
+                    [SecretMaterialisationClass::ProviderNativeLease],
                 ),
             ],
             headless: false,
@@ -355,6 +436,7 @@ mod tests {
             result.selected_provider_ref.unwrap().as_str(),
             "provider:keychain"
         );
+        assert_eq!(result.selected_provider_tier, Some(SecretProviderTier::OsSecureStore));
     }
 
     #[test]
@@ -396,6 +478,7 @@ mod tests {
         .unwrap();
 
         assert!(result.selected());
+        assert_eq!(result.selected_provider_tier, Some(SecretProviderTier::ExplicitEnvironmentImport));
         assert_eq!(
             result.degradation.as_deref(),
             Some("operator-supplied headless environment import")
@@ -421,6 +504,9 @@ mod tests {
         assert!(!json.contains(raw_secret));
         assert!(json.contains("credential:openai/research"));
         assert!(json.contains("provider:varlock-1password"));
+
+        let secret = SecretValue::new(raw_secret).unwrap();
+        assert_eq!(format!("{secret:?}"), "SecretValue(<redacted>)");
     }
 
     #[test]
@@ -428,6 +514,8 @@ mod tests {
         let base = CredentialBindingState {
             credential_ref: credential("credential:openai/research"),
             provider_ref: SecretProviderRef::new("provider:keychain").unwrap(),
+            provider_tier: SecretProviderTier::OsSecureStore,
+            materialisation: SecretMaterialisationClass::ProviderNativeLease,
             binding_provenance: "keychain:item-42".into(),
             revision_or_lease_class: Some("revision:v1".into()),
             expires_at: None,
@@ -448,6 +536,8 @@ mod tests {
         let first = CredentialBindingState {
             credential_ref: credential("credential:openai/research"),
             provider_ref: SecretProviderRef::new("provider:keychain").unwrap(),
+            provider_tier: SecretProviderTier::OsSecureStore,
+            materialisation: SecretMaterialisationClass::ProviderNativeLease,
             binding_provenance: "keychain:item-42".into(),
             revision_or_lease_class: None,
             expires_at: None,
@@ -457,6 +547,8 @@ mod tests {
         let replacement = CredentialBindingState {
             credential_ref: first.credential_ref.clone(),
             provider_ref: SecretProviderRef::new("provider:varlock-1password").unwrap(),
+            provider_tier: SecretProviderTier::BrokeredSecureProvider,
+            materialisation: SecretMaterialisationClass::CredentialBroker,
             binding_provenance: "op://Agent/provider-key".into(),
             revision_or_lease_class: None,
             expires_at: None,
@@ -467,5 +559,45 @@ mod tests {
         assert_eq!(first.credential_ref, replacement.credential_ref);
         assert_ne!(first.provider_ref, replacement.provider_ref);
         assert_ne!(first.binding_provenance, replacement.binding_provenance);
+    }
+
+    struct FakeProvider {
+        descriptor: SecretProviderDescriptor,
+    }
+
+    impl SecretProvider for FakeProvider {
+        fn descriptor(&self, _credential_ref: &CredentialRef) -> SecretProviderDescriptor {
+            self.descriptor.clone()
+        }
+
+        fn binding_state(&self, _credential_ref: &CredentialRef) -> Result<Option<CredentialBindingState>> {
+            Ok(None)
+        }
+
+        fn bind(&self, _credential_ref: &CredentialRef, _secret: &SecretValue) -> Result<CredentialBindingState> {
+            Err(invalid("fake provider cannot bind"))
+        }
+
+        fn materialise(&self, _credential_ref: &CredentialRef, _class: SecretMaterialisationClass) -> Result<Option<SecretValue>> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn provider_neutral_headless_unbound_reports_exact_rejection() {
+        let mut descriptor = provider(
+            "provider:keychain",
+            SecretProviderTier::OsSecureStore,
+            [SecretMaterialisationClass::ProviderNativeLease],
+        );
+        descriptor.supported_credentials.clear();
+        let provider = FakeProvider { descriptor };
+
+        let result = resolve_registered_credential(requirement(), &[&provider], true, false).unwrap();
+        assert!(!result.selected());
+        assert_eq!(
+            result.provider_explanations[0].rejection,
+            Some(CredentialProviderRejection::CredentialNotBound)
+        );
     }
 }
