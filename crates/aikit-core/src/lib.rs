@@ -50,6 +50,7 @@ pub mod knowledge_wiki;
 pub mod knowledge_wiki_index;
 pub mod knowledge_wiki_provider;
 pub mod lifecycle;
+pub mod live_activation_history;
 pub mod platform;
 pub mod policy;
 pub mod procedure;
@@ -196,6 +197,7 @@ pub use knowledge_wiki_provider::{
     NATIVE_SEMANTIC_WIKI_PROVIDER,
 };
 pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
+pub use live_activation_history::live_activation_history_evidence;
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;
 pub use procedure::{
