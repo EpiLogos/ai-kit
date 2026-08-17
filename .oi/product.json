@@ -5,6 +5,7 @@
   "version": "0.1.0",
   "repository": "https://github.com/EpiLogos/ai-kit",
   "source_checkout": "ai-kit",
+  "lockfile": "Cargo.lock",
   "artifact": {
     "kind": "cli",
     "entry": "aikit",
