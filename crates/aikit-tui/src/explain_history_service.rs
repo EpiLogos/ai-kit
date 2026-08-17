@@ -154,12 +154,16 @@ impl ExplainHistoryApplicationService for ApplicationService<'_> {
                 &backend.context().context_id,
             )?);
 
-            if let Some(resource) =
-                resource.filter(|value| value.as_str().starts_with("session-space/"))
-            {
-                let space = SessionSpaceRef::parse(resource.as_str())?;
-                let store = SessionSpaceApplicationStore::new(home.clone());
-                entries.extend(session_space_history_evidence(&store, &space)?);
+            // SessionSpace receipts are indexed by canonical relations at read
+            // time, not copied into an aggregate history store. This means a
+            // Project, Surface, Component, AgentSession, Host or provider can
+            // navigate back to the SessionSpace receipt that mentioned it.
+            let session_spaces = SessionSpaceApplicationStore::new(home.clone());
+            for state in session_spaces.list()? {
+                entries.extend(session_space_history_evidence(
+                    &session_spaces,
+                    state.id(),
+                )?);
             }
         }
 
