@@ -25,6 +25,7 @@ pub mod catalog;
 pub mod composition;
 pub mod composition_mutation;
 pub mod composition_view;
+pub mod composition_workspace;
 pub mod context;
 pub mod context_resolution;
 pub mod context_source;
