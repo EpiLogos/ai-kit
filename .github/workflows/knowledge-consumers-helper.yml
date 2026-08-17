@@ -1,0 +1,44 @@
+name: Knowledge consumers helper
+
+on:
+  push:
+    branches:
+      - agent/knowledge-navigation-production-closure
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/knowledge-navigation-production-closure
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: python3 scripts/knowledge_consumers_patch.py
+      - run: |
+          rm scripts/knowledge_consumers_patch.py
+          rm .github/workflows/knowledge-consumers-helper.yml
+          cargo fmt --all
+          allowed='^(crates/aikit-tui/src/application.rs|crates/aikit-tui/src/application_service.rs|crates/aikit-cli/src/cli.rs|crates/aikit-cli/src/main.rs)$'
+          while IFS= read -r file; do
+            if [[ "$file" =~ ^crates/ ]] && [[ ! "$file" =~ $allowed ]]; then
+              git checkout -- "$file"
+            fi
+          done < <(git diff --name-only)
+      - run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "feat(knowledge): wire final CLI and TUI consumers"
+          git push origin HEAD:agent/knowledge-navigation-production-closure
+      - run: cargo check -p aikit-core -p aikit-store -p aikit-tui -p aikit-cli
+      - run: |
+          cargo test -p aikit-tui application_service --lib
+          cargo test -p aikit-core knowledge --lib
+          cargo test -p aikit-store knowledge_application --lib
