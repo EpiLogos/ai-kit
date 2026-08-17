@@ -24,6 +24,7 @@ pub mod foreign;
 pub mod hook;
 pub mod json;
 pub mod jump;
+pub mod model_roster;
 pub mod multicall;
 pub mod mux_install;
 pub mod profile_ops;
