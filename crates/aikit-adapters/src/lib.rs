@@ -35,8 +35,9 @@ pub use deepseek_harness::{
     DEEPSEEK_HARNESS_RELEASE, DEEPSEEK_HARNESS_UPSTREAM_REVISION,
 };
 pub use deepseek_live::{
-    deepseek_live_cordis_composition, CordisProcessActivationDriver, CordisProcessSpec,
-    DeepSeekLiveComposition, DEEPSEEK_CORDIS_WEB_PORT, DEEPSEEK_LIVE_CORDIS_COMPONENTS,
+    deepseek_live_cordis_composition, CordisActivationGrant, CordisActivationOperation,
+    CordisProcessActivationDriver, CordisProcessSpec, DeepSeekLiveComposition,
+    DEEPSEEK_CORDIS_WEB_PORT, DEEPSEEK_LIVE_CORDIS_COMPONENTS,
 };
 pub use deepseek_maximal::{
     deepseek_maximal_conformance, DeepSeekMaximalConformance, DEEPSEEK_CORDIS_REVISION,

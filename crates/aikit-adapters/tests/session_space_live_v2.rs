@@ -4,9 +4,9 @@ use std::time::Duration;
 use aikit_adapters::{
     connection_into_session_space, deepseek_live_cordis_composition, deepseek_maximal_conformance,
     ConnectionCapabilities, ConnectionDescriptor, ConnectionProtocol, ConnectionProtocolFamily,
-    ConnectionState, CordisProcessActivationDriver, CordisProcessSpec, DeepSeekShellProvider,
-    NativeSessionBinding, SessionOpenMode, DEEPSEEK_HARNESS_UPSTREAM_REVISION,
-    DEEPSEEK_LIVE_CORDIS_COMPONENTS,
+    ConnectionState, CordisActivationGrant, CordisActivationOperation,
+    CordisProcessActivationDriver, CordisProcessSpec, DeepSeekShellProvider, NativeSessionBinding,
+    SessionOpenMode, DEEPSEEK_HARNESS_UPSTREAM_REVISION, DEEPSEEK_LIVE_CORDIS_COMPONENTS,
 };
 use aikit_core::resource::ResourceRef;
 use aikit_core::{
@@ -194,17 +194,17 @@ fn acp_degradation_does_not_counterfeit_classic_harness_failure() {
 
 #[cfg(unix)]
 #[test]
-fn session_space_active_transition_is_backed_by_a_real_provider_process_lifecycle() {
+fn session_space_active_transition_is_backed_by_a_real_authorised_provider_process_lifecycle() {
     let live = deepseek_live_cordis_composition(DeepSeekShellProvider::Local).unwrap();
     let body_fingerprint = live.composition.fingerprint.clone();
-    let mut runtime = SessionSpaceRuntime::open(SessionSpaceDefinition::new(
-        SessionSpaceRef::parse("session-space/process-proof").unwrap(),
-    ))
-    .unwrap();
+    let space = SessionSpaceRef::parse("session-space/process-proof").unwrap();
+    let agent_session = r("agent-session/process-proof");
+    let harness = live.composition.harness.clone();
+    let mut runtime = SessionSpaceRuntime::open(SessionSpaceDefinition::new(space.clone())).unwrap();
     let lease = runtime
         .bind_agent_session(SessionSpaceAgentSession {
-            agent_session: r("agent-session/process-proof"),
-            harness: live.composition.harness.clone(),
+            agent_session: agent_session.clone(),
+            harness: harness.clone(),
             native_session_id: None,
             provider: Some(r("provider/test-process")),
             provenance: vec!["test AgentSession binding".into()],
@@ -223,6 +223,34 @@ fn session_space_active_transition_is_backed_by_a_real_provider_process_lifecycl
     };
     let mut driver = CordisProcessActivationDriver::new(spec);
     let component = r("component/deepseek/client-ui-conversation");
+
+    let denied = runtime
+        .activate_component(&lease, &component, &mut driver)
+        .unwrap_err();
+    assert_eq!(denied.code(), "cordis.activation.authority_required");
+    assert!(!driver.is_running().unwrap());
+
+    for (operation, grant_ref) in [
+        (CordisActivationOperation::Activate, "authority/activate"),
+        (CordisActivationOperation::Deactivate, "authority/deactivate"),
+    ] {
+        driver
+            .register_activation_grant(CordisActivationGrant {
+                grant_ref: grant_ref.into(),
+                authority_ref: format!("actuation/determination/{grant_ref}"),
+                operation,
+                space: space.clone(),
+                agent_session: agent_session.clone(),
+                harness: harness.clone(),
+                component: component.clone(),
+                composition_fingerprint: body_fingerprint.clone(),
+                implementation_revision: DEEPSEEK_HARNESS_UPSTREAM_REVISION.into(),
+                expires_at_unix_ms: u64::MAX,
+                max_uses: 1,
+            })
+            .unwrap();
+    }
+
     let state = runtime
         .activate_component(&lease, &component, &mut driver)
         .unwrap();
@@ -239,12 +267,22 @@ fn session_space_active_transition_is_backed_by_a_real_provider_process_lifecycl
         active.observed_composition_fingerprint.as_deref(),
         Some(body_fingerprint.as_str())
     );
+    assert!(active
+        .provenance
+        .iter()
+        .any(|line| line.contains("actuation/determination/authority/activate")));
     let contributed_surfaces = active_model
         .surfaces
         .iter()
         .filter(|surface| surface.component.as_ref() == Some(&component))
         .count();
     assert!(contributed_surfaces > 0);
+
+    let replay = runtime
+        .activate_component(&lease, &component, &mut driver)
+        .unwrap_err();
+    assert_eq!(replay.code(), "cordis.activation.authority_exhausted");
+    assert!(driver.is_running().unwrap());
 
     let state = runtime
         .deactivate_component(&lease, &component, &mut driver)
