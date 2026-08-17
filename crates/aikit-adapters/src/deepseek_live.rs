@@ -1,0 +1,350 @@
+//! Live DeepSeek Harness/Cordis activation over the exact current upstream process seam.
+//!
+//! At the pinned source revision the ordinary `dsh web` bundle already mounts
+//! `cordis-host-runner` and `cordis-client-runner`. The repository's older
+//! `examples/web-cordis/cordis.yml` overlay now duplicates `cordis-host-runner`
+//! and fails fast, so AIKit deliberately follows the current bundle rather than
+//! preserving that stale demo seam. This adapter starts/stops the target-owned
+//! Web/Cordis process, waits for its target-owned endpoint, and only then reports
+//! a SessionSpace Component as live.
+
+use std::collections::BTreeSet;
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use aikit_core::resource::ResourceRef;
+use aikit_core::{
+    resolve_harness_composition, AikitError, CompositionActivationMode, HarnessComposition, Result,
+    SessionSpaceActivationDriver, SessionSpaceActivationObservation, SessionSpaceActivationRequest,
+};
+
+use crate::composition_topology::ComponentContainment;
+use crate::deepseek_harness::{DeepSeekShellProvider, DEEPSEEK_HARNESS_UPSTREAM_REVISION};
+use crate::deepseek_maximal::{deepseek_maximal_conformance, DeepSeekMaximalConformance};
+
+pub const DEEPSEEK_CORDIS_WEB_PORT: u16 = 3080;
+
+/// Components for which the current maximal conformance adapter has direct
+/// process-level evidence inside the shipped Web/Cordis composition. Agent-loop
+/// remains a per-session/preset concern and therefore stays at its resolver
+/// activation mode until an actual AgentSession activation proves it live.
+pub const DEEPSEEK_LIVE_CORDIS_COMPONENTS: &[&str] = &[
+    "component/deepseek/profile-root",
+    "component/deepseek/client-ui-slots",
+    "component/deepseek/client-ui-conversation",
+    "component/deepseek/client-ui-commands",
+    "component/deepseek/client-ui-permission",
+];
+
+pub struct DeepSeekLiveComposition {
+    pub composition: HarnessComposition,
+    pub containments: Vec<ComponentContainment>,
+    pub live_components: BTreeSet<ResourceRef>,
+}
+
+/// Resolve the live-capable #65 specimen through the one canonical composition
+/// resolver. Target evidence changes the adapter-owned catalogue/request inputs
+/// *before* resolution so the canonical body fingerprint/history includes the
+/// final activation modes. Resolver output is never rewritten afterward.
+pub fn deepseek_live_cordis_composition(
+    shell: DeepSeekShellProvider,
+) -> Result<DeepSeekLiveComposition> {
+    let DeepSeekMaximalConformance {
+        mut specimen,
+        containments,
+    } = deepseek_maximal_conformance(shell);
+    let live_components: BTreeSet<_> = DEEPSEEK_LIVE_CORDIS_COMPONENTS
+        .iter()
+        .map(|component| r(component))
+        .collect();
+
+    // The target adapter owns this conformance fact, but the canonical resolver
+    // owns the resulting body. Advertise LiveMounted on descriptors/contributions
+    // and select that mode before resolution; never post-mutate a resolved body.
+    for component in &live_components {
+        let mut descriptor = specimen.catalog.component(component).cloned().ok_or_else(|| {
+            AikitError::new(
+                "cordis.composition.component_absent",
+                format!("live Cordis component {component} is absent from the conformance catalog"),
+            )
+        })?;
+        descriptor
+            .activation_modes
+            .insert(CompositionActivationMode::LiveMounted);
+        for contribution in &mut descriptor.contributions {
+            contribution.activation_mode = CompositionActivationMode::LiveMounted;
+        }
+        specimen.catalog.insert_component(descriptor);
+    }
+    for selection in &mut specimen.request.selections {
+        if live_components.contains(&selection.component) {
+            selection.activation_mode = CompositionActivationMode::LiveMounted;
+        }
+    }
+
+    let composition = resolve_harness_composition(&specimen.catalog, specimen.request)?;
+
+    Ok(DeepSeekLiveComposition {
+        composition,
+        containments,
+        live_components,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct CordisProcessSpec {
+    pub provider: ResourceRef,
+    pub program: String,
+    pub args: Vec<String>,
+    pub working_directory: PathBuf,
+    pub readiness: Option<SocketAddr>,
+    pub startup_timeout: Duration,
+    pub provenance: Vec<String>,
+}
+
+impl CordisProcessSpec {
+    /// Exact current upstream Web/Cordis process path. The caller supplies a
+    /// checkout at the pinned revision; AIKit does not vendor or fork Cordis.
+    pub fn deepseek_web(source_checkout: impl AsRef<Path>) -> Self {
+        Self {
+            provider: r("provider/deepseek/cordis-web"),
+            program: "node".into(),
+            args: vec![
+                "--import".into(),
+                "tsx".into(),
+                "apps/cli/src/bin.ts".into(),
+                "web".into(),
+            ],
+            working_directory: source_checkout.as_ref().to_path_buf(),
+            readiness: Some(SocketAddr::from(([127, 0, 0, 1], DEEPSEEK_CORDIS_WEB_PORT))),
+            startup_timeout: Duration::from_secs(20),
+            provenance: vec![
+                format!("deepseek-ai/deepseek-harness@{DEEPSEEK_HARNESS_UPSTREAM_REVISION}"),
+                "packages/bundle/web-app/cordis.patch.yml:cordis-host-runner+cordis-client-runner"
+                    .into(),
+                "apps/cli/src/bin.ts web (default target-owned Web/Cordis bundle)".into(),
+            ],
+        }
+    }
+}
+
+/// Process-owning adapter for the target's real Cordis runtime. One process may
+/// substantiate several AIKit Component readings, but it remains one target-owned
+/// provider; ACP/AgentSession and SessionSpace identities stay separate.
+pub struct CordisProcessActivationDriver {
+    spec: CordisProcessSpec,
+    child: Option<Child>,
+    active_components: BTreeSet<ResourceRef>,
+}
+
+impl CordisProcessActivationDriver {
+    pub fn new(spec: CordisProcessSpec) -> Self {
+        Self {
+            spec,
+            child: None,
+            active_components: BTreeSet::new(),
+        }
+    }
+
+    pub fn deepseek_web(source_checkout: impl AsRef<Path>) -> Self {
+        Self::new(CordisProcessSpec::deepseek_web(source_checkout))
+    }
+
+    pub fn provider(&self) -> &ResourceRef {
+        &self.spec.provider
+    }
+
+    pub fn is_running(&mut self) -> Result<bool> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(false);
+        };
+        match child.try_wait().map_err(process_error)? {
+            None => Ok(true),
+            Some(_) => {
+                self.child = None;
+                self.active_components.clear();
+                Ok(false)
+            }
+        }
+    }
+
+    pub fn stop_all(&mut self) -> Result<()> {
+        let Some(mut child) = self.child.take() else {
+            self.active_components.clear();
+            return Ok(());
+        };
+        if child.try_wait().map_err(process_error)?.is_none() {
+            child.kill().map_err(process_error)?;
+        }
+        child.wait().map_err(process_error)?;
+        self.active_components.clear();
+        Ok(())
+    }
+
+    fn ensure_started(&mut self) -> Result<()> {
+        if self.is_running()? {
+            return Ok(());
+        }
+
+        let mut command = Command::new(&self.spec.program);
+        command
+            .args(&self.spec.args)
+            .current_dir(&self.spec.working_directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        self.child = Some(command.spawn().map_err(|error| {
+            AikitError::new(
+                "cordis.process.spawn_failed",
+                format!(
+                    "failed to start Cordis provider `{}` in {}: {error}",
+                    self.spec.program,
+                    self.spec.working_directory.display()
+                ),
+            )
+        })?);
+
+        self.wait_until_ready()
+    }
+
+    fn wait_until_ready(&mut self) -> Result<()> {
+        let deadline = Instant::now() + self.spec.startup_timeout;
+        loop {
+            let Some(child) = self.child.as_mut() else {
+                return Err(AikitError::new(
+                    "cordis.process.missing",
+                    "Cordis provider disappeared during activation",
+                ));
+            };
+            if let Some(status) = child.try_wait().map_err(process_error)? {
+                self.child = None;
+                return Err(AikitError::new(
+                    "cordis.process.exited_during_activation",
+                    format!("Cordis provider exited during activation with {status}"),
+                ));
+            }
+
+            match self.spec.readiness {
+                None => return Ok(()),
+                Some(address) => {
+                    if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+
+            if Instant::now() >= deadline {
+                let _ = self.stop_all();
+                return Err(AikitError::new(
+                    "cordis.process.readiness_timeout",
+                    format!(
+                        "Cordis provider did not become reachable at {:?} within {:?}",
+                        self.spec.readiness, self.spec.startup_timeout
+                    ),
+                ));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn validate_target(request: &SessionSpaceActivationRequest) -> Result<()> {
+        let Some(implementation) = &request.component.implementation else {
+            return Err(AikitError::new(
+                "cordis.activation.missing_target_binding",
+                format!("{} has no target-native binding", request.component.component),
+            ));
+        };
+        if implementation.implementation_target != "deepseek-ai/deepseek-harness" {
+            return Err(AikitError::new(
+                "cordis.activation.wrong_target",
+                format!(
+                    "{} belongs to {}, not deepseek-ai/deepseek-harness",
+                    request.component.component, implementation.implementation_target
+                ),
+            ));
+        }
+        if implementation.revision.as_deref() != Some(DEEPSEEK_HARNESS_UPSTREAM_REVISION) {
+            return Err(AikitError::new(
+                "cordis.activation.revision_mismatch",
+                format!(
+                    "{} is not bound to the pinned DeepSeek Harness revision {}",
+                    request.component.component, DEEPSEEK_HARNESS_UPSTREAM_REVISION
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SessionSpaceActivationDriver for CordisProcessActivationDriver {
+    fn activate(
+        &mut self,
+        request: &SessionSpaceActivationRequest,
+    ) -> Result<SessionSpaceActivationObservation> {
+        Self::validate_target(request)?;
+        self.ensure_started()?;
+        self.active_components
+            .insert(request.component.component.clone());
+        let mut provenance = self.spec.provenance.clone();
+        provenance.push(format!(
+            "provider process confirmed live while activating {}",
+            request.component.component
+        ));
+        Ok(SessionSpaceActivationObservation::Active {
+            provider: self.spec.provider.clone(),
+            provenance,
+        })
+    }
+
+    fn deactivate(
+        &mut self,
+        request: &SessionSpaceActivationRequest,
+    ) -> Result<SessionSpaceActivationObservation> {
+        Self::validate_target(request)?;
+        if !self.active_components.contains(&request.component.component) {
+            return Ok(SessionSpaceActivationObservation::Deactivated {
+                provider: self.spec.provider.clone(),
+                provenance: self.spec.provenance.clone(),
+            });
+        }
+        if self.active_components.len() > 1 {
+            // The process seam proves composition activation and whole-provider teardown.
+            // It does not prove arbitrary in-process Cordis Fiber disposal from Rust.
+            // Refuse to counterfeit that stronger operation while siblings remain live.
+            return Err(AikitError::new(
+                "cordis.process.partial_retraction_unsupported",
+                format!(
+                    "cannot prove live retraction of {} through the process seam while {} sibling Components remain active",
+                    request.component.component,
+                    self.active_components.len() - 1
+                ),
+            ));
+        }
+
+        self.active_components.remove(&request.component.component);
+        self.stop_all()?;
+        let mut provenance = self.spec.provenance.clone();
+        provenance.push("Cordis provider stopped after final live Component deactivation".into());
+        Ok(SessionSpaceActivationObservation::Deactivated {
+            provider: self.spec.provider.clone(),
+            provenance,
+        })
+    }
+}
+
+impl Drop for CordisProcessActivationDriver {
+    fn drop(&mut self) {
+        let _ = self.stop_all();
+    }
+}
+
+fn process_error(error: std::io::Error) -> AikitError {
+    AikitError::new("cordis.process.io", error.to_string())
+}
+
+fn r(raw: &str) -> ResourceRef {
+    ResourceRef::parse(raw).expect("DeepSeek live adapter uses static valid ResourceRefs")
+}
