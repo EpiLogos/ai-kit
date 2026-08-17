@@ -222,7 +222,7 @@ fn session_space_active_transition_is_backed_by_a_real_provider_process_lifecycl
         provenance: vec!["real child-process lifecycle fixture".into()],
     };
     let mut driver = CordisProcessActivationDriver::new(spec);
-    let component = r("component/deepseek/profile-root");
+    let component = r("component/deepseek/client-ui-conversation");
     let state = runtime
         .activate_component(&lease, &component, &mut driver)
         .unwrap();
