@@ -24,7 +24,7 @@ forget
 
 Provider status/degradation is an accompanying disclosure surface, not a replacement for any operation above.
 
-The production CLI exposes the same faculty as `aikit knowledge search|read|relations|route|frame|sources|explain|history|status|forget`. Search returns typed addresses that can be passed back as JSON; `wiki=REF`, `source=REF` and `project=REF` are convenience forms for stable address classes.
+The production CLI exposes the same faculty as `aikit knowledge search|read|relations|route|frame|sources|explain|history|status|forget`. Search returns typed addresses that can be passed back as JSON; `wiki=REF`, `source=REF` and `project=REF` are convenience forms for stable address classes. CLI and TUI consume the same application service; neither surface is a provider-specific semantic owner.
 
 ## Procedure
 
