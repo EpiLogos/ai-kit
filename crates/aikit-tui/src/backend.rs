@@ -17,6 +17,7 @@ use aikit_core::capsule::{Capsule, ExecMode, WorkingDir};
 use aikit_core::context::ContextDescriptor;
 use aikit_core::id::{CapsuleId, ContextId, GenerationId};
 use aikit_core::platform::TargetId;
+use aikit_core::project::ProjectRef;
 use aikit_core::projection::ActivationEffect;
 use aikit_core::resolve::ResolvedView;
 use aikit_core::resource::{
@@ -25,8 +26,17 @@ use aikit_core::resource::{
 };
 use aikit_core::scope::{ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
+use aikit_core::session_space::{SessionSpaceReadModel, SessionSpaceRef};
+use aikit_core::session_space_application::{
+    AgentSessionContinuityEvidence, SessionSpaceAuthoredState, SessionSpaceMutation,
+    SessionSpaceNativeObservation, SessionSpacePreview, SessionSpaceReconstructionReport,
+};
 use aikit_core::{FamiliarityObservation, FamiliarityStore, Result};
 use aikit_store::inbox::{Candidate, CandidateState, PromotionEdits, Similarity};
+use aikit_store::{
+    explain_session_space_with_receipts, AikitHome, SessionSpaceApplicationStore,
+    SessionSpaceExplainEvidence, SessionSpaceHistoryComparison, SessionSpaceReceipt,
+};
 
 /// The mask a secret wears everywhere it is displayed.
 pub const REDACTED: &str = "••••••";
@@ -203,6 +213,16 @@ impl PromotionDraft {
     }
 }
 
+fn session_space_store(home: Option<&AikitHome>) -> Result<SessionSpaceApplicationStore> {
+    let home = home.cloned().ok_or_else(|| {
+        aikit_core::AikitError::new(
+            "session_space.application_home_unavailable",
+            "this application backend has no canonical AIKit home for SessionSpace persistence",
+        )
+    })?;
+    Ok(SessionSpaceApplicationStore::new(home))
+}
+
 /// Low-level resolved/package/runtime backend beneath `ApplicationService`.
 ///
 /// Despite the retained compatibility name, this trait owns no application state,
@@ -213,6 +233,13 @@ pub trait PaletteBackend {
     fn view(&self) -> &ResolvedView;
 
     fn scope_layers(&self) -> Option<&[ScopeLayer]> {
+        None
+    }
+
+    /// The store root already owned by the production application backend.
+    /// Test/fake backends may omit it; SessionSpace operations then fail explicitly
+    /// rather than falling back to process-global discovery.
+    fn application_home(&self) -> Option<&AikitHome> {
         None
     }
 
@@ -394,6 +421,96 @@ pub trait PaletteBackend {
 
     fn record_familiarity(&mut self, _observation: FamiliarityObservation) -> Result<()> {
         Ok(())
+    }
+
+    // SessionSpace application operations deliberately live on the shared backend
+    // seam. They all resolve to the same canonical store and never rerun Project,
+    // ContextResolution or provider semantics.
+    fn session_space_list(&self) -> Result<Vec<SessionSpaceAuthoredState>> {
+        session_space_store(self.application_home())?.list()
+    }
+
+    fn session_space_show(&self, space: &SessionSpaceRef) -> Result<SessionSpaceAuthoredState> {
+        session_space_store(self.application_home())?.load(space)
+    }
+
+    fn session_space_open(&self, space: &SessionSpaceRef) -> Result<SessionSpaceAuthoredState> {
+        self.session_space_show(space)
+    }
+
+    fn session_space_discover(
+        &self,
+        project: Option<&ProjectRef>,
+    ) -> Result<Vec<SessionSpaceAuthoredState>> {
+        session_space_store(self.application_home())?.discover(project)
+    }
+
+    fn session_space_stage(
+        &self,
+        space: Option<&SessionSpaceRef>,
+        intent: SessionSpaceMutation,
+    ) -> Result<SessionSpacePreview> {
+        session_space_store(self.application_home())?.stage(space, intent)
+    }
+
+    fn session_space_apply(&mut self, preview: &SessionSpacePreview) -> Result<SessionSpaceReceipt> {
+        session_space_store(self.application_home())?.apply(preview)
+    }
+
+    fn session_space_history(&self, space: &SessionSpaceRef) -> Result<Vec<SessionSpaceReceipt>> {
+        session_space_store(self.application_home())?.history(space)
+    }
+
+    fn session_space_compare_history(
+        &self,
+        space: &SessionSpaceRef,
+        from_sequence: u64,
+        to_sequence: u64,
+    ) -> Result<SessionSpaceHistoryComparison> {
+        session_space_store(self.application_home())?
+            .compare_history(space, from_sequence, to_sequence)
+    }
+
+    fn session_space_stage_restore(
+        &self,
+        space: &SessionSpaceRef,
+        sequence: u64,
+    ) -> Result<SessionSpacePreview> {
+        session_space_store(self.application_home())?.stage_restore(space, sequence)
+    }
+
+    fn session_space_reconstruct(
+        &self,
+        space: &SessionSpaceRef,
+        runtime: Option<&SessionSpaceReadModel>,
+        native_observations: &[SessionSpaceNativeObservation],
+        continuity: &[AgentSessionContinuityEvidence],
+    ) -> Result<SessionSpaceReconstructionReport> {
+        session_space_store(self.application_home())?.reconstruct(
+            space,
+            runtime,
+            native_observations,
+            continuity,
+        )
+    }
+
+    fn session_space_reconcile(
+        &self,
+        space: &SessionSpaceRef,
+        runtime: Option<&SessionSpaceReadModel>,
+        native_observations: &[SessionSpaceNativeObservation],
+        continuity: &[AgentSessionContinuityEvidence],
+    ) -> Result<SessionSpaceReconstructionReport> {
+        self.session_space_reconstruct(space, runtime, native_observations, continuity)
+    }
+
+    fn session_space_explain(
+        &self,
+        space: &SessionSpaceRef,
+        reconstruction: Option<SessionSpaceReconstructionReport>,
+    ) -> Result<SessionSpaceExplainEvidence> {
+        let store = session_space_store(self.application_home())?;
+        explain_session_space_with_receipts(&store, space, reconstruction)
     }
 
     fn capsule(&self, id: &CapsuleId) -> Option<&Capsule>;

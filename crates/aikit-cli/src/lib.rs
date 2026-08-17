@@ -31,7 +31,12 @@ pub mod profile_ops;
 pub mod project_binding;
 pub mod projects;
 pub mod run;
+pub mod session_space_ops;
+pub mod session_space_service;
 pub mod skill_sources;
 pub mod task;
 pub mod tree_build;
 pub mod ui;
+
+pub use session_space_ops::SessionSpaceCliAdapter;
+pub use session_space_service::SessionSpaceServiceOps;

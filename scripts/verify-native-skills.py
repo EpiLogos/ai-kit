@@ -13,6 +13,7 @@ EXPECTED = {
     "skill/aikit/skill-authoring",
     "skill/aikit/knowledge-navigation",
     "skill/aikit/runtime-operation",
+    "skill/aikit/session-space",
     "skill/aikit/provider-authoring",
     "skill/aikit/component-surface-authoring",
     "skill/aikit/verification",

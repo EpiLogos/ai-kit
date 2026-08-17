@@ -20,7 +20,8 @@ use aikit_core::search::SearchDoc;
 use aikit_core::{FamiliarityObservation, FamiliarityStore, Result};
 
 use aikit_store::{
-    familiarity_observation_event, replay_familiarity, EventRecorder, FamiliarityReplay,
+    familiarity_observation_event, replay_familiarity, AikitHome, EventRecorder,
+    FamiliarityReplay,
 };
 
 use aikit_tui::application::RelationView;
@@ -111,6 +112,10 @@ impl PaletteBackend for V2SurfaceService<'_> {
 
     fn scope_layers(&self) -> Option<&[ScopeLayer]> {
         <Service as PaletteBackend>::scope_layers(self.service)
+    }
+
+    fn application_home(&self) -> Option<&AikitHome> {
+        Some(self.service.home())
     }
 
     fn documents(&self) -> Vec<SearchDoc> {
