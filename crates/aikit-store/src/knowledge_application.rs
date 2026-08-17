@@ -146,7 +146,7 @@ impl KnowledgeApplicationStore {
         state.next_sequence = state.next_sequence.saturating_add(1);
         let receipt = KnowledgeApplicationReceipt {
             schema: KNOWLEDGE_APPLICATION_STORE_VERSION.into(),
-            receipt_id: format!("knowledge-receipt/{}", Ulid::new()),
+            receipt_id: format!("knowledge-receipt/{}", Ulid::generate()),
             sequence,
             recorded_at_ms: now_ms(),
             operation,
@@ -201,7 +201,7 @@ impl KnowledgeApplicationStore {
                 format!("could not encode Knowledge history: {error}"),
             )
         })?;
-        let temp = parent.join(format!(".application-history-{}.tmp", Ulid::new()));
+        let temp = parent.join(format!(".application-history-{}.tmp", Ulid::generate()));
         {
             let mut file = fs::File::create(&temp)
                 .map_err(|error| io_error("knowledge.history_write_failed", &temp, error))?;
