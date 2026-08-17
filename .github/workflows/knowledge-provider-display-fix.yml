@@ -1,0 +1,35 @@
+name: Knowledge provider display fix
+
+on:
+  push:
+    branches:
+      - agent/knowledge-navigation-production-closure
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/knowledge-navigation-production-closure
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: python3 scripts/knowledge_provider_display_fix.py
+      - run: |
+          rm scripts/knowledge_provider_display_fix.py
+          rm .github/workflows/knowledge-provider-display-fix.yml
+          rustfmt --edition 2021 crates/aikit-tui/src/application_service.rs
+      - run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "fix(knowledge): render mandatory provider identity"
+          git push origin HEAD:agent/knowledge-navigation-production-closure
+      - run: cargo check -p aikit-core -p aikit-store -p aikit-tui -p aikit-cli
+      - run: cargo test -p aikit-cli --test knowledge_application_v2
