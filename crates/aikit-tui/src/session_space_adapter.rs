@@ -6,14 +6,15 @@
 //! models suitable for the existing TUI application surface.
 
 use aikit_core::project::ProjectRef;
-use aikit_core::session_space::SessionSpaceRef;
+use aikit_core::session_space::{SessionSpaceReadModel, SessionSpaceRef};
 use aikit_core::session_space_application::{
-    SessionSpaceExplanation, SessionSpaceMutation, SessionSpacePreview,
-    SessionSpaceReconstructionReport,
+    AgentSessionContinuityEvidence, SessionSpaceMutation, SessionSpaceNativeObservation,
+    SessionSpacePreview, SessionSpaceReconstructionReport,
 };
 use aikit_core::Result;
 use aikit_store::{
-    SessionSpaceApplicationStore, SessionSpaceHistoryComparison, SessionSpaceReceipt,
+    explain_session_space_with_receipts, SessionSpaceApplicationStore,
+    SessionSpaceExplainEvidence, SessionSpaceHistoryComparison, SessionSpaceReceipt,
 };
 use serde_json::{to_value, Value};
 
@@ -32,6 +33,10 @@ impl<'a> SessionSpaceApplicationAdapter<'a> {
 
     pub fn show(&self, space: &SessionSpaceRef) -> Result<Value> {
         json_value(self.store.load(space)?)
+    }
+
+    pub fn open(&self, space: &SessionSpaceRef) -> Result<Value> {
+        self.show(space)
     }
 
     pub fn discover(&self, project: Option<&ProjectRef>) -> Result<Value> {
@@ -71,12 +76,35 @@ impl<'a> SessionSpaceApplicationAdapter<'a> {
         self.store.stage_restore(space, sequence)
     }
 
+    pub fn reconstruct(
+        &self,
+        space: &SessionSpaceRef,
+        runtime: Option<&SessionSpaceReadModel>,
+        native_observations: &[SessionSpaceNativeObservation],
+        continuity: &[AgentSessionContinuityEvidence],
+    ) -> Result<SessionSpaceReconstructionReport> {
+        self.store
+            .reconstruct(space, runtime, native_observations, continuity)
+    }
+
+    /// Reconcile is the current-state reading of the same canonical-vs-observed
+    /// relation model. It does not mutate provider state or manufacture recovery.
+    pub fn reconcile(
+        &self,
+        space: &SessionSpaceRef,
+        runtime: Option<&SessionSpaceReadModel>,
+        native_observations: &[SessionSpaceNativeObservation],
+        continuity: &[AgentSessionContinuityEvidence],
+    ) -> Result<SessionSpaceReconstructionReport> {
+        self.reconstruct(space, runtime, native_observations, continuity)
+    }
+
     pub fn explain(
         &self,
         space: &SessionSpaceRef,
         reconstruction: Option<SessionSpaceReconstructionReport>,
-    ) -> Result<SessionSpaceExplanation> {
-        self.store.explain(space, reconstruction)
+    ) -> Result<SessionSpaceExplainEvidence> {
+        explain_session_space_with_receipts(self.store, space, reconstruction)
     }
 }
 
