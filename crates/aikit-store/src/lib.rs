@@ -37,6 +37,7 @@
 //! | Who reviewed what? | [`trust`] |
 //! | Why did two panes not corrupt each other? | [`locks`], [`generation`] |
 //! | What actually lands in `current/`? | [`generation`] |
+//! | What changed between two immutable Project worlds? | [`generation_history`] |
 //! | What was recorded, and what was deliberately not? | [`events`] |
 //! | How is learned accessibility rebuilt? | [`familiarity`] |
 //! | How are existing authorities projected into Explain/History? | [`history_evidence`] |
@@ -55,6 +56,7 @@ pub mod edit;
 pub mod events;
 pub mod familiarity;
 pub mod generation;
+pub mod generation_history;
 pub mod history_evidence;
 pub mod home;
 pub mod inbox;
@@ -83,6 +85,7 @@ pub use familiarity::{
     FAMILIARITY_RESET_EVENT,
 };
 pub use generation::{CommittedGeneration, GenerationBuilder, GenerationMetadata, StagedGeneration};
+pub use generation_history::{compare_generation_worlds, GenerationWorldComparison};
 pub use history_evidence::{
     familiarity_history_evidence_model, generation_history_evidence,
     session_space_history_evidence, session_space_receipt_evidence,
