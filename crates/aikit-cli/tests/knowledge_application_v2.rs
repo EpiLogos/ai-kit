@@ -111,6 +111,13 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
         );
         assert!(ranking.navigation_score > ranking.provider_score);
 
+        let explanation = service.knowledge_explain(&source).unwrap();
+        let detail = explanation.detail.expect("Explain carries ranking evidence");
+        assert_eq!(detail["ranking"]["route"]["observations"], 2);
+        assert_eq!(detail["signalClasses"][0], "provider-relevance");
+        assert_eq!(detail["signalClasses"][1], "frecency");
+        assert_eq!(detail["signalClasses"][2], "context");
+
         let frame = service
             .knowledge_frame(Some("authentication evidence"), &[wiki.clone(), source])
             .unwrap();
