@@ -80,7 +80,11 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
         assert_eq!(route.steps.len(), 2);
         assert_eq!(route.steps[0].lens.as_deref(), Some("semantic-wiki"));
         assert_eq!(route.steps[1].lens.as_deref(), Some("source-pool"));
-        assert_eq!(route.steps[1].transition.as_deref(), Some("source"));
+        assert_eq!(
+            route.steps[1].transition.as_deref(),
+            Some("project-map:source"),
+            "cross-lens transition retains ProjectMap provenance instead of counterfeiting a provider-native edge"
+        );
 
         let repeated = service
             .knowledge_route(
