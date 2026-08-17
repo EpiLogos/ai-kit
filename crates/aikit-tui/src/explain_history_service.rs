@@ -11,12 +11,13 @@ use aikit_core::resource::{ResourceIndex, ResourceRef, SourceAuthority};
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::{
     explain_resource_evidence, EvidenceProvenance, ExplainEvidence, ExplainFact,
-    FamiliarityContext, HistoryEvidence, HistoryKind, HistoryReadModel, HistoryRecoverability,
-    Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS, EXPLAIN_HISTORY_VERSION,
+    FamiliarityContext, GenerationId, HistoryEvidence, HistoryKind, HistoryReadModel,
+    HistoryRecoverability, Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS, EXPLAIN_HISTORY_VERSION,
 };
 use aikit_store::{
-    familiarity_history_evidence_model, generation_history_evidence, procedure_history_evidence,
-    session_space_history_evidence, SessionSpaceApplicationStore,
+    compare_generation_worlds, familiarity_history_evidence_model, generation_history_evidence,
+    procedure_history_evidence, session_space_history_evidence, GenerationWorldComparison,
+    SessionSpaceApplicationStore,
 };
 
 use crate::application_service::ApplicationService;
@@ -30,6 +31,14 @@ pub trait ExplainHistoryApplicationService {
     /// Cross-domain History read assembled from existing authorities. No row here
     /// is writable and no TUI-local database exists.
     fn history_evidence(&self, resource: Option<&ResourceRef>) -> Result<HistoryReadModel>;
+
+    /// Compare two immutable Project worlds from their committed Generation locks.
+    /// This does not rerun today's resolver and does not mutate either world.
+    fn compare_generation_evidence(
+        &self,
+        before: &GenerationId,
+        after: &GenerationId,
+    ) -> Result<GenerationWorldComparison>;
 }
 
 impl ExplainHistoryApplicationService for ApplicationService<'_> {
@@ -179,6 +188,21 @@ impl ExplainHistoryApplicationService for ApplicationService<'_> {
                 .then_with(|| right.id.cmp(&left.id))
         });
         Ok(HistoryReadModel::new(entries))
+    }
+
+    fn compare_generation_evidence(
+        &self,
+        before: &GenerationId,
+        after: &GenerationId,
+    ) -> Result<GenerationWorldComparison> {
+        let backend = self.backend();
+        let home = backend.application_home().ok_or_else(|| {
+            aikit_core::AikitError::new(
+                "application.history_home_unavailable",
+                "Generation History comparison requires the canonical AIKit application home",
+            )
+        })?;
+        compare_generation_worlds(home, &backend.context().context_id, before, after)
     }
 }
 
