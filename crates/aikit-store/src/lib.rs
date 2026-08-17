@@ -43,10 +43,12 @@
 //! | How does a capture become a capsule? | [`inbox`] |
 //! | Why did my hand-formatted profile survive a toggle? | [`edit`] |
 //! | Which session is this, after tmux restarted? | [`state`] |
+//! | Which SessionSpace semantic state and receipts survive provider loss? | [`session_space_application`] |
 
 #![forbid(unsafe_code)]
 
 pub mod channel;
+pub mod composition_application;
 pub mod curator;
 pub mod edit;
 pub mod events;
@@ -59,6 +61,7 @@ pub mod locks;
 pub mod procedure;
 pub mod registry;
 pub mod scan;
+pub mod session_space_application;
 pub mod skillsets;
 pub mod state;
 pub mod template;
@@ -67,6 +70,10 @@ pub mod trust;
 // The modules stay the documented home of each type; these are the names the
 // four consuming crates would otherwise import a dozen `use` lines to reach.
 pub use channel::{Evidence, InboxChannel, InboxItem, InboxKind, InboxState, NewItem};
+pub use composition_application::{
+    apply_skillset_relation_mutation, preview_skillset_relation_mutation,
+    SkillSetRelationProcedurePreview, SkillSetRelationProcedureReceipt,
+};
 pub use curator::{curate, detect_drift, report_drift, CurationReport, Drift};
 pub use edit::{OverlayDocument, ProfileDocument};
 pub use events::{Event, EventAction, EventRecorder, Outcome, Timestamp};
@@ -85,6 +92,10 @@ pub use procedure::{
 };
 pub use registry::{load_project_local, load_registry, RegistryLoad, RegistryProblem, Snapshot};
 pub use scan::{Finding, Scanner};
+pub use session_space_application::{
+    SessionSpaceApplicationStore, SessionSpaceHistoryComparison, SessionSpaceReceipt,
+    SESSION_SPACE_STORE_VERSION,
+};
 pub use state::{ContextRecord, SessionRecord, SessionState, StateStore};
 pub use template::{plan_instantiation, ParamValues};
 pub use trust::{TrustSnapshot, TrustStore};

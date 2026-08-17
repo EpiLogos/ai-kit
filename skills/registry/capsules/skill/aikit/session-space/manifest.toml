@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/session-space"
+kind = "skill"
+name = "AIKit SessionSpace operation"
+description = "Inspect, stage, preview, persist, reconstruct, explain and review SessionSpace semantic state through AIKit's shared application authority."
+maturity = "stable"
+tags = ["aikit", "session-space", "operation", "history", "explain"]
+
+[skill]
+root = "payload"

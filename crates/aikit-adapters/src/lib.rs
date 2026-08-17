@@ -17,6 +17,7 @@ pub mod okf;
 pub mod runner;
 pub mod session_space_connection;
 pub mod session_space_observation;
+pub mod session_space_reconstruction;
 pub mod shells;
 pub mod working_environment;
 
@@ -55,6 +56,7 @@ pub use session_space_observation::{
     SessionSpaceFileObservationProvider, SessionSpaceObservationError,
     SESSION_SPACE_OBSERVATION_FILE_VERSION,
 };
+pub use session_space_reconstruction::session_space_native_observations;
 pub use working_environment::{
     MuxSessionSpaceActivationDriver, MuxWorkingEnvironment, NativeBindingKind,
     ProviderNativeBinding, WorkingEnvironmentCapabilities, WorkingEnvironmentHealth,

@@ -19,12 +19,14 @@
 #![forbid(unsafe_code)]
 
 pub mod actor_bootstrap;
+pub mod application_context;
 pub mod arg;
 pub mod capsule;
 pub mod catalog;
 pub mod composition;
 pub mod composition_mutation;
 pub mod composition_view;
+pub mod composition_workspace;
 pub mod context;
 pub mod context_resolution;
 pub mod context_source;
@@ -62,6 +64,7 @@ pub mod scope;
 pub mod search;
 pub mod session;
 pub mod session_space;
+pub mod session_space_application;
 pub mod session_space_contribution;
 pub mod skillset;
 pub mod surfacing;
