@@ -112,6 +112,15 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
         );
         assert!(ranking.navigation_score > ranking.provider_score);
 
+        let exact = service
+            .knowledge_search("wiki:node:authentication", 50)
+            .unwrap();
+        assert_eq!(
+            exact.hits.first().map(|hit| hit.resource.as_str()),
+            Some("wiki:node:authentication"),
+            "learned ease must not hide an exact addressed result"
+        );
+
         let explanation = service.knowledge_explain(&source).unwrap();
         let detail = explanation.detail.expect("Explain carries ranking evidence");
         assert_eq!(detail["ranking"]["route"]["observations"], 2);
