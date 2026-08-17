@@ -22,6 +22,7 @@ pub mod project_workspace_render;
 pub mod project_world_api;
 pub mod project_world_service;
 pub mod session_space_adapter;
+pub mod session_space_service;
 pub mod staging;
 pub mod theme;
 pub mod tree;
@@ -57,6 +58,7 @@ pub use navigation::{
 pub use project_workspace::{ComposeHorizon, ProjectWorkspaceSelection, ProjectWorkspaceState};
 pub use project_world_api::ProjectWorldApplicationService;
 pub use session_space_adapter::SessionSpaceApplicationAdapter;
+pub use session_space_service::SessionSpaceApplicationProjection;
 pub use theme::Theme;
 pub use working_field::{
     select_working_field_subject, working_field_from_session_space, PermissionProjection,
