@@ -168,11 +168,7 @@ impl TuiApplicationService for ApplicationService<'_> {
                 if resources.iter().any(|item| item.resource == hit.resource) {
                     continue;
                 }
-                let provider = hit
-                    .provider
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "provider-neutral".into());
+                let provider = hit.provider.to_string();
                 resources.push(ResourceListItem {
                     resource: hit.resource,
                     kind: hit.kind,
