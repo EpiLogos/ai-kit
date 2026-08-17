@@ -8,7 +8,7 @@ use crate::context::ContextDescriptor;
 use crate::context_resolution::{compose_context_resolution, ContextResolution, RequestedActors};
 use crate::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
 use crate::resolve::ResolvedView;
-use crate::resource::{ResourceRef, ResourceSearchIndex};
+use crate::resource::{ResourceIndex, ResourceRef};
 use crate::scope::ScopeLayer;
 use crate::Result;
 
@@ -22,7 +22,7 @@ pub fn application_context_resolution(
     context: &ContextDescriptor,
     view: &ResolvedView,
     scope_layers: &[ScopeLayer],
-    resources: &ResourceSearchIndex,
+    resources: &dyn ResourceIndex,
 ) -> Result<ContextResolution> {
     let project_ref = project_ref(context)?;
     let constituent = ProjectConstituentRef::parse("source:working-tree")?;
@@ -65,7 +65,7 @@ mod tests {
     use crate::context_resolution::ReferenceResolution;
     use crate::policy::ManagedPolicy;
     use crate::resolve::{resolve, ResolveRequest};
-    use crate::resource::{ResourceDescriptor, ResourceKind, ResourceRecord};
+    use crate::resource::{ResourceDescriptor, ResourceKind, ResourceRecord, ResourceSearchIndex};
     use crate::scope::{LayerOrigin, ScopeKind, ScopeLayer};
     use crate::trust::MemoryTrust;
 
@@ -117,14 +117,10 @@ mod tests {
             Default::default(),
         );
         let view = resolved(&context, vec![layer.clone()]);
+        let resources = ResourceSearchIndex::default();
 
-        let resolution = application_context_resolution(
-            &context,
-            &view,
-            &[layer],
-            &ResourceSearchIndex::default(),
-        )
-        .unwrap();
+        let resolution = application_context_resolution(&context, &view, &[layer], &resources)
+            .unwrap();
 
         assert_eq!(resolution.scopes.len(), 1);
         assert_eq!(resolution.scopes[0].kind, ScopeKind::Project);
