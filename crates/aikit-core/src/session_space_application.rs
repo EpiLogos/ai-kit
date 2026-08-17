@@ -1,21 +1,14 @@
 //! Shared, UI-neutral SessionSpace application contract.
 //!
-//! This module extends the existing [`crate::session_space`] runtime without
-//! replacing it. `SessionSpaceRuntime` remains the owner of live AgentSession,
-//! Component, Surface and connection observations. This module owns only the
-//! durable semantic relations AIKit can author: exact Project/ContextResolution
-//! evidence, attachment intent, portable focus, and references to provider/host/
-//! Workcell/material identities owned elsewhere.
+//! `SessionSpaceRuntime` remains the owner of live AgentSession, Component,
+//! Surface and connection observations. This layer owns only durable semantic
+//! relations AIKit can author: exact Project/ContextResolution evidence,
+//! attachment intent, portable focus, and references to provider/host/Workcell
+//! material identities owned elsewhere.
 //!
-//! Durable mutations follow one law:
-//!
-//! ```text
-//! inspect -> stage typed intent -> preview -> validate basis
-//!         -> apply through store authority -> receipt -> re-read
-//! ```
-//!
-//! No resolver runs here. Explain/reconstruction consume evidence already present
-//! on ContextResolution, SessionSpace runtime readings, and application receipts.
+//! Durable mutations follow the common application law:
+//! inspect -> stage typed intent -> preview -> validate basis -> authoritative
+//! apply -> receipt -> re-read. No resolver runs here.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,11 +22,6 @@ use crate::{AikitError, Result};
 
 pub const SESSION_SPACE_APPLICATION_VERSION: &str = "aikit.session-space-application/v1";
 
-/// Stable, content-addressed reference to the *evidence basis* of one
-/// ContextResolution. This is not another resolver identity: it is derived from
-/// the exact ProjectBinding, resolver hash, catalog revision, ordered scope
-/// provenance, ContextSource refs and requested Host ref already resolved by the
-/// canonical ContextResolution seam.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ContextResolutionRef(ResourceRef);
@@ -55,7 +43,7 @@ pub struct ContextResolutionBasis {
     pub project_binding: ProjectBinding,
     pub resolver_hash: String,
     pub catalog_revision: String,
-    /// Kept in canonical precedence order. SessionSpace never folds/reorders it.
+    /// Canonical precedence order from ContextResolution; never folded here.
     pub scopes: Vec<ScopeResolution>,
     #[serde(default)]
     pub context_sources: Vec<ResourceRef>,
@@ -73,14 +61,13 @@ pub struct ContextResolutionEvidence {
 
 impl ContextResolutionEvidence {
     pub fn from_resolution(resolution: &ContextResolution) -> Result<Self> {
-        let host = resolution.host.as_ref().map(reference_identity);
         let basis = ContextResolutionBasis {
             project_binding: resolution.project_binding.clone(),
             resolver_hash: resolution.deterministic.hash.to_string(),
             catalog_revision: resolution.deterministic.catalog_revision.clone(),
             scopes: resolution.scopes.clone(),
             context_sources: resolution.retrieval.context_sources.clone(),
-            host,
+            host: resolution.host.as_ref().map(reference_identity),
         };
         let encoded = serde_json::to_vec(&basis).map_err(|error| {
             AikitError::new(
@@ -120,8 +107,6 @@ fn reference_identity(resolution: &ReferenceResolution) -> ResourceRef {
     }
 }
 
-/// Explicit Project membership plus its independently resolved Context evidence.
-/// There is deliberately no aggregate Project or aggregate Context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSpaceProjectContextBinding {
     pub project: ProjectRef,
@@ -171,7 +156,6 @@ pub struct SessionSpaceSurfaceAttachmentIntent {
     pub provenance: Vec<String>,
 }
 
-/// A durable reference to native material, never ownership of the native object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionSpaceNativeReferenceKind {
@@ -206,10 +190,6 @@ pub struct SessionSpaceFocus {
     pub provenance: Vec<String>,
 }
 
-/// Canonical durable SessionSpace semantic state. The embedded Definition remains
-/// the existing SessionSpace identity/project-membership declaration; the fields
-/// beside it are the richer #62 application bindings that the runtime explicitly
-/// left to this layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSpaceAuthoredState {
     pub version: String,
@@ -333,9 +313,6 @@ pub enum SessionSpaceMutation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         focus: Option<SessionSpaceFocus>,
     },
-    /// Restore is only constructed by the persistence authority from an immutable
-    /// historical receipt. Callers select a receipt/revision; they do not write
-    /// arbitrary historical bytes into the canonical file.
     Restore {
         target: Box<SessionSpaceAuthoredState>,
         evidence: String,
@@ -472,30 +449,50 @@ fn apply_intent(
             {
                 state.focus = None;
             }
-            changed.push(change("agent-session", agent_session.as_str(), "attachment-intent-removed"));
+            changed.push(change(
+                "agent-session",
+                agent_session.as_str(),
+                "attachment-intent-removed",
+            ));
         }
         SessionSpaceMutation::AttachSurface { attachment } => {
             state
                 .surfaces
                 .insert(attachment.surface.clone(), attachment.clone());
-            changed.push(change("surface", attachment.surface.as_str(), "attachment-intent-added"));
+            changed.push(change(
+                "surface",
+                attachment.surface.as_str(),
+                "attachment-intent-added",
+            ));
         }
         SessionSpaceMutation::DetachSurface { surface } => {
             state.surfaces.remove(surface);
             if state.focus.as_ref().is_some_and(|focus| focus.target == *surface) {
                 state.focus = None;
             }
-            changed.push(change("surface", surface.as_str(), "attachment-intent-removed"));
+            changed.push(change(
+                "surface",
+                surface.as_str(),
+                "attachment-intent-removed",
+            ));
         }
         SessionSpaceMutation::BindNativeReference { binding } => {
             state
                 .native_references
                 .insert(binding.reference.clone(), binding.clone());
-            changed.push(change("native-reference", binding.reference.as_str(), "bound"));
+            changed.push(change(
+                "native-reference",
+                binding.reference.as_str(),
+                "bound",
+            ));
         }
         SessionSpaceMutation::UnbindNativeReference { reference } => {
             state.native_references.remove(reference);
-            if state.focus.as_ref().is_some_and(|focus| focus.target == *reference) {
+            if state
+                .focus
+                .as_ref()
+                .is_some_and(|focus| focus.target == *reference)
+            {
                 state.focus = None;
             }
             changed.push(change("native-reference", reference.as_str(), "unbound"));
@@ -518,8 +515,15 @@ fn apply_intent(
             let next_revision = state.revision;
             *state = (**target).clone();
             state.revision = next_revision;
-            state.definition.provenance.push(format!("restored from {evidence}"));
-            changed.push(change("session-space", state.id().to_string(), "historical-state-restored"));
+            state
+                .definition
+                .provenance
+                .push(format!("restored from {evidence}"));
+            changed.push(change(
+                "session-space",
+                state.id().to_string(),
+                "historical-state-restored",
+            ));
         }
     }
     Ok(())
@@ -551,8 +555,6 @@ pub struct SessionSpaceNativeObservation {
     pub reason: Option<String>,
 }
 
-/// Explicit proof supplied by the AgentSession owner. A connected transport or a
-/// matching provider-native session id is intentionally insufficient by itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSessionContinuityEvidence {
     pub agent_session: ResourceRef,
@@ -588,8 +590,6 @@ pub struct SessionSpaceReconstructionReport {
     pub space: SessionSpaceRef,
     pub semantic_revision: u64,
     pub relations: Vec<ReconstructionRelation>,
-    /// Provider window/pane/layout geometry is observation, never canonical
-    /// SessionSpace semantics, so reconstruction explicitly refuses to invent it.
     pub provider_native_detail: ReconstructionStatus,
 }
 
@@ -613,7 +613,11 @@ pub fn reconstruct_session_space(
 
     let runtime_sessions: BTreeSet<_> = runtime
         .into_iter()
-        .flat_map(|view| view.agent_sessions.iter().map(|binding| binding.agent_session.clone()))
+        .flat_map(|view| {
+            view.agent_sessions
+                .iter()
+                .map(|binding| binding.agent_session.clone())
+        })
         .collect();
     let continuity: BTreeMap<_, _> = continuity
         .iter()
@@ -644,7 +648,9 @@ pub fn reconstruct_session_space(
             reference: session.to_string(),
             status,
             reason,
-            evidence: proof.map(|proof| proof.provenance.clone()).unwrap_or_default(),
+            evidence: proof
+                .map(|proof| proof.provenance.clone())
+                .unwrap_or_default(),
         });
     }
 
@@ -760,7 +766,7 @@ mod tests {
     fn evidence(name: &str, origin: &str, hash: &str) -> ContextResolutionEvidence {
         let project = project(name);
         let binding = ProjectBinding::new(
-            project.clone(),
+            project,
             ProjectConstituentRef::parse("source:working-tree").unwrap(),
             ProjectBindingLocator::Remote {
                 locator: format!("https://example.invalid/{name}"),
@@ -775,8 +781,9 @@ mod tests {
                 depth: 0,
                 origin: origin.into(),
             }],
-            context_sources: vec![ResourceRef::parse(&format!("context-source/{name}"))
-                .unwrap()],
+            context_sources: vec![
+                ResourceRef::parse(&format!("context-source/{name}")).unwrap(),
+            ],
             host: None,
         };
         let bytes = serde_json::to_vec(&basis).unwrap();
@@ -822,15 +829,15 @@ mod tests {
         }
         assert_eq!(state.project_contexts.len(), 2);
         assert_ne!(
-            state.project_contexts[&project("a")].context.reference,
-            state.project_contexts[&project("b")].context.reference
+            state.project_contexts[&project("a")].reference,
+            state.project_contexts[&project("b")].reference
         );
         assert_eq!(
-            state.project_contexts[&project("a")].context.basis.scopes[0].origin,
+            state.project_contexts[&project("a")].basis.scopes[0].origin,
             "/a/.aikit/profile.toml"
         );
         assert_eq!(
-            state.project_contexts[&project("b")].context.basis.scopes[0].origin,
+            state.project_contexts[&project("b")].basis.scopes[0].origin,
             "/b/.aikit/profile.toml"
         );
     }
@@ -899,7 +906,11 @@ mod tests {
             .find(|relation| relation.reference == agent.as_str())
             .unwrap();
         assert_eq!(relation.status, ReconstructionStatus::Degraded);
-        assert!(relation.reason.as_deref().unwrap().contains("continuity is unproven"));
+        assert!(relation
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("continuity is unproven"));
     }
 
     #[test]
