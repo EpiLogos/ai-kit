@@ -6,6 +6,7 @@ pub mod agent_connection;
 pub mod bkmr;
 pub mod clients;
 pub mod composition_topology;
+pub mod connection_process;
 pub mod deepseek_harness;
 pub mod deepseek_live;
 pub mod deepseek_maximal;
@@ -17,6 +18,7 @@ pub mod runner;
 pub mod session_space_connection;
 pub mod session_space_observation;
 pub mod shells;
+pub mod working_environment;
 
 pub use agent_connection::{
     AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest,
@@ -30,6 +32,7 @@ pub use composition_topology::{
     resolve_component_topology, ComponentContainment, HarnessCompositionTopology,
     HARNESS_COMPOSITION_TOPOLOGY_VERSION,
 };
+pub use connection_process::ConnectionProcess;
 pub use deepseek_harness::{
     deepseek_harness_conformance, DeepSeekHarnessConformance, DeepSeekShellProvider,
     DEEPSEEK_HARNESS_RELEASE, DEEPSEEK_HARNESS_UPSTREAM_REVISION,
@@ -51,4 +54,10 @@ pub use session_space_connection::connection_into_session_space;
 pub use session_space_observation::{
     SessionSpaceFileObservationProvider, SessionSpaceObservationError,
     SESSION_SPACE_OBSERVATION_FILE_VERSION,
+};
+pub use working_environment::{
+    MuxSessionSpaceActivationDriver, MuxWorkingEnvironment, NativeBindingKind,
+    ProviderNativeBinding, WorkingEnvironmentCapabilities, WorkingEnvironmentHealth,
+    WorkingEnvironmentObservation, WorkingEnvironmentProvider,
+    WORKING_ENVIRONMENT_PROVIDER_VERSION,
 };
