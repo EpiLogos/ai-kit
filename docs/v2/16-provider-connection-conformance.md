@@ -60,6 +60,8 @@ The existing `Cmux` adapter remains the sole controller. `working_environment_cm
 
 The lane is intentionally gated by `AIKIT_CMUX_REAL`. A host without a real cmux app/control socket is not Closure evidence and is reported as skipped.
 
+A cmux workspace or surface can **host** an explicitly bound AgentSession relation, but cmux does not itself own an AgentSession protocol. The provider seam therefore does not claim native AgentSession resume/continuity from a cmux id.
+
 ## tmux
 
 `working_environment_tmux_real.rs` uses a real private tmux server and proves:
@@ -77,6 +79,8 @@ The lane is intentionally gated by `AIKIT_CMUX_REAL`. A host without a real cmux
 
 The existing tmux adapter remains authoritative for presentation truth: `true_popup` is a real capability; non-popup providers remain inline rather than being cosmetically simulated.
 
+As with cmux, tmux can host an AgentSession's terminal Surface but tmux persistence is not AgentSession continuity and no native attach/resume protocol is invented.
+
 ## VS Code rich IDE specimen
 
 The fixture under `provider-fixtures/vscode-session-space/` launches actual VS Code `1.133.0` with two workspace roots and proves through the stable extension API:
@@ -92,6 +96,14 @@ The fixture under `provider-fixtures/vscode-session-space/` launches actual VS C
 `fixture.code-workspace` is only the launch input to VS Code. It is not an AIKit SessionSpace store and contains no canonical SessionSpace identity.
 
 VS Code provider identity is likewise not Project, Surface or AgentSession identity. An external integration participates through the public working-environment seam and explicit bindings.
+
+### Stable AgentSession limitation
+
+The current stable VS Code extension API does **not** expose a general API for enumerating, attaching, detaching or rebinding arbitrary existing chat/agent sessions. Current VS Code documentation describes `chatSessionsProvider` as a **proposed** API, and the public API does not provide general observation/history injection for sessions owned by VS Code/Copilot.
+
+Therefore this specimen proves a real agent/conversation **Surface**, but it does not claim stable public AgentSession attach/detach/rebind. #63 must remain open unless that acceptance is satisfied by a genuinely supported current provider/API or the ticket is explicitly narrowed. Private workspace storage and proposed APIs are not accepted as a substitute.
+
+Current Zed documentation was also rechecked because its product-level Threads Sidebar, ACP External Agents and Terminal Threads provide richer native agent-session UX. That is useful candidate pressure, but this pass did not prove a stable external control/API seam that would let AIKit bind/focus those objects without private Zed internals, so it is not silently substituted for the actual VS Code proof.
 
 ## ACP
 
@@ -152,4 +164,4 @@ This branch removes two lower-level uncertainties for the unified terminal worki
 - #67 can consume one provider-neutral working-environment seam for tmux/cmux/IDE focus and provider health instead of owning a mux;
 - #67 can consume one real process transport under `aikit.connection-adapter/v1` for ACP/classic conversation lifecycles instead of implementing a protocol adapter.
 
-#67 still depends on #62's application/persistence operations for the enclosing durable SessionSpace read/write experience. A skipped real cmux lane also remains a #63 closure blocker until exercised on a real current cmux host.
+#67 still depends on #62's application/persistence operations for the enclosing durable SessionSpace read/write experience. #63 also remains open until both the real current cmux gate and the rich-IDE AgentSession attach/detach/rebind acceptance have genuine provider evidence.
