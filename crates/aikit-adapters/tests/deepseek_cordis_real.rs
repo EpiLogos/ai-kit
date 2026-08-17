@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use aikit_adapters::{
-    deepseek_live_cordis_composition, CordisProcessActivationDriver, DeepSeekShellProvider,
-    DEEPSEEK_HARNESS_UPSTREAM_REVISION,
+    deepseek_live_cordis_composition, CordisActivationGrant, CordisActivationOperation,
+    CordisProcessActivationDriver, DeepSeekShellProvider, DEEPSEEK_HARNESS_UPSTREAM_REVISION,
 };
 use aikit_core::resource::ResourceRef;
 use aikit_core::{
@@ -15,7 +15,7 @@ fn r(raw: &str) -> ResourceRef {
 }
 
 #[test]
-fn real_pinned_deepseek_cordis_web_activates_inside_session_space() {
+fn real_pinned_deepseek_cordis_web_activates_inside_session_space_with_exact_authority() {
     let Some(checkout) = std::env::var_os("AIKIT_DEEPSEEK_HARNESS_CHECKOUT") else {
         assert!(
             std::env::var_os("AIKIT_REQUIRE_DEEPSEEK_CORDIS_REAL").is_none(),
@@ -34,18 +34,20 @@ fn real_pinned_deepseek_cordis_web_activates_inside_session_space() {
         Some(DEEPSEEK_HARNESS_UPSTREAM_REVISION)
     );
     let body_fingerprint = live.composition.fingerprint.clone();
+    let space = SessionSpaceRef::parse("session-space/deepseek-real").unwrap();
+    let agent_session = r("agent-session/deepseek-real");
+    let harness = live.composition.harness.clone();
 
     let mut runtime = SessionSpaceRuntime::open(
-        SessionSpaceDefinition::new(SessionSpaceRef::parse("session-space/deepseek-real").unwrap())
-            .with_provenance(format!(
-                "real DeepSeek Harness Cordis acceptance @{DEEPSEEK_HARNESS_UPSTREAM_REVISION}"
-            )),
+        SessionSpaceDefinition::new(space.clone()).with_provenance(format!(
+            "real DeepSeek Harness Cordis acceptance @{DEEPSEEK_HARNESS_UPSTREAM_REVISION}"
+        )),
     )
     .unwrap();
     let lease = runtime
         .bind_agent_session(SessionSpaceAgentSession {
-            agent_session: r("agent-session/deepseek-real"),
-            harness: live.composition.harness.clone(),
+            agent_session: agent_session.clone(),
+            harness: harness.clone(),
             native_session_id: None,
             provider: Some(r("provider/deepseek/cordis-web")),
             provenance: vec!["real provider acceptance binding".into()],
@@ -55,6 +57,27 @@ fn real_pinned_deepseek_cordis_web_activates_inside_session_space() {
 
     let component = r("component/deepseek/client-ui-conversation");
     let mut driver = CordisProcessActivationDriver::deepseek_web(&checkout);
+    for (operation, grant_ref) in [
+        (CordisActivationOperation::Activate, "authority/real-activate"),
+        (CordisActivationOperation::Deactivate, "authority/real-deactivate"),
+    ] {
+        driver
+            .register_activation_grant(CordisActivationGrant {
+                grant_ref: grant_ref.into(),
+                authority_ref: format!("actuation/determination/{grant_ref}"),
+                operation,
+                space: space.clone(),
+                agent_session: agent_session.clone(),
+                harness: harness.clone(),
+                component: component.clone(),
+                composition_fingerprint: body_fingerprint.clone(),
+                implementation_revision: DEEPSEEK_HARNESS_UPSTREAM_REVISION.into(),
+                expires_at_unix_ms: u64::MAX,
+                max_uses: 1,
+            })
+            .unwrap();
+    }
+
     let state = runtime
         .activate_component(&lease, &component, &mut driver)
         .unwrap();
@@ -79,6 +102,10 @@ fn real_pinned_deepseek_cordis_web_activates_inside_session_space() {
         .provenance
         .iter()
         .any(|source| source.contains(DEEPSEEK_HARNESS_UPSTREAM_REVISION)));
+    assert!(active
+        .provenance
+        .iter()
+        .any(|source| source.contains("actuation/determination/authority/real-activate")));
     assert!(read_model.surfaces.iter().any(|surface| {
         surface.component.as_ref() == Some(&component)
     }));
