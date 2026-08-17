@@ -16,6 +16,9 @@ pub struct CredentialSetupView {
     pub purpose: String,
     pub native_provider: SecretProviderDescriptor,
     pub env_var: Option<String>,
+    /// Whether an environment-import route is declared/eligible for disclosure.
+    /// This does not mean the raw value has been read; that happens only after
+    /// the operator explicitly chooses `--from-env`.
     pub env_available: bool,
     pub encrypted_fallback_available: bool,
     pub headless: bool,
@@ -62,11 +65,7 @@ pub fn render_credential_setup_panel(view: &CredentialSetupView) -> String {
         if let Some(env_var) = &view.env_var {
             lines.push(format!(
                 "Explicit environment import: --from-env --env-var {env_var} ({})",
-                if view.env_available {
-                    "present"
-                } else {
-                    "not present"
-                }
+                env_route_status(view.env_available)
             ));
         }
         return lines.join("\n");
@@ -77,11 +76,7 @@ pub fn render_credential_setup_panel(view: &CredentialSetupView) -> String {
     if let Some(env_var) = &view.env_var {
         lines.push(format!(
             "  [2] Import explicitly from {env_var} (--from-env) · {} · lowest tier",
-            if view.env_available {
-                "present"
-            } else {
-                "not present"
-            }
+            env_route_status(view.env_available)
         ));
     } else {
         lines.push("  [2] Import explicitly from a named environment variable (--from-env --env-var NAME) · lowest tier".into());
@@ -99,6 +94,14 @@ pub fn render_credential_setup_panel(view: &CredentialSetupView) -> String {
 pub fn credential_setup_widget(view: &CredentialSetupView) -> Paragraph<'static> {
     Paragraph::new(render_credential_setup_panel(view))
         .block(Block::default().borders(Borders::ALL).title("Credentials"))
+}
+
+fn env_route_status(declared: bool) -> &'static str {
+    if declared {
+        "route declared; value unread until explicit selection"
+    } else {
+        "route unavailable"
+    }
 }
 
 fn tier_name(tier: SecretProviderTier) -> &'static str {
@@ -165,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn interactive_panel_keeps_env_import_visible() {
+    fn interactive_panel_keeps_env_import_visible_without_claiming_value_was_read() {
         insta::assert_snapshot!(render_credential_setup_panel(&view(false)), @r###"
         Credential setup
         Credential: credential:openai/research
@@ -177,7 +180,7 @@ mod tests {
 
         Choose a credential source:
           [1] Enter secret and bind it to the OS secure store
-          [2] Import explicitly from OPENAI_API_KEY (--from-env) · present · lowest tier
+          [2] Import explicitly from OPENAI_API_KEY (--from-env) · route declared; value unread until explicit selection · lowest tier
           [q] Cancel
         "###);
     }
@@ -188,5 +191,6 @@ mod tests {
         assert!(!rendered.contains("Enter secret"));
         assert!(rendered.contains("no secret prompt"));
         assert!(rendered.contains("--from-env"));
+        assert!(rendered.contains("value unread until explicit selection"));
     }
 }
