@@ -56,6 +56,7 @@ pub mod generation;
 pub mod home;
 pub mod inbox;
 pub mod index;
+pub mod knowledge_application;
 pub mod locks;
 pub mod procedure;
 pub mod registry;
@@ -82,6 +83,10 @@ pub use generation::{CommittedGeneration, GenerationBuilder, GenerationMetadata,
 pub use home::AikitHome;
 pub use inbox::{Candidate, CandidateState, Capture, Inbox, PromotionEdits, Similarity};
 pub use index::{CapsuleFilter, CapsuleRow, Facets, Index, ReindexReport};
+pub use knowledge_application::{
+    KnowledgeApplicationReceipt, KnowledgeApplicationStore, KnowledgeHistoryOperation,
+    KNOWLEDGE_APPLICATION_STORE_VERSION,
+};
 pub use locks::{ContextLock, LockOptions};
 pub use procedure::{
     plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner,

@@ -154,7 +154,8 @@ pub use knowledge_code::{
 };
 pub use knowledge_navigation::{
     KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation, KnowledgeProviderStatus,
-    KnowledgeSearchHit, KnowledgeSearchResult, SourcePoolBinding, KNOWLEDGE_APPLICATION_VERSION,
+    KnowledgeRankingEvidence, KnowledgeSearchHit, KnowledgeSearchResult, SourcePoolBinding,
+    KNOWLEDGE_APPLICATION_VERSION,
 };
 pub use knowledge_operations::{
     KnowledgeOperations, KnowledgeSources, KNOWLEDGE_OPERATIONS_VERSION,

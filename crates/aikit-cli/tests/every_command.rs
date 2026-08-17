@@ -70,6 +70,9 @@ fn run(home: &Path, project: &Path, args: &[&str]) -> (bool, Value) {
 const READ_ONLY: &[&[&str]] = &[
     &["status"],
     &["search", "greet"],
+    &["knowledge", "status"],
+    &["knowledge", "search", "greet"],
+    &["knowledge", "history"],
     &["explain", "script/demo/greet"],
     &["diff"],
     &["doctor"],

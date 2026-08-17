@@ -378,6 +378,13 @@ pub struct KnowledgeContextPack {
     pub absences: Vec<String>,
     #[serde(default)]
     pub explanations: Vec<String>,
+    /// Conflicts observed in the materialised retrieval result. This never authors
+    /// a provider relation or resolves the contradiction on the provider's behalf.
+    #[serde(default)]
+    pub contradictions: Vec<String>,
+    /// Questions left open by explicit provider/read absences.
+    #[serde(default)]
+    pub open_questions: Vec<String>,
     #[serde(default)]
     pub budget: ContextPackBudget,
 }
@@ -392,8 +399,40 @@ impl KnowledgeContextPack {
             readings: Vec::new(),
             absences: Vec::new(),
             explanations: Vec::new(),
+            contradictions: Vec::new(),
+            open_questions: Vec::new(),
             budget: ContextPackBudget::default(),
         }
+    }
+
+    /// Derive only uncertainty already evidenced by this pack. Provider-owned
+    /// semantics are not normalised or silently reconciled here.
+    pub fn derive_uncertainty(&mut self) {
+        self.contradictions.clear();
+        for (index, left) in self.readings.iter().enumerate() {
+            for right in self.readings.iter().skip(index + 1) {
+                if left.resource != right.resource {
+                    continue;
+                }
+                let conflicts = left.revision != right.revision
+                    || left.content != right.content
+                    || left.authority != right.authority;
+                if conflicts {
+                    let finding = format!(
+                        "conflicting materialised readings for {} (provider/revision/authority evidence differs)",
+                        left.resource
+                    );
+                    if !self.contradictions.contains(&finding) {
+                        self.contradictions.push(finding);
+                    }
+                }
+            }
+        }
+        self.open_questions = self
+            .absences
+            .iter()
+            .map(|absence| format!("unresolved provider/material question: {absence}"))
+            .collect();
     }
 }
 

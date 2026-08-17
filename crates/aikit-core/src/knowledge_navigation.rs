@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::familiarity::FamiliarityContext;
+use crate::familiarity::{AccessibilityAssessment, FamiliarityContext};
 use crate::knowledge::{
     KnowledgeContextPack, KnowledgeReading, KnowledgeRelationView, KnowledgeRoute,
     KnowledgeRouteStep, RelationDirection, RelationEdge, RelationNode, RelationOrigin,
@@ -48,11 +48,23 @@ pub struct KnowledgeSearchHit {
     pub resource: ResourceRef,
     pub kind: ResourceKind,
     pub label: String,
+    /// Provider-native relevance score. Learned accessibility never overwrites it.
     pub score: f64,
     #[serde(default)]
     pub snippet: String,
     pub provider: ProviderRef,
     pub authority: SourceAuthority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranking: Option<KnowledgeRankingEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeRankingEvidence {
+    pub provider_score: f64,
+    pub navigation_score: f64,
+    pub destination: AccessibilityAssessment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<AccessibilityAssessment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -205,6 +217,7 @@ impl<'a> KnowledgeApplication<'a> {
                     snippet: hit.summary,
                     provider: wiki.status().provider,
                     authority: SourceAuthority::Authored,
+                    ranking: None,
                 }
             }));
         } else {
@@ -238,6 +251,7 @@ impl<'a> KnowledgeApplication<'a> {
                         snippet: hit.snippet,
                         provider: hit.provider,
                         authority: SourceAuthority::Observed,
+                        ranking: None,
                     }
                 })),
                 Err(error) => absences.push(format!(
@@ -262,6 +276,7 @@ impl<'a> KnowledgeApplication<'a> {
                             snippet: hit.snippet,
                             provider: hit.provider,
                             authority: SourceAuthority::Derived,
+                            ranking: None,
                         }
                     })),
                     Err(error) => absences.push(format!(
@@ -297,12 +312,26 @@ impl<'a> KnowledgeApplication<'a> {
                     snippet: format!("explicit {:?} ProjectMap endpoint", endpoint.lens),
                     provider: endpoint.provider.clone().unwrap_or_else(project_map_provider),
                     authority: endpoint.authority,
+                    ranking: None,
                 })
             }));
         } else {
             absences.push("ProjectMap endpoint search unavailable: federation absent".into());
         }
 
+        // ProjectMap is a federation fallback, not a richer operational
+        // address. If a provider-native hit for the same canonical ResourceRef
+        // is already present, keep that native address while leaving provider
+        // relevance to rank distinct resources and duplicate native providers.
+        let native_resources = hits
+            .iter()
+            .filter(|hit| !matches!(hit.address, KnowledgeAddress::ProjectMap(_)))
+            .map(|hit| hit.resource.to_string())
+            .collect::<HashSet<_>>();
+        hits.retain(|hit| {
+            !matches!(hit.address, KnowledgeAddress::ProjectMap(_))
+                || !native_resources.contains(&hit.resource.to_string())
+        });
         hits.sort_by(|left, right| {
             right
                 .score
@@ -574,6 +603,7 @@ impl<'a> KnowledgeApplication<'a> {
         if let Ok(route) = self.route(query, addresses) {
             pack.routes.push(route);
         }
+        pack.derive_uncertainty();
         pack
     }
 
@@ -1227,6 +1257,33 @@ mod tests {
                 && edge.origin.lens.as_deref() == Some("project-map")
         }));
         assert!(app.status().project_map);
+    }
+
+    #[test]
+    fn search_prefers_provider_native_address_over_project_map_projection() {
+        let index = wiki();
+        let wiki_provider = SemanticWikiProvider::new(&index);
+        let mut project_map = ProjectMap::new();
+        project_map
+            .add_endpoint(endpoint(
+                "wiki:node:auth",
+                ProjectLens::SemanticWiki,
+                ResourceKind::KnowledgeNode,
+                SourceAuthority::Authored,
+            ))
+            .unwrap();
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(wiki_provider)
+            .with_project_map(&project_map);
+
+        let result = app.search("wiki:node:auth", 10);
+        let hit = result
+            .hits
+            .iter()
+            .find(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .expect("Wiki resource is discoverable");
+        assert!(matches!(hit.address, KnowledgeAddress::Wiki(_)));
+        assert_ne!(hit.provider, project_map_provider());
     }
 
     #[test]
