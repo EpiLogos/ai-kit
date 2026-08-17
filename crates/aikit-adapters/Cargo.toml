@@ -16,6 +16,7 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 shell-words = { workspace = true }
 jiff = { workspace = true }
+blake3 = { workspace = true }
 keyring = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
