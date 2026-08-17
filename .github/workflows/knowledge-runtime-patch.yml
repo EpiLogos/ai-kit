@@ -32,7 +32,7 @@ jobs:
           PY
       - name: Apply production Knowledge integration
         run: python .github/scripts/knowledge_runtime_patch.py
-      - name: Align canonical resource-module imports
+      - name: Align generated code with canonical APIs
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -52,6 +52,20 @@ jobs:
               '    KnowledgeOperations, KnowledgeRoute, ProjectMap, Result, SemanticWikiIndex,\n    SemanticWikiProvider,\n};\nuse aikit_core::resource::{ResourceRef, SourceRef};'
           )
           text = text.replace('aikit_core::SourceRef::parse(value)?', 'SourceRef::parse(value)?')
+          text = text.replace('SemanticWikiIndex::rebuild(&wiki_objects)?', 'SemanticWikiIndex::rebuild(wiki_objects)?')
+          text = text.replace(
+              '.map(|root| GitNexusCodeIndexProvider::new(SystemRunner, root.clone()));',
+              '.map(|root| {\n                let repo_name = root.file_name().and_then(|value| value.to_str()).unwrap_or("project").to_string();\n                let source = SourceRef::parse(&format!("source/project/{repo_name}"))\n                    .expect("derived project source ref must be valid");\n                GitNexusCodeIndexProvider::new(SystemRunner::new().with_cwd(root), repo_name, source, None)\n            });'
+          )
+          text = text.replace(
+              'self.application().relations(address)',
+              'KnowledgeOperations::relations(&self.application(), address)'
+          )
+          text = text.replace(
+              'pub fn explain(&self, address: &KnowledgeAddress) -> aikit_core::KnowledgeExplanation {\n        self.application().explain(address)\n    }',
+              'pub fn explain(&self, address: &KnowledgeAddress) -> Result<aikit_core::KnowledgeExplanation> {\n        KnowledgeOperations::explain(&self.application(), address)\n    }'
+          )
+          text = text.replace('fn read(path: &Path, code: &str)', "fn read(path: &Path, code: &'static str)")
           p.write_text(text)
 
           p = Path('crates/aikit-cli/src/app/mod.rs')
@@ -59,12 +73,20 @@ jobs:
               'aikit_core::ResourceRef::parse("surface/aikit/tui")',
               'aikit_core::resource::ResourceRef::parse("surface/aikit/tui")'
           )
+          text = text.replace(
+              'Ok(crate::knowledge_runtime::KnowledgeRuntime::from_service(self)?.explain(address))',
+              'crate::knowledge_runtime::KnowledgeRuntime::from_service(self)?.explain(address)'
+          )
           p.write_text(text)
 
           p = Path('crates/aikit-cli/src/main.rs')
           text = p.read_text().replace(
               'aikit_core::ResourceRef::parse("surface/aikit/cli")?',
               'aikit_core::resource::ResourceRef::parse("surface/aikit/cli")?'
+          )
+          text = text.replace(
+              'KnowledgeSub::Explain { address } => serde_json::to_value(runtime.explain(&parse_address(&address)?)),',
+              'KnowledgeSub::Explain { address } => serde_json::to_value(runtime.explain(&parse_address(&address)?)?),'
           )
           p.write_text(text)
 
