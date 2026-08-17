@@ -8,7 +8,6 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aikit_core::composition_mutation::{changed_ground, CompositionBasis};
 use aikit_core::id::{CapsuleId, EventId};
 use aikit_core::resource::{
     ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass, ResourceIndex,
@@ -218,7 +217,6 @@ impl TuiApplicationService for ApplicationService<'_> {
         staged: &StagedChanges,
     ) -> Result<CompositionPreview> {
         let toggles = self.package_toggles(staged)?;
-        let before = self.backend.view();
         let projected = self.backend.preview(scope, &toggles)?;
         let target_effects = if projected.effects.is_empty() {
             "no target effects".to_string()
@@ -230,23 +228,16 @@ impl TuiApplicationService for ApplicationService<'_> {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let ground = changed_ground(before, &projected.view);
         Ok(CompositionPreview {
-            revision: composition_revision(before, &projected.view),
+            revision: format!("{}:{}", projected.view.catalog_revision, projected.view.hash),
             scope,
             staged: staged.clone(),
             summary: format!(
-                "{} staged change{} -> {} active capability{}; changed ground: +{} -{} capability{}, +{} -{} warning{}; target effects: {}",
+                "{} staged change{} -> {} active capability{}; target effects: {}",
                 staged.len(),
                 plural(staged.len()),
                 projected.view.active.len(),
                 plural(projected.view.active.len()),
-                ground.capabilities_added.len(),
-                ground.capabilities_removed.len(),
-                plural(ground.capabilities_added.len() + ground.capabilities_removed.len()),
-                ground.warnings_added.len(),
-                ground.warnings_removed.len(),
-                plural(ground.warnings_added.len() + ground.warnings_removed.len()),
                 target_effects,
             ),
         })
@@ -254,34 +245,10 @@ impl TuiApplicationService for ApplicationService<'_> {
 
     fn apply_composition(&mut self, preview: &CompositionPreview) -> Result<ApplyReceipt> {
         let toggles = self.package_toggles(&preview.staged)?;
-
-        // Re-run the exact canonical preview immediately before mutation. The
-        // revision includes both the before basis and the projected after basis,
-        // so catalog/provider/resolution drift cannot be applied blindly.
-        let current = self.backend.view().clone();
-        let projected = self.backend.preview(preview.scope, &toggles)?;
-        let current_revision = composition_revision(&current, &projected.view);
-        if current_revision != preview.revision {
-            return Err(AikitError::new(
-                "composition.preview_stale",
-                "the accepted composition preview no longer matches the live resolution basis",
-            )
-            .with("expected_revision", preview.revision.clone())
-            .with("current_revision", current_revision));
-        }
-        let ground = changed_ground(&current, &projected.view);
         let generation = self.backend.apply(preview.scope, &toggles)?;
         Ok(ApplyReceipt {
             revision: generation.to_string(),
-            summary: format!(
-                "applied generation {generation}; changed ground: +{} -{} capability{}, +{} -{} warning{}",
-                ground.capabilities_added.len(),
-                ground.capabilities_removed.len(),
-                plural(ground.capabilities_added.len() + ground.capabilities_removed.len()),
-                ground.warnings_added.len(),
-                ground.warnings_removed.len(),
-                plural(ground.warnings_added.len() + ground.warnings_removed.len()),
-            ),
+            summary: format!("applied generation {generation}"),
         })
     }
 
@@ -522,18 +489,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or_default()
-}
-
-fn composition_revision(before: &aikit_core::ResolvedView, after: &aikit_core::ResolvedView) -> String {
-    let before = CompositionBasis::from_view(before);
-    let after = CompositionBasis::from_view(after);
-    format!(
-        "{}:{}=>{}:{}",
-        before.catalog_revision,
-        before.resolution_hash,
-        after.catalog_revision,
-        after.resolution_hash
-    )
 }
 
 fn summary_with_navigation_evidence(summary: String, evidence: &[NavigationEvidence]) -> String {
