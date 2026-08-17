@@ -38,9 +38,6 @@ fn cli_adapter_uses_the_same_preview_receipt_and_read_model() {
     assert_eq!(projected, direct);
 
     let receipt = cli.apply(&projected).unwrap();
-    assert_eq!(
-        cli.show(&space).unwrap(),
-        serde_json::to_value(&receipt.after).unwrap()
-    );
+    assert_eq!(cli.show(&space).unwrap(), serde_json::to_value(&receipt.after).unwrap());
     assert_eq!(cli.history(&space).unwrap().as_array().unwrap().len(), 2);
 }

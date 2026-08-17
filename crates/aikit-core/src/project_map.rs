@@ -111,10 +111,7 @@ impl ProjectMap {
         if !self.endpoints.contains_key(&binding.from) {
             return Err(AikitError::new(
                 "project_map.unknown_endpoint",
-                format!(
-                    "ProjectMap binding source {} is not registered",
-                    binding.from
-                ),
+                format!("ProjectMap binding source {} is not registered", binding.from),
             ));
         }
         if !self.endpoints.contains_key(&binding.to) {
@@ -132,11 +129,8 @@ impl ProjectMap {
         if !self.bindings.contains(&binding) {
             self.bindings.push(binding);
             self.bindings.sort_by(|left, right| {
-                (&left.from, &left.to, &left.relation).cmp(&(
-                    &right.from,
-                    &right.to,
-                    &right.relation,
-                ))
+                (&left.from, &left.to, &left.relation)
+                    .cmp(&(&right.from, &right.to, &right.relation))
             });
         }
         Ok(())
@@ -167,11 +161,7 @@ impl ProjectMap {
             }
         }
         steps.sort_by(|left, right| {
-            (&left.to, &left.relation, left.reversed).cmp(&(
-                &right.to,
-                &right.relation,
-                right.reversed,
-            ))
+            (&left.to, &left.relation, left.reversed).cmp(&(&right.to, &right.relation, right.reversed))
         });
         steps
     }
@@ -216,12 +206,7 @@ impl ProjectMap {
 mod tests {
     use super::*;
 
-    fn endpoint(
-        id: &str,
-        lens: ProjectLens,
-        kind: ResourceKind,
-        authority: SourceAuthority,
-    ) -> ProjectMapEndpoint {
+    fn endpoint(id: &str, lens: ProjectLens, kind: ResourceKind, authority: SourceAuthority) -> ProjectMapEndpoint {
         ProjectMapEndpoint {
             resource: ResourceRef::parse(id).unwrap(),
             kind,
@@ -274,27 +259,11 @@ mod tests {
     fn bounded_route_crosses_only_explicit_federation_bindings() {
         let mut map = ProjectMap::new();
         for (id, lens, kind, authority) in [
-            (
-                "wiki:node:auth",
-                ProjectLens::SemanticWiki,
-                ResourceKind::KnowledgeNode,
-                SourceAuthority::Authored,
-            ),
-            (
-                "source:design",
-                ProjectLens::SourcePool,
-                ResourceKind::KnowledgeSource,
-                SourceAuthority::Observed,
-            ),
-            (
-                "code:login",
-                ProjectLens::Code,
-                ResourceKind::CodeReference,
-                SourceAuthority::Derived,
-            ),
+            ("wiki:node:auth", ProjectLens::SemanticWiki, ResourceKind::KnowledgeNode, SourceAuthority::Authored),
+            ("source:design", ProjectLens::SourcePool, ResourceKind::KnowledgeSource, SourceAuthority::Observed),
+            ("code:login", ProjectLens::Code, ResourceKind::CodeReference, SourceAuthority::Derived),
         ] {
-            map.add_endpoint(endpoint(id, lens, kind, authority))
-                .unwrap();
+            map.add_endpoint(endpoint(id, lens, kind, authority)).unwrap();
         }
         map.bind(ProjectMapBinding {
             from: ResourceRef::parse("wiki:node:auth").unwrap(),
@@ -304,8 +273,7 @@ mod tests {
             authority: SourceAuthority::Authored,
             provider: None,
             provenance: vec![],
-        })
-        .unwrap();
+        }).unwrap();
         map.bind(ProjectMapBinding {
             from: ResourceRef::parse("source:design").unwrap(),
             to: ResourceRef::parse("code:login").unwrap(),
@@ -314,15 +282,12 @@ mod tests {
             authority: SourceAuthority::Authored,
             provider: None,
             provenance: vec![],
-        })
-        .unwrap();
-        let route = map
-            .route(
-                &ResourceRef::parse("code:login").unwrap(),
-                &ResourceRef::parse("wiki:node:auth").unwrap(),
-                2,
-            )
-            .unwrap();
+        }).unwrap();
+        let route = map.route(
+            &ResourceRef::parse("code:login").unwrap(),
+            &ResourceRef::parse("wiki:node:auth").unwrap(),
+            2,
+        ).unwrap();
         assert_eq!(route.len(), 2);
         assert!(route.iter().all(|step| step.reversed));
     }

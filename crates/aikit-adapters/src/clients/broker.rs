@@ -171,10 +171,7 @@ impl BrokerAdapter {
                 .map(|entry| first_sentence(&entry.description))
                 .unwrap_or_default();
             if let Some(overlays) = context.view.skill_usage_overlays.get(id) {
-                for addition in overlays
-                    .iter()
-                    .filter_map(|overlay| overlay.description.as_ref())
-                {
+                for addition in overlays.iter().filter_map(|overlay| overlay.description.as_ref()) {
                     if !addition.trim().is_empty() {
                         if !description.is_empty() {
                             description.push(' ');

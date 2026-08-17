@@ -26,9 +26,6 @@ fn project_spec_id_remains_migration_provenance_not_project_identity() {
     );
 
     assert_eq!(binding.project.as_str(), "project:epilogos/ai-kit");
-    assert_eq!(
-        binding.legacy_project_spec_id.as_deref(),
-        Some("legacy-ai-kit")
-    );
+    assert_eq!(binding.legacy_project_spec_id.as_deref(), Some("legacy-ai-kit"));
     assert_ne!(binding.project.as_str(), matched.spec.id);
 }

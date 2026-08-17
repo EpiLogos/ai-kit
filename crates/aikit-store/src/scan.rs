@@ -223,24 +223,8 @@ const SECRET_NAMES: &[&str] = &[
 /// Key names that make a high-entropy value *expected*, and therefore not a
 /// finding: hashes, ids and versions are supposed to look random.
 const BENIGN_NAMES: &[&str] = &[
-    "hash",
-    "sha",
-    "sha1",
-    "sha256",
-    "digest",
-    "checksum",
-    "etag",
-    "uuid",
-    "guid",
-    "revision",
-    "commit",
-    "blob",
-    "nonce_len",
-    "version",
-    "url",
-    "uri",
-    "path",
-    "id",
+    "hash", "sha", "sha1", "sha256", "digest", "checksum", "etag", "uuid", "guid", "revision",
+    "commit", "blob", "nonce_len", "version", "url", "uri", "path", "id",
 ];
 
 /// Values that are obviously not a real credential.
@@ -467,9 +451,7 @@ fn names_a_secret(lowered_key: &str) -> bool {
     if is_benign_name(lowered_key) {
         return false;
     }
-    SECRET_NAMES
-        .iter()
-        .any(|needle| lowered_key.contains(needle))
+    SECRET_NAMES.iter().any(|needle| lowered_key.contains(needle))
 }
 
 fn is_benign_name(lowered_key: &str) -> bool {
@@ -532,7 +514,9 @@ fn is_high_entropy(value: &str) -> bool {
 
 fn is_uuid(value: &str) -> bool {
     value.len() == 36
-        && value.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '-')
         && value.matches('-').count() == 4
 }
 
@@ -569,10 +553,7 @@ fn shape_regexes() -> &'static [(&'static ShapeRule, Regex)] {
                 let regex = Regex::new(rule.pattern).unwrap_or_else(|e| {
                     // These are literals in this file; a failure here is a bug
                     // caught by the tests, not a runtime condition.
-                    panic!(
-                        "built-in secret rule `{}` is not a valid regex: {e}",
-                        rule.name
-                    )
+                    panic!("built-in secret rule `{}` is not a valid regex: {e}", rule.name)
                 });
                 (rule, regex)
             })

@@ -46,10 +46,9 @@ use crate::events::{Event, EventAction, Outcome, Timestamp};
 use crate::registry::RegistryLoad;
 
 /// Schema steps, applied in order. Append only — never edit one that shipped.
-const MIGRATIONS: &[(&str, &str)] = &[
-    (
-        "0001-initial",
-        r#"
+const MIGRATIONS: &[(&str, &str)] = &[(
+    "0001-initial",
+    r#"
 CREATE TABLE capsules (
     id           TEXT PRIMARY KEY,
     kind         TEXT NOT NULL,
@@ -183,14 +182,14 @@ CREATE TABLE promotion_queue (
     queued_ns     INTEGER NOT NULL
 );
 "#,
-    ),
-    // The Inbox as the system's own channel (Spec II §2): drift notices, version
-    // conflicts, procedure reports and agent proposals the system addresses to the
-    // user. Operational — these records exist nowhere else — so it must never enter
-    // DERIVED_TABLES or a reindex would silently discard the system's messages.
-    (
-        "0002-inbox-items",
-        r#"
+),
+// The Inbox as the system's own channel (Spec II §2): drift notices, version
+// conflicts, procedure reports and agent proposals the system addresses to the
+// user. Operational — these records exist nowhere else — so it must never enter
+// DERIVED_TABLES or a reindex would silently discard the system's messages.
+(
+    "0002-inbox-items",
+    r#"
 CREATE TABLE inbox_items (
     inbox_id     TEXT PRIMARY KEY,
     kind         TEXT NOT NULL,
@@ -207,8 +206,7 @@ CREATE TABLE inbox_items (
 CREATE INDEX inbox_items_by_state ON inbox_items(state_label);
 CREATE INDEX inbox_items_by_dedup ON inbox_items(dedup_key);
 "#,
-    ),
-];
+)];
 
 /// Tables `reindex` is allowed to empty.
 const DERIVED_TABLES: &[&str] = &["capsules", "profiles"];
@@ -388,11 +386,9 @@ impl Index {
 
         let applied: u32 = self
             .conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| {
+                r.get(0)
+            })
             .map_err(|e| sql_error("index.migrate_failed", &e))?;
 
         if applied as usize > MIGRATIONS.len() {
@@ -426,11 +422,9 @@ impl Index {
 
     pub fn schema_version(&self) -> Result<u32> {
         self.conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| {
+                r.get(0)
+            })
             .map_err(|e| sql_error("index.query_failed", &e))
     }
 
@@ -523,13 +517,11 @@ impl Index {
                 params![
                     profile.id.to_string(),
                     profile.description,
-                    join(
-                        &profile
-                            .extends
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                    ),
+                    join(&profile
+                        .extends
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()),
                     RegistrySource::PERSONAL,
                     now,
                 ],
@@ -542,8 +534,7 @@ impl Index {
             profiles: profiles.len(),
             problems: load.problems.len(),
         };
-        tx.commit()
-            .map_err(|e| sql_error("index.write_failed", &e))?;
+        tx.commit().map_err(|e| sql_error("index.write_failed", &e))?;
         Ok(report)
     }
 
@@ -788,10 +779,7 @@ impl Index {
                     binding.mux.as_str(),
                     binding.mux_session,
                     binding.mux_surface,
-                    binding
-                        .project_root
-                        .as_ref()
-                        .map(|p| p.display().to_string()),
+                    binding.project_root.as_ref().map(|p| p.display().to_string()),
                     binding.isolation.as_str(),
                     Timestamp::now().as_nanos(),
                 ],

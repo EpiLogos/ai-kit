@@ -76,14 +76,15 @@ fn draw_shell(
     let panes = layout.split(inner);
     frame.render_widget(query_line(state, &theme), panes.query);
 
-    let compact_world_lines =
-        if panes.preview.is_none() && state.presentation == PresentationMode::Workspace {
-            world
-                .map(|world| project_world_lines(state, world))
-                .filter(|lines| !lines.is_empty())
-        } else {
-            None
-        };
+    let compact_world_lines = if panes.preview.is_none()
+        && state.presentation == PresentationMode::Workspace
+    {
+        world
+            .map(|world| project_world_lines(state, world))
+            .filter(|lines| !lines.is_empty())
+    } else {
+        None
+    };
     if let Some(lines) = compact_world_lines {
         frame.render_widget(project_world_pane(lines, &theme), panes.list);
     } else {
@@ -188,11 +189,7 @@ fn resource_line<'a>(
     let mut spans = vec![
         Span::styled(
             format!("{cursor}{staged_mark} "),
-            if staged {
-                theme.staged()
-            } else {
-                theme.accent()
-            },
+            if staged { theme.staged() } else { theme.accent() },
         ),
         Span::styled(
             format!("{} ", pad(&kind, 20.min(kind.chars().count().max(8)))),
@@ -200,19 +197,12 @@ fn resource_line<'a>(
         ),
         Span::styled(
             pad(&item.label, label_width),
-            if selected {
-                theme.selected()
-            } else {
-                theme.base()
-            },
+            if selected { theme.selected() } else { theme.base() },
         ),
     ];
     if summary_width > 3 {
         spans.push(Span::styled(
-            format!(
-                " {}",
-                truncate(&item.summary, summary_width.saturating_sub(1))
-            ),
+            format!(" {}", truncate(&item.summary, summary_width.saturating_sub(1))),
             theme.dim(),
         ));
     }
@@ -260,10 +250,7 @@ fn preview_pane<'a>(
     if state.overlay == Some(Overlay::Explain) {
         if let Some(ActionOutcome::Explained { subject, summary }) = state.action_result.as_ref() {
             return Paragraph::new(vec![
-                Line::from(Span::styled(
-                    format!("Explain · {subject}"),
-                    theme.heading(),
-                )),
+                Line::from(Span::styled(format!("Explain · {subject}"), theme.heading())),
                 Line::from(""),
                 Line::from(Span::raw(summary.clone())),
                 Line::from(""),
@@ -291,10 +278,7 @@ fn preview_pane<'a>(
         Line::from(""),
         Line::from(Span::raw(item.summary.clone())),
         Line::from(""),
-        Line::from(Span::styled(
-            item.resource.as_str().to_string(),
-            theme.dim(),
-        )),
+        Line::from(Span::styled(item.resource.as_str().to_string(), theme.dim())),
     ];
     if state.contextual_actions_for.as_ref() == Some(&item.resource)
         && !state.contextual_actions.is_empty()
@@ -369,10 +353,7 @@ fn project_world_pane(lines: Vec<String>, theme: &Theme) -> Paragraph<'static> {
 
 fn footer<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
     if let Some(status) = &state.status {
-        return Paragraph::new(Line::from(Span::styled(
-            status.message.clone(),
-            theme.dim(),
-        )));
+        return Paragraph::new(Line::from(Span::styled(status.message.clone(), theme.dim())));
     }
     let scope = state
         .mutation_scope
@@ -386,11 +367,7 @@ fn footer<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
             "{} · {} result{} · {} staged · scope {} · Alt+←/→ fields · : actions · Ctrl+W Quick",
             workspace_section_label(state.workspace_section),
             state.read_model.resources.len(),
-            if state.read_model.resources.len() == 1 {
-                ""
-            } else {
-                "s"
-            },
+            if state.read_model.resources.len() == 1 { "" } else { "s" },
             state.staged.len(),
             scope,
         )

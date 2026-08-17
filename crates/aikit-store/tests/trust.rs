@@ -114,11 +114,7 @@ fn a_recorded_review_persists_across_reopening_the_database() {
     {
         let index = Index::open(&path).unwrap();
         TrustStore::new(&index)
-            .record(
-                &key("aaa"),
-                TrustState::Trusted,
-                Some("read it line by line"),
-            )
+            .record(&key("aaa"), TrustState::Trusted, Some("read it line by line"))
             .unwrap();
     }
     let reopened = Index::open(&path).unwrap();
@@ -134,12 +130,8 @@ fn recording_the_same_revision_twice_updates_rather_than_duplicates() {
     let index = index(tmp.path());
     let trust = TrustStore::new(&index);
 
-    trust
-        .record(&key("aaa"), TrustState::Reviewed, None)
-        .unwrap();
-    trust
-        .record(&key("aaa"), TrustState::Trusted, None)
-        .unwrap();
+    trust.record(&key("aaa"), TrustState::Reviewed, None).unwrap();
+    trust.record(&key("aaa"), TrustState::Trusted, None).unwrap();
 
     assert_eq!(trust.state(&key("aaa")), TrustState::Trusted);
     assert_eq!(
@@ -157,12 +149,8 @@ fn reviewing_a_new_revision_supersedes_the_one_it_replaces() {
     let index = index(tmp.path());
     let trust = TrustStore::new(&index);
 
-    trust
-        .record(&key("aaa"), TrustState::Trusted, None)
-        .unwrap();
-    let superseded = trust
-        .record(&key("bbb"), TrustState::Reviewed, None)
-        .unwrap();
+    trust.record(&key("aaa"), TrustState::Trusted, None).unwrap();
+    let superseded = trust.record(&key("bbb"), TrustState::Reviewed, None).unwrap();
 
     assert_eq!(trust.state(&key("bbb")), TrustState::Reviewed);
     assert_eq!(
@@ -189,19 +177,11 @@ fn superseding_does_not_reach_across_capsules_or_across_registries() {
         cid("hook/gate/secrets"),
         Revision::from_raw("aaa"),
     );
-    trust
-        .record(&other_capsule, TrustState::Trusted, None)
-        .unwrap();
-    trust
-        .record(&other_source, TrustState::Trusted, None)
-        .unwrap();
-    trust
-        .record(&key("aaa"), TrustState::Trusted, None)
-        .unwrap();
+    trust.record(&other_capsule, TrustState::Trusted, None).unwrap();
+    trust.record(&other_source, TrustState::Trusted, None).unwrap();
+    trust.record(&key("aaa"), TrustState::Trusted, None).unwrap();
 
-    trust
-        .record(&key("bbb"), TrustState::Trusted, None)
-        .unwrap();
+    trust.record(&key("bbb"), TrustState::Trusted, None).unwrap();
 
     assert_eq!(trust.state(&other_capsule), TrustState::Trusted);
     assert_eq!(
@@ -220,15 +200,9 @@ fn a_block_is_not_swept_away_by_a_later_review_of_another_revision() {
     let index = index(tmp.path());
     let trust = TrustStore::new(&index);
 
-    trust
-        .record(&key("aaa"), TrustState::Blocked, Some("exfiltrates"))
-        .unwrap();
-    trust
-        .record(&key("ccc"), TrustState::Quarantined, None)
-        .unwrap();
-    trust
-        .record(&key("bbb"), TrustState::Trusted, None)
-        .unwrap();
+    trust.record(&key("aaa"), TrustState::Blocked, Some("exfiltrates")).unwrap();
+    trust.record(&key("ccc"), TrustState::Quarantined, None).unwrap();
+    trust.record(&key("bbb"), TrustState::Trusted, None).unwrap();
 
     let effective = |rev: &str| {
         trust.state_for(
@@ -252,12 +226,8 @@ fn blocking_a_revision_does_not_supersede_the_trusted_one() {
     let index = index(tmp.path());
     let trust = TrustStore::new(&index);
 
-    trust
-        .record(&key("aaa"), TrustState::Trusted, None)
-        .unwrap();
-    let superseded = trust
-        .record(&key("bbb"), TrustState::Blocked, None)
-        .unwrap();
+    trust.record(&key("aaa"), TrustState::Trusted, None).unwrap();
+    let superseded = trust.record(&key("bbb"), TrustState::Blocked, None).unwrap();
 
     assert!(superseded.is_empty());
     assert_eq!(trust.state(&key("aaa")), TrustState::Trusted);
@@ -274,11 +244,7 @@ fn an_edited_capsule_loses_its_review_because_the_revision_moved() {
     let trust = TrustStore::new(&index);
 
     let before = load_registry(fixture.root(), RegistrySource::personal()).unwrap();
-    let capsule = before
-        .catalog
-        .get(&cid("hook/gate/secrets"))
-        .cloned()
-        .unwrap();
+    let capsule = before.catalog.get(&cid("hook/gate/secrets")).cloned().unwrap();
     trust
         .record(
             &TrustKey::new(
@@ -291,11 +257,7 @@ fn an_edited_capsule_loses_its_review_because_the_revision_moved() {
         )
         .unwrap();
 
-    fixture.write_payload(
-        "hook/gate/secrets",
-        "payload/check",
-        "#!/bin/sh\ncurl evil\n",
-    );
+    fixture.write_payload("hook/gate/secrets", "payload/check", "#!/bin/sh\ncurl evil\n");
     let after = load_registry(fixture.root(), RegistrySource::personal()).unwrap();
     let edited = after.catalog.get(&cid("hook/gate/secrets")).unwrap();
 
@@ -314,9 +276,7 @@ fn a_snapshot_answers_the_same_way_the_live_store_does() {
     let tmp = tempfile::tempdir().unwrap();
     let index = index(tmp.path());
     let store = TrustStore::new(&index);
-    store
-        .record(&key("aaa"), TrustState::Trusted, None)
-        .unwrap();
+    store.record(&key("aaa"), TrustState::Trusted, None).unwrap();
     store
         .record(
             &TrustKey::new(
@@ -346,11 +306,7 @@ fn a_resolver_run_against_the_persistent_oracle_holds_an_unreviewed_hook_back() 
     let store = TrustStore::new(&index);
 
     let load = load_registry(fixture.root(), RegistrySource::personal()).unwrap();
-    let capsule = load
-        .catalog
-        .get(&cid("hook/gate/secrets"))
-        .cloned()
-        .unwrap();
+    let capsule = load.catalog.get(&cid("hook/gate/secrets")).cloned().unwrap();
 
     let request = aikit_core::ResolveRequest {
         context: aikit_core::ContextDescriptor::for_project(tmp.path()),

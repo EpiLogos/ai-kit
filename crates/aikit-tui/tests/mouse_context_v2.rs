@@ -7,7 +7,9 @@ use aikit_tui::event::PaletteEvent;
 use aikit_tui::host::UiHost;
 use aikit_tui::layout::Layout;
 use aikit_tui::{ActionOutcome, PresentationMode, WorkspaceSection};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
@@ -74,12 +76,8 @@ fn mouse_and_keyboard_invoke_the_same_contextual_action_operation() {
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("deploy"),
     )
     .unwrap();
-    keyboard
-        .handle(&mut keyboard_backend, PaletteEvent::Resize(120, 30))
-        .unwrap();
-    keyboard
-        .handle(&mut keyboard_backend, key(KeyCode::Down))
-        .unwrap();
+    keyboard.handle(&mut keyboard_backend, PaletteEvent::Resize(120, 30)).unwrap();
+    keyboard.handle(&mut keyboard_backend, key(KeyCode::Down)).unwrap();
     let _ = draw(&keyboard);
     keyboard
         .handle(&mut keyboard_backend, key(KeyCode::Char(':')))
@@ -99,9 +97,7 @@ fn mouse_and_keyboard_invoke_the_same_contextual_action_operation() {
     mouse_surface
         .handle(&mut mouse_backend, PaletteEvent::Resize(120, 30))
         .unwrap();
-    mouse_surface
-        .handle(&mut mouse_backend, key(KeyCode::Down))
-        .unwrap();
+    mouse_surface.handle(&mut mouse_backend, key(KeyCode::Down)).unwrap();
     let _ = draw(&mouse_surface);
     assert!(!mouse_surface.semantic().contextual_actions.is_empty());
 
@@ -133,10 +129,7 @@ fn mouse_and_keyboard_choose_the_same_workspace_section() {
     keyboard
         .handle(&mut keyboard_backend, alt(KeyCode::Right))
         .unwrap();
-    assert_eq!(
-        keyboard.semantic().workspace_section,
-        WorkspaceSection::Compose
-    );
+    assert_eq!(keyboard.semantic().workspace_section, WorkspaceSection::Compose);
 
     let (_mouse_dir, mut mouse_backend) = fixture();
     let mut mouse_surface = ApplicationSurfaceController::new(

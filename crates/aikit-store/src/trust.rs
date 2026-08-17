@@ -201,10 +201,7 @@ impl<'a> TrustStore<'a> {
         state: TrustState,
         note: Option<&str>,
     ) -> Result<()> {
-        debug_assert!(
-            state.is_standing(),
-            "set_standing given a per-revision state"
-        );
+        debug_assert!(state.is_standing(), "set_standing given a per-revision state");
         self.index
             .conn()
             .execute(
@@ -230,9 +227,7 @@ impl<'a> TrustStore<'a> {
         let mut stmt = self
             .index
             .conn()
-            .prepare(
-                "SELECT state FROM trust WHERE source = ?1 AND capsule_id = ?2 AND revision = ?3",
-            )
+            .prepare("SELECT state FROM trust WHERE source = ?1 AND capsule_id = ?2 AND revision = ?3")
             .map_err(|e| sql_error("trust.query_failed", &e))?;
         let mut rows = stmt
             .query(params![
@@ -241,14 +236,9 @@ impl<'a> TrustStore<'a> {
                 key.revision.as_str()
             ])
             .map_err(|e| sql_error("trust.query_failed", &e))?;
-        match rows
-            .next()
-            .map_err(|e| sql_error("trust.query_failed", &e))?
-        {
+        match rows.next().map_err(|e| sql_error("trust.query_failed", &e))? {
             Some(row) => {
-                let raw: String = row
-                    .get(0)
-                    .map_err(|e| sql_error("trust.query_failed", &e))?;
+                let raw: String = row.get(0).map_err(|e| sql_error("trust.query_failed", &e))?;
                 TrustState::from_str(&raw)
             }
             None => Ok(TrustState::Unseen),
@@ -285,8 +275,7 @@ impl<'a> TrustStore<'a> {
 
         let mut out = Vec::new();
         for row in rows {
-            let (revision, state, note, ns) =
-                row.map_err(|e| sql_error("trust.query_failed", &e))?;
+            let (revision, state, note, ns) = row.map_err(|e| sql_error("trust.query_failed", &e))?;
             out.push(TrustRecord {
                 key: TrustKey::new(
                     source.clone(),
@@ -353,9 +342,7 @@ impl<'a> TrustStore<'a> {
         let mut stmt = self
             .index
             .conn()
-            .prepare(
-                "SELECT state FROM trust WHERE source = ?1 AND capsule_id = ?2 AND revision = ?3",
-            )
+            .prepare("SELECT state FROM trust WHERE source = ?1 AND capsule_id = ?2 AND revision = ?3")
             .map_err(|e| sql_error("trust.query_failed", &e))?;
         let mut rows = stmt
             .query(params![
@@ -364,14 +351,9 @@ impl<'a> TrustStore<'a> {
                 STANDING_REVISION
             ])
             .map_err(|e| sql_error("trust.query_failed", &e))?;
-        match rows
-            .next()
-            .map_err(|e| sql_error("trust.query_failed", &e))?
-        {
+        match rows.next().map_err(|e| sql_error("trust.query_failed", &e))? {
             Some(row) => {
-                let raw: String = row
-                    .get(0)
-                    .map_err(|e| sql_error("trust.query_failed", &e))?;
+                let raw: String = row.get(0).map_err(|e| sql_error("trust.query_failed", &e))?;
                 Ok(Some(TrustState::from_str(&raw)?))
             }
             None => Ok(None),
@@ -386,7 +368,11 @@ impl TrustOracle for TrustStore<'_> {
     }
 
     /// A block or dismissal, keyed on identity so an edit cannot clear it.
-    fn standing_verdict(&self, source: &RegistrySource, capsule: &CapsuleId) -> Option<TrustState> {
+    fn standing_verdict(
+        &self,
+        source: &RegistrySource,
+        capsule: &CapsuleId,
+    ) -> Option<TrustState> {
         // Fail closed on a database error: `None` gives ordinary per-revision
         // keying, which cannot resurrect a blocked capsule because the block
         // simply is not seen — the caller then treats it as `Unseen`, which
@@ -423,7 +409,11 @@ impl TrustOracle for TrustSnapshot {
         self.entries.get(key).copied().unwrap_or_default()
     }
 
-    fn standing_verdict(&self, source: &RegistrySource, capsule: &CapsuleId) -> Option<TrustState> {
+    fn standing_verdict(
+        &self,
+        source: &RegistrySource,
+        capsule: &CapsuleId,
+    ) -> Option<TrustState> {
         self.standing
             .get(&(source.clone(), capsule.clone()))
             .copied()

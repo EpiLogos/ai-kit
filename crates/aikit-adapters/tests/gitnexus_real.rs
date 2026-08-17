@@ -140,12 +140,7 @@ export function logout(): boolean {
         .detect_changes("unstaged", None)
         .expect("real GitNexus detect-changes");
     assert!(changes.detail.is_string());
-    assert!(!changes
-        .detail
-        .as_str()
-        .unwrap_or_default()
-        .trim()
-        .is_empty());
+    assert!(!changes.detail.as_str().unwrap_or_default().trim().is_empty());
     let structural = provider
         .structural_check()
         .expect("real GitNexus cycle check");

@@ -30,7 +30,8 @@ fn observations_and_resets_replay_across_index_reopen() {
         // Unrelated durable events are ignored by familiarity replay.
         index
             .record_event(
-                &Event::new(EventAction::RegistrySync).at(Timestamp::from_nanos(500_000_000)),
+                &Event::new(EventAction::RegistrySync)
+                    .at(Timestamp::from_nanos(500_000_000)),
             )
             .unwrap();
         append_familiarity_observation(
@@ -98,7 +99,9 @@ fn unknown_persisted_schema_invalidates_only_learned_replay() {
     let dir = tempfile::tempdir().unwrap();
     let index = Index::open(&dir.path().join("aikit.db")).unwrap();
     index
-        .record_event(&Event::new(EventAction::RegistrySync).at(Timestamp::from_nanos(500_000_000)))
+        .record_event(
+            &Event::new(EventAction::RegistrySync).at(Timestamp::from_nanos(500_000_000)),
+        )
         .unwrap();
 
     let mut old = Event::new(EventAction::ResourceUse).at(Timestamp::from_nanos(1_000_000_000));

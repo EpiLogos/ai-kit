@@ -368,8 +368,7 @@ impl SessionSpaceRuntime {
         let epoch = self.next_epoch;
         self.next_epoch += 1;
         let session = binding.agent_session.clone();
-        self.agent_sessions
-            .insert(session.clone(), (binding, epoch));
+        self.agent_sessions.insert(session.clone(), (binding, epoch));
         self.compositions.remove(&session);
         self.components
             .retain(|key, _| key.agent_session != session);
@@ -452,14 +451,14 @@ impl SessionSpaceRuntime {
                 component.state = SessionSpaceActivationState::Removed;
                 component.provider = None;
                 component.observed_composition_fingerprint = None;
-                component.reason =
-                    Some("removed by canonical HarnessComposition recomposition".into());
+                component.reason = Some("removed by canonical HarnessComposition recomposition".into());
             }
         }
         // Surface membership follows the canonical resolved body exactly. Runtime
         // deactivation never deletes a Surface reading; recomposition may.
-        self.surfaces
-            .retain(|key, _| key.agent_session != session || new_surfaces.contains(&key.surface));
+        self.surfaces.retain(|key, _| {
+            key.agent_session != session || new_surfaces.contains(&key.surface)
+        });
 
         for component in &composition.component_bindings {
             let key = SessionComponentKey {
@@ -483,9 +482,7 @@ impl SessionSpaceRuntime {
             } else if preserve_observation {
                 prior
                     .as_ref()
-                    .map_or(SessionSpaceActivationState::Eligible, |existing| {
-                        existing.state
-                    })
+                    .map_or(SessionSpaceActivationState::Eligible, |existing| existing.state)
             } else {
                 // A changed canonical body invalidates provider activation evidence
                 // until the provider observes that exact new fingerprint.
@@ -508,11 +505,7 @@ impl SessionSpaceRuntime {
                     activation_mode: component.activation_mode,
                     state,
                     provider: preserve_observation
-                        .then(|| {
-                            prior
-                                .as_ref()
-                                .and_then(|existing| existing.provider.clone())
-                        })
+                        .then(|| prior.as_ref().and_then(|existing| existing.provider.clone()))
                         .flatten(),
                     observed_composition_fingerprint: preserve_observation
                         .then(|| {
@@ -547,9 +540,7 @@ impl SessionSpaceRuntime {
                         component: component.clone(),
                     })
                 })
-                .map_or(SessionSpaceActivationState::Declared, |component| {
-                    component.state
-                });
+                .map_or(SessionSpaceActivationState::Declared, |component| component.state);
             self.surfaces.insert(
                 key,
                 SessionSpaceSurfaceReading {
@@ -583,10 +574,7 @@ impl SessionSpaceRuntime {
         let current = self.components.get(&key).cloned().ok_or_else(|| {
             AikitError::new(
                 "session_space.component_absent",
-                format!(
-                    "component {component} is not admitted to {}",
-                    self.definition.id
-                ),
+                format!("component {component} is not admitted to {}", self.definition.id),
             )
         })?;
         if current.activation_mode != CompositionActivationMode::LiveMounted {
@@ -612,10 +600,7 @@ impl SessionSpaceRuntime {
         let composition = self.compositions.get(&lease.agent_session).ok_or_else(|| {
             AikitError::new(
                 "session_space.composition_absent",
-                format!(
-                    "AgentSession {} has no admitted composition",
-                    lease.agent_session
-                ),
+                format!("AgentSession {} has no admitted composition", lease.agent_session),
             )
         })?;
         let component_binding = composition
@@ -663,8 +648,11 @@ impl SessionSpaceRuntime {
                 return Err(error);
             }
         };
-        let state =
-            self.apply_activation_observation(&key, &request.composition_fingerprint, observation);
+        let state = self.apply_activation_observation(
+            &key,
+            &request.composition_fingerprint,
+            observation,
+        );
         self.refresh_surface_states(&lease.agent_session);
         self.bump_revision();
         Ok(state)
@@ -707,10 +695,7 @@ impl SessionSpaceRuntime {
         let composition = self.compositions.get(&lease.agent_session).ok_or_else(|| {
             AikitError::new(
                 "session_space.composition_absent",
-                format!(
-                    "AgentSession {} has no admitted composition",
-                    lease.agent_session
-                ),
+                format!("AgentSession {} has no admitted composition", lease.agent_session),
             )
         })?;
         let component_binding = composition
@@ -738,8 +723,11 @@ impl SessionSpaceRuntime {
                 .collect(),
         };
         let observation = driver.deactivate(&request)?;
-        let state =
-            self.apply_activation_observation(&key, &request.composition_fingerprint, observation);
+        let state = self.apply_activation_observation(
+            &key,
+            &request.composition_fingerprint,
+            observation,
+        );
         // Deactivation changes observed live truth only. The canonical desired
         // composition still contains this Component and its Surfaces; only an
         // admitted recomposition may remove those membership relations.
@@ -771,10 +759,7 @@ impl SessionSpaceRuntime {
             if !self.components.contains_key(&key) {
                 return Err(AikitError::new(
                     "session_space.connection_component_absent",
-                    format!(
-                        "connection {} references unadmitted component {component}",
-                        connection.connection
-                    ),
+                    format!("connection {} references unadmitted component {component}", connection.connection),
                 ));
             }
         }
@@ -889,36 +874,27 @@ impl SessionSpaceRuntime {
         Ok(())
     }
 
-    fn ensure_lease(&self, lease: &SessionSpaceLease) -> Result<&(SessionSpaceAgentSession, u64)> {
+    fn ensure_lease(
+        &self,
+        lease: &SessionSpaceLease,
+    ) -> Result<&(SessionSpaceAgentSession, u64)> {
         self.ensure_open()?;
         if lease.space != self.definition.id {
             return Err(AikitError::new(
                 "session_space.lease_space_mismatch",
-                format!(
-                    "lease belongs to {}, not {}",
-                    lease.space, self.definition.id
-                ),
+                format!("lease belongs to {}, not {}", lease.space, self.definition.id),
             ));
         }
-        let binding = self
-            .agent_sessions
-            .get(&lease.agent_session)
-            .ok_or_else(|| {
-                AikitError::new(
-                    "session_space.agent_session_unbound",
-                    format!(
-                        "AgentSession {} is not bound to {}",
-                        lease.agent_session, self.definition.id
-                    ),
-                )
-            })?;
+        let binding = self.agent_sessions.get(&lease.agent_session).ok_or_else(|| {
+            AikitError::new(
+                "session_space.agent_session_unbound",
+                format!("AgentSession {} is not bound to {}", lease.agent_session, self.definition.id),
+            )
+        })?;
         if binding.1 != lease.epoch {
             return Err(AikitError::new(
                 "session_space.stale_lease",
-                format!(
-                    "AgentSession {} was rebound; lease is stale",
-                    lease.agent_session
-                ),
+                format!("AgentSession {} was rebound; lease is stale", lease.agent_session),
             ));
         }
         Ok(binding)
@@ -1001,9 +977,7 @@ impl SessionSpaceRuntime {
                         component: component.clone(),
                     })
                 })
-                .map_or(SessionSpaceActivationState::Declared, |component| {
-                    component.state
-                });
+                .map_or(SessionSpaceActivationState::Declared, |component| component.state);
         }
     }
 

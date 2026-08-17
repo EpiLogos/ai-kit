@@ -58,10 +58,7 @@ impl WorkspaceSection {
     }
 
     fn relative(self, delta: isize) -> Self {
-        let current = Self::ALL
-            .iter()
-            .position(|candidate| *candidate == self)
-            .unwrap_or(0);
+        let current = Self::ALL.iter().position(|candidate| *candidate == self).unwrap_or(0);
         let last = Self::ALL.len().saturating_sub(1);
         let next = if delta.is_negative() {
             current.saturating_sub(delta.unsigned_abs())
@@ -240,10 +237,7 @@ pub trait TuiApplicationService {
     /// Canonical Actions currently applicable to this Resource in this context.
     /// The default keeps existing service implementations source-compatible while
     /// richer backends opt into the V2 Action field.
-    fn contextual_actions(
-        &self,
-        _resource: &ResourceRef,
-    ) -> Result<Vec<ContextualActionDescriptor>> {
+    fn contextual_actions(&self, _resource: &ResourceRef) -> Result<Vec<ContextualActionDescriptor>> {
         Ok(Vec::new())
     }
 
@@ -451,9 +445,9 @@ impl TuiRuntime {
             UiEffect::PreviewComposition { scope, staged } => Ok(UiAction::CompositionPreviewed(
                 service.preview_composition(scope, &staged)?,
             )),
-            UiEffect::ApplyComposition { preview } => Ok(UiAction::ApplyFinished(
-                service.apply_composition(&preview)?,
-            )),
+            UiEffect::ApplyComposition { preview } => {
+                Ok(UiAction::ApplyFinished(service.apply_composition(&preview)?))
+            }
         }
     }
 
@@ -572,9 +566,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 effects.push(UiEffect::InvokeContextualAction { action });
             } else {
                 state.status = Some(UiStatus {
-                    message: format!(
-                        "action {action_ref} is not available for the selected resource"
-                    ),
+                    message: format!("action {action_ref} is not available for the selected resource"),
                 });
             }
         }
@@ -595,9 +587,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 ActionOutcome::Explained { .. } => {
                     state.overlay = Some(Overlay::Explain);
                 }
-                ActionOutcome::Staged {
-                    resource, intent, ..
-                } => {
+                ActionOutcome::Staged { resource, intent, .. } => {
                     state.staged.stage(resource.clone(), *intent);
                     state.preview = None;
                 }
@@ -702,16 +692,14 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         UiAction::ConfirmApply => {
             if state.overlay == Some(Overlay::ConfirmApply) {
                 if let Some(preview) = state.preview.clone() {
-                    if state.mutation_scope == Some(preview.scope) && preview.staged == state.staged
-                    {
+                    if state.mutation_scope == Some(preview.scope) && preview.staged == state.staged {
                         effects.push(UiEffect::ApplyComposition { preview });
                     } else {
                         state.overlay = None;
                         state.preview = None;
                         state.status = Some(UiStatus {
-                            message:
-                                "composition changed after preview; preview again before apply"
-                                    .into(),
+                            message: "composition changed after preview; preview again before apply"
+                                .into(),
                         });
                     }
                 }
@@ -803,9 +791,8 @@ fn select_relative(state: &mut TuiState, delta: isize) -> Option<ResourceRef> {
     let next = match (current, delta.is_negative()) {
         (None, _) => 0,
         (Some(index), true) => index.saturating_sub(delta.unsigned_abs()),
-        (Some(index), false) => {
-            (index + delta as usize).min(state.read_model.resources.len().saturating_sub(1))
-        }
+        (Some(index), false) => (index + delta as usize)
+            .min(state.read_model.resources.len().saturating_sub(1)),
     };
     state.selected = state.read_model.resource_at(next).cloned();
     state.selection_invalidation = None;

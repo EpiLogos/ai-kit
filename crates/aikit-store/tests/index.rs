@@ -155,25 +155,13 @@ fn a_capsule_deleted_from_disk_disappears_from_the_index_on_the_next_reindex() {
 fn an_edited_payload_shows_up_as_a_new_revision_in_the_index() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut index, fixture) = seeded(tmp.path());
-    let before = index
-        .capsule(&cid("script/test/nt"))
-        .unwrap()
-        .unwrap()
-        .revision;
+    let before = index.capsule(&cid("script/test/nt")).unwrap().unwrap().revision;
 
-    fixture.write_payload(
-        "script/test/nt",
-        "payload/run.sh",
-        "#!/bin/sh\necho changed\n",
-    );
+    fixture.write_payload("script/test/nt", "payload/run.sh", "#!/bin/sh\necho changed\n");
     let load = load_registry(fixture.root(), RegistrySource::personal()).unwrap();
     index.reindex(&load).unwrap();
 
-    let after = index
-        .capsule(&cid("script/test/nt"))
-        .unwrap()
-        .unwrap()
-        .revision;
+    let after = index.capsule(&cid("script/test/nt")).unwrap().unwrap().revision;
     assert_ne!(before, after);
 }
 
@@ -321,11 +309,7 @@ fn filtering_by_kind_and_tag_narrows_the_way_the_query_language_says_it_does() {
     assert_eq!(tagged.len(), 1);
 
     let both = index
-        .find(
-            &CapsuleFilter::default()
-                .with_kind(Kind::Script)
-                .with_tag("rust"),
-        )
+        .find(&CapsuleFilter::default().with_kind(Kind::Script).with_tag("rust"))
         .unwrap();
     assert!(
         both.is_empty(),
@@ -339,17 +323,11 @@ fn text_filtering_matches_the_fields_a_person_would_expect_to_search() {
     let (index, _fixture) = seeded(tmp.path());
 
     assert_eq!(
-        index
-            .find(&CapsuleFilter::default().with_text("review"))
-            .unwrap()
-            .len(),
+        index.find(&CapsuleFilter::default().with_text("review")).unwrap().len(),
         1
     );
     assert_eq!(
-        index
-            .find(&CapsuleFilter::default().with_text("nt"))
-            .unwrap()
-            .len(),
+        index.find(&CapsuleFilter::default().with_text("nt")).unwrap().len(),
         1
     );
     assert!(index

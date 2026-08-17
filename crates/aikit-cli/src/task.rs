@@ -90,10 +90,13 @@ pub fn spawn(repo: &Path, name: &str, isolation: Isolation) -> Result<SpawnOutco
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            let out = git(
-                repo,
-                &["worktree", "add", "-b", &branch, &path.to_string_lossy()],
-            )?;
+            let out = git(repo, &[
+                "worktree",
+                "add",
+                "-b",
+                &branch,
+                &path.to_string_lossy(),
+            ])?;
             if !out.status {
                 return Err(AikitError::new(
                     "task.worktree_failed",
@@ -273,7 +276,12 @@ fn git(cwd: &Path, args: &[&str]) -> Result<GitOutput> {
         .args(args)
         .current_dir(cwd)
         .output()
-        .map_err(|e| AikitError::new("task.git_unavailable", format!("could not run git: {e}")))?;
+        .map_err(|e| {
+            AikitError::new(
+                "task.git_unavailable",
+                format!("could not run git: {e}"),
+            )
+        })?;
     Ok(GitOutput {
         status: output.status.success(),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),

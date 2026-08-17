@@ -75,18 +75,9 @@ fn an_unknown_event_is_carried_through_rather_than_dropped() {
 
 #[test]
 fn a_manifest_may_spell_an_event_in_kebab_or_snake_case() {
-    assert_eq!(
-        HookEventKind::parse("pre-tool-use"),
-        HookEventKind::PreToolUse
-    );
-    assert_eq!(
-        HookEventKind::parse("pre_tool_use"),
-        HookEventKind::PreToolUse
-    );
-    assert_eq!(
-        HookEventKind::parse("PRETOOLUSE"),
-        HookEventKind::PreToolUse
-    );
+    assert_eq!(HookEventKind::parse("pre-tool-use"), HookEventKind::PreToolUse);
+    assert_eq!(HookEventKind::parse("pre_tool_use"), HookEventKind::PreToolUse);
+    assert_eq!(HookEventKind::parse("PRETOOLUSE"), HookEventKind::PreToolUse);
 }
 
 #[test]
@@ -324,10 +315,7 @@ fn a_step_whose_matcher_misses_is_recorded_as_not_matched_and_never_invoked() {
     };
     let decision = Dispatcher::new().run(&chain, &pre_tool_use("Bash"), &mut runner);
 
-    assert!(
-        invoked.is_empty(),
-        "a non-matching step must not be executed"
-    );
+    assert!(invoked.is_empty(), "a non-matching step must not be executed");
     assert!(decision.allowed);
     assert_eq!(decision.steps[0].outcome, StepOutcome::NotMatched);
 }
@@ -390,10 +378,7 @@ fn a_gate_denial_short_circuits_the_verifiers_but_the_observers_still_run() {
     assert_eq!(denial.capsule.to_string(), "hook/gate/boundary");
     assert_eq!(denial.phase, HookPhase::Gate);
     assert!(!denial.from_system_failure);
-    assert_eq!(
-        denial.reason,
-        "writes outside the project are not allowed here"
-    );
+    assert_eq!(denial.reason, "writes outside the project are not allowed here");
 
     let verifier = decision.step("hook/verify/secrets").unwrap();
     assert_eq!(verifier.outcome, StepOutcome::ShortCircuited);
@@ -414,10 +399,7 @@ fn an_observer_can_never_deny_the_event() {
     let mut runner = |_: &HookStep, _: &HookEvent| StepResult::deny("I disapprove");
     let decision = Dispatcher::new().run(&chain, &pre_tool_use("Bash"), &mut runner);
 
-    assert!(
-        decision.allowed,
-        "an observe-phase denial must not stop the event"
-    );
+    assert!(decision.allowed, "an observe-phase denial must not stop the event");
     assert!(decision.denial.is_none());
     assert!(
         decision.warnings.iter().any(|w| w.contains("observe")),
@@ -445,8 +427,7 @@ fn failure_fixture(policy: &str) -> Fixture {
 
 fn run_failing(f: &Fixture) -> aikit_core::hooks::HookDecision {
     let chain = chain(f, "PreToolUse");
-    let mut runner =
-        |_: &HookStep, _: &HookEvent| StepResult::system_failure("exited with signal 9");
+    let mut runner = |_: &HookStep, _: &HookEvent| StepResult::system_failure("exited with signal 9");
     Dispatcher::new().run(&chain, &pre_tool_use("Bash"), &mut runner)
 }
 
@@ -562,14 +543,8 @@ fn a_transform_rewrites_the_payload_that_every_later_step_sees() {
     .with_tool_name("Bash");
     let decision = Dispatcher::new().run(&chain, &event, &mut runner);
 
-    assert_eq!(
-        seen_by_verifier,
-        serde_json::json!({ "command": "echo ***" })
-    );
-    assert_eq!(
-        decision.payload,
-        serde_json::json!({ "command": "echo ***" })
-    );
+    assert_eq!(seen_by_verifier, serde_json::json!({ "command": "echo ***" }));
+    assert_eq!(decision.payload, serde_json::json!({ "command": "echo ***" }));
     assert_eq!(
         decision.step("hook/transform/redact").unwrap().outcome,
         StepOutcome::Transformed
@@ -694,11 +669,7 @@ fn two_parallel_verifiers_are_not_grouped_when_one_depends_on_the_other() {
     let chain = chain(&f, "PreToolUse");
     let groups = chain.execution_groups();
 
-    assert_eq!(
-        groups.len(),
-        2,
-        "a dependency must split the parallel group"
-    );
+    assert_eq!(groups.len(), 2, "a dependency must split the parallel group");
     assert_eq!(groups[0].capsules[0].to_string(), "hook/verify/b-producer");
     assert_eq!(groups[1].capsules[0].to_string(), "hook/verify/a-consumer");
 }
@@ -745,9 +716,7 @@ fn bypassable(id: &str, bypass: &str) -> aikit_core::capsule::Capsule {
     hook_table(
         id,
         "",
-        &format!(
-            "entry = \"payload/x\"\nevents = [\"PreToolUse\"]\nphase = \"gate\"\nbypass = {bypass}"
-        ),
+        &format!("entry = \"payload/x\"\nevents = [\"PreToolUse\"]\nphase = \"gate\"\nbypass = {bypass}"),
     )
 }
 
@@ -849,14 +818,8 @@ fn a_bypassed_step_is_skipped_recorded_and_loudly_warned_about() {
 fn a_bypass_issued_for_one_capsule_does_not_cover_another() {
     let f = enabled(
         vec![
-            bypassable(
-                "hook/gate/a-one",
-                "{ allowed = true, reason_required = false }",
-            ),
-            bypassable(
-                "hook/gate/b-two",
-                "{ allowed = true, reason_required = false }",
-            ),
+            bypassable("hook/gate/a-one", "{ allowed = true, reason_required = false }"),
+            bypassable("hook/gate/b-two", "{ allowed = true, reason_required = false }"),
         ],
         &["hook/gate/a-one", "hook/gate/b-two"],
     );
@@ -895,7 +858,11 @@ fn every_step_appears_in_the_decision_record_with_its_phase_and_duration() {
 
     assert_eq!(decision.steps.len(), 3);
     assert_eq!(
-        decision.steps.iter().map(|s| s.phase).collect::<Vec<_>>(),
+        decision
+            .steps
+            .iter()
+            .map(|s| s.phase)
+            .collect::<Vec<_>>(),
         vec![HookPhase::Gate, HookPhase::Verify, HookPhase::Observe]
     );
     for record in &decision.steps {
@@ -910,10 +877,7 @@ fn a_step_carries_the_effective_config_the_resolver_produced_for_its_capsule() {
     let mut layer = layer(ScopeKind::Session, &["hook/verify/cargo-check"], &[]);
     let mut table = toml::value::Table::new();
     table.insert("mode".into(), toml::Value::String("changed-crates".into()));
-    layer
-        .patch
-        .config
-        .insert(cid("hook/verify/cargo-check"), table);
+    layer.patch.config.insert(cid("hook/verify/cargo-check"), table);
 
     let f = Fixture::new(vec![hook_table(
         "hook/verify/cargo-check",

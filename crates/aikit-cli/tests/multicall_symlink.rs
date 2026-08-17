@@ -25,7 +25,8 @@ fn write(path: &Path, contents: &str) {
 
 /// A personal registry with one script capsule that exports `greet`.
 fn seed_registry(home: &Path) {
-    let base = home.join("registries/personal/capsules/script/demo/greet");
+    let base = home
+        .join("registries/personal/capsules/script/demo/greet");
     write(
         &base.join("manifest.toml"),
         r#"schema = 1
@@ -246,7 +247,8 @@ fn an_unknown_export_name_is_reported_not_silently_ignored() {
     let mut env = BTreeMap::new();
     env.insert("AIKIT_CONTEXT_ID".to_string(), CONTEXT_ID.to_string());
     let home = AikitHome::at(home_dir.path());
-    let mut service = Service::open(home, project.path(), |k| env.get(k).cloned()).unwrap();
+    let mut service =
+        Service::open(home, project.path(), |k| env.get(k).cloned()).unwrap();
     service
         .apply(ApplyRequest {
             scope: ScopeKind::Project,

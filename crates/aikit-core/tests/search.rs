@@ -233,12 +233,8 @@ fn a_search_doc_is_built_from_a_real_resolved_view() {
     )]);
     let view = f.resolve().unwrap();
 
-    let active = SearchDoc::from_view(
-        &view,
-        &cid("script/test/cargo-nextest"),
-        UsageStats::default(),
-    )
-    .expect("a catalogued capsule must produce a document");
+    let active = SearchDoc::from_view(&view, &cid("script/test/cargo-nextest"), UsageStats::default())
+        .expect("a catalogued capsule must produce a document");
     assert_eq!(active.status, DocStatus::Active);
     assert_eq!(active.scope, Some(ScopeKind::Project));
     assert!(active.in_current_project);
@@ -246,11 +242,13 @@ fn a_search_doc_is_built_from_a_real_resolved_view() {
     assert!(active.runnable);
     assert_eq!(active.exports, vec!["cargo-nextest", "nt"]);
 
-    let idle =
-        SearchDoc::from_view(&view, &cid("skill/rust/review"), UsageStats::default()).unwrap();
+    let idle = SearchDoc::from_view(&view, &cid("skill/rust/review"), UsageStats::default()).unwrap();
     assert_eq!(idle.status, DocStatus::Inactive);
     assert!(!idle.in_active_context);
-    assert!(!idle.runnable, "a skill is never runnable, active or not");
+    assert!(
+        !idle.runnable,
+        "a skill is never runnable, active or not"
+    );
     assert_eq!(idle.scope, None);
 }
 
@@ -265,8 +263,7 @@ fn a_capability_held_back_by_trust_is_a_document_with_unavailable_status() {
         .untrust("hook/gate/boundary");
     let view = f.resolve().unwrap();
 
-    let doc =
-        SearchDoc::from_view(&view, &cid("hook/gate/boundary"), UsageStats::default()).unwrap();
+    let doc = SearchDoc::from_view(&view, &cid("hook/gate/boundary"), UsageStats::default()).unwrap();
     assert_eq!(doc.status, DocStatus::Unavailable);
     assert!(parse_query("status:unavailable").matches_filters(&doc));
 }

@@ -45,10 +45,7 @@ exports = ["greet"]
 fn service(home_path: &Path, project: &Path) -> Service {
     let mut env = BTreeMap::new();
     env.insert("AIKIT_CONTEXT_ID".to_string(), CONTEXT_ID.to_string());
-    Service::open(AikitHome::at(home_path), project, move |k| {
-        env.get(k).cloned()
-    })
-    .unwrap()
+    Service::open(AikitHome::at(home_path), project, move |k| env.get(k).cloned()).unwrap()
 }
 
 #[test]
@@ -120,15 +117,10 @@ fn relabelling_an_unchanged_view_does_not_mint_a_second_generation() {
         .filter_map(Result::ok)
         .filter(|e| e.file_name().to_string_lossy().starts_with("gen_"))
         .count();
-    assert_eq!(
-        count, 1,
-        "labelling must not create a near-duplicate generation"
-    );
+    assert_eq!(count, 1, "labelling must not create a near-duplicate generation");
 
     assert_eq!(
-        svc.current_generation_properties()
-            .get("label")
-            .map(String::as_str),
+        svc.current_generation_properties().get("label").map(String::as_str),
         Some("known-good"),
     );
 }

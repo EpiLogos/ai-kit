@@ -108,11 +108,7 @@ entry = "payload/run.sh"
         let mut catalog = MemoryCatalog::default();
         catalog.insert(capsule("script/z/last"));
         catalog.insert(capsule("script/a/first"));
-        let ids: Vec<String> = catalog
-            .capsules()
-            .iter()
-            .map(|c| c.id.to_string())
-            .collect();
+        let ids: Vec<String> = catalog.capsules().iter().map(|c| c.id.to_string()).collect();
         assert_eq!(ids, vec!["script/a/first", "script/z/last"]);
     }
 

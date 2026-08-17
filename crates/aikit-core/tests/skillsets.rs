@@ -7,8 +7,10 @@
 mod common;
 use common::*;
 
+use aikit_core::skillset::{
+    self, SetMembership, SetProvenance, SkillSet,
+};
 use aikit_core::scope::ScopeKind;
-use aikit_core::skillset::{self, SetMembership, SetProvenance, SkillSet};
 use aikit_core::trust::TrustState;
 
 fn set_of(name: &str, members: &[&str]) -> SkillSet {
@@ -71,10 +73,7 @@ fn a_set_reports_what_it_withheld_in_one_describable_line() {
         .resolve()
         .expect("resolves");
 
-    let set = set_of(
-        "rust-review",
-        &["skill/rust/a", "skill/rust/b", "skill/rust/c"],
-    );
+    let set = set_of("rust-review", &["skill/rust/a", "skill/rust/b", "skill/rust/c"]);
     let projection = skillset::project(&set, &view);
     let line = projection.summarize("sets/rust-review");
 
@@ -90,11 +89,7 @@ fn nesting_gives_sub_sets_and_the_parent_carries_the_whole_subtree() {
     let child = set_of("pasyanti", &["skill/rust/a", "skill/rust/b"]);
     let parent = set_of("nara", &["skill/rust/c"]).with_child(child.clone());
 
-    assert_eq!(
-        parent.len(),
-        3,
-        "the parent carries its own plus the child's"
-    );
+    assert_eq!(parent.len(), 3, "the parent carries its own plus the child's");
     assert_eq!(child.len(), 2, "the child carries only its own");
     assert!(parent.all_members().contains(&cid("skill/rust/a")));
 }
@@ -105,11 +100,7 @@ fn sets_compose_by_union_and_a_shared_member_appears_once() {
     let right = set_of("right", &["skill/rust/b", "skill/rust/shared"]);
 
     let union = skillset::union(&[&left, &right]);
-    assert_eq!(
-        union.len(),
-        3,
-        "union, with the shared member once: {union:?}"
-    );
+    assert_eq!(union.len(), 3, "union, with the shared member once: {union:?}");
     assert!(union.contains(&cid("skill/rust/shared")));
 }
 
@@ -124,10 +115,7 @@ fn an_observed_set_is_read_only_and_wears_its_sigil() {
         },
     );
     assert_eq!(observed.label(), "@nara");
-    assert!(
-        !observed.provenance.is_writable(),
-        "observed is read-only until adopted"
-    );
+    assert!(!observed.provenance.is_writable(), "observed is read-only until adopted");
 
     let composed = SkillSet::new("rust-review", SetProvenance::Composed);
     assert_eq!(composed.label(), "rust-review");
@@ -150,11 +138,7 @@ fn a_new_capsule_matching_a_retained_pattern_is_proposed_never_joined() {
     ];
     let candidates = skillset::candidates(&set, &catalogued);
 
-    assert_eq!(
-        candidates.len(),
-        1,
-        "only the new matching capsule: {candidates:?}"
-    );
+    assert_eq!(candidates.len(), 1, "only the new matching capsule: {candidates:?}");
     assert_eq!(candidates[0].capsule, cid("skill/rust/unsafe-audit"));
     assert!(
         !set.all_members().contains(&cid("skill/rust/unsafe-audit")),
@@ -172,10 +156,7 @@ fn a_single_star_stays_within_a_path_segment_and_a_double_star_crosses() {
     );
     assert!(glob_matches("skill/**", "skill/rust/deep/review"));
     assert!(!glob_matches("skill/rust/*", "skill/python/lint"));
-    assert!(glob_matches(
-        "script/test/cargo-*",
-        "script/test/cargo-nextest"
-    ));
+    assert!(glob_matches("script/test/cargo-*", "script/test/cargo-nextest"));
 }
 
 #[test]
@@ -188,15 +169,10 @@ fn a_set_asking_for_something_not_installed_says_so_rather_than_failing() {
         .resolve()
         .expect("resolves");
 
-    let set = set_of(
-        "wishful",
-        &["skill/rust/review", "skill/rust/not-installed"],
-    );
+    let set = set_of("wishful", &["skill/rust/review", "skill/rust/not-installed"]);
     let projection = skillset::project(&set, &view);
 
     assert_eq!(projection.projected, vec![cid("skill/rust/review")]);
     assert_eq!(projection.withheld.len(), 1);
-    assert!(projection
-        .summarize("sets/wishful")
-        .contains("not installed"));
+    assert!(projection.summarize("sets/wishful").contains("not installed"));
 }

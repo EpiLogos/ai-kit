@@ -13,7 +13,9 @@ use std::os::unix::fs::PermissionsExt;
 
 use aikit_cli::hook;
 use aikit_core::capsule::{BypassPolicy, HookPhase};
-use aikit_core::hooks::{BypassScope, BypassToken, HookChain, HookEvent, HookEventKind, HookStep};
+use aikit_core::hooks::{
+    BypassScope, BypassToken, HookChain, HookEvent, HookEventKind, HookStep,
+};
 use aikit_core::id::{CapsuleId, ContextId};
 use aikit_store::index::Index;
 use tempfile::TempDir;
@@ -45,11 +47,7 @@ fn gate_chain(id: &CapsuleId) -> HookChain {
 }
 
 fn event() -> HookEvent {
-    HookEvent::new(
-        "claude",
-        HookEventKind::PreToolUse,
-        serde_json::json!({"tool": "Bash"}),
-    )
+    HookEvent::new("claude", HookEventKind::PreToolUse, serde_json::json!({"tool": "Bash"}))
 }
 
 #[test]
@@ -73,14 +71,8 @@ fn a_gate_denies_a_bypass_lets_exactly_one_event_through_then_is_spent() {
 
     // 3. The very next event is let through, and the token is consumed.
     let bypassed = hook::dispatch(&index, &context, &chain, &event(), &roots).unwrap();
-    assert!(
-        bypassed.allowed,
-        "the bypass must let this one event through"
-    );
-    assert!(
-        bypassed.was_bypassed(),
-        "and it must be recorded as bypassed"
-    );
+    assert!(bypassed.allowed, "the bypass must let this one event through");
+    assert!(bypassed.was_bypassed(), "and it must be recorded as bypassed");
     assert!(
         index.open_bypasses(&context).unwrap().is_empty(),
         "the token is spent after exactly one event"
@@ -90,10 +82,7 @@ fn a_gate_denies_a_bypass_lets_exactly_one_event_through_then_is_spent() {
 
     // 4. The event after that is denied again — the bypass was not a global switch.
     let after = hook::dispatch(&index, &context, &chain, &event(), &roots).unwrap();
-    assert!(
-        !after.allowed,
-        "with the token spent, the gate denies once more"
-    );
+    assert!(!after.allowed, "with the token spent, the gate denies once more");
 }
 
 #[test]

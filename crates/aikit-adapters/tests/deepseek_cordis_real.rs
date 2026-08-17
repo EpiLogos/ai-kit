@@ -6,8 +6,8 @@ use aikit_adapters::{
 };
 use aikit_core::resource::ResourceRef;
 use aikit_core::{
-    SessionSpaceActivationState, SessionSpaceAgentSession, SessionSpaceDefinition, SessionSpaceRef,
-    SessionSpaceRuntime,
+    SessionSpaceActivationState, SessionSpaceAgentSession, SessionSpaceDefinition,
+    SessionSpaceRef, SessionSpaceRuntime,
 };
 
 fn r(raw: &str) -> ResourceRef {
@@ -58,14 +58,8 @@ fn real_pinned_deepseek_cordis_web_activates_inside_session_space_with_exact_aut
     let component = r("component/deepseek/client-ui-conversation");
     let mut driver = CordisProcessActivationDriver::deepseek_web(&checkout);
     for (operation, grant_ref) in [
-        (
-            CordisActivationOperation::Activate,
-            "authority/real-activate",
-        ),
-        (
-            CordisActivationOperation::Deactivate,
-            "authority/real-deactivate",
-        ),
+        (CordisActivationOperation::Activate, "authority/real-activate"),
+        (CordisActivationOperation::Deactivate, "authority/real-deactivate"),
     ] {
         driver
             .register_activation_grant(CordisActivationGrant {
@@ -112,10 +106,9 @@ fn real_pinned_deepseek_cordis_web_activates_inside_session_space_with_exact_aut
         .provenance
         .iter()
         .any(|source| source.contains("actuation/determination/authority/real-activate")));
-    assert!(read_model
-        .surfaces
-        .iter()
-        .any(|surface| { surface.component.as_ref() == Some(&component) }));
+    assert!(read_model.surfaces.iter().any(|surface| {
+        surface.component.as_ref() == Some(&component)
+    }));
 
     let deactivated = runtime
         .deactivate_component(&lease, &component, &mut driver)
@@ -126,9 +119,7 @@ fn real_pinned_deepseek_cordis_web_activates_inside_session_space_with_exact_aut
         "provider teardown must not counterfeit canonical recomposition"
     );
     assert!(!driver.is_running().unwrap());
-    assert!(runtime
-        .read_model()
-        .surfaces
-        .iter()
-        .any(|surface| { surface.component.as_ref() == Some(&component) }));
+    assert!(runtime.read_model().surfaces.iter().any(|surface| {
+        surface.component.as_ref() == Some(&component)
+    }));
 }

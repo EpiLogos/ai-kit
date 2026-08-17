@@ -117,10 +117,7 @@ fn the_documented_file_names_are_the_ones_the_specification_lists() {
     );
     assert_eq!(
         home.registry_capsules("personal"),
-        tmp.path()
-            .join("registries")
-            .join("personal")
-            .join("capsules")
+        tmp.path().join("registries").join("personal").join("capsules")
     );
 }
 

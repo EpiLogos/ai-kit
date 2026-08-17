@@ -106,11 +106,7 @@ impl StagedDiff {
 }
 
 fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
-    if n == 1 {
-        one
-    } else {
-        many
-    }
+    if n == 1 { one } else { many }
 }
 
 /// Resolver failure surfaced by the read-only compatibility preview.

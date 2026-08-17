@@ -141,6 +141,7 @@ pub enum Maturity {
     Blocked,
 }
 
+
 impl Maturity {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -361,6 +362,7 @@ pub enum ExecMode {
     Replace,
 }
 
+
 impl ExecMode {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -395,6 +397,7 @@ pub enum WorkingDir {
     /// The capsule's own payload directory.
     Capsule,
 }
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -439,6 +442,7 @@ pub enum SkillFormat {
     Aikit,
 }
 
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[derive(Default)]
@@ -448,6 +452,7 @@ pub enum SkillActivation {
     #[default]
     ModelOrUser,
 }
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -481,6 +486,7 @@ pub enum HookPhase {
     Observe,
     Capture,
 }
+
 
 impl HookPhase {
     pub fn as_str(self) -> &'static str {
@@ -521,6 +527,7 @@ pub enum FailurePolicy {
     /// Allow, but record and surface a warning.
     Warn,
 }
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -766,10 +773,7 @@ pub struct Capsule {
 impl Capsule {
     pub fn from_toml_str(src: &str) -> Result<Self> {
         let raw: RawManifest = toml::from_str(src).map_err(|e| {
-            AikitError::new(
-                "manifest.parse_error",
-                format!("could not parse manifest: {e}"),
-            )
+            AikitError::new("manifest.parse_error", format!("could not parse manifest: {e}"))
         })?;
         Self::from_raw(raw)
     }
@@ -819,9 +823,7 @@ impl Capsule {
         if raw.description.trim().is_empty() {
             return err(
                 "manifest.invalid",
-                format!(
-                    "`{id}` has an empty description; the description is what makes it findable"
-                ),
+                format!("`{id}` has an empty description; the description is what makes it findable"),
             );
         }
 
@@ -900,7 +902,10 @@ impl Capsule {
         }
         for req in &raw.requires {
             if req.id == id {
-                return err("manifest.invalid", format!("`{id}` requires itself"));
+                return err(
+                    "manifest.invalid",
+                    format!("`{id}` requires itself"),
+                );
             }
         }
         for con in &raw.conflicts {
@@ -1018,10 +1023,7 @@ mod tests {
     #[test]
     fn kinds_declare_what_activation_means_for_them() {
         for kind in Kind::ALL {
-            assert!(
-                !kind.activation_meaning().is_empty(),
-                "{kind} has no meaning"
-            );
+            assert!(!kind.activation_meaning().is_empty(), "{kind} has no meaning");
         }
     }
 
@@ -1104,10 +1106,7 @@ entry = "payload/run.sh"
 [[requires]]
 id = "script/test/thing"
 "#;
-        assert_eq!(
-            Capsule::from_toml_str(src).unwrap_err().code(),
-            "manifest.invalid"
-        );
+        assert_eq!(Capsule::from_toml_str(src).unwrap_err().code(), "manifest.invalid");
     }
 
     #[test]
@@ -1122,10 +1121,7 @@ description = "   "
 [script]
 entry = "payload/run.sh"
 "#;
-        assert_eq!(
-            Capsule::from_toml_str(src).unwrap_err().code(),
-            "manifest.invalid"
-        );
+        assert_eq!(Capsule::from_toml_str(src).unwrap_err().code(), "manifest.invalid");
     }
 
     #[test]
@@ -1148,10 +1144,7 @@ type = "path"
 name = "path"
 type = "string"
 "#;
-        assert_eq!(
-            Capsule::from_toml_str(src).unwrap_err().code(),
-            "manifest.invalid"
-        );
+        assert_eq!(Capsule::from_toml_str(src).unwrap_err().code(), "manifest.invalid");
     }
 
     #[test]

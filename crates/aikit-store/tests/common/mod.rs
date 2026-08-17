@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use aikit_core::catalog::Catalog;
 use aikit_core::trust::MemoryTrust;
 use aikit_core::{
-    CapsuleId, ContextDescriptor, LayerOrigin, PoolPatch, ProfileId, RegistrySource,
-    ResolveRequest, ResolvedContext, ScopeKind, ScopeLayer, TrustState,
+    CapsuleId, ContextDescriptor, LayerOrigin, PoolPatch, ProfileId, RegistrySource, ResolveRequest,
+    ResolvedContext, ScopeKind, ScopeLayer, TrustState,
 };
 
 /// A registry under construction on disk.

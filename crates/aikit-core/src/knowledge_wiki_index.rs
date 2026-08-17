@@ -76,13 +76,8 @@ pub struct WikiLocalWhole {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "kebab-case")]
 pub enum WikiMutationProposal {
-    Upsert {
-        object: WikiObjectEnvelope,
-    },
-    Remove {
-        resource: ResourceRef,
-        expected_revision: u64,
-    },
+    Upsert { object: WikiObjectEnvelope },
+    Remove { resource: ResourceRef, expected_revision: u64 },
 }
 
 /// Serializable proposal envelope without making `WikiObject` itself a tagged
@@ -483,11 +478,7 @@ impl SemanticWikiIndex {
                 "space",
                 label,
                 searchable,
-                format!(
-                    "{} node refs · {} child spaces",
-                    space.node_refs.len(),
-                    space.child_space_refs.len()
-                ),
+                format!("{} node refs · {} child spaces", space.node_refs.len(), space.child_space_refs.len()),
             );
         }
         if let Some(node) = self.nodes.get(resource) {
@@ -497,11 +488,7 @@ impl SemanticWikiIndex {
                 "node",
                 label,
                 searchable,
-                format!(
-                    "{} · {} source refs",
-                    node.node_type,
-                    node.source_refs.len()
-                ),
+                format!("{} · {} source refs", node.node_type, node.source_refs.len()),
             );
         }
         if let Some(edge) = self.edges.get(resource) {
@@ -522,11 +509,7 @@ impl SemanticWikiIndex {
                 "frame",
                 label.clone(),
                 format!("{} {}", label, frame.member_refs.len()),
-                format!(
-                    "{} members · {} spaces",
-                    frame.member_refs.len(),
-                    frame.space_refs.len()
-                ),
+                format!("{} members · {} spaces", frame.member_refs.len(), frame.space_refs.len()),
             );
         }
         let reading = self
@@ -617,14 +600,7 @@ mod tests {
         ResourceRef::parse(raw).unwrap()
     }
 
-    fn space(
-        id: &str,
-        title: &str,
-        parents: &[&str],
-        children: &[&str],
-        nodes: &[&str],
-        anchor: Option<&str>,
-    ) -> WikiObject {
+    fn space(id: &str, title: &str, parents: &[&str], children: &[&str], nodes: &[&str], anchor: Option<&str>) -> WikiObject {
         WikiObject::Space(WikiSpace {
             profile: crate::OKF_WIKI_PROFILE.into(),
             ref_id: r(id),
@@ -678,31 +654,15 @@ mod tests {
     #[test]
     fn rebuild_is_deterministic_and_search_backlinks_preserve_authority() {
         let objects = vec![
-            space(
-                "wiki:space:root",
-                "Root",
-                &[],
-                &[],
-                &["wiki:node:a", "wiki:node:b"],
-                Some("wiki:node:a"),
-            ),
+            space("wiki:space:root", "Root", &[], &[], &["wiki:node:a", "wiki:node:b"], Some("wiki:node:a")),
             node("wiki:node:a", "Semantic Wiki", &["wiki:space:root"], None),
             node("wiki:node:b", "Source Pool", &["wiki:space:root"], None),
-            edge(
-                "wiki:edge:a-b",
-                "wiki:node:a",
-                "wiki:node:b",
-                "develops",
-                WikiEdgeOrigin::Authored,
-            ),
+            edge("wiki:edge:a-b", "wiki:node:a", "wiki:node:b", "develops", WikiEdgeOrigin::Authored),
         ];
         let first = SemanticWikiIndex::rebuild(objects.clone()).unwrap();
         let second = SemanticWikiIndex::rebuild(objects).unwrap();
         assert_eq!(first.revision(), second.revision());
-        assert_eq!(
-            first.search("source pool", 10)[0].resource.as_str(),
-            "wiki:node:b"
-        );
+        assert_eq!(first.search("source pool", 10)[0].resource.as_str(), "wiki:node:b");
         let backlinks = first.backlinks(&r("wiki:node:b"));
         assert_eq!(backlinks.len(), 1);
         assert_eq!(backlinks[0].origin, WikiEdgeOrigin::Authored);
@@ -712,47 +672,16 @@ mod tests {
     #[test]
     fn recursive_spaces_and_node_as_local_whole_are_bounded() {
         let objects = vec![
-            space(
-                "wiki:space:root",
-                "Root",
-                &[],
-                &["wiki:space:child"],
-                &["wiki:node:whole"],
-                Some("wiki:node:whole"),
-            ),
-            space(
-                "wiki:space:child",
-                "Child",
-                &["wiki:space:root"],
-                &[],
-                &["wiki:node:whole", "wiki:node:part"],
-                Some("wiki:node:whole"),
-            ),
-            node(
-                "wiki:node:whole",
-                "Whole",
-                &["wiki:space:root", "wiki:space:child"],
-                Some("wiki:space:child"),
-            ),
+            space("wiki:space:root", "Root", &[], &["wiki:space:child"], &["wiki:node:whole"], Some("wiki:node:whole")),
+            space("wiki:space:child", "Child", &["wiki:space:root"], &[], &["wiki:node:whole", "wiki:node:part"], Some("wiki:node:whole")),
+            node("wiki:node:whole", "Whole", &["wiki:space:root", "wiki:space:child"], Some("wiki:space:child")),
             node("wiki:node:part", "Part", &["wiki:space:child"], None),
-            edge(
-                "wiki:edge:whole-part",
-                "wiki:node:whole",
-                "wiki:node:part",
-                "contains",
-                WikiEdgeOrigin::QlDerived,
-            ),
+            edge("wiki:edge:whole-part", "wiki:node:whole", "wiki:node:part", "contains", WikiEdgeOrigin::QlDerived),
         ];
         let index = SemanticWikiIndex::rebuild(objects).unwrap();
-        assert_eq!(
-            index.subspaces(&r("wiki:space:root"), 1),
-            vec![r("wiki:space:child")]
-        );
+        assert_eq!(index.subspaces(&r("wiki:space:root"), 1), vec![r("wiki:space:child")]);
         let whole = index.local_whole(&r("wiki:node:whole")).unwrap();
-        assert_eq!(
-            whole.local_space.unwrap().ref_id.as_str(),
-            "wiki:space:child"
-        );
+        assert_eq!(whole.local_space.unwrap().ref_id.as_str(), "wiki:space:child");
         assert_eq!(whole.members.len(), 2);
         assert_eq!(whole.neighbours[0].origin, WikiEdgeOrigin::QlDerived);
     }
@@ -768,7 +697,12 @@ mod tests {
             "knowledge.wiki_duplicate_ref"
         );
 
-        let broken = vec![node("wiki:node:a", "A", &[], Some("wiki:space:missing"))];
+        let broken = vec![node(
+            "wiki:node:a",
+            "A",
+            &[],
+            Some("wiki:space:missing"),
+        )];
         assert_eq!(
             SemanticWikiIndex::rebuild(broken).unwrap_err().code(),
             "knowledge.wiki_local_space_missing"

@@ -34,10 +34,7 @@ impl ConnectionProcess {
             ));
         };
         let mut command = Command::new(program);
-        command
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped());
+        command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped());
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
@@ -86,10 +83,7 @@ impl ConnectionProcess {
         serde_json::from_str(&line).map_err(|error| {
             AikitError::new(
                 "connection.process.invalid_json",
-                format!(
-                    "target `{}` emitted invalid JSON: {error}",
-                    self.argv.join(" ")
-                ),
+                format!("target `{}` emitted invalid JSON: {error}", self.argv.join(" ")),
             )
             .with("line", line)
         })
@@ -105,10 +99,7 @@ impl ConnectionProcess {
         self.stdin.write_all(b"\n").map_err(|error| {
             AikitError::new(
                 "connection.process.write_failed",
-                format!(
-                    "could not terminate line for `{}`: {error}",
-                    self.argv.join(" ")
-                ),
+                format!("could not terminate line for `{}`: {error}", self.argv.join(" ")),
             )
         })?;
         self.stdin.flush().map_err(|error| {

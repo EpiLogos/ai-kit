@@ -208,12 +208,7 @@ mod tests {
     fn four_compose_horizons_are_explicit_and_not_one_flat_list() {
         assert_eq!(
             ComposeHorizon::ALL.map(ComposeHorizon::as_str),
-            [
-                "Capabilities",
-                "Information",
-                "Actor / Runtime",
-                "Projection"
-            ]
+            ["Capabilities", "Information", "Actor / Runtime", "Projection"]
         );
     }
 

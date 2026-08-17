@@ -142,10 +142,7 @@ mod tests {
     #[test]
     fn the_current_platform_is_one_of_the_known_ones() {
         let p = Platform::current();
-        assert!(matches!(
-            p,
-            Platform::Linux | Platform::Macos | Platform::Windows
-        ));
+        assert!(matches!(p, Platform::Linux | Platform::Macos | Platform::Windows));
     }
 
     #[test]

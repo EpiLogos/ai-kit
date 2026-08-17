@@ -30,8 +30,7 @@ pub trait SessionSpaceApplicationProjection {
         space: Option<&SessionSpaceRef>,
         intent: SessionSpaceMutation,
     ) -> Result<SessionSpacePreview>;
-    fn session_space_apply(&mut self, preview: &SessionSpacePreview)
-        -> Result<SessionSpaceReceipt>;
+    fn session_space_apply(&mut self, preview: &SessionSpacePreview) -> Result<SessionSpaceReceipt>;
     fn session_space_history(&self, space: &SessionSpaceRef) -> Result<Vec<SessionSpaceReceipt>>;
     fn session_space_compare_history(
         &self,
@@ -93,10 +92,7 @@ impl SessionSpaceApplicationProjection for ApplicationService<'_> {
         self.backend().session_space_stage(space, intent)
     }
 
-    fn session_space_apply(
-        &mut self,
-        preview: &SessionSpacePreview,
-    ) -> Result<SessionSpaceReceipt> {
+    fn session_space_apply(&mut self, preview: &SessionSpacePreview) -> Result<SessionSpaceReceipt> {
         self.backend_mut().session_space_apply(preview)
     }
 
@@ -129,8 +125,12 @@ impl SessionSpaceApplicationProjection for ApplicationService<'_> {
         native_observations: &[SessionSpaceNativeObservation],
         continuity: &[AgentSessionContinuityEvidence],
     ) -> Result<SessionSpaceReconstructionReport> {
-        self.backend()
-            .session_space_reconstruct(space, runtime, native_observations, continuity)
+        self.backend().session_space_reconstruct(
+            space,
+            runtime,
+            native_observations,
+            continuity,
+        )
     }
 
     fn session_space_reconcile(
@@ -140,8 +140,12 @@ impl SessionSpaceApplicationProjection for ApplicationService<'_> {
         native_observations: &[SessionSpaceNativeObservation],
         continuity: &[AgentSessionContinuityEvidence],
     ) -> Result<SessionSpaceReconstructionReport> {
-        self.backend()
-            .session_space_reconcile(space, runtime, native_observations, continuity)
+        self.backend().session_space_reconcile(
+            space,
+            runtime,
+            native_observations,
+            continuity,
+        )
     }
 
     fn session_space_explain(

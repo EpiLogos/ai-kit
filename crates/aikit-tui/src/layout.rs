@@ -210,10 +210,7 @@ impl Glyphs {
         }
         let utf8 = ["LC_ALL", "LC_CTYPE", "LANG"].iter().any(|key| {
             std::env::var(key)
-                .map(|v| {
-                    v.to_ascii_lowercase().contains("utf-8")
-                        || v.to_ascii_lowercase().contains("utf8")
-                })
+                .map(|v| v.to_ascii_lowercase().contains("utf-8") || v.to_ascii_lowercase().contains("utf8"))
                 .unwrap_or(false)
         });
         if utf8 {

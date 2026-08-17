@@ -8,7 +8,9 @@
 
 use aikit_core::context::Isolation;
 use aikit_core::platform::MuxKind;
-use aikit_core::session::{compile, Attach, Direction, Lifecycle, Placement, Restart, SessionSpec};
+use aikit_core::session::{
+    compile, Attach, Direction, Lifecycle, Placement, Restart, SessionSpec,
+};
 
 const FULL: &str = r#"
 schema = 1
@@ -101,10 +103,7 @@ fn a_session_spec_parses_the_documented_toml() {
     let spec = spec(FULL);
     assert_eq!(spec.id, "payments-dev");
     assert_eq!(spec.name, "Payments — development");
-    assert_eq!(
-        spec.root.as_deref(),
-        Some(std::path::Path::new("~/work/payments"))
-    );
+    assert_eq!(spec.root.as_deref(), Some(std::path::Path::new("~/work/payments")));
     assert_eq!(spec.backend.mux, None, "`auto` means the adapter decides");
     assert_eq!(spec.attach, Attach::Always);
     assert_eq!(spec.lifecycle, Lifecycle::Persist);
@@ -239,9 +238,7 @@ fn an_unsupported_schema_is_rejected_rather_than_guessed_at() {
 #[test]
 fn a_malformed_document_reports_a_parse_error_with_a_stable_code() {
     assert_eq!(
-        SessionSpec::from_toml_str("this is not toml =")
-            .unwrap_err()
-            .code(),
+        SessionSpec::from_toml_str("this is not toml =").unwrap_err().code(),
         "session.parse_error"
     );
 }
@@ -462,11 +459,7 @@ fn panes_declared_before_their_parent_are_reordered_so_the_parent_comes_first() 
     )))
     .unwrap();
 
-    let order: Vec<&str> = plan.views[0]
-        .steps
-        .iter()
-        .map(|s| s.pane.as_str())
-        .collect();
+    let order: Vec<&str> = plan.views[0].steps.iter().map(|s| s.pane.as_str()).collect();
     assert_eq!(order, vec!["root", "child"]);
 }
 
@@ -479,11 +472,7 @@ fn independent_panes_keep_their_declared_order() {
     )))
     .unwrap();
 
-    let order: Vec<&str> = plan.views[0]
-        .steps
-        .iter()
-        .map(|s| s.pane.as_str())
-        .collect();
+    let order: Vec<&str> = plan.views[0].steps.iter().map(|s| s.pane.as_str()).collect();
     assert_eq!(order, vec!["root", "z", "a"]);
 }
 

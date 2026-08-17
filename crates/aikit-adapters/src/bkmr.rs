@@ -352,11 +352,9 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
                 )?;
                 let mut ids = Vec::new();
                 for line in stdout.lines() {
-                    if let Some(id) = line
-                        .split_whitespace()
-                        .next()
-                        .filter(|raw| !raw.is_empty() && raw.chars().all(|ch| ch.is_ascii_digit()))
-                    {
+                    if let Some(id) = line.split_whitespace().next().filter(|raw| {
+                        !raw.is_empty() && raw.chars().all(|ch| ch.is_ascii_digit())
+                    }) {
                         if !ids.iter().any(|seen| seen == id) {
                             ids.push(id.to_string());
                         }
@@ -373,8 +371,11 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
                     for record in records {
                         if let Some(hit) = self.hit_from_record(&record, mode, rank) {
                             let required = tags.iter().map(String::as_str).collect::<BTreeSet<_>>();
-                            let actual =
-                                hit.tags.iter().map(String::as_str).collect::<BTreeSet<_>>();
+                            let actual = hit
+                                .tags
+                                .iter()
+                                .map(String::as_str)
+                                .collect::<BTreeSet<_>>();
                             if required.is_subset(&actual) {
                                 hits.push(hit);
                             }
@@ -426,10 +427,7 @@ fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> BkmrCliSurface {
                 semantic_cli: false,
                 hybrid_json: false,
                 tags: false,
-                reason: Some(format!(
-                    "bkmr --version exited with status {}",
-                    output.status
-                )),
+                reason: Some(format!("bkmr --version exited with status {}", output.status)),
             }
         }
         Err(error) => {
@@ -445,10 +443,7 @@ fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> BkmrCliSurface {
             }
         }
     };
-    let version = parse_version(&format!(
-        "{} {}",
-        version_output.stdout, version_output.stderr
-    ));
+    let version = parse_version(&format!("{} {}", version_output.stdout, version_output.stderr));
     let top = probe_help(runner, binary, &["--help"]);
     let search = probe_help(runner, binary, &["search", "--help"]);
     let hybrid = probe_help(runner, binary, &["hsearch", "--help"]);
@@ -533,10 +528,7 @@ fn json_records(stdout: &str) -> Result<Vec<Map<String, Value>>> {
         Value::Object(mut object) => {
             for key in ["hits", "results", "bookmarks"] {
                 if let Some(Value::Array(values)) = object.remove(key) {
-                    return Ok(values
-                        .into_iter()
-                        .filter_map(ValueObjectOwned::into_object)
-                        .collect());
+                    return Ok(values.into_iter().filter_map(ValueObjectOwned::into_object).collect());
                 }
             }
             vec![Value::Object(object)]
@@ -566,7 +558,7 @@ impl ValueObjectOwned for Value {
 mod tests {
     use std::sync::Arc;
 
-    use aikit_core::knowledge_source_pool::{SourceProviderStatus, SourceVisibility};
+    use aikit_core::knowledge_source_pool::{SourceVisibility, SourceProviderStatus};
     use aikit_core::resource::SourceRevision;
 
     use super::*;
@@ -580,14 +572,8 @@ mod tests {
                     "bkmr --help",
                     "commands: search sem-search hsearch tag tags create-db add show info\n",
                 )
-                .on(
-                    "bkmr search --help",
-                    "options: --json --fzf --tags --np --no-color\n",
-                )
-                .on(
-                    "bkmr hsearch --help",
-                    "options: --json --tags --limit --np\n",
-                )
+                .on("bkmr search --help", "options: --json --fzf --tags --np --no-color\n")
+                .on("bkmr hsearch --help", "options: --json --tags --limit --np\n")
                 .on("create-db", "created\n")
                 .on(" add ", "added\n")
                 .on(" search quasars ", search_json),
@@ -634,8 +620,7 @@ mod tests {
         let response = r#"[{"bookmark":{"id":41,"title":"Astronomy","description":"aikit-source-ref:source:astronomy","tags":["astronomy","science"],"content":"quasars"},"score":0.9}]"#;
         let runner = scripted(response);
         let calls = Arc::clone(&runner);
-        let mut provider =
-            BkmrSourcePoolProvider::new(runner, "/tmp/aikit-bkmr-contract.db", false);
+        let mut provider = BkmrSourcePoolProvider::new(runner, "/tmp/aikit-bkmr-contract.db", false);
         provider.rebuild(&[astronomy()]).unwrap();
         let hits = provider
             .search("quasars", SourceSearchMode::Fulltext, &[], 20)

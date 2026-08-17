@@ -227,9 +227,7 @@ enum PendingAcpRequest {
         mode: SessionOpenMode,
         canonical_agent_session: Option<ResourceRef>,
     },
-    Prompt {
-        native_session_id: String,
-    },
+    Prompt { native_session_id: String },
 }
 
 impl AcpV1ConnectionAdapter {
@@ -351,7 +349,10 @@ impl AcpV1ConnectionAdapter {
                 format!("ACP request {id} failed: {error}"),
             ));
         }
-        let result = message.get("result").cloned().unwrap_or_else(|| json!({}));
+        let result = message
+            .get("result")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
         match pending {
             PendingAcpRequest::Initialize => {
                 self.apply_initialize_result(&result)?;
@@ -603,11 +604,17 @@ impl AgentConnectionAdapter for AcpV1ConnectionAdapter {
         let id = message.get("id").and_then(Value::as_u64);
         match (method.as_deref(), id) {
             (Some("session/request_permission"), Some(id)) => {
-                let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
+                let params = message
+                    .get("params")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 self.ingest_permission_request(id, &params)
             }
             (Some(method), _) => {
-                let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
+                let params = message
+                    .get("params")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 self.ingest_notification(method, &params)
             }
             (None, Some(id)) => self.ingest_response(id, &message),
@@ -629,7 +636,11 @@ pub struct ClassicProcessConnectionAdapter {
 }
 
 impl ClassicProcessConnectionAdapter {
-    pub fn new(connection_ref: ResourceRef, argv: Vec<String>, provenance: Vec<String>) -> Self {
+    pub fn new(
+        connection_ref: ResourceRef,
+        argv: Vec<String>,
+        provenance: Vec<String>,
+    ) -> Self {
         Self {
             descriptor: ConnectionDescriptor {
                 adapter_ref: ResourceRef::parse("connection-adapter/classic-process/v1")

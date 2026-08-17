@@ -329,6 +329,7 @@ impl EnvironmentImportProvider {
                     credential_ref,
                     provenance: format!("project-env:{}#{env_var}", path.display()),
                     env_var,
+                    source_available: true,
                     value: Some(SecretValue::new(value)?),
                 });
             }
@@ -611,9 +612,15 @@ mod encrypted_fallback {
             })?;
             let key = self.derive_key(&salt)?;
             let cipher = XChaCha20Poly1305::new((&key).into());
+            let nonce = XNonce::try_from(nonce.as_slice()).map_err(|_| {
+                provider_error(
+                    "credential.encrypted_fallback_invalid",
+                    "encrypted fallback nonce must be 24 bytes",
+                )
+            })?;
             let plaintext = cipher
                 .decrypt(
-                    XNonce::from_slice(&nonce),
+                    &nonce,
                     Payload {
                         msg: &ciphertext,
                         aad: credential_ref.as_str().as_bytes(),
@@ -713,9 +720,10 @@ mod encrypted_fallback {
             })?;
             let key = self.derive_key(&salt)?;
             let cipher = XChaCha20Poly1305::new((&key).into());
+            let nonce_value = XNonce::try_from(nonce.as_slice()).expect("fixed 24-byte nonce");
             let ciphertext = cipher
                 .encrypt(
-                    XNonce::from_slice(&nonce),
+                    &nonce_value,
                     Payload {
                         msg: secret.expose().as_bytes(),
                         aad: credential_ref.as_str().as_bytes(),

@@ -18,16 +18,14 @@ fn capability_relation_read_model_uses_canonical_contextual_actions() {
     let actions = view.value["contextualActions"]
         .as_array()
         .expect("relation model must expose contextual Actions");
-    assert_eq!(
-        actions.len(),
-        2,
-        "Explain and Toggle are contextual Actions"
-    );
+    assert_eq!(actions.len(), 2, "Explain and Toggle are contextual Actions");
     assert!(actions.iter().any(|action| {
-        action.get("action").and_then(|value| value.as_str()) == Some("action/capability/explain")
+        action.get("action").and_then(|value| value.as_str())
+            == Some("action/capability/explain")
     }));
     assert!(actions.iter().any(|action| {
-        action.get("action").and_then(|value| value.as_str()) == Some("action/capability/toggle")
+        action.get("action").and_then(|value| value.as_str())
+            == Some("action/capability/toggle")
     }));
 }
 
@@ -44,7 +42,9 @@ fn resource_without_typed_relations_does_not_invent_edges() {
     assert!(view.value["contextualActions"]
         .as_array()
         .is_some_and(Vec::is_empty));
-    assert!(view.value["related"].as_array().is_some_and(Vec::is_empty));
+    assert!(view.value["related"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
     assert!(view.value["resolverRelated"]
         .as_array()
         .is_some_and(Vec::is_empty));

@@ -21,8 +21,8 @@ fn write(path: &Path, contents: &str) {
 
 /// A home carrying the real `tool/search/bkmr` capsule from `contrib/`.
 fn seed_home(home: &Path) {
-    let src =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contrib/bkmr/capsules/tool/search/bkmr");
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../contrib/bkmr/capsules/tool/search/bkmr");
     let dst = home.join("registries/personal/capsules/tool/search/bkmr");
     fs::create_dir_all(&dst).unwrap();
     fs::copy(src.join("manifest.toml"), dst.join("manifest.toml"))
@@ -36,10 +36,7 @@ fn project_binding(root: &Path, db: &str, also: &[&str]) {
     } else {
         format!(
             "also = [{}]\n",
-            also.iter()
-                .map(|a| format!("\"{a}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
+            also.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(", ")
         )
     };
     write(
@@ -106,21 +103,13 @@ fn two_projects_resolve_to_two_bkmr_databases_with_nothing_shared() {
 
     // The capsules' own variable agrees with the tool's, so a human typing bare
     // `bkmr` in that pane cannot be looking at a different database.
-    assert_eq!(
-        value_of(&epi_env, "AIKIT_BKMR_DB").as_deref(),
-        Some(epi_db.as_str())
-    );
+    assert_eq!(value_of(&epi_env, "AIKIT_BKMR_DB").as_deref(), Some(epi_db.as_str()));
 
     // `also` is a DECLARED set, not a directory glob.
     let set = value_of(&epi_env, "AIKIT_BKMR_DB_SET").expect("a db set is exported");
+    assert!(set.contains("epi-logos.db") && set.contains("books.db"), "got {set}");
     assert!(
-        set.contains("epi-logos.db") && set.contains("books.db"),
-        "got {set}"
-    );
-    assert!(
-        !value_of(&blog_env, "AIKIT_BKMR_DB_SET")
-            .unwrap()
-            .contains("books.db"),
+        !value_of(&blog_env, "AIKIT_BKMR_DB_SET").unwrap().contains("books.db"),
         "the blog declared no cross-search set, so it gets none"
     );
 

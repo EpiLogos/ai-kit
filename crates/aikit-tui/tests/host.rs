@@ -49,14 +49,8 @@ fn an_inline_palette_stays_within_the_documented_row_band() {
 fn a_terminal_too_short_for_an_inline_strip_goes_fullscreen_rather_than_cramped() {
     // 15 rows cannot hold a 14-row strip plus any surrounding context, so there
     // is nothing left to preserve and the honest answer is the whole screen.
-    assert_eq!(
-        UiHost::choose(&TerminalProfile::new(100, 15)),
-        UiHost::Fullscreen
-    );
-    assert_eq!(
-        UiHost::choose(&TerminalProfile::new(30, 40)),
-        UiHost::Fullscreen
-    );
+    assert_eq!(UiHost::choose(&TerminalProfile::new(100, 15)), UiHost::Fullscreen);
+    assert_eq!(UiHost::choose(&TerminalProfile::new(30, 40)), UiHost::Fullscreen);
 }
 
 #[test]

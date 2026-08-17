@@ -298,8 +298,9 @@ impl<'a> InboxChannel<'a> {
             proposal: item.proposal,
         };
 
-        let evidence_json = serde_json::to_string(&stored.evidence)
-            .map_err(|e| AikitError::new("inbox.unserializable", format!("evidence: {e}")))?;
+        let evidence_json = serde_json::to_string(&stored.evidence).map_err(|e| {
+            AikitError::new("inbox.unserializable", format!("evidence: {e}"))
+        })?;
 
         self.index
             .conn()
@@ -329,10 +330,7 @@ impl<'a> InboxChannel<'a> {
 
     /// Every item, newest first.
     pub fn items(&self) -> Result<Vec<InboxItem>> {
-        self.query(
-            "SELECT {C} FROM inbox_items ORDER BY created_ns DESC, inbox_id",
-            params![],
-        )
+        self.query("SELECT {C} FROM inbox_items ORDER BY created_ns DESC, inbox_id", params![])
     }
 
     /// Only the items still wanting attention at `now` (open, or a deferral that
@@ -357,12 +355,7 @@ impl<'a> InboxChannel<'a> {
 
     /// Record the user's decision on an item, keeping it for audit.
     pub fn resolve(&self, id: &InboxId, decision: &str) -> Result<()> {
-        self.set_state(
-            id,
-            &InboxState::Resolved {
-                decision: decision.to_string(),
-            },
-        )
+        self.set_state(id, &InboxState::Resolved { decision: decision.to_string() })
     }
 
     /// Snooze an item until a time.
@@ -380,10 +373,11 @@ impl<'a> InboxChannel<'a> {
             )
             .map_err(|e| sql_error("inbox.write_failed", &e))?;
         if changed == 0 {
-            return Err(
-                AikitError::new("inbox.unknown_item", format!("no inbox item {id}"))
-                    .with("inbox_id", id.to_string()),
-            );
+            return Err(AikitError::new(
+                "inbox.unknown_item",
+                format!("no inbox item {id}"),
+            )
+            .with("inbox_id", id.to_string()));
         }
         Ok(())
     }

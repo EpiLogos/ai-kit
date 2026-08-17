@@ -24,10 +24,7 @@ fn a_bare_terminal_is_always_present_because_it_is_where_we_already_are() {
     assert_eq!(presence.kind, MuxKind::Plain);
     assert!(presence.installed);
     assert!(presence.is_usable());
-    assert!(
-        presence.inside,
-        "a plain terminal is always the one we are in"
-    );
+    assert!(presence.inside, "a plain terminal is always the one we are in");
 }
 
 #[test]
@@ -69,10 +66,7 @@ fn a_multi_pane_plan_warns_about_every_pane_that_cannot_exist_here() {
     let plain = Plain::new();
     let dir = tempfile::tempdir().unwrap();
     let binding = plain
-        .ensure_session(
-            &three_pane_plan("payments", dir.path()),
-            ReconcileMode::default(),
-        )
+        .ensure_session(&three_pane_plan("payments", dir.path()), ReconcileMode::default())
         .unwrap();
 
     // Three panes across two views were asked for; one terminal is available.

@@ -2,8 +2,10 @@ use serde_json::Value;
 
 #[test]
 fn current_provider_fixture_is_provenance_bearing_and_not_fitness() {
-    let value: Value =
-        serde_json::from_str(include_str!("fixtures/openai-gpt-5.4-2026-08-17.json")).unwrap();
+    let value: Value = serde_json::from_str(include_str!(
+        "fixtures/openai-gpt-5.4-2026-08-17.json"
+    ))
+    .unwrap();
 
     assert_eq!(value["provider_ref"], "provider:openai");
     assert_eq!(value["model_ref"], "model:gpt-5.4");
@@ -16,10 +18,7 @@ fn current_provider_fixture_is_provenance_bearing_and_not_fitness() {
     assert_eq!(value["features"]["structured_outputs"], true);
     assert_eq!(value["modalities"]["image_input"], true);
     assert!(value["source"].as_str().unwrap().starts_with("https://"));
-    assert!(value["observed_at"]
-        .as_str()
-        .unwrap()
-        .starts_with("2026-08-17"));
+    assert!(value["observed_at"].as_str().unwrap().starts_with("2026-08-17"));
 
     let object = value.as_object().unwrap();
     assert!(!object.contains_key("fitness"));

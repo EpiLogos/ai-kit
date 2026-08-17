@@ -10,17 +10,13 @@ pub fn model_roster_matrix(roster: &ModelRoster) -> Vec<String> {
         "MODEL ROSTER · {:?} · {}",
         roster.policy, roster.demand.use_type
     )];
-    lines
-        .push("RANK  MODEL  PROVIDER  ELIGIBLE  TASK  PROFILE  COST(USD)  ACCESS  WHY".to_string());
+    lines.push("RANK  MODEL  PROVIDER  ELIGIBLE  TASK  PROFILE  COST(USD)  ACCESS  WHY".to_string());
     lines.extend(roster.entries.iter().map(render_entry));
     lines
 }
 
 fn render_entry(entry: &ModelRosterEntry) -> String {
-    let rank = entry
-        .rank
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "-".into());
+    let rank = entry.rank.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
     let task = component(entry, "task-fit");
     let profile = component(entry, "profile-fit");
     let cost = entry
@@ -46,7 +42,9 @@ fn render_entry(entry: &ModelRosterEntry) -> String {
     };
     format!(
         "{rank:<4}  {}  {}  {:<8}  {task:<7}  {profile:<7}  {cost:<9}  {access:<8}  {why}",
-        entry.model, entry.provider, entry.explanation.eligible
+        entry.model,
+        entry.provider,
+        entry.explanation.eligible
     )
 }
 

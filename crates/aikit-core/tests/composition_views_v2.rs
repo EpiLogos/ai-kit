@@ -61,9 +61,9 @@ fn explain_uses_resolver_owned_provider_scope_lifetime_and_surface_evidence() {
     });
 
     let mut descriptor = component("component/agent-loop");
-    descriptor
-        .requirements
-        .push(ComponentRequirement::required(contract_ref.clone()).reactive());
+    descriptor.requirements.push(
+        ComponentRequirement::required(contract_ref.clone()).reactive(),
+    );
     descriptor.supported_surfaces.push(surface_ref.clone());
     descriptor.contributions.push(ComponentContribution {
         id: r("contribution/trajectory"),
@@ -87,10 +87,13 @@ fn explain_uses_resolver_owned_provider_scope_lifetime_and_surface_evidence() {
             .with_priority(10),
     );
 
-    let composition =
-        resolve_harness_composition(&catalog, request(vec![selection("component/agent-loop")]))
-            .unwrap();
-    let explanation = explain_composed_component(&catalog, &composition, &component_ref).unwrap();
+    let composition = resolve_harness_composition(
+        &catalog,
+        request(vec![selection("component/agent-loop")]),
+    )
+    .unwrap();
+    let explanation =
+        explain_composed_component(&catalog, &composition, &component_ref).unwrap();
 
     assert_eq!(explanation.component, component_ref);
     assert_eq!(explanation.resolution_scope.scope, ScopeKind::Project);
@@ -125,11 +128,14 @@ fn history_diff_reports_mount_retract_rebind_and_surface_changes() {
         .push(ComponentRequirement::required(contract.clone()));
     before_catalog.insert_component(base.clone());
     before_catalog.add_provider(
-        ContractProvider::available(contract.clone(), r("provider/session-v1")).with_priority(10),
+        ContractProvider::available(contract.clone(), r("provider/session-v1"))
+            .with_priority(10),
     );
-    let before =
-        resolve_harness_composition(&before_catalog, request(vec![selection("component/base")]))
-            .unwrap();
+    let before = resolve_harness_composition(
+        &before_catalog,
+        request(vec![selection("component/base")]),
+    )
+    .unwrap();
 
     let mut after_catalog = CompositionCatalog::default();
     after_catalog.insert_surface(SurfaceDescriptor {
@@ -156,7 +162,8 @@ fn history_diff_reports_mount_retract_rebind_and_surface_changes() {
     });
     after_catalog.insert_component(inspector);
     after_catalog.add_provider(
-        ContractProvider::available(contract.clone(), r("provider/session-v2")).with_priority(20),
+        ContractProvider::available(contract.clone(), r("provider/session-v2"))
+            .with_priority(20),
     );
     let after = resolve_harness_composition(
         &after_catalog,
@@ -179,7 +186,10 @@ fn history_diff_reports_mount_retract_rebind_and_surface_changes() {
         diff.rebound_contracts[0].after_provider,
         r("provider/session-v2")
     );
-    assert_eq!(diff.added_contributions, vec![r("contribution/inspector")]);
+    assert_eq!(
+        diff.added_contributions,
+        vec![r("contribution/inspector")]
+    );
     assert_eq!(diff.added_surfaces, vec![r("surface/inspector")]);
     assert_ne!(diff.before_fingerprint, diff.after_fingerprint);
 }
@@ -188,8 +198,11 @@ fn history_diff_reports_mount_retract_rebind_and_surface_changes() {
 fn body_history_refuses_to_compare_different_actor_anchors() {
     let mut catalog = CompositionCatalog::default();
     catalog.insert_component(component("component/base"));
-    let before =
-        resolve_harness_composition(&catalog, request(vec![selection("component/base")])).unwrap();
+    let before = resolve_harness_composition(
+        &catalog,
+        request(vec![selection("component/base")]),
+    )
+    .unwrap();
 
     let mut changed_request = request(vec![selection("component/base")]);
     changed_request.agent = Some(r("agent/other"));

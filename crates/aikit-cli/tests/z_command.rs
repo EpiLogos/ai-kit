@@ -81,10 +81,7 @@ fn z_finds_a_capability_by_a_fragment_of_its_name_and_never_activates_it() {
         data["capability"], "script/test/cargo-nextest",
         "the exact leaf beats the longer one: {data}"
     );
-    assert_eq!(
-        data["action"], "run",
-        "a script's natural action is to run it"
-    );
+    assert_eq!(data["action"], "run", "a script's natural action is to run it");
     assert_eq!(
         data["activated"],
         Value::Bool(false),

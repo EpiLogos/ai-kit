@@ -266,7 +266,11 @@ impl CodexAdapter {
                 .get(&capability.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            items.extend(exported.project_effective(Path::new(SKILLS_PREFIX), mode, overlays)?);
+            items.extend(exported.project_effective(
+                Path::new(SKILLS_PREFIX),
+                mode,
+                overlays,
+            )?);
         }
         Ok(items)
     }
@@ -278,10 +282,7 @@ impl CodexAdapter {
         items: &mut Vec<ProjectionItem>,
     ) -> Result<()> {
         if let Some(actor) = context.actor_bootstrap.as_ref() {
-            items.push(bootstrap::managed_bootstrap_item(
-                Path::new(SKILLS_PREFIX),
-                actor,
-            )?);
+            items.push(bootstrap::managed_bootstrap_item(Path::new(SKILLS_PREFIX), actor)?);
             plan.notes.push(
                 "the managed `aikit-context` Agent Skill is private to this task worktree; richer AIKit state remains on-demand"
                     .to_string(),
