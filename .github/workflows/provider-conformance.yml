@@ -9,36 +9,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  provider-closure-one-shot:
-    if: ${{ github.head_ref == 'agent/session-space-provider-closure' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: agent/session-space-provider-closure
-          fetch-depth: 0
-      - name: Use cmux typed v2 operation for Surface close
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('crates/aikit-adapters/src/mux/cmux.rs')
-          text = path.read_text()
-          old = '''    fn close(&self, target: &MuxTarget) -> Result<()> {\n        if let Some(surface) = &target.surface {\n            self.must(&["close-surface", "--surface", surface])?;\n        } else if let Some(workspace) = &target.session {\n'''
-          new = '''    fn close(&self, target: &MuxTarget) -> Result<()> {\n        if let Some(surface) = &target.surface {\n            // As with focus, current cmux exposes a stable Surface handle and\n            // typed `surface.close` on the v2 socket. The v0.64.22 compatibility\n            // CLI requires enclosing workspace/window scope for close-surface,\n            // while the typed operation accepts the Surface id directly.\n            let probe = self.probe_or_empty();\n            if probe.methods.contains("surface.close") {\n                self.call_v2(\n                    "surface.close",\n                    serde_json::json!({ "surface_id": surface }),\n                )?;\n            } else {\n                self.must(&["close-surface", "--surface", surface])?;\n            }\n        } else if let Some(workspace) = &target.session {\n'''
-          assert text.count(old) == 1, 'cmux surface-close anchor changed'
-          path.write_text(text.replace(old, new, 1))
-          PY
-      - name: Commit source repair
-        run: |
-          git config user.name 'EpiLogos provider closure'
-          git config user.email 'actions@users.noreply.github.com'
-          git add crates/aikit-adapters/src/mux/cmux.rs
-          git commit -m 'fix(v2): close cmux surfaces over the typed v2 socket'
-          git push origin HEAD:agent/session-space-provider-closure
-
   tmux-3-7c-real:
     runs-on: ubuntu-latest
     steps:
