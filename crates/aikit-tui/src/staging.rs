@@ -7,11 +7,14 @@
 //! `StagedSet` / `StagedDiff` / [`stage`] are retained only for the published
 //! `aikit diff` compatibility verb while CLI package commands still speak
 //! `CapsuleId`. [`stage`] accepts `&dyn PaletteBackend` and can therefore only ask
-//! the shared backend to resolve a hypothetical preview. It is not a second
-//! staging owner and must not be used by the V2 terminal surface.
+//! the shared backend to resolve a hypothetical preview. Effective before/after
+//! truth is computed by `aikit-core::composition_mutation::changed_ground`, not by
+//! this compatibility projection. It is not a second staging owner and must not be
+//! used by the V2 terminal surface.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use aikit_core::composition_mutation::changed_ground;
 use aikit_core::error::AikitError;
 use aikit_core::id::CapsuleId;
 use aikit_core::resolve::ResolvedView;
@@ -144,20 +147,21 @@ pub fn stage(backend: &dyn PaletteBackend, scope: ScopeKind, staged: &StagedSet)
 
 fn diff(current: &ResolvedView, projected: &Projected, requested: Vec<Toggle>) -> StagedDiff {
     let asked: BTreeSet<&CapsuleId> = requested.iter().map(|toggle| &toggle.capsule).collect();
+    let ground = changed_ground(current, &projected.view);
 
-    let added_dependencies = projected
-        .view
-        .active
-        .keys()
-        .filter(|id| !current.is_active(id) && !asked.contains(id))
-        .cloned()
+    // The compatibility CLI historically calls resolver-expanded changes
+    // "dependencies". Preserve that outward vocabulary while sourcing the actual
+    // before/after capability delta from the shared application/domain model.
+    let added_dependencies = ground
+        .capabilities_added
+        .into_iter()
+        .filter(|id| !asked.contains(id))
         .collect();
 
-    let dropped_dependencies = current
-        .active
-        .keys()
-        .filter(|id| !projected.view.is_active(id) && !asked.contains(id))
-        .cloned()
+    let dropped_dependencies = ground
+        .capabilities_removed
+        .into_iter()
+        .filter(|id| !asked.contains(id))
         .collect();
 
     let still_unavailable = projected
