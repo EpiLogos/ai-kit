@@ -1,0 +1,128 @@
+name: Temporary Explain History production closure
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  finish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Correct current core import path in generated acceptance test
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/tmp_finish_explain_history.sh')
+          text = path.read_text()
+          old = '''use aikit_cli::app::Service;
+          use aikit_core::resource::ResourceRef;
+          use aikit_core::{
+              HistoryKind, SourceAuthority, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
+          };'''
+          new = '''use aikit_cli::app::Service;
+          use aikit_core::resource::{ResourceRef, SourceAuthority};
+          use aikit_core::{HistoryKind, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF};'''
+          if old not in text:
+              raise SystemExit('generated acceptance import block not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Keep destination and route learned accessibility distinct
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/tmp_finish_explain_history.sh')
+          text = path.read_text()
+
+          old = '''                });
+            }
+        }
+
+        if let Some(store) = backend.familiarity()? {
+'''
+          new = '''                });
+            }
+
+            if let Some(search) = backend.knowledge_search(resource.as_str(), 256)? {
+                if let Some(ranking) = search
+                    .hits
+                    .into_iter()
+                    .find(|hit| hit.resource == *resource)
+                    .and_then(|hit| hit.ranking)
+                {
+                    if let Some(route) = ranking.route.filter(|assessment| !assessment.is_empty()) {
+                        let mut canonical_refs = vec![resource.clone()];
+                        if let Some(route_ref) = route.route.clone() {
+                            canonical_refs.push(route_ref);
+                        }
+                        evidence.push(ExplainFact {
+                            relation: "learned-route-accessibility".into(),
+                            authority: Some(SourceAuthority::Learned),
+                            summary: format!(
+                                "{} observed route use{}; contextual frecency {:.4}",
+                                route.observations,
+                                if route.observations == 1 { "" } else { "s" },
+                                route.contextual_frecency
+                            ),
+                            canonical_refs,
+                            provenance: route
+                                .evidence_ids
+                                .iter()
+                                .map(|id| EvidenceProvenance {
+                                    source: ResourceRef::parse(&format!(
+                                        "familiarity-observation/{id}"
+                                    ))
+                                    .ok(),
+                                    ..EvidenceProvenance::default()
+                                })
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if let Some(store) = backend.familiarity()? {
+'''
+          if old not in text:
+              raise SystemExit('Knowledge Explain insertion point not found')
+          text = text.replace(old, new, 1)
+          text = text.replace(
+              'relation: "learned-accessibility".into(),',
+              'relation: "learned-destination-accessibility".into(),',
+              1,
+          )
+
+          old = '''    assert!(explain
+        .facts
+        .iter()
+        .any(|fact| fact.relation == "learned-accessibility" && fact.authority == Some(SourceAuthority::Learned)));
+'''
+          new = '''    let learned_route = explain
+        .facts
+        .iter()
+        .find(|fact| fact.relation == "learned-route-accessibility")
+        .expect("route use remains distinct learned accessibility evidence");
+    assert_eq!(learned_route.authority, Some(SourceAuthority::Learned));
+    assert!(learned_route
+        .canonical_refs
+        .iter()
+        .any(|resource| resource.as_str().starts_with("knowledge-route/")));
+    assert!(!explain
+        .facts
+        .iter()
+        .any(|fact| fact.relation == "learned-destination-accessibility"));
+'''
+          if old not in text:
+              raise SystemExit('learned accessibility acceptance block not found')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+      - run: bash scripts/tmp_finish_explain_history.sh
