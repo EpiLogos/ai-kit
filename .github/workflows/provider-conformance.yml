@@ -51,25 +51,12 @@ jobs:
               assert text.count(old) == 1, f'cmux compatibility anchor changed: {old[:40]!r}'
               text = text.replace(old, new, 1)
           cmux.write_text(text)
-
-          workflow = Path('.github/workflows/provider-conformance.yml')
-          wf = workflow.read_text()
-          wf = wf.replace('permissions:\n  contents: write\n', 'permissions:\n  contents: read\n', 1)
-          marker = '  provider-closure-one-shot:\n'
-          start = wf.index(marker)
-          end = wf.index('  tmux-3-7c-real:\n', start)
-          wf = wf[:start] + wf[end:]
-          workflow.write_text(wf)
-
-          helper = Path('.github/workflows/zz-provider-closure-one-shot.yml')
-          if helper.exists():
-              helper.unlink()
           PY
-      - name: Commit repair and remove temporary workflow hooks
+      - name: Commit source repair
         run: |
           git config user.name 'EpiLogos provider closure'
           git config user.email 'actions@users.noreply.github.com'
-          git add crates/aikit-adapters/src/mux/cmux.rs .github/workflows/provider-conformance.yml .github/workflows/zz-provider-closure-one-shot.yml
+          git add crates/aikit-adapters/src/mux/cmux.rs
           git commit -m 'fix(v2): read current cmux capability methods'
           git push origin HEAD:agent/session-space-provider-closure
 
