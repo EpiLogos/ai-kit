@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/projectcentral-wiki-maintenance"
+kind = "skill"
+name = "ProjectCentral Agent Wiki Maintenance"
+description = "Maintain Central-owned ProjectCentral Agent Wiki knowledge through AIKit Knowledge Navigation while preserving human-source authority and source return."
+maturity = "experimental"
+tags = ["aikit", "central", "knowledge", "wiki", "provenance"]
+
+[skill]
+root = "payload"
