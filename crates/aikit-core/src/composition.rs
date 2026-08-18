@@ -294,10 +294,12 @@ pub enum SurfaceKind {
     Cli,
     AgentTool,
     Conversation,
+    Messaging,
     Trajectory,
     Tui,
     Web,
     Api,
+    Webhook,
     Automation,
     Editor,
 }
