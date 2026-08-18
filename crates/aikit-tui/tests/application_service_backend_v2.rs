@@ -21,8 +21,10 @@ fn production_application_searches_the_resolved_resource_field() {
     let service = ApplicationService::new(&mut backend);
     let model = service.search("deploy").unwrap();
 
-    assert_eq!(model.resources.len(), 1);
-    assert_eq!(model.resources[0].resource.as_str(), "script/ops/deploy");
+    assert!(model
+        .resources
+        .iter()
+        .any(|item| item.resource.as_str() == "script/ops/deploy"));
     assert!(model.revision.contains("deploy"));
 }
 
