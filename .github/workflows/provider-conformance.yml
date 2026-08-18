@@ -70,9 +70,13 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: provider-fixtures/vscode-session-space/package.json
+      - name: Build external AIKit provider lifecycle probe
+        run: cargo build --manifest-path ../../Cargo.toml -p aikit-adapters --bin aikit-working-environment-control-probe
       - name: Install Extension Host fixture
         run: npm install
-      - name: Exercise VS Code 1.133.0 public provider APIs
+      - name: Exercise VS Code 1.133.0 provider APIs and AgentSession lifecycle
+        env:
+          AIKIT_VSCODE_PROVIDER_PROBE: ${{ github.workspace }}/target/debug/aikit-working-environment-control-probe
         run: xvfb-run -a npm test
 
   cmux-0-64-22-real:
