@@ -11,12 +11,16 @@ use std::fs;
 use aikit_core::resource::{ResourceRef, SourceAuthority};
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::{
-    familiarity_history_evidence, AikitError, ContextId, FamiliarityStore, HistoryEvidence,
-    HistoryKind, HistoryReadModel, HistoryRecoverability, Result, EXPLAIN_HISTORY_VERSION,
+    familiarity_history_evidence, AikitError, ContextId, EvidenceProvenance, FamiliarityStore,
+    HistoryEvidence, HistoryKind, HistoryReadModel, HistoryRecoverability, Result,
+    EXPLAIN_HISTORY_VERSION,
 };
 
 use crate::generation::{is_generation, read_lock, read_metadata, GENERATIONS};
-use crate::{AikitHome, SessionSpaceApplicationStore, SessionSpaceReceipt};
+use crate::{
+    AikitHome, KnowledgeApplicationReceipt, KnowledgeHistoryOperation,
+    SessionSpaceApplicationStore, SessionSpaceReceipt,
+};
 
 /// Read immutable generation evidence for one canonical Context. A previous
 /// Generation is inspectable historical ground; this function does not invent a
@@ -128,6 +132,138 @@ pub fn familiarity_history_evidence_model(store: &FamiliarityStore) -> HistoryRe
             .map(familiarity_history_evidence)
             .collect(),
     )
+}
+
+/// Project one durable AIKit-owned Knowledge operation receipt into the common
+/// timeline. Provider/source semantics remain in their providers; this is only the
+/// audit evidence that AIKit actually traversed a route or materialised a frame.
+pub fn knowledge_application_receipt_evidence(
+    receipt: &KnowledgeApplicationReceipt,
+) -> Result<HistoryEvidence> {
+    let mut canonical_refs = BTreeSet::new();
+    let mut authorities = vec![SourceAuthority::Generated];
+    let mut provenance = Vec::new();
+    let mut details = BTreeMap::new();
+    details.insert("sequence".into(), receipt.sequence.to_string());
+
+    let (kind, subject, summary, recoverability) = match receipt.operation {
+        KnowledgeHistoryOperation::Route => {
+            let route = receipt.route.as_ref().ok_or_else(|| {
+                AikitError::new(
+                    "history.knowledge_route_receipt_invalid",
+                    format!("{} contains no KnowledgeRoute", receipt.receipt_id),
+                )
+            })?;
+            canonical_refs.insert(route.route.clone());
+            if let Some(query) = &route.query {
+                details.insert("query".into(), query.clone());
+            }
+            details.insert("steps".into(), route.steps.len().to_string());
+            for step in &route.steps {
+                canonical_refs.insert(step.resource.clone());
+                if !authorities.contains(&step.authority) {
+                    authorities.push(step.authority);
+                }
+                provenance.push(EvidenceProvenance {
+                    provider: step
+                        .provider
+                        .as_ref()
+                        .and_then(|provider| ResourceRef::parse(&provider.to_string()).ok()),
+                    source: Some(step.resource.clone()),
+                    lens: step.lens.clone(),
+                    revision: step.revision.clone(),
+                    native_id: None,
+                });
+            }
+            (
+                HistoryKind::KnowledgeRoute,
+                route.route.clone(),
+                format!(
+                    "Knowledge route {} · {} step{}",
+                    route.route,
+                    route.steps.len(),
+                    if route.steps.len() == 1 { "" } else { "s" }
+                ),
+                HistoryRecoverability::ReplayNavigation,
+            )
+        }
+        KnowledgeHistoryOperation::Frame => {
+            let frame = receipt.frame.as_ref().ok_or_else(|| {
+                AikitError::new(
+                    "history.knowledge_frame_receipt_invalid",
+                    format!("{} contains no Knowledge context frame", receipt.receipt_id),
+                )
+            })?;
+            let subject = ResourceRef::parse(&receipt.receipt_id)?;
+            canonical_refs.insert(subject.clone());
+            canonical_refs.extend(frame.selected.iter().cloned());
+            details.insert("readings".into(), frame.readings.len().to_string());
+            details.insert("routes".into(), frame.routes.len().to_string());
+            details.insert("absences".into(), frame.absences.len().to_string());
+            details.insert(
+                "contradictions".into(),
+                frame.contradictions.len().to_string(),
+            );
+            details.insert(
+                "openQuestions".into(),
+                frame.open_questions.len().to_string(),
+            );
+            for reading in &frame.readings {
+                canonical_refs.insert(reading.resource.clone());
+                if !authorities.contains(&reading.authority) {
+                    authorities.push(reading.authority);
+                }
+                provenance.push(EvidenceProvenance {
+                    provider: reading
+                        .provider
+                        .as_ref()
+                        .and_then(|provider| ResourceRef::parse(&provider.to_string()).ok()),
+                    source: Some(reading.resource.clone()),
+                    lens: reading.lens.clone(),
+                    revision: reading.revision.clone(),
+                    native_id: None,
+                });
+            }
+            for route in &frame.routes {
+                canonical_refs.insert(route.route.clone());
+                for step in &route.steps {
+                    canonical_refs.insert(step.resource.clone());
+                    if !authorities.contains(&step.authority) {
+                        authorities.push(step.authority);
+                    }
+                }
+            }
+            (
+                HistoryKind::KnowledgeFrame,
+                subject,
+                format!(
+                    "Knowledge frame · {} reading{} · {} route{} · {} absence{}",
+                    frame.readings.len(),
+                    if frame.readings.len() == 1 { "" } else { "s" },
+                    frame.routes.len(),
+                    if frame.routes.len() == 1 { "" } else { "s" },
+                    frame.absences.len(),
+                    if frame.absences.len() == 1 { "" } else { "s" },
+                ),
+                HistoryRecoverability::InspectOnly,
+            )
+        }
+    };
+
+    canonical_refs.insert(subject.clone());
+    Ok(HistoryEvidence {
+        schema: EXPLAIN_HISTORY_VERSION.into(),
+        id: receipt.receipt_id.clone(),
+        kind,
+        subject,
+        authorities,
+        occurred_at_unix_ms: Some(u128::from(receipt.recorded_at_ms)),
+        summary,
+        canonical_refs: canonical_refs.into_iter().collect(),
+        provenance,
+        recoverability,
+        details,
+    })
 }
 
 /// Project canonical SessionSpace receipts. The receipt is generated evidence of

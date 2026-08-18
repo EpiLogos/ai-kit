@@ -66,8 +66,10 @@ pub enum Command {
     Knowledge(KnowledgeCmd),
     /// Show the effective view for the current context.
     Status(StatusArgs),
-    /// Explain why a capability is or is not active.
+    /// Explain why a capability or V2 Resource has its current effective evidence.
     Explain(ExplainArgs),
+    /// Read cross-domain evidence-bearing History, optionally scoped to one Resource.
+    History(HistoryArgs),
     /// Show what applying the current declarations would change.
     Diff(DiffArgs),
     /// Run the health checks.
@@ -672,9 +674,16 @@ pub struct StatusArgs {
 
 #[derive(Debug, Args)]
 pub struct ExplainArgs {
-    /// The capability id, e.g. `skill/rust/code-review`.
-    #[arg(value_name = "CAPABILITY")]
+    /// Capability id or canonical V2 ResourceRef.
+    #[arg(value_name = "RESOURCE")]
     pub capability: String,
+}
+
+#[derive(Debug, Args)]
+pub struct HistoryArgs {
+    /// Optional canonical ResourceRef to filter the common timeline.
+    #[arg(value_name = "RESOURCE")]
+    pub resource: Option<String>,
 }
 
 #[derive(Debug, Args)]

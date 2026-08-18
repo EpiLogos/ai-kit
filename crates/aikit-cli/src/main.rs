@@ -18,6 +18,7 @@ use aikit_cli::app::{
 use aikit_cli::cli::*;
 use aikit_cli::json::{self, EnvelopeContext};
 use aikit_cli::{hook, multicall, run, ui};
+use aikit_tui::{application_service::ApplicationService, ExplainHistoryApplicationService};
 
 use aikit_core::hooks::HookEvent;
 use aikit_core::id::{CapsuleId, Revision};
@@ -175,6 +176,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
         Some(Command::Status(a)) => cmd_status(cwd, a),
         Some(Command::Explain(a)) => cmd_explain(cwd, a),
+        Some(Command::History(a)) => cmd_history(cwd, a),
         Some(Command::Run(a)) => cmd_run(cwd, a),
         Some(Command::Enable(a)) => cmd_toggle(cwd, a, true),
         Some(Command::Disable(a)) => cmd_toggle(cwd, a, false),
@@ -1511,29 +1513,59 @@ fn cmd_status(cwd: &std::path::Path, a: StatusArgs) -> Result<Reply> {
 }
 
 fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {
-    let service = Service::discover(cwd)?;
-    let id = CapsuleId::parse(&a.capability)?;
-    let explanation = service.resolved().explain(&id).ok_or_else(|| {
-        AikitError::new(
-            "resolution.unknown_capability",
-            format!("{id} is not in the catalogue for this context"),
-        )
-        .with("capability", id.to_string())
-    })?;
-    let data = jval!({
-        "id": explanation.id.to_string(),
-        "revision": explanation.revision.as_ref().map(|revision| revision.as_str()),
-        "active": explanation.active,
-        "declared_enabled": explanation.declared_enabled,
-        "selected_by": explanation.selected_by,
-        "required_by": explanation.required_by,
-        "dependencies": explanation.dependencies,
-        "exports": explanation.exports,
-        "skill_usage_overlays": explanation.skill_usage_overlays,
-        "unavailable": explanation.unavailable.as_ref().map(|r| r.describe()),
-        "render": explanation.render(),
-    });
-    Ok(reply(&service, data, vec![]))
+    use aikit_core::resource::ResourceRef;
+
+    let mut service = Service::discover(cwd)?;
+    let capsule_candidate = CapsuleId::parse(&a.capability).ok();
+    if let Some(id) = capsule_candidate.as_ref() {
+        if let Some(explanation) = service.resolved().explain(id) {
+            let data = jval!({
+                "id": explanation.id.to_string(),
+                "revision": explanation.revision.as_ref().map(|revision| revision.as_str()),
+                "active": explanation.active,
+                "declared_enabled": explanation.declared_enabled,
+                "selected_by": explanation.selected_by,
+                "required_by": explanation.required_by,
+                "dependencies": explanation.dependencies,
+                "exports": explanation.exports,
+                "skill_usage_overlays": explanation.skill_usage_overlays,
+                "unavailable": explanation.unavailable.as_ref().map(|r| r.describe()),
+                "render": explanation.render(),
+            });
+            return Ok(reply(&service, data, vec![]));
+        }
+    }
+
+    let resource = ResourceRef::parse(&a.capability)?;
+    let evidence = {
+        let application = ApplicationService::new(&mut service);
+        application.explain_evidence(&resource)
+    };
+    match evidence {
+        Ok(evidence) => Ok(reply(&service, jval!(evidence), vec![])),
+        Err(error) if capsule_candidate.is_some() => {
+            let id = capsule_candidate.expect("checked above");
+            Err(AikitError::new(
+                "resolution.unknown_capability",
+                format!("{id} is not in the catalogue for this context"),
+            )
+            .with("capability", id.to_string())
+            .with("evidence_error", error.code()))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn cmd_history(cwd: &std::path::Path, a: HistoryArgs) -> Result<Reply> {
+    use aikit_core::resource::ResourceRef;
+
+    let mut service = Service::discover(cwd)?;
+    let resource = a.resource.as_deref().map(ResourceRef::parse).transpose()?;
+    let history = {
+        let application = ApplicationService::new(&mut service);
+        application.history_evidence(resource.as_ref())?
+    };
+    Ok(reply(&service, jval!(history), vec![]))
 }
 
 fn cmd_run(cwd: &std::path::Path, a: RunArgs) -> Result<Reply> {

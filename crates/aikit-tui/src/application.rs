@@ -192,6 +192,10 @@ pub enum ActionOutcome {
         subject: ResourceRef,
         summary: String,
     },
+    History {
+        subject: ResourceRef,
+        summary: String,
+    },
     Staged {
         resource: ResourceRef,
         intent: ActivationIntent,
@@ -207,6 +211,7 @@ impl ActionOutcome {
         match self {
             Self::Opened { summary, .. }
             | Self::Explained { summary, .. }
+            | Self::History { summary, .. }
             | Self::Staged { summary, .. }
             | Self::Status { summary } => summary,
         }
@@ -632,6 +637,15 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 }
                 ActionOutcome::Explained { .. } => {
                     state.overlay = Some(Overlay::Explain);
+                }
+                ActionOutcome::History { .. } => {
+                    state.navigation.push(NavigationPoint {
+                        selected: state.selected.clone(),
+                        relation_view: state.relation_view,
+                        workspace_section: state.workspace_section,
+                    });
+                    state.overlay = None;
+                    state.workspace_section = WorkspaceSection::History;
                 }
                 ActionOutcome::Staged {
                     resource, intent, ..

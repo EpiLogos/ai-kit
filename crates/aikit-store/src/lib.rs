@@ -87,11 +87,14 @@ pub use familiarity::{
     familiarity_reset_event, replay_familiarity, FamiliarityReplay, FAMILIARITY_OBSERVATION_EVENT,
     FAMILIARITY_RESET_EVENT,
 };
-pub use generation::{CommittedGeneration, GenerationBuilder, GenerationMetadata, StagedGeneration};
+pub use generation::{
+    CommittedGeneration, GenerationBuilder, GenerationMetadata, StagedGeneration,
+};
 pub use generation_history::{compare_generation_worlds, GenerationWorldComparison};
 pub use history_evidence::{
     familiarity_history_evidence_model, generation_history_evidence,
-    session_space_history_evidence, session_space_receipt_evidence,
+    knowledge_application_receipt_evidence, session_space_history_evidence,
+    session_space_receipt_evidence,
 };
 pub use home::AikitHome;
 pub use inbox::{Candidate, CandidateState, Capture, Inbox, PromotionEdits, Similarity};
@@ -101,9 +104,7 @@ pub use knowledge_application::{
     KNOWLEDGE_APPLICATION_STORE_VERSION,
 };
 pub use locks::{ContextLock, LockOptions};
-pub use procedure::{
-    plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner,
-};
+pub use procedure::{plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner};
 pub use procedure_history::procedure_history_evidence;
 pub use registry::{load_project_local, load_registry, RegistryLoad, RegistryProblem, Snapshot};
 pub use scan::{Finding, Scanner};

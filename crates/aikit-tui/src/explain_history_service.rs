@@ -16,8 +16,8 @@ use aikit_core::{
 };
 use aikit_store::{
     compare_generation_worlds, familiarity_history_evidence_model, generation_history_evidence,
-    procedure_history_evidence, session_space_history_evidence, GenerationWorldComparison,
-    SessionSpaceApplicationStore,
+    knowledge_application_receipt_evidence, procedure_history_evidence,
+    session_space_history_evidence, GenerationWorldComparison, SessionSpaceApplicationStore,
 };
 
 use crate::application_service::ApplicationService;
@@ -45,13 +45,98 @@ impl ExplainHistoryApplicationService for ApplicationService<'_> {
     fn explain_evidence(&self, resource: &ResourceRef) -> Result<ExplainEvidence> {
         let backend = self.backend();
         let index = backend.navigation_index();
-        let record = ResourceIndex::resource(&index, resource).ok_or_else(|| {
-            aikit_core::AikitError::new(
-                "application.resource_not_in_navigation_index",
-                format!("{resource} is not in the V2 navigation index"),
-            )
-        })?;
-        let mut evidence = explain_resource_evidence(&record.explanation());
+        let mut evidence = ResourceIndex::resource(&index, resource)
+            .map(|record| explain_resource_evidence(&record.explanation()))
+            .unwrap_or_else(|| ExplainEvidence {
+                schema: EXPLAIN_HISTORY_VERSION.into(),
+                subject: resource.clone(),
+                facts: Vec::new(),
+            });
+
+        if let Some(address) = backend.knowledge_address(resource)? {
+            if let Some(reading) = backend.knowledge_read(&address)? {
+                let mut canonical_refs = vec![reading.resource.clone()];
+                canonical_refs.extend(
+                    reading
+                        .evidence
+                        .iter()
+                        .filter_map(|source| ResourceRef::parse(source.as_str()).ok()),
+                );
+                evidence.push(ExplainFact {
+                    relation: "knowledge-reading".into(),
+                    authority: Some(reading.authority),
+                    summary: reading.why_selected.clone(),
+                    canonical_refs,
+                    provenance: vec![EvidenceProvenance {
+                        provider: reading
+                            .provider
+                            .as_ref()
+                            .and_then(|provider| ResourceRef::parse(&provider.to_string()).ok()),
+                        source: Some(reading.resource.clone()),
+                        lens: reading.lens.clone(),
+                        revision: reading.revision.clone(),
+                        native_id: None,
+                    }],
+                });
+            }
+            if let Some(explanation) = backend.knowledge_explain(&address)? {
+                evidence.push(ExplainFact {
+                    relation: "knowledge-provider-explain".into(),
+                    authority: Some(explanation.authority),
+                    summary: explanation.summary,
+                    canonical_refs: explanation
+                        .sources
+                        .iter()
+                        .filter_map(|source| ResourceRef::parse(source.as_str()).ok())
+                        .collect(),
+                    provenance: vec![EvidenceProvenance {
+                        provider: explanation
+                            .provider
+                            .as_ref()
+                            .and_then(|provider| ResourceRef::parse(&provider.to_string()).ok()),
+                        ..EvidenceProvenance::default()
+                    }],
+                });
+            }
+
+            if let Some(search) = backend.knowledge_search(resource.as_str(), 256)? {
+                if let Some(ranking) = search
+                    .hits
+                    .into_iter()
+                    .find(|hit| hit.resource == *resource)
+                    .and_then(|hit| hit.ranking)
+                {
+                    if let Some(route) = ranking.route.filter(|assessment| !assessment.is_empty()) {
+                        let mut canonical_refs = vec![resource.clone()];
+                        if let Some(route_ref) = route.route.clone() {
+                            canonical_refs.push(route_ref);
+                        }
+                        evidence.push(ExplainFact {
+                            relation: "learned-route-accessibility".into(),
+                            authority: Some(SourceAuthority::Learned),
+                            summary: format!(
+                                "{} observed route use{}; contextual frecency {:.4}",
+                                route.observations,
+                                if route.observations == 1 { "" } else { "s" },
+                                route.contextual_frecency
+                            ),
+                            canonical_refs,
+                            provenance: route
+                                .evidence_ids
+                                .iter()
+                                .map(|id| EvidenceProvenance {
+                                    source: ResourceRef::parse(&format!(
+                                        "familiarity-observation/{id}"
+                                    ))
+                                    .ok(),
+                                    ..EvidenceProvenance::default()
+                                })
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        }
 
         if let Some(store) = backend.familiarity()? {
             let assessment = store.assess_destination(
@@ -86,6 +171,15 @@ impl ExplainHistoryApplicationService for ApplicationService<'_> {
                         .collect(),
                 });
             }
+        }
+
+        if evidence.facts.is_empty() {
+            return Err(aikit_core::AikitError::new(
+                "application.resource_not_in_navigation_index",
+                format!(
+                    "{resource} has no Resource or Knowledge evidence in the V2 application field"
+                ),
+            ));
         }
 
         if resource.as_str().starts_with("session-space/") {
@@ -160,6 +254,10 @@ impl ExplainHistoryApplicationService for ApplicationService<'_> {
 
         if let Some(store) = backend.familiarity()? {
             entries.extend(familiarity_history_evidence_model(&store).entries);
+        }
+
+        for receipt in backend.knowledge_history(resource)? {
+            entries.push(knowledge_application_receipt_evidence(&receipt)?);
         }
 
         if let Some(home) = backend.application_home() {
