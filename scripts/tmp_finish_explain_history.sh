@@ -97,7 +97,7 @@ new = '''    let learned_route = explain
     assert!(learned_route
         .canonical_refs
         .iter()
-        .any(|resource| resource.as_str().starts_with("knowledge-route/")));
+        .any(|resource| resource.as_str().starts_with("knowledge-route:")));
     assert!(!explain
         .facts
         .iter()
