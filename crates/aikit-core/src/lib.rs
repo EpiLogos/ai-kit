@@ -68,6 +68,7 @@ pub mod session_space;
 pub mod session_space_application;
 pub mod session_space_contribution;
 pub mod skillset;
+pub mod surface_material;
 pub mod surfacing;
 pub mod trust;
 
