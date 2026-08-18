@@ -14,15 +14,15 @@ use aikit_core::{
     parse_wiki_objects, AbsenceKind, AgentWikiMaintenancePlan, AikitError,
     ContextSourceOperation, ContextSourceProvider, ContextSourceProviderCapabilities,
     ContextSourceProviderStatus, ContextSourceReadRequest, ProjectCentralBinding,
-    ProjectCentralSourceDescriptor, ProjectCentralSourceKind, ProjectCentralStanding, ProjectRef,
-    ProviderReadResult, ProviderRef, ResourceRef, ResourceSource, Result, SemanticWikiIndex,
-    SourceAuthority, SourceRef, SourceRevision, SourceState, StructuredAbsence,
-    CENTRAL_PROJECT_SCHEMA, CENTRAL_ROOT_WIKI_SOURCE, CENTRAL_WIKI_PROFILE,
-    NO_AGENT_RETRIEVAL_MARKER, PROJECTCENTRAL_BINDING_VERSION, PROJECTCENTRAL_FILESYSTEM_PROVIDER,
-    PROJECTCENTRAL_GOVERNANCE_ROOT, PROJECTCENTRAL_HUMAN_ROOT, PROJECTCENTRAL_WIKI_SOURCE,
+    ProjectCentralSourceDescriptor, ProjectCentralSourceKind, ProjectCentralStanding,
+    ProviderReadResult, ProviderRef, ResourceRef, ResourceSource, Result, SourceRef,
+    SourceRevision, SourceState, StructuredAbsence, CENTRAL_PROJECT_SCHEMA, CENTRAL_ROOT_WIKI_SOURCE,
+    CENTRAL_WIKI_PROFILE, NO_AGENT_RETRIEVAL_MARKER, PROJECTCENTRAL_BINDING_VERSION,
+    PROJECTCENTRAL_FILESYSTEM_PROVIDER, PROJECTCENTRAL_GOVERNANCE_ROOT,
+    PROJECTCENTRAL_HUMAN_ROOT, PROJECTCENTRAL_WIKI_SOURCE,
 };
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -52,13 +52,8 @@ impl ProjectCentralFilesystemBinding {
     pub fn inspect(project_root: impl AsRef<Path>, central_root: Option<&Path>) -> Result<Self> {
         let project_root = project_root.as_ref().to_path_buf();
         let manifest_path = project_root.join("ProjectCentral/project.json");
-        let manifest_text = fs::read_to_string(&manifest_path).map_err(|error| {
-            io_error(
-                "projectcentral.manifest_read",
-                &manifest_path,
-                error,
-            )
-        })?;
+        let manifest_text = fs::read_to_string(&manifest_path)
+            .map_err(|error| io_error("projectcentral.manifest_read", &manifest_path, error))?;
         let manifest: Manifest = serde_json::from_str(&manifest_text).map_err(|error| {
             AikitError::new(
                 "projectcentral.manifest_invalid",
@@ -67,7 +62,7 @@ impl ProjectCentralFilesystemBinding {
         })?;
         validate_manifest(&manifest)?;
 
-        let project = ProjectRef::parse(&manifest.project_id)?;
+        let project = aikit_core::ProjectRef::parse(&manifest.project_id)?;
         let manifest_source = source(&format!("source:central:{}:manifest", manifest.project_id))?;
         let human_root = source(&format!("source:central:{}:human-root", manifest.project_id))?;
         let governance_root = source(&format!(
@@ -95,7 +90,8 @@ impl ProjectCentralFilesystemBinding {
         )?;
 
         let human_path = project_root.join(PROJECTCENTRAL_HUMAN_ROOT);
-        let human_allowed = human_path.exists() && !human_path.join(NO_AGENT_RETRIEVAL_MARKER).exists();
+        let human_allowed =
+            human_path.exists() && !human_path.join(NO_AGENT_RETRIEVAL_MARKER).exists();
         push_source(
             &mut sources,
             &mut paths,
@@ -433,9 +429,12 @@ fn validate_relative_source(raw: &str) -> Result<()> {
     let path = Path::new(raw);
     if path.is_absolute()
         || raw.trim().is_empty()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
     {
         return Err(AikitError::new(
             "projectcentral.adopted_source_escape",
@@ -621,10 +620,9 @@ mod tests {
 
     use aikit_core::{
         plan_agent_wiki_maintenance, AgentWikiMaintenanceRequest, ContextSourceIndex,
-        ContextSourceReadOutcome, HumanSourceRevisionProposal, HorizonRequest, KnowledgeAddress,
-        KnowledgeApplication, ProjectCentralSourceKind, RetrievalTarget, SemanticRevision,
-        SemanticWikiProvider, WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject, WikiProvenanceRef,
-        WikiSpace,
+        ContextSourceReadOutcome, HorizonRequest, HumanSourceRevisionProposal, KnowledgeAddress,
+        KnowledgeApplication, ProjectCentralSourceKind, RetrievalTarget, SemanticWikiIndex,
+        SemanticWikiProvider, WikiNode, WikiObject, WikiProvenanceRef,
     };
     use tempfile::TempDir;
 
@@ -639,7 +637,9 @@ mod tests {
 
     fn wiki_json(title: &str, source_ref: Option<&str>) -> String {
         let provenance = source_ref
-            .map(|source| format!(r#"[{{"source_ref":"{source}","source_revision":"r1"}}]"#))
+            .map(|source| {
+                format!(r#"[{{"source_ref":"{source}","source_revision":"r1"}}]"#)
+            })
             .unwrap_or_else(|| "[]".into());
         format!(
             r#"{{"profile":"okf-wiki/v1","objects":[
