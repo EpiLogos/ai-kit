@@ -1,11 +1,11 @@
 //! Filesystem adapter for Central's public ProjectCentral contract.
 //!
-//! Project entry reads only the small ProjectCentral manifest plus filesystem
-//! metadata. Human material and SemanticWiki payloads remain unloaded until an
-//! explicit ContextSource or Wiki read. `.no-agent-retrieval` prunes a subtree
-//! before any descendant is disclosed.
+//! Project entry reads only the small ProjectCentral manifest, Central's optional
+//! accepted source-relation ledger, and filesystem metadata. Human material and
+//! SemanticWiki payloads remain unloaded until an explicit ContextSource or Wiki
+//! read. `.no-agent-retrieval` prunes a subtree before any descendant is disclosed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -14,11 +14,13 @@ use aikit_core::{
     parse_wiki_objects, AbsenceKind, AgentWikiMaintenancePlan, AikitError,
     ContextSourceOperation, ContextSourceProvider, ContextSourceProviderCapabilities,
     ContextSourceProviderStatus, ContextSourceReadRequest, ProjectCentralBinding,
-    ProjectCentralSourceDescriptor, ProjectCentralSourceKind, ProjectCentralStanding,
+    ProjectCentralProvenance, ProjectCentralSourceDescriptor, ProjectCentralSourceKind,
+    ProjectCentralStanding, ProjectCentralTreatment, ProjectCentralTruthStanding,
     ProviderReadResult, ProviderRef, ResourceRef, ResourceSource, Result, SourceRef,
-    SourceRevision, SourceState, StructuredAbsence, CENTRAL_PROJECT_SCHEMA, CENTRAL_ROOT_WIKI_SOURCE,
-    CENTRAL_WIKI_PROFILE, NO_AGENT_RETRIEVAL_MARKER, PROJECTCENTRAL_BINDING_VERSION,
-    PROJECTCENTRAL_FILESYSTEM_PROVIDER, PROJECTCENTRAL_GOVERNANCE_ROOT,
+    SourceRevision, SourceState, StructuredAbsence, CENTRAL_GROUND_RELATIONS_SCHEMA,
+    CENTRAL_PROJECT_SCHEMA, CENTRAL_ROOT_WIKI_SOURCE, CENTRAL_WIKI_PROFILE,
+    NO_AGENT_RETRIEVAL_MARKER, PROJECTCENTRAL_BINDING_VERSION, PROJECTCENTRAL_FILESYSTEM_PROVIDER,
+    PROJECTCENTRAL_GOVERNANCE_ROOT, PROJECTCENTRAL_GROUND_RELATIONS_SOURCE,
     PROJECTCENTRAL_HUMAN_ROOT, PROJECTCENTRAL_WIKI_SOURCE,
 };
 use serde::Deserialize;
@@ -38,6 +40,28 @@ struct WikiBinding {
     source: String,
     #[serde(default)]
     adopted_sources: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GroundRelationsFile {
+    schema: String,
+    project_id: String,
+    #[serde(default)]
+    relations: Vec<GroundRelation>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GroundRelation {
+    #[serde(rename = "ref")]
+    source_ref: String,
+    path: String,
+    provenance: ProjectCentralProvenance,
+    #[serde(rename = "standing")]
+    truth_standing: ProjectCentralTruthStanding,
+    #[serde(default)]
+    roles: Vec<String>,
+    treatment: ProjectCentralTreatment,
+    recognition: String,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +86,28 @@ impl ProjectCentralFilesystemBinding {
         })?;
         validate_manifest(&manifest)?;
 
+        let ground_relations_file = read_ground_relations(&project_root, &manifest.project_id)?;
+        let mut relations_by_path = BTreeMap::<PathBuf, GroundRelation>::new();
+        if let Some(relations) = &ground_relations_file {
+            for relation in &relations.relations {
+                validate_relative_source(&relation.path)?;
+                let path = PathBuf::from(&relation.path);
+                if relations_by_path
+                    .insert(path.clone(), relation.clone())
+                    .is_some()
+                {
+                    return Err(AikitError::new(
+                        "projectcentral.ground_relation_duplicate_path",
+                        format!(
+                            "{} contains more than one accepted relation for {}",
+                            PROJECTCENTRAL_GROUND_RELATIONS_SOURCE,
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+        }
+
         let project = aikit_core::ProjectRef::parse(&manifest.project_id)?;
         let manifest_source = source(&format!("source:central:{}:manifest", manifest.project_id))?;
         let human_root = source(&format!("source:central:{}:human-root", manifest.project_id))?;
@@ -75,6 +121,7 @@ impl ProjectCentralFilesystemBinding {
         let mut sources = Vec::new();
         let mut paths = BTreeMap::new();
         let mut standings = BTreeMap::new();
+        let mut consumed_relations = BTreeSet::<PathBuf>::new();
 
         push_source(
             &mut sources,
@@ -85,9 +132,41 @@ impl ProjectCentralFilesystemBinding {
             PathBuf::from("ProjectCentral/project.json"),
             ProjectCentralSourceKind::Manifest,
             ProjectCentralStanding::Observed,
+            ProjectCentralProvenance::Observed,
+            ProjectCentralTruthStanding::Unspecified,
+            Vec::new(),
+            ProjectCentralTreatment::Unresolved,
+            None,
             true,
             false,
         )?;
+
+        let ground_relations = if ground_relations_file.is_some() {
+            let relation_ref = source(&format!(
+                "source:central:{}:ground-relations",
+                manifest.project_id
+            ))?;
+            push_source(
+                &mut sources,
+                &mut paths,
+                &mut standings,
+                &project_root,
+                relation_ref.clone(),
+                PathBuf::from(PROJECTCENTRAL_GROUND_RELATIONS_SOURCE),
+                ProjectCentralSourceKind::GroundRelations,
+                ProjectCentralStanding::Observed,
+                ProjectCentralProvenance::Observed,
+                ProjectCentralTruthStanding::Unspecified,
+                Vec::new(),
+                ProjectCentralTreatment::Unresolved,
+                None,
+                true,
+                false,
+            )?;
+            Some(relation_ref)
+        } else {
+            None
+        };
 
         let human_path = project_root.join(PROJECTCENTRAL_HUMAN_ROOT);
         let human_allowed =
@@ -100,18 +179,22 @@ impl ProjectCentralFilesystemBinding {
             human_root.clone(),
             PathBuf::from(PROJECTCENTRAL_HUMAN_ROOT),
             ProjectCentralSourceKind::HumanRoot,
-            ProjectCentralStanding::HumanAuthored,
+            ProjectCentralStanding::Unresolved,
+            ProjectCentralProvenance::Unresolved,
+            ProjectCentralTruthStanding::Unspecified,
+            Vec::new(),
+            ProjectCentralTreatment::ProjectcentralUser,
+            None,
             human_allowed,
             true,
         )?;
         if human_allowed {
-            scan_tree(
+            scan_human_tree(
                 &project_root,
                 &human_path,
                 &manifest.project_id,
-                "human",
-                ProjectCentralSourceKind::HumanMaterial,
-                ProjectCentralStanding::HumanAuthored,
+                &relations_by_path,
+                &mut consumed_relations,
                 &mut sources,
                 &mut paths,
                 &mut standings,
@@ -130,20 +213,54 @@ impl ProjectCentralFilesystemBinding {
             PathBuf::from(PROJECTCENTRAL_GOVERNANCE_ROOT),
             ProjectCentralSourceKind::GovernanceRoot,
             ProjectCentralStanding::HumanGovernance,
+            ProjectCentralProvenance::HumanAuthored,
+            ProjectCentralTruthStanding::Unspecified,
+            Vec::new(),
+            ProjectCentralTreatment::Unresolved,
+            None,
             governance_allowed,
             true,
         )?;
         if governance_allowed {
-            scan_tree(
+            scan_governance_tree(
                 &project_root,
                 &governance_path,
                 &manifest.project_id,
-                "governance",
-                ProjectCentralSourceKind::GovernanceMaterial,
-                ProjectCentralStanding::HumanGovernance,
                 &mut sources,
                 &mut paths,
                 &mut standings,
+            )?;
+        }
+
+        // Accepted relations may retain human-authored or evidential Project source
+        // outside ProjectCentral/user. Preserve the Central-issued SourceRef and
+        // provenance/standing without moving or copying the source.
+        for (relative_path, relation) in &relations_by_path {
+            if consumed_relations.contains(relative_path) {
+                continue;
+            }
+            let kind = if relative_path.starts_with(PROJECTCENTRAL_HUMAN_ROOT) {
+                ProjectCentralSourceKind::HumanMaterial
+            } else {
+                ProjectCentralSourceKind::RelatedProjectSource
+            };
+            let readable = path_agent_readable(&project_root, relative_path);
+            push_source(
+                &mut sources,
+                &mut paths,
+                &mut standings,
+                &project_root,
+                source(&relation.source_ref)?,
+                relative_path.clone(),
+                kind,
+                relation.provenance.operational_standing(),
+                relation.provenance,
+                relation.truth_standing,
+                relation.roles.clone(),
+                relation.treatment,
+                Some(relation.recognition.clone()),
+                readable,
+                false,
             )?;
         }
 
@@ -156,6 +273,11 @@ impl ProjectCentralFilesystemBinding {
             PathBuf::from(PROJECTCENTRAL_WIKI_SOURCE),
             ProjectCentralSourceKind::CanonicalWiki,
             ProjectCentralStanding::AgentMaintained,
+            ProjectCentralProvenance::AgentMaintained,
+            ProjectCentralTruthStanding::Unspecified,
+            Vec::new(),
+            ProjectCentralTreatment::GeneratedDerived,
+            None,
             true,
             false,
         )?;
@@ -176,7 +298,12 @@ impl ProjectCentralFilesystemBinding {
                 PathBuf::from(adopted),
                 ProjectCentralSourceKind::AdoptedWiki,
                 ProjectCentralStanding::AgentMaintained,
-                true,
+                ProjectCentralProvenance::AgentMaintained,
+                ProjectCentralTruthStanding::Unspecified,
+                Vec::new(),
+                ProjectCentralTreatment::GeneratedDerived,
+                None,
+                path_agent_readable(&project_root, Path::new(adopted)),
                 false,
             )?;
             adopted_wikis.push(source_ref);
@@ -185,12 +312,17 @@ impl ProjectCentralFilesystemBinding {
         let root_wiki = if let Some(central_root) = central_root {
             let root_ref = source("source:central:root:agent-wiki")?;
             let root_path = central_root.join(CENTRAL_ROOT_WIKI_SOURCE);
-            let exists = root_path.is_file();
+            let exists = root_path.is_file() && !is_symlink(&root_path);
             let descriptor = ProjectCentralSourceDescriptor {
                 source: root_ref.clone(),
                 relative_path: PathBuf::from(CENTRAL_ROOT_WIKI_SOURCE),
                 kind: ProjectCentralSourceKind::RootWiki,
                 standing: ProjectCentralStanding::AgentMaintained,
+                provenance: ProjectCentralProvenance::AgentMaintained,
+                truth_standing: ProjectCentralTruthStanding::Unspecified,
+                roles: Vec::new(),
+                treatment: ProjectCentralTreatment::GeneratedDerived,
+                recognition: None,
                 exists,
                 agent_readable: exists,
                 is_directory: false,
@@ -214,6 +346,11 @@ impl ProjectCentralFilesystemBinding {
             relative_path: PathBuf::from("."),
             kind: ProjectCentralSourceKind::NativeProjectRoot,
             standing: ProjectCentralStanding::NativeProject,
+            provenance: ProjectCentralProvenance::Observed,
+            truth_standing: ProjectCentralTruthStanding::Unspecified,
+            roles: Vec::new(),
+            treatment: ProjectCentralTreatment::OrdinaryProjectSource,
+            recognition: None,
             exists: project_root.is_dir(),
             agent_readable: true,
             is_directory: true,
@@ -231,6 +368,7 @@ impl ProjectCentralFilesystemBinding {
                 canonical_wiki,
                 adopted_wikis,
                 root_wiki,
+                ground_relations,
                 native_project_root,
                 sources,
             },
@@ -381,7 +519,7 @@ impl ContextSourceProvider for ProjectCentralFileProvider {
             .standing
             .get(&request.resource)
             .copied()
-            .unwrap_or(ProjectCentralStanding::Observed);
+            .unwrap_or(ProjectCentralStanding::Unresolved);
         let source = SourceRef::parse(request.resource.as_str())
             .expect("ContextSource ResourceRef originated from a SourceRef");
         ProviderReadResult::Retrieved {
@@ -389,7 +527,7 @@ impl ContextSourceProvider for ProjectCentralFileProvider {
             revision: revision_for(path),
             provenance: vec![ResourceSource {
                 source,
-                authority: Some(standing.source_authority()),
+                authority: standing.source_authority(),
                 revision: revision_for(path),
                 locator: Some(aikit_core::ResourceLocator::Path(path.clone())),
                 state: SourceState::Available,
@@ -425,6 +563,37 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
+fn read_ground_relations(project_root: &Path, project_id: &str) -> Result<Option<GroundRelationsFile>> {
+    let path = project_root.join(PROJECTCENTRAL_GROUND_RELATIONS_SOURCE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let input = fs::read_to_string(&path)
+        .map_err(|error| io_error("projectcentral.ground_relations_read", &path, error))?;
+    let relations: GroundRelationsFile = serde_json::from_str(&input).map_err(|error| {
+        AikitError::new(
+            "projectcentral.ground_relations_invalid",
+            format!("{} is not valid Central ground relations: {error}", path.display()),
+        )
+    })?;
+    if relations.schema != CENTRAL_GROUND_RELATIONS_SCHEMA {
+        return Err(AikitError::new(
+            "projectcentral.ground_relations_schema",
+            format!(
+                "expected {CENTRAL_GROUND_RELATIONS_SCHEMA}, found {}",
+                relations.schema
+            ),
+        ));
+    }
+    if relations.project_id != project_id {
+        return Err(AikitError::new(
+            "projectcentral.ground_relations_project",
+            "ground relation project_id does not match ProjectCentral/project.json",
+        ));
+    }
+    Ok(Some(relations))
+}
+
 fn validate_relative_source(raw: &str) -> Result<()> {
     let path = Path::new(raw);
     if path.is_absolute()
@@ -437,21 +606,20 @@ fn validate_relative_source(raw: &str) -> Result<()> {
         })
     {
         return Err(AikitError::new(
-            "projectcentral.adopted_source_escape",
-            "adopted Wiki source must remain project-relative",
+            "projectcentral.source_escape",
+            "ProjectCentral source must remain project-relative",
         ));
     }
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scan_tree(
+fn scan_human_tree(
     project_root: &Path,
     directory: &Path,
     project_id: &str,
-    namespace: &str,
-    kind: ProjectCentralSourceKind,
-    standing: ProjectCentralStanding,
+    relations_by_path: &BTreeMap<PathBuf, GroundRelation>,
+    consumed_relations: &mut BTreeSet<PathBuf>,
     sources: &mut Vec<ProjectCentralSourceDescriptor>,
     paths: &mut BTreeMap<ResourceRef, PathBuf>,
     standings: &mut BTreeMap<ResourceRef, ProjectCentralStanding>,
@@ -465,39 +633,124 @@ fn scan_tree(
         .map_err(|error| io_error("projectcentral.directory_entry", directory, error))?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
+        let file_type = entry
+            .file_type()
+            .map_err(|error| io_error("projectcentral.file_type", &entry.path(), error))?;
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
         if entry.file_name() == NO_AGENT_RETRIEVAL_MARKER {
             continue;
         }
-        if path.is_dir() {
-            scan_tree(
+        if file_type.is_dir() {
+            scan_human_tree(
                 project_root,
                 &path,
                 project_id,
-                namespace,
-                kind,
-                standing,
+                relations_by_path,
+                consumed_relations,
                 sources,
                 paths,
                 standings,
             )?;
             continue;
         }
-        let relative = path.strip_prefix(project_root).map_err(|_| {
-            AikitError::new(
-                "projectcentral.source_escape",
-                "ProjectCentral source escaped the Project root",
-            )
-        })?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let relative = relative_path(project_root, &path)?;
+        if let Some(relation) = relations_by_path.get(&relative) {
+            consumed_relations.insert(relative.clone());
+            push_source(
+                sources,
+                paths,
+                standings,
+                project_root,
+                source(&relation.source_ref)?,
+                relative,
+                ProjectCentralSourceKind::HumanMaterial,
+                relation.provenance.operational_standing(),
+                relation.provenance,
+                relation.truth_standing,
+                relation.roles.clone(),
+                relation.treatment,
+                Some(relation.recognition.clone()),
+                true,
+                false,
+            )?;
+        } else {
+            let source_ref = source(&central_ground_source_ref(project_id, &relative))?;
+            push_source(
+                sources,
+                paths,
+                standings,
+                project_root,
+                source_ref,
+                relative,
+                ProjectCentralSourceKind::HumanMaterial,
+                ProjectCentralStanding::Unresolved,
+                ProjectCentralProvenance::Unresolved,
+                ProjectCentralTruthStanding::Unspecified,
+                Vec::new(),
+                ProjectCentralTreatment::ProjectcentralUser,
+                None,
+                true,
+                false,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_governance_tree(
+    project_root: &Path,
+    directory: &Path,
+    project_id: &str,
+    sources: &mut Vec<ProjectCentralSourceDescriptor>,
+    paths: &mut BTreeMap<ResourceRef, PathBuf>,
+    standings: &mut BTreeMap<ResourceRef, ProjectCentralStanding>,
+) -> Result<()> {
+    if directory.join(NO_AGENT_RETRIEVAL_MARKER).exists() {
+        return Ok(());
+    }
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| io_error("projectcentral.directory_read", directory, error))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| io_error("projectcentral.directory_entry", directory, error))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let file_type = entry
+            .file_type()
+            .map_err(|error| io_error("projectcentral.file_type", &entry.path(), error))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_name() == NO_AGENT_RETRIEVAL_MARKER {
+            continue;
+        }
+        if file_type.is_dir() {
+            scan_governance_tree(
+                project_root,
+                &path,
+                project_id,
+                sources,
+                paths,
+                standings,
+            )?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let relative = relative_path(project_root, &path)?;
         let local = relative
-            .strip_prefix(if namespace == "human" {
-                PROJECTCENTRAL_HUMAN_ROOT
-            } else {
-                PROJECTCENTRAL_GOVERNANCE_ROOT
-            })
-            .unwrap_or(relative);
+            .strip_prefix(PROJECTCENTRAL_GOVERNANCE_ROOT)
+            .unwrap_or(&relative);
         let source_ref = source(&format!(
-            "source:central:{project_id}:{namespace}:{}",
+            "source:central:{project_id}:governance:{}",
             local.to_string_lossy()
         ))?;
         push_source(
@@ -506,9 +759,14 @@ fn scan_tree(
             standings,
             project_root,
             source_ref,
-            relative.to_path_buf(),
-            kind,
-            standing,
+            relative,
+            ProjectCentralSourceKind::GovernanceMaterial,
+            ProjectCentralStanding::HumanGovernance,
+            ProjectCentralProvenance::HumanAuthored,
+            ProjectCentralTruthStanding::Unspecified,
+            Vec::new(),
+            ProjectCentralTreatment::Unresolved,
+            None,
             true,
             false,
         )?;
@@ -526,20 +784,32 @@ fn push_source(
     relative_path: PathBuf,
     kind: ProjectCentralSourceKind,
     standing: ProjectCentralStanding,
+    provenance: ProjectCentralProvenance,
+    truth_standing: ProjectCentralTruthStanding,
+    roles: Vec<String>,
+    treatment: ProjectCentralTreatment,
+    recognition: Option<String>,
     agent_readable: bool,
     is_directory: bool,
 ) -> Result<()> {
     let absolute = project_root.join(&relative_path);
-    let exists = if is_directory {
-        absolute.is_dir()
-    } else {
-        absolute.is_file()
-    };
+    let symlink = is_symlink(&absolute);
+    let exists = !symlink
+        && if is_directory {
+            absolute.is_dir()
+        } else {
+            absolute.is_file()
+        };
     let descriptor = ProjectCentralSourceDescriptor {
         source: source_ref.clone(),
         relative_path,
         kind,
         standing,
+        provenance,
+        truth_standing,
+        roles,
+        treatment,
+        recognition,
         exists,
         agent_readable: agent_readable && exists,
         is_directory,
@@ -552,6 +822,54 @@ fn push_source(
     standings.insert(key, standing);
     sources.push(descriptor);
     Ok(())
+}
+
+fn relative_path(project_root: &Path, path: &Path) -> Result<PathBuf> {
+    path.strip_prefix(project_root)
+        .map(Path::to_path_buf)
+        .map_err(|_| {
+            AikitError::new(
+                "projectcentral.source_escape",
+                "ProjectCentral source escaped the Project root",
+            )
+        })
+}
+
+fn path_agent_readable(project_root: &Path, relative: &Path) -> bool {
+    let absolute = project_root.join(relative);
+    if is_symlink(&absolute) {
+        return false;
+    }
+    let mut cursor = absolute.parent();
+    while let Some(directory) = cursor {
+        if !directory.starts_with(project_root) {
+            return false;
+        }
+        if directory.join(NO_AGENT_RETRIEVAL_MARKER).is_file() {
+            return false;
+        }
+        if directory == project_root {
+            break;
+        }
+        cursor = directory.parent();
+    }
+    true
+}
+
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+fn central_ground_source_ref(project_id: &str, relative_path: &Path) -> String {
+    let path = relative_path.to_string_lossy();
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in path.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("central:project-source:{project_id}:{hash:016x}")
 }
 
 fn revision_for(path: &Path) -> Option<SourceRevision> {
@@ -621,12 +939,17 @@ mod tests {
     use aikit_core::{
         plan_agent_wiki_maintenance, AgentWikiMaintenanceRequest, ContextSourceIndex,
         ContextSourceReadOutcome, HorizonRequest, HumanSourceRevisionProposal, KnowledgeAddress,
-        KnowledgeApplication, ProjectCentralSourceKind, RetrievalTarget, SemanticWikiIndex,
-        SemanticWikiProvider, WikiNode, WikiObject, WikiProvenanceRef,
+        KnowledgeApplication, ProjectCentralGroundStatus, ProjectCentralProvenance,
+        ProjectCentralSourceKind, ProjectCentralStanding, ProjectCentralTreatment,
+        ProjectCentralTruthStanding, RetrievalTarget, SemanticWikiIndex, SemanticWikiProvider,
+        WikiNode, WikiObject, WikiProvenanceRef,
     };
     use tempfile::TempDir;
 
     use super::*;
+
+    const PURPOSE_REF: &str = "central:project-source:epilogos/demo:0000000000000001";
+    const VISION_REF: &str = "central:project-source:epilogos/demo:0000000000000002";
 
     fn write(path: &Path, content: &str) {
         if let Some(parent) = path.parent() {
@@ -673,14 +996,27 @@ mod tests {
             &project.join("ProjectCentral/user/research/deep/purpose.md"),
             "Human purpose",
         );
+        write(&project.join("VISION.md"), "Retained native human vision");
+        write(
+            &project.join(PROJECTCENTRAL_GROUND_RELATIONS_SOURCE),
+            &format!(
+                r#"{{
+                  "schema":"central.project.ground-relations/v1",
+                  "project_id":"epilogos/demo",
+                  "relations":[
+                    {{"ref":"{PURPOSE_REF}","path":"ProjectCentral/user/research/deep/purpose.md","provenance":"human-authored","standing":"authored-human-position","roles":["purpose"],"treatment":"projectcentral-user","recognition":"human-accepted source relation","recorded_at_unix_seconds":1}},
+                    {{"ref":"{VISION_REF}","path":"VISION.md","provenance":"human-adopted","standing":"design-commitment","roles":["vision"],"treatment":"retain-native-in-place","recognition":"human-accepted source relation","recorded_at_unix_seconds":2}}
+                  ]
+                }}"#
+            ),
+        );
         write(
             &project.join("ProjectCentral/agents/governance/STYLE.md"),
             "Human governance",
         );
-        let human_source = "source:central:epilogos/demo:human:research/deep/purpose.md";
         write(
             &project.join(PROJECTCENTRAL_WIKI_SOURCE),
-            &wiki_json("Purpose", Some(human_source)),
+            &wiki_json("Purpose", Some(PURPOSE_REF)),
         );
         write(
             &project.join("legacy/wiki.json"),
@@ -700,10 +1036,67 @@ mod tests {
         let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
         let orientation = binding.semantic.orientation().unwrap();
         assert_eq!(orientation.human_material_count, 1);
+        assert_eq!(orientation.recognised_human_source_count, 2);
+        assert_eq!(orientation.ground_status, ProjectCentralGroundStatus::Established);
         assert!(binding.semantic.sources.iter().any(|source| {
             source.kind == ProjectCentralSourceKind::HumanMaterial
                 && source.relative_path.ends_with("research/deep/purpose.md")
+                && source.source.as_str() == PURPOSE_REF
         }));
+    }
+
+    #[test]
+    fn unclassified_human_aperture_file_remains_unresolved_until_recognised() {
+        let (_temp, central, project) = fixture();
+        write(
+            &project.join("ProjectCentral/user/generated-suggestion.md"),
+            "not human-authored merely because it is here",
+        );
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let unresolved = binding
+            .semantic
+            .sources
+            .iter()
+            .find(|source| source.relative_path.ends_with("generated-suggestion.md"))
+            .unwrap();
+        assert_eq!(unresolved.standing, ProjectCentralStanding::Unresolved);
+        assert_eq!(unresolved.provenance, ProjectCentralProvenance::Unresolved);
+        assert_eq!(
+            unresolved.truth_standing,
+            ProjectCentralTruthStanding::Unspecified
+        );
+        assert!(unresolved.recognition.is_none());
+        let context = binding.semantic.account_context().unwrap();
+        assert_eq!(context.preferred_human_sources.len(), 2);
+        assert!(context
+            .other_source_relations
+            .iter()
+            .any(|source| source.relative_path.ends_with("generated-suggestion.md")));
+        let entry = binding
+            .semantic
+            .context_sources()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.resource.descriptor.id.as_str() == unresolved.source.as_str())
+            .unwrap();
+        assert!(entry.resource.descriptor.sources[0].authority.is_none());
+    }
+
+    #[test]
+    fn recognised_native_human_source_stays_in_place_with_exact_central_standing() {
+        let (_temp, central, project) = fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let context = binding.semantic.account_context().unwrap();
+        let vision = context
+            .preferred_human_sources
+            .iter()
+            .find(|source| source.source.as_str() == VISION_REF)
+            .unwrap();
+        assert_eq!(vision.relative_path, PathBuf::from("VISION.md"));
+        assert_eq!(vision.provenance, ProjectCentralProvenance::HumanAdopted);
+        assert_eq!(vision.truth_standing, ProjectCentralTruthStanding::DesignCommitment);
+        assert_eq!(vision.treatment, ProjectCentralTreatment::RetainNativeInPlace);
+        assert_eq!(fs::read_to_string(project.join("VISION.md")).unwrap(), "Retained native human vision");
     }
 
     #[test]
@@ -837,10 +1230,7 @@ mod tests {
         )
         .unwrap();
         let current = binding.load_project_wiki().unwrap();
-        let source_ref = SourceRef::parse(
-            "source:central:epilogos/demo:human:research/deep/purpose.md",
-        )
-        .unwrap();
+        let source_ref = SourceRef::parse(PURPOSE_REF).unwrap();
         let update = WikiObject::Node(WikiNode {
             profile: CENTRAL_WIKI_PROFILE.into(),
             ref_id: ResourceRef::parse("wiki:node:purpose").unwrap(),
@@ -906,15 +1296,32 @@ mod tests {
     }
 
     #[test]
-    fn account_context_exposes_source_refs_without_generating_an_account() {
+    fn structured_account_handoff_preserves_exact_sources_and_standings() {
         let (_temp, central, project) = fixture();
         let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let wiki = SemanticWikiIndex::rebuild(binding.load_project_wiki().unwrap()).unwrap();
+        let app = KnowledgeApplication::new(aikit_core::FamiliarityContext::default())
+            .with_wiki(SemanticWikiProvider::new(&wiki));
+        let hit = app.search("Purpose", 10).hits.into_iter().next().unwrap();
+        assert!(app.read(&hit.address).unwrap().content.is_some());
+
         let context = binding.semantic.account_context().unwrap();
-        assert_eq!(context.preferred_human_sources.len(), 1);
+        assert_eq!(context.preferred_human_sources.len(), 2);
+        assert!(context.preferred_human_sources.iter().any(|source| {
+            source.source.as_str() == PURPOSE_REF
+                && source.provenance == ProjectCentralProvenance::HumanAuthored
+                && source.truth_standing == ProjectCentralTruthStanding::AuthoredHumanPosition
+        }));
+        assert!(context.preferred_human_sources.iter().any(|source| {
+            source.source.as_str() == VISION_REF
+                && source.provenance == ProjectCentralProvenance::HumanAdopted
+                && source.truth_standing == ProjectCentralTruthStanding::DesignCommitment
+        }));
+        assert!(context.ground_relations.is_some());
         assert!(context
             .capabilities
             .iter()
-            .any(|capability| capability.as_str() == "skill:product-understanding"));
+            .any(|capability| capability.as_str() == "skill:structured-account-authoring"));
         assert!(!project.join("ProjectCentral/user/ACCOUNT.md").exists());
     }
 }
