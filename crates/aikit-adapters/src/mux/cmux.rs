@@ -1604,7 +1604,19 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
 
     fn close(&self, target: &MuxTarget) -> Result<()> {
         if let Some(surface) = &target.surface {
-            self.must(&["close-surface", "--surface", surface])?;
+            // As with focus, current cmux exposes a stable Surface handle and
+            // typed `surface.close` on the v2 socket. The v0.64.22 compatibility
+            // CLI requires enclosing workspace/window scope for close-surface,
+            // while the typed operation accepts the Surface id directly.
+            let probe = self.probe_or_empty();
+            if probe.methods.contains("surface.close") {
+                self.call_v2(
+                    "surface.close",
+                    serde_json::json!({ "surface_id": surface }),
+                )?;
+            } else {
+                self.must(&["close-surface", "--surface", surface])?;
+            }
         } else if let Some(workspace) = &target.session {
             self.must(&["close-workspace", "--workspace", workspace])?;
         } else {
