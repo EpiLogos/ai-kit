@@ -107,6 +107,18 @@ if old not in text:
     raise SystemExit('old learned accessibility assertion not found in patch body')
 text = text.replace(old, new, 1)
 
+old = '''    let mut state = TuiState::default();
+    state.selected = Some(source_ref.clone());
+'''
+new = '''    let mut state = TuiState {
+        selected: Some(source_ref.clone()),
+        ..TuiState::default()
+    };
+'''
+if old not in text:
+    raise SystemExit('TuiState default-reassignment block not found in patch body')
+text = text.replace(old, new, 1)
+
 old = 'rm -f .github/workflows/tmp-finish-explain-history.yml scripts/tmp_finish_explain_history.sh'
 new = 'rm -f .github/workflows/tmp-finish-explain-history.yml scripts/tmp_finish_explain_history.sh scripts/tmp_finish_explain_history_body.sh'
 if old not in text:
