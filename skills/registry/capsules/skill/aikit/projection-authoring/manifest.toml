@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/projection-authoring"
+kind = "skill"
+name = "AIKit Projection Authoring"
+description = "Prepare and refine selective O:I Projection representations while preserving native source authority, audience boundaries and explicit return paths."
+maturity = "stable"
+tags = ["aikit", "projection", "authoring", "oi", "provenance"]
+
+[skill]
+root = "payload"
