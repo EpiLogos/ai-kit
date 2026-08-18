@@ -17,6 +17,18 @@ from pathlib import Path
 path = Path('scripts/tmp_finish_explain_history_body.sh')
 text = path.read_text()
 
+old = '''use aikit_cli::app::Service;
+use aikit_core::resource::ResourceRef;
+use aikit_core::{
+    HistoryKind, SourceAuthority, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
+};'''
+new = '''use aikit_cli::app::Service;
+use aikit_core::resource::{ResourceRef, SourceAuthority};
+use aikit_core::{HistoryKind, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF};'''
+if old not in text:
+    raise SystemExit('generated acceptance import block not found in patch body')
+text = text.replace(old, new, 1)
+
 old = '''                });
             }
         }
