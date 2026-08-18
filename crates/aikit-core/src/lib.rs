@@ -24,6 +24,7 @@ pub mod arg;
 pub mod capsule;
 pub mod catalog;
 pub mod composition;
+pub mod composition_explain_history;
 pub mod composition_mutation;
 pub mod composition_view;
 pub mod composition_workspace;
@@ -34,6 +35,8 @@ pub mod credential;
 pub mod duration;
 pub mod effects;
 pub mod error;
+pub mod explain_history;
+pub mod explain_history_actions;
 pub mod familiarity;
 pub mod frecency;
 pub mod guidance;
@@ -49,6 +52,7 @@ pub mod knowledge_wiki;
 pub mod knowledge_wiki_index;
 pub mod knowledge_wiki_provider;
 pub mod lifecycle;
+pub mod live_activation_history;
 pub mod model_runtime;
 pub mod platform;
 pub mod policy;
@@ -93,6 +97,9 @@ pub use composition::{
     RequirementStrength, ResolutionScope, RetractionMode, SurfaceDescriptor, SurfaceKind,
     TargetNativeComponentBinding, HARNESS_COMPOSITION_VERSION,
 };
+pub use composition_explain_history::{
+    explain_harness_component, explain_harness_composition_preview,
+};
 pub use composition_mutation::{
     apply_confirmed_harness_composition, preview_harness_composition_change,
     ConfirmedHarnessCompositionPreview, HarnessCompositionMutation, HarnessCompositionPreview,
@@ -125,6 +132,16 @@ pub use credential::{
 };
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
+pub use explain_history::{
+    explain_resource_evidence, familiarity_history_evidence,
+    harness_composition_history_evidence, EvidenceProvenance, ExplainEvidence, ExplainFact,
+    HistoryEvidence, HistoryKind, HistoryReadModel, HistoryRecoverability,
+    EXPLAIN_HISTORY_VERSION,
+};
+pub use explain_history_actions::{
+    explain_history_action_resources, explain_history_actions_for,
+    install_explain_history_actions, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
+};
 pub use familiarity::{
     AccessibilityAssessment, AccessibilitySignal, AccessibilitySignalClass, FamiliarityContext,
     FamiliarityObservation, FamiliaritySnapshot, FamiliaritySnapshotLoad, FamiliarityStore,
@@ -185,6 +202,7 @@ pub use knowledge_wiki_provider::{
     NATIVE_SEMANTIC_WIKI_PROVIDER,
 };
 pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
+pub use live_activation_history::live_activation_history_evidence;
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;
 pub use procedure::{

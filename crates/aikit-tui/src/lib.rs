@@ -12,6 +12,7 @@ pub mod application_service;
 pub mod application_surface;
 pub mod backend;
 pub mod event;
+pub mod explain_history_service;
 pub mod host;
 pub mod knowledge_service;
 pub mod layout;
@@ -46,6 +47,7 @@ pub use backend::{
     ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
 };
 pub use event::{EventSource, PaletteEvent, ScriptedEvents};
+pub use explain_history_service::ExplainHistoryApplicationService;
 pub use host::{Escalation, TerminalProfile, UiHost};
 pub use knowledge_service::KnowledgeNavigationService;
 pub use layout::{Glyphs, Layout, Width};
