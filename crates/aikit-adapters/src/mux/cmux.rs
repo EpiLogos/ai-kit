@@ -1477,7 +1477,11 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
 
     fn focus(&self, target: &MuxTarget) -> Result<()> {
         if let Some(surface) = &target.surface {
-            self.must(&["focus-pane", "--pane", surface])?;
+            // SessionBinding.surfaces contains cmux Surface handles, not pane
+            // handles. v0.64.22 keeps the v1 `focus-surface` operation and maps
+            // it to the v2 `surface.focus` method; passing `surface:*` to
+            // `focus-pane --pane` is a category error and fails on the real app.
+            self.must(&["focus-surface", "--surface", surface])?;
         } else if let Some(workspace) = &target.session {
             self.must(&["select-workspace", "--workspace", workspace])?;
         } else {
