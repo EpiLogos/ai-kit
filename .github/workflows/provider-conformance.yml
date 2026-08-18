@@ -117,6 +117,7 @@ jobs:
             -u CMUX_TAB_ID \
             -u CMUX_PANEL_ID \
             CMUX_SOCKET_MODE=automation \
+            CMUX_ALLOW_SOCKET_OVERRIDE=1 \
             CMUX_SOCKET_PATH="$socket" \
             CMUXD_UNIX_PATH="$daemon_socket" \
             CMUX_DEBUG_LOG="$log" \
@@ -136,6 +137,7 @@ jobs:
           fi
           echo "CMUX_SOCKET_PATH=$socket" >> "$GITHUB_ENV"
           echo "CMUX_SOCKET_MODE=automation" >> "$GITHUB_ENV"
+          echo "CMUX_ALLOW_SOCKET_OVERRIDE=1" >> "$GITHUB_ENV"
           echo "CMUXD_UNIX_PATH=$daemon_socket" >> "$GITHUB_ENV"
           cmux capabilities --json || cmux --json capabilities
       - name: Run real SessionSpace/cmux provider proof
