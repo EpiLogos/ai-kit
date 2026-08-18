@@ -21,6 +21,7 @@ pub enum HistoryKind {
     Recent,
     Familiarity,
     KnowledgeRoute,
+    KnowledgeFrame,
     Generation,
     HarnessComposition,
     SessionSpace,
