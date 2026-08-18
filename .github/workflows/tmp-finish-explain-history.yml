@@ -1,0 +1,19 @@
+name: Temporary Explain History production closure
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  finish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - run: bash scripts/tmp_finish_explain_history.sh
