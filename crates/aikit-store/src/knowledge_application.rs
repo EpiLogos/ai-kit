@@ -6,6 +6,7 @@
 //! retain provider/lens/revision/authority evidence already present on those
 //! operation results; they never become a second semantic graph.
 
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -135,7 +136,7 @@ impl KnowledgeApplicationStore {
             .filter(|receipt| context.is_none_or(|wanted| &receipt.context == wanted))
             .filter(|receipt| resource.is_none_or(|wanted| receipt.touches(wanted)))
             .collect::<Vec<_>>();
-        receipts.sort_by(|left, right| right.sequence.cmp(&left.sequence));
+        receipts.sort_by_key(|receipt| Reverse(receipt.sequence));
         Ok(receipts)
     }
 
@@ -276,7 +277,7 @@ mod tests {
             ..native.clone()
         };
 
-        store.remember_search_hits(&[native.clone()]).unwrap();
+        store.remember_search_hits(std::slice::from_ref(&native)).unwrap();
         store.remember_search_hits(&[projection]).unwrap();
         assert_eq!(store.address(&resource).unwrap(), Some(native.address));
 
@@ -292,7 +293,7 @@ mod tests {
             authority: SourceAuthority::Authored,
             ranking: None,
         };
-        store.remember_search_hits(&[fallback.clone()]).unwrap();
+        store.remember_search_hits(std::slice::from_ref(&fallback)).unwrap();
         assert_eq!(store.address(&other).unwrap(), Some(fallback.address));
     }
 
