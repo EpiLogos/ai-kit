@@ -16,6 +16,11 @@ def replace_once(path: str, old: str, new: str) -> None:
 provider = "crates/aikit-adapters/src/credential_provider.rs"
 replace_once(
     provider,
+    "use std::path::{Path, PathBuf};\n",
+    "use std::path::Path;\n#[cfg(target_os = \"linux\")]\nuse std::path::PathBuf;\n",
+)
+replace_once(
+    provider,
     '''fn provider_error(code: &'static str, message: impl Into<String>) -> AikitError {
     AikitError::new(code, message)
 }
