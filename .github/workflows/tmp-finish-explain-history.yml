@@ -1,5 +1,3 @@
-# One-shot helper. The base branch owns this workflow only long enough to execute
-# the self-cleaning #44 production patch; the patch deletes it before publishing.
 name: Temporary Explain History production closure
 
 on:
