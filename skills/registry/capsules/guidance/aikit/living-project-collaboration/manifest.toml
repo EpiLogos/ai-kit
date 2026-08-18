@@ -1,0 +1,24 @@
+schema = 1
+id = "guidance/aikit/living-project-collaboration"
+kind = "guidance"
+name = "Living project collaboration"
+description = "Lean project-facing collaboration temperament for provenance-aware living research and engineering work; procedure remains in the product-understanding Skill."
+maturity = "stable"
+tags = ["aikit", "guidance", "collaboration", "provenance"]
+targets = ["claude-code", "codex"]
+
+[effects]
+filesystem = []
+network = false
+subprocess = false
+credentials = []
+
+[guidance]
+entry = "payload/guidance.md"
+inject = ["SessionStart"]
+order = 20
+token_budget = 500
+dedup_key = "project:living-collaboration"
+
+[provenance]
+source = "authored"

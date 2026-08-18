@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/product-understanding"
+kind = "skill"
+name = "AIKit Product Understanding"
+description = "Develop provenance-aware product understanding from authored intent through design, implementation and current evidence, stopping at the smallest sufficient depth for the task."
+maturity = "stable"
+tags = ["aikit", "product", "provenance", "knowledge"]
+
+[skill]
+root = "payload"

@@ -1,0 +1,30 @@
+schema = 1
+
+[[case]]
+id = "straight-retrieval-stops"
+task_class = "retrieval"
+visit = ["requested-source"]
+avoid = ["authored-human-position", "product-vision", "design-decision", "architectural-contract", "philosophical-corpus"]
+expected = "Use the smallest sufficient source; do not ingest the whole product/philosophical corpus."
+
+[[case]]
+id = "product-design-traverses-provenance"
+task_class = "product-design"
+visit = ["authored-human-position", "product-constitutional-intent", "design-decision", "architectural-contract", "implementation-fact", "current-development-state"]
+report_classes = true
+expected = "Returned understanding relates authored reason to design, architecture and current reality without collapsing their authority classes."
+
+[[case]]
+id = "current-capability-descends-to-reality"
+task_class = "current-capability"
+visit = ["implementation-fact", "experimental-finding", "current-development-state"]
+forbid_claim_authority = ["product-constitutional-intent", "design-decision"]
+expected = "Vision/design may explain intended meaning but cannot prove current capability."
+
+[[case]]
+id = "returned-reality-proposes-pressure"
+task_class = "returned-finding"
+visit = ["experimental-finding", "authored-human-position"]
+proposal_only = true
+authored_source_mutated = false
+expected = "A returned finding can pressure authored ground through a provenance-bearing proposal but cannot silently rewrite it."
