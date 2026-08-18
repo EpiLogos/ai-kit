@@ -1,0 +1,35 @@
+[[case]]
+id = "central-selected-world"
+source_kind = "central"
+source_roots = ["Control/user", "Control/agents", "Control/machines", "Work"]
+selected = ["Control/user/public-ground.md", "Control/agents/public-collaboration.md", "Work/project-a"]
+forbid_public_inference = ["Control/user", "Control/agents", "Control/machines", "Work"]
+requires_explicit_selection = true
+new_profile_ontology = false
+source_mutated_by_projection = false
+return_requires_proposal = true
+
+[[case]]
+id = "deep-project-reading"
+source_kind = "project"
+source_adoption_gate = false
+readings = ["positions", "vision", "design", "architecture", "implementation", "runs-evidence", "current-state"]
+report_provenance_standing = true
+new_project_ontology = false
+
+[[case]]
+id = "ordinary-non-ql-project"
+source_kind = "filesystem-project"
+visible_headings = ["Why I keep these notes", "From a walk to a useful record", "Recent observations"]
+ql_required = false
+forced_six_sections = false
+source_adoption_gate = false
+
+[[case]]
+id = "html-is-renderer"
+source_kind = "structured-reading"
+output = "standalone-html"
+html_is_canonical_source = false
+preserve_projection_identity = true
+agent_requires_html_scrape = false
+required_template = "skills/registry/capsules/skill/aikit/html-account/payload/full-account-template.html"

@@ -1,6 +1,9 @@
 skill/aikit/operation
 skill/aikit/knowledge-navigation
 skill/aikit/product-understanding
+skill/aikit/structured-account-authoring
+skill/aikit/projection-authoring
+skill/aikit/html-account
 skill/aikit/runtime-operation
 skill/aikit/verification
 skill/aikit/profile-skillset

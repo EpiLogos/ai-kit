@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/structured-account-authoring"
+kind = "skill"
+name = "AIKit Structured Account Authoring"
+description = "Compose a rich provenance-aware reading of a coherent authored world without replacing its native source or ontology."
+maturity = "stable"
+tags = ["aikit", "authoring", "account", "provenance", "projection"]
+
+[skill]
+root = "payload"
