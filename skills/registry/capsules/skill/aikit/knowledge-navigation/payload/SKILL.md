@@ -37,6 +37,58 @@ The production CLI exposes the same faculty as `aikit knowledge search|read|rela
 7. Use `history` to recover durable AIKit-owned route/frame receipts in the same Project/actor/Focus context without manufacturing provider graph history. `forget` resets learned familiarity influence only; it does not erase canonical Resource identity, provider truth or the operation audit trail.
 8. When a provider is absent/degraded, return that state honestly and use other eligible sources only if the effective context authorises them. Baseline address/fuzzy navigation must remain useful without rich providers or QL/MEF.
 
+## ProjectCentral local Wiki worlds
+
+When a Project exposes Central's `central.project/v1` binding, consume it as a native Knowledge Navigation source relation rather than inventing an aperture document or another graph.
+
+Keep ownership, provenance and truth standing separate:
+
+```text
+ProjectCentral/user/**                     human-owned authorship aperture
+                                            (location alone does NOT prove authorship)
+recognised human-authored/adopted source    Central-issued source ref + provenance/standing
+ProjectCentral/agents/governance/**         human-authored Agent governance
+ProjectCentral/agents/wiki/wiki.json        Agent-maintained semantic knowledge
+ordinary native Project source             authored/observed/inferred only as provenance establishes
+observed evidence                          != authored
+inferred / derived reading                 != observed
+```
+
+When Central's accepted relation source is present, consume `ProjectCentral/relations/source-relations.json` with schema `central.project.ground-relations/v1` rather than inferring authority from filenames or paths. Preserve its exact distinctions:
+
+- provenance: `human-authored`, `human-edited-draft`, `human-adopted`, `generated-suggestion`, `generated-derived`, `agent-maintained`, `observed`, `inference`, `unresolved`;
+- truth standing: `authored-human-position`, `design-commitment`, `architecture-contract`, `implementation-fact`, `observed-evidence`, `current-development-state`, `agent-inference`, `unspecified`;
+- treatment and roles as relation metadata rather than a directory taxonomy.
+
+An unclassified file under `ProjectCentral/user/**` remains readable/askable when policy permits, but its provenance and truth standing stay unresolved until Central records direct authorship/adoption. This prevents generated material from acquiring human authority merely because it landed in the human-owned aperture. A recognised native human source may remain exactly where it is; consume its Central-issued source ref and `retain-native-in-place` relation rather than moving/copying it into ProjectCentral.
+
+Project entry should establish Project identity, human-source availability, governance availability, canonical Agent Wiki identity, adopted Wiki sources, accepted source relations, native Project source and optional Control root Wiki **without retrieving the whole tree or Wiki**. Preserve the ContextSource progression `exists -> known-to-exist -> askable -> retrieved -> focused`; a broad information horizon is not prompt inclusion.
+
+Respect `.no-agent-retrieval` recursively before source disclosure. A human may freely organise `ProjectCentral/user/**`; arbitrary or non-text material may be known to exist even when the current provider cannot interpret its contents.
+
+For Agent Wiki maintenance:
+
+1. Inspect the canonical Wiki revision and the exact source revisions cited by affected Wiki objects.
+2. Distinguish stale, conflicting and merely additional knowledge. Semantic conflict is an Agent judgement over Claims/evidence; deterministic code should validate revision, provenance and topology rather than pretending semantic disagreement is mechanically decidable.
+3. Form the smallest coherent WikiNode/WikiEdge/reading changes and preserve exact source/provenance plus producer/run or generation refs when available.
+4. Validate the proposed whole through the existing SemanticWiki index before persistence. Adopted Wikis remain participating sources and do not replace the canonical Wiki.
+5. Persist Project knowledge only to `ProjectCentral/agents/wiki/wiki.json` (and maintain `Control/agents/wiki/wiki.json` only when the root Wiki is explicitly the target). Derived indexes remain rebuildable state.
+6. If returned implementation/runtime evidence challenges recognised human-authored Project source, represent the pressure as a human-source revision proposal / Decision pressure with evidence. **Do not silently rewrite `ProjectCentral/user/**`, retained native human source, or human governance.** Updating Agent Wiki knowledge and proposing a human-source revision are different operations.
+
+The normal source-return relation is therefore:
+
+```text
+recognised human-authored Project source
+    -> Agent-maintained SemanticWiki
+    -> bounded traversal
+    -> exact human/native source or evidence
+    -> developmental return
+    -> Agent Wiki update with provenance
+    -> explicit proposal when human source is challenged
+```
+
+For optional account/document integration, hand `product-understanding` and `structured-account-authoring` the structured ProjectCentral account context: exact Central source refs, paths, provenance, truth standing, roles/treatment, canonical Agent Wiki identity and relation-source identity. Do not make those Skills rediscover path conventions in prompts. `projection-authoring` and `html-account` may render derivative readings when explicitly requested; capability availability does not auto-generate a document, make HTML canonical, or create a second Project ontology.
+
 ## Verification
 
-Use AIKit knowledge-navigation/source-pool/wiki/familiarity/relation tests plus the real bkmr and GitNexus conformance lanes. Acceptance requires stable canonical refs; inspectable provider/lens/revision/source provenance; bounded relations; route/familiarity separation; exact addressed results protected from learned ranking; and no-QL-provider parity. This Skill does not encode TUI keybindings and does not grant provider, retrieval, trust or mutation authority.
+Use AIKit knowledge-navigation/source-pool/wiki/familiarity/relation tests plus the real bkmr and GitNexus conformance lanes. Acceptance requires stable canonical refs; inspectable provider/lens/revision/source provenance; bounded relations; route/familiarity separation; exact addressed results protected from learned ranking; and no-QL-provider parity. ProjectCentral acceptance additionally requires no README dependency, arbitrary nesting, recursive `.no-agent-retrieval`, unresolved aperture material not acquiring human authority, exact accepted source/provenance/truth-standing consumption, retained native human source participation without movement, canonical Project/root Wiki paths, adopted-source participation without canonical replacement, lazy Project entry, explicit exact retrieval, provenance-bearing Agent Wiki maintenance, no silent human-source mutation and explicit revision proposals. This Skill does not encode TUI keybindings and does not grant provider, retrieval, trust or mutation authority.

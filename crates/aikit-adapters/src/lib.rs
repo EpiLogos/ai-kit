@@ -14,6 +14,7 @@ pub mod gitnexus;
 pub mod interactive_connection;
 pub mod mux;
 pub mod okf;
+pub mod projectcentral;
 pub mod runner;
 pub mod session_space_connection;
 pub mod session_space_observation;
@@ -52,6 +53,7 @@ pub use interactive_connection::{
     PermissionDecision,
 };
 pub use okf::{parse_okf_markdown, render_okf_markdown};
+pub use projectcentral::{ProjectCentralFileProvider, ProjectCentralFilesystemBinding};
 pub use session_space_connection::connection_into_session_space;
 pub use session_space_observation::{
     SessionSpaceFileObservationProvider, SessionSpaceObservationError,
