@@ -80,9 +80,72 @@ jobs:
         run: xvfb-run -a npm test
 
   cmux-0-64-22-real:
-    # A GitHub-hosted runner can install the app, but it cannot prove the user's
-    # live control-socket semantics reliably. Enable this on the dedicated macOS
-    # provider runner instead of turning a missing GUI/socket into a mock pass.
+    # cmux itself ships an automation socket mode. Exercise the exact signed
+    # v0.64.22 release on a clean hosted Mac so this requirement is reproducible
+    # and does not depend on one developer's persistent desktop state.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install exact cmux v0.64.22 release
+        run: |
+          set -euo pipefail
+          dmg="$RUNNER_TEMP/cmux-v0.64.22.dmg"
+          mount="$RUNNER_TEMP/cmux-mount"
+          curl -fsSL -o "$dmg" https://github.com/manaflow-ai/cmux/releases/download/v0.64.22/cmux-macos.dmg
+          mkdir -p "$mount"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount"
+          app="$(find "$mount" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app"
+          sudo rm -rf /Applications/cmux.app
+          sudo ditto "$app" /Applications/cmux.app
+          hdiutil detach "$mount"
+          cli=/Applications/cmux.app/Contents/Resources/bin/cmux
+          test -x "$cli"
+          sudo ln -sf "$cli" /usr/local/bin/cmux
+          cmux --version
+          cmux --version | grep -F '0.64.22'
+      - name: Launch real cmux automation socket
+        run: |
+          set -euo pipefail
+          socket="$RUNNER_TEMP/aikit-cmux-v0.64.22.sock"
+          daemon_socket="$RUNNER_TEMP/aikit-cmuxd-v0.64.22.sock"
+          log="$RUNNER_TEMP/aikit-cmux-v0.64.22.log"
+          rm -f "$socket" "$daemon_socket" "$log"
+          env \
+            -u CMUX_WORKSPACE_ID \
+            -u CMUX_SURFACE_ID \
+            -u CMUX_TAB_ID \
+            -u CMUX_PANEL_ID \
+            CMUX_SOCKET_MODE=automation \
+            CMUX_SOCKET_PATH="$socket" \
+            CMUXD_UNIX_PATH="$daemon_socket" \
+            CMUX_DEBUG_LOG="$log" \
+            CMUX_DISABLE_SESSION_RESTORE=1 \
+            open -g /Applications/cmux.app
+          for _ in {1..150}; do
+            if [[ -S "$socket" ]]; then
+              break
+            fi
+            sleep 0.2
+          done
+          if [[ ! -S "$socket" ]]; then
+            echo "cmux automation socket did not appear: $socket" >&2
+            ps aux | grep -i '[c]mux' || true
+            test -f "$log" && tail -200 "$log" || true
+            exit 1
+          fi
+          echo "CMUX_SOCKET_PATH=$socket" >> "$GITHUB_ENV"
+          echo "CMUX_SOCKET_MODE=automation" >> "$GITHUB_ENV"
+          echo "CMUXD_UNIX_PATH=$daemon_socket" >> "$GITHUB_ENV"
+          cmux capabilities --json || cmux --json capabilities
+      - name: Run real SessionSpace/cmux provider proof
+        env:
+          AIKIT_REQUIRE_CMUX_REAL: '1'
+        run: cargo test -p aikit-adapters --test working_environment_cmux_real -- --nocapture
+
+  cmux-0-64-22-selfhosted-real:
+    # Keep the persistent-user-host lane as an additional specimen when present;
+    # it no longer substitutes for the reproducible clean-host proof above.
     if: ${{ vars.AIKIT_CMUX_REAL == 'true' }}
     runs-on: [self-hosted, macOS, cmux]
     steps:
