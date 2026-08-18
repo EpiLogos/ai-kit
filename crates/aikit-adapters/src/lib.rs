@@ -20,6 +20,7 @@ pub mod session_space_observation;
 pub mod session_space_reconstruction;
 pub mod shells;
 pub mod working_environment;
+pub mod working_environment_control;
 
 pub use agent_connection::{
     AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest,
@@ -62,4 +63,8 @@ pub use working_environment::{
     ProviderNativeBinding, WorkingEnvironmentCapabilities, WorkingEnvironmentHealth,
     WorkingEnvironmentObservation, WorkingEnvironmentProvider,
     WORKING_ENVIRONMENT_PROVIDER_VERSION,
+};
+pub use working_environment_control::{
+    AgentSessionSurfaceBinding, AgentSessionWorkingEnvironmentProvider,
+    WorkingEnvironmentControlClient, WORKING_ENVIRONMENT_CONTROL_VERSION,
 };
