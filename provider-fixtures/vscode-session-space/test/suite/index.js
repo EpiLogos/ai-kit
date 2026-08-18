@@ -1,10 +1,55 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 const vscode = require('vscode');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitForControlAddress() {
+  const controlFile = process.env.AIKIT_VSCODE_PROVIDER_CONTROL_FILE;
+  assert.ok(controlFile, 'VS Code provider control file must be configured');
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (fs.existsSync(controlFile)) {
+      const address = fs.readFileSync(controlFile, 'utf8').trim();
+      if (address) return address;
+    }
+    await delay(50);
+  }
+  throw new Error(`VS Code provider control address was not published at ${controlFile}`);
+}
+
+function runProbe(probe, address) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(probe, [], {
+      env: {
+        ...process.env,
+        AIKIT_WORKING_ENVIRONMENT_CONTROL_ADDR: address
+      },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`AIKit provider lifecycle probe timed out\nstdout:\n${stdout}\nstderr:\n${stderr}`));
+    }, 30000);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on('close', (status) => {
+      clearTimeout(timeout);
+      resolve({ status, stdout, stderr });
+    });
+  });
+}
 
 async function run() {
   const folders = vscode.workspace.workspaceFolders || [];
@@ -52,9 +97,27 @@ async function run() {
     'current VS Code must expose agent/conversation participant creation'
   );
 
-  // Provider-native editor/terminal/tab identities are deliberately not used as
-  // SessionSpace, Project, AgentSession or Surface identity. The fixture proves
-  // addressable provider Surfaces only; canonical refs remain AIKit-owned.
+  // The rich IDE requirement is not closed by Chat API visibility alone. Drive
+  // AIKit's external provider control seam into this real Extension Host. The
+  // Rust probe supplies caller-owned canonical AgentSession/Surface refs and an
+  // already-existing connection-native session binding, then proves attach,
+  // detach, reattach and rebind without VS Code minting canonical identity.
+  // This child process must stay asynchronous: the provider endpoint lives in
+  // this same Extension Host and needs the event loop to remain responsive.
+  const address = await waitForControlAddress();
+  const probe = process.env.AIKIT_VSCODE_PROVIDER_PROBE;
+  assert.ok(probe, 'AIKit working-environment control probe must be configured');
+  const result = await runProbe(probe, address);
+  assert.strictEqual(
+    result.status,
+    0,
+    `AIKit provider lifecycle probe failed\nstdout:\n${result.stdout || ''}\nstderr:\n${result.stderr || ''}`
+  );
+  assert.match(result.stdout || '', /AgentSession lifecycle: .*PASS/);
+
+  // Provider-native editor/terminal/tab/panel/session identities remain
+  // provenance. Canonical refs are supplied by AIKit; ACP/native continuity is
+  // supplied below the IDE through aikit.connection-adapter/v1.
   controller.dispose();
   preview.dispose();
   terminal.dispose();

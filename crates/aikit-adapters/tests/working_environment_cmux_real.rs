@@ -8,11 +8,13 @@ mod common;
 
 use common::plan_from;
 use aikit_adapters::mux::cmux::Cmux;
+use aikit_adapters::mux::SessionIdentity;
 use aikit_adapters::runner::SystemRunner;
 use aikit_adapters::{
     MuxWorkingEnvironment, NativeBindingKind, WorkingEnvironmentHealth,
     WorkingEnvironmentProvider,
 };
+use aikit_core::id::SessionId;
 use aikit_core::resource::ResourceRef;
 
 fn r(raw: &str) -> ResourceRef {
@@ -42,6 +44,13 @@ fn real_cmux_exposes_native_ids_only_through_explicit_session_space_bindings() {
     let Some(cmux) = require_cmux() else {
         return;
     };
+    // cmux's workspace/surface ids are provider bindings, never AIKit identity.
+    // Give the adapter the durable AIKit session identity it must use to mark
+    // ownership before any real provider mutation is allowed.
+    let cmux = cmux.with_identity(SessionIdentity {
+        session_id: Some(SessionId::parse("ses_cmux_provider_real").unwrap()),
+        ..SessionIdentity::default()
+    });
     let temp = tempfile::tempdir().unwrap();
     let plan = plan_from(&format!(
         r#"

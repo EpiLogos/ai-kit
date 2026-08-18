@@ -37,7 +37,13 @@
 //! get the variables, and the binding says so instead of implying otherwise.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
+#[cfg(unix)]
+use std::time::Duration;
 
 use aikit_core::platform::MuxKind;
 use aikit_core::profile::ConfigTable;
@@ -153,7 +159,13 @@ pub struct Posted {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CmuxProbe {
     pub version: Option<String>,
+    /// Exact live control socket reported by the current provider.
+    pub socket_path: Option<String>,
+    /// Legacy/user-facing CLI commands reported by older capability responses.
     pub commands: BTreeSet<String>,
+    /// Current cmux v2 socket methods. v0.64.22 keeps the legacy CLI command
+    /// contract while advertising these method names from `capabilities`.
+    pub methods: BTreeSet<String>,
     pub features: BTreeMap<String, bool>,
     /// Whether the socket answered at all.
     pub reachable: bool,
@@ -163,7 +175,33 @@ pub struct CmuxProbe {
 
 impl CmuxProbe {
     pub fn has_command(&self, name: &str) -> bool {
-        self.commands.contains(name)
+        if self.commands.contains(name) {
+            return true;
+        }
+
+        // cmux v0.64.22's `capabilities` response advertises the v2 socket
+        // method registry instead of the still-supported compatibility CLI
+        // command list. Keep AIKit on the documented CLI contract, but accept a
+        // method as evidence that its corresponding CLI operation is present.
+        let method = match name {
+            "new-workspace" => "workspace.create",
+            "new-window" => "window.create",
+            "move-workspace-to-window" => "workspace.move_to_window",
+            "new-split" => "surface.split",
+            "new-pane" => "pane.create",
+            "list-panes" => "pane.list",
+            "list-pane-surfaces" => "pane.surfaces",
+            "rename-tab" => "tab.action",
+            "workspace-action" => "workspace.action",
+            "notify" => "notification.create",
+            "markdown" => "markdown.open",
+            "respawn-pane" => "surface.respawn",
+            "close-surface" => "surface.close",
+            "close-workspace" => "workspace.close",
+            "select-workspace" => "workspace.select",
+            _ => return false,
+        };
+        self.methods.contains(method)
     }
 
     pub fn feature(&self, name: &str) -> bool {
@@ -206,6 +244,18 @@ impl CmuxProbe {
             })
             .unwrap_or_default();
 
+        let methods = object
+            .get("methods")
+            .and_then(|m| m.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|i| i.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let features = object
             .get("features")
             .and_then(|f| f.as_object())
@@ -222,7 +272,12 @@ impl CmuxProbe {
                 .get("version")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            socket_path: object
+                .get("socket_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             commands,
+            methods,
             features,
             reachable: true,
             note: None,
@@ -333,6 +388,94 @@ impl<R: CommandRunner> Cmux<R> {
 
     fn must_owned(&self, args: &[String]) -> Result<Output> {
         self.must(&args.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    #[cfg(unix)]
+    fn call_v2(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        let probe = self.probe()?;
+        let socket = std::env::var("CMUX_SOCKET_PATH")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or(probe.socket_path)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "mux.cmux_socket_missing",
+                    format!("cmux advertises `{method}` but did not disclose a live socket path"),
+                )
+            })?;
+
+        let mut stream = UnixStream::connect(&socket).map_err(|error| {
+            AikitError::new(
+                "mux.cmux_socket_connect_failed",
+                format!("could not connect to cmux socket `{socket}`: {error}"),
+            )
+        })?;
+        let timeout = Some(Duration::from_secs(10));
+        stream.set_read_timeout(timeout).map_err(|error| {
+            AikitError::new(
+                "mux.cmux_socket_timeout_failed",
+                format!("could not set cmux socket read timeout: {error}"),
+            )
+        })?;
+        stream.set_write_timeout(timeout).map_err(|error| {
+            AikitError::new(
+                "mux.cmux_socket_timeout_failed",
+                format!("could not set cmux socket write timeout: {error}"),
+            )
+        })?;
+
+        let request = serde_json::json!({
+            "id": 1,
+            "method": method,
+            "params": params,
+        });
+        writeln!(stream, "{request}").map_err(|error| {
+            AikitError::new(
+                "mux.cmux_socket_write_failed",
+                format!("could not write cmux `{method}` request: {error}"),
+            )
+        })?;
+        stream.flush().map_err(|error| {
+            AikitError::new(
+                "mux.cmux_socket_write_failed",
+                format!("could not flush cmux `{method}` request: {error}"),
+            )
+        })?;
+
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).map_err(|error| {
+            AikitError::new(
+                "mux.cmux_socket_read_failed",
+                format!("could not read cmux `{method}` response: {error}"),
+            )
+        })?;
+        let response: serde_json::Value = serde_json::from_str(line.trim()).map_err(|error| {
+            AikitError::new(
+                "mux.cmux_socket_decode_failed",
+                format!("could not decode cmux `{method}` response: {error}"),
+            )
+        })?;
+        if response.get("id").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Err(AikitError::new(
+                "mux.cmux_socket_response_mismatch",
+                format!("cmux `{method}` response did not match request id 1: {response}"),
+            ));
+        }
+        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(AikitError::new(
+                "mux.cmux_socket_operation_failed",
+                format!("cmux `{method}` failed: {response}"),
+            ));
+        }
+        Ok(response.get("result").cloned().unwrap_or(serde_json::Value::Null))
+    }
+
+    #[cfg(not(unix))]
+    fn call_v2(&self, method: &str, _params: serde_json::Value) -> Result<serde_json::Value> {
+        Err(AikitError::new(
+            "mux.cmux_socket_unsupported",
+            format!("cmux v2 socket operation `{method}` requires a Unix host"),
+        ))
     }
 
     // -----------------------------------------------------------------------
@@ -1434,7 +1577,20 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
 
     fn focus(&self, target: &MuxTarget) -> Result<()> {
         if let Some(surface) = &target.surface {
-            self.must(&["focus-pane", "--pane", surface])?;
+            // Current cmux reports stable Surface handles and the typed
+            // `surface.focus` method in `capabilities`, but the signed v0.64.22
+            // compatibility CLI does not expose a Surface-focus subcommand. Use
+            // the provider's documented JSON-lines socket for that exact method;
+            // older providers keep the legacy pane-focus path below.
+            let probe = self.probe_or_empty();
+            if probe.methods.contains("surface.focus") {
+                self.call_v2(
+                    "surface.focus",
+                    serde_json::json!({ "surface_id": surface }),
+                )?;
+            } else {
+                self.must(&["focus-pane", "--pane", surface])?;
+            }
         } else if let Some(workspace) = &target.session {
             self.must(&["select-workspace", "--workspace", workspace])?;
         } else {
@@ -1448,7 +1604,19 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
 
     fn close(&self, target: &MuxTarget) -> Result<()> {
         if let Some(surface) = &target.surface {
-            self.must(&["close-surface", "--surface", surface])?;
+            // As with focus, current cmux exposes a stable Surface handle and
+            // typed `surface.close` on the v2 socket. The v0.64.22 compatibility
+            // CLI requires enclosing workspace/window scope for close-surface,
+            // while the typed operation accepts the Surface id directly.
+            let probe = self.probe_or_empty();
+            if probe.methods.contains("surface.close") {
+                self.call_v2(
+                    "surface.close",
+                    serde_json::json!({ "surface_id": surface }),
+                )?;
+            } else {
+                self.must(&["close-surface", "--surface", surface])?;
+            }
         } else if let Some(workspace) = &target.session {
             self.must(&["close-workspace", "--workspace", workspace])?;
         } else {
