@@ -1,0 +1,52 @@
+name: Persistent Surface conformance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: persistent-surface-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  collapsed-local-workcell:
+    name: AIKit Surface ↔ Workcell managed-service proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout AIKit candidate
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Rust 1.88
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+
+      - name: Prove AIKit persistent Surface identity and rebinding
+        run: cargo test --locked -p aikit-core --test surface_material_v2 -- --nocapture --test-threads=1
+
+      - name: Checkout pinned Workcell collapsed-local substrate
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/Workcell
+          ref: 8184f9ba95c5efc0077701a4b58c1abb2943bd6e
+          path: workcell
+
+      - name: Prove real local managed-service lifecycle in Workcell
+        working-directory: workcell
+        run: cargo test --locked -p epilogos-workcell-runtime --test managed_host_service -- --nocapture --test-threads=1
+
+      - name: Record pre-physical boundary
+        shell: bash
+        run: |
+          cat <<'EOF'
+          Persistent Surface conformance passed against Workcell 8184f9ba95c5efc0077701a4b58c1abb2943bd6e.
+          This gate proves collapsed-local process/service readiness, observation, disappearance,
+          release/rematerialisation and AIKit identity-preserving Surface rebinding.
+          It deliberately does not claim Ubuntu/Tailscale/Fabric physical acceptance.
+          EOF
