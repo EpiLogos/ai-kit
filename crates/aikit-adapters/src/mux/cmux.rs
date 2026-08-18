@@ -153,7 +153,11 @@ pub struct Posted {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CmuxProbe {
     pub version: Option<String>,
+    /// Legacy/user-facing CLI commands reported by older capability responses.
     pub commands: BTreeSet<String>,
+    /// Current cmux v2 socket methods. v0.64.22 keeps the legacy CLI command
+    /// contract while advertising these method names from `capabilities`.
+    pub methods: BTreeSet<String>,
     pub features: BTreeMap<String, bool>,
     /// Whether the socket answered at all.
     pub reachable: bool,
@@ -163,7 +167,33 @@ pub struct CmuxProbe {
 
 impl CmuxProbe {
     pub fn has_command(&self, name: &str) -> bool {
-        self.commands.contains(name)
+        if self.commands.contains(name) {
+            return true;
+        }
+
+        // cmux v0.64.22's `capabilities` response advertises the v2 socket
+        // method registry instead of the still-supported compatibility CLI
+        // command list. Keep AIKit on the documented CLI contract, but accept a
+        // method as evidence that its corresponding CLI operation is present.
+        let method = match name {
+            "new-workspace" => "workspace.create",
+            "new-window" => "window.create",
+            "move-workspace-to-window" => "workspace.move_to_window",
+            "new-split" => "surface.split",
+            "new-pane" => "pane.create",
+            "list-panes" => "pane.list",
+            "list-pane-surfaces" => "pane.surfaces",
+            "rename-tab" => "tab.action",
+            "workspace-action" => "workspace.action",
+            "notify" => "notification.create",
+            "markdown" => "markdown.open",
+            "respawn-pane" => "surface.respawn",
+            "close-surface" => "surface.close",
+            "close-workspace" => "workspace.close",
+            "select-workspace" => "workspace.select",
+            _ => return false,
+        };
+        self.methods.contains(method)
     }
 
     pub fn feature(&self, name: &str) -> bool {
@@ -206,6 +236,18 @@ impl CmuxProbe {
             })
             .unwrap_or_default();
 
+        let methods = object
+            .get("methods")
+            .and_then(|m| m.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|i| i.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let features = object
             .get("features")
             .and_then(|f| f.as_object())
@@ -223,6 +265,7 @@ impl CmuxProbe {
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
             commands,
+            methods,
             features,
             reachable: true,
             note: None,
