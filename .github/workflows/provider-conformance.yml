@@ -9,60 +9,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  provider-closure-one-shot:
-    if: ${{ github.head_ref == 'agent/session-space-provider-closure' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: agent/session-space-provider-closure
-          fetch-depth: 0
-      - name: Add exact cmux v2 socket call for Surface focus
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('crates/aikit-adapters/src/mux/cmux.rs')
-          text = path.read_text()
-
-          replacements = [
-              (
-                  '''use std::collections::{BTreeMap, BTreeSet};\nuse std::sync::Mutex;\n''',
-                  '''use std::collections::{BTreeMap, BTreeSet};\n#[cfg(unix)]\nuse std::io::{BufRead, BufReader, Write};\n#[cfg(unix)]\nuse std::os::unix::net::UnixStream;\nuse std::sync::Mutex;\n#[cfg(unix)]\nuse std::time::Duration;\n''',
-              ),
-              (
-                  '''pub struct CmuxProbe {\n    pub version: Option<String>,\n    /// Legacy/user-facing CLI commands reported by older capability responses.\n''',
-                  '''pub struct CmuxProbe {\n    pub version: Option<String>,\n    /// Exact live control socket reported by the current provider.\n    pub socket_path: Option<String>,\n    /// Legacy/user-facing CLI commands reported by older capability responses.\n''',
-              ),
-              (
-                  '''        Some(Self {\n            version: object\n                .get("version")\n                .and_then(|v| v.as_str())\n                .map(str::to_string),\n            commands,\n''',
-                  '''        Some(Self {\n            version: object\n                .get("version")\n                .and_then(|v| v.as_str())\n                .map(str::to_string),\n            socket_path: object\n                .get("socket_path")\n                .and_then(|v| v.as_str())\n                .map(str::to_string),\n            commands,\n''',
-              ),
-              (
-                  '''    fn must_owned(&self, args: &[String]) -> Result<Output> {\n        self.must(&args.iter().map(String::as_str).collect::<Vec<_>>())\n    }\n\n    // -----------------------------------------------------------------------\n    // Probing\n''',
-                  '''    fn must_owned(&self, args: &[String]) -> Result<Output> {\n        self.must(&args.iter().map(String::as_str).collect::<Vec<_>>())\n    }\n\n    #[cfg(unix)]\n    fn call_v2(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {\n        let probe = self.probe()?;\n        let socket = std::env::var("CMUX_SOCKET_PATH")\n            .ok()\n            .filter(|value| !value.trim().is_empty())\n            .or(probe.socket_path)\n            .ok_or_else(|| {\n                AikitError::new(\n                    "mux.cmux_socket_missing",\n                    format!("cmux advertises `{method}` but did not disclose a live socket path"),\n                )\n            })?;\n\n        let mut stream = UnixStream::connect(&socket).map_err(|error| {\n            AikitError::new(\n                "mux.cmux_socket_connect_failed",\n                format!("could not connect to cmux socket `{socket}`: {error}"),\n            )\n        })?;\n        let timeout = Some(Duration::from_secs(10));\n        stream.set_read_timeout(timeout).map_err(|error| {\n            AikitError::new(\n                "mux.cmux_socket_timeout_failed",\n                format!("could not set cmux socket read timeout: {error}"),\n            )\n        })?;\n        stream.set_write_timeout(timeout).map_err(|error| {\n            AikitError::new(\n                "mux.cmux_socket_timeout_failed",\n                format!("could not set cmux socket write timeout: {error}"),\n            )\n        })?;\n\n        let request = serde_json::json!({\n            "id": 1,\n            "method": method,\n            "params": params,\n        });\n        writeln!(stream, "{request}").map_err(|error| {\n            AikitError::new(\n                "mux.cmux_socket_write_failed",\n                format!("could not write cmux `{method}` request: {error}"),\n            )\n        })?;\n        stream.flush().map_err(|error| {\n            AikitError::new(\n                "mux.cmux_socket_write_failed",\n                format!("could not flush cmux `{method}` request: {error}"),\n            )\n        })?;\n\n        let mut line = String::new();\n        BufReader::new(stream).read_line(&mut line).map_err(|error| {\n            AikitError::new(\n                "mux.cmux_socket_read_failed",\n                format!("could not read cmux `{method}` response: {error}"),\n            )\n        })?;\n        let response: serde_json::Value = serde_json::from_str(line.trim()).map_err(|error| {\n            AikitError::new(\n                "mux.cmux_socket_decode_failed",\n                format!("could not decode cmux `{method}` response: {error}"),\n            )\n        })?;\n        if response.get("id").and_then(serde_json::Value::as_u64) != Some(1) {\n            return Err(AikitError::new(\n                "mux.cmux_socket_response_mismatch",\n                format!("cmux `{method}` response did not match request id 1: {response}"),\n            ));\n        }\n        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {\n            return Err(AikitError::new(\n                "mux.cmux_socket_operation_failed",\n                format!("cmux `{method}` failed: {response}"),\n            ));\n        }\n        Ok(response.get("result").cloned().unwrap_or(serde_json::Value::Null))\n    }\n\n    #[cfg(not(unix))]\n    fn call_v2(&self, method: &str, _params: serde_json::Value) -> Result<serde_json::Value> {\n        Err(AikitError::new(\n            "mux.cmux_socket_unsupported",\n            format!("cmux v2 socket operation `{method}` requires a Unix host"),\n        ))\n    }\n\n    // -----------------------------------------------------------------------\n    // Probing\n''',
-              ),
-              (
-                  '''        if let Some(surface) = &target.surface {\n            // SessionBinding.surfaces contains cmux Surface handles. The signed\n            // v0.64.22 CLI exposes the supported v2 `surface.focus` operation\n            // through `raw operation` even though it has no `focus-surface`\n            // compatibility subcommand. Keep the semantic Surface handle intact.\n            let params = serde_json::json!({ "surface_id": surface }).to_string();\n            self.must(&[\n                "raw",\n                "operation",\n                "surface.focus",\n                "--params-json",\n                &params,\n            ])?;\n        } else if let Some(workspace) = &target.session {\n''',
-                  '''        if let Some(surface) = &target.surface {\n            // Current cmux reports stable Surface handles and the typed\n            // `surface.focus` method in `capabilities`, but the signed v0.64.22\n            // compatibility CLI does not expose a Surface-focus subcommand. Use\n            // the provider's documented JSON-lines socket for that exact method;\n            // older providers keep the legacy pane-focus path below.\n            let probe = self.probe_or_empty();\n            if probe.methods.contains("surface.focus") {\n                self.call_v2(\n                    "surface.focus",\n                    serde_json::json!({ "surface_id": surface }),\n                )?;\n            } else {\n                self.must(&["focus-pane", "--pane", surface])?;\n            }\n        } else if let Some(workspace) = &target.session {\n''',
-              ),
-          ]
-
-          for old, new in replacements:
-              assert text.count(old) == 1, f'cmux v2 bridge anchor changed: {old[:60]!r}'
-              text = text.replace(old, new, 1)
-          path.write_text(text)
-          PY
-      - name: Commit source repair
-        run: |
-          git config user.name 'EpiLogos provider closure'
-          git config user.email 'actions@users.noreply.github.com'
-          git add crates/aikit-adapters/src/mux/cmux.rs
-          git commit -m 'fix(v2): focus cmux surfaces over the typed v2 socket'
-          git push origin HEAD:agent/session-space-provider-closure
-
   tmux-3-7c-real:
     runs-on: ubuntu-latest
     steps:
@@ -131,6 +80,9 @@ jobs:
         run: xvfb-run -a npm test
 
   cmux-0-64-22-real:
+    # cmux itself ships an automation socket mode. Exercise the exact signed
+    # v0.64.22 release on a clean hosted Mac so this requirement is reproducible
+    # and does not depend on one developer's persistent desktop state.
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -194,6 +146,8 @@ jobs:
         run: cargo test -p aikit-adapters --test working_environment_cmux_real -- --nocapture
 
   cmux-0-64-22-selfhosted-real:
+    # Keep the persistent-user-host lane as an additional specimen when present;
+    # it no longer substitutes for the reproducible clean-host proof above.
     if: ${{ vars.AIKIT_CMUX_REAL == 'true' }}
     runs-on: [self-hosted, macOS, cmux]
     steps:
