@@ -1,17 +1,15 @@
 name: Provider closure one-shot
 
 on:
-  push:
-    branches:
-      - agent/session-space-provider-closure
-    paths:
-      - '.github/workflows/zz-provider-closure-one-shot.yml'
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
 
 jobs:
   patch-current-cmux-probe:
+    if: ${{ github.head_ref == 'agent/session-space-provider-closure' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
