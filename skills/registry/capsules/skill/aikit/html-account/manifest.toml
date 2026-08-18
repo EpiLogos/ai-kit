@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/html-account"
+kind = "skill"
+name = "AIKit HTML Account"
+description = "Render a structured authored reading as a clear, research-grounded, self-contained HTML account using the canonical portable account template."
+maturity = "stable"
+tags = ["aikit", "html", "account", "authoring", "presentation"]
+
+[skill]
+root = "payload"
