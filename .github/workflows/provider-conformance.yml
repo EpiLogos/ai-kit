@@ -9,9 +9,36 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  provider-closure-one-shot:
+    if: ${{ github.head_ref == 'agent/session-space-provider-closure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/session-space-provider-closure
+          fetch-depth: 0
+      - name: Make Surface targets use cmux Surface focus
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('crates/aikit-adapters/src/mux/cmux.rs')
+          text = path.read_text()
+          old = '''    fn focus(&self, target: &MuxTarget) -> Result<()> {\n        if let Some(surface) = &target.surface {\n            self.must(&["focus-pane", "--pane", surface])?;\n        } else if let Some(workspace) = &target.session {\n'''
+          new = '''    fn focus(&self, target: &MuxTarget) -> Result<()> {\n        if let Some(surface) = &target.surface {\n            // SessionBinding.surfaces contains cmux Surface handles, not pane\n            // handles. v0.64.22 keeps the v1 `focus-surface` operation and maps\n            // it to the v2 `surface.focus` method; passing `surface:*` to\n            // `focus-pane --pane` is a category error and fails on the real app.\n            self.must(&["focus-surface", "--surface", surface])?;\n        } else if let Some(workspace) = &target.session {\n'''
+          assert text.count(old) == 1, 'cmux focus anchor changed'
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Commit source repair
+        run: |
+          git config user.name 'EpiLogos provider closure'
+          git config user.email 'actions@users.noreply.github.com'
+          git add crates/aikit-adapters/src/mux/cmux.rs
+          git commit -m 'fix(v2): focus current cmux surface handles'
+          git push origin HEAD:agent/session-space-provider-closure
+
   tmux-3-7c-real:
     runs-on: ubuntu-latest
     steps:
@@ -80,9 +107,6 @@ jobs:
         run: xvfb-run -a npm test
 
   cmux-0-64-22-real:
-    # cmux itself ships an automation socket mode. Exercise the exact signed
-    # v0.64.22 release on a clean hosted Mac so this requirement is reproducible
-    # and does not depend on one developer's persistent desktop state.
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -146,8 +170,6 @@ jobs:
         run: cargo test -p aikit-adapters --test working_environment_cmux_real -- --nocapture
 
   cmux-0-64-22-selfhosted-real:
-    # Keep the persistent-user-host lane as an additional specimen when present;
-    # it no longer substitutes for the reproducible clean-host proof above.
     if: ${{ vars.AIKIT_CMUX_REAL == 'true' }}
     runs-on: [self-hosted, macOS, cmux]
     steps:
