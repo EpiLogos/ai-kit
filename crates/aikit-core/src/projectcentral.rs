@@ -27,9 +27,12 @@ use crate::{AikitError, Result};
 pub const PROJECTCENTRAL_BINDING_VERSION: &str = "aikit.projectcentral-binding/v1";
 pub const CENTRAL_PROJECT_SCHEMA: &str = "central.project/v1";
 pub const CENTRAL_WIKI_PROFILE: &str = "okf-wiki/v1";
+pub const CENTRAL_GROUND_RELATIONS_SCHEMA: &str = "central.project.ground-relations/v1";
 pub const PROJECTCENTRAL_HUMAN_ROOT: &str = "ProjectCentral/user";
 pub const PROJECTCENTRAL_GOVERNANCE_ROOT: &str = "ProjectCentral/agents/governance";
 pub const PROJECTCENTRAL_WIKI_SOURCE: &str = "ProjectCentral/agents/wiki/wiki.json";
+pub const PROJECTCENTRAL_GROUND_RELATIONS_SOURCE: &str =
+    "ProjectCentral/relations/source-relations.json";
 pub const CENTRAL_ROOT_WIKI_SOURCE: &str = "Control/agents/wiki/wiki.json";
 pub const NO_AGENT_RETRIEVAL_MARKER: &str = ".no-agent-retrieval";
 pub const PROJECTCENTRAL_FILESYSTEM_PROVIDER: &str = "provider/projectcentral/filesystem";
@@ -42,16 +45,20 @@ pub enum ProjectCentralStanding {
     AgentMaintained,
     Observed,
     InferredDerived,
+    Generated,
+    Unresolved,
     NativeProject,
 }
 
 impl ProjectCentralStanding {
-    pub fn source_authority(self) -> SourceAuthority {
+    pub fn source_authority(self) -> Option<SourceAuthority> {
         match self {
-            Self::HumanAuthored | Self::HumanGovernance => SourceAuthority::Authored,
-            Self::AgentMaintained => SourceAuthority::Learned,
-            Self::Observed | Self::NativeProject => SourceAuthority::Observed,
-            Self::InferredDerived => SourceAuthority::Derived,
+            Self::HumanAuthored | Self::HumanGovernance => Some(SourceAuthority::Authored),
+            Self::AgentMaintained => Some(SourceAuthority::Learned),
+            Self::Observed | Self::NativeProject => Some(SourceAuthority::Observed),
+            Self::InferredDerived => Some(SourceAuthority::Derived),
+            Self::Generated => Some(SourceAuthority::Generated),
+            Self::Unresolved => None,
         }
     }
 
@@ -62,17 +69,127 @@ impl ProjectCentralStanding {
             Self::AgentMaintained => "agent-maintained",
             Self::Observed => "observed",
             Self::InferredDerived => "inferred-derived",
+            Self::Generated => "generated",
+            Self::Unresolved => "unresolved",
             Self::NativeProject => "native-project",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProjectCentralProvenance {
+    HumanAuthored,
+    HumanEditedDraft,
+    HumanAdopted,
+    GeneratedSuggestion,
+    GeneratedDerived,
+    AgentMaintained,
+    Observed,
+    Inference,
+    #[default]
+    Unresolved,
+}
+
+impl ProjectCentralProvenance {
+    pub fn is_recognised_human_source(self) -> bool {
+        matches!(self, Self::HumanAuthored | Self::HumanAdopted)
+    }
+
+    pub fn operational_standing(self) -> ProjectCentralStanding {
+        match self {
+            Self::HumanAuthored | Self::HumanAdopted => ProjectCentralStanding::HumanAuthored,
+            Self::AgentMaintained => ProjectCentralStanding::AgentMaintained,
+            Self::Observed => ProjectCentralStanding::Observed,
+            Self::Inference | Self::GeneratedDerived => ProjectCentralStanding::InferredDerived,
+            Self::GeneratedSuggestion => ProjectCentralStanding::Generated,
+            Self::HumanEditedDraft | Self::Unresolved => ProjectCentralStanding::Unresolved,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HumanAuthored => "human-authored",
+            Self::HumanEditedDraft => "human-edited-draft",
+            Self::HumanAdopted => "human-adopted",
+            Self::GeneratedSuggestion => "generated-suggestion",
+            Self::GeneratedDerived => "generated-derived",
+            Self::AgentMaintained => "agent-maintained",
+            Self::Observed => "observed",
+            Self::Inference => "inference",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProjectCentralTruthStanding {
+    #[default]
+    Unspecified,
+    AuthoredHumanPosition,
+    DesignCommitment,
+    ArchitectureContract,
+    ImplementationFact,
+    ObservedEvidence,
+    CurrentDevelopmentState,
+    AgentInference,
+}
+
+impl ProjectCentralTruthStanding {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::AuthoredHumanPosition => "authored-human-position",
+            Self::DesignCommitment => "design-commitment",
+            Self::ArchitectureContract => "architecture-contract",
+            Self::ImplementationFact => "implementation-fact",
+            Self::ObservedEvidence => "observed-evidence",
+            Self::CurrentDevelopmentState => "current-development-state",
+            Self::AgentInference => "agent-inference",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProjectCentralTreatment {
+    ProjectcentralUser,
+    RetainNativeInPlace,
+    OrdinaryProjectSource,
+    GeneratedDerived,
+    #[default]
+    Unresolved,
+}
+
+impl ProjectCentralTreatment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProjectcentralUser => "projectcentral-user",
+            Self::RetainNativeInPlace => "retain-native-in-place",
+            Self::OrdinaryProjectSource => "ordinary-project-source",
+            Self::GeneratedDerived => "generated-derived",
+            Self::Unresolved => "unresolved",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum ProjectCentralGroundStatus {
+    Empty,
+    Partial,
+    Established,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ProjectCentralSourceKind {
     Manifest,
+    GroundRelations,
     HumanRoot,
     HumanMaterial,
+    RelatedProjectSource,
     GovernanceRoot,
     GovernanceMaterial,
     CanonicalWiki,
@@ -87,6 +204,16 @@ pub struct ProjectCentralSourceDescriptor {
     pub relative_path: PathBuf,
     pub kind: ProjectCentralSourceKind,
     pub standing: ProjectCentralStanding,
+    #[serde(default)]
+    pub provenance: ProjectCentralProvenance,
+    #[serde(default)]
+    pub truth_standing: ProjectCentralTruthStanding,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub treatment: ProjectCentralTreatment,
+    #[serde(default)]
+    pub recognition: Option<String>,
     pub exists: bool,
     pub agent_readable: bool,
     pub is_directory: bool,
@@ -107,6 +234,8 @@ pub struct ProjectCentralBinding {
     pub adopted_wikis: Vec<SourceRef>,
     #[serde(default)]
     pub root_wiki: Option<SourceRef>,
+    #[serde(default)]
+    pub ground_relations: Option<SourceRef>,
     pub native_project_root: SourceRef,
     #[serde(default)]
     pub sources: Vec<ProjectCentralSourceDescriptor>,
@@ -118,6 +247,8 @@ pub struct ProjectCentralOrientation {
     pub project_id: String,
     pub human_root: SourceRef,
     pub human_material_count: usize,
+    pub recognised_human_source_count: usize,
+    pub ground_status: ProjectCentralGroundStatus,
     pub governance_present: bool,
     pub canonical_wiki: SourceRef,
     pub canonical_wiki_exists: bool,
@@ -125,32 +256,83 @@ pub struct ProjectCentralOrientation {
     pub adopted_wikis: Vec<SourceRef>,
     #[serde(default)]
     pub root_wiki: Option<SourceRef>,
+    #[serde(default)]
+    pub ground_relations: Option<SourceRef>,
     pub native_project_root: SourceRef,
     /// Skills are disclosed as available powers; project entry does not execute them.
     pub optional_account_capabilities: Vec<ResourceRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectCentralAccountSource {
+    pub source: SourceRef,
+    pub relative_path: PathBuf,
+    pub provenance: ProjectCentralProvenance,
+    pub truth_standing: ProjectCentralTruthStanding,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    pub treatment: ProjectCentralTreatment,
+}
+
+impl From<&ProjectCentralSourceDescriptor> for ProjectCentralAccountSource {
+    fn from(value: &ProjectCentralSourceDescriptor) -> Self {
+        Self {
+            source: value.source.clone(),
+            relative_path: value.relative_path.clone(),
+            provenance: value.provenance,
+            truth_standing: value.truth_standing,
+            roles: value.roles.clone(),
+            treatment: value.treatment,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectCentralAccountContext {
     pub project: ProjectRef,
-    /// Preferred high-altitude human-authored aperture, without file contents.
-    pub preferred_human_sources: Vec<SourceRef>,
+    /// Preferred human-owned aperture. This identity does not assert authorship of every child.
+    pub preferred_authored_aperture: SourceRef,
+    /// Only explicitly recognised human-authored/adopted sources, including retained native files.
+    pub preferred_human_sources: Vec<ProjectCentralAccountSource>,
+    /// Other Project-ground relations, including unresolved material and non-human standings.
+    pub other_source_relations: Vec<ProjectCentralAccountSource>,
     pub agent_wiki: SourceRef,
+    #[serde(default)]
+    pub ground_relations: Option<SourceRef>,
     pub native_project_root: SourceRef,
     pub capabilities: Vec<ResourceRef>,
 }
 
 impl ProjectCentralBinding {
     pub fn orientation(&self) -> Result<ProjectCentralOrientation> {
-        let human_material_count = self
+        let account_sources = self
             .sources
             .iter()
             .filter(|source| {
-                source.kind == ProjectCentralSourceKind::HumanMaterial
-                    && source.exists
+                source.exists
                     && source.agent_readable
+                    && matches!(
+                        source.kind,
+                        ProjectCentralSourceKind::HumanMaterial
+                            | ProjectCentralSourceKind::RelatedProjectSource
+                    )
             })
+            .collect::<Vec<_>>();
+        let human_material_count = account_sources
+            .iter()
+            .filter(|source| source.kind == ProjectCentralSourceKind::HumanMaterial)
             .count();
+        let recognised_human_source_count = account_sources
+            .iter()
+            .filter(|source| source.provenance.is_recognised_human_source())
+            .count();
+        let ground_status = if recognised_human_source_count > 0 {
+            ProjectCentralGroundStatus::Established
+        } else if account_sources.is_empty() {
+            ProjectCentralGroundStatus::Empty
+        } else {
+            ProjectCentralGroundStatus::Partial
+        };
         let governance_present = self.sources.iter().any(|source| {
             matches!(
                 source.kind,
@@ -166,40 +348,55 @@ impl ProjectCentralBinding {
             project_id: self.project_id.clone(),
             human_root: self.human_root.clone(),
             human_material_count,
+            recognised_human_source_count,
+            ground_status,
             governance_present,
             canonical_wiki: self.canonical_wiki.clone(),
             canonical_wiki_exists,
             adopted_wikis: self.adopted_wikis.clone(),
             root_wiki: self.root_wiki.clone(),
+            ground_relations: self.ground_relations.clone(),
             native_project_root: self.native_project_root.clone(),
-            optional_account_capabilities: vec![
-                ResourceRef::parse("skill:product-understanding")?,
-                ResourceRef::parse("skill:structured-account-authoring")?,
-                ResourceRef::parse("skill:projection-authoring")?,
-                ResourceRef::parse("skill:html-account")?,
-            ],
+            optional_account_capabilities: account_capabilities()?,
         })
     }
 
     pub fn account_context(&self) -> Result<ProjectCentralAccountContext> {
-        let mut preferred_human_sources = self
+        let mut account_sources = self
             .sources
             .iter()
             .filter(|source| {
-                source.kind == ProjectCentralSourceKind::HumanMaterial
-                    && source.exists
+                source.exists
                     && source.agent_readable
-                    && source.standing == ProjectCentralStanding::HumanAuthored
+                    && matches!(
+                        source.kind,
+                        ProjectCentralSourceKind::HumanMaterial
+                            | ProjectCentralSourceKind::RelatedProjectSource
+                    )
             })
-            .map(|source| source.source.clone())
             .collect::<Vec<_>>();
-        preferred_human_sources.sort();
+        account_sources.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+
+        let preferred_human_sources = account_sources
+            .iter()
+            .filter(|source| source.provenance.is_recognised_human_source())
+            .map(|source| ProjectCentralAccountSource::from(*source))
+            .collect();
+        let other_source_relations = account_sources
+            .iter()
+            .filter(|source| !source.provenance.is_recognised_human_source())
+            .map(|source| ProjectCentralAccountSource::from(*source))
+            .collect();
+
         Ok(ProjectCentralAccountContext {
             project: self.project.clone(),
+            preferred_authored_aperture: self.human_root.clone(),
             preferred_human_sources,
+            other_source_relations,
             agent_wiki: self.canonical_wiki.clone(),
+            ground_relations: self.ground_relations.clone(),
             native_project_root: self.native_project_root.clone(),
-            capabilities: self.orientation()?.optional_account_capabilities,
+            capabilities: account_capabilities()?,
         })
     }
 
@@ -216,6 +413,7 @@ impl ProjectCentralBinding {
                     && matches!(
                         source.kind,
                         ProjectCentralSourceKind::HumanMaterial
+                            | ProjectCentralSourceKind::RelatedProjectSource
                             | ProjectCentralSourceKind::GovernanceMaterial
                     )
             })
@@ -232,12 +430,34 @@ impl ProjectCentralBinding {
                     source.standing.as_str().into(),
                 );
                 descriptor.annotations.insert(
+                    "central.provenance".into(),
+                    source.provenance.as_str().into(),
+                );
+                descriptor.annotations.insert(
+                    "central.truth-standing".into(),
+                    source.truth_standing.as_str().into(),
+                );
+                descriptor.annotations.insert(
+                    "central.treatment".into(),
+                    source.treatment.as_str().into(),
+                );
+                descriptor.annotations.insert(
                     "central.path".into(),
                     source.relative_path.display().to_string(),
                 );
+                if !source.roles.is_empty() {
+                    descriptor
+                        .annotations
+                        .insert("central.roles".into(), source.roles.join(","));
+                }
+                if let Some(recognition) = &source.recognition {
+                    descriptor
+                        .annotations
+                        .insert("central.recognition".into(), recognition.clone());
+                }
                 descriptor.sources.push(ResourceSource {
                     source: source.source.clone(),
-                    authority: Some(source.standing.source_authority()),
+                    authority: source.standing.source_authority(),
                     revision: source.revision.clone(),
                     locator: Some(ResourceLocator::Path(source.relative_path.clone())),
                     state: SourceState::Available,
@@ -276,6 +496,15 @@ impl ProjectCentralBinding {
             })
             .collect()
     }
+}
+
+fn account_capabilities() -> Result<Vec<ResourceRef>> {
+    Ok(vec![
+        ResourceRef::parse("skill:product-understanding")?,
+        ResourceRef::parse("skill:structured-account-authoring")?,
+        ResourceRef::parse("skill:projection-authoring")?,
+        ResourceRef::parse("skill:html-account")?,
+    ])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,12 +628,18 @@ mod tests {
             canonical_wiki: source("source:central:test:agent-wiki"),
             adopted_wikis: vec![],
             root_wiki: None,
+            ground_relations: Some(source("source:central:test:ground-relations")),
             native_project_root: source("source:project:test:root"),
             sources: vec![ProjectCentralSourceDescriptor {
-                source: source("source:central:test:human:notes/deep.md"),
+                source: source("central:project-source:epilogos/test:0000000000000001"),
                 relative_path: PathBuf::from("ProjectCentral/user/notes/deep.md"),
                 kind: ProjectCentralSourceKind::HumanMaterial,
                 standing: ProjectCentralStanding::HumanAuthored,
+                provenance: ProjectCentralProvenance::HumanAuthored,
+                truth_standing: ProjectCentralTruthStanding::AuthoredHumanPosition,
+                roles: vec!["purpose".into()],
+                treatment: ProjectCentralTreatment::ProjectcentralUser,
+                recognition: Some("human-accepted source relation".into()),
                 exists: true,
                 agent_readable: true,
                 is_directory: false,
@@ -426,9 +661,13 @@ mod tests {
     }
 
     #[test]
-    fn account_context_prefers_human_ground_but_does_not_execute_account_craft() {
+    fn account_context_preserves_human_source_standing_without_executing_account_craft() {
         let context = binding().account_context().unwrap();
         assert_eq!(context.preferred_human_sources.len(), 1);
+        assert_eq!(
+            context.preferred_human_sources[0].truth_standing,
+            ProjectCentralTruthStanding::AuthoredHumanPosition
+        );
         assert_eq!(context.agent_wiki.as_str(), "source:central:test:agent-wiki");
         assert!(context
             .capabilities
@@ -437,8 +676,22 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_human_aperture_material_does_not_acquire_authored_authority() {
+        let mut value = binding();
+        value.sources[0].standing = ProjectCentralStanding::Unresolved;
+        value.sources[0].provenance = ProjectCentralProvenance::Unresolved;
+        value.sources[0].truth_standing = ProjectCentralTruthStanding::Unspecified;
+        value.sources[0].recognition = None;
+        let context = value.account_context().unwrap();
+        assert!(context.preferred_human_sources.is_empty());
+        assert_eq!(context.other_source_relations.len(), 1);
+        let entries = value.context_sources().unwrap();
+        assert!(entries[0].resource.descriptor.sources[0].authority.is_none());
+    }
+
+    #[test]
     fn maintenance_detects_stale_source_and_keeps_human_pressure_as_proposal() {
-        let src = source("source:central:test:human:vision.md");
+        let src = source("central:project-source:epilogos/test:0000000000000001");
         let node = WikiObject::Node(WikiNode {
             profile: CENTRAL_WIKI_PROFILE.into(),
             ref_id: ResourceRef::parse("wiki:node:vision").unwrap(),
