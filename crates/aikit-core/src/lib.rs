@@ -61,6 +61,7 @@ pub mod profile;
 pub mod project;
 pub mod project_map;
 pub mod project_world;
+pub mod projectcentral;
 pub mod projection;
 pub mod ql;
 pub mod resolve;
@@ -212,6 +213,7 @@ pub use procedure::{
     RegistryOwnership, UndoRecord, UndoStep, WorldEdit,
 };
 pub use profile::{ConfigMerge, ConfigTable, PoolPatch, Profile};
+pub use project::{ProjectConstituentRef, ProjectRef};
 pub use project_map::{
     ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint, ProjectMapStep,
     PROJECT_MAP_VERSION,
@@ -221,6 +223,15 @@ pub use project_world::{
     EffectiveRevisionDisclosure, InformationHorizonDisclosure, ProjectWorldReadModel,
     ProjectWorldResource, ProjectionDisclosure, ResolutionBasisDisclosure,
     ResourceEffectiveDisclosure, ResourceIntentDisclosure, PROJECT_WORLD_VERSION,
+};
+pub use projectcentral::{
+    plan_agent_wiki_maintenance, AgentWikiMaintenancePlan, AgentWikiMaintenanceRequest,
+    HumanSourceRevisionProposal, ProjectCentralAccountContext, ProjectCentralBinding,
+    ProjectCentralOrientation, ProjectCentralSourceDescriptor, ProjectCentralSourceKind,
+    ProjectCentralStanding, CENTRAL_PROJECT_SCHEMA, CENTRAL_ROOT_WIKI_SOURCE,
+    CENTRAL_WIKI_PROFILE, NO_AGENT_RETRIEVAL_MARKER, PROJECTCENTRAL_BINDING_VERSION,
+    PROJECTCENTRAL_FILESYSTEM_PROVIDER, PROJECTCENTRAL_GOVERNANCE_ROOT,
+    PROJECTCENTRAL_HUMAN_ROOT, PROJECTCENTRAL_WIKI_SOURCE,
 };
 pub use projection::{
     target_label, ActivationEffect, MaterializationMode, ProjectionItem, ProjectionPlan,
@@ -237,6 +248,11 @@ pub use ql::{
 pub use resolve::{
     resolve, resolve_diagnostic, ActiveCapability, Diagnosis, ResolveRequest, ResolvedView,
     ResolutionHash, UnavailableReason,
+};
+pub use resource::{
+    Eligibility, OwnerRef, PreferenceIntent, ProviderOffer, ProviderRef, ProviderState,
+    ResourceDescriptor, ResourceExplanation, ResourceKind, ResourceLocator, ResourceRecord,
+    ResourceRef, ResourceSource, SourceAuthority, SourceRef, SourceRevision, SourceState,
 };
 pub use scope::{LayerOrigin, ScopeKind, ScopeLayer};
 pub use search::{
