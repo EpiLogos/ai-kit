@@ -15,9 +15,10 @@ use aikit_core::resource::{
     ResourceKind, ResourceRef, ResourceSearchIndex,
 };
 use aikit_core::{
-    AikitError, FamiliarityContext, FamiliarityObservation, FamiliarityUse, ForgetScope,
-    KnowledgeAddress, KnowledgeContextPack, KnowledgeProviderStatus, KnowledgeReading,
-    KnowledgeRoute, KnowledgeSources, Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+    explain_history_actions_for, install_explain_history_actions, AikitError, FamiliarityContext,
+    FamiliarityObservation, FamiliarityUse, ForgetScope, KnowledgeAddress, KnowledgeContextPack,
+    KnowledgeProviderStatus, KnowledgeReading, KnowledgeRoute, KnowledgeSources, Result,
+    DEFAULT_FAMILIARITY_HALF_LIFE_MS, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
 };
 use aikit_store::KnowledgeHistoryOperation;
 use serde_json::{json, to_string_pretty, to_value, Value};
@@ -53,6 +54,7 @@ impl<'a> ApplicationService<'a> {
 
     fn navigation_index(&self) -> Result<ResourceSearchIndex> {
         let mut index = self.backend.navigation_index();
+        install_explain_history_actions(&mut index)?;
         if let Some(familiarity) = self.backend.familiarity()? {
             index.apply_familiarity(
                 &familiarity,
@@ -580,11 +582,55 @@ impl TuiApplicationService for ApplicationService<'_> {
         resource: &ResourceRef,
     ) -> Result<Vec<ContextualActionDescriptor>> {
         let index = self.navigation_index()?;
-        Ok(index.actions_for(resource).into_iter().cloned().collect())
+        let mut actions = index
+            .actions_for(resource)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if self.backend.knowledge_address(resource)?.is_some() {
+            for action in explain_history_actions_for(resource)? {
+                if !actions
+                    .iter()
+                    .any(|existing| existing.action == action.action)
+                {
+                    actions.push(action);
+                }
+            }
+        }
+        Ok(actions)
     }
 
     fn invoke_action(&mut self, action: &ContextualActionDescriptor) -> Result<ActionOutcome> {
         let outcome = match action.action.as_str() {
+            EXPLAIN_ACTION_REF => {
+                let evidence = crate::explain_history_service::ExplainHistoryApplicationService::explain_evidence(
+                    self,
+                    &action.subject,
+                )?;
+                ActionOutcome::Explained {
+                    subject: action.subject.clone(),
+                    summary: to_string_pretty(&evidence).map_err(json_error)?,
+                }
+            }
+            HISTORY_ACTION_REF => {
+                let history = crate::explain_history_service::ExplainHistoryApplicationService::history_evidence(
+                    self,
+                    Some(&action.subject),
+                )?;
+                ActionOutcome::History {
+                    subject: action.subject.clone(),
+                    summary: format!(
+                        "history · {} evidence entr{} for {}",
+                        history.entries.len(),
+                        if history.entries.len() == 1 {
+                            "y"
+                        } else {
+                            "ies"
+                        },
+                        action.subject
+                    ),
+                }
+            }
             "action/project/open" => ActionOutcome::Opened {
                 subject: action.subject.clone(),
                 summary: format!("opened {}", action.subject),
