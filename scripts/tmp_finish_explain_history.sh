@@ -71,12 +71,6 @@ if old not in text:
     raise SystemExit('Knowledge Explain insertion point not found in patch body')
 text = text.replace(old, new, 1)
 
-old = 'relation: "learned-accessibility".into(),'
-new = 'relation: "learned-destination-accessibility".into(),'
-if old not in text:
-    raise SystemExit('destination familiarity relation not found in patch body')
-text = text.replace(old, new, 1)
-
 old = '''    assert!(explain
         .facts
         .iter()
@@ -95,7 +89,7 @@ new = '''    let learned_route = explain
     assert!(!explain
         .facts
         .iter()
-        .any(|fact| fact.relation == "learned-destination-accessibility"));
+        .any(|fact| fact.relation == "learned-accessibility"));
 '''
 if old not in text:
     raise SystemExit('old learned accessibility assertion not found in patch body')
