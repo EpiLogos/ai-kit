@@ -144,7 +144,8 @@ impl ProfileDocument {
                 toml_edit::value(description.clone());
         }
         if let Some(guidance) = &overlay.guidance {
-            self.doc[SKILL_OVERLAYS][&rendered]["guidance"] = toml_edit::value(guidance.clone());
+            self.doc[SKILL_OVERLAYS][&rendered]["guidance"] =
+                toml_edit::value(guidance.clone());
         }
         if let Some(revision) = &overlay.reviewed_against {
             self.doc[SKILL_OVERLAYS][&rendered]["reviewed_against"] =
@@ -407,8 +408,7 @@ fn write_atomically(path: &Path, contents: &[u8]) -> Result<()> {
         "{}.aikit-tmp",
         path.extension().and_then(|e| e.to_str()).unwrap_or("toml")
     ));
-    std::fs::write(&temporary, contents)
-        .map_err(|e| io_error("edit.write_failed", &temporary, &e))?;
+    std::fs::write(&temporary, contents).map_err(|e| io_error("edit.write_failed", &temporary, &e))?;
     match std::fs::rename(&temporary, path) {
         Ok(()) => Ok(()),
         Err(e) => {

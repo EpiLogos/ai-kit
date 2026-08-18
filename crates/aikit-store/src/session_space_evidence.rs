@@ -40,8 +40,8 @@ pub fn explain_session_space_with_receipts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AikitHome;
     use aikit_core::session_space_application::SessionSpaceMutation;
+    use crate::AikitHome;
 
     #[test]
     fn explain_uses_the_same_receipt_that_changed_canonical_state() {
@@ -63,9 +63,6 @@ mod tests {
         let evidence = explain_session_space_with_receipts(&store, &id, None).unwrap();
         assert_eq!(evidence.receipt_count, 1);
         assert_eq!(evidence.latest_receipt.as_ref(), Some(&receipt));
-        assert_eq!(
-            evidence.explanation.semantic_revision,
-            receipt.after.revision
-        );
+        assert_eq!(evidence.explanation.semantic_revision, receipt.after.revision);
     }
 }
