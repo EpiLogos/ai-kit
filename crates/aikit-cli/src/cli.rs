@@ -72,6 +72,8 @@ pub enum Command {
     Diff(DiffArgs),
     /// Run the health checks.
     Doctor(DoctorArgs),
+    /// Inspect, bind and explicitly import credentials.
+    Credential(CredentialCmd),
     /// Run an exported capability once.
     Run(RunArgs),
     /// Enable a capability in a scope.
@@ -673,8 +675,23 @@ pub struct StatusArgs {
 #[derive(Debug, Args)]
 pub struct ExplainArgs {
     /// The capability id, e.g. `skill/rust/code-review`.
-    #[arg(value_name = "CAPABILITY")]
-    pub capability: String,
+    #[arg(value_name = "CAPABILITY", required_unless_present = "credential")]
+    pub capability: Option<String>,
+    /// Explain resolution for this semantic CredentialRef instead of a capability.
+    #[arg(long, value_name = "CREDENTIAL", conflicts_with = "capability")]
+    pub credential: Option<String>,
+    /// Named shell/project environment source to make visible in the explanation.
+    #[arg(long, value_name = "NAME", requires = "credential")]
+    pub env_var: Option<String>,
+    /// Named project .env file. It is inspected only as part of this explicit credential flow.
+    #[arg(long, value_name = "FILE", requires = "env_var")]
+    pub project_env: Option<std::path::PathBuf>,
+    /// Explicitly permit the environment-import tier for this resolution.
+    #[arg(long, requires = "env_var")]
+    pub from_env: bool,
+    /// Explain the headless/CI resolution path.
+    #[arg(long, requires = "credential")]
+    pub headless: bool,
 }
 
 #[derive(Debug, Args)]
@@ -689,6 +706,71 @@ pub struct DoctorArgs {
     #[arg(long)]
     pub yes: bool,
 }
+
+#[derive(Debug, Args)]
+pub struct CredentialCmd {
+    #[command(subcommand)]
+    pub command: CredentialSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CredentialSub {
+    /// Resolve an existing binding or run the explicit initial-config flow.
+    Setup(CredentialSetupArgs),
+    /// Explain provider eligibility without materialising secret data.
+    Explain(CredentialExplainArgs),
+    /// List safe persisted binding metadata.
+    List(CredentialListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CredentialSetupArgs {
+    #[arg(value_name = "CREDENTIAL")]
+    pub credential: String,
+    #[arg(long, value_name = "CONSUMER", default_value = "operator:aikit")]
+    pub consumer: String,
+    #[arg(
+        long,
+        value_name = "PURPOSE",
+        default_value = "provider authentication"
+    )]
+    pub purpose: String,
+    #[arg(long, value_name = "NAME")]
+    pub env_var: Option<String>,
+    #[arg(long, value_name = "FILE", requires = "env_var")]
+    pub project_env: Option<std::path::PathBuf>,
+    /// Explicitly choose the environment-import path. Never implied by variable presence.
+    #[arg(long, requires = "env_var")]
+    pub from_env: bool,
+    /// Never prompt. Existing binding or explicit --from-env must resolve.
+    #[arg(long)]
+    pub headless: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CredentialExplainArgs {
+    #[arg(value_name = "CREDENTIAL")]
+    pub credential: String,
+    #[arg(long, value_name = "CONSUMER", default_value = "operator:aikit")]
+    pub consumer: String,
+    #[arg(
+        long,
+        value_name = "PURPOSE",
+        default_value = "credential resolution explanation"
+    )]
+    pub purpose: String,
+    #[arg(long, value_name = "NAME")]
+    pub env_var: Option<String>,
+    #[arg(long, value_name = "FILE", requires = "env_var")]
+    pub project_env: Option<std::path::PathBuf>,
+    #[arg(long, requires = "env_var")]
+    pub from_env: bool,
+    #[arg(long)]
+    pub headless: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CredentialListArgs {}
 
 #[derive(Debug, Args)]
 pub struct RunArgs {

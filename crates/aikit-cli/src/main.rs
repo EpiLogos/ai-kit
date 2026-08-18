@@ -17,7 +17,7 @@ use aikit_cli::app::{
 };
 use aikit_cli::cli::*;
 use aikit_cli::json::{self, EnvelopeContext};
-use aikit_cli::{hook, multicall, run, ui};
+use aikit_cli::{credential, hook, multicall, run, ui};
 
 use aikit_core::hooks::HookEvent;
 use aikit_core::id::{CapsuleId, Revision};
@@ -193,6 +193,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Capture(a)) => cmd_capture(cwd, a),
         Some(Command::Diff(_)) => cmd_diff(cwd),
         Some(Command::Doctor(a)) => cmd_doctor(cwd, a),
+        Some(Command::Credential(c)) => cmd_credential(cwd, c, json_mode),
         Some(Command::Use(a)) => cmd_use(cwd, a),
         Some(Command::Recent(a)) => cmd_recent(cwd, a.limit),
         Some(Command::Failures(a)) => cmd_failures(cwd, a.limit),
@@ -1512,7 +1513,37 @@ fn cmd_status(cwd: &std::path::Path, a: StatusArgs) -> Result<Reply> {
 
 fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {
     let service = Service::discover(cwd)?;
-    let id = CapsuleId::parse(&a.capability)?;
+    if let Some(credential_ref) = a.credential {
+        let request = credential::CredentialRequest {
+            credential: aikit_core::credential::CredentialRef::new(credential_ref)?,
+            consumer_ref: "operator:aikit-explain".into(),
+            purpose: "credential resolution explanation".into(),
+            env_var: a.env_var,
+            project_env: a.project_env,
+            from_env: a.from_env,
+            headless: a.headless,
+        };
+        let inspection = credential::inspect(service.home(), &request)?;
+        return Ok(reply(
+            &service,
+            jval!({
+                "credential": request.credential.as_str(),
+                "resolution": inspection.resolution,
+                "persisted_binding": inspection.persisted_binding,
+                "native_provider": inspection.native_provider,
+                "env_available": inspection.env_available,
+            }),
+            vec![],
+        ));
+    }
+
+    let capability = a.capability.ok_or_else(|| {
+        AikitError::new(
+            "cli.usage",
+            "pass a capability id or --credential CREDENTIAL",
+        )
+    })?;
+    let id = CapsuleId::parse(&capability)?;
     let explanation = service.resolved().explain(&id).ok_or_else(|| {
         AikitError::new(
             "resolution.unknown_capability",
@@ -1534,6 +1565,65 @@ fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {
         "render": explanation.render(),
     });
     Ok(reply(&service, data, vec![]))
+}
+
+fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    match command.command {
+        CredentialSub::Setup(a) => {
+            let request = credential::CredentialRequest {
+                credential: aikit_core::credential::CredentialRef::new(a.credential)?,
+                consumer_ref: a.consumer,
+                purpose: a.purpose,
+                env_var: a.env_var,
+                project_env: a.project_env,
+                from_env: a.from_env,
+                headless: a.headless || json_mode,
+            };
+            let outcome = credential::setup(service.home(), &request)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "credential": request.credential.as_str(),
+                    "newly_bound": outcome.newly_bound,
+                    "binding": outcome.binding,
+                    "resolution": outcome.resolution,
+                }),
+                vec![],
+            ))
+        }
+        CredentialSub::Explain(a) => {
+            let request = credential::CredentialRequest {
+                credential: aikit_core::credential::CredentialRef::new(a.credential)?,
+                consumer_ref: a.consumer,
+                purpose: a.purpose,
+                env_var: a.env_var,
+                project_env: a.project_env,
+                from_env: a.from_env,
+                headless: a.headless || json_mode,
+            };
+            let inspection = credential::inspect(service.home(), &request)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "credential": request.credential.as_str(),
+                    "resolution": inspection.resolution,
+                    "persisted_binding": inspection.persisted_binding,
+                    "native_provider": inspection.native_provider,
+                    "env_available": inspection.env_available,
+                }),
+                vec![],
+            ))
+        }
+        CredentialSub::List(_) => {
+            let bindings = aikit_store::CredentialBindingStore::new(service.home()).list()?;
+            Ok(reply(
+                &service,
+                jval!({ "bindings": bindings, "count": bindings.len() }),
+                vec![],
+            ))
+        }
+    }
 }
 
 fn cmd_run(cwd: &std::path::Path, a: RunArgs) -> Result<Reply> {
