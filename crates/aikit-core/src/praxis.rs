@@ -89,12 +89,15 @@ mod tests {
     use super::*;
     use crate::context_resolution::{compose_context_resolution, RequestedActors};
     use crate::method::MethodSkillRef;
-    use crate::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
+    use crate::project::{
+        ProjectBinding, ProjectBindingLocator, ProjectConstituentRef, ProjectRef,
+    };
     use crate::resource::{
         MemoryResourceIndex, ResourceDescriptor, ResourceKind, ResourceRecord, SourceRef,
     };
     use crate::resolve::{resolve, ResolveRequest};
-    use crate::{Catalog, ContextDescriptor, MemoryCatalog};
+    use crate::trust::AlwaysTrusted;
+    use crate::{ContextDescriptor, ManagedPolicy, MemoryCatalog};
 
     fn record(id: &str, kind: ResourceKind) -> ResourceRecord {
         ResourceRecord::new(ResourceDescriptor::new(
@@ -107,25 +110,25 @@ mod tests {
 
     #[test]
     fn method_selection_is_downstream_of_context_resolution_not_a_precedence_engine() {
-        let catalog = MemoryCatalog::new();
-        let deterministic = resolve(
-            &catalog,
-            ResolveRequest {
-                context: ContextDescriptor::default(),
-                layers: vec![],
-            },
-        )
-        .unwrap();
+        let catalog = MemoryCatalog::default();
+        let trust = AlwaysTrusted;
+        let request = ResolveRequest {
+            context: ContextDescriptor::for_project("/tmp/test"),
+            layers: vec![],
+            policy: ManagedPolicy::default(),
+        };
+        let deterministic = resolve(&catalog, &trust, &request).unwrap();
         let mut resources = MemoryResourceIndex::default();
         resources.insert(record("cap:wayfinder", ResourceKind::Capability));
         let context = compose_context_resolution(
             &deterministic,
-            ProjectBinding {
-                project: ProjectRef::parse("project:test").unwrap(),
-                constituents: vec![ProjectConstituentRef::LocalDirectory {
+            ProjectBinding::new(
+                ProjectRef::parse("project:test").unwrap(),
+                ProjectConstituentRef::parse("constituent:test").unwrap(),
+                ProjectBindingLocator::LocalDirectory {
                     path: "/tmp/test".into(),
-                }],
-            },
+                },
+            ),
             &[],
             &resources,
             RequestedActors::default(),
