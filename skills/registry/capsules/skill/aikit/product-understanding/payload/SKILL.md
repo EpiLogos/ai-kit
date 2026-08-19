@@ -63,6 +63,66 @@ For the O:I field, begin from the current authored positions in `docs/positions/
 
 The traversal is directional, not a command to read every layer. Skip layers that do not exist or do not bear on the question, but disclose meaningful absences rather than inventing them.
 
+## Project recovery and local structural articulation
+
+For a new, imported or unfamiliar Project, recover its existing world before asking the human to re-describe what can already be established from source. The median orientation is:
+
+```text
+human-authored Ground / recognised intent where present
+        ↓
+native docs + history + existing Project vocabulary
+        ↓
+SemanticWiki / maintained Project ontology where present
+        ↓
+native local structural descriptions / scoped contracts
+        ↓
+exact code + tests + current implementation evidence
+        ↓
+ProjectMap reflection among the stable refs above
+        ↓
+capability / praxis gaps
+        ↓
+only then: proposed durable Project praxis or source changes
+```
+
+A Project may express local articulation through module/file headers, `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, package/module READMEs, ADRs, manifests, interface notes or other native forms. **Classify them by actual role and provenance, not filename.** A conventional filename is a discovery hint, not proof that material is human-authored, Agent governance, a structural contract or implementation truth.
+
+Keep at least these representations differentiated when they exist:
+
+```text
+human-authored Project Ground          meaning / intent at its authored scope
+Agent governance                       standing human guidance for Agents
+Agent-maintained SemanticWiki          maintained semantic knowledge
+local structural description           description/contract about a local implementation region
+ordinary source/docs                    source according to its own provenance
+runtime/code implementation             current operative implementation fact
+derived/generated docs or indexes       rebuildable observation/projection
+current working / temporal material     moving work, not automatically stable reference
+praxis source                            reusable Skills / Methods owned by their source
+```
+
+Do not move compatible native material into ProjectCentral merely to make it legible to AIKit. Retain it in place and relate it through stable source/resource refs when the owning relation permits that. Generated harness projection files and derived indexes remain derivative even when their shape resembles authored source.
+
+## Native filesystem / document-governance praxis
+
+Before changing a region, recover the smallest applicable source chain from broad orientation toward local specificity. The practical laws are:
+
+```text
+read applicable broad -> local source before changing a region
+closest applicable contract supplies local specificity
+one durable fact/contract has one authoritative home
+link to that home rather than duplicating it
+routing/catalog material stays small
+rebuildable generated indexes are not hand-authored truth
+stable reference and current working material stay distinguishable
+structural change returns pressure to the nearest owning description/contract
+load only the context required for the act
+```
+
+These are relational laws, not a repository-layout mandate. Do not require a universal `AGENTS.md` hierarchy, `CONTEXT.md`, numbered ICM stages, proprietary source tree or any other migration merely to obtain the behaviour. Where several native sources apply, preserve their actual scope and provenance rather than inventing a global precedence unrelated to the Project.
+
+When code changes falsify a local description or an architectural assertion, report the discrepancy and route pressure toward the nearest owning source. Do not silently treat either the old description or the new code as authority for questions the other representation owns.
+
 ## Claim classes — keep them distinct
 
 Classify consequential claims using at least these source/authority classes:
@@ -105,6 +165,27 @@ sources -> search -> read -> relations / route -> frame -> explain / history
 
 Prefer source-owned refs and exact revisions. Preserve provider, source, revision, lens/authority and degradation evidence already carried by Knowledge Navigation. A context frame is selected retrieval material for this act; it is not a new authored source. Route/familiarity history makes retrieval easier; it does not increase authority.
 
+When explicit ProjectMap reflection exists, use it to cross the differentiated representations rather than reconstructing their relation in prompt prose:
+
+```text
+semantic concept / WikiNode
+    -> authored/design Ground: why does this exist?
+    -> local description: what region/contract describes it?
+    -> exact CodeReference: where/how is it realised now?
+    -> CodeIndex context: what is its current structural neighbourhood?
+    -> verification/evidence: what supports or falsifies the implementation claim?
+    -> Run/Decision/history: what changed and what returned?
+
+exact CodeReference
+    -> known Project concept
+    -> local description / ownership
+    -> authored/design source
+    -> verification/evidence
+    -> history / returned difference
+```
+
+ProjectMap is the explicit federation seam, not semantic authority and not a universal graph. CodeIndex/GitNexus is derived structural intelligence, not a source of Project meaning. A local description is a source/contract about implementation, not implementation truth. Stable labels alone do not prove semantic↔code parity.
+
 For live repository state, inspect the actual current branch/code and current issues/PRs before making time-sensitive implementation claims. Historical tickets and old diagrams remain evidence of development history, not automatic descriptions of current reality.
 
 ## Returned understanding
@@ -132,7 +213,7 @@ reviewable proposal with provenance and reasons
 explicit human acceptance, revision or rejection
 ```
 
-Do not silently rewrite Central Control or another human-authored source. A correct observation is still supporting context until the owner authors or accepts the durable change.
+The same return may instead pressure a local structural description, Agent governance or praxis source. Route the difference to the nearest actual owner rather than promoting an observation into a rewrite. Do not silently rewrite Central Control or another human-authored source. A correct observation is still supporting context until the owner authors or accepts the durable change.
 
 ## Relation to vision/design authoring
 
@@ -152,6 +233,8 @@ returned understanding
 explicitly renewed authored ground where warranted
 ```
 
+The same architecture permits semantic articulation to lead precisely to executable articulation and executable reality to return evidence into semantic articulation. Some O:I research positions describe executable code as operative Logos; ordinary Project UX and runtime contracts need no philosophical enum or renaming to instantiate that relation.
+
 Consume the real current authoring practices and artifacts present in the product. Do not fabricate a legacy HTML-prototyping Skill, mandatory diagram format, or document ontology merely because such an artifact could be useful.
 
 ## Completion checks
@@ -159,10 +242,12 @@ Consume the real current authoring practices and artifacts present in the produc
 Before claiming understanding, ask:
 
 - Did I use the smallest sufficient context for this task?
-- Did I distinguish authored human position, product intent, design, architecture, implementation, experimental evidence, current development state and inference where they matter?
-- Are current-capability claims grounded in current implementation/evidence rather than vision alone?
+- Did I distinguish authored human position, product intent, design, architecture, local description, implementation, experimental evidence, current development state and inference where they matter?
+- Are current-capability claims grounded in current implementation/evidence rather than vision or local description alone?
 - Are product-meaning claims grounded in authored/constitutional sources rather than inferred backwards from code?
-- Did I preserve exact source/revision/provenance where current AIKit operations provide it?
-- If returned reality challenges authored ground, did I produce a proposal rather than silently mutate the authored source?
+- Did I classify local material by role/provenance rather than filename convention?
+- Did I preserve exact source/revision/provenance and semantic/code anchors where current AIKit operations provide them?
+- If a stable ProjectMap reflection exists, did I use it rather than duplicate architecture into prompt prose?
+- If returned reality challenges authored Ground, local description, governance or praxis, did I route a proposal/discrepancy to the correct owner rather than silently mutate source?
 
-This Skill grants no authority to read private Control source, mutate product canon, merge a PR, or change a Profile merely because it is available.
+This Skill grants no authority to read private Control source, mutate product canon, merge a PR, rewrite local contracts, or change a Profile merely because it is available.
