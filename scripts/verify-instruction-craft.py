@@ -98,7 +98,7 @@ for required in (
     "routing affordance",
     "model/context load",
     "human invocation load",
-    "Progressive disclosure",
+    "progressive disclosure",
     "positive operational specification",
     "Human authority is inherited, not reimplemented",
     "Phase separation",
@@ -108,7 +108,7 @@ for required in (
     "Communication is part of capability",
     "references/instruction-architecture-review.md",
     "central.agent-governance-relations/v1",
-    "operational precedence algorithm",
+    "instruction-precedence algorithm",
 ):
     if required not in skill:
         raise SystemExit(f"skill-authoring missing instruction architecture relation: {required}")
