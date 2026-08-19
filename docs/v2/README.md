@@ -1,10 +1,10 @@
 # AIKit V2 — Vision and Design Specification
 
 **Status:** AUTHORITATIVE TARGET DESIGN — proposed for V2 programme  
-**Date:** 2026-08-15  
+**Date:** 2026-08-19  
 **Repository:** `EpiLogos/ai-kit`  
-**Scope:** product vision, ownership, context cognition, resource resolution, source/retrieval model, Knowledge Navigation, actor environment, composable runtime environments, projection, memory, human TUI/CLI, runtime integration, QL/MEF interoperability, migration from the current implementation  
-**Implementation posture:** the current AIKit is a valuable production-oriented alpha and a source of proven mechanisms. This specification defines the correct full product even where V2 requires substantial internal, TUI, schema, or UX rework.
+**Scope:** product vision, ownership, context cognition, resource resolution, source/retrieval model, Knowledge Navigation, actor environment, composable runtime environments, projection, memory, human TUI/CLI, runtime integration, QL/MEF interoperability, migration, native praxis and Project reflection  
+**Implementation posture:** the current AIKit is a valuable production-oriented alpha and a source of proven mechanisms. This specification defines the correct full product, while later numbered implementation/evidence contracts record where returned code and conformance have made parts of that target concrete or revised its earlier abstractions.
 
 ---
 
@@ -40,9 +40,11 @@ Agent / Agency
 Profiles and scopes
 Capabilities
 Skills
+Methods / UsageOverlays / SkillSets
 Actions / Action Sets
 Context Sources
 SemanticWiki / SourcePool / ProjectMap knowledge horizons
+Project meaning ↔ local description ↔ exact code reflection
 Models
 Harnesses
 Components / Contracts / runtime composition
@@ -59,7 +61,7 @@ target-specific projections
 
 For humans, the CLI is AIKit's operational language while the TUI becomes the human environment-composition and context-navigation instrument over that same application state. Search, Context, Compose, Explain, History and relation navigation are semantic capabilities, not separate semantic stores.
 
-Knowledge Navigation preserves distinct provider authorities: SemanticWiki is authored semantic/meaning structure, SourcePool is an evidential retrieval horizon, code-index providers own structural code intelligence, ProjectMap federates those lenses through stable refs, and KnowledgeRoute records actual traversal/familiarity without manufacturing semantic truth. The same addressable field may be rendered as list, tree or local graph without collapsing relation ownership.
+Knowledge Navigation preserves distinct provider authorities: SemanticWiki is maintained semantic/meaning structure, SourcePool is an evidential retrieval horizon, code-index providers own derived structural code intelligence, ProjectMap federates those lenses through stable refs, and KnowledgeRoute records actual traversal/familiarity without manufacturing semantic truth. The same addressable field may be rendered as list, tree or local graph without collapsing relation ownership.
 
 AIKit does not become the owner of the meanings it carries. Project meaning remains Project-owned. Agent identity remains independent of AIKit. Application Actions remain application-owned. Human-authored material remains human-owned. Workcell remains the materialisation layer. QL/MEF remains an independent formal/semantic module. Harnesses remain the embodied agent-loop technologies.
 
@@ -84,14 +86,16 @@ independently authored / observed world
                 ↓
        Agent / Agency / human
                 ↓
-            execution
+            execution / returned evidence
 ```
 
 ---
 
 # Specification package
 
-This directory is one authoritative AIKit V2 target-design specification split into sectional files for navigation and review. Read in order:
+This directory is one AIKit V2 specification and evidence package split into sectional files for navigation and review. The early files establish target design; later files record migration, implementation, evidence and returned refinements. Read the files relevant to the question, preserving that distinction rather than treating every document as the same kind of authority.
+
+Current numbered route:
 
 1. `01-PRODUCT-AND-OWNERSHIP.md`
 2. `02-RESOLUTION-AND-CONTEXT-COGNITION.md`
@@ -102,5 +106,18 @@ This directory is one authoritative AIKit V2 target-design specification split i
 7. `07-DEVELOPMENT-AND-ACCEPTANCE.md`
 8. `08-VERIFICATION-RUNS-AND-CLOSURE.md`
 9. `09-COMPOSABLE-RUNTIME-ENVIRONMENTS.md`
+10. `10-PERSISTENT-AGENCY-AND-MATERIAL-HOSTING.md`
+11. `11-MIGRATION-CLOSURE-LEDGER.md`
+12. `12-PRELOCAL-ACCEPTANCE-EVIDENCE.md`
+13. `13-COMPOSITION-CONNECTION-TUI-CONVERGENCE-EVIDENCE.md`
+14. `14-SESSIONSPACE-FIRST-PARTY-CIRCUIT-EVIDENCE.md`
+15. `15-MODEL-ROSTER-CAPABILITY-FIT.md`
+16. `16-provider-connection-conformance.md`
+17. `18-PROFILE-COMPOSITION-APPLICATION-PARITY.md`
+18. `19-COMPOSITION-CONVERGENCE-REPAIR.md`
+19. `20-PRAXIS-METHODS-AND-SKILL-COMPOSITION.md`
+20. `21-PROJECT-REFLECTION-AND-LOCAL-ARTICULATION.md`
 
-The package defines the target product. `../ARCHITECTURE.md` remains evidence for the current implementation and migration baseline rather than a constraint on the V2 target.
+The numeric filename prefixes are historical programme sequence identifiers rather than a promise that every integer is occupied; do not renumber existing accepted files merely to remove a gap.
+
+`../ARCHITECTURE.md` remains evidence for the current implementation and migration baseline rather than a constraint on the V2 target. For current implementation claims, inspect live code/tests and the later evidence contracts; for product meaning, follow the authored product ground and its provenance rather than inferring purpose backwards from code.
