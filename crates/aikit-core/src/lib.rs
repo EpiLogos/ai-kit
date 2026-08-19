@@ -63,6 +63,7 @@ pub mod procedure;
 pub mod profile;
 pub mod project;
 pub mod project_map;
+pub mod project_recovery;
 pub mod project_reflection;
 pub mod project_world;
 pub mod projectcentral;
@@ -232,6 +233,10 @@ pub use project::{ProjectConstituentRef, ProjectRef};
 pub use project_map::{
     ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint, ProjectMapStep,
     PROJECT_MAP_VERSION,
+};
+pub use project_recovery::{
+    project_recovery, ProjectRecoveryReadModel, ProjectRecoveryStage, ProjectRecoveryStageKind,
+    ProjectRecoveryStageState, RecognitionPressure, PROJECT_RECOVERY_VERSION,
 };
 pub use project_reflection::{
     classify_local_source, project_reflection, verify_reflection_law,
