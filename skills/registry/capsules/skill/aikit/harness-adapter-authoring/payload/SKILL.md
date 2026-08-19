@@ -1,3 +1,9 @@
+---
+name: harness-adapter-authoring
+description: Admit an unsupported or newly encountered harness/edition by preserving its least-distorting native faculties, source ownership, lifecycle truth and activation evidence through AIKit's public adapter contract.
+argument-hint: Name the exact harness product/edition/version, installed or source revision, observed native faculties, current adapter state if any, and the unsupported or degraded behaviour that requires admission work.
+---
+
 # AIKit Harness Adapter Authoring
 
 Use this when AIKit encounters a real harness/edition for which no accepted adapter exists.
