@@ -6,6 +6,8 @@ use aikit_core::{
 
 const EPI_REVISION: &str = "daa660cbc1b8c5da83828698665a753852cb0287";
 const QL_HEAD: &str = "de7d50c9f7dcfec33cfa0fd5f8a8a1068b4fbe84";
+const BIMBA_COORDINATE: &str = "#1-4.2";
+const BIMBA_NODE_PATH: &str = "Idea/Bimba/Map/datasets/low-detail/nodes_paramasiva.json";
 const MANIFEST_PATH: &str =
     "docs/integrations/epi-logos/EPI-HOLOGRAPHIC-KERNEL-MANIFEST.json";
 
@@ -49,11 +51,12 @@ fn bind(
 /// Epi is deliberately only a conformance subject here. AIKit never parses a
 /// Bimba coordinate, C category, S/S′ relation, M′ form, or VĀK meaning.
 ///
-/// The semantic ResourceRef denotes the target-owned specimen identity from the
-/// QL-MEF holographic manifest. The manifest itself records that the exact live
-/// Bimba graph node for this low-level law remains unresolved until the local
-/// Bimba MCP/Neo4j source can be inspected. The test therefore proves the
-/// generic reflection seam without fabricating a missing Bimba coordinate.
+/// The frozen Epi Map now supplies the exact source-owned identity for this
+/// specimen: `#1-4.2`, "Principle of Inversion". Its source formulation names
+/// the six-position complement pairs 0↔5, 1↔4 and 2↔3, while the Map relation
+/// `#1-4.1 INVERTS_INTO #1-4.2` preserves its source lineage. AIKit carries the
+/// coordinate only as an opaque target-owned ReflectionLaw coordinate. Live
+/// Bimba MCP/Neo4j verification remains a separate source-owner evidence leg.
 #[test]
 fn epi_manifest_subject_round_trips_to_exact_ql_c_symbol_and_evidence() {
     let semantic = ResourceRef::parse("epi:specimen:position-inversion").unwrap();
@@ -142,13 +145,18 @@ fn epi_manifest_subject_round_trips_to_exact_ql_c_symbol_and_evidence() {
 
     let law = ReflectionLaw {
         id: "epi-holographic-specimen/position-inversion/v1".into(),
-        source: Some(SourceRef::parse(&format!("github:EpiLogos/QL-MEF:{MANIFEST_PATH}")).unwrap()),
-        source_revision: Some(QL_HEAD.into()),
+        source: Some(
+            SourceRef::parse(&format!(
+                "github:EpiLogos/Epi-Logos-C-Experiments:{BIMBA_NODE_PATH}"
+            ))
+            .unwrap(),
+        ),
+        source_revision: Some(EPI_REVISION.into()),
         unique_implementation: true,
         mappings: vec![ReflectionMapping {
-            // This is a target-owned manifest subject, not a fabricated Bimba
-            // node. Live Bimba-node recovery remains an explicit source gap.
-            coordinate: "formal:sixfold-complement".into(),
+            // Exact target-owned Bimba source identity. AIKit does not interpret
+            // its syntax or derive its parentage/relation semantics.
+            coordinate: BIMBA_COORDINATE.into(),
             semantic: semantic.clone(),
             implementation: code_resource.clone(),
             relation: "implemented-by".into(),
@@ -182,6 +190,7 @@ fn epi_manifest_subject_round_trips_to_exact_ql_c_symbol_and_evidence() {
         .iter()
         .any(|item| item.endpoint.resource == manifest));
 
+    assert_eq!(law.mappings[0].coordinate, BIMBA_COORDINATE);
     assert_eq!(code.path, "c/src/primitive.c");
     assert_eq!(code.symbol.as_deref(), Some("ql_position_invert"));
     assert_eq!(code.revision.as_ref().map(SourceRevision::as_str), Some(QL_HEAD));
