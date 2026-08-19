@@ -224,13 +224,13 @@ pub fn verify_activation_truth(
 ) -> Result<()> {
     observation.validate_against(plan)?;
 
-    let impossible = match (&plan.effect, observation.state) {
-        (ActivationEffect::Unsupported { .. }, HarnessActivationState::Loaded) => true,
-        (ActivationEffect::Brokered { .. }, HarnessActivationState::Loaded) => true,
-        (ActivationEffect::NextSessionOnly { .. }, HarnessActivationState::Loaded) => true,
-        (ActivationEffect::RestartClient { .. }, HarnessActivationState::Loaded) => true,
-        _ => false,
-    };
+    let impossible = matches!(
+        (&plan.effect, observation.state),
+        (ActivationEffect::Unsupported { .. }, HarnessActivationState::Loaded)
+            | (ActivationEffect::Brokered { .. }, HarnessActivationState::Loaded)
+            | (ActivationEffect::NextSessionOnly { .. }, HarnessActivationState::Loaded)
+            | (ActivationEffect::RestartClient { .. }, HarnessActivationState::Loaded)
+    );
     if impossible {
         return Err(AikitError::new(
             "harness_activation.lifecycle_overclaim",
