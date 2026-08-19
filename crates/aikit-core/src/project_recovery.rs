@@ -435,8 +435,12 @@ mod tests {
         }));
         assert!(receipt.stages.iter().any(|stage| {
             stage.kind == ProjectRecoveryStageKind::CapabilityPraxis
-                && stage.state == ProjectRecoveryStageState::Available
+                && stage.state == ProjectRecoveryStageState::Partial
         }));
+        assert_eq!(
+            receipt.unresolved_capabilities,
+            vec![ResourceRef::parse("skill/aikit/knowledge-navigation").unwrap()]
+        );
     }
 
     #[test]
