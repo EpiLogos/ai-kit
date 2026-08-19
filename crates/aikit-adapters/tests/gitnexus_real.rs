@@ -23,6 +23,17 @@ fn git(root: &std::path::Path, args: &[&str]) {
     assert!(status.success(), "git fixture command failed: {args:?}");
 }
 
+fn revision(root: &std::path::Path) -> SourceRevision {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let revision = String::from_utf8(output.stdout).unwrap();
+    SourceRevision::parse(&format!("git:{}", revision.trim())).unwrap()
+}
+
 fn endpoint(
     resource: ResourceRef,
     kind: ResourceKind,
@@ -52,6 +63,63 @@ fn bind(map: &mut ProjectMap, from: &ResourceRef, to: &ResourceRef, relation: &s
         provenance: vec![ResourceRef::parse("source:fixture:project-reflection").unwrap()],
     })
     .unwrap();
+}
+
+fn reflection_map(
+    semantic: &ResourceRef,
+    description: &ResourceRef,
+    code: &ResourceRef,
+    verification: &ResourceRef,
+    code_revision: &SourceRevision,
+) -> ProjectMap {
+    let mut map = ProjectMap::new();
+    for value in [
+        endpoint(
+            semantic.clone(),
+            ResourceKind::KnowledgeNode,
+            ProjectLens::SemanticWiki,
+            SourceAuthority::Authored,
+            Some("wiki-rev-1".into()),
+        ),
+        endpoint(
+            description.clone(),
+            ResourceKind::KnowledgeSource,
+            ProjectLens::SourcePool,
+            SourceAuthority::Authored,
+            Some("description-rev-1".into()),
+        ),
+        endpoint(
+            code.clone(),
+            ResourceKind::CodeReference,
+            ProjectLens::Code,
+            SourceAuthority::Derived,
+            Some(code_revision.to_string()),
+        ),
+        endpoint(
+            verification.clone(),
+            ResourceKind::Action,
+            ProjectLens::Verification,
+            SourceAuthority::Observed,
+            Some(GITNEXUS_TESTED_VERSION.into()),
+        ),
+    ] {
+        map.add_endpoint(value).unwrap();
+    }
+    bind(map.borrow_mut(), semantic, description, "described-by", SourceAuthority::Authored);
+    bind(map.borrow_mut(), description, code, "describes", SourceAuthority::Authored);
+    bind(map.borrow_mut(), semantic, code, "implemented-by", SourceAuthority::Authored);
+    bind(map.borrow_mut(), code, verification, "verified-by", SourceAuthority::Observed);
+    map
+}
+
+trait BorrowMap {
+    fn borrow_mut(&mut self) -> &mut ProjectMap;
+}
+
+impl BorrowMap for ProjectMap {
+    fn borrow_mut(&mut self) -> &mut ProjectMap {
+        self
+    }
 }
 
 #[test]
@@ -90,14 +158,7 @@ export function login(token: string): boolean {
             "fixture",
         ],
     );
-    let revision_output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(revision_output.status.success());
-    let revision = String::from_utf8(revision_output.stdout).unwrap();
-    let source_revision = SourceRevision::parse(&format!("git:{}", revision.trim())).unwrap();
+    let source_revision = revision(root);
 
     let mut provider = GitNexusCodeIndexProvider::new(
         SystemRunner::new(),
@@ -159,49 +220,17 @@ export function login(token: string): boolean {
         .expect("real GitNexus trace");
     assert!(trace.detail.is_object());
 
-    // Bind the exact source-owned CodeReference produced by the real provider into
-    // the same ProjectMap federation used by human and Agent Knowledge Navigation.
     let semantic = ResourceRef::parse("wiki:concept:login").unwrap();
     let description = ResourceRef::parse("source:local-description:auth-module").unwrap();
     let code = login.resource_ref();
     let verification = ResourceRef::parse("verification:gitnexus:1.6.9").unwrap();
-    let mut map = ProjectMap::new();
-    for value in [
-        endpoint(
-            semantic.clone(),
-            ResourceKind::KnowledgeNode,
-            ProjectLens::SemanticWiki,
-            SourceAuthority::Authored,
-            Some("wiki-rev-1".into()),
-        ),
-        endpoint(
-            description.clone(),
-            ResourceKind::KnowledgeSource,
-            ProjectLens::SourcePool,
-            SourceAuthority::Authored,
-            Some("description-rev-1".into()),
-        ),
-        endpoint(
-            code.clone(),
-            ResourceKind::CodeReference,
-            ProjectLens::Code,
-            SourceAuthority::Derived,
-            Some(source_revision.to_string()),
-        ),
-        endpoint(
-            verification.clone(),
-            ResourceKind::Action,
-            ProjectLens::Verification,
-            SourceAuthority::Observed,
-            Some(GITNEXUS_TESTED_VERSION.into()),
-        ),
-    ] {
-        map.add_endpoint(value).unwrap();
-    }
-    bind(&mut map, &semantic, &description, "described-by", SourceAuthority::Authored);
-    bind(&mut map, &description, &code, "describes", SourceAuthority::Authored);
-    bind(&mut map, &semantic, &code, "implemented-by", SourceAuthority::Authored);
-    bind(&mut map, &code, &verification, "verified-by", SourceAuthority::Observed);
+    let map = reflection_map(
+        &semantic,
+        &description,
+        &code,
+        &verification,
+        &source_revision,
+    );
 
     let from_meaning = project_reflection(&map, &semantic, 3, 16);
     assert!(from_meaning
@@ -245,13 +274,12 @@ export function login(token: string): boolean {
     };
     assert!(verify_reflection_law(&map, &law).is_conformant());
 
-    // A stale local/reflection assertion is evidence, never silent retargeting.
     let stale = ReflectionLaw {
         mappings: vec![ReflectionMapping {
             expected_implementation_revision: Some("git:stale-revision".into()),
             ..law.mappings[0].clone()
         }],
-        ..law
+        ..law.clone()
     };
     let stale_result = verify_reflection_law(&map, &stale);
     assert!(!stale_result.is_conformant());
@@ -285,4 +313,100 @@ export function logout(): boolean {
         .structural_check()
         .expect("real GitNexus cycle check");
     assert!(structural.detail.is_object());
+
+    // Now move the code in the real git repository, commit a new revision, and
+    // rebuild the actual provider. The semantic subject stays stable while the
+    // exact executable address changes.
+    git(root, &["add", "src/auth.ts"]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.email=aikit@example.invalid",
+            "-c",
+            "user.name=AIKit CI",
+            "commit",
+            "-qm",
+            "extend auth",
+        ],
+    );
+    git(root, &["mv", "src/auth.ts", "src/authentication.ts"]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.email=aikit@example.invalid",
+            "-c",
+            "user.name=AIKit CI",
+            "commit",
+            "-qm",
+            "move auth module",
+        ],
+    );
+    let moved_revision = revision(root);
+    assert_ne!(moved_revision, source_revision);
+
+    let mut rebuilt_provider = GitNexusCodeIndexProvider::new(
+        SystemRunner::new(),
+        "aikit-gitnexus-fixture",
+        SourceRef::parse("source:git/aikit-gitnexus-fixture").unwrap(),
+        Some(moved_revision.clone()),
+    );
+    let rebuilt = rebuilt_provider
+        .index(root, true)
+        .expect("real GitNexus rebuild after code movement");
+    assert!(rebuilt.indexed);
+    let moved_login = rebuilt_provider
+        .search("login", 10)
+        .expect("real GitNexus query after code movement")
+        .into_iter()
+        .find(|hit| hit.reference.symbol.as_deref() == Some("login"))
+        .expect("rebuilt index must expose login at its moved path")
+        .reference;
+    assert!(moved_login.path.ends_with("src/authentication.ts"));
+    let moved_code = moved_login.resource_ref();
+    assert_ne!(moved_code, code);
+
+    let rebuilt_map = reflection_map(
+        &semantic,
+        &description,
+        &moved_code,
+        &verification,
+        &moved_revision,
+    );
+    let rebuilt_from_meaning = project_reflection(&rebuilt_map, &semantic, 3, 16);
+    assert!(rebuilt_from_meaning
+        .code
+        .iter()
+        .any(|item| item.endpoint.resource == moved_code));
+    let rebuilt_from_code = project_reflection(&rebuilt_map, &moved_code, 3, 16);
+    assert!(rebuilt_from_code
+        .meaning
+        .iter()
+        .any(|item| item.endpoint.resource == semantic));
+
+    let current_law = ReflectionLaw {
+        mappings: vec![ReflectionMapping {
+            implementation: moved_code.clone(),
+            expected_implementation_revision: Some(moved_revision.to_string()),
+            ..law.mappings[0].clone()
+        }],
+        ..law.clone()
+    };
+    assert!(verify_reflection_law(&rebuilt_map, &current_law).is_conformant());
+
+    let stale_after_move = ReflectionLaw {
+        mappings: vec![ReflectionMapping {
+            implementation: moved_code,
+            expected_implementation_revision: Some(source_revision.to_string()),
+            ..law.mappings[0].clone()
+        }],
+        ..law
+    };
+    let stale_after_move_result = verify_reflection_law(&rebuilt_map, &stale_after_move);
+    assert!(!stale_after_move_result.is_conformant());
+    assert!(stale_after_move_result
+        .issues
+        .iter()
+        .any(|issue| issue.kind == ReflectionIssueKind::Stale));
 }
