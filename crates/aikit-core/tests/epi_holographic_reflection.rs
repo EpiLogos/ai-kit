@@ -8,8 +8,6 @@ const EPI_REVISION: &str = "daa660cbc1b8c5da83828698665a753852cb0287";
 const QL_HEAD: &str = "de7d50c9f7dcfec33cfa0fd5f8a8a1068b4fbe84";
 const BIMBA_COORDINATE: &str = "#1-4.2";
 const BIMBA_NODE_PATH: &str = "Idea/Bimba/Map/datasets/low-detail/nodes_paramasiva.json";
-const MANIFEST_PATH: &str =
-    "docs/integrations/epi-logos/EPI-HOLOGRAPHIC-KERNEL-MANIFEST.json";
 
 fn endpoint(
     resource: ResourceRef,
