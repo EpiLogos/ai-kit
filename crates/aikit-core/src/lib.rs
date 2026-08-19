@@ -40,6 +40,7 @@ pub mod explain_history_actions;
 pub mod familiarity;
 pub mod frecency;
 pub mod guidance;
+pub mod harness_admission;
 pub mod hooks;
 pub mod id;
 pub mod knowledge;
@@ -158,6 +159,12 @@ pub use frecency::{Candidate, Jump, Tiebreak};
 pub use guidance::{
     compose, estimate_tokens, Composition, CompositionEntry, CompositionRequest, FragmentStatus,
     GuidanceFragment,
+};
+pub use harness_admission::{
+    unsupported_harness_gap, verify_activation_truth, FacultySupport, HarnessActivationObservation,
+    HarnessActivationState, HarnessAdmissionAdapter, HarnessAdmissionDescriptor,
+    HarnessCompatibilityGap, HarnessEditionKind, HarnessFaculty, HarnessFacultyObservation,
+    HarnessLifecyclePhase, HARNESS_ADAPTER_AUTHORING_SKILL, HARNESS_ADAPTER_SDK_VERSION,
 };
 pub use hooks::{
     build_chains, matches as hook_matches, BypassScope, BypassToken, Denial, Dispatcher,
