@@ -383,7 +383,8 @@ mod tests {
     use crate::project::{ProjectBinding, ProjectBindingLocator, ProjectConstituentRef};
     use crate::resolve::{resolve, ResolveRequest};
     use crate::resource::{MemoryResourceIndex, ResourceDescriptor, ResourceKind, ResourceRecord};
-    use crate::{AlwaysTrusted, ContextDescriptor, ManagedPolicy, MemoryCatalog, ProjectRef};
+    use crate::trust::AlwaysTrusted;
+    use crate::{ContextDescriptor, ManagedPolicy, MemoryCatalog, ProjectRef};
 
     fn resolution() -> ContextResolution {
         let catalog = MemoryCatalog::default();
