@@ -2,7 +2,7 @@ schema = 1
 id = "skill/aikit/skill-authoring"
 kind = "skill"
 name = "AIKit Skill authoring"
-description = "Write, validate and promote high-quality managed Skills without confusing source, projection, trust or fitness."
+description = "Use when creating, reviewing or simplifying an AIKit Skill or persistent guidance source so its trigger, scope, disclosure, procedure and conformance stay small and explicit."
 maturity = "stable"
 tags = ["aikit", "skills", "authoring"]
 
