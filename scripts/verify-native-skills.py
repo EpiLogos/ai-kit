@@ -246,12 +246,9 @@ if len(lean_guidance.split()) > 330:
     raise SystemExit("lean project guidance has become procedural rather than orienting")
 
 operator = (REGISTRY / "skill/aikit/operation/payload/SKILL.md").read_text()
-for required in (
-    "existing world",
-    "Explain",
-    "History",
-):
-    if required not in operator:
-        raise SystemExit(f"operation Skill missing required orientation: {required}")
+if "SkillSet selected != Root position" not in (ROOT / "skills/README.md").read_text():
+    raise SystemExit("suite authority distinction missing")
+if "projected Skill" not in operator:
+    raise SystemExit("operator source/projection distinction missing")
 
-print(f"native skills OK: {len(seen_skills)} Skills, {len(seen_guidance)} guidance fragments, {len(refs)} SkillSets")
+print("AIKit first-party native Skills, guidance and SkillSets: OK")
