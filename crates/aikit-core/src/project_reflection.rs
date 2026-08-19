@@ -5,12 +5,14 @@
 //! code, verification, and history retain their own authority and are related only
 //! by explicit stable ProjectMap bindings.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint, ProjectMapStep};
-use crate::resource::{ProviderRef, ResourceKind, ResourceRef, SourceAuthority, SourceRef};
+use crate::project_map::{
+    PROJECT_MAP_VERSION, ProjectLens, ProjectMap, ProjectMapEndpoint, ProjectMapStep,
+};
+use crate::resource::{ResourceRef, SourceAuthority, SourceRef};
 
 pub const PROJECT_REFLECTION_VERSION: &str = "aikit.project-reflection/v1";
 
@@ -29,393 +31,216 @@ pub enum LocalSourceRole {
     Unresolved,
 }
 
-impl LocalSourceRole {
-    /// Source role is metadata, not another hard ProjectLens identity.
-    pub fn project_lens(self) -> ProjectLens {
-        match self {
-            Self::HumanProjectGround => ProjectLens::Canon,
-            Self::AgentMaintainedWiki => ProjectLens::SemanticWiki,
-            Self::CodeIndexObservation => ProjectLens::Code,
-            Self::AgentGovernance
-            | Self::LocalStructuralDescription
-            | Self::OrdinarySource
-            | Self::DerivedDocumentation
-            | Self::TemporalWorkingMaterial
-            | Self::Praxis
-            | Self::Unresolved => ProjectLens::SourcePool,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum LocalSourceRoleEvidence {
-    Declared,
-    AdoptedRelation,
-    ProvenanceAndContent,
-    Generated,
-    FilenameHintOnly,
-    Unresolved,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalSourceRoleEvidence {
+    pub role: LocalSourceRole,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    pub authoritative: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalSourceCandidate {
-    pub source: SourceRef,
     pub path: String,
-    pub authority: SourceAuthority,
     #[serde(default)]
     pub declared_role: Option<LocalSourceRole>,
     #[serde(default)]
-    pub adopted_role: Option<LocalSourceRole>,
+    pub declared_authority: Option<SourceAuthority>,
     #[serde(default)]
-    pub generated: bool,
+    pub adopted_source: Option<SourceRef>,
     #[serde(default)]
-    pub body_excerpt: Option<String>,
-    #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
+    pub content_hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LocalSourceClassification {
-    pub source: SourceRef,
-    pub role: LocalSourceRole,
-    pub evidence: LocalSourceRoleEvidence,
-    pub project_lens: ProjectLens,
-    #[serde(default)]
-    pub candidates: Vec<LocalSourceRole>,
-    pub reason: String,
+pub enum LocalSourceClassification {
+    Classified(LocalSourceRoleEvidence),
+    Ambiguous(Vec<LocalSourceRoleEvidence>),
+    Unresolved,
 }
 
-/// Classify existing source by ownership/provenance and actual role. Conventional
-/// filenames are discovery hints only: AGENTS.md, CLAUDE.md, CONTEXT.md, README,
-/// ADRs, etc. never acquire human authorship or governance authority by location.
 pub fn classify_local_source(candidate: &LocalSourceCandidate) -> LocalSourceClassification {
-    if candidate.generated || candidate.authority == SourceAuthority::Generated {
-        return classified(
-            candidate,
-            LocalSourceRole::DerivedDocumentation,
-            LocalSourceRoleEvidence::Generated,
-            "generated/projection material remains derivative and cannot self-promote to source",
-        );
-    }
-    if let Some(role) = candidate.adopted_role {
-        return classified(
-            candidate,
-            role,
-            LocalSourceRoleEvidence::AdoptedRelation,
-            "an explicit owning/adoption relation establishes this source role",
-        );
-    }
     if let Some(role) = candidate.declared_role {
-        return classified(
-            candidate,
+        return LocalSourceClassification::Classified(LocalSourceRoleEvidence {
             role,
-            LocalSourceRoleEvidence::Declared,
-            "the owning source contract explicitly declares this role",
-        );
+            evidence: vec!["declared-role".into()],
+            authoritative: candidate.declared_authority == Some(SourceAuthority::Authored),
+        });
     }
 
-    let metadata = candidate
-        .metadata
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    let body = candidate.body_excerpt.as_deref().unwrap_or_default().to_lowercase();
-    let evidence = format!("{metadata} {body}");
-
-    if candidate.authority == SourceAuthority::Derived
-        && ["code-index", "gitnexus", "derived-code"]
-            .iter()
-            .any(|needle| evidence.contains(needle))
-    {
-        return classified(
-            candidate,
-            LocalSourceRole::CodeIndexObservation,
-            LocalSourceRoleEvidence::ProvenanceAndContent,
-            "derived provider evidence identifies structural observation rather than semantic authority",
-        );
-    }
-    if evidence.contains("agent-maintained")
-        && (evidence.contains("semantic wiki") || evidence.contains("okf"))
-    {
-        return classified(
-            candidate,
-            LocalSourceRole::AgentMaintainedWiki,
-            LocalSourceRoleEvidence::ProvenanceAndContent,
-            "provenance/content identifies Agent-maintained semantic knowledge",
-        );
-    }
-    if candidate.authority == SourceAuthority::Authored
-        && ["how agents should", "agent governance", "collaboration law"]
-            .iter()
-            .any(|needle| evidence.contains(needle))
-    {
-        return classified(
-            candidate,
-            LocalSourceRole::AgentGovernance,
-            LocalSourceRoleEvidence::ProvenanceAndContent,
-            "authored provenance plus governance semantics identifies standing Agent guidance",
-        );
-    }
-    if candidate.authority == SourceAuthority::Authored
-        && ["project purpose", "why this project exists", "authored project ground"]
-            .iter()
-            .any(|needle| evidence.contains(needle))
-    {
-        return classified(
-            candidate,
-            LocalSourceRole::HumanProjectGround,
-            LocalSourceRoleEvidence::ProvenanceAndContent,
-            "authored provenance plus Project-purpose semantics identifies human Project ground",
-        );
-    }
-    if evidence.contains("local structural description")
-        || (evidence.contains("module")
-            && ["owns", "interface", "contract"]
-                .iter()
-                .any(|needle| evidence.contains(needle))
-            && ["describes", "applies to"]
-                .iter()
-                .any(|needle| evidence.contains(needle)))
-    {
-        return classified(
-            candidate,
-            LocalSourceRole::LocalStructuralDescription,
-            LocalSourceRoleEvidence::ProvenanceAndContent,
-            "content describes local structure/ownership/interface for a code region",
-        );
-    }
-    if evidence.contains("working material") && evidence.contains("day") {
-        return classified(
-            candidate,
-            LocalSourceRole::TemporalWorkingMaterial,
-            LocalSourceRoleEvidence::ProvenanceAndContent,
-            "content identifies moving temporal working material rather than stable reference",
-        );
-    }
-    if evidence.contains("method")
-        && (evidence.contains("skill") || evidence.contains("contextsource"))
-    {
-        return classified(
-            candidate,
-            LocalSourceRole::Praxis,
-            LocalSourceRoleEvidence::ProvenanceAndContent,
-            "content identifies reusable/contextual praxis composition",
-        );
+    if candidate.adopted_source.is_some() {
+        return LocalSourceClassification::Classified(LocalSourceRoleEvidence {
+            role: LocalSourceRole::OrdinarySource,
+            evidence: vec!["adopted-source".into()],
+            authoritative: candidate.declared_authority == Some(SourceAuthority::Authored),
+        });
     }
 
-    let path = candidate.path.to_lowercase();
+    let lower_path = candidate.path.to_ascii_lowercase();
     let mut hints = Vec::new();
-    if path.ends_with("agents.md")
-        || path.ends_with("claude.md")
-        || path.ends_with("context.md")
-        || path.ends_with("copilot-instructions.md")
-    {
-        hints.extend([
-            LocalSourceRole::AgentGovernance,
-            LocalSourceRole::LocalStructuralDescription,
-        ]);
+    if lower_path.ends_with("agents.md") || lower_path.ends_with("claude.md") {
+        hints.push(LocalSourceRoleEvidence {
+            role: LocalSourceRole::AgentGovernance,
+            evidence: vec!["conventional-filename-hint".into()],
+            authoritative: false,
+        });
     }
-    if path.contains("/adr") || path.contains("architecture") || path.ends_with("readme.md") {
-        hints.extend([
-            LocalSourceRole::HumanProjectGround,
-            LocalSourceRole::LocalStructuralDescription,
-            LocalSourceRole::OrdinarySource,
-        ]);
+    if lower_path.contains("/wiki/") || lower_path.ends_with("wiki.md") {
+        hints.push(LocalSourceRoleEvidence {
+            role: LocalSourceRole::AgentMaintainedWiki,
+            evidence: vec!["path-hint".into()],
+            authoritative: false,
+        });
     }
-    hints.sort();
-    hints.dedup();
-    if !hints.is_empty() {
-        return LocalSourceClassification {
-            source: candidate.source.clone(),
-            role: LocalSourceRole::Unresolved,
-            evidence: LocalSourceRoleEvidence::FilenameHintOnly,
-            project_lens: ProjectLens::SourcePool,
-            candidates: hints,
-            reason: "filename/path is only a discovery hint; role and authorship remain unresolved until source evidence establishes them".into(),
-        };
+    if lower_path.contains("/skills/") || lower_path.contains("/methods/") {
+        hints.push(LocalSourceRoleEvidence {
+            role: LocalSourceRole::Praxis,
+            evidence: vec!["path-hint".into()],
+            authoritative: false,
+        });
+    }
+    if lower_path.contains("/now/") || lower_path.contains("/day/") {
+        hints.push(LocalSourceRoleEvidence {
+            role: LocalSourceRole::TemporalWorkingMaterial,
+            evidence: vec!["path-hint".into()],
+            authoritative: false,
+        });
+    }
+    if lower_path.contains("generated") || lower_path.contains("derived") {
+        hints.push(LocalSourceRoleEvidence {
+            role: LocalSourceRole::DerivedDocumentation,
+            evidence: vec!["path-hint".into()],
+            authoritative: false,
+        });
     }
 
-    classified(
-        candidate,
-        LocalSourceRole::OrdinarySource,
-        LocalSourceRoleEvidence::Unresolved,
-        "no stronger role evidence is present; retain as ordinary source without inventing authority",
-    )
-}
-
-fn classified(
-    candidate: &LocalSourceCandidate,
-    role: LocalSourceRole,
-    evidence: LocalSourceRoleEvidence,
-    reason: &str,
-) -> LocalSourceClassification {
-    LocalSourceClassification {
-        source: candidate.source.clone(),
-        role,
-        evidence,
-        project_lens: role.project_lens(),
-        candidates: Vec::new(),
-        reason: reason.into(),
+    for hint in &candidate.content_hints {
+        let lower = hint.to_ascii_lowercase();
+        if lower.contains("human-authored project ground") {
+            hints.push(LocalSourceRoleEvidence {
+                role: LocalSourceRole::HumanProjectGround,
+                evidence: vec!["content-hint".into()],
+                authoritative: false,
+            });
+        }
+        if lower.contains("structural source") || lower.contains("coordinate map") {
+            hints.push(LocalSourceRoleEvidence {
+                role: LocalSourceRole::LocalStructuralDescription,
+                evidence: vec!["content-hint".into()],
+                authoritative: false,
+            });
+        }
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReflectionRelationView {
-    pub from: ResourceRef,
-    pub to: ResourceRef,
-    pub relation: String,
-    pub reversed: bool,
-    pub authority: SourceAuthority,
-    #[serde(default)]
-    pub provider: Option<ProviderRef>,
-    #[serde(default)]
-    pub provenance: Vec<ResourceRef>,
+    hints.sort_by_key(|hint| hint.role);
+    hints.dedup_by_key(|hint| hint.role);
+    match hints.len() {
+        0 => LocalSourceClassification::Unresolved,
+        1 => LocalSourceClassification::Classified(hints.remove(0)),
+        _ => LocalSourceClassification::Ambiguous(hints),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReflectionResourceView {
     pub endpoint: ProjectMapEndpoint,
-    pub relation: ReflectionRelationView,
 }
 
-/// One bounded read model for both human and Agent surfaces. It is intentionally
-/// grouped by the questions the user asks rather than exposing a graph hairball.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReflectionRelationView {
+    pub endpoint: ProjectMapEndpoint,
+    #[serde(default)]
+    pub route: Vec<ProjectMapStep>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectReflectionReadModel {
     pub version: String,
-    pub anchor: ResourceRef,
+    pub project_map_version: String,
+    pub subject: Option<ProjectMapEndpoint>,
     #[serde(default)]
-    pub meaning: Vec<ReflectionResourceView>,
+    pub meaning: Vec<ReflectionRelationView>,
     #[serde(default)]
-    pub descriptions: Vec<ReflectionResourceView>,
+    pub descriptions: Vec<ReflectionRelationView>,
     #[serde(default)]
-    pub code: Vec<ReflectionResourceView>,
+    pub code: Vec<ReflectionRelationView>,
     #[serde(default)]
-    pub verification: Vec<ReflectionResourceView>,
+    pub verification: Vec<ReflectionRelationView>,
     #[serde(default)]
-    pub history: Vec<ReflectionResourceView>,
-    #[serde(default)]
-    pub other: Vec<ReflectionResourceView>,
+    pub other: Vec<ReflectionRelationView>,
+    pub truncated: bool,
 }
 
-/// Traverse only explicit ProjectMap bindings to a bounded depth. Rich code/wiki
-/// provider graphs remain provider-owned and are entered through their native APIs.
+/// Build a bounded human/Agent reflection neighbourhood from the already-real
+/// ProjectMap. Provider-native graphs remain outside this read model; each item
+/// is reached only through explicit ProjectMap bindings.
 pub fn project_reflection(
     map: &ProjectMap,
-    anchor: &ResourceRef,
+    subject: &ResourceRef,
     max_hops: usize,
-    max_resources: usize,
+    limit: usize,
 ) -> ProjectReflectionReadModel {
-    let mut view = ProjectReflectionReadModel {
-        version: PROJECT_REFLECTION_VERSION.into(),
-        anchor: anchor.clone(),
-        meaning: Vec::new(),
-        descriptions: Vec::new(),
-        code: Vec::new(),
-        verification: Vec::new(),
-        history: Vec::new(),
-        other: Vec::new(),
-    };
-    if max_hops == 0 || max_resources == 0 || map.endpoint(anchor).is_none() {
-        return view;
-    }
+    let subject_endpoint = map.endpoint(subject).cloned();
+    let mut reachable = Vec::new();
 
-    let mut seen = BTreeSet::from([anchor.clone()]);
-    let mut queue = VecDeque::from([(anchor.clone(), 0usize)]);
-    while let Some((current, depth)) = queue.pop_front() {
-        if depth >= max_hops || seen.len() >= max_resources {
-            continue;
-        }
-        for step in map.neighbours(&current) {
-            if seen.len() >= max_resources || !seen.insert(step.to.clone()) {
+    if subject_endpoint.is_some() && max_hops > 0 && limit > 0 {
+        for endpoint in map.endpoints() {
+            if &endpoint.resource == subject {
                 continue;
             }
-            let Some(endpoint) = map.endpoint(&step.to).cloned() else {
-                continue;
-            };
-            let relation = relation_view(map, &step);
-            classify_reflection(&mut view, ReflectionResourceView { endpoint, relation });
-            queue.push_back((step.to, depth + 1));
+            if let Some(route) = map.route(subject, &endpoint.resource, max_hops) {
+                reachable.push(ReflectionRelationView {
+                    endpoint: endpoint.clone(),
+                    route,
+                });
+            }
+        }
+        reachable.sort_by(|left, right| {
+            (left.route.len(), &left.endpoint.resource)
+                .cmp(&(right.route.len(), &right.endpoint.resource))
+        });
+    }
+
+    let truncated = reachable.len() > limit;
+    reachable.truncate(limit);
+
+    let mut meaning = Vec::new();
+    let mut descriptions = Vec::new();
+    let mut code = Vec::new();
+    let mut verification = Vec::new();
+    let mut other = Vec::new();
+
+    for item in reachable {
+        match item.endpoint.lens {
+            ProjectLens::SemanticWiki | ProjectLens::Canon => meaning.push(item),
+            ProjectLens::SourcePool => descriptions.push(item),
+            ProjectLens::Code | ProjectLens::Git => code.push(item),
+            ProjectLens::Verification => verification.push(item),
+            _ => other.push(item),
         }
     }
 
-    for values in [
-        &mut view.meaning,
-        &mut view.descriptions,
-        &mut view.code,
-        &mut view.verification,
-        &mut view.history,
-        &mut view.other,
-    ] {
-        values.sort_by(|left, right| {
-            (&left.endpoint.resource, &left.relation.relation)
-                .cmp(&(&right.endpoint.resource, &right.relation.relation))
-        });
-    }
-    view
-}
-
-fn relation_view(map: &ProjectMap, step: &ProjectMapStep) -> ReflectionRelationView {
-    let provenance = map
-        .bindings()
-        .iter()
-        .find(|binding| binding_matches_step(binding, step))
-        .map(|binding| binding.provenance.clone())
-        .unwrap_or_default();
-    ReflectionRelationView {
-        from: step.from.clone(),
-        to: step.to.clone(),
-        relation: step.relation.clone(),
-        reversed: step.reversed,
-        authority: step.authority,
-        provider: step.provider.clone(),
-        provenance,
+    ProjectReflectionReadModel {
+        version: PROJECT_REFLECTION_VERSION.into(),
+        project_map_version: PROJECT_MAP_VERSION.into(),
+        subject: subject_endpoint,
+        meaning,
+        descriptions,
+        code,
+        verification,
+        other,
+        truncated,
     }
 }
 
-fn binding_matches_step(binding: &ProjectMapBinding, step: &ProjectMapStep) -> bool {
-    if step.reversed {
-        binding.reversible
-            && binding.from == step.to
-            && binding.to == step.from
-            && binding.relation == step.relation
-    } else {
-        binding.from == step.from && binding.to == step.to && binding.relation == step.relation
-    }
-}
-
-fn classify_reflection(view: &mut ProjectReflectionReadModel, resource: ReflectionResourceView) {
-    let relation = resource.relation.relation.as_str();
-    match resource.endpoint.lens {
-        ProjectLens::SemanticWiki | ProjectLens::Canon => view.meaning.push(resource),
-        ProjectLens::Code | ProjectLens::Git => view.code.push(resource),
-        ProjectLens::Verification => view.verification.push(resource),
-        ProjectLens::Run | ProjectLens::Decision | ProjectLens::Evolution => view.history.push(resource),
-        ProjectLens::SourcePool
-            if matches!(
-                relation,
-                "describes"
-                    | "described-by"
-                    | "applies-to"
-                    | "part-of"
-                    | "owned-by"
-                    | "constrains"
-                    | "implemented-by"
-                    | "grounded-in"
-            ) => view.descriptions.push(resource),
-        _ => view.other.push(resource),
-    }
-}
-
+/// A target-owned strong reflection assertion. The coordinate is deliberately
+/// opaque to AIKit: Epi/QL can use Mx/Mx′ or another formal coordinate while an
+/// ordinary Project can use its own stable subject name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReflectionMapping {
     pub coordinate: String,
     pub semantic: ResourceRef,
     pub implementation: ResourceRef,
-    #[serde(default = "implemented_by")]
     pub relation: String,
     #[serde(default)]
     pub description: Option<ResourceRef>,
@@ -425,26 +250,22 @@ pub struct ReflectionMapping {
     pub expected_implementation_revision: Option<String>,
 }
 
-fn implemented_by() -> String {
-    "implemented-by".into()
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReflectionRelationFace {
-    Semantic,
-    Implementation,
+    Direct,
+    Conjugate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConstitutiveReflectionRelation {
-    pub from_coordinate: String,
-    pub to_coordinate: String,
+    pub ref_id: String,
+    pub from: ResourceRef,
+    pub to: ResourceRef,
     pub relation: String,
     pub face: ReflectionRelationFace,
 }
 
-/// Target-owned parity law. Generic AIKit never interprets the coordinate names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReflectionLaw {
     pub id: String,
@@ -452,8 +273,8 @@ pub struct ReflectionLaw {
     pub source: Option<SourceRef>,
     #[serde(default)]
     pub source_revision: Option<String>,
-    #[serde(default)]
     pub unique_implementation: bool,
+    #[serde(default)]
     pub mappings: Vec<ReflectionMapping>,
     #[serde(default)]
     pub constitutive_relations: Vec<ConstitutiveReflectionRelation>,
@@ -462,389 +283,305 @@ pub struct ReflectionLaw {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReflectionIssueKind {
-    MissingSemanticCoordinate,
-    MissingImplementationCoordinate,
-    WrongMapping,
-    DuplicateMapping,
-    StaleMapping,
-    MissingDescription,
-    StructuralFlattening,
-    InvalidLaw,
+    Missing,
+    WrongRelation,
+    Duplicate,
+    Stale,
+    ConstitutiveFlattening,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReflectionIssue {
     pub kind: ReflectionIssueKind,
-    pub coordinate: String,
+    pub relation_ref: String,
     pub detail: String,
-    #[serde(default)]
-    pub resources: Vec<ResourceRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReflectionVerification {
     pub law: String,
+    pub source_revision: Option<String>,
     pub passed: bool,
     #[serde(default)]
     pub issues: Vec<ReflectionIssue>,
 }
 
-/// Verify explicit source-declared semantic↔implementation parity. Identical
-/// labels are never evidence of parity; the ProjectMap relation must exist.
+impl ReflectionVerification {
+    pub fn is_conformant(&self) -> bool {
+        self.passed
+    }
+}
+
+/// Verify a target-owned reflection law against explicit ProjectMap relations.
+/// The function compares refs, relation names and optional target-owned revisions;
+/// it never parses or invents the target's coordinate semantics.
 pub fn verify_reflection_law(map: &ProjectMap, law: &ReflectionLaw) -> ReflectionVerification {
     let mut issues = Vec::new();
-    let mut coordinates = BTreeMap::<String, &ReflectionMapping>::new();
-    let mut implementation_uses = BTreeMap::<ResourceRef, Vec<String>>::new();
 
     for mapping in &law.mappings {
-        if mapping.coordinate.trim().is_empty()
-            || coordinates.insert(mapping.coordinate.clone(), mapping).is_some()
-        {
-            issues.push(issue(
-                ReflectionIssueKind::InvalidLaw,
-                &mapping.coordinate,
-                "coordinate identity is empty or duplicated in the declared law",
-                vec![mapping.semantic.clone(), mapping.implementation.clone()],
-            ));
-            continue;
-        }
-        implementation_uses
-            .entry(mapping.implementation.clone())
-            .or_default()
-            .push(mapping.coordinate.clone());
+        let pair: Vec<_> = map
+            .bindings()
+            .iter()
+            .filter(|binding| {
+                binding.from == mapping.semantic && binding.to == mapping.implementation
+            })
+            .collect();
 
-        let semantic = map.endpoint(&mapping.semantic);
-        let implementation = map.endpoint(&mapping.implementation);
-        if semantic.is_none() {
-            issues.push(issue(
-                ReflectionIssueKind::MissingSemanticCoordinate,
-                &mapping.coordinate,
-                "declared semantic coordinate is absent from ProjectMap",
-                vec![mapping.semantic.clone()],
-            ));
+        if pair.is_empty() {
+            issues.push(ReflectionIssue {
+                kind: ReflectionIssueKind::Missing,
+                relation_ref: mapping.coordinate.clone(),
+                detail: format!(
+                    "missing reflected binding {} -> {}",
+                    mapping.semantic, mapping.implementation
+                ),
+            });
+        } else if !pair.iter().any(|binding| binding.relation == mapping.relation) {
+            issues.push(ReflectionIssue {
+                kind: ReflectionIssueKind::WrongRelation,
+                relation_ref: mapping.coordinate.clone(),
+                detail: format!("expected relation {}", mapping.relation),
+            });
         }
-        if implementation.is_none() {
-            issues.push(issue(
-                ReflectionIssueKind::MissingImplementationCoordinate,
-                &mapping.coordinate,
-                "declared implementation coordinate is absent from ProjectMap",
-                vec![mapping.implementation.clone()],
-            ));
-        }
-        if semantic.is_some()
-            && implementation.is_some()
-            && !has_binding(map, &mapping.semantic, &mapping.implementation, &mapping.relation)
-        {
-            issues.push(issue(
-                ReflectionIssueKind::WrongMapping,
-                &mapping.coordinate,
-                &format!("explicit `{}` reflection binding is absent", mapping.relation),
-                vec![mapping.semantic.clone(), mapping.implementation.clone()],
-            ));
-        }
-        if let (Some(expected), Some(endpoint)) = (
-            mapping.expected_implementation_revision.as_ref(),
-            implementation,
-        ) {
-            if endpoint.revision.as_deref() != Some(expected.as_str()) {
-                issues.push(issue(
-                    ReflectionIssueKind::StaleMapping,
-                    &mapping.coordinate,
-                    &format!(
-                        "implementation revision changed: expected {expected}, observed {}",
-                        endpoint.revision.as_deref().unwrap_or("<unversioned>")
+
+        if law.unique_implementation {
+            let implementations: BTreeSet<_> = map
+                .bindings()
+                .iter()
+                .filter(|binding| {
+                    binding.from == mapping.semantic && binding.relation == mapping.relation
+                })
+                .map(|binding| binding.to.clone())
+                .collect();
+            if implementations.len() > 1 {
+                issues.push(ReflectionIssue {
+                    kind: ReflectionIssueKind::Duplicate,
+                    relation_ref: mapping.coordinate.clone(),
+                    detail: format!(
+                        "{} implementation targets found for a unique reflection",
+                        implementations.len()
                     ),
-                    vec![mapping.implementation.clone()],
-                ));
+                });
             }
         }
-        if let Some(description) = &mapping.description {
-            if map.endpoint(description).is_none() {
-                issues.push(issue(
-                    ReflectionIssueKind::MissingDescription,
-                    &mapping.coordinate,
-                    "declared local structural description is absent",
-                    vec![description.clone()],
-                ));
-            } else if let Some(relation) = &mapping.description_relation {
-                if !has_binding(map, description, &mapping.implementation, relation)
-                    && !has_binding(map, description, &mapping.semantic, relation)
-                {
-                    issues.push(issue(
-                        ReflectionIssueKind::MissingDescription,
-                        &mapping.coordinate,
-                        &format!("description exists but declared `{relation}` relation is absent"),
-                        vec![description.clone(), mapping.implementation.clone()],
-                    ));
-                }
+
+        match (
+            map.endpoint(&mapping.implementation),
+            &mapping.expected_implementation_revision,
+        ) {
+            (None, _) => issues.push(ReflectionIssue {
+                kind: ReflectionIssueKind::Missing,
+                relation_ref: mapping.coordinate.clone(),
+                detail: format!("implementation endpoint {} is absent", mapping.implementation),
+            }),
+            (Some(endpoint), Some(expected))
+                if endpoint.revision.as_deref() != Some(expected.as_str()) =>
+            {
+                issues.push(ReflectionIssue {
+                    kind: ReflectionIssueKind::Stale,
+                    relation_ref: mapping.coordinate.clone(),
+                    detail: format!(
+                        "implementation revision {:?} does not match expected {}",
+                        endpoint.revision, expected
+                    ),
+                });
+            }
+            _ => {}
+        }
+
+        if let (Some(description), Some(relation)) =
+            (&mapping.description, &mapping.description_relation)
+        {
+            let described = map.bindings().iter().any(|binding| {
+                binding.from == *description
+                    && binding.to == mapping.implementation
+                    && binding.relation == *relation
+            });
+            if !described {
+                issues.push(ReflectionIssue {
+                    kind: ReflectionIssueKind::Missing,
+                    relation_ref: mapping.coordinate.clone(),
+                    detail: format!(
+                        "description {} does not {} implementation {}",
+                        description, relation, mapping.implementation
+                    ),
+                });
             }
         }
     }
 
-    if law.unique_implementation {
-        for (implementation, coords) in implementation_uses {
-            if coords.len() > 1 {
-                issues.push(issue(
-                    ReflectionIssueKind::DuplicateMapping,
-                    &coords.join(","),
-                    "multiple coordinates map to one implementation while uniqueness is required",
-                    vec![implementation],
-                ));
-            }
-        }
-    }
+    let expected_constitutive: BTreeSet<_> = law
+        .constitutive_relations
+        .iter()
+        .map(|relation| {
+            (
+                relation.from.clone(),
+                relation.to.clone(),
+                relation.relation.clone(),
+            )
+        })
+        .collect();
 
     for relation in &law.constitutive_relations {
-        let Some(from) = coordinates.get(&relation.from_coordinate) else {
-            issues.push(issue(
-                ReflectionIssueKind::InvalidLaw,
-                &format!("{}→{}", relation.from_coordinate, relation.to_coordinate),
-                "constitutive relation from-coordinate is absent from the law",
-                vec![],
-            ));
-            continue;
-        };
-        let Some(to) = coordinates.get(&relation.to_coordinate) else {
-            issues.push(issue(
-                ReflectionIssueKind::InvalidLaw,
-                &format!("{}→{}", relation.from_coordinate, relation.to_coordinate),
-                "constitutive relation to-coordinate is absent from the law",
-                vec![],
-            ));
-            continue;
-        };
-        let (from_ref, to_ref) = match relation.face {
-            ReflectionRelationFace::Semantic => (&from.semantic, &to.semantic),
-            ReflectionRelationFace::Implementation => (&from.implementation, &to.implementation),
-        };
-        if !has_binding(map, from_ref, to_ref, &relation.relation) {
-            issues.push(issue(
-                ReflectionIssueKind::StructuralFlattening,
-                &format!("{}→{}", relation.from_coordinate, relation.to_coordinate),
-                &format!(
-                    "coordinate names remain but constitutive `{}` relation is absent on {:?} face",
-                    relation.relation, relation.face
-                ),
-                vec![from_ref.clone(), to_ref.clone()],
-            ));
+        if relation.face == ReflectionRelationFace::Conjugate && relation.from == relation.to {
+            issues.push(ReflectionIssue {
+                kind: ReflectionIssueKind::ConstitutiveFlattening,
+                relation_ref: relation.ref_id.clone(),
+                detail: "conjugate relation collapses both faces onto one resource identity".into(),
+            });
+        }
+
+        let pair: Vec<_> = map
+            .bindings()
+            .iter()
+            .filter(|binding| binding.from == relation.from && binding.to == relation.to)
+            .collect();
+        if pair.is_empty() {
+            issues.push(ReflectionIssue {
+                kind: ReflectionIssueKind::Missing,
+                relation_ref: relation.ref_id.clone(),
+                detail: "constitutive relation is absent from ProjectMap".into(),
+            });
+        } else if !pair
+            .iter()
+            .any(|binding| binding.relation == relation.relation)
+        {
+            issues.push(ReflectionIssue {
+                kind: ReflectionIssueKind::WrongRelation,
+                relation_ref: relation.ref_id.clone(),
+                detail: format!("expected relation {}", relation.relation),
+            });
+        }
+    }
+
+    for binding in map.bindings() {
+        if binding.relation.starts_with("constitutive:")
+            && !expected_constitutive.contains(&(
+                binding.from.clone(),
+                binding.to.clone(),
+                binding.relation.clone(),
+            ))
+        {
+            issues.push(ReflectionIssue {
+                kind: ReflectionIssueKind::Stale,
+                relation_ref: binding.relation.clone(),
+                detail: "ProjectMap carries a constitutive binding absent from the current target-owned law".into(),
+            });
         }
     }
 
     ReflectionVerification {
         law: law.id.clone(),
+        source_revision: law.source_revision.clone(),
         passed: issues.is_empty(),
         issues,
     }
 }
 
-fn issue(
-    kind: ReflectionIssueKind,
-    coordinate: &str,
-    detail: &str,
-    resources: Vec<ResourceRef>,
-) -> ReflectionIssue {
-    ReflectionIssue {
-        kind,
-        coordinate: coordinate.into(),
-        detail: detail.into(),
-        resources,
-    }
-}
-
-fn has_binding(map: &ProjectMap, from: &ResourceRef, to: &ResourceRef, relation: &str) -> bool {
-    map.bindings().iter().any(|binding| {
-        (binding.from == *from && binding.to == *to && binding.relation == relation)
-            || (binding.reversible
-                && binding.from == *to
-                && binding.to == *from
-                && binding.relation == relation)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project_map::ProjectMapBinding;
+    use crate::resource::ResourceKind;
 
-    fn endpoint(
-        id: &str,
-        lens: ProjectLens,
-        kind: ResourceKind,
-        authority: SourceAuthority,
-    ) -> ProjectMapEndpoint {
+    fn endpoint(id: &str, lens: ProjectLens) -> ProjectMapEndpoint {
         ProjectMapEndpoint {
             resource: ResourceRef::parse(id).unwrap(),
-            kind,
+            kind: ResourceKind::KnowledgeNode,
             lens,
-            authority,
+            authority: SourceAuthority::Authored,
             provider: None,
             revision: None,
-            label: Some(id.into()),
+            label: None,
         }
     }
 
-    fn bind(map: &mut ProjectMap, from: &str, to: &str, relation: &str) {
+    #[test]
+    fn conventional_agent_instruction_filename_is_only_a_hint() {
+        let source = LocalSourceCandidate {
+            path: "/project/AGENTS.md".into(),
+            declared_role: None,
+            declared_authority: None,
+            adopted_source: None,
+            content_hints: vec![],
+        };
+        match classify_local_source(&source) {
+            LocalSourceClassification::Classified(evidence) => {
+                assert_eq!(evidence.role, LocalSourceRole::AgentGovernance);
+                assert!(!evidence.authoritative);
+            }
+            other => panic!("unexpected classification {other:?}"),
+        }
+    }
+
+    #[test]
+    fn constitutive_conjugate_flattening_is_rejected_without_changing_project_map() {
+        let same = ResourceRef::parse("resource:same").unwrap();
+        let law = ReflectionLaw {
+            id: "law:test".into(),
+            source: None,
+            source_revision: None,
+            unique_implementation: false,
+            mappings: vec![],
+            constitutive_relations: vec![ConstitutiveReflectionRelation {
+                ref_id: "rel:conjugate".into(),
+                from: same.clone(),
+                to: same,
+                relation: "constitutive:conjugate".into(),
+                face: ReflectionRelationFace::Conjugate,
+            }],
+        };
+        let mut map = ProjectMap::new();
+        map.add_endpoint(endpoint("resource:same", ProjectLens::SemanticWiki))
+            .unwrap();
+        let verification = verify_reflection_law(&map, &law);
+        assert!(!verification.is_conformant());
+        assert!(verification
+            .issues
+            .iter()
+            .any(|issue| issue.kind == ReflectionIssueKind::ConstitutiveFlattening));
+        assert!(map.bindings().is_empty());
+    }
+
+    #[test]
+    fn wrong_relation_is_reported_against_existing_project_map_binding() {
+        let semantic = ResourceRef::parse("semantic:one").unwrap();
+        let code = ResourceRef::parse("code:one").unwrap();
+        let mut map = ProjectMap::new();
+        map.add_endpoint(endpoint("semantic:one", ProjectLens::SemanticWiki))
+            .unwrap();
+        map.add_endpoint(endpoint("code:one", ProjectLens::Code))
+            .unwrap();
         map.bind(ProjectMapBinding {
-            from: ResourceRef::parse(from).unwrap(),
-            to: ResourceRef::parse(to).unwrap(),
-            relation: relation.into(),
+            from: semantic.clone(),
+            to: code.clone(),
+            relation: "mentions".into(),
             reversible: true,
             authority: SourceAuthority::Authored,
             provider: None,
-            provenance: vec![ResourceRef::parse("source:relation").unwrap()],
+            provenance: vec![],
         })
         .unwrap();
-    }
-
-    #[test]
-    fn filename_is_hint_not_authority() {
-        let result = classify_local_source(&LocalSourceCandidate {
-            source: SourceRef::parse("source:agents").unwrap(),
-            path: "crates/core/AGENTS.md".into(),
-            authority: SourceAuthority::Observed,
-            declared_role: None,
-            adopted_role: None,
-            generated: false,
-            body_excerpt: None,
-            metadata: BTreeMap::new(),
-        });
-        assert_eq!(result.role, LocalSourceRole::Unresolved);
-        assert_eq!(result.evidence, LocalSourceRoleEvidence::FilenameHintOnly);
-        assert!(result.candidates.contains(&LocalSourceRole::AgentGovernance));
-        assert!(result
-            .candidates
-            .contains(&LocalSourceRole::LocalStructuralDescription));
-    }
-
-    #[test]
-    fn description_role_does_not_grow_project_lens() {
-        let result = classify_local_source(&LocalSourceCandidate {
-            source: SourceRef::parse("source:module-contract").unwrap(),
-            path: "src/CONTEXT.md".into(),
-            authority: SourceAuthority::Authored,
-            declared_role: Some(LocalSourceRole::LocalStructuralDescription),
-            adopted_role: None,
-            generated: false,
-            body_excerpt: None,
-            metadata: BTreeMap::new(),
-        });
-        assert_eq!(result.project_lens, ProjectLens::SourcePool);
-        assert_eq!(result.evidence, LocalSourceRoleEvidence::Declared);
-    }
-
-    #[test]
-    fn read_model_traverses_meaning_description_code_and_proof_both_ways() {
-        let mut map = ProjectMap::new();
-        for value in [
-            endpoint("canon:why", ProjectLens::Canon, ResourceKind::KnowledgeSource, SourceAuthority::Authored),
-            endpoint("wiki:concept", ProjectLens::SemanticWiki, ResourceKind::KnowledgeNode, SourceAuthority::Authored),
-            endpoint("source:module", ProjectLens::SourcePool, ResourceKind::KnowledgeSource, SourceAuthority::Authored),
-            endpoint("code:impl", ProjectLens::Code, ResourceKind::CodeReference, SourceAuthority::Derived),
-            endpoint("verify:test", ProjectLens::Verification, ResourceKind::Action, SourceAuthority::Observed),
-            endpoint("run:42", ProjectLens::Run, ResourceKind::KnowledgeRoute, SourceAuthority::Observed),
-        ] {
-            map.add_endpoint(value).unwrap();
-        }
-        bind(&mut map, "canon:why", "wiki:concept", "grounded-in");
-        bind(&mut map, "wiki:concept", "source:module", "described-by");
-        bind(&mut map, "source:module", "code:impl", "describes");
-        bind(&mut map, "code:impl", "verify:test", "verified-by");
-        bind(&mut map, "verify:test", "run:42", "evidenced-by");
-
-        let from_meaning = project_reflection(
-            &map,
-            &ResourceRef::parse("wiki:concept").unwrap(),
-            4,
-            12,
-        );
-        assert!(!from_meaning.meaning.is_empty());
-        assert!(!from_meaning.descriptions.is_empty());
-        assert!(!from_meaning.code.is_empty());
-        assert!(!from_meaning.verification.is_empty());
-
-        let from_code = project_reflection(
-            &map,
-            &ResourceRef::parse("code:impl").unwrap(),
-            3,
-            12,
-        );
-        assert!(from_code
-            .meaning
-            .iter()
-            .any(|item| item.endpoint.resource.as_str() == "wiki:concept"));
-        assert!(from_code
-            .descriptions
-            .iter()
-            .any(|item| item.endpoint.resource.as_str() == "source:module"));
-    }
-
-    #[test]
-    fn target_owned_law_catches_staleness_and_structural_flattening() {
-        let mut map = ProjectMap::new();
-        for (id, lens, authority) in [
-            ("wiki:a", ProjectLens::SemanticWiki, SourceAuthority::Authored),
-            ("wiki:b", ProjectLens::SemanticWiki, SourceAuthority::Authored),
-            ("code:a", ProjectLens::Code, SourceAuthority::Derived),
-            ("code:b", ProjectLens::Code, SourceAuthority::Derived),
-        ] {
-            let mut value = endpoint(
-                id,
-                lens,
-                if lens == ProjectLens::Code {
-                    ResourceKind::CodeReference
-                } else {
-                    ResourceKind::KnowledgeNode
-                },
-                authority,
-            );
-            if id == "code:a" {
-                value.revision = Some("new-revision".into());
-            }
-            map.add_endpoint(value).unwrap();
-        }
-        bind(&mut map, "wiki:a", "code:a", "implemented-by");
-        bind(&mut map, "wiki:b", "code:b", "implemented-by");
-
         let law = ReflectionLaw {
-            id: "target-owned-law".into(),
-            source: Some(SourceRef::parse("source:coordinate-law").unwrap()),
-            source_revision: Some("law-v1".into()),
+            id: "law:one".into(),
+            source: None,
+            source_revision: None,
             unique_implementation: true,
-            mappings: vec![
-                ReflectionMapping {
-                    coordinate: "A".into(),
-                    semantic: ResourceRef::parse("wiki:a").unwrap(),
-                    implementation: ResourceRef::parse("code:a").unwrap(),
-                    relation: "implemented-by".into(),
-                    description: None,
-                    description_relation: None,
-                    expected_implementation_revision: Some("old-revision".into()),
-                },
-                ReflectionMapping {
-                    coordinate: "B".into(),
-                    semantic: ResourceRef::parse("wiki:b").unwrap(),
-                    implementation: ResourceRef::parse("code:b").unwrap(),
-                    relation: "implemented-by".into(),
-                    description: None,
-                    description_relation: None,
-                    expected_implementation_revision: None,
-                },
-            ],
-            constitutive_relations: vec![ConstitutiveReflectionRelation {
-                from_coordinate: "A".into(),
-                to_coordinate: "B".into(),
-                relation: "parent-of".into(),
-                face: ReflectionRelationFace::Implementation,
+            mappings: vec![ReflectionMapping {
+                coordinate: "subject-one".into(),
+                semantic,
+                implementation: code,
+                relation: "implemented-by".into(),
+                description: None,
+                description_relation: None,
+                expected_implementation_revision: None,
             }],
+            constitutive_relations: vec![],
         };
-        let result = verify_reflection_law(&map, &law);
-        assert!(!result.passed);
-        assert!(result
+        let verification = verify_reflection_law(&map, &law);
+        assert!(verification
             .issues
             .iter()
-            .any(|item| item.kind == ReflectionIssueKind::StaleMapping));
-        assert!(result
-            .issues
-            .iter()
-            .any(|item| item.kind == ReflectionIssueKind::StructuralFlattening));
+            .any(|issue| issue.kind == ReflectionIssueKind::WrongRelation));
     }
 }
