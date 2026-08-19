@@ -18,6 +18,14 @@ use crate::resource::{ResourceRef, SourceRef};
 
 pub const PROJECT_RECOVERY_VERSION: &str = "aikit.project-recovery/v1";
 
+/// Stable source identity plus the separately derived role classification used by
+/// Project recovery. Source identity never comes from the classification itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectLocalSourceBinding {
+    pub source: SourceRef,
+    pub classification: LocalSourceClassification,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProjectRecoveryStageKind {
@@ -80,20 +88,14 @@ pub struct ProjectRecoveryReadModel {
 pub fn project_recovery(
     resolution: &ContextResolution,
     central: Option<&ProjectCentralOrientation>,
-    local_sources: &[LocalSourceClassification],
+    local_sources: &[ProjectLocalSourceBinding],
     reflection: Option<&ProjectReflectionReadModel>,
     praxis: Option<&PraxisResolution>,
 ) -> ProjectRecoveryReadModel {
     let mut stages = Vec::new();
     let mut recognition_pressure = Vec::new();
 
-    let reflected_canon = reflection
-        .into_iter()
-        .flat_map(|view| view.meaning.iter())
-        .filter(|item| item.endpoint.lens == ProjectLens::Canon)
-        .map(|item| item.endpoint.resource.clone())
-        .collect::<Vec<_>>();
-
+    let reflected_canon = reflected_by_lens(reflection, ProjectLens::Canon);
     let ground_stage = match central {
         Some(orientation) => {
             let mut sources = vec![orientation.human_root.clone()];
@@ -105,7 +107,7 @@ pub fn project_recovery(
                 ProjectCentralGroundStatus::Partial => {
                     recognition_pressure.push(RecognitionPressure {
                         source: Some(orientation.human_root.clone()),
-                        reason: "Project ground exists but no currently recognised human source establishes the authored standing of all candidate material".into(),
+                        reason: "Project ground exists but currently recognised human source does not establish all candidate authored standing".into(),
                     });
                     ProjectRecoveryStageState::Partial
                 }
@@ -136,20 +138,24 @@ pub fn project_recovery(
     };
     stages.push(ground_stage);
 
-    let mut native_sources = Vec::new();
-    let mut descriptions = Vec::new();
-    let mut unresolved_local = 0usize;
-    for classification in local_sources {
-        native_sources.push(classification.source.clone());
-        if classification.role == LocalSourceRole::LocalStructuralDescription {
-            descriptions.push(classification.source.clone());
-        }
-        if classification.role == LocalSourceRole::Unresolved {
-            unresolved_local += 1;
-        }
-    }
+    let mut native_sources = local_sources
+        .iter()
+        .map(|binding| binding.source.clone())
+        .collect::<Vec<_>>();
     native_sources.sort();
     native_sources.dedup();
+
+    let mut descriptions = Vec::new();
+    let mut unresolved_local = 0usize;
+    for binding in local_sources {
+        match resolved_local_role(&binding.classification) {
+            Some(LocalSourceRole::LocalStructuralDescription) => {
+                descriptions.push(binding.source.clone())
+            }
+            Some(_) => {}
+            None => unresolved_local += 1,
+        }
+    }
     descriptions.sort();
     descriptions.dedup();
 
@@ -166,19 +172,14 @@ pub fn project_recovery(
         sources: native_sources,
         note: if unresolved_local > 0 {
             format!(
-                "{unresolved_local} discovered local source candidate(s) remain role-unresolved; filename hints were not promoted to authority"
+                "{unresolved_local} discovered local source candidate(s) remain role-unresolved or hint-only; source identity is preserved without promoting filename/path hints to authority"
             )
         } else {
-            "native Project source is retained in place and classified only as provenance/owner evidence supports".into()
+            "native Project source is retained in place and classified only as owner/provenance evidence supports".into()
         },
     });
 
-    let reflected_wiki = reflection
-        .into_iter()
-        .flat_map(|view| view.meaning.iter())
-        .filter(|item| item.endpoint.lens == ProjectLens::SemanticWiki)
-        .map(|item| item.endpoint.resource.clone())
-        .collect::<Vec<_>>();
+    let reflected_wiki = reflected_by_lens(reflection, ProjectLens::SemanticWiki);
     let central_wiki = central
         .filter(|orientation| orientation.canonical_wiki_exists)
         .map(|orientation| orientation.canonical_wiki.clone());
@@ -194,11 +195,7 @@ pub fn project_recovery(
         note: "SemanticWiki is maintained Project knowledge, not a replacement for human Ground or native source".into(),
     });
 
-    let reflected_descriptions = reflection
-        .into_iter()
-        .flat_map(|view| view.descriptions.iter())
-        .map(|item| item.endpoint.resource.clone())
-        .collect::<Vec<_>>();
+    let reflected_descriptions = reflected_by_lens(reflection, ProjectLens::SourcePool);
     stages.push(ProjectRecoveryStage {
         kind: ProjectRecoveryStageKind::LocalStructuralDescription,
         state: if descriptions.is_empty() && reflected_descriptions.is_empty() {
@@ -314,6 +311,51 @@ pub fn project_recovery(
     }
 }
 
+/// A classification only becomes operative bootstrap knowledge when it is more
+/// than a conventional filename/path hint. This lets discovery be generous while
+/// keeping role attribution conservative.
+fn resolved_local_role(classification: &LocalSourceClassification) -> Option<LocalSourceRole> {
+    match classification {
+        LocalSourceClassification::Classified(evidence)
+            if !evidence.evidence.iter().all(|item| {
+                item == "conventional-filename-hint" || item == "path-hint"
+            }) => Some(evidence.role),
+        LocalSourceClassification::Classified(_)
+        | LocalSourceClassification::Ambiguous(_)
+        | LocalSourceClassification::Unresolved => None,
+    }
+}
+
+fn reflected_by_lens(
+    reflection: Option<&ProjectReflectionReadModel>,
+    lens: ProjectLens,
+) -> Vec<ResourceRef> {
+    let Some(view) = reflection else {
+        return Vec::new();
+    };
+    let mut resources = Vec::new();
+    if let Some(subject) = &view.subject {
+        if subject.lens == lens {
+            resources.push(subject.resource.clone());
+        }
+    }
+    for item in view
+        .meaning
+        .iter()
+        .chain(&view.descriptions)
+        .chain(&view.code)
+        .chain(&view.verification)
+        .chain(&view.other)
+    {
+        if item.endpoint.lens == lens {
+            resources.push(item.endpoint.resource.clone());
+        }
+    }
+    resources.sort();
+    resources.dedup();
+    resources
+}
+
 fn reflected_resources(view: &ProjectReflectionReadModel) -> Vec<ResourceRef> {
     let mut resources = view
         .meaning
@@ -321,11 +363,12 @@ fn reflected_resources(view: &ProjectReflectionReadModel) -> Vec<ResourceRef> {
         .chain(&view.descriptions)
         .chain(&view.code)
         .chain(&view.verification)
-        .chain(&view.history)
         .chain(&view.other)
         .map(|item| item.endpoint.resource.clone())
         .collect::<Vec<_>>();
-    resources.push(view.anchor.clone());
+    if let Some(subject) = &view.subject {
+        resources.push(subject.resource.clone());
+    }
     resources.sort();
     resources.dedup();
     resources
@@ -333,15 +376,11 @@ fn reflected_resources(view: &ProjectReflectionReadModel) -> Vec<ResourceRef> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use super::*;
     use crate::context_resolution::{compose_context_resolution, RequestedActors};
     use crate::project::{ProjectBinding, ProjectBindingLocator, ProjectConstituentRef};
-    use crate::projectcentral::{
-        ProjectCentralGroundStatus, ProjectCentralOrientation,
-    };
     use crate::resolve::{resolve, ResolveRequest};
     use crate::resource::{MemoryResourceIndex, ResourceDescriptor, ResourceKind, ResourceRecord};
     use crate::{AlwaysTrusted, ContextDescriptor, ManagedPolicy, MemoryCatalog, ProjectRef};
@@ -396,6 +435,25 @@ mod tests {
         assert!(receipt.stages.iter().any(|stage| {
             stage.kind == ProjectRecoveryStageKind::CapabilityPraxis
                 && stage.state == ProjectRecoveryStageState::Available
+        }));
+    }
+
+    #[test]
+    fn filename_hint_remains_partial_not_project_truth() {
+        let local = ProjectLocalSourceBinding {
+            source: SourceRef::parse("source:project-local:example:AGENTS.md").unwrap(),
+            classification: LocalSourceClassification::Classified(
+                crate::project_reflection::LocalSourceRoleEvidence {
+                    role: LocalSourceRole::AgentGovernance,
+                    evidence: vec!["conventional-filename-hint".into()],
+                    authoritative: false,
+                },
+            ),
+        };
+        let receipt = project_recovery(&resolution(), None, &[local], None, None);
+        assert!(receipt.stages.iter().any(|stage| {
+            stage.kind == ProjectRecoveryStageKind::NativeProjectSource
+                && stage.state == ProjectRecoveryStageState::Partial
         }));
     }
 
