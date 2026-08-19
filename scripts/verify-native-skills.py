@@ -141,6 +141,40 @@ pressure = by_id["returned-reality-proposes-pressure"]
 if not pressure["proposal_only"] or pressure["authored_source_mutated"]:
     raise SystemExit("returned-reality fixture permits silent authored-source mutation")
 
+human_cases = tomllib.loads((ROOT / "skills/fixtures/human-authority/cases.toml").read_text(encoding="utf-8"))["case"]
+human_by_id = {case["id"]: case for case in human_cases}
+if set(human_by_id) != {
+    "existing-intent-resolves",
+    "reversible-engineering-proceeds",
+    "prototype-before-abstract-question",
+    "genuine-authorial-fork-escalates",
+    "right-altitude-question",
+    "returned-discovery-proposes",
+    "small-task-keeps-stop-rule",
+}:
+    raise SystemExit("human-authority fixture set mismatch")
+existing = human_by_id["existing-intent-resolves"]
+if not existing["existing_intent"] or not existing["source_or_evidence_can_resolve"] or existing["human_request"]:
+    raise SystemExit("human-authority fixture permits redundant confirmation of existing intent")
+reversible = human_by_id["reversible-engineering-proceeds"]
+if not reversible["reversible_engineering"] or reversible["human_request"] or not reversible["return_evidence"]:
+    raise SystemExit("reversible engineering is incorrectly escalated as human authorship")
+prototype = human_by_id["prototype-before-abstract-question"]
+if not prototype["bounded_prototype_available"] or not prototype["prototype_is_reversible"] or not prototype["prototype_before_human_request"]:
+    raise SystemExit("prototype-before-escalation case does not produce bounded evidence first")
+authorial = human_by_id["genuine-authorial-fork-escalates"]
+if authorial["source_or_evidence_can_resolve"] or not authorial["materially_different_product_futures"] or not authorial["human_request"]:
+    raise SystemExit("genuine authorial fork is not escalated")
+altitude = human_by_id["right-altitude-question"]
+if not altitude["human_request"] or altitude["question_level"] != "experienced-product-consequence" or not altitude["implementation_detail_is_supporting"]:
+    raise SystemExit("human request is not phrased at the meaningful consequence level")
+returned = human_by_id["returned-discovery-proposes"]
+if not returned["agent_understanding_updated"] or returned["human_source_mutated"] or not returned["proposal_to_human_ground"]:
+    raise SystemExit("returned discovery silently mutates human-authored source")
+small = human_by_id["small-task-keeps-stop-rule"]
+if small["loads_product_corpus"] or small["human_authority_guidance_requires_deep_traversal"]:
+    raise SystemExit("human-authority guidance breaks the smallest-sufficient-context stop rule")
+
 account_cases = tomllib.loads((ROOT / "skills/fixtures/account-authoring/cases.toml").read_text(encoding="utf-8"))["case"]
 account_by_id = {case["id"]: case for case in account_cases}
 if set(account_by_id) != {
@@ -186,6 +220,8 @@ product_understanding = (REGISTRY / "skill/aikit/product-understanding/payload/S
 for required in (
     "Provenance determines authority for the question being asked",
     "smallest sufficient depth",
+    "What determination does only the human need to make here?",
+    "Prototype before abstract escalation",
     "AUTHORED HUMAN POSITION",
     "IMPLEMENTATION FACT",
     "CURRENT DEVELOPMENT STATE",
@@ -230,6 +266,8 @@ for required in (
     "You and I communicate directly as collaborators",
     "Current code tells us what is real now; it does not retroactively define why the project exists.",
     "Vision tells us what is meant; it does not prove what currently works.",
+    "Preserve human attention for genuine authorship and Recognition.",
+    "Do not ask for confirmation of a determination already present.",
     "the smallest sufficient context for straightforward retrieval or coding",
 ):
     if required not in lean_guidance:

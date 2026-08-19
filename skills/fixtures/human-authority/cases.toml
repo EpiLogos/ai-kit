@@ -1,0 +1,54 @@
+schema = 1
+
+[[case]]
+id = "existing-intent-resolves"
+existing_intent = true
+source_or_evidence_can_resolve = true
+human_request = false
+expected = "Use the already-authorised determination; do not ask the human to confirm what the Project has already said."
+
+[[case]]
+id = "reversible-engineering-proceeds"
+consequential_meaning_resolved = true
+reversible_engineering = true
+human_request = false
+return_evidence = true
+expected = "Make the local reversible engineering judgement under existing authority and return the choice/evidence rather than turning it into authorship work."
+
+[[case]]
+id = "prototype-before-abstract-question"
+consequential_meaning_resolved = false
+bounded_prototype_available = true
+prototype_is_reversible = true
+prototype_before_human_request = true
+expected = "Where cheap bounded evidence can make the meaningful difference experienceable, produce it before asking the human to decide incidental implementation vocabulary."
+
+[[case]]
+id = "genuine-authorial-fork-escalates"
+consequential_meaning_resolved = false
+source_or_evidence_can_resolve = false
+materially_different_product_futures = true
+human_request = true
+expected = "Escalate when materially different human/product futures remain after reasonable source and evidence work."
+
+[[case]]
+id = "right-altitude-question"
+human_request = true
+question_level = "experienced-product-consequence"
+implementation_detail_is_supporting = true
+expected = "Ask for the determination only the human needs to make; keep provider/component mechanics inspectable underneath it."
+
+[[case]]
+id = "returned-discovery-proposes"
+returned_discovery = true
+agent_understanding_updated = true
+human_source_mutated = false
+proposal_to_human_ground = true
+expected = "A better returned possibility may update Agent understanding and pressure human ground, but durable human authorship changes only through human adoption."
+
+[[case]]
+id = "small-task-keeps-stop-rule"
+task_class = "local-mechanical"
+loads_product_corpus = false
+human_authority_guidance_requires_deep_traversal = false
+expected = "Human-authority guidance does not make an ordinary retrieval or local coding task load the whole product corpus."
