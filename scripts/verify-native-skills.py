@@ -19,6 +19,7 @@ EXPECTED_SKILLS = {
     "skill/aikit/runtime-operation",
     "skill/aikit/session-space",
     "skill/aikit/provider-authoring",
+    "skill/aikit/harness-adapter-authoring",
     "skill/aikit/component-surface-authoring",
     "skill/aikit/verification",
 }
@@ -105,6 +106,13 @@ if {
     "skill/aikit/html-account",
 } & operator_members:
     raise SystemExit("aikit:operator must not imply deep account/projection authoring")
+extension_members = {
+    line.strip()
+    for line in (SETS / refs["aikit:extension-developer"] / "members").read_text().splitlines()
+    if line.strip()
+}
+if "skill/aikit/harness-adapter-authoring" not in extension_members:
+    raise SystemExit("aikit:extension-developer: harness adapter authoring member missing")
 
 fixture = ROOT / "skills/fixtures/minimal-authored-skill"
 fdata = tomllib.loads((fixture / "manifest.toml").read_text(encoding="utf-8"))
@@ -238,9 +246,12 @@ if len(lean_guidance.split()) > 330:
     raise SystemExit("lean project guidance has become procedural rather than orienting")
 
 operator = (REGISTRY / "skill/aikit/operation/payload/SKILL.md").read_text()
-if "SkillSet selected != Root position" not in (ROOT / "skills/README.md").read_text():
-    raise SystemExit("suite authority distinction missing")
-if "projected Skill" not in operator:
-    raise SystemExit("operator source/projection distinction missing")
+for required in (
+    "existing world",
+    "Explain",
+    "History",
+):
+    if required not in operator:
+        raise SystemExit(f"operation Skill missing required orientation: {required}")
 
-print("AIKit first-party native Skills, guidance and SkillSets: OK")
+print(f"native skills OK: {len(seen_skills)} Skills, {len(seen_guidance)} guidance fragments, {len(refs)} SkillSets")
