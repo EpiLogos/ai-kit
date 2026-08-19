@@ -57,6 +57,7 @@ pub mod method;
 pub mod model_runtime;
 pub mod platform;
 pub mod policy;
+pub mod praxis;
 pub mod procedure;
 pub mod profile;
 pub mod project;
@@ -213,6 +214,7 @@ pub use method::{
 };
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;
+pub use praxis::{resolve_praxis, PraxisResolution, SelectedMethod, PRAXIS_RESOLUTION_VERSION};
 pub use procedure::{
     absent_fields, render_marked_block, select_isolation, splice_marked_block, FieldOrigin,
     FieldOrigins, Fidelity, Inverse, MutationIsolation, Plan, PlanDigest, Procedure, ProcedureKind,
