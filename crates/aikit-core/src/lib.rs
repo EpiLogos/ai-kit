@@ -53,6 +53,7 @@ pub mod knowledge_wiki_index;
 pub mod knowledge_wiki_provider;
 pub mod lifecycle;
 pub mod live_activation_history;
+pub mod method;
 pub mod model_runtime;
 pub mod platform;
 pub mod policy;
@@ -60,6 +61,7 @@ pub mod procedure;
 pub mod profile;
 pub mod project;
 pub mod project_map;
+pub mod project_reflection;
 pub mod project_world;
 pub mod projectcentral;
 pub mod projection;
@@ -205,6 +207,10 @@ pub use knowledge_wiki_provider::{
 };
 pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
 pub use live_activation_history::live_activation_history_evidence;
+pub use method::{
+    resolve_method, Method, MethodResolution, MethodResolvedRef, MethodSkillRef, UsageOverlayRef,
+    METHOD_VERSION,
+};
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;
 pub use procedure::{
@@ -217,6 +223,14 @@ pub use project::{ProjectConstituentRef, ProjectRef};
 pub use project_map::{
     ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint, ProjectMapStep,
     PROJECT_MAP_VERSION,
+};
+pub use project_reflection::{
+    classify_local_source, project_reflection, verify_reflection_law,
+    ConstitutiveReflectionRelation, LocalSourceCandidate, LocalSourceClassification,
+    LocalSourceRole, LocalSourceRoleEvidence, ProjectReflectionReadModel, ReflectionIssue,
+    ReflectionIssueKind, ReflectionLaw, ReflectionMapping, ReflectionRelationFace,
+    ReflectionRelationView, ReflectionResourceView, ReflectionVerification,
+    PROJECT_REFLECTION_VERSION,
 };
 pub use project_world::{
     disclose_project_world, ActorDisclosure, ActorRuntimeDisclosure, CapabilityHorizonDisclosure,
