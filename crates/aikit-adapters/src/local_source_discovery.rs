@@ -139,7 +139,7 @@ pub fn discover_local_sources(
         .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(LocalSourceDiscovery {
         version: LOCAL_SOURCE_DISCOVERY_VERSION.into(),
-        project,
+        project: project.clone(),
         files_visited: state.files_visited,
         truncated: state.truncated,
         sources: state.sources,
@@ -358,7 +358,7 @@ fn normalise_relative(path: &Path) -> PathBuf {
     path.components().collect()
 }
 
-fn io_error(code: &str, path: &Path, error: std::io::Error) -> AikitError {
+fn io_error(code: &'static str, path: &Path, error: std::io::Error) -> AikitError {
     AikitError::new(code, format!("{}: {error}", path.display()))
 }
 
