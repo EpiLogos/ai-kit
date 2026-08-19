@@ -46,6 +46,9 @@ pub struct NativeSourceRelation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveredLocalSource {
+    /// Stable source identity is kept beside role classification. A role hint is
+    /// never allowed to manufacture or replace source identity.
+    pub source: SourceRef,
     pub relative_path: PathBuf,
     pub candidate: LocalSourceCandidate,
     pub classification: LocalSourceClassification,
@@ -114,7 +117,7 @@ pub fn discover_local_sources(
         }
         let path = project_root.join(relative);
         if path.is_file() {
-            let candidate = candidate_for(
+            let (source, candidate) = candidate_for(
                 &project,
                 project_root,
                 &path,
@@ -123,6 +126,7 @@ pub fn discover_local_sources(
             )?;
             let classification = classify_local_source(&candidate);
             state.sources.push(DiscoveredLocalSource {
+                source,
                 relative_path: relative.clone(),
                 candidate,
                 classification,
@@ -193,18 +197,19 @@ fn walk(directory: &Path, depth: usize, state: &mut WalkState<'_>) -> Result<()>
         if relation.is_none() && !candidate_path(&path, relative) {
             continue;
         }
-        let candidate = candidate_for(
+        let (source, candidate) = candidate_for(
             state.project,
             state.root,
             &path,
             relation,
             state.limits.max_body_bytes,
         )?;
-        if relation.is_none() && !candidate_content(&candidate) && !strong_filename_hint(relative) {
+        if relation.is_none() && candidate.content_hints.is_empty() && !strong_filename_hint(relative) {
             continue;
         }
         let classification = classify_local_source(&candidate);
         state.sources.push(DiscoveredLocalSource {
+            source,
             relative_path: relative.to_path_buf(),
             candidate,
             classification,
@@ -219,7 +224,7 @@ fn candidate_for(
     path: &Path,
     relation: Option<&NativeSourceRelation>,
     max_body_bytes: usize,
-) -> Result<LocalSourceCandidate> {
+) -> Result<(SourceRef, LocalSourceCandidate)> {
     let relative = path
         .strip_prefix(root)
         .map_err(|_| AikitError::new("local_source_discovery.path_escape", "source escaped Project root"))?;
@@ -229,55 +234,53 @@ fn candidate_for(
         .ok()
         .filter(|body| !body.trim().is_empty());
     let generated = generated_hint(relative, body_excerpt.as_deref());
-    let mut metadata = BTreeMap::new();
-    metadata.insert(
-        "discovery.version".into(),
-        LOCAL_SOURCE_DISCOVERY_VERSION.into(),
-    );
-    metadata.insert("project".into(), project.to_string());
-    if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
-        metadata.insert("extension".into(), extension.into());
-    }
-    metadata.insert(
-        "owner-relation".into(),
-        if relation.is_some() { "present" } else { "absent" }.into(),
-    );
+    let content_hints = content_hints(body_excerpt.as_deref());
 
-    let (source, authority, adopted_role) = if let Some(relation) = relation {
+    let (source, declared_role, declared_authority, adopted_source) = if let Some(relation) = relation {
         (
             relation.source.clone(),
-            relation.authority,
             Some(relation.role),
+            Some(relation.authority),
+            Some(relation.source.clone()),
         )
     } else {
-        (
-            SourceRef::parse(&format!(
-                "source:project-local:{}:{}",
-                project.as_str(),
-                relative.to_string_lossy()
-            ))?,
-            SourceAuthority::Observed,
-            None,
-        )
+        let source = SourceRef::parse(&format!(
+            "source:project-local:{}:{}",
+            project.as_str(),
+            relative.to_string_lossy()
+        ))?;
+        if generated {
+            (
+                source,
+                Some(LocalSourceRole::DerivedDocumentation),
+                Some(SourceAuthority::Generated),
+                None,
+            )
+        } else {
+            (source, None, Some(SourceAuthority::Observed), None)
+        }
     };
 
-    Ok(LocalSourceCandidate {
+    Ok((
         source,
-        path: relative.to_string_lossy().into_owned(),
-        authority,
-        declared_role: None,
-        adopted_role,
-        generated,
-        body_excerpt,
-        metadata,
-    })
+        LocalSourceCandidate {
+            path: relative.to_string_lossy().into_owned(),
+            declared_role,
+            declared_authority,
+            adopted_source,
+            content_hints,
+        },
+    ))
 }
 
 fn candidate_path(path: &Path, relative: &Path) -> bool {
     strong_filename_hint(relative)
-        || relative
-            .components()
-            .any(|component| matches!(component.as_os_str().to_str(), Some("docs" | "doc" | "adr" | "adrs" | "architecture")))
+        || relative.components().any(|component| {
+            matches!(
+                component.as_os_str().to_str(),
+                Some("docs" | "doc" | "adr" | "adrs" | "architecture")
+            )
+        })
         || path.extension().and_then(|value| value.to_str()).is_some_and(|ext| {
             matches!(
                 ext.to_ascii_lowercase().as_str(),
@@ -303,28 +306,31 @@ fn strong_filename_hint(relative: &Path) -> bool {
         || lower.contains("manifest")
 }
 
-fn candidate_content(candidate: &LocalSourceCandidate) -> bool {
-    let body = candidate
-        .body_excerpt
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    [
-        "local structural description",
-        "agent governance",
-        "how agents should",
-        "project purpose",
-        "why this project exists",
-        "architecture contract",
-        "module owns",
-        "interface contract",
-        "applies to",
-        "describes",
-        "method",
-        "contextsource",
-    ]
-    .iter()
-    .any(|needle| body.contains(needle))
+fn content_hints(body: Option<&str>) -> Vec<String> {
+    let lower = body.unwrap_or_default().to_ascii_lowercase();
+    let mut hints = Vec::new();
+    for (needle, evidence) in [
+        ("human-authored project ground", "human-authored project ground"),
+        ("project purpose", "human-authored project ground candidate"),
+        ("why this project exists", "human-authored project ground candidate"),
+        ("agent governance", "agent governance"),
+        ("how agents should", "agent governance"),
+        ("local structural description", "structural source"),
+        ("structural source", "structural source"),
+        ("coordinate map", "coordinate map"),
+        ("module owns", "structural source"),
+        ("interface contract", "structural source"),
+        ("architecture contract", "structural source"),
+        ("method", "method praxis"),
+        ("contextsource", "method praxis"),
+    ] {
+        if lower.contains(needle) {
+            hints.push(evidence.to_string());
+        }
+    }
+    hints.sort();
+    hints.dedup();
+    hints
 }
 
 fn generated_hint(relative: &Path, body: Option<&str>) -> bool {
@@ -360,6 +366,13 @@ fn io_error(code: &str, path: &Path, error: std::io::Error) -> AikitError {
 mod tests {
     use super::*;
 
+    fn role(classification: &LocalSourceClassification) -> Option<LocalSourceRole> {
+        match classification {
+            LocalSourceClassification::Classified(evidence) => Some(evidence.role),
+            LocalSourceClassification::Ambiguous(_) | LocalSourceClassification::Unresolved => None,
+        }
+    }
+
     #[test]
     fn filename_only_is_discovery_not_authority() {
         let temp = tempfile::tempdir().unwrap();
@@ -376,9 +389,15 @@ mod tests {
             .iter()
             .find(|source| source.relative_path == PathBuf::from("AGENTS.md"))
             .unwrap();
-        assert_eq!(source.classification.role, LocalSourceRole::Unresolved);
-        assert!(!source.classification.candidates.is_empty());
-        assert_eq!(source.candidate.authority, SourceAuthority::Observed);
+        match &source.classification {
+            LocalSourceClassification::Classified(evidence) => {
+                assert_eq!(evidence.role, LocalSourceRole::AgentGovernance);
+                assert!(!evidence.authoritative);
+                assert!(evidence.evidence.iter().any(|item| item.contains("filename")));
+            }
+            other => panic!("unexpected filename-hint classification {other:?}"),
+        }
+        assert_eq!(source.candidate.declared_authority, Some(SourceAuthority::Observed));
     }
 
     #[test]
@@ -405,8 +424,9 @@ mod tests {
         assert_eq!(result.sources.len(), 1);
         let source = &result.sources[0];
         assert_eq!(source.relative_path, PathBuf::from("README.md"));
-        assert_eq!(source.classification.role, LocalSourceRole::HumanProjectGround);
-        assert_eq!(source.candidate.source.as_str(), "central:project-source:example/project:readme");
+        assert_eq!(role(&source.classification), Some(LocalSourceRole::HumanProjectGround));
+        assert_eq!(source.source.as_str(), "central:project-source:example/project:readme");
+        assert_eq!(source.candidate.adopted_source.as_ref(), Some(&source.source));
     }
 
     #[test]
@@ -426,7 +446,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.sources.len(), 1);
-        assert_eq!(result.sources[0].classification.role, LocalSourceRole::DerivedDocumentation);
+        assert_eq!(role(&result.sources[0].classification), Some(LocalSourceRole::DerivedDocumentation));
+        match &result.sources[0].classification {
+            LocalSourceClassification::Classified(evidence) => assert!(!evidence.authoritative),
+            other => panic!("unexpected generated classification {other:?}"),
+        }
     }
 
     #[test]
