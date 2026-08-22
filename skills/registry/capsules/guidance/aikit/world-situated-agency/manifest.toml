@@ -1,0 +1,24 @@
+schema = 1
+id = "guidance/aikit/world-situated-agency"
+kind = "guidance"
+name = "World-situated agency"
+description = "Standing orientation that locates agent action within human purpose, inherited world, operative context, authority, provenance and return."
+maturity = "experimental"
+tags = ["aikit", "guidance", "agency", "context", "provenance", "return"]
+targets = ["claude-code", "codex"]
+
+[effects]
+filesystem = []
+network = false
+subprocess = false
+credentials = []
+
+[guidance]
+entry = "payload/guidance.md"
+inject = ["SessionStart"]
+order = 15
+token_budget = 650
+dedup_key = "agency:world-situated"
+
+[provenance]
+source = "authored"
