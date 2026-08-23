@@ -5,16 +5,19 @@
 //! host-supplied `ContemplateExecutor` seam. The commands here are deterministic query/preflight
 //! operations suitable for Agent, CI and cross-product conformance callers.
 
+use std::error::Error;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 
 use aikit_core::{
-    portable_contemplate_preflight, KnowledgeImpactRequest, PortableContemplatePreflightRequest,
+    KnowledgeImpactRequest, PortableContemplatePreflightRequest, portable_contemplate_preflight,
 };
-use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+
+type BoxError = Box<dyn Error>;
 
 #[derive(Debug, Parser)]
 #[command(name = "aikit-knowledge-living")]
@@ -41,24 +44,23 @@ struct InputArgs {
     input: PathBuf,
 }
 
-fn read_json<T: DeserializeOwned>(path: &PathBuf) -> Result<T> {
+fn read_json<T: DeserializeOwned>(path: &PathBuf) -> Result<T, BoxError> {
     let bytes = if path.as_os_str() == "-" {
         let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)
-            .context("read Living Knowledge request from stdin")?;
+        std::io::stdin().read_to_end(&mut bytes)?;
         bytes
     } else {
-        fs::read(path).with_context(|| format!("read {}", path.display()))?
+        fs::read(path)?
     };
-    serde_json::from_slice(&bytes).with_context(|| format!("parse {} as JSON", path.display()))
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
-fn print_json(value: &impl Serialize) -> Result<()> {
+fn print_json(value: &impl Serialize) -> Result<(), BoxError> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
     match cli.command {
         Command::Impact(args) => {
