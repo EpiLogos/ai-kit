@@ -19,6 +19,7 @@ EXPECTED_SKILLS = {
     "skill/aikit/runtime-operation",
     "skill/aikit/session-space",
     "skill/aikit/provider-authoring",
+    "skill/aikit/harness-adapter-authoring",
     "skill/aikit/component-surface-authoring",
     "skill/aikit/verification",
     "skill/aikit/meta-harness-craft",
@@ -107,6 +108,13 @@ if {
     "skill/aikit/html-account",
 } & operator_members:
     raise SystemExit("aikit:operator must not imply deep account/projection authoring")
+extension_members = {
+    line.strip()
+    for line in (SETS / refs["aikit:extension-developer"] / "members").read_text().splitlines()
+    if line.strip()
+}
+if "skill/aikit/harness-adapter-authoring" not in extension_members:
+    raise SystemExit("aikit:extension-developer: harness adapter authoring member missing")
 
 fixture = ROOT / "skills/fixtures/minimal-authored-skill"
 fdata = tomllib.loads((fixture / "manifest.toml").read_text(encoding="utf-8"))
