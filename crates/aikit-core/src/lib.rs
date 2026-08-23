@@ -44,6 +44,7 @@ pub mod hooks;
 pub mod id;
 pub mod knowledge;
 pub mod knowledge_code;
+pub mod knowledge_living;
 pub mod knowledge_navigation;
 pub mod knowledge_operations;
 pub mod knowledge_okf;
@@ -177,6 +178,15 @@ pub use knowledge::{
 pub use knowledge_code::{
     CodeContext, CodeImpact, CodeIndexCapabilities, CodeIndexProvider, CodeIndexStatus,
     CodeReference, CodeSearchHit, CodeTrace, GITNEXUS_TESTED_VERSION,
+};
+pub use knowledge_living::{
+    build_integrative_reading, contemplate_preflight, deterministic_knowledge_impact,
+    explicit_contemplate, living_wiki_provenance, ContemplateExecutor, ContemplateGenerated,
+    ContemplateOutcome, ContemplatePreflight, ContemplateRequest, IntegrativeWikiReading,
+    KnowledgeAffectedResource, KnowledgeChangeHorizon, KnowledgeChangeKind, KnowledgeChangeProvider,
+    KnowledgeDependency, KnowledgeFreshness, KnowledgeImpact, KnowledgeObservedSource,
+    KnowledgeSourceChange, ReadingBasisEdge, ReadingBasisNode, ReadingReturnPath,
+    INTEGRATIVE_READING_EXTENSION, LIVING_KNOWLEDGE_VERSION,
 };
 pub use knowledge_navigation::{
     KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation, KnowledgeProviderStatus,
