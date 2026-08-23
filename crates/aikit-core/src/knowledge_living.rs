@@ -590,7 +590,7 @@ mod tests {
                     provider_native: BTreeMap::new(),
                     resources: MaterialResourceReading::default(),
                     lifetime_owner: "test".into(),
-                    retraction: RetractionMode::Immediate,
+                    retraction: RetractionMode::Live,
                 },
                 model_surface: ModelSurfaceReading {
                     contract: None,
@@ -701,7 +701,7 @@ mod tests {
             vec![],
             KnowledgeFreshness::Fresh,
         );
-        assert_eq!(result.unwrap_err().code, "knowledge.living_basis_cycle");
+        assert_eq!(result.unwrap_err().code(), "knowledge.living_basis_cycle");
     }
 
     struct CountingExecutor { calls: usize }
