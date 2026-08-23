@@ -156,7 +156,7 @@ pub fn deterministic_knowledge_impact(
             Some(_) if dependency.integrative => KnowledgeFreshness::IntegrationPending,
             Some(_) => KnowledgeFreshness::BasisChanged,
         };
-        if freshness != KnowledgeFreshness::Fresh || changed_sources.contains(&dependency.source) {
+        if freshness != KnowledgeFreshness::Fresh {
             affected.push(KnowledgeAffectedResource {
                 resource: dependency.dependent.clone(),
                 source: dependency.source.clone(),
@@ -502,6 +502,7 @@ pub fn living_wiki_provenance(source: SourceRef, revision: SourceRevision) -> Wi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::composition::RetractionMode;
     use crate::familiarity::FamiliarityContext;
     use crate::method::Method;
     use crate::model_runtime::{
@@ -510,14 +511,19 @@ mod tests {
         ModelRuntimeRelation, ModelSurfaceReading, ModelVariantReading, PlacementObservation,
         RuntimeChangeApplication,
     };
-    use crate::composition::RetractionMode;
-    use crate::resource::ProviderRef;
     use crate::ql::QlClientSubject;
+    use crate::resource::ProviderRef;
     use std::collections::{BTreeMap, BTreeSet};
 
-    fn resource(value: &str) -> ResourceRef { ResourceRef::parse(value).unwrap() }
-    fn source(value: &str) -> SourceRef { SourceRef::parse(value).unwrap() }
-    fn revision(value: &str) -> SourceRevision { SourceRevision::parse(value).unwrap() }
+    fn resource(value: &str) -> ResourceRef {
+        ResourceRef::parse(value).unwrap()
+    }
+    fn source(value: &str) -> SourceRef {
+        SourceRef::parse(value).unwrap()
+    }
+    fn revision(value: &str) -> SourceRevision {
+        SourceRevision::parse(value).unwrap()
+    }
 
     fn horizon() -> KnowledgeChangeHorizon {
         KnowledgeChangeHorizon {
@@ -574,7 +580,10 @@ mod tests {
             agent_session: Some("session:test".into()),
             harness_composition_fingerprint: "abc".into(),
             relation: ModelRuntimeRelation {
-                model: ModelVariantReading { model: resource("model:test"), variant: "default".into() },
+                model: ModelVariantReading {
+                    model: resource("model:test"),
+                    variant: "default".into(),
+                },
                 engine: InferenceEngineReading {
                     engine: resource("engine:test"),
                     provider: ProviderRef::parse("provider:test").unwrap(),
@@ -633,8 +642,14 @@ mod tests {
     fn deterministic_impact_is_relation_only_and_zero_agent() {
         let impact = deterministic_knowledge_impact(&horizon(), &dependencies()).unwrap();
         assert_eq!(impact.affected.len(), 2);
-        assert_eq!(impact.affected[0].freshness, KnowledgeFreshness::BasisChanged);
-        assert_eq!(impact.affected[1].freshness, KnowledgeFreshness::IntegrationPending);
+        assert_eq!(
+            impact.affected[0].freshness,
+            KnowledgeFreshness::BasisChanged
+        );
+        assert_eq!(
+            impact.affected[1].freshness,
+            KnowledgeFreshness::IntegrationPending
+        );
         assert!(!impact.automatic_agent_or_model_invocation);
         assert_eq!(impact.changed_sources, vec![source("central:source:position")]);
     }
@@ -644,7 +659,12 @@ mod tests {
         let mut h = horizon();
         h.sources.clear();
         let impact = deterministic_knowledge_impact(&h, &dependencies()).unwrap();
-        assert!(impact.affected.iter().all(|item| item.freshness == KnowledgeFreshness::BasisUnavailable));
+        assert!(
+            impact
+                .affected
+                .iter()
+                .all(|item| item.freshness == KnowledgeFreshness::BasisUnavailable)
+        );
     }
 
     #[test]
@@ -673,10 +693,20 @@ mod tests {
                 roles: vec!["purpose".into()],
             }],
             vec![],
-            vec![ReadingReturnPath { from_basis: basis_ref, through: vec![], to_whole: whole }],
+            vec![ReadingReturnPath {
+                from_basis: basis_ref,
+                through: vec![],
+                to_whole: whole,
+            }],
             KnowledgeFreshness::Fresh,
-        ).unwrap();
-        assert!(built.reading.extensions.contains_key(INTEGRATIVE_READING_EXTENSION));
+        )
+        .unwrap();
+        assert!(
+            built
+                .reading
+                .extensions
+                .contains_key(INTEGRATIVE_READING_EXTENSION)
+        );
     }
 
     #[test]
@@ -684,19 +714,43 @@ mod tests {
         let a = resource("wiki:a");
         let b = resource("wiki:b");
         let reading = WikiReading {
-            profile: "okf-wiki/v1".into(), ref_id: resource("wiki:whole"), revision: 1,
-            provenance: vec![], frame_ref: resource("wiki:frame"), reading_type: "quilt".into(),
-            artifact_ref: None, derived_by_ref: None, extensions: BTreeMap::new(),
+            profile: "okf-wiki/v1".into(),
+            ref_id: resource("wiki:whole"),
+            revision: 1,
+            provenance: vec![],
+            frame_ref: resource("wiki:frame"),
+            reading_type: "quilt".into(),
+            artifact_ref: None,
+            derived_by_ref: None,
+            extensions: BTreeMap::new(),
         };
         let result = build_integrative_reading(
             reading,
             vec![
-                ReadingBasisNode { resource: a.clone(), source: None, source_revision: None, roles: vec![] },
-                ReadingBasisNode { resource: b.clone(), source: None, source_revision: None, roles: vec![] },
+                ReadingBasisNode {
+                    resource: a.clone(),
+                    source: None,
+                    source_revision: None,
+                    roles: vec![],
+                },
+                ReadingBasisNode {
+                    resource: b.clone(),
+                    source: None,
+                    source_revision: None,
+                    roles: vec![],
+                },
             ],
             vec![
-                ReadingBasisEdge { from: a.clone(), to: b.clone(), relation: "supports".into() },
-                ReadingBasisEdge { from: b, to: a, relation: "depends-on".into() },
+                ReadingBasisEdge {
+                    from: a.clone(),
+                    to: b.clone(),
+                    relation: "supports".into(),
+                },
+                ReadingBasisEdge {
+                    from: b,
+                    to: a,
+                    relation: "depends-on".into(),
+                },
             ],
             vec![],
             KnowledgeFreshness::Fresh,
@@ -704,7 +758,9 @@ mod tests {
         assert_eq!(result.unwrap_err().code(), "knowledge.living_basis_cycle");
     }
 
-    struct CountingExecutor { calls: usize }
+    struct CountingExecutor {
+        calls: usize,
+    }
     impl ContemplateExecutor for CountingExecutor {
         fn execute(&mut self, _preflight: &ContemplatePreflight) -> Result<ContemplateGenerated> {
             self.calls += 1;
@@ -760,10 +816,18 @@ mod tests {
         );
         let with_ql = ContemplateRequest {
             project: ProjectRef::parse("example/project").unwrap(),
-            focus: vec![], horizon: &h, dependencies: &deps, current_wiki_objects: &[], runtime: &rt,
-            method: None, ql: Some(ql),
+            focus: vec![],
+            horizon: &h,
+            dependencies: &deps,
+            current_wiki_objects: &[],
+            runtime: &rt,
+            method: None,
+            ql: Some(ql),
         };
-        let without_ql = ContemplateRequest { ql: None, ..with_ql };
+        let without_ql = ContemplateRequest {
+            ql: None,
+            ..with_ql
+        };
         let ordinary = contemplate_preflight(&without_ql).unwrap();
         assert!(ordinary.ql.is_none());
         assert_eq!(ordinary.impact.affected.len(), 2);
