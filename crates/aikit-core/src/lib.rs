@@ -45,6 +45,7 @@ pub mod id;
 pub mod knowledge;
 pub mod knowledge_code;
 pub mod knowledge_living;
+pub mod knowledge_living_relations;
 pub mod knowledge_navigation;
 pub mod knowledge_operations;
 pub mod knowledge_okf;
@@ -187,6 +188,15 @@ pub use knowledge_living::{
     KnowledgeDependency, KnowledgeFreshness, KnowledgeImpact, KnowledgeObservedSource,
     KnowledgeSourceChange, ReadingBasisEdge, ReadingBasisNode, ReadingReturnPath,
     INTEGRATIVE_READING_EXTENSION, LIVING_KNOWLEDGE_VERSION,
+};
+pub use knowledge_living_relations::{
+    build_revisioned_integrative_reading, deterministic_transitive_knowledge_impact,
+    integrated_through_cursor, integrative_basis_refs, integrating_readings,
+    portable_contemplate_preflight, validate_reintegration, KnowledgeImpactPath,
+    KnowledgeImpactRef, KnowledgeImpactRequest, KnowledgeImpactStep, KnowledgeResourceDependency,
+    KnowledgeTransitiveAffected, KnowledgeTransitiveImpact, PortableContemplatePreflight,
+    PortableContemplatePreflightRequest, ReadingBasisRevision, DEFAULT_LIVING_IMPACT_DEPTH,
+    DEFAULT_LIVING_IMPACT_RESOURCES, LIVING_RELATIONS_VERSION,
 };
 pub use knowledge_navigation::{
     KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation, KnowledgeProviderStatus,
