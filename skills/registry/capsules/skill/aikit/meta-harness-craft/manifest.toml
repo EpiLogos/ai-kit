@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/meta-harness-craft"
+kind = "skill"
+name = "AIKit Meta-harness Craft"
+description = "Craft and improve the persistent artifacts, context-selection rules, praxis, validation and return paths that situate agent work across sessions."
+maturity = "experimental"
+tags = ["aikit", "context", "harness", "praxis", "artifacts", "validation", "return"]
+
+[skill]
+root = "payload"
