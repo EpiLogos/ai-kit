@@ -21,9 +21,11 @@ EXPECTED_SKILLS = {
     "skill/aikit/provider-authoring",
     "skill/aikit/component-surface-authoring",
     "skill/aikit/verification",
+    "skill/aikit/meta-harness-craft",
 }
 EXPECTED_GUIDANCE = {
     "guidance/aikit/living-project-collaboration",
+    "guidance/aikit/world-situated-agency",
 }
 
 seen_skills: set[str] = set()
