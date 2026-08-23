@@ -1,17 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use aikit_core::model_runtime::{
+    AccessFieldReading, InferenceEngineForm, InferenceEngineReading, MaterialResourceReading,
+    ModelAccessReading, ModelMaterialisationReading, ModelRuntimeReadModel, ModelRuntimeRelation,
+    ModelSurfaceReading, ModelVariantReading, PlacementObservation, RuntimeChangeApplication,
+};
 use aikit_core::{
     bounded_contemplate_preflight, deterministic_transitive_knowledge_impact,
     explicit_bounded_contemplate, parse_contemplate_generated, wiki_living_dependencies,
-    AccessFieldReading, BoundedContemplateExecutor, BoundedContemplatePreflight,
-    ContemplateGenerated, ContemplateRequest, InferenceEngineForm, InferenceEngineReading,
-    KnowledgeChangeHorizon, KnowledgeChangeKind, KnowledgeFreshness, KnowledgeObservedSource,
-    KnowledgeSourceChange, MaterialResourceReading, ModelAccessReading,
-    ModelMaterialisationReading, ModelRuntimeReadModel, ModelRuntimeRelation, ModelSurfaceReading,
-    ModelVariantReading, PlacementObservation, ProjectRef, ProviderRef, ResourceRef,
-    RetractionMode, RuntimeChangeApplication, SemanticRevision, SemanticWikiIndex, SourceRef,
-    SourceRevision, WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject, WikiProvenanceRef,
-    WikiReading, INTEGRATIVE_READING_EXTENSION,
+    BoundedContemplateExecutor, BoundedContemplatePreflight, ContemplateGenerated,
+    ContemplateRequest, KnowledgeChangeHorizon, KnowledgeChangeKind, KnowledgeFreshness,
+    KnowledgeObservedSource, KnowledgeSourceChange, ProjectRef, ProviderRef, ResourceRef,
+    RetractionMode, SemanticRevision, SemanticWikiIndex, SemanticWikiReading as WikiReading,
+    SourceRef, SourceRevision, WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject,
+    WikiProvenanceRef, INTEGRATIVE_READING_EXTENSION,
 };
 
 fn resource(value: &str) -> ResourceRef {
