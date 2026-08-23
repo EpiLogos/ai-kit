@@ -46,7 +46,9 @@ pub mod id;
 pub mod knowledge;
 pub mod knowledge_code;
 pub mod knowledge_living;
+pub mod knowledge_living_context;
 pub mod knowledge_living_relations;
+pub mod knowledge_living_transport;
 pub mod knowledge_navigation;
 pub mod knowledge_operations;
 pub mod knowledge_okf;
@@ -196,6 +198,14 @@ pub use knowledge_living::{
     KnowledgeSourceChange, ReadingBasisEdge, ReadingBasisNode, ReadingReturnPath,
     INTEGRATIVE_READING_EXTENSION, LIVING_KNOWLEDGE_VERSION,
 };
+pub use knowledge_living_context::{
+    assemble_contemplate_context, bounded_contemplate_preflight, explicit_bounded_contemplate,
+    wiki_living_dependencies, BoundedContemplateExecutor, BoundedContemplateOutcome,
+    BoundedContemplatePreflight, ContemplateContextField, ContemplateFieldChange,
+    ContemplateFieldObject, ContemplateFieldRelation, ContemplateFieldReturn,
+    ContemplateFieldSource, CONTEMPLATE_FIELD_VERSION, DEFAULT_CONTEMPLATE_OBJECT_BUDGET,
+    DEFAULT_CONTEMPLATE_RELATION_DEPTH,
+};
 pub use knowledge_living_relations::{
     build_revisioned_integrative_reading, deterministic_transitive_knowledge_impact,
     integrated_through_cursor, integrative_basis_refs, integrating_readings,
@@ -204,6 +214,9 @@ pub use knowledge_living_relations::{
     KnowledgeTransitiveAffected, KnowledgeTransitiveImpact, PortableContemplatePreflight,
     PortableContemplatePreflightRequest, ReadingBasisRevision, DEFAULT_LIVING_IMPACT_DEPTH,
     DEFAULT_LIVING_IMPACT_RESOURCES, LIVING_RELATIONS_VERSION,
+};
+pub use knowledge_living_transport::{
+    parse_contemplate_generated, CONTEMPLATE_RETURN_VERSION,
 };
 pub use knowledge_navigation::{
     KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation, KnowledgeProviderStatus,
