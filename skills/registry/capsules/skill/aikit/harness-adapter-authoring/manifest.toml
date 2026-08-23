@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/harness-adapter-authoring"
+kind = "skill"
+name = "AIKit Harness Adapter Authoring"
+description = "Admit an unsupported harness by preserving its native faculties, source ownership and activation truth through AIKit's public adapter contract."
+maturity = "experimental"
+tags = ["aikit", "harness", "adapter", "projection", "conformance", "provenance"]
+
+[skill]
+root = "payload"

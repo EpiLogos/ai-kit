@@ -7,4 +7,5 @@ skill/aikit/verification
 skill/aikit/profile-skillset
 skill/aikit/skill-authoring
 skill/aikit/provider-authoring
+skill/aikit/harness-adapter-authoring
 skill/aikit/component-surface-authoring

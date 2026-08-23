@@ -8,6 +8,8 @@ on:
       - "crates/aikit-core/src/skillset.rs"
       - "crates/aikit-core/src/profile.rs"
       - "crates/aikit-core/src/session_space*.rs"
+      - "crates/aikit-core/src/harness_admission.rs"
+      - "crates/aikit-core/tests/harness_admission.rs"
       - ".github/workflows/native-skills.yml"
   push:
     branches: [main]
@@ -17,6 +19,8 @@ on:
       - "crates/aikit-core/src/skillset.rs"
       - "crates/aikit-core/src/profile.rs"
       - "crates/aikit-core/src/session_space*.rs"
+      - "crates/aikit-core/src/harness_admission.rs"
+      - "crates/aikit-core/tests/harness_admission.rs"
       - ".github/workflows/native-skills.yml"
 
 jobs:
@@ -26,5 +30,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 scripts/verify-native-skills.py
       - uses: dtolnay/rust-toolchain@stable
+      - name: Public harness-admission SDK conformance
+        run: cargo test -p aikit-core --test harness_admission
       - run: cargo test -p aikit-cli --test set_command
       - run: cargo test -p aikit-cli --test acceptance
