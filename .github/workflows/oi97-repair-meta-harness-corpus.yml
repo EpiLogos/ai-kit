@@ -1,0 +1,48 @@
+name: OI97 repair meta-harness corpus expectations
+
+on:
+  push:
+    branches: [praxis/meta-harness-context-craft]
+    paths:
+      - '.github/workflows/oi97-repair-meta-harness-corpus.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: praxis/meta-harness-context-craft
+      - name: Reconcile first-party corpus expectations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/verify-native-skills.py')
+          text = path.read_text()
+          skill = '    "skill/aikit/meta-harness-craft",\n'
+          guidance = '    "guidance/aikit/world-situated-agency",\n'
+          if '"skill/aikit/meta-harness-craft"' not in text:
+              anchor = '    "skill/aikit/verification",\n'
+              assert anchor in text
+              text = text.replace(anchor, anchor + skill, 1)
+          if '"guidance/aikit/world-situated-agency"' not in text:
+              anchor = '    "guidance/aikit/living-project-collaboration",\n'
+              assert anchor in text
+              text = text.replace(anchor, anchor + guidance, 1)
+          path.write_text(text)
+          PY
+          python3 scripts/verify-native-skills.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/verify-native-skills.py
+          if git diff --cached --quiet; then
+            echo 'Verifier already reconciled.'
+          else
+            git commit -m 'test(oi97): recognise meta-harness Skill and Guidance'
+            git push origin HEAD:praxis/meta-harness-context-craft
+          fi
