@@ -115,17 +115,14 @@ fn world() -> (KnowledgeChangeHorizon, Vec<WikiObject>) {
     );
     reading_extensions.insert("tensions".into(), serde_json::json!(["open question"]));
 
+    // The whole has no direct source provenance in this fixture. Its only change
+    // dependency is the explicit integrative basis relation from the granular part,
+    // so any impact on the whole below is genuinely transitive.
     let reading = WikiObject::Reading(WikiReading {
         profile: "okf-wiki/v1".into(),
         ref_id: whole.clone(),
         revision: 2,
-        provenance: vec![WikiProvenanceRef {
-            source_ref: src.clone(),
-            source_revision: Some(SemanticRevision::Text("r1".into())),
-            producer_ref: Some(resource("agent:test")),
-            generation_ref: None,
-            extensions: BTreeMap::new(),
-        }],
+        provenance: vec![],
         frame_ref: resource("wiki:frame:test"),
         reading_type: "integrative".into(),
         artifact_ref: None,
@@ -222,9 +219,28 @@ fn public_living_knowledge_path_is_deterministic_until_explicit_contemplate() {
     )
     .unwrap();
     assert!(impact
+        .direct
+        .affected
+        .iter()
+        .any(|value| value.resource == resource("wiki:node:part")));
+    assert!(!impact
+        .direct
+        .affected
+        .iter()
+        .any(|value| value.resource == resource("wiki:reading:whole")));
+    let whole_path = impact
+        .paths
+        .iter()
+        .find(|value| value.resource == resource("wiki:reading:whole"))
+        .expect("whole must have an inspectable transitive path");
+    assert_eq!(whole_path.steps.len(), 2);
+    assert!(impact
         .transitive
         .iter()
         .any(|value| value.resource == resource("wiki:reading:whole")));
+    assert!(impact
+        .pending_integration
+        .contains(&resource("wiki:reading:whole")));
     assert!(!impact.automatic_agent_or_model_invocation);
 
     let runtime = runtime();
