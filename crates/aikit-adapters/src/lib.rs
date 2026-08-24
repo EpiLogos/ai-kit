@@ -57,7 +57,7 @@ pub use local_source_discovery::{
     discover_local_sources, DiscoveredLocalSource, LocalSourceDiscovery,
     LocalSourceDiscoveryLimits, NativeSourceRelation, LOCAL_SOURCE_DISCOVERY_VERSION,
 };
-pub use okf::{parse_okf_markdown, render_okf_markdown};
+pub use okf::{parse_authored_markdown_relations, parse_okf_markdown, render_okf_markdown};
 pub use projectcentral::{ProjectCentralFileProvider, ProjectCentralFilesystemBinding};
 pub use session_space_connection::connection_into_session_space;
 pub use session_space_observation::{
