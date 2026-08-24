@@ -149,7 +149,7 @@ impl<'a> SemanticWikiProvider<'a> {
                     to,
                     neighbour.relation.clone(),
                     direction,
-                    RelationOrigin::new(authority_for_edge_origin(neighbour.origin))
+                    RelationOrigin::new(authority_for_neighbour(&neighbour))
                         .from_provider(self.provider.clone())
                         .in_lens("semantic-wiki"),
                 ))?;
@@ -295,6 +295,19 @@ fn authority_for_object(object: &WikiObject) -> SourceAuthority {
     }
 }
 
+/// `WikiEdgeOrigin::Authored` means the relation was explicitly present in source
+/// language. It does not by itself prove that the owning source was human-authored.
+/// Source compilers may therefore carry the owner's epistemic standing on exact
+/// provenance; common Knowledge relation views prefer that standing when present.
+fn authority_for_neighbour(neighbour: &WikiNeighbour) -> SourceAuthority {
+    neighbour
+        .provenance
+        .iter()
+        .filter_map(|provenance| provenance.extensions.get("source_authority"))
+        .find_map(|value| serde_json::from_value::<SourceAuthority>(value.clone()).ok())
+        .unwrap_or_else(|| authority_for_edge_origin(neighbour.origin))
+}
+
 fn authority_for_edge_origin(origin: WikiEdgeOrigin) -> SourceAuthority {
     match origin {
         WikiEdgeOrigin::Authored => SourceAuthority::Authored,
@@ -386,7 +399,16 @@ mod tests {
             profile: crate::knowledge_wiki::OKF_WIKI_PROFILE.into(),
             ref_id: ResourceRef::parse("wiki:edge:source-link").unwrap(),
             revision: 1,
-            provenance: Vec::new(),
+            provenance: vec![WikiProvenanceRef {
+                source_ref: SourceRef::parse("source:notes:alpha").unwrap(),
+                source_revision: None,
+                producer_ref: None,
+                generation_ref: None,
+                extensions: BTreeMap::from([(
+                    "source_authority".into(),
+                    serde_json::json!("learned"),
+                )]),
+            }],
             from_ref: ResourceRef::parse("source:notes:alpha").unwrap(),
             to_ref: ResourceRef::parse("wiki:node:living-wiki").unwrap(),
             relation: "references".into(),
@@ -417,7 +439,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(source_view.nodes[0].kind, ResourceKind::KnowledgeSource);
-        assert_eq!(source_view.edges[0].origin.authority, SourceAuthority::Authored);
+        assert_eq!(source_view.edges[0].origin.authority, SourceAuthority::Learned);
 
         let flow_view = provider
             .relations(RelationQuery::local(ResourceRef::parse("flow:thread:1").unwrap()))
