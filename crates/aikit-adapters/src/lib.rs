@@ -34,9 +34,10 @@ pub use agent_connection::{
     SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION, AGENT_CONNECTION_ADAPTER_VERSION,
 };
 pub use authored_wiki_source::{
-    compile_authored_wiki_relations, parse_authored_wiki_source,
-    rebuild_semantic_wiki_with_authored_relations, AuthoredWikiRelationCompilation,
-    AuthoredWikiSourceProjection, PendingAuthoredRelation, AUTHORED_WIKI_SOURCE_VERSION,
+    authored_relation_dependencies, compile_authored_wiki_relations, parse_authored_wiki_source,
+    parse_authored_wiki_source_with_authority, rebuild_semantic_wiki_with_authored_relations,
+    AuthoredWikiRelationCompilation, AuthoredWikiSourceProjection, PendingAuthoredRelation,
+    AUTHORED_WIKI_SOURCE_VERSION,
 };
 pub use composition_topology::{
     resolve_component_topology, ComponentContainment, HarnessCompositionTopology,
