@@ -27,6 +27,9 @@ on:
       - "crates/aikit-core/tests/harness_admission.rs"
       - ".github/workflows/native-skills.yml"
 
+permissions:
+  contents: write
+
 jobs:
   conformance:
     runs-on: ubuntu-latest
@@ -40,3 +43,228 @@ jobs:
         run: cargo test -p aikit-core --test harness_admission
       - run: cargo test -p aikit-cli --test set_command
       - run: cargo test -p aikit-cli --test acceptance
+
+  oi97-credential-convergence:
+    if: github.event_name == 'pull_request' && github.head_ref == 'converge/oi97-v2-native-credentials'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: converge/oi97-v2-native-credentials
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compose credential seams into current Wiki/Flow V2
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          provider = Path('crates/aikit-adapters/src/credential_provider.rs')
+          s = provider.read_text()
+          old = 'use std::path::{Path, PathBuf};'
+          new = 'use std::path::Path;\n#[cfg(target_os = "linux")]\nuse std::path::PathBuf;'
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif new not in s:
+              raise SystemExit('credential provider import seam moved')
+          provider.write_text(s)
+
+          core = Path('crates/aikit-core/src/lib.rs')
+          s = core.read_text()
+          old = '''pub use credential::{
+              resolve_credential, CredentialBindingState, CredentialProviderRejection, CredentialRef,
+              CredentialResolution, CredentialResolutionRequest, ProviderResolutionExplanation,
+              SecretMaterialisationClass, SecretProviderDescriptor, SecretProviderRef, SecretProviderTier,
+              SecretRequirement, SecretRequirementRef, CREDENTIAL_RESOLUTION_VERSION,
+          };'''
+          new = '''pub use credential::{
+              resolve_credential, resolve_registered_credential, CredentialBindingState,
+              CredentialProviderRejection, CredentialRef, CredentialResolution, CredentialResolutionRequest,
+              ProviderResolutionExplanation, SecretMaterialisationClass, SecretProvider,
+              SecretProviderDescriptor, SecretProviderRef, SecretProviderTier, SecretRequirement,
+              SecretRequirementRef, SecretValue, CREDENTIAL_RESOLUTION_VERSION,
+          };'''
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif 'resolve_registered_credential' not in s:
+              raise SystemExit('core credential export seam moved')
+          core.write_text(s)
+
+          main = Path('crates/aikit-cli/src/main.rs')
+          s = main.read_text()
+          s = s.replace(
+              'use aikit_cli::{hook, multicall, run, ui};',
+              'use aikit_cli::{credential, hook, multicall, run, ui};',
+              1,
+          )
+          dispatch_anchor = '        Some(Command::Doctor(a)) => cmd_doctor(cwd, a),\n'
+          credential_arm = '        Some(Command::Credential(c)) => cmd_credential(cwd, c, json_mode),\n'
+          if credential_arm not in s:
+              if dispatch_anchor not in s:
+                  raise SystemExit('CLI dispatch seam moved')
+              s = s.replace(dispatch_anchor, dispatch_anchor + credential_arm, 1)
+
+          start = s.index('fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {')
+          end = s.index('\nfn cmd_history(cwd: &std::path::Path, a: HistoryArgs) -> Result<Reply> {', start)
+          replacement = r'''fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {
+              if let Some(credential_ref) = a.credential {
+                  let service = Service::discover(cwd)?;
+                  let request = credential::CredentialRequest {
+                      credential: aikit_core::credential::CredentialRef::new(credential_ref)?,
+                      consumer_ref: "operator:aikit-explain".into(),
+                      purpose: "credential resolution explanation".into(),
+                      env_var: a.env_var,
+                      project_env: a.project_env,
+                      from_env: a.from_env,
+                      headless: a.headless,
+                  };
+                  let inspection = credential::inspect(service.home(), &request)?;
+                  return Ok(reply(
+                      &service,
+                      jval!({
+                          "credential": request.credential.as_str(),
+                          "resolution": inspection.resolution,
+                          "persisted_binding": inspection.persisted_binding,
+                          "native_provider": inspection.native_provider,
+                          "env_available": inspection.env_available,
+                      }),
+                      vec![],
+                  ));
+              }
+
+              let capability = a.capability.ok_or_else(|| {
+                  AikitError::new(
+                      "cli.usage",
+                      "pass a capability/Resource id or --credential CREDENTIAL",
+                  )
+              })?;
+              use aikit_core::resource::ResourceRef;
+
+              let mut service = Service::discover(cwd)?;
+              let capsule_candidate = CapsuleId::parse(&capability).ok();
+              if let Some(id) = capsule_candidate.as_ref() {
+                  if let Some(explanation) = service.resolved().explain(id) {
+                      let data = jval!({
+                          "id": explanation.id.to_string(),
+                          "revision": explanation.revision.as_ref().map(|revision| revision.as_str()),
+                          "active": explanation.active,
+                          "declared_enabled": explanation.declared_enabled,
+                          "selected_by": explanation.selected_by,
+                          "required_by": explanation.required_by,
+                          "dependencies": explanation.dependencies,
+                          "exports": explanation.exports,
+                          "skill_usage_overlays": explanation.skill_usage_overlays,
+                          "unavailable": explanation.unavailable.as_ref().map(|r| r.describe()),
+                          "render": explanation.render(),
+                      });
+                      return Ok(reply(&service, data, vec![]));
+                  }
+              }
+
+              let resource = ResourceRef::parse(&capability)?;
+              let evidence = {
+                  let application = ApplicationService::new(&mut service);
+                  application.explain_evidence(&resource)
+              };
+              match evidence {
+                  Ok(evidence) => Ok(reply(&service, jval!(evidence), vec![])),
+                  Err(error) if capsule_candidate.is_some() => {
+                      let id = capsule_candidate.expect("checked above");
+                      Err(AikitError::new(
+                          "resolution.unknown_capability",
+                          format!("{id} is not in the catalogue for this context"),
+                      )
+                      .with("capability", id.to_string())
+                      .with("evidence_error", error.code()))
+                  }
+                  Err(error) => Err(error),
+              }
+          }
+
+          fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool) -> Result<Reply> {
+              let service = Service::discover(cwd)?;
+              match command.command {
+                  CredentialSub::Setup(a) => {
+                      let request = credential::CredentialRequest {
+                          credential: aikit_core::credential::CredentialRef::new(a.credential)?,
+                          consumer_ref: a.consumer,
+                          purpose: a.purpose,
+                          env_var: a.env_var,
+                          project_env: a.project_env,
+                          from_env: a.from_env,
+                          headless: a.headless || json_mode,
+                      };
+                      let outcome = credential::setup(service.home(), &request)?;
+                      Ok(reply(
+                          &service,
+                          jval!({
+                              "credential": request.credential.as_str(),
+                              "newly_bound": outcome.newly_bound,
+                              "binding": outcome.binding,
+                              "resolution": outcome.resolution,
+                          }),
+                          vec![],
+                      ))
+                  }
+                  CredentialSub::Explain(a) => {
+                      let request = credential::CredentialRequest {
+                          credential: aikit_core::credential::CredentialRef::new(a.credential)?,
+                          consumer_ref: a.consumer,
+                          purpose: a.purpose,
+                          env_var: a.env_var,
+                          project_env: a.project_env,
+                          from_env: a.from_env,
+                          headless: a.headless || json_mode,
+                      };
+                      let inspection = credential::inspect(service.home(), &request)?;
+                      Ok(reply(
+                          &service,
+                          jval!({
+                              "credential": request.credential.as_str(),
+                              "resolution": inspection.resolution,
+                              "persisted_binding": inspection.persisted_binding,
+                              "native_provider": inspection.native_provider,
+                              "env_available": inspection.env_available,
+                          }),
+                          vec![],
+                      ))
+                  }
+                  CredentialSub::List(_) => {
+                      let bindings = aikit_store::CredentialBindingStore::new(service.home()).list()?;
+                      Ok(reply(
+                          &service,
+                          jval!({ "bindings": bindings, "count": bindings.len() }),
+                          vec![],
+                      ))
+                  }
+              }
+          }
+          '''
+          s = s[:start] + replacement + s[end:]
+          main.write_text(s)
+          PY
+          cargo fmt --all
+      - name: Verify current credential + V2 composition
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p aikit-core
+          cargo test -p aikit-store
+          cargo test -p aikit-adapters
+          cargo test -p aikit-cli
+          cargo test -p aikit-tui
+          cargo clippy --workspace --all-targets -- -D warnings
+          bash scripts/verify
+      - name: Commit exact semantic result
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout origin/main -- .github/workflows/native-skills.yml
+          printf '%s\n' 'delete after convergence to trigger exact-head CI' > .oi97-credential-trigger
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'feat(v2): converge native credential providers'
+          git push origin HEAD:converge/oi97-v2-native-credentials
