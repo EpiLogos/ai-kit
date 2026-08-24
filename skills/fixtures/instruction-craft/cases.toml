@@ -1,0 +1,89 @@
+schema = 1
+
+[[case]]
+id = "trigger-positive-negative"
+skill = "skill-authoring"
+positive_task = "Create a new reusable AIKit Skill for reviewing source provenance."
+negative_task = "Use the existing provenance review Skill on this one document."
+positive_select = true
+negative_select = false
+expected = "The description routes authoring/revision work without spuriously selecting the Skill merely because an existing Skill is used."
+
+[[case]]
+id = "process-heavy-governance-extracts"
+source_scope = "cross-project-governance"
+contains_long_reusable_procedure = true
+proposed_destination = "skill-or-context-pointer"
+automatic_source_mutation = false
+expected = "Keep the stable governance relation compact and propose moving reusable procedure behind a Skill/reference without silently rewriting Central source."
+
+[[case]]
+id = "no-op-deletion-test"
+no_op_instruction_removed = true
+no_op_conformance_changed = false
+load_bearing_instruction_removed = true
+load_bearing_conformance_changed = true
+expected = "Deletion review distinguishes sediment from language that materially changes the target behaviour."
+
+[[case]]
+id = "contrast-targeted-no-leak"
+contrast_example_present = true
+target_behaviour_improves = true
+unrelated_output_changes = false
+expected = "A compact bad/good contrast anchors the intended distinction without leaking its incidental form into unrelated work."
+
+[[case]]
+id = "progressive-disclosure-common-path"
+rare_reference = "provider-specific-template"
+condition_present = false
+rare_reference_loaded = false
+expected = "The common Skill path names the condition but does not load an infrequent template when the branch is absent."
+
+[[case]]
+id = "phase-separation-hides-future"
+phase = "investigate"
+later_artifact = "plan"
+closure_condition_met = false
+later_artifact_visible = false
+expected = "Where later output causes premature completion, the investigate phase reaches its closure condition before the plan artifact enters context."
+
+[[case]]
+id = "planning-retrieves-available-fact"
+available_fact = true
+fact_retrieved = true
+human_request = false
+expected = "A planning procedure resolves available facts rather than converting retrieval work into a human question."
+
+[[case]]
+id = "authorial-fork-reuses-human-authority"
+source_or_evidence_can_resolve = false
+materially_different_product_futures = true
+human_request = true
+question_level = "experienced-product-consequence"
+expected = "A genuine authorial fork reuses product-understanding human-authority discipline and asks at the consequential altitude."
+
+[[case]]
+id = "history-audit-proposes-governance"
+repeated_failure_evidence = true
+cause_classified = true
+governance_change_proposed = true
+human_review_required = true
+automatic_governance_mutation = false
+expected = "Historical behaviour supports a regression-backed governance proposal but never self-promotes into human-authored source."
+
+[[case]]
+id = "vertical-slice-has-evidence-reason"
+vertical_slice_recommended = true
+risk_named = true
+layers_crossed = true
+earlier_evidence_named = true
+phrase_is_mandatory_dogma = false
+expected = "A vertical slice is recommended because it returns earlier evidence for the named risk, not because the phrase is universally mandatory."
+
+[[case]]
+id = "disclosure-tradeoff-explicit"
+mode = "model-invoked-skill"
+context_load_considered = true
+human_invocation_load_considered = true
+universal_threshold_claimed = false
+expected = "Invocation mode is chosen by an inspectable local trade-off rather than a universal token threshold."

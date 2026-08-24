@@ -22,6 +22,72 @@ Do not make a Skill absorb a Project merely because the Project needs it, and do
 7. Add examples/fixtures where they prove behaviour. For an authoring Skill, prove that it can guide creation of a small valid Skill that passes the same structural rules.
 8. Submit source/revision to the managed source review/trust lifecycle. Repeated success or fitness evidence may inform review but never promotes source automatically.
 
+## Instruction architecture
+
+Use this deeper craft when the task is creating, reviewing or simplifying instructions themselves rather than merely using an existing Skill.
+
+### Source ownership first
+
+Recover the actual source owner before moving language between governance, Guidance, Skill, Method, Project docs or a conditional reference. Human-authored Central governance such as `central.agent-governance-relations/v1` remains Central source; AIKit composes it operationally and does not reinterpret source scope as an instruction-precedence algorithm.
+
+A Skill description is a **routing affordance**. It should name the concrete situation that selects the Skill and a nearby situation that should not. Put reusable procedure in the body rather than accumulating keywords and procedure in the routing description.
+
+### Governance, procedure and disclosure
+
+Classify durable language by what it does:
+
+```text
+stable fact / vocabulary / care / collaboration boundary
+    -> compact governance / Guidance where its source owner warrants persistence
+
+situational reusable procedure
+    -> Skill
+
+Focus-bearing relation among independently owned resources
+    -> Method
+
+rare provider/template/deep example
+    -> conditional reference / context pointer
+
+current Project fact
+    -> Project source / Wiki / evidence owner
+
+one-off workaround
+    -> normally no durable instruction unless returned evidence warrants it
+```
+
+Choose disclosure mode by an inspectable local trade-off between **model/context load** and **human invocation load**. There is no universal token threshold. The common Skill path should state the branch condition and use **progressive disclosure** so rare references do not enter ordinary context merely because they exist.
+
+For consequential boundaries, pair a prohibition with a **positive operational specification**: state the transition the Agent should perform instead of only naming what it must avoid.
+
+### Human authority is inherited, not reimplemented
+
+Instruction craft consumes `aikit:product-understanding` human-authority discipline. Resolve current request, authored source, evidence and reversible engineering before escalating. If materially different product futures remain, ask at the experienced/product/architectural consequence. Historical repetition or successful Agent output never self-promotes into human-authored governance.
+
+### Phase separation
+
+Use phase separation only when a later artifact predictably causes premature completion, hides an unresolved evidence boundary or crosses a real authority boundary. Name the phase closure condition and what later artifact remains unavailable. Direct work does not need ceremony merely because phases are possible.
+
+### Vertical slices and tracer bullets
+
+Recommend a vertical slice only when you can name the risk, the layers crossed and the evidence it returns earlier than a horizontal build. The phrase is a technique, not mandatory engineering dogma.
+
+### Regression before sediment
+
+Attach positive/nearby-negative trigger fixtures and behavioural regression where the language is load-bearing. Run a no-op/deletion test against accumulated instructions: if removing a rule changes neither the target behaviour nor a recurring evidence-backed failure, consolidate or delete it. The goal is the smallest sufficient architecture, not minimum character count.
+
+### Historical behaviour is evidence, not authorship
+
+Sessions, Runs, PRs and repeated failures may justify a governance or Skill proposal after the cause is classified. They do not confer authority to rewrite human source automatically. Route the returned pressure to the real owner.
+
+### Communication is part of capability
+
+Where successful operation requires the Agent to expose evidence, uncertainty, returned difference or a human authorial fork, that communication is part of the Skill's capability contract rather than ornamental verbosity.
+
+The practical premise here is language-conditioned behaviour: instruction language changes distinctions, salience and action. This is not evidence of phenomenal consciousness.
+
+For substantial governance audits, repeated failures, trigger ambiguity, progressive-disclosure redesign, phase separation or historical instruction review, open `references/instruction-architecture-review.md`. Do not load that deep review on the ordinary authoring path.
+
 ## UsageOverlay before source mutation
 
 When an unchanged Skill is broadly correct but a user/Project/Focus needs a small situated orientation, use the existing scoped Skill Usage Overlay mechanism rather than forking or rewriting the Skill source.
