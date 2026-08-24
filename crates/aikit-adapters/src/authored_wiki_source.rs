@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 
+use aikit_core::knowledge_living::KnowledgeDependency;
 use aikit_core::knowledge_okf::{
     materialize_authored_wiki_edge, okf_wiki_source_profile, resolve_authored_relation,
     AuthoredRelationCandidate, AuthoredRelationEvidence, AuthoredRelationResolution,
@@ -15,7 +16,7 @@ use aikit_core::knowledge_okf::{
 };
 use aikit_core::knowledge_wiki::{WikiEdge, WikiObject};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
-use aikit_core::resource::{ResourceRef, SourceRef, SourceRevision};
+use aikit_core::resource::{ResourceRef, SourceAuthority, SourceRef, SourceRevision};
 use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -29,11 +30,18 @@ pub const AUTHORED_WIKI_SOURCE_VERSION: &str = "aikit.authored-wiki-source/v1";
 /// `subject_ref` and `source_ref` are deliberately distinct. A Flow therefore
 /// participates by its stable FlowRef while its retained file/source identity
 /// remains exact provenance, without reclassifying the Flow as a WikiNode.
+///
+/// `source_authority` is also deliberately distinct from `WikiEdgeOrigin::Authored`:
+/// the latter says that the relation was explicit in source language; the former
+/// says what epistemic standing the owning source currently has. An Agent-maintained
+/// Flow can therefore contain an explicit authored link without that link being
+/// misrepresented as human-authored authority.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuthoredWikiSourceProjection {
     pub version: String,
     pub subject_ref: ResourceRef,
     pub source_ref: SourceRef,
+    pub source_authority: SourceAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<SourceRevision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,6 +57,7 @@ pub struct AuthoredWikiSourceProjection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingAuthoredRelation {
     pub subject_ref: ResourceRef,
+    pub source_authority: SourceAuthority,
     pub evidence: AuthoredRelationEvidence,
 }
 
@@ -63,12 +72,34 @@ pub struct AuthoredWikiRelationCompilation {
     pub automatic_agent_or_model_invocation: bool,
 }
 
-/// Parse one retained Markdown source. Plain Markdown is fully valid input.
-/// Frontmatter becomes OKF/Properties semantics only when it explicitly carries
-/// a `type`, preserving ordinary non-OKF YAML as another tool's source language.
+/// Parse one retained Markdown source when the caller has no stronger source
+/// standing. Seeing bytes proves observation, not authorship, so the conservative
+/// default authority is `Observed`.
 pub fn parse_authored_wiki_source(
     subject_ref: ResourceRef,
     source_ref: SourceRef,
+    source_revision: Option<SourceRevision>,
+    locators: Vec<String>,
+    markdown: &str,
+) -> Result<AuthoredWikiSourceProjection> {
+    parse_authored_wiki_source_with_authority(
+        subject_ref,
+        source_ref,
+        SourceAuthority::Observed,
+        source_revision,
+        locators,
+        markdown,
+    )
+}
+
+/// Parse one retained Markdown source with source-owner epistemic standing.
+/// Plain Markdown is fully valid input. Frontmatter becomes OKF/Properties
+/// semantics only when it explicitly carries a `type`, preserving ordinary
+/// non-OKF YAML as another tool's source language.
+pub fn parse_authored_wiki_source_with_authority(
+    subject_ref: ResourceRef,
+    source_ref: SourceRef,
+    source_authority: SourceAuthority,
     source_revision: Option<SourceRevision>,
     locators: Vec<String>,
     markdown: &str,
@@ -92,6 +123,7 @@ pub fn parse_authored_wiki_source(
         version: AUTHORED_WIKI_SOURCE_VERSION.into(),
         subject_ref: profile_subject.unwrap_or(subject_ref),
         source_ref,
+        source_authority,
         source_revision,
         title,
         aliases,
@@ -121,6 +153,7 @@ pub fn compile_authored_wiki_relations(
             ) {
                 pending.push(PendingAuthoredRelation {
                     subject_ref: source.subject_ref.clone(),
+                    source_authority: source.source_authority,
                     evidence: resolved,
                 });
                 continue;
@@ -137,6 +170,17 @@ pub fn compile_authored_wiki_relations(
             let mut edge =
                 materialize_authored_wiki_edge(edge_ref, source.subject_ref.clone(), &resolved)?;
             edge.revision = authored_edge_revision(&resolved);
+            if let Some(provenance) = edge.provenance.first_mut() {
+                provenance.extensions.insert(
+                    "source_authority".into(),
+                    serde_json::to_value(source.source_authority).map_err(|error| {
+                        AikitError::new(
+                            "knowledge.authored_relation_serialize",
+                            format!("could not serialize source authority: {error}"),
+                        )
+                    })?,
+                );
+            }
             edges.push(edge);
         }
     }
@@ -155,6 +199,41 @@ pub fn compile_authored_wiki_relations(
         pending,
         automatic_agent_or_model_invocation: false,
     })
+}
+
+/// Every explicit source relation depends on the exact source revision which
+/// carries it. This projects that deterministic dependency into the existing
+/// Living Knowledge metabolism: a source revision/change can mark its semantic
+/// subject affected without any background Agent/model interpretation.
+pub fn authored_relation_dependencies(
+    sources: &[AuthoredWikiSourceProjection],
+) -> Vec<KnowledgeDependency> {
+    let mut dependencies = sources
+        .iter()
+        .flat_map(|source| {
+            source.relations.iter().map(|relation| KnowledgeDependency {
+                dependent: source.subject_ref.clone(),
+                source: source.source_ref.clone(),
+                basis_revision: source.source_revision.clone(),
+                relation: format!("authored-source:{}", relation.relation),
+                provenance_ref: None,
+                integrative: false,
+            })
+        })
+        .collect::<Vec<_>>();
+    dependencies.sort_by(|left, right| {
+        left.dependent
+            .cmp(&right.dependent)
+            .then(left.source.cmp(&right.source))
+            .then(left.relation.cmp(&right.relation))
+    });
+    dependencies.dedup_by(|left, right| {
+        left.dependent == right.dependent
+            && left.source == right.source
+            && left.relation == right.relation
+            && left.basis_revision == right.basis_revision
+    });
+    dependencies
 }
 
 /// Rebuild the existing SemanticWiki with source-compiled authored edges. This is
@@ -392,6 +471,7 @@ The [[Living Wiki]] becomes inhabitable through [[Future Concept]].
         .unwrap();
 
         assert_eq!(source.subject_ref.as_str(), "wiki:concept:flow");
+        assert_eq!(source.source_authority, SourceAuthority::Observed);
         assert_eq!(source.aliases, vec!["Live Flow"]);
         assert_eq!(source.relations.len(), 3);
         assert_eq!(
@@ -426,22 +506,26 @@ The [[Living Wiki]] becomes inhabitable through [[Future Concept]].
     #[test]
     fn compilation_resolves_to_existing_wiki_and_rebuild_produces_backlink() {
         let wiki = vec![node("wiki:node:beta", "Beta")];
-        let source = parse_authored_wiki_source(
+        let source = parse_authored_wiki_source_with_authority(
             r("source:note:alpha"),
             s("source:note:alpha"),
+            SourceAuthority::Authored,
             Some(SourceRevision::parse("rev-1").unwrap()),
             vec!["notes/alpha.md".into()],
             "Alpha develops beside [[Beta]].\n",
         )
         .unwrap();
-        let compilation =
-            compile_authored_wiki_relations(&[source], &wiki, &[]).unwrap();
+        let compilation = compile_authored_wiki_relations(&[source], &wiki, &[]).unwrap();
         assert_eq!(compilation.edges.len(), 1);
         assert!(compilation.pending.is_empty());
         assert_eq!(compilation.edges[0].origin, WikiEdgeOrigin::Authored);
         assert_eq!(compilation.edges[0].relation, "references");
         assert_eq!(compilation.edges[0].from_ref.as_str(), "source:note:alpha");
         assert_eq!(compilation.edges[0].to_ref.as_str(), "wiki:node:beta");
+        assert_eq!(
+            compilation.edges[0].provenance[0].extensions["source_authority"],
+            serde_json::json!("authored")
+        );
 
         let first = rebuild_semantic_wiki_with_authored_relations(&wiki, &compilation).unwrap();
         let second = rebuild_semantic_wiki_with_authored_relations(&wiki, &compilation).unwrap();
@@ -450,6 +534,26 @@ The [[Living Wiki]] becomes inhabitable through [[Future Concept]].
         assert_eq!(backlinks.len(), 1);
         assert_eq!(backlinks[0].resource.as_str(), "source:note:alpha");
         assert_eq!(backlinks[0].origin, WikiEdgeOrigin::Authored);
+    }
+
+    #[test]
+    fn explicit_relation_origin_does_not_overwrite_agent_source_authority() {
+        let wiki = vec![node("wiki:node:beta", "Beta")];
+        let source = parse_authored_wiki_source_with_authority(
+            r("flow:agent-thread"),
+            s("source:flow:agent-thread"),
+            SourceAuthority::Learned,
+            Some(SourceRevision::parse("rev-agent-2").unwrap()),
+            vec!["flows/agent-thread.md".into()],
+            "Agent-maintained flow links [[Beta]].\n",
+        )
+        .unwrap();
+        let compilation = compile_authored_wiki_relations(&[source], &wiki, &[]).unwrap();
+        assert_eq!(compilation.edges[0].origin, WikiEdgeOrigin::Authored);
+        assert_eq!(
+            compilation.edges[0].provenance[0].extensions["source_authority"],
+            serde_json::json!("learned")
+        );
     }
 
     #[test]
@@ -465,6 +569,7 @@ The [[Living Wiki]] becomes inhabitable through [[Future Concept]].
         let compilation = compile_authored_wiki_relations(&[source], &[], &[]).unwrap();
         assert!(compilation.edges.is_empty());
         assert_eq!(compilation.pending.len(), 1);
+        assert_eq!(compilation.pending[0].source_authority, SourceAuthority::Observed);
         assert_eq!(compilation.pending[0].evidence.raw_target, "Future Concept");
         assert!(matches!(
             compilation.pending[0].evidence.resolution,
@@ -514,5 +619,25 @@ The [[Living Wiki]] becomes inhabitable through [[Future Concept]].
         let second = compile_authored_wiki_relations(&[parse("rev-2")], &wiki, &[]).unwrap();
         assert_eq!(first.edges[0].ref_id, second.edges[0].ref_id);
         assert_ne!(first.edges[0].revision, second.edges[0].revision);
+    }
+
+    #[test]
+    fn authored_relations_feed_existing_living_knowledge_dependency_path() {
+        let source = parse_authored_wiki_source_with_authority(
+            r("wiki:node:flow"),
+            s("source:flow"),
+            SourceAuthority::Authored,
+            Some(SourceRevision::parse("rev-9").unwrap()),
+            vec!["flow.md".into()],
+            "See [[Future Concept]] and [[Another]].\n",
+        )
+        .unwrap();
+        let dependencies = authored_relation_dependencies(&[source]);
+        assert_eq!(dependencies.len(), 1);
+        assert_eq!(dependencies[0].dependent.as_str(), "wiki:node:flow");
+        assert_eq!(dependencies[0].source.as_str(), "source:flow");
+        assert_eq!(dependencies[0].basis_revision.as_ref().unwrap().as_str(), "rev-9");
+        assert_eq!(dependencies[0].relation, "authored-source:references");
+        assert!(!dependencies[0].integrative);
     }
 }
