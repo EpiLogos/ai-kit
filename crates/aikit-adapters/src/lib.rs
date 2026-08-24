@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_connection;
+pub mod authored_wiki_source;
 pub mod bkmr;
 pub mod clients;
 pub mod composition_topology;
@@ -31,6 +32,11 @@ pub use agent_connection::{
     ConnectionSignal, ConnectionSignalKind, ConnectionState, NativePermissionChoice,
     NativePermissionRequest, NativeSessionBinding, PromptRequest, SessionOpenMode,
     SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION, AGENT_CONNECTION_ADAPTER_VERSION,
+};
+pub use authored_wiki_source::{
+    compile_authored_wiki_relations, parse_authored_wiki_source,
+    rebuild_semantic_wiki_with_authored_relations, AuthoredWikiRelationCompilation,
+    AuthoredWikiSourceProjection, PendingAuthoredRelation, AUTHORED_WIKI_SOURCE_VERSION,
 };
 pub use composition_topology::{
     resolve_component_topology, ComponentContainment, HarnessCompositionTopology,
