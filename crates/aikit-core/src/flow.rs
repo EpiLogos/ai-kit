@@ -753,6 +753,31 @@ mod tests {
                 writes: 0,
             }
         }
+
+        fn non_central_style(container: &str) -> Self {
+            Self {
+                provider: resource("provider:notes-house-flow"),
+                flow: FlowSourceDescriptor {
+                    flow_ref: resource("flow:notes-house:thread-1"),
+                    source_ref: source("source:notes-house:thread-1"),
+                    revision: revision("notes-house-r7"),
+                    provider: resource("provider:notes-house-flow"),
+                    lifecycle: FlowLifecycle::Active,
+                    title: Some("Thread".into()),
+                    scope: Some(resource("project:test")),
+                    container_hint: Some(container.into()),
+                    capabilities: FlowCapabilities {
+                        read: true,
+                        write: true,
+                        history: true,
+                    },
+                    provenance: vec!["mock non-Central source-house Flow capability".into()],
+                },
+                body: "current Flow body".into(),
+                disclose: true,
+                writes: 0,
+            }
+        }
     }
 
     impl FlowProvider for MemoryFlowProvider {
@@ -924,7 +949,7 @@ mod tests {
     fn central_and_non_central_containers_use_same_flow_provider_seam() {
         let context = context();
         let central = MemoryFlowProvider::central_style("ProjectCentral/now/flows/2026-08-24-0100.md");
-        let notes = MemoryFlowProvider::central_style("notes/2026-08-24-0100.md");
+        let notes = MemoryFlowProvider::non_central_style("notes/2026-08-24-0100.md");
         let a = bind_flow_for_act(
             &central,
             &context,
@@ -943,7 +968,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(a.binding.flow_ref, b.binding.flow_ref);
+        assert_ne!(a.binding.flow_ref, b.binding.flow_ref);
+        assert_ne!(a.binding.provider, b.binding.provider);
+        assert_eq!(b.binding.provider.as_str(), "provider:notes-house-flow");
+        assert_eq!(notes.flow.container_hint.as_deref(), Some("notes/2026-08-24-0100.md"));
         assert_eq!(a.disclosed_body(), Some("current Flow body"));
         assert_eq!(b.disclosed_body(), Some("current Flow body"));
         assert!(!a.automatic_agent_or_model_invocation);
@@ -1030,17 +1058,22 @@ mod tests {
     #[test]
     fn flow_change_uses_living_knowledge_impact_without_invocation() {
         let provider = MemoryFlowProvider::central_style("notes/thread.md");
+        let basis = provider.flow.clone();
         let dependency = flow_knowledge_dependency(
             resource("wiki:reading:thread"),
-            &provider.flow,
+            &basis,
             "integrates-flow",
             Some(resource("wiki:reading:thread")),
             true,
         );
-        let impact = crate::deterministic_knowledge_impact(&horizon(&provider.flow), &[dependency])
+        let mut current = basis.clone();
+        current.revision = revision("central.content-fnv1a64/v1:9:bbbbbbbbbbbbbbbb");
+        let impact = crate::deterministic_knowledge_impact(&horizon(&current), &[dependency])
             .unwrap();
         assert!(!impact.automatic_agent_or_model_invocation);
-        assert_eq!(impact.changed_sources, vec![provider.flow.source_ref.clone()]);
+        assert_eq!(impact.changed_sources, vec![basis.source_ref.clone()]);
+        assert_eq!(impact.affected.len(), 1);
+        assert_eq!(impact.affected[0].freshness, crate::KnowledgeFreshness::IntegrationPending);
     }
 
     #[derive(Default)]
@@ -1054,13 +1087,48 @@ mod tests {
             preflight: &FlowContemplatePreflight,
         ) -> Result<FlowContemplateGenerated> {
             self.calls += 1;
+            let whole = resource("wiki:reading:flow-whole");
+            let reading = crate::knowledge_wiki::WikiReading {
+                profile: crate::knowledge_wiki::OKF_WIKI_PROFILE.into(),
+                ref_id: whole.clone(),
+                revision: 1,
+                provenance: vec![crate::living_wiki_provenance(
+                    preflight.standing.binding.source_ref.clone(),
+                    preflight.standing.binding.flow_revision.clone(),
+                )],
+                frame_ref: resource("wiki:frame:flow-contemplate"),
+                reading_type: "integrative-flow".into(),
+                artifact_ref: None,
+                derived_by_ref: Some(resource("agent:test")),
+                extensions: BTreeMap::new(),
+            };
+            let integrated = crate::build_integrative_reading(
+                reading,
+                vec![crate::ReadingBasisNode {
+                    resource: preflight.standing.binding.flow_ref.clone(),
+                    source: Some(preflight.standing.binding.source_ref.clone()),
+                    source_revision: Some(preflight.standing.binding.flow_revision.clone()),
+                    roles: vec!["flow-source".into()],
+                }],
+                vec![],
+                vec![crate::ReadingReturnPath {
+                    from_basis: preflight.standing.binding.flow_ref.clone(),
+                    through: vec![],
+                    to_whole: whole,
+                }],
+                crate::KnowledgeFreshness::Fresh,
+            )?;
             Ok(FlowContemplateGenerated {
                 living: ContemplateGenerated {
-                    wiki_upserts: Vec::<WikiObject>::new(),
-                    integrative_readings: vec![],
+                    wiki_upserts: vec![WikiObject::Reading(integrated.reading.clone())],
+                    integrative_readings: vec![integrated],
                     candidates: vec!["candidate understanding".into()],
                     tensions: vec!["open question".into()],
-                    human_source_proposals: Vec::<HumanSourceRevisionProposal>::new(),
+                    human_source_proposals: vec![HumanSourceRevisionProposal {
+                        source: source("source:human-ground:test"),
+                        reason: "Flow contemplation exposes a possible authored-position refinement".into(),
+                        evidence: vec![preflight.standing.binding.source_ref.clone()],
+                    }],
                 },
                 flow_mutations: vec![FlowMutationIntent {
                     version: FLOW_CONTEXT_VERSION.into(),
@@ -1119,12 +1187,20 @@ mod tests {
                 reference: standing.binding.flow_ref.clone(),
             },
             FlowAuthorityRef {
+                authority: FlowContextAuthority::WikiReading,
+                reference: resource("wiki:reading:prior-flow"),
+            },
+            FlowAuthorityRef {
                 authority: FlowContextAuthority::Claim,
                 reference: resource("claim:external:test"),
             },
             FlowAuthorityRef {
                 authority: FlowContextAuthority::Ground,
                 reference: resource("ground:human:test"),
+            },
+            FlowAuthorityRef {
+                authority: FlowContextAuthority::Run,
+                reference: resource("run:external:test"),
             },
             FlowAuthorityRef {
                 authority: FlowContextAuthority::AgentSession,
@@ -1156,7 +1232,27 @@ mod tests {
             provider.flow.revision
         );
         assert_eq!(outcome.living.candidates, vec!["candidate understanding"]);
-        assert!(outcome.living.agent_wiki.human_source_proposals.is_empty());
+        assert_eq!(outcome.living.integrative_readings.len(), 1);
+        assert_eq!(outcome.living.integrative_readings[0].reading.reading_type, "integrative-flow");
+        assert!(outcome
+            .living
+            .agent_wiki
+            .next_objects
+            .iter()
+            .any(|object| matches!(object, WikiObject::Reading(reading) if reading.ref_id.as_str() == "wiki:reading:flow-whole")));
+        assert_eq!(outcome.living.agent_wiki.human_source_proposals.len(), 1);
+        assert_eq!(
+            outcome.living.agent_wiki.human_source_proposals[0].source.as_str(),
+            "source:human-ground:test"
+        );
+        assert!(outcome.preflight.authority_refs.iter().any(|entry| {
+            entry.authority == FlowContextAuthority::Claim
+                && entry.reference.as_str() == "claim:external:test"
+        }));
+        assert!(outcome.preflight.authority_refs.iter().any(|entry| {
+            entry.authority == FlowContextAuthority::Run
+                && entry.reference.as_str() == "run:external:test"
+        }));
     }
 
     #[test]
