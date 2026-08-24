@@ -4,7 +4,7 @@
 //! Markdown syntax so parsing/serialization cannot pull codec concerns into the
 //! I/O-free domain crate.
 
-use aikit_core::knowledge_okf::AuthoredRelationEvidence;
+use aikit_core::knowledge_okf::{AuthoredRelationAnchor, AuthoredRelationEvidence};
 use aikit_core::resource::{SourceRef, SourceRevision};
 use aikit_core::{AikitError, OkfDocument, Result};
 use serde_json::Value;
@@ -119,8 +119,7 @@ fn parse_inline_links(
                         line[cursor..end].to_string(),
                         display,
                         fragment,
-                        base + cursor,
-                        base + end,
+                        AuthoredRelationAnchor::body(base + cursor, base + end),
                     ));
                 }
                 cursor = end;
@@ -144,8 +143,7 @@ fn parse_inline_links(
                                 line[cursor..end].to_string(),
                                 (!label.is_empty()).then(|| label.to_string()),
                                 fragment,
-                                base + cursor,
-                                base + end,
+                                AuthoredRelationAnchor::body(base + cursor, base + end),
                             ));
                         }
                         cursor = end;
@@ -265,7 +263,10 @@ fn find_byte(bytes: &[u8], start: usize, byte: u8) -> Option<usize> {
 }
 
 fn optional_frontmatter_body_start(markdown: &str) -> Option<usize> {
-    let bom = markdown.starts_with('\u{feff}').then_some('\u{feff}'.len_utf8()).unwrap_or(0);
+    let bom = markdown
+        .starts_with('\u{feff}')
+        .then_some('\u{feff}'.len_utf8())
+        .unwrap_or(0);
     let source = &markdown[bom..];
     let rest = source
         .strip_prefix("---\r\n")
