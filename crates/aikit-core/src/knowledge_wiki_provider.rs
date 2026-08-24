@@ -193,16 +193,30 @@ impl<'a> SemanticWikiProvider<'a> {
     }
 
     fn relation_node(&self, resource: &ResourceRef) -> Result<RelationNode> {
-        let object = self.resolve(resource).ok_or_else(|| {
-            AikitError::new(
-                "knowledge.wiki_object_missing",
-                format!("Wiki object {resource} is not indexed"),
-            )
-        })?;
-        Ok(RelationNode::new(
-            resource.clone(),
-            resource_kind(&object),
-            object_label(&object),
+        if let Some(object) = self.resolve(resource) {
+            return Ok(RelationNode::new(
+                resource.clone(),
+                resource_kind(&object),
+                object_label(&object),
+            ));
+        }
+
+        // Source-authored edges may deliberately terminate at a stable resource
+        // which is not itself a canonical Wiki object (for example a FlowRef or
+        // retained SourceRef). Presence in the relation index is enough to make
+        // that endpoint traversable; it does not promote the endpoint into Wiki
+        // storage or give it a new semantic identity.
+        if !self.index.neighbours(resource, 1).is_empty() {
+            return Ok(RelationNode::new(
+                resource.clone(),
+                external_relation_kind(resource),
+                resource.to_string(),
+            ));
+        }
+
+        Err(AikitError::new(
+            "knowledge.wiki_object_missing",
+            format!("Wiki object or relation endpoint {resource} is not indexed"),
         ))
     }
 }
@@ -249,6 +263,14 @@ fn resource_kind(object: &WikiObject) -> ResourceKind {
     }
 }
 
+fn external_relation_kind(resource: &ResourceRef) -> ResourceKind {
+    if resource.as_str().starts_with("source:") {
+        ResourceKind::KnowledgeSource
+    } else {
+        ResourceKind::ContextSource
+    }
+}
+
 fn object_label(object: &WikiObject) -> String {
     match object {
         WikiObject::Space(value) => value
@@ -287,7 +309,9 @@ fn authority_for_edge_origin(origin: WikiEdgeOrigin) -> SourceAuthority {
 
 #[cfg(test)]
 mod tests {
-    use crate::knowledge_wiki::{parse_wiki_objects, WikiEdgeOrigin};
+    use std::collections::BTreeMap;
+
+    use crate::knowledge_wiki::{parse_wiki_objects, WikiEdge, WikiEdgeOrigin, WikiNode};
     use crate::knowledge_wiki_index::SemanticWikiIndex;
 
     use super::*;
@@ -342,5 +366,63 @@ mod tests {
             provider.neighbours(&ResourceRef::parse("wiki:node:a").unwrap(), 10)[0].origin,
             WikiEdgeOrigin::Authored
         );
+    }
+
+    #[test]
+    fn relation_expansion_keeps_external_source_and_flow_endpoints_outside_wiki_identity() {
+        let target = WikiObject::Node(WikiNode {
+            profile: crate::knowledge_wiki::OKF_WIKI_PROFILE.into(),
+            ref_id: ResourceRef::parse("wiki:node:living-wiki").unwrap(),
+            revision: 1,
+            provenance: Vec::new(),
+            node_type: "Concept".into(),
+            title: Some("Living Wiki".into()),
+            space_refs: Vec::new(),
+            source_refs: Vec::new(),
+            local_space_ref: None,
+            extensions: BTreeMap::new(),
+        });
+        let source_edge = WikiObject::Edge(WikiEdge {
+            profile: crate::knowledge_wiki::OKF_WIKI_PROFILE.into(),
+            ref_id: ResourceRef::parse("wiki:edge:source-link").unwrap(),
+            revision: 1,
+            provenance: Vec::new(),
+            from_ref: ResourceRef::parse("source:notes:alpha").unwrap(),
+            to_ref: ResourceRef::parse("wiki:node:living-wiki").unwrap(),
+            relation: "references".into(),
+            origin: WikiEdgeOrigin::Authored,
+            origin_ref: None,
+            extensions: BTreeMap::new(),
+        });
+        let flow_edge = WikiObject::Edge(WikiEdge {
+            profile: crate::knowledge_wiki::OKF_WIKI_PROFILE.into(),
+            ref_id: ResourceRef::parse("wiki:edge:flow-link").unwrap(),
+            revision: 1,
+            provenance: Vec::new(),
+            from_ref: ResourceRef::parse("flow:thread:1").unwrap(),
+            to_ref: ResourceRef::parse("wiki:node:living-wiki").unwrap(),
+            relation: "references".into(),
+            origin: WikiEdgeOrigin::Authored,
+            origin_ref: None,
+            extensions: BTreeMap::new(),
+        });
+        let index = SemanticWikiIndex::rebuild([target, source_edge, flow_edge]).unwrap();
+        assert!(index.resolve(&ResourceRef::parse("source:notes:alpha").unwrap()).is_none());
+        assert!(index.resolve(&ResourceRef::parse("flow:thread:1").unwrap()).is_none());
+
+        let provider = SemanticWikiProvider::new(&index);
+        let source_view = provider
+            .relations(RelationQuery::local(
+                ResourceRef::parse("source:notes:alpha").unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(source_view.nodes[0].kind, ResourceKind::KnowledgeSource);
+        assert_eq!(source_view.edges[0].origin.authority, SourceAuthority::Authored);
+
+        let flow_view = provider
+            .relations(RelationQuery::local(ResourceRef::parse("flow:thread:1").unwrap()))
+            .unwrap();
+        assert_eq!(flow_view.nodes[0].kind, ResourceKind::ContextSource);
+        assert_eq!(flow_view.edges[0].relation, "references");
     }
 }
