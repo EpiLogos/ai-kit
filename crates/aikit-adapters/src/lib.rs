@@ -7,6 +7,7 @@ pub mod bkmr;
 pub mod clients;
 pub mod composition_topology;
 pub mod connection_process;
+pub mod credential_provider;
 pub mod deepseek_harness;
 pub mod deepseek_live;
 pub mod deepseek_maximal;
@@ -37,6 +38,11 @@ pub use composition_topology::{
     HARNESS_COMPOSITION_TOPOLOGY_VERSION,
 };
 pub use connection_process::ConnectionProcess;
+#[cfg(target_os = "linux")]
+pub use credential_provider::LinuxEncryptedFallbackProvider;
+pub use credential_provider::{
+    EnvironmentImportProvider, NativeSecureStoreProvider, NativeSecureStoreStatus,
+};
 pub use deepseek_harness::{
     deepseek_harness_conformance, DeepSeekHarnessConformance, DeepSeekShellProvider,
     DEEPSEEK_HARNESS_RELEASE, DEEPSEEK_HARNESS_UPSTREAM_REVISION,
