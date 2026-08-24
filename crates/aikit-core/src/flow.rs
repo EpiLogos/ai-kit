@@ -8,6 +8,7 @@
 //! aperture.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::context_resolution::ContextResolution;
 use crate::guidance::GuidanceFragment;
@@ -16,6 +17,7 @@ use crate::knowledge_living::{
     explicit_contemplate, ContemplateExecutor, ContemplateGenerated, ContemplateOutcome,
     ContemplatePreflight, ContemplateRequest, KnowledgeDependency,
 };
+use crate::knowledge_living_transport::parse_contemplate_generated;
 use crate::knowledge_living_context::{
     bounded_contemplate_preflight, BoundedContemplatePreflight, DEFAULT_CONTEMPLATE_OBJECT_BUDGET,
     DEFAULT_CONTEMPLATE_RELATION_DEPTH,
@@ -31,6 +33,7 @@ use crate::{AikitError, Result};
 
 pub const FLOW_CONTEXT_VERSION: &str = "aikit.flow-context/v1";
 pub const FLOW_CONTEMPLATE_VERSION: &str = "aikit.flow-contemplate/v1";
+pub const FLOW_CONTEMPLATE_RETURN_VERSION: &str = "aikit.flow-contemplate-return/v1";
 pub const FLOW_GUIDANCE_CAPSULE: &str = "guidance/flow/standing-context";
 pub const FLOW_SKILL_REF: &str = "cap:flow-working";
 pub const FLOW_KNOWLEDGE_NAVIGATION_REF: &str = "cap:knowledge-navigation";
@@ -516,6 +519,47 @@ fn flow_invocation_ref(
 pub struct FlowContemplateGenerated {
     pub living: ContemplateGenerated,
     pub flow_mutations: Vec<FlowMutationIntent>,
+}
+
+
+#[derive(Debug, Deserialize)]
+struct FlowContemplateReturnEnvelope {
+    version: String,
+    living: Value,
+    #[serde(default)]
+    flow_mutations: Vec<FlowMutationIntent>,
+}
+
+/// Parse one transport response for explicit `Contemplate(FlowRef)` into the
+/// native AIKit return. The nested `living` object is validated by the already-
+/// accepted Living Knowledge transport parser; Flow mutation intents remain
+/// typed, owner-directed expected-revision requests.
+pub fn parse_flow_contemplate_generated(input: &str) -> Result<FlowContemplateGenerated> {
+    let envelope: FlowContemplateReturnEnvelope = serde_json::from_str(input).map_err(|error| {
+        AikitError::new(
+            "flow.contemplate_return_invalid_json",
+            format!("Flow Contemplate return must be structured JSON: {error}"),
+        )
+    })?;
+    if envelope.version != FLOW_CONTEMPLATE_RETURN_VERSION {
+        return Err(AikitError::new(
+            "flow.contemplate_return_version_unsupported",
+            format!(
+                "Flow Contemplate return version `{}` is not `{FLOW_CONTEMPLATE_RETURN_VERSION}`",
+                envelope.version
+            ),
+        ));
+    }
+    let living = serde_json::to_string(&envelope.living).map_err(|error| {
+        AikitError::new(
+            "flow.contemplate_return_living_unserializable",
+            format!("could not recover nested Living Knowledge return: {error}"),
+        )
+    })?;
+    Ok(FlowContemplateGenerated {
+        living: parse_contemplate_generated(&living)?,
+        flow_mutations: envelope.flow_mutations,
+    })
 }
 
 pub trait FlowContemplateExecutor {
@@ -1253,6 +1297,48 @@ mod tests {
             entry.authority == FlowContextAuthority::Run
                 && entry.reference.as_str() == "run:external:test"
         }));
+    }
+
+    #[test]
+    fn flow_transport_keeps_living_validation_and_owner_mutation_intent_typed() {
+        let parsed = parse_flow_contemplate_generated(
+            r#"{
+              "version":"aikit.flow-contemplate-return/v1",
+              "living":{
+                "version":"aikit.contemplate-return/v1",
+                "wiki_upserts":[],
+                "integrative_readings":[],
+                "candidates":["candidate:flow"],
+                "tensions":[],
+                "human_source_proposals":[]
+              },
+              "flow_mutations":[{
+                "version":"aikit.flow-context/v1",
+                "flow_ref":"flow:notes-house:thread-1",
+                "expected_revision":"notes-house-r7",
+                "replacement":"refined source",
+                "actor":"agent:test",
+                "agency":"agency:test",
+                "agent_session":"agent-session/test",
+                "context_resolution_version":"aikit.context-resolution/v2",
+                "method":"method:contemplate-flow",
+                "invocation_ref":"flow-contemplate/abc"
+              }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.living.candidates, vec!["candidate:flow"]);
+        assert_eq!(parsed.flow_mutations.len(), 1);
+        assert_eq!(parsed.flow_mutations[0].flow_ref.as_str(), "flow:notes-house:thread-1");
+        assert_eq!(parsed.flow_mutations[0].expected_revision.as_str(), "notes-house-r7");
+
+        let prose = parse_flow_contemplate_generated("please edit the Flow").unwrap_err();
+        assert_eq!(prose.code(), "flow.contemplate_return_invalid_json");
+        let bad_nested = parse_flow_contemplate_generated(
+            r#"{"version":"aikit.flow-contemplate-return/v1","living":{"version":"wrong"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(bad_nested.code(), "knowledge.contemplate_return_version_unsupported");
     }
 
     #[test]

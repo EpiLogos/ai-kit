@@ -163,12 +163,14 @@ pub use familiarity::{
 pub use flow::{
     apply_flow_mutation, bind_flow_for_act, explicit_flow_contemplate,
     first_party_flow_guidance, first_party_flow_method, first_party_flow_resource_records,
-    flow_contemplate_preflight, flow_knowledge_dependency, FlowAuthorityRef, FlowBinding,
+    flow_contemplate_preflight, flow_knowledge_dependency, parse_flow_contemplate_generated,
+    FlowAuthorityRef, FlowBinding,
     FlowCapabilities, FlowContextAuthority, FlowContemplateExecutor, FlowContemplateGenerated,
     FlowContemplateOutcome, FlowContemplatePreflight, FlowContemplateRequest, FlowLifecycle,
     FlowMutationIntent, FlowProvider, FlowReadOutcome, FlowSourceDescriptor, FlowStandingContext,
     FlowStandingDisclosure, FlowWriteRequest, FlowWriteResult, FLOW_CONTEXT_VERSION,
-    FLOW_CONTEMPLATE_ACTION_REF, FLOW_CONTEMPLATE_VERSION, FLOW_GUIDANCE_CAPSULE,
+    FLOW_CONTEMPLATE_ACTION_REF, FLOW_CONTEMPLATE_RETURN_VERSION, FLOW_CONTEMPLATE_VERSION,
+    FLOW_GUIDANCE_CAPSULE,
     FLOW_KNOWLEDGE_NAVIGATION_REF, FLOW_LIVING_KNOWLEDGE_REF, FLOW_METHOD_REF,
     FLOW_METHOD_SOURCE, FLOW_SKILL_REF,
 };
