@@ -127,8 +127,7 @@ impl AuthoredRelationEvidence {
         raw_token: impl Into<String>,
         display: Option<String>,
         fragment: Option<String>,
-        start_byte: usize,
-        end_byte: usize,
+        anchor: AuthoredRelationAnchor,
     ) -> Self {
         Self {
             profile: AUTHORED_RELATION_PROFILE.to_string(),
@@ -140,7 +139,7 @@ impl AuthoredRelationEvidence {
             display,
             fragment,
             channel: AuthoredRelationChannel::Body,
-            anchor: AuthoredRelationAnchor::body(start_byte, end_byte),
+            anchor,
             resolution: AuthoredRelationResolution::Unresolved,
         }
     }
@@ -175,7 +174,7 @@ pub struct OkfWikiSourceProfile {
     pub relations: Vec<AuthoredRelationEvidence>,
 }
 
-/// Interpret the optional open `okf-wiki` source properties carried by an OKF
+/// Interpret optional open `okf-wiki` source properties carried by an OKF
 /// document. This does not change universal OKF v0.2 validation: aliases and
 /// typed relations are profile-level extensions and unknown fields remain intact
 /// on `OkfDocument.metadata`.
@@ -448,9 +447,28 @@ pub fn materialize_authored_wiki_edge(
     );
 
     let provenance_extensions = std::collections::BTreeMap::from([
-        ("channel".to_string(), serde_json::to_value(evidence.channel).unwrap()),
-        ("anchor".to_string(), serde_json::to_value(&evidence.anchor).unwrap()),
-        ("raw_target".to_string(), Value::String(evidence.raw_target.clone())),
+        (
+            "channel".to_string(),
+            serde_json::to_value(evidence.channel).map_err(|error| {
+                AikitError::new(
+                    "knowledge.authored_relation_serialize",
+                    format!("could not serialize authored relation channel: {error}"),
+                )
+            })?,
+        ),
+        (
+            "anchor".to_string(),
+            serde_json::to_value(&evidence.anchor).map_err(|error| {
+                AikitError::new(
+                    "knowledge.authored_relation_serialize",
+                    format!("could not serialize authored relation anchor: {error}"),
+                )
+            })?,
+        ),
+        (
+            "raw_target".to_string(),
+            Value::String(evidence.raw_target.clone()),
+        ),
     ]);
 
     Ok(WikiEdge {
@@ -612,13 +630,21 @@ mod tests {
         assert_eq!(profile.aliases, vec!["Live Flow", "Linguistic Flow"]);
         assert_eq!(profile.source_refs[0].as_str(), "source:oi-flow-design");
         assert_eq!(profile.relations.len(), 2);
-        assert_eq!(profile.relations[0].relation, "depends-on");
+        let depends_on = profile
+            .relations
+            .iter()
+            .find(|relation| relation.relation == "depends-on")
+            .unwrap();
         assert!(matches!(
-            profile.relations[0].resolution,
+            depends_on.resolution,
             AuthoredRelationResolution::Resolved { .. }
         ));
-        assert_eq!(profile.relations[1].relation, "develops");
-        assert_eq!(profile.relations[1].raw_target, "Living Wiki");
+        let develops = profile
+            .relations
+            .iter()
+            .find(|relation| relation.relation == "develops")
+            .unwrap();
+        assert_eq!(develops.raw_target, "Living Wiki");
         assert_eq!(document.metadata, metadata);
     }
 
@@ -631,8 +657,7 @@ mod tests {
             "[[knowledge/Flow.md]]",
             None,
             None,
-            0,
-            21,
+            AuthoredRelationAnchor::body(0, 21),
         );
         let candidate = AuthoredRelationCandidate {
             ref_id: ResourceRef::parse("wiki:node:flow").unwrap(),
@@ -665,8 +690,7 @@ mod tests {
             "[[Future Concept]]",
             None,
             None,
-            0,
-            18,
+            AuthoredRelationAnchor::body(0, 18),
         );
         assert!(matches!(
             resolve_authored_relation(&missing, &[]).resolution,
