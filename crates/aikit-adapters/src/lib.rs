@@ -17,6 +17,7 @@ pub mod local_source_discovery;
 pub mod mux;
 pub mod okf;
 pub mod projectcentral;
+pub mod projectcentral_authored_wiki;
 pub mod runner;
 pub mod session_space_connection;
 pub mod session_space_observation;
@@ -66,6 +67,10 @@ pub use local_source_discovery::{
 };
 pub use okf::{parse_authored_markdown_relations, parse_okf_markdown, render_okf_markdown};
 pub use projectcentral::{ProjectCentralFileProvider, ProjectCentralFilesystemBinding};
+pub use projectcentral_authored_wiki::{
+    projectcentral_authored_wiki, ProjectCentralAuthoredWiki, ProjectCentralAuthoredWikiStatus,
+    PROJECTCENTRAL_AUTHORED_WIKI_VERSION,
+};
 pub use session_space_connection::connection_into_session_space;
 pub use session_space_observation::{
     SessionSpaceFileObservationProvider, SessionSpaceObservationError,
