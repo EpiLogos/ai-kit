@@ -38,6 +38,7 @@ pub mod error;
 pub mod explain_history;
 pub mod explain_history_actions;
 pub mod familiarity;
+pub mod flow;
 pub mod frecency;
 pub mod guidance;
 pub mod harness_admission;
@@ -158,6 +159,20 @@ pub use familiarity::{
     FamiliarityObservation, FamiliaritySnapshot, FamiliaritySnapshotLoad, FamiliarityStore,
     FamiliarityUse, FitnessEvidence, ForgetScope, RouteStepEvidence,
     DEFAULT_FAMILIARITY_HALF_LIFE_MS, FAMILIARITY_SCHEMA_VERSION,
+};
+pub use flow::{
+    apply_flow_mutation, bind_flow_for_act, explicit_flow_contemplate,
+    first_party_flow_guidance, first_party_flow_method, first_party_flow_resource_records,
+    flow_contemplate_preflight, flow_knowledge_dependency, parse_flow_contemplate_generated,
+    FlowAuthorityRef, FlowBinding,
+    FlowCapabilities, FlowContextAuthority, FlowContemplateExecutor, FlowContemplateGenerated,
+    FlowContemplateOutcome, FlowContemplatePreflight, FlowContemplateRequest, FlowLifecycle,
+    FlowMutationIntent, FlowProvider, FlowReadOutcome, FlowSourceDescriptor, FlowStandingContext,
+    FlowStandingDisclosure, FlowWriteRequest, FlowWriteResult, FLOW_CONTEXT_VERSION,
+    FLOW_CONTEMPLATE_ACTION_REF, FLOW_CONTEMPLATE_RETURN_VERSION, FLOW_CONTEMPLATE_VERSION,
+    FLOW_GUIDANCE_CAPSULE,
+    FLOW_KNOWLEDGE_NAVIGATION_REF, FLOW_LIVING_KNOWLEDGE_REF, FLOW_METHOD_REF,
+    FLOW_METHOD_SOURCE, FLOW_SKILL_REF,
 };
 pub use frecency::{Candidate, Jump, Tiebreak};
 pub use guidance::{
