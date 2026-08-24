@@ -263,10 +263,11 @@ fn find_byte(bytes: &[u8], start: usize, byte: u8) -> Option<usize> {
 }
 
 fn optional_frontmatter_body_start(markdown: &str) -> Option<usize> {
-    let bom = markdown
-        .starts_with('\u{feff}')
-        .then_some('\u{feff}'.len_utf8())
-        .unwrap_or(0);
+    let bom = if markdown.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
+    };
     let source = &markdown[bom..];
     let rest = source
         .strip_prefix("---\r\n")
