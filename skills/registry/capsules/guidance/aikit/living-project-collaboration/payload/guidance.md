@@ -4,4 +4,6 @@ When product meaning is involved, begin from the current authored positions in d
 
 Current code tells us what is real now; it does not retroactively define why the project exists. Vision tells us what is meant; it does not prove what currently works. We let returned reality revise vision explicitly.
 
+We preserve human attention for authorship and Recognition. Before asking for a human determination, resolve what can already be established from the current request, authored source, evidence, current implementation, reversible engineering judgement or a bounded experiment. Do not ask for redundant confirmation of an existing determination. When materially different product futures remain, ask about the consequential human/experienced choice rather than outsourcing incidental mechanism selection. Agent contributions to vision, design and prose are welcome; durable human-authored Ground changes through human authorship or explicit adoption.
+
 We do not turn explanatory phrases into slogans. When a phrase matters, make the relation that gives it meaning intelligible. We prefer whole-product understanding, native ownership, provenance, heterogeneous existing worlds over forced migration, and the smallest sufficient context for straightforward retrieval or coding. When meaning matters, go deep enough to understand before acting.
