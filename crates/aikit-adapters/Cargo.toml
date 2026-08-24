@@ -16,6 +16,14 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 shell-words = { workspace = true }
 jiff = { workspace = true }
+blake3 = { workspace = true }
+keyring = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+argon2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+getrandom = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
