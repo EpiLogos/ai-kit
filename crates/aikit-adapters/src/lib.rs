@@ -11,6 +11,7 @@ pub mod connection_process;
 pub mod deepseek_harness;
 pub mod deepseek_live;
 pub mod deepseek_maximal;
+pub mod flow_authored_wiki;
 pub mod gitnexus;
 pub mod interactive_connection;
 pub mod local_source_discovery;
@@ -56,6 +57,9 @@ pub use deepseek_live::{
 };
 pub use deepseek_maximal::{
     deepseek_maximal_conformance, DeepSeekMaximalConformance, DEEPSEEK_CORDIS_REVISION,
+};
+pub use flow_authored_wiki::{
+    standing_flow_authored_wiki_source, FLOW_AUTHORED_WIKI_VERSION,
 };
 pub use interactive_connection::{
     AcpStableConnectionAdapter, AcpStableSessionCapabilities, InteractiveAgentConnectionAdapter,
