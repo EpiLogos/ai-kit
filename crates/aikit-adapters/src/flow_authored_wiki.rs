@@ -32,12 +32,7 @@ pub fn standing_flow_authored_wiki_source(
         ));
     }
 
-    let locators = standing
-        .binding
-        .provenance
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
+    let locators = standing.binding.provenance.to_vec();
     parse_authored_wiki_source_with_authority(
         standing.binding.flow_ref.clone(),
         standing.binding.source_ref.clone(),
