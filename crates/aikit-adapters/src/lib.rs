@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_connection;
+pub mod authored_wiki_read;
 pub mod authored_wiki_source;
 pub mod bkmr;
 pub mod clients;
@@ -34,6 +35,9 @@ pub use agent_connection::{
     ConnectionSignal, ConnectionSignalKind, ConnectionState, NativePermissionChoice,
     NativePermissionRequest, NativeSessionBinding, PromptRequest, SessionOpenMode,
     SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION, AGENT_CONNECTION_ADAPTER_VERSION,
+};
+pub use authored_wiki_read::{
+    authored_wiki_subject_relations, AuthoredWikiSubjectRelations, AUTHORED_WIKI_READ_VERSION,
 };
 pub use authored_wiki_source::{
     authored_relation_dependencies, compile_authored_wiki_relations, parse_authored_wiki_source,
