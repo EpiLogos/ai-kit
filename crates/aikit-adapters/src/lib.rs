@@ -13,6 +13,7 @@ pub mod connection_process;
 pub mod deepseek_harness;
 pub mod deepseek_live;
 pub mod deepseek_maximal;
+pub mod factory_run_thought_authored_wiki;
 pub mod flow_authored_wiki;
 pub mod gitnexus;
 pub mod interactive_connection;
@@ -65,6 +66,14 @@ pub use deepseek_live::{
 };
 pub use deepseek_maximal::{
     deepseek_maximal_conformance, DeepSeekMaximalConformance, DEEPSEEK_CORDIS_REVISION,
+};
+pub use factory_run_thought_authored_wiki::{
+    factory_run_thought_authored_wiki, FactoryBuildCognitiveProvenance,
+    FactoryBuildCognitiveSnapshot, FactoryBuildCognitiveView, FactoryRunThought,
+    FactoryRunThoughtAuthoredWiki, FactoryRunThoughtAuthoredWikiStatus, FactoryRunThoughtPassage,
+    FactoryRunThoughtProducer, FactoryRunThoughtProjection, FactoryRunThoughtSourceDisclosure,
+    FACTORY_BUILD_COGNITIVE_PROVIDER_CONTRACT, FACTORY_BUILD_COGNITIVE_VIEW_CONTRACT,
+    FACTORY_RUN_THOUGHT_AUTHORED_WIKI_VERSION,
 };
 pub use flow_authored_wiki::{
     standing_flow_authored_wiki_source, FLOW_AUTHORED_WIKI_VERSION,
