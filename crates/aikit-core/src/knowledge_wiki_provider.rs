@@ -209,7 +209,7 @@ impl<'a> SemanticWikiProvider<'a> {
         if !self.index.neighbours(resource, 1).is_empty() {
             return Ok(RelationNode::new(
                 resource.clone(),
-                external_relation_kind(resource),
+                external_relation_kind(self.index, resource),
                 resource.to_string(),
             ));
         }
@@ -263,8 +263,18 @@ fn resource_kind(object: &WikiObject) -> ResourceKind {
     }
 }
 
-fn external_relation_kind(resource: &ResourceRef) -> ResourceKind {
-    if resource.as_str().starts_with("source:") {
+/// SourceRef is opaque and is not required to use a `source:` spelling. Prefer
+/// exact edge provenance over lexical prefixes when deciding whether an external
+/// relation endpoint is a retained knowledge source. This keeps Central's
+/// `central:project-source:*` identities and other conforming source houses native.
+fn external_relation_kind(index: &SemanticWikiIndex, resource: &ResourceRef) -> ResourceKind {
+    let proven_source = index.neighbours(resource, 16).iter().any(|neighbour| {
+        neighbour
+            .provenance
+            .iter()
+            .any(|provenance| provenance.source_ref.as_str() == resource.as_str())
+    });
+    if proven_source || resource.as_str().starts_with("source:") {
         ResourceKind::KnowledgeSource
     } else {
         ResourceKind::ContextSource
@@ -395,12 +405,13 @@ mod tests {
             local_space_ref: None,
             extensions: BTreeMap::new(),
         });
+        let source_id = "central:project-source:demo:alpha";
         let source_edge = WikiObject::Edge(WikiEdge {
             profile: crate::knowledge_wiki::OKF_WIKI_PROFILE.into(),
             ref_id: ResourceRef::parse("wiki:edge:source-link").unwrap(),
             revision: 1,
             provenance: vec![WikiProvenanceRef {
-                source_ref: SourceRef::parse("source:notes:alpha").unwrap(),
+                source_ref: SourceRef::parse(source_id).unwrap(),
                 source_revision: None,
                 producer_ref: None,
                 generation_ref: None,
@@ -409,7 +420,7 @@ mod tests {
                     serde_json::json!("learned"),
                 )]),
             }],
-            from_ref: ResourceRef::parse("source:notes:alpha").unwrap(),
+            from_ref: ResourceRef::parse(source_id).unwrap(),
             to_ref: ResourceRef::parse("wiki:node:living-wiki").unwrap(),
             relation: "references".into(),
             origin: WikiEdgeOrigin::Authored,
@@ -429,14 +440,12 @@ mod tests {
             extensions: BTreeMap::new(),
         });
         let index = SemanticWikiIndex::rebuild([target, source_edge, flow_edge]).unwrap();
-        assert!(index.resolve(&ResourceRef::parse("source:notes:alpha").unwrap()).is_none());
+        assert!(index.resolve(&ResourceRef::parse(source_id).unwrap()).is_none());
         assert!(index.resolve(&ResourceRef::parse("flow:thread:1").unwrap()).is_none());
 
         let provider = SemanticWikiProvider::new(&index);
         let source_view = provider
-            .relations(RelationQuery::local(
-                ResourceRef::parse("source:notes:alpha").unwrap(),
-            ))
+            .relations(RelationQuery::local(ResourceRef::parse(source_id).unwrap()))
             .unwrap();
         assert_eq!(source_view.nodes[0].kind, ResourceKind::KnowledgeSource);
         assert_eq!(source_view.edges[0].origin.authority, SourceAuthority::Learned);
