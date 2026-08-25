@@ -3,6 +3,9 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_connection;
+pub mod authored_wiki_living;
+pub mod authored_wiki_read;
+pub mod authored_wiki_source;
 pub mod bkmr;
 pub mod clients;
 pub mod composition_topology;
@@ -10,12 +13,14 @@ pub mod connection_process;
 pub mod deepseek_harness;
 pub mod deepseek_live;
 pub mod deepseek_maximal;
+pub mod flow_authored_wiki;
 pub mod gitnexus;
 pub mod interactive_connection;
 pub mod local_source_discovery;
 pub mod mux;
 pub mod okf;
 pub mod projectcentral;
+pub mod projectcentral_authored_wiki;
 pub mod runner;
 pub mod session_space_connection;
 pub mod session_space_observation;
@@ -31,6 +36,18 @@ pub use agent_connection::{
     ConnectionSignal, ConnectionSignalKind, ConnectionState, NativePermissionChoice,
     NativePermissionRequest, NativeSessionBinding, PromptRequest, SessionOpenMode,
     SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION, AGENT_CONNECTION_ADAPTER_VERSION,
+};
+pub use authored_wiki_living::{
+    authored_wiki_knowledge_impact, AUTHORED_WIKI_LIVING_VERSION,
+};
+pub use authored_wiki_read::{
+    authored_wiki_subject_relations, AuthoredWikiSubjectRelations, AUTHORED_WIKI_READ_VERSION,
+};
+pub use authored_wiki_source::{
+    authored_relation_dependencies, compile_authored_wiki_relations, parse_authored_wiki_source,
+    parse_authored_wiki_source_with_authority, rebuild_semantic_wiki_with_authored_relations,
+    AuthoredWikiRelationCompilation, AuthoredWikiSourceProjection, PendingAuthoredRelation,
+    AUTHORED_WIKI_SOURCE_VERSION,
 };
 pub use composition_topology::{
     resolve_component_topology, ComponentContainment, HarnessCompositionTopology,
@@ -49,6 +66,9 @@ pub use deepseek_live::{
 pub use deepseek_maximal::{
     deepseek_maximal_conformance, DeepSeekMaximalConformance, DEEPSEEK_CORDIS_REVISION,
 };
+pub use flow_authored_wiki::{
+    standing_flow_authored_wiki_source, FLOW_AUTHORED_WIKI_VERSION,
+};
 pub use interactive_connection::{
     AcpStableConnectionAdapter, AcpStableSessionCapabilities, InteractiveAgentConnectionAdapter,
     PermissionDecision,
@@ -57,8 +77,12 @@ pub use local_source_discovery::{
     discover_local_sources, DiscoveredLocalSource, LocalSourceDiscovery,
     LocalSourceDiscoveryLimits, NativeSourceRelation, LOCAL_SOURCE_DISCOVERY_VERSION,
 };
-pub use okf::{parse_okf_markdown, render_okf_markdown};
+pub use okf::{parse_authored_markdown_relations, parse_okf_markdown, render_okf_markdown};
 pub use projectcentral::{ProjectCentralFileProvider, ProjectCentralFilesystemBinding};
+pub use projectcentral_authored_wiki::{
+    projectcentral_authored_wiki, ProjectCentralAuthoredWiki, ProjectCentralAuthoredWikiStatus,
+    PROJECTCENTRAL_AUTHORED_WIKI_VERSION,
+};
 pub use session_space_connection::connection_into_session_space;
 pub use session_space_observation::{
     SessionSpaceFileObservationProvider, SessionSpaceObservationError,
