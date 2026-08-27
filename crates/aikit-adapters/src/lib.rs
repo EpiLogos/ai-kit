@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod actuation_stream_projection;
 pub mod agent_connection;
 pub mod authored_wiki_living;
 pub mod authored_wiki_read;
@@ -29,6 +30,11 @@ pub mod shells;
 pub mod working_environment;
 pub mod working_environment_control;
 
+pub use actuation_stream_projection::{
+    project_connection_signal_to_actuation_stream, ActuationStreamAppendProjection,
+    ActuationStreamProjectionContext, ACTUATION_STREAM_OWNER_REVISION,
+    ACTUATION_STREAM_SCHEMA, CONNECTION_SIGNAL_STREAM_PROJECTION_VERSION,
+};
 pub use agent_connection::{
     AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest,
     ClassicProcessConnectionAdapter, ConnectionCapabilities, ConnectionCommand,
