@@ -79,6 +79,7 @@ pub mod resource;
 pub mod scope;
 pub mod search;
 pub mod session;
+pub mod session_ecology;
 pub mod session_space;
 pub mod session_space_application;
 pub mod session_space_contribution;
@@ -341,6 +342,12 @@ pub use search::{
 pub use session::{
     compile as compile_session, Attach, BackendSpec, Direction, Lifecycle, PaneSpec, PaneStep,
     Placement, Restart, SessionPlan, SessionSpec, Split, TaskSpec, ViewPlan, ViewSpec,
+};
+pub use session_ecology::{
+    disclose_session_ecology, AgentSessionEcologyReading, AgentSessionLineage,
+    AgentSessionLineageRelation, AgentSessionSemanticBinding, SessionEcologyPresence,
+    SessionEcologyReadModel, SessionEcologySurfaceReading, SessionInvocationMode,
+    SessionInvocationReading, SessionInvocationRelation, SESSION_ECOLOGY_VERSION,
 };
 pub use session_space::{
     SessionSpaceActivationDriver, SessionSpaceActivationObservation, SessionSpaceActivationRequest,
