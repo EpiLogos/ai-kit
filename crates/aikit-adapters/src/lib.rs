@@ -15,6 +15,7 @@ pub mod deepseek_harness;
 pub mod deepseek_live;
 pub mod deepseek_maximal;
 pub mod flow_authored_wiki;
+pub mod gateway_connector;
 pub mod gitnexus;
 pub mod interactive_connection;
 pub mod local_source_discovery;
@@ -74,6 +75,15 @@ pub use deepseek_maximal::{
 };
 pub use flow_authored_wiki::{
     standing_flow_authored_wiki_source, FLOW_AUTHORED_WIKI_VERSION,
+};
+pub use gateway_connector::{
+    verify_connector_descriptor, ConnectorCapabilities, ConnectorConformance,
+    ConnectorConnectionState, ConnectorDescriptor, ConnectorFuture, ConnectorHealth,
+    ConnectorHello, ConnectorOperation, ConnectorWireFrame, ConversationAddress,
+    DeliveryReceipt, DeliveryState, GatewayConnector, InboundEvent, InboundEventKind,
+    MediaReference, OutboundOperation, OutboundOperationKind, SenderIdentity, SenderKind,
+    GATEWAY_CONNECTOR_SCHEMA_PATH, GATEWAY_CONNECTOR_SDK_VERSION,
+    GATEWAY_CONNECTOR_WIRE_VERSION,
 };
 pub use interactive_connection::{
     AcpStableConnectionAdapter, AcpStableSessionCapabilities, InteractiveAgentConnectionAdapter,
