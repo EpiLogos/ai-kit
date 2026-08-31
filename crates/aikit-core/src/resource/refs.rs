@@ -40,3 +40,11 @@ opaque_ref!(OwnerRef, "owner");
 opaque_ref!(SourceRef, "source");
 opaque_ref!(ProviderRef, "provider");
 opaque_ref!(SourceRevision, "source revision");
+
+#[cfg(test)]
+impl SourceRevision {
+    /// Test-only convenience delegates to the same validated parser used by production.
+    pub(crate) fn new(raw: &str) -> Result<Self> {
+        Self::parse(raw)
+    }
+}

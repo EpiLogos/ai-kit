@@ -4,6 +4,9 @@
 //! terminal adapters may supply the already-resolved inputs, but they must not own
 //! the rules that turn those inputs into ProjectBinding or actor references.
 
+#[path = "world_inhabitation.rs"]
+pub mod world_inhabitation;
+
 use crate::context::ContextDescriptor;
 use crate::context_resolution::{compose_context_resolution, ContextResolution, RequestedActors};
 use crate::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
