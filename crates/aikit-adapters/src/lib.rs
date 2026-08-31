@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+extern crate self as aikit_adapters;
+
 pub mod actuation_stream_projection;
 pub mod agent_connection;
 pub mod authored_wiki_living;
@@ -17,6 +19,8 @@ pub mod deepseek_maximal;
 pub mod factory_run_thought_authored_wiki;
 pub mod flow_authored_wiki;
 pub mod gateway_connector;
+#[allow(unused_imports)]
+pub mod gateway_runtime;
 pub mod gitnexus;
 pub mod interactive_connection;
 pub mod local_source_discovery;
@@ -93,6 +97,15 @@ pub use gateway_connector::{
     MediaReference, OutboundOperation, OutboundOperationKind, SenderIdentity, SenderKind,
     GATEWAY_CONNECTOR_SCHEMA_PATH, GATEWAY_CONNECTOR_SDK_VERSION,
     GATEWAY_CONNECTOR_WIRE_VERSION,
+};
+pub use gateway_runtime::{
+    connector_descriptor, execute_gateway_command, text_send, AgencyGateway,
+    GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayBinding,
+    GatewayCommand, GatewayDiscovery, GatewayErrorEnvelope, GatewayIngressDecision,
+    GatewayIngressPolicy, GatewayIngressResult, GatewayReplay, GatewayRequestEnvelope,
+    GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus,
+    GatewayStreamEvent, GatewayStreamJournal,
+    ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA, AGENCY_GATEWAY_VERSION,
 };
 pub use interactive_connection::{
     AcpStableConnectionAdapter, AcpStableSessionCapabilities, InteractiveAgentConnectionAdapter,

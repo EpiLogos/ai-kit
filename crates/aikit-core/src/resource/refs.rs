@@ -11,7 +11,8 @@ macro_rules! opaque_ref {
         pub struct $name(String);
 
         impl $name {
-            pub fn parse(raw: &str) -> Result<Self> {
+            pub fn parse(raw: impl AsRef<str>) -> Result<Self> {
+                let raw = raw.as_ref();
                 if raw.is_empty() || raw != raw.trim() || raw.contains('\0') {
                     return Err(AikitError::new(
                         "resource.invalid_ref",
