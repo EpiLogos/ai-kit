@@ -33,6 +33,8 @@ pub mod session_space_connection;
 pub mod session_space_observation;
 pub mod session_space_reconstruction;
 pub mod shells;
+mod telegram_bot_api;
+pub mod telegram_gateway;
 pub mod working_environment;
 pub mod working_environment_control;
 
@@ -127,6 +129,10 @@ pub use session_space_observation::{
     SESSION_SPACE_OBSERVATION_FILE_VERSION,
 };
 pub use session_space_reconstruction::session_space_native_observations;
+pub use telegram_gateway::{
+    TelegramBotApiTransport, TelegramBotIdentity, TelegramConnector, TelegramConnectorConfig,
+    TELEGRAM_BOT_API_BASE, TELEGRAM_GATEWAY_CONNECTOR_VERSION,
+};
 pub use working_environment::{
     MuxSessionSpaceActivationDriver, MuxWorkingEnvironment, NativeBindingKind,
     ProviderNativeBinding, WorkingEnvironmentCapabilities, WorkingEnvironmentHealth,
