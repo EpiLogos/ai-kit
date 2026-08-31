@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 description = "AIKit Ratatui palette: search, preview, staging, argument forms, promotion."
 
+[lints.clippy]
+# Rust 1.88 newly reports owned temporary strings passed by reference to generic
+# ResourceRef parsers across established TUI projection code. Keep the workspace
+# -D warnings gate while allowing this source-compatible style lint in this crate.
+needless_borrows_for_generic_args = "allow"
+
 [dependencies]
 aikit-core = { workspace = true }
 aikit-store = { workspace = true }

@@ -62,7 +62,7 @@ impl<'a> V2SurfaceService<'a> {
             }
         }
         for profile in profiles {
-            if let Ok(id) = ResourceRef::parse(&profile.to_string()) {
+            if let Ok(id) = ResourceRef::parse(profile.to_string()) {
                 let record = ResourceRecord::new(ResourceDescriptor::new(
                     id,
                     ResourceKind::Profile,
@@ -81,7 +81,7 @@ impl<'a> V2SurfaceService<'a> {
         // activation. Keep their own Resource identity so human and agent views can
         // inspect the same selection without manufacturing Capability/Capsule ids.
         for name in self.service.project_skill_sets() {
-            let Ok(id) = ResourceRef::parse(&format!("skill-set/{name}")) else {
+            let Ok(id) = ResourceRef::parse(format!("skill-set/{name}")) else {
                 continue;
             };
             let record = ResourceRecord::new(ResourceDescriptor::new(

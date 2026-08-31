@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 description = "AIKit domain model: capsules, scopes, deterministic capability resolution, projections."
 
+[lints.clippy]
+# Rust 1.88's Clippy flags borrowed temporary format Strings accepted by ResourceRef::parse.
+# These calls are semantically harmless and occur throughout the existing core; keep the
+# whole-repository -D warnings gate while allowing only this newly-introduced style lint.
+needless_borrows_for_generic_args = "allow"
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

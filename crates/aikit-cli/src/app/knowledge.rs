@@ -73,7 +73,7 @@ impl Service {
                 .descriptor
                 .project_id
                 .as_ref()
-                .and_then(|project| ResourceRef::parse(&format!("project/{project}")).ok()),
+                .and_then(|project| ResourceRef::parse(format!("project/{project}")).ok()),
             actor: None,
             agency: None,
             focus: self.descriptor.task.clone(),
@@ -397,7 +397,7 @@ impl Service {
 
         let mut code = None;
         if let Some(project_id) = self.descriptor.project_id.as_ref() {
-            let source = SourceRef::parse(&format!("source:project-code:{project_id}"))?;
+            let source = SourceRef::parse(format!("source:project-code:{project_id}"))?;
             let mut provider = GitNexusCodeIndexProvider::new(
                 SystemRunner::new().with_cwd(root),
                 project_id.to_string(),
@@ -437,7 +437,6 @@ impl Service {
             .get(&id)
             .map(|capability| &capability.config)
     }
-
     fn build_project_map(
         &self,
         wiki: Option<&SemanticWikiIndex>,

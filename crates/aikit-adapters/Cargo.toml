@@ -7,6 +7,13 @@ license.workspace = true
 repository.workspace = true
 description = "AIKit adapters: multiplexers (tmux, cmux, plain), agent clients (Claude Code, Codex, broker), shells."
 
+[lints.clippy]
+# Rust 1.88 newly reports two source-compatible style classes in established
+# adapter code and the gateway merge ref. Preserve the strict workspace warning
+# gate while keeping these non-semantic formatting/parser forms accepted.
+needless_borrows_for_generic_args = "allow"
+uninlined_format_args = "allow"
+
 [dependencies]
 aikit-core = { workspace = true }
 serde = { workspace = true }

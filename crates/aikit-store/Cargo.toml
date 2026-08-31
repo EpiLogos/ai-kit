@@ -7,6 +7,13 @@ license.workspace = true
 repository.workspace = true
 description = "AIKit persistence: registries, catalog index, context generations, trust, events, capture inbox."
 
+[lints.clippy]
+# Rust 1.88 newly reports owned String temporaries passed by reference to the
+# generic ResourceRef parsers throughout the established history store. Keep the
+# strict workspace warning gate while treating this source-compatible style lint
+# as non-semantic until those call sites are naturally touched.
+needless_borrows_for_generic_args = "allow"
+
 [dependencies]
 aikit-core = { workspace = true }
 serde = { workspace = true }
