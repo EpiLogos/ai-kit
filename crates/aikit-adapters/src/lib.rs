@@ -21,6 +21,7 @@ pub mod flow_authored_wiki;
 pub mod gateway_connector;
 #[allow(unused_imports)]
 pub mod gateway_runtime;
+pub mod gateway_service;
 pub mod gitnexus;
 pub mod interactive_connection;
 pub mod local_source_discovery;
@@ -108,6 +109,10 @@ pub use gateway_runtime::{
     GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus,
     GatewayStreamEvent, GatewayStreamJournal,
     ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA, AGENCY_GATEWAY_VERSION,
+};
+pub use gateway_service::{
+    persist_gateway_state, restore_gateway_state, run_gateway_service, GatewayServiceConfig,
+    DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
 };
 pub use interactive_connection::{
     AcpStableConnectionAdapter, AcpStableSessionCapabilities, InteractiveAgentConnectionAdapter,
