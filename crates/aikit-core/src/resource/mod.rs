@@ -12,6 +12,7 @@ mod model;
 #[path = "../model_roster.rs"]
 mod model_roster;
 mod operative;
+mod operative_provider;
 mod refs;
 mod search;
 mod versioned_world;
@@ -36,6 +37,11 @@ pub use operative::{
     resolve_search, six_horizon_disclosure, ActionRef, ActionSemanticProfile, AddressHorizon,
     RelationOp, ResolveCandidate, ResolveExpression, ResolvePath, ResolvePathStep,
     ResolvedActionCandidate, OPERATIVE_SYNTAX_VERSION,
+};
+pub use operative_provider::{
+    OperativeSemanticOperation, OperativeSemanticProvider, OperativeSemanticProviderCapabilities,
+    OperativeSemanticProviderDescriptor, OperativeSemanticProviderStatus,
+    OPERATIVE_SEMANTIC_PROVIDER_VERSION,
 };
 pub use refs::{OwnerRef, ProviderRef, ResourceRef, SourceRef, SourceRevision};
 pub use search::{
