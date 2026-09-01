@@ -4,6 +4,7 @@ use aikit_adapters::{
     WORKING_ENVIRONMENT_PROVIDER_VERSION,
 };
 use aikit_core::resource::ResourceRef;
+use aikit_core::Result;
 
 fn r(raw: &str) -> ResourceRef {
     ResourceRef::parse(raw).unwrap()
@@ -81,20 +82,20 @@ impl WorkingEnvironmentProvider for ExternalFixtureProvider {
         }
     }
 
-    fn observe(&mut self) -> aikit_adapters::Result<WorkingEnvironmentObservation> {
+    fn observe(&mut self) -> Result<WorkingEnvironmentObservation> {
         Ok(self.observation())
     }
 
-    fn open(&mut self) -> aikit_adapters::Result<WorkingEnvironmentObservation> {
+    fn open(&mut self) -> Result<WorkingEnvironmentObservation> {
         Ok(self.observation())
     }
 
-    fn focus_surface(&mut self, surface: &ResourceRef) -> aikit_adapters::Result<()> {
+    fn focus_surface(&mut self, surface: &ResourceRef) -> Result<()> {
         self.focused = Some(surface.clone());
         Ok(())
     }
 
-    fn detach_surface(&mut self, surface: &ResourceRef) -> aikit_adapters::Result<()> {
+    fn detach_surface(&mut self, surface: &ResourceRef) -> Result<()> {
         self.detached.push(surface.clone());
         Ok(())
     }
