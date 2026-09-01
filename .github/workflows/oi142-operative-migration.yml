@@ -11,6 +11,7 @@ on:
       - 'scripts/oi142-parser-fix.py'
       - 'scripts/oi142-search-test-migrate.py'
       - 'scripts/oi142-method-path-migrate.py'
+      - 'scripts/oi142-method-consumers-migrate.py'
 
 permissions:
   contents: write
@@ -32,6 +33,7 @@ jobs:
           python3 scripts/oi142-parser-fix.py
           python3 scripts/oi142-search-test-migrate.py
           python3 scripts/oi142-method-path-migrate.py
+          python3 scripts/oi142-method-consumers-migrate.py
       - name: Format current workspace
         # Main currently carries pre-existing rustfmt drift outside #142. Format
         # the checkout so the implementation under test is canonical, but do not
@@ -51,6 +53,7 @@ jobs:
                   crates/aikit-core/src/knowledge.rs \
                   crates/aikit-core/src/method.rs \
                   crates/aikit-core/src/praxis.rs \
+                  crates/aikit-core/src/flow.rs \
                   crates/aikit-core/tests/search.rs \
                   crates/aikit-tui/src/application_service.rs \
                   crates/aikit-adapters/src/gateway_service.rs
