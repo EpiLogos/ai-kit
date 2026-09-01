@@ -173,6 +173,7 @@ struct IndexedResource {
     record: ResourceRecord,
     evidence: Vec<NavigationEvidence>,
     familiarity: Option<AccessibilityAssessment>,
+    resolve_path_familiarity: BTreeMap<String, AccessibilityAssessment>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -195,6 +196,7 @@ impl ResourceSearchIndex {
                     record,
                     evidence,
                     familiarity: None,
+                    resolve_path_familiarity: BTreeMap::new(),
                 },
             )
             .map(|previous| previous.record)
@@ -265,6 +267,35 @@ impl ResourceSearchIndex {
                 NavigationEvidence::new(NavigationEvidenceClass::LearnedUsage).with_detail(detail),
             );
             indexed.familiarity = Some(assessment);
+        }
+    }
+
+    /// Apply learned accessibility for one exact Resolve expression identity.
+    /// This evidence is deliberately not added to generic zero-query navigation:
+    /// it is only meaningful while resolving the same praxis language again.
+    pub fn apply_resolve_path_familiarity(
+        &mut self,
+        familiarity: &FamiliarityStore,
+        path_identity: &str,
+        context: &FamiliarityContext,
+        now_ms: u64,
+        half_life_ms: u64,
+    ) {
+        for indexed in self.resources.values_mut() {
+            let assessment = familiarity.assess_resolve_path(
+                path_identity,
+                &indexed.record.descriptor.id,
+                context,
+                now_ms,
+                half_life_ms,
+            );
+            if assessment.is_empty() {
+                indexed.resolve_path_familiarity.remove(path_identity);
+            } else {
+                indexed
+                    .resolve_path_familiarity
+                    .insert(path_identity.to_string(), assessment);
+            }
         }
     }
 
@@ -417,19 +448,42 @@ impl ResourceIndex for ResourceSearchIndex {
         let Some(indexed) = self.resources.get(id) else {
             return ResolveRankingSignals::default();
         };
-        let familiarity = indexed.familiarity.as_ref();
-        ResolveRankingSignals {
-            authored_preference_rank: indexed.record.preference.as_ref().map(|value| value.rank),
-            learned_observations: familiarity.map_or(0, |value| value.observations),
-            learned_contextual_observations: familiarity
-                .map_or(0, |value| value.contextual_observations),
-            learned_frecency_milli: familiarity.map_or(0, |value| quantise_milli(value.frecency)),
-            learned_contextual_frecency_milli: familiarity
-                .map_or(0, |value| quantise_milli(value.contextual_frecency)),
-            learned_contextual_fitness_milli: familiarity
-                .and_then(|value| value.contextual_fitness_milli)
-                .map(|value| value.round() as i32),
-        }
+        resolve_ranking_signals(indexed, None)
+    }
+
+    fn resolve_path_ranking(&self, path_identity: &str, id: &ResourceRef) -> ResolveRankingSignals {
+        let Some(indexed) = self.resources.get(id) else {
+            return ResolveRankingSignals::default();
+        };
+        resolve_ranking_signals(indexed, Some(path_identity))
+    }
+}
+
+fn resolve_ranking_signals(
+    indexed: &IndexedResource,
+    path_identity: Option<&str>,
+) -> ResolveRankingSignals {
+    let familiarity = indexed.familiarity.as_ref();
+    let path = path_identity.and_then(|identity| indexed.resolve_path_familiarity.get(identity));
+    ResolveRankingSignals {
+        authored_preference_rank: indexed.record.preference.as_ref().map(|value| value.rank),
+        learned_path_observations: path.map_or(0, |value| value.observations),
+        learned_path_contextual_observations: path.map_or(0, |value| value.contextual_observations),
+        learned_path_frecency_milli: path.map_or(0, |value| quantise_milli(value.frecency)),
+        learned_path_contextual_frecency_milli: path
+            .map_or(0, |value| quantise_milli(value.contextual_frecency)),
+        learned_path_contextual_fitness_milli: path
+            .and_then(|value| value.contextual_fitness_milli)
+            .map(|value| value.round() as i32),
+        learned_observations: familiarity.map_or(0, |value| value.observations),
+        learned_contextual_observations: familiarity
+            .map_or(0, |value| value.contextual_observations),
+        learned_frecency_milli: familiarity.map_or(0, |value| quantise_milli(value.frecency)),
+        learned_contextual_frecency_milli: familiarity
+            .map_or(0, |value| quantise_milli(value.contextual_frecency)),
+        learned_contextual_fitness_milli: familiarity
+            .and_then(|value| value.contextual_fitness_milli)
+            .map(|value| value.round() as i32),
     }
 }
 
@@ -574,6 +628,80 @@ mod tests {
         let scattered = fuzzy_score("proj", "profile object relation job").unwrap();
         assert!(prefix > scattered);
         assert!(fuzzy_score("xyz", "project").is_none());
+    }
+
+    #[test]
+    fn learned_resolve_path_breaks_an_otherwise_equal_resolution_tie() {
+        use super::super::{
+            parse_resolve_expression, resolve_expression, resolve_path_identity, AddressHorizon,
+            RelationOp, ResourceDescriptor,
+        };
+        use crate::familiarity::{
+            FamiliarityContext, FamiliarityObservation, FamiliarityStore, OperativePathEvidence,
+            RouteStepEvidence,
+        };
+
+        let mut index = ResourceSearchIndex::default();
+        for id in ["action/alpha", "action/beta"] {
+            index.insert_resource(
+                ResourceRecord::new(ResourceDescriptor::new(
+                    ResourceRef::parse(id).unwrap(),
+                    ResourceKind::Action,
+                    "Verify",
+                    "verify current state",
+                )),
+                Vec::new(),
+            );
+        }
+        let expression = parse_resolve_expression("+ @5 verify").unwrap();
+        let path_identity = resolve_path_identity(&expression);
+        let beta = ResourceRef::parse("action/beta").unwrap();
+        let mut familiarity = FamiliarityStore::new();
+        familiarity
+            .record(
+                FamiliarityObservation::resolve_path(
+                    "evt/path/beta",
+                    None,
+                    beta.clone(),
+                    vec![RouteStepEvidence {
+                        resource: beta.clone(),
+                        provider: None,
+                        lens: None,
+                        revision: None,
+                    }],
+                    OperativePathEvidence {
+                        path_identity: path_identity.clone(),
+                        expression: expression.clone(),
+                        relation_ops: vec![RelationOp::Affirm],
+                        horizons: vec![AddressHorizon::H5],
+                        method: None,
+                        action: Some(beta.clone()),
+                        surface: None,
+                        activity: None,
+                        return_ref: None,
+                    },
+                    FamiliarityContext::default(),
+                    1_000,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        index.apply_resolve_path_familiarity(
+            &familiarity,
+            &path_identity,
+            &FamiliarityContext::default(),
+            1_001,
+            10_000,
+        );
+
+        let path = resolve_expression(&expression, &index, 16);
+        assert_eq!(path.candidates[0].resource, beta);
+        assert_eq!(
+            path.candidates[0]
+                .ranking
+                .learned_path_contextual_observations,
+            1
+        );
     }
 
     #[test]

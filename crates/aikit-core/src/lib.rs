@@ -51,8 +51,8 @@ pub mod knowledge_living_context;
 pub mod knowledge_living_relations;
 pub mod knowledge_living_transport;
 pub mod knowledge_navigation;
-pub mod knowledge_operations;
 pub mod knowledge_okf;
+pub mod knowledge_operations;
 pub mod knowledge_source_pool;
 pub mod knowledge_wiki;
 pub mod knowledge_wiki_index;
@@ -146,34 +146,31 @@ pub use credential::{
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
 pub use explain_history::{
-    explain_resource_evidence, familiarity_history_evidence,
-    harness_composition_history_evidence, EvidenceProvenance, ExplainEvidence, ExplainFact,
-    HistoryEvidence, HistoryKind, HistoryReadModel, HistoryRecoverability,
-    EXPLAIN_HISTORY_VERSION,
+    explain_resource_evidence, familiarity_history_evidence, harness_composition_history_evidence,
+    EvidenceProvenance, ExplainEvidence, ExplainFact, HistoryEvidence, HistoryKind,
+    HistoryReadModel, HistoryRecoverability, EXPLAIN_HISTORY_VERSION,
 };
 pub use explain_history_actions::{
-    explain_history_action_resources, explain_history_actions_for,
-    install_explain_history_actions, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
+    explain_history_action_resources, explain_history_actions_for, install_explain_history_actions,
+    EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
 };
 pub use familiarity::{
     AccessibilityAssessment, AccessibilitySignal, AccessibilitySignalClass, FamiliarityContext,
     FamiliarityObservation, FamiliaritySnapshot, FamiliaritySnapshotLoad, FamiliarityStore,
-    FamiliarityUse, FitnessEvidence, ForgetScope, RouteStepEvidence,
+    FamiliarityUse, FitnessEvidence, ForgetScope, OperativePathEvidence, RouteStepEvidence,
     DEFAULT_FAMILIARITY_HALF_LIFE_MS, FAMILIARITY_SCHEMA_VERSION,
 };
 pub use flow::{
-    apply_flow_mutation, bind_flow_for_act, explicit_flow_contemplate,
-    first_party_flow_guidance, first_party_flow_method, first_party_flow_resource_records,
-    flow_contemplate_preflight, flow_knowledge_dependency, parse_flow_contemplate_generated,
-    FlowAuthorityRef, FlowBinding,
-    FlowCapabilities, FlowContextAuthority, FlowContemplateExecutor, FlowContemplateGenerated,
-    FlowContemplateOutcome, FlowContemplatePreflight, FlowContemplateRequest, FlowLifecycle,
+    apply_flow_mutation, bind_flow_for_act, explicit_flow_contemplate, first_party_flow_guidance,
+    first_party_flow_method, first_party_flow_resource_records, flow_contemplate_preflight,
+    flow_knowledge_dependency, parse_flow_contemplate_generated, FlowAuthorityRef, FlowBinding,
+    FlowCapabilities, FlowContemplateExecutor, FlowContemplateGenerated, FlowContemplateOutcome,
+    FlowContemplatePreflight, FlowContemplateRequest, FlowContextAuthority, FlowLifecycle,
     FlowMutationIntent, FlowProvider, FlowReadOutcome, FlowSourceDescriptor, FlowStandingContext,
-    FlowStandingDisclosure, FlowWriteRequest, FlowWriteResult, FLOW_CONTEXT_VERSION,
-    FLOW_CONTEMPLATE_ACTION_REF, FLOW_CONTEMPLATE_RETURN_VERSION, FLOW_CONTEMPLATE_VERSION,
-    FLOW_GUIDANCE_CAPSULE,
-    FLOW_KNOWLEDGE_NAVIGATION_REF, FLOW_LIVING_KNOWLEDGE_REF, FLOW_METHOD_REF,
-    FLOW_METHOD_SOURCE, FLOW_SKILL_REF,
+    FlowStandingDisclosure, FlowWriteRequest, FlowWriteResult, FLOW_CONTEMPLATE_ACTION_REF,
+    FLOW_CONTEMPLATE_RETURN_VERSION, FLOW_CONTEMPLATE_VERSION, FLOW_CONTEXT_VERSION,
+    FLOW_GUIDANCE_CAPSULE, FLOW_KNOWLEDGE_NAVIGATION_REF, FLOW_LIVING_KNOWLEDGE_REF,
+    FLOW_METHOD_REF, FLOW_METHOD_SOURCE, FLOW_SKILL_REF,
 };
 pub use frecency::{Candidate, Jump, Tiebreak};
 pub use guidance::{
@@ -209,10 +206,10 @@ pub use knowledge_living::{
     build_integrative_reading, contemplate_preflight, deterministic_knowledge_impact,
     explicit_contemplate, living_wiki_provenance, ContemplateExecutor, ContemplateGenerated,
     ContemplateOutcome, ContemplatePreflight, ContemplateRequest, IntegrativeWikiReading,
-    KnowledgeAffectedResource, KnowledgeChangeHorizon, KnowledgeChangeKind, KnowledgeChangeProvider,
-    KnowledgeDependency, KnowledgeFreshness, KnowledgeImpact, KnowledgeObservedSource,
-    KnowledgeSourceChange, ReadingBasisEdge, ReadingBasisNode, ReadingReturnPath,
-    INTEGRATIVE_READING_EXTENSION, LIVING_KNOWLEDGE_VERSION,
+    KnowledgeAffectedResource, KnowledgeChangeHorizon, KnowledgeChangeKind,
+    KnowledgeChangeProvider, KnowledgeDependency, KnowledgeFreshness, KnowledgeImpact,
+    KnowledgeObservedSource, KnowledgeSourceChange, ReadingBasisEdge, ReadingBasisNode,
+    ReadingReturnPath, INTEGRATIVE_READING_EXTENSION, LIVING_KNOWLEDGE_VERSION,
 };
 pub use knowledge_living_context::{
     assemble_contemplate_context, bounded_contemplate_preflight, explicit_bounded_contemplate,
@@ -224,25 +221,23 @@ pub use knowledge_living_context::{
 };
 pub use knowledge_living_relations::{
     build_revisioned_integrative_reading, deterministic_transitive_knowledge_impact,
-    integrated_through_cursor, integrative_basis_refs, integrating_readings,
+    integrated_through_cursor, integrating_readings, integrative_basis_refs,
     portable_contemplate_preflight, validate_reintegration, KnowledgeImpactPath,
     KnowledgeImpactRef, KnowledgeImpactRequest, KnowledgeImpactStep, KnowledgeResourceDependency,
     KnowledgeTransitiveAffected, KnowledgeTransitiveImpact, PortableContemplatePreflight,
     PortableContemplatePreflightRequest, ReadingBasisRevision, DEFAULT_LIVING_IMPACT_DEPTH,
     DEFAULT_LIVING_IMPACT_RESOURCES, LIVING_RELATIONS_VERSION,
 };
-pub use knowledge_living_transport::{
-    parse_contemplate_generated, CONTEMPLATE_RETURN_VERSION,
-};
+pub use knowledge_living_transport::{parse_contemplate_generated, CONTEMPLATE_RETURN_VERSION};
 pub use knowledge_navigation::{
     KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation, KnowledgeProviderStatus,
     KnowledgeRankingEvidence, KnowledgeSearchHit, KnowledgeSearchResult, SourcePoolBinding,
     KNOWLEDGE_APPLICATION_VERSION,
 };
+pub use knowledge_okf::{validate_okf, OkfDocument, OKF_VERSION};
 pub use knowledge_operations::{
     KnowledgeOperations, KnowledgeSources, KNOWLEDGE_OPERATIONS_VERSION,
 };
-pub use knowledge_okf::{validate_okf, OkfDocument, OKF_VERSION};
 pub use knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceBinding, SourceHit, SourceMaterial,
     SourcePool, SourcePoolProvider, SourceProviderCapabilities, SourceProviderStatus,
@@ -273,9 +268,9 @@ pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;
 pub use praxis::{resolve_praxis, PraxisResolution, SelectedMethod, PRAXIS_RESOLUTION_VERSION};
 pub use procedure::{
-    absent_fields, render_marked_block, select_isolation, splice_marked_block, FieldOrigin,
-    FieldOrigins, Fidelity, Inverse, MutationIsolation, Plan, PlanDigest, Procedure, ProcedureKind,
-    RegistryOwnership, UndoRecord, UndoStep, WorldEdit,
+    absent_fields, render_marked_block, select_isolation, splice_marked_block, Fidelity,
+    FieldOrigin, FieldOrigins, Inverse, MutationIsolation, Plan, PlanDigest, Procedure,
+    ProcedureKind, RegistryOwnership, UndoRecord, UndoStep, WorldEdit,
 };
 pub use profile::{ConfigMerge, ConfigTable, PoolPatch, Profile};
 pub use project::{ProjectConstituentRef, ProjectRef};
@@ -310,8 +305,7 @@ pub use projectcentral::{
     CENTRAL_GROUND_RELATIONS_SCHEMA, CENTRAL_PROJECT_SCHEMA, CENTRAL_ROOT_WIKI_SOURCE,
     CENTRAL_WIKI_PROFILE, NO_AGENT_RETRIEVAL_MARKER, PROJECTCENTRAL_BINDING_VERSION,
     PROJECTCENTRAL_FILESYSTEM_PROVIDER, PROJECTCENTRAL_GOVERNANCE_ROOT,
-    PROJECTCENTRAL_GROUND_RELATIONS_SOURCE, PROJECTCENTRAL_HUMAN_ROOT,
-    PROJECTCENTRAL_WIKI_SOURCE,
+    PROJECTCENTRAL_GROUND_RELATIONS_SOURCE, PROJECTCENTRAL_HUMAN_ROOT, PROJECTCENTRAL_WIKI_SOURCE,
 };
 pub use projection::{
     target_label, ActivationEffect, MaterializationMode, ProjectionItem, ProjectionPlan,
@@ -326,8 +320,8 @@ pub use ql::{
     QL_OUTPUT_SCHEMA_VERSION, QL_PROVENANCE_SCHEMA_VERSION,
 };
 pub use resolve::{
-    resolve, resolve_diagnostic, ActiveCapability, Diagnosis, ResolveRequest, ResolvedView,
-    ResolutionHash, UnavailableReason,
+    resolve, resolve_diagnostic, ActiveCapability, Diagnosis, ResolutionHash, ResolveRequest,
+    ResolvedView, UnavailableReason,
 };
 pub use resource::{
     Eligibility, OwnerRef, PreferenceIntent, ProviderOffer, ProviderRef, ProviderState,
@@ -362,6 +356,8 @@ pub use session_space_contribution::{
     SessionSpaceContributionRegistryReadModel, SessionSpaceContributionRemoval,
     SESSION_SPACE_CONTRIBUTION_REGISTRY_VERSION, SESSION_SPACE_CONTRIBUTION_VERSION,
 };
-pub use skillset::{SetMembership, SetProjection, SetProvenance, SkillSet, Withheld, WithheldReason};
+pub use skillset::{
+    SetMembership, SetProjection, SetProvenance, SkillSet, Withheld, WithheldReason,
+};
 pub use surfacing::{plan_surfacing, DisplayContext, SurfacingPlan};
 pub use trust::{TrustKey, TrustOracle, TrustState};

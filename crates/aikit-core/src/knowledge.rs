@@ -535,9 +535,8 @@ mod tests {
                     "provider/gitnexus"
                 );
             }
-            crate::FamiliarityUse::ResolvePath { route, steps, .. } => {
-                assert_eq!(route, r("knowledge-route/auth-to-code"));
-                assert_eq!(steps.len(), 2);
+            crate::FamiliarityUse::ResolvePath { .. } => {
+                panic!("KnowledgeRoute familiarity must remain route evidence")
             }
             crate::FamiliarityUse::Destination => panic!("route evidence must remain a route"),
         }

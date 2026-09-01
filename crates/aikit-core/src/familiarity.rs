@@ -92,7 +92,10 @@ pub enum FamiliarityUse {
         steps: Vec<RouteStepEvidence>,
     },
     ResolvePath {
-        route: ResourceRef,
+        /// Present only when an actual canonical KnowledgeRoute participated in
+        /// the traversal. A general ResolvePath never manufactures route identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        knowledge_route: Option<ResourceRef>,
         steps: Vec<RouteStepEvidence>,
         operative: OperativePathEvidence,
     },
@@ -171,13 +174,19 @@ impl FamiliarityObservation {
 
     pub fn resolve_path(
         observation_id: impl Into<String>,
-        route: ResourceRef,
+        knowledge_route: Option<ResourceRef>,
         destination: ResourceRef,
         steps: Vec<RouteStepEvidence>,
         operative: OperativePathEvidence,
         context: FamiliarityContext,
         observed_at_ms: u64,
     ) -> Result<Self> {
+        if operative.path_identity.trim().is_empty() {
+            return Err(AikitError::new(
+                "familiarity.missing_resolve_path_identity",
+                "a ResolvePath familiarity observation needs the stable path identity",
+            ));
+        }
         if steps.is_empty() {
             return Err(AikitError::new(
                 "familiarity.empty_resolve_path",
@@ -195,7 +204,7 @@ impl FamiliarityObservation {
             destination,
             context,
             use_kind: FamiliarityUse::ResolvePath {
-                route,
+                knowledge_route,
                 steps,
                 operative,
             },
@@ -246,6 +255,8 @@ pub struct AccessibilityAssessment {
     pub destination: ResourceRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<ResourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_identity: Option<String>,
     pub observations: usize,
     pub contextual_observations: usize,
     pub frecency: f64,
@@ -284,8 +295,16 @@ pub enum FamiliaritySnapshotLoad {
 pub enum ForgetScope {
     Destination(ResourceRef),
     Route(ResourceRef),
+    ResolvePath(String),
     Project(ResourceRef),
     All,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FamiliaritySelector<'a> {
+    Destination,
+    Route(&'a ResourceRef),
+    ResolvePath(&'a str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -359,7 +378,13 @@ impl FamiliarityStore {
         now_ms: u64,
         half_life_ms: u64,
     ) -> AccessibilityAssessment {
-        self.assess(destination, None, context, now_ms, half_life_ms)
+        self.assess(
+            destination,
+            FamiliaritySelector::Destination,
+            context,
+            now_ms,
+            half_life_ms,
+        )
     }
 
     pub fn assess_route(
@@ -370,13 +395,36 @@ impl FamiliarityStore {
         now_ms: u64,
         half_life_ms: u64,
     ) -> AccessibilityAssessment {
-        self.assess(destination, Some(route), context, now_ms, half_life_ms)
+        self.assess(
+            destination,
+            FamiliaritySelector::Route(route),
+            context,
+            now_ms,
+            half_life_ms,
+        )
+    }
+
+    pub fn assess_resolve_path(
+        &self,
+        path_identity: &str,
+        destination: &ResourceRef,
+        context: &FamiliarityContext,
+        now_ms: u64,
+        half_life_ms: u64,
+    ) -> AccessibilityAssessment {
+        self.assess(
+            destination,
+            FamiliaritySelector::ResolvePath(path_identity),
+            context,
+            now_ms,
+            half_life_ms,
+        )
     }
 
     fn assess(
         &self,
         destination: &ResourceRef,
-        route: Option<&ResourceRef>,
+        selector: FamiliaritySelector<'_>,
         context: &FamiliarityContext,
         now_ms: u64,
         half_life_ms: u64,
@@ -387,13 +435,18 @@ impl FamiliarityStore {
             if &observation.destination != destination {
                 continue;
             }
-            let route_matches = match (route, &observation.use_kind) {
-                (None, FamiliarityUse::Destination) => true,
-                (Some(wanted), FamiliarityUse::Route { route, .. })
-                | (Some(wanted), FamiliarityUse::ResolvePath { route, .. }) => route == wanted,
+            let identity_matches = match (selector, &observation.use_kind) {
+                (FamiliaritySelector::Destination, FamiliarityUse::Destination) => true,
+                (FamiliaritySelector::Route(wanted), FamiliarityUse::Route { route, .. }) => {
+                    route == wanted
+                }
+                (
+                    FamiliaritySelector::ResolvePath(wanted),
+                    FamiliarityUse::ResolvePath { operative, .. },
+                ) => operative.path_identity == wanted,
                 _ => false,
             };
-            if route_matches {
+            if identity_matches {
                 matching.push(observation);
             }
         }
@@ -464,7 +517,14 @@ impl FamiliarityStore {
 
         AccessibilityAssessment {
             destination: destination.clone(),
-            route: route.cloned(),
+            route: match selector {
+                FamiliaritySelector::Route(route) => Some(route.clone()),
+                _ => None,
+            },
+            path_identity: match selector {
+                FamiliaritySelector::ResolvePath(identity) => Some(identity.to_string()),
+                _ => None,
+            },
             observations: matching.len(),
             contextual_observations: contextual.len(),
             frecency,
@@ -485,15 +545,15 @@ impl FamiliarityStore {
                 !(matches!(observation.use_kind, FamiliarityUse::Destination)
                     && &observation.destination == destination)
             }
-            ForgetScope::Route(route) => match &observation.use_kind {
-                FamiliarityUse::Route {
-                    route: observed, ..
-                }
-                | FamiliarityUse::ResolvePath {
-                    route: observed, ..
-                } => observed != route,
-                _ => true,
-            },
+            ForgetScope::Route(route) => !matches!(
+                &observation.use_kind,
+                FamiliarityUse::Route { route: observed, .. } if observed == route
+            ),
+            ForgetScope::ResolvePath(path_identity) => !matches!(
+                &observation.use_kind,
+                FamiliarityUse::ResolvePath { operative, .. }
+                    if &operative.path_identity == path_identity
+            ),
             ForgetScope::Project(project) => observation.context.project.as_ref() != Some(project),
             ForgetScope::All => false,
         });
@@ -507,12 +567,24 @@ impl FamiliarityStore {
                 FamiliarityUse::Route {
                     route: observed,
                     steps,
-                }
-                | FamiliarityUse::ResolvePath {
-                    route: observed,
-                    steps,
-                    ..
                 } if observed == route => Some(
+                    steps
+                        .iter()
+                        .map(|step| step.resource.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn resolve_path_steps(&self, path_identity: &str) -> BTreeSet<Vec<ResourceRef>> {
+        self.observations
+            .values()
+            .filter_map(|observation| match &observation.use_kind {
+                FamiliarityUse::ResolvePath {
+                    steps, operative, ..
+                } if operative.path_identity == path_identity => Some(
                     steps
                         .iter()
                         .map(|step| step.resource.clone())

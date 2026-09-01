@@ -597,8 +597,9 @@ pub fn resolve_expression(
     resources: &dyn ResourceIndex,
     limit: usize,
 ) -> ResolvePath {
+    let identity = resolve_path_identity(expression);
     let mut steps = Vec::new();
-    let mut candidates = evaluate(expression, resources, &mut steps);
+    let mut candidates = evaluate(expression, resources, &identity, &mut steps);
     candidates.sort_by(|left, right| {
         right
             .exact
@@ -617,6 +618,30 @@ pub fn resolve_expression(
                     .authored_preference_rank
                     .unwrap_or_default()
                     .cmp(&left.ranking.authored_preference_rank.unwrap_or_default())
+            })
+            .then_with(|| {
+                right
+                    .ranking
+                    .learned_path_contextual_frecency_milli
+                    .cmp(&left.ranking.learned_path_contextual_frecency_milli)
+            })
+            .then_with(|| {
+                right
+                    .ranking
+                    .learned_path_contextual_fitness_milli
+                    .unwrap_or_default()
+                    .cmp(
+                        &left
+                            .ranking
+                            .learned_path_contextual_fitness_milli
+                            .unwrap_or_default(),
+                    )
+            })
+            .then_with(|| {
+                right
+                    .ranking
+                    .learned_path_frecency_milli
+                    .cmp(&left.ranking.learned_path_frecency_milli)
             })
             .then_with(|| {
                 right
@@ -650,10 +675,9 @@ pub fn resolve_expression(
     } else {
         candidates.clear();
     }
-    let rendered = expression.render();
     ResolvePath {
         version: OPERATIVE_SYNTAX_VERSION.into(),
-        identity: stable_path_identity(&rendered),
+        identity,
         expression: expression.clone(),
         steps,
         candidates,
@@ -671,11 +695,12 @@ pub fn resolve_search(query: &str, resources: &dyn ResourceIndex, limit: usize) 
 fn evaluate(
     expression: &ResolveExpression,
     resources: &dyn ResourceIndex,
+    path_identity: &str,
     steps: &mut Vec<ResolvePathStep>,
 ) -> Vec<ResolveCandidate> {
     match expression {
         ResolveExpression::Subject { value } => {
-            let candidates = subject_candidates(value, resources);
+            let candidates = subject_candidates(value, resources, path_identity);
             steps.push(ResolvePathStep::Subject {
                 value: value.clone(),
                 candidates: candidates
@@ -689,7 +714,7 @@ fn evaluate(
             horizon,
             expression,
         } => {
-            let mut candidates = evaluate(expression, resources, steps);
+            let mut candidates = evaluate(expression, resources, path_identity, steps);
             if let Some(horizon) = horizon {
                 candidates.retain(|candidate| candidate.horizons.contains(horizon));
             }
@@ -703,20 +728,20 @@ fn evaluate(
             candidates
         }
         ResolveExpression::Unary { op, expression } => {
-            let candidates = evaluate(expression, resources, steps);
+            let candidates = evaluate(expression, resources, path_identity, steps);
             steps.push(ResolvePathStep::Relation { op: *op });
             candidates
         }
         ResolveExpression::Binary { op, left, right } => {
-            let mut candidates = evaluate(left, resources, steps);
-            let right = evaluate(right, resources, steps);
+            let mut candidates = evaluate(left, resources, path_identity, steps);
+            let right = evaluate(right, resources, path_identity, steps);
             steps.push(ResolvePathStep::Relation { op: *op });
             candidates.extend(right);
             dedupe_candidates(candidates)
         }
         ResolveExpression::Frame { expression } => {
             steps.push(ResolvePathStep::Frame);
-            evaluate(expression, resources, steps)
+            evaluate(expression, resources, path_identity, steps)
         }
     }
 }
@@ -736,7 +761,11 @@ fn dedupe_candidates(candidates: Vec<ResolveCandidate>) -> Vec<ResolveCandidate>
     by_ref.into_values().collect()
 }
 
-fn subject_candidates(value: &str, resources: &dyn ResourceIndex) -> Vec<ResolveCandidate> {
+fn subject_candidates(
+    value: &str,
+    resources: &dyn ResourceIndex,
+    path_identity: &str,
+) -> Vec<ResolveCandidate> {
     let query = value.trim().to_lowercase();
     let exact_ref = ResourceRef::parse(value.trim()).ok();
     resources
@@ -759,7 +788,7 @@ fn subject_candidates(value: &str, resources: &dyn ResourceIndex) -> Vec<Resolve
                 horizons: horizons_for_resource(record),
                 exact,
                 score,
-                ranking: resources.resolve_ranking(&record.descriptor.id),
+                ranking: resources.resolve_path_ranking(path_identity, &record.descriptor.id),
             })
         })
         .collect()
@@ -954,6 +983,10 @@ pub fn six_horizon_disclosure(
     ResolveExpression::Frame {
         expression: Box::new(expression),
     }
+}
+
+pub fn resolve_path_identity(expression: &ResolveExpression) -> String {
+    stable_path_identity(&expression.render())
 }
 
 fn stable_path_identity(rendered: &str) -> String {

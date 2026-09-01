@@ -13,6 +13,16 @@ pub struct ResolveRankingSignals {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authored_preference_rank: Option<i32>,
     #[serde(default)]
+    pub learned_path_observations: usize,
+    #[serde(default)]
+    pub learned_path_contextual_observations: usize,
+    #[serde(default)]
+    pub learned_path_frecency_milli: i64,
+    #[serde(default)]
+    pub learned_path_contextual_frecency_milli: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learned_path_contextual_fitness_milli: Option<i32>,
+    #[serde(default)]
     pub learned_observations: usize,
     #[serde(default)]
     pub learned_contextual_observations: usize,
@@ -30,6 +40,14 @@ pub trait ResourceIndex {
 
     fn resolve_ranking(&self, _id: &ResourceRef) -> ResolveRankingSignals {
         ResolveRankingSignals::default()
+    }
+
+    fn resolve_path_ranking(
+        &self,
+        _path_identity: &str,
+        id: &ResourceRef,
+    ) -> ResolveRankingSignals {
+        self.resolve_ranking(id)
     }
 }
 

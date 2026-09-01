@@ -4,8 +4,8 @@ use aikit_core::resource::{
 };
 use aikit_core::{
     AccessibilitySignalClass, FamiliarityContext, FamiliarityObservation, FamiliaritySnapshot,
-    FamiliaritySnapshotLoad, FamiliarityStore, FitnessEvidence, ForgetScope, RouteStepEvidence,
-    DEFAULT_FAMILIARITY_HALF_LIFE_MS, FAMILIARITY_SCHEMA_VERSION,
+    FamiliaritySnapshotLoad, FamiliarityStore, FitnessEvidence, ForgetScope, OperativePathEvidence,
+    RouteStepEvidence, DEFAULT_FAMILIARITY_HALF_LIFE_MS, FAMILIARITY_SCHEMA_VERSION,
 };
 
 fn r(raw: &str) -> ResourceRef {
@@ -52,12 +52,8 @@ fn the_same_destination_learns_different_accessibility_in_different_contexts() {
         now,
         DEFAULT_FAMILIARITY_HALF_LIFE_MS,
     );
-    let docs_score = store.assess_destination(
-        &destination,
-        &docs,
-        now,
-        DEFAULT_FAMILIARITY_HALF_LIFE_MS,
-    );
+    let docs_score =
+        store.assess_destination(&destination, &docs, now, DEFAULT_FAMILIARITY_HALF_LIFE_MS);
 
     assert_eq!(payments_score.observations, 2);
     assert_eq!(docs_score.observations, 2);
@@ -167,13 +163,12 @@ fn route_familiarity_preserves_the_route_steps_provider_lens_and_revision_eviden
     assert_eq!(assessment.contextual_observations, 2);
     assert_eq!(
         store.route_steps(&route),
-        std::collections::BTreeSet::from([vec![
-            r("knowledge-node/auth"),
-            destination.clone(),
-        ]])
+        std::collections::BTreeSet::from([vec![r("knowledge-node/auth"), destination.clone(),]])
     );
     match observation.use_kind {
-        aikit_core::FamiliarityUse::Route { steps: observed, .. } => {
+        aikit_core::FamiliarityUse::Route {
+            steps: observed, ..
+        } => {
             assert_eq!(observed[0].provider, Some(r("provider/wiki")));
             assert_eq!(observed[0].lens.as_deref(), Some("L4-prime"));
             assert_eq!(observed[0].revision.as_deref(), Some("wiki-r41"));
@@ -215,7 +210,10 @@ fn resetting_one_learned_scope_does_not_touch_other_evidence_or_canonical_identi
         )
         .unwrap();
 
-    assert_eq!(store.forget(&ForgetScope::Destination(destination.clone())), 1);
+    assert_eq!(
+        store.forget(&ForgetScope::Destination(destination.clone())),
+        1
+    );
     assert!(store
         .assess_destination(&destination, &ctx, 3, 100)
         .is_empty());
@@ -226,6 +224,94 @@ fn resetting_one_learned_scope_does_not_touch_other_evidence_or_canonical_identi
         1
     );
     assert_eq!(destination.as_str(), "knowledge-node/auth");
+}
+
+#[test]
+fn resolve_path_familiarity_has_its_own_identity_and_reset_scope() {
+    use aikit_core::resource::{
+        parse_resolve_expression, resolve_path_identity, AddressHorizon, RelationOp,
+    };
+
+    let destination = r("action/verify");
+    let route = r("knowledge-route/spec-to-verify");
+    let ctx = context("project/app", "agent/operator", "verify");
+    let expression = parse_resolve_expression("+ @5 action/verify").unwrap();
+    let path_identity = resolve_path_identity(&expression);
+    let steps = vec![RouteStepEvidence {
+        resource: destination.clone(),
+        provider: Some(r("provider/native")),
+        lens: Some("action".into()),
+        revision: Some("r7".into()),
+    }];
+    let mut store = FamiliarityStore::new();
+
+    store
+        .record(
+            FamiliarityObservation::route(
+                "evt/route/independent",
+                route.clone(),
+                destination.clone(),
+                steps.clone(),
+                ctx.clone(),
+                1_000,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    store
+        .record(
+            FamiliarityObservation::resolve_path(
+                "evt/path/independent",
+                Some(route.clone()),
+                destination.clone(),
+                steps,
+                OperativePathEvidence {
+                    path_identity: path_identity.clone(),
+                    expression: expression.clone(),
+                    relation_ops: vec![RelationOp::Affirm],
+                    horizons: vec![AddressHorizon::H5],
+                    method: Some(r("method/verify")),
+                    action: Some(destination.clone()),
+                    surface: Some(r("surface/aikit/tui")),
+                    activity: None,
+                    return_ref: None,
+                },
+                ctx.clone(),
+                1_001,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        store
+            .assess_route(&route, &destination, &ctx, 1_002, 10_000)
+            .observations,
+        1
+    );
+    let path = store.assess_resolve_path(&path_identity, &destination, &ctx, 1_002, 10_000);
+    assert_eq!(path.observations, 1);
+    assert_eq!(path.route, None);
+    assert_eq!(path.path_identity.as_deref(), Some(path_identity.as_str()));
+    assert_eq!(
+        store.resolve_path_steps(&path_identity),
+        std::collections::BTreeSet::from([vec![destination.clone()]])
+    );
+
+    assert_eq!(
+        store.forget(&ForgetScope::ResolvePath(path_identity.clone())),
+        1
+    );
+    assert!(store
+        .assess_resolve_path(&path_identity, &destination, &ctx, 1_003, 10_000)
+        .is_empty());
+    assert_eq!(
+        store
+            .assess_route(&route, &destination, &ctx, 1_003, 10_000)
+            .observations,
+        1,
+        "forgetting operative-path ease must not erase KnowledgeRoute evidence"
+    );
 }
 
 #[test]
@@ -294,7 +380,9 @@ fn snapshot_schema_change_explicitly_invalidates_only_learned_influence() {
             assert_eq!(observations_discarded, 1);
             assert!(reason.contains(FAMILIARITY_SCHEMA_VERSION));
         }
-        FamiliaritySnapshotLoad::Loaded(_) => panic!("old schema should not silently influence ranking"),
+        FamiliaritySnapshotLoad::Loaded(_) => {
+            panic!("old schema should not silently influence ranking")
+        }
     }
     assert_eq!(destination.as_str(), "knowledge-node/auth");
 }

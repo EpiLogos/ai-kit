@@ -32,9 +32,10 @@ pub use model_roster::{
 };
 pub use operative::{
     horizons_for_resource, parse_or_search_expression, parse_resolve_expression,
-    resolve_action_candidates, resolve_expression, resolve_search, six_horizon_disclosure,
-    ActionRef, AddressHorizon, RelationOp, ResolveCandidate, ResolveExpression, ResolvePath,
-    ResolvePathStep, ResolvedActionCandidate, OPERATIVE_SYNTAX_VERSION,
+    resolve_action_candidates, resolve_expression, resolve_path_identity, resolve_search,
+    six_horizon_disclosure, ActionRef, AddressHorizon, RelationOp, ResolveCandidate,
+    ResolveExpression, ResolvePath, ResolvePathStep, ResolvedActionCandidate,
+    OPERATIVE_SYNTAX_VERSION,
 };
 pub use refs::{OwnerRef, ProviderRef, ResourceRef, SourceRef, SourceRevision};
 pub use search::{

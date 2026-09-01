@@ -11,9 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aikit_core::composition_mutation::{changed_ground, CompositionBasis};
 use aikit_core::id::{CapsuleId, EventId};
 use aikit_core::resource::{
-    parse_or_search_expression, resolve_expression, ContextualActionDescriptor, NavigationEvidence,
-    NavigationEvidenceClass, ResolveExpression, ResourceDescriptor, ResourceIndex, ResourceKind,
-    ResourceRecord, ResourceRef, ResourceSearchIndex,
+    parse_or_search_expression, resolve_expression, resolve_path_identity,
+    ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass, ResolveExpression,
+    ResourceDescriptor, ResourceIndex, ResourceKind, ResourceRecord, ResourceRef,
+    ResourceSearchIndex,
 };
 use aikit_core::{
     explain_history_actions_for, install_explain_history_actions, AikitError, FamiliarityContext,
@@ -101,6 +102,15 @@ impl<'a> ApplicationService<'a> {
             }
         }
 
+        if let Some(familiarity) = self.backend.familiarity()? {
+            index.apply_resolve_path_familiarity(
+                &familiarity,
+                &resolve_path_identity(&expression),
+                &familiarity_context(self.backend.context()),
+                now_ms(),
+                DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+            );
+        }
         let path = resolve_expression(&expression, &index, 256);
         // Empty human Search is the existing zero-query navigation state, not an
         // explicit `@` aperture. Preserve its evidence-only presentation while
@@ -523,12 +533,16 @@ impl TuiApplicationService for ApplicationService<'_> {
                                 )
                             }
                             FamiliarityUse::ResolvePath {
-                                route,
+                                knowledge_route,
                                 steps,
                                 operative,
                             } => {
+                                let route = knowledge_route
+                                    .as_ref()
+                                    .map(|route| format!(" · route {route}"))
+                                    .unwrap_or_default();
                                 format!(
-                                    "resolve {} · route {route} · {} step{}",
+                                    "resolve {}{route} · {} step{}",
                                     operative.path_identity,
                                     steps.len(),
                                     plural(steps.len())
