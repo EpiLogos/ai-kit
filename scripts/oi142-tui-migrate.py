@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+# verification trigger: KnowledgeRoute + TUI parity
+
 
 def patch(path: str, old: str, new: str) -> None:
     target = Path(path)
