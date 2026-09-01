@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+# verification trigger: escaped literal acceptance after workflow registration
 path = Path("crates/aikit-core/src/resource/operative.rs")
 source = path.read_text()
 old = '''    if trimmed.starts_with('"') || trimmed.starts_with('\\'') {\n        return match parse_resolve_expression(trimmed)? {\n'''
