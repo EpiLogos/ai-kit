@@ -933,14 +933,14 @@ mod tests {
     fn semantic_state_round_trips_through_atomic_file_without_material_identity() {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("gateway.json");
-        let gateway = gateway();
-        persist_gateway_state(&gateway, Some(&state)).unwrap();
+        let initial_gateway = gateway();
+        persist_gateway_state(&initial_gateway, Some(&state)).unwrap();
         let encoded = fs::read_to_string(&state).unwrap();
         assert!(!encoded.contains("pid"));
         assert!(!encoded.contains("socket"));
         assert!(!encoded.contains("workcell"));
         let restored = restore_gateway_state(gateway(), Some(&state)).unwrap();
-        assert_eq!(restored.status(), gateway.status());
+        assert_eq!(restored.status(), initial_gateway.status());
     }
 
     #[test]
