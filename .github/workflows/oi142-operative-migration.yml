@@ -1,0 +1,40 @@
+name: OI142 operative migration
+
+on:
+  push:
+    branches:
+      - feat/oi142-operative-resolve-syntax
+    paths:
+      - 'scripts/oi142-migrate.py'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/oi142-operative-resolve-syntax
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Apply bounded migration
+        run: python3 scripts/oi142-migrate.py
+      - name: Format
+        run: cargo fmt --all -- --check || (cargo fmt --all && cargo fmt --all -- --check)
+      - name: Verify AIKit
+        run: cargo test --workspace --all-targets
+      - name: Commit verified source delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add crates/aikit-core/src/resource/operative.rs \
+                  crates/aikit-core/src/search.rs \
+                  crates/aikit-core/src/familiarity.rs \
+                  crates/aikit-core/src/actor_bootstrap.rs
+          git diff --cached --quiet && exit 0
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m '[OI142] Migrate Search familiarity and actor disclosure onto operative syntax'
+          git push origin HEAD:feat/oi142-operative-resolve-syntax
