@@ -40,6 +40,7 @@ jobs:
                   crates/aikit-core/src/familiarity.rs \
                   crates/aikit-core/src/explain_history.rs \
                   crates/aikit-core/src/actor_bootstrap.rs \
+                  crates/aikit-core/src/knowledge.rs \
                   crates/aikit-tui/src/application_service.rs
           git diff --cached --quiet && exit 0
           git config user.name 'github-actions[bot]'
