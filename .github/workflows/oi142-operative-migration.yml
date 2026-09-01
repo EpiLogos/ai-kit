@@ -5,7 +5,7 @@ on:
     branches:
       - feat/oi142-operative-resolve-syntax
     paths:
-      - 'scripts/oi142-action-invocation-migrate.py'
+      - 'scripts/oi142-operative-provider-migrate.py'
 
 permissions:
   contents: write
@@ -19,27 +19,20 @@ jobs:
           ref: feat/oi142-operative-resolve-syntax
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Apply bounded Action qualification/invocation migration
-        run: python3 scripts/oi142-action-invocation-migrate.py
+      - name: Apply provider-neutral operative enrichment seam
+        run: python3 scripts/oi142-operative-provider-migrate.py
       - name: Format current workspace
         run: cargo fmt --all
-      - name: Verify AIKit
+      - name: Verify AIKit without QL-MEF installed
         run: cargo test --workspace --all-targets
       - name: Commit verified source delta
         shell: bash
         run: |
           set -euo pipefail
-          git add crates/aikit-core/src/explain_history_actions.rs \
-                  crates/aikit-core/src/resource/mod.rs \
-                  crates/aikit-core/src/resource/operative.rs \
-                  crates/aikit-core/src/resource/search.rs \
-                  crates/aikit-tui/src/application.rs \
-                  crates/aikit-tui/src/application_service.rs \
-                  crates/aikit-tui/src/backend.rs \
-                  crates/aikit-tui/tests/application_service_backend_v2.rs \
-                  crates/aikit-tui/tests/common/mod.rs
+          git add crates/aikit-core/src/resource/mod.rs \
+                  crates/aikit-core/src/resource/operative_provider.rs
           git diff --cached --quiet && exit 0
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m '[OI142] Qualify syntax-resolved Actions through native invocation'
+          git commit -m '[OI142] Add provider-neutral operative semantic enrichment seam'
           git push origin HEAD:feat/oi142-operative-resolve-syntax
