@@ -23,6 +23,7 @@ pub mod gateway_connector;
 pub mod gateway_runtime;
 pub mod gateway_service;
 pub mod gitnexus;
+pub mod herdr;
 pub mod interactive_connection;
 pub mod local_source_discovery;
 pub mod mux;
@@ -114,6 +115,10 @@ pub use gateway_runtime::{
 pub use gateway_service::{
     persist_gateway_state, restore_gateway_state, run_gateway_service, GatewayServiceConfig,
     DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
+};
+pub use herdr::{
+    parse_herdr_snapshot, HerdrAgentObservation, HerdrAgentStatus, HerdrSnapshot,
+    HerdrWorkingEnvironment, HERDR_PROVIDER_VERSION, HERDR_UPSTREAM_REVISION,
 };
 pub use interactive_connection::{
     AcpStableConnectionAdapter, AcpStableSessionCapabilities, InteractiveAgentConnectionAdapter,
