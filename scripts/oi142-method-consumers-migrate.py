@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+# acceptance trigger: exact compiler-discovered Method consumers, 2026-09-01
+
 
 def patch(path: str, old: str, new: str) -> None:
     target = Path(path)
