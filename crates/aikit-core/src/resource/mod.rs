@@ -13,6 +13,7 @@ mod model;
 mod model_roster;
 mod refs;
 mod search;
+mod versioned_world;
 
 pub use action_search::search_contextual_actions;
 pub use factory::{FactoryInteropView, FactoryResourceImport};
@@ -32,4 +33,10 @@ pub use refs::{OwnerRef, ProviderRef, ResourceRef, SourceRef, SourceRevision};
 pub use search::{
     ActionStageability, ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass,
     ResourceRankingSignals, ResourceSearchHit, ResourceSearchHitKind, ResourceSearchIndex,
+};
+pub use versioned_world::{
+    CreateWorktreeRequest, GitRepositoryRelation, GitWorkingState, GitWorktreeRelation,
+    VersionDiff, VersionDiffRequest, VersionHistoryEntry, VersionHistoryRequest, VersionRevision,
+    VersionedProjectWorld, VersionedWorldCapability, VersionedWorldProvider,
+    VersionedWorldProviderDescriptor, VersionedWorldProviderStatus, VERSIONED_WORLD_VERSION,
 };
