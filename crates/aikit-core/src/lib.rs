@@ -102,13 +102,14 @@ pub use capsule::{
 };
 pub use catalog::{Catalog, MemoryCatalog};
 pub use composition::{
-    resolve_harness_composition, ActivationScope, ActivationScopeKind, ComponentBinding,
-    ComponentContribution, ComponentDescriptor, ComponentRequirement, ComponentSelection,
-    CompositionAbsence, CompositionActivationMode, CompositionCatalog, CompositionRelationKind,
-    CompositionState, ContractBinding, ContractProvider, ContributionKind, HarnessComposition,
+    resolve_composition_body, resolve_harness_composition, ActivationScope, ActivationScopeKind,
+    ComponentBinding, ComponentContribution, ComponentDescriptor, ComponentRequirement,
+    ComponentSelection, CompositionAbsence, CompositionActivationMode, CompositionBody,
+    CompositionBodyRequest, CompositionCatalog, CompositionRelationKind, CompositionState,
+    ContractBinding, ContractProvider, ContributionKind, HarnessComposition,
     HarnessCompositionRequest, LifetimeOwner, LifetimeOwnerKind, ProjectionBinding,
     RequirementStrength, ResolutionScope, RetractionMode, SurfaceDescriptor, SurfaceKind,
-    TargetNativeComponentBinding, HARNESS_COMPOSITION_VERSION,
+    TargetNativeComponentBinding, COMPOSITION_BODY_VERSION, HARNESS_COMPOSITION_VERSION,
 };
 pub use composition_explain_history::{
     explain_harness_component, explain_harness_composition_preview,
