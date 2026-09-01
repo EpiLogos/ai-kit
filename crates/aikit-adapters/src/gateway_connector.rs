@@ -99,7 +99,10 @@ impl ConnectorDescriptor {
         if self.implementation.trim().is_empty() {
             return Err(AikitError::new(
                 "gateway_connector.empty_implementation",
-                format!("connector {} must name its implementation", self.connector_ref),
+                format!(
+                    "connector {} must name its implementation",
+                    self.connector_ref
+                ),
             ));
         }
         if self
@@ -110,7 +113,10 @@ impl ConnectorDescriptor {
         {
             return Err(AikitError::new(
                 "gateway_connector.empty_media_type",
-                format!("connector {} advertises an empty media type", self.connector_ref),
+                format!(
+                    "connector {} advertises an empty media type",
+                    self.connector_ref
+                ),
             ));
         }
         Ok(())
@@ -257,7 +263,11 @@ impl InboundEvent {
                 ),
             ));
         }
-        if !self.address.platform.eq_ignore_ascii_case(&descriptor.platform) {
+        if !self
+            .address
+            .platform
+            .eq_ignore_ascii_case(&descriptor.platform)
+        {
             return Err(AikitError::new(
                 "gateway_connector.platform_drift",
                 format!(
@@ -270,7 +280,10 @@ impl InboundEvent {
             InboundEventKind::Custom if self.custom_kind.as_deref().is_none_or(str::is_empty) => {
                 return Err(AikitError::new(
                     "gateway_connector.custom_kind_missing",
-                    format!("custom inbound event {} requires custom_kind", self.event_ref),
+                    format!(
+                        "custom inbound event {} requires custom_kind",
+                        self.event_ref
+                    ),
                 ));
             }
             InboundEventKind::Custom => {}
@@ -359,7 +372,11 @@ impl OutboundOperation {
                 ),
             ));
         }
-        if !self.address.platform.eq_ignore_ascii_case(&descriptor.platform) {
+        if !self
+            .address
+            .platform
+            .eq_ignore_ascii_case(&descriptor.platform)
+        {
             return Err(AikitError::new(
                 "gateway_connector.platform_drift",
                 format!(
@@ -462,12 +479,24 @@ impl ConnectorHello {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ConnectorWireFrame {
-    Hello { hello: ConnectorHello },
-    Inbound { event: InboundEvent },
-    Outbound { operation: OutboundOperation },
-    DeliveryReceipt { receipt: DeliveryReceipt },
-    Health { health: ConnectorHealth },
-    Shutdown { reason: String },
+    Hello {
+        hello: ConnectorHello,
+    },
+    Inbound {
+        event: InboundEvent,
+    },
+    Outbound {
+        operation: OutboundOperation,
+    },
+    DeliveryReceipt {
+        receipt: DeliveryReceipt,
+    },
+    Health {
+        health: ConnectorHealth,
+    },
+    Shutdown {
+        reason: String,
+    },
     Error {
         code: String,
         message: String,
@@ -497,7 +526,9 @@ pub struct ConnectorConformance {
 
 /// Structural conformance shared by first-party and external-style connector
 /// specimens. Live platform/API behaviour remains connector-specific evidence.
-pub fn verify_connector_descriptor(descriptor: &ConnectorDescriptor) -> Result<ConnectorConformance> {
+pub fn verify_connector_descriptor(
+    descriptor: &ConnectorDescriptor,
+) -> Result<ConnectorConformance> {
     descriptor.validate()?;
     Ok(ConnectorConformance {
         connector_ref: descriptor.connector_ref.clone(),
@@ -624,7 +655,10 @@ mod tests {
     #[test]
     fn outbound_operation_requires_advertised_capability() {
         let mut limited = descriptor();
-        limited.capabilities.operations.remove(&ConnectorOperation::Edit);
+        limited
+            .capabilities
+            .operations
+            .remove(&ConnectorOperation::Edit);
         let operation = OutboundOperation {
             operation_ref: r("gateway-operation/edit-1"),
             connector_ref: limited.connector_ref.clone(),

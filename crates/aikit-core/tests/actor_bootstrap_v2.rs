@@ -69,8 +69,7 @@ fn selection(component: &str, session: &str) -> ComponentSelection {
         resolution_scope: ResolutionScope::new(ScopeKind::Project, "project profile"),
         activation_scope: ActivationScope::new(ActivationScopeKind::AgentSession)
             .with_reference(session),
-        lifetime_owner: LifetimeOwner::new(LifetimeOwnerKind::AgentSession)
-            .with_reference(session),
+        lifetime_owner: LifetimeOwner::new(LifetimeOwnerKind::AgentSession).with_reference(session),
         activation_mode: CompositionActivationMode::LiveMounted,
     }
 }
@@ -129,18 +128,38 @@ fn bootstrap_is_thin_but_preserves_actor_provenance_and_runtime_body_pointer() {
     let bootstrap = bootstrap(&resolution, Some(&body), "session/a");
 
     assert_eq!(bootstrap.project.project.as_str(), "project/test");
-    assert_eq!(bootstrap.agent.as_ref().unwrap().resource(), &r("agent:test"));
-    assert_eq!(bootstrap.agency.as_ref().unwrap().resource(), &r("agency:test"));
-    assert_eq!(bootstrap.harness.as_ref().unwrap().resource(), &r("harness:test"));
-    assert_eq!(bootstrap.model.as_ref().unwrap().resource(), &r("model:test"));
-    assert_eq!(bootstrap.host.as_ref().unwrap().resource(), &r("host:test-host"));
+    assert_eq!(
+        bootstrap.agent.as_ref().unwrap().resource(),
+        &r("agent:test")
+    );
+    assert_eq!(
+        bootstrap.agency.as_ref().unwrap().resource(),
+        &r("agency:test")
+    );
+    assert_eq!(
+        bootstrap.harness.as_ref().unwrap().resource(),
+        &r("harness:test")
+    );
+    assert_eq!(
+        bootstrap.model.as_ref().unwrap().resource(),
+        &r("model:test")
+    );
+    assert_eq!(
+        bootstrap.host.as_ref().unwrap().resource(),
+        &r("host:test-host")
+    );
     assert_eq!(bootstrap.agent_session.as_deref(), Some("session/a"));
     assert_eq!(
         bootstrap.runtime_body.as_ref().unwrap().fingerprint,
         body.fingerprint
     );
     assert_eq!(
-        bootstrap.runtime_body.as_ref().unwrap().generation.as_deref(),
+        bootstrap
+            .runtime_body
+            .as_ref()
+            .unwrap()
+            .generation
+            .as_deref(),
         Some("generation/1")
     );
     assert_eq!(
@@ -179,6 +198,9 @@ fn bootstrap_remains_valid_without_a_composition_capable_body() {
     let bootstrap = bootstrap(&resolution, None, "session/thin");
 
     assert!(bootstrap.runtime_body.is_none());
-    assert_eq!(bootstrap.harness.as_ref().unwrap().resource(), &r("harness:test"));
+    assert_eq!(
+        bootstrap.harness.as_ref().unwrap().resource(),
+        &r("harness:test")
+    );
     assert_eq!(bootstrap.agent_session.as_deref(), Some("session/thin"));
 }

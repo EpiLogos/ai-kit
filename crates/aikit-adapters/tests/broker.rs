@@ -187,7 +187,10 @@ fn skill_routing_orientation_survives_upstream_first_sentence_compaction() {
         index.contains("Prefer for work spanning agent sessions."),
         "the routing augmentation must remain in the compact broker index:\n{index}"
     );
-    assert!(!index.contains("remaining upstream detail"), "got:\n{index}");
+    assert!(
+        !index.contains("remaining upstream detail"),
+        "got:\n{index}"
+    );
 }
 
 #[test]

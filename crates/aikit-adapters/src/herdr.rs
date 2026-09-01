@@ -114,13 +114,14 @@ pub fn parse_herdr_snapshot(raw: &str) -> Result<HerdrSnapshot> {
             "Herdr session_snapshot result has no snapshot",
         )
     })?;
-    let version = string_field(snapshot, "version").ok_or_else(|| {
-        AikitError::new("herdr.missing_version", "Herdr snapshot has no version")
-    })?;
+    let version = string_field(snapshot, "version")
+        .ok_or_else(|| AikitError::new("herdr.missing_version", "Herdr snapshot has no version"))?;
     let protocol = snapshot
         .get("protocol")
         .and_then(Value::as_u64)
-        .ok_or_else(|| AikitError::new("herdr.missing_protocol", "Herdr snapshot has no protocol"))?;
+        .ok_or_else(|| {
+            AikitError::new("herdr.missing_protocol", "Herdr snapshot has no protocol")
+        })?;
     let agents = snapshot
         .get("agents")
         .and_then(Value::as_array)
@@ -232,7 +233,7 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
     }
 
     pub fn snapshot(&self) -> Result<HerdrSnapshot> {
-        parse_herdr_snapshot(&self.run(&["api", "snapshot"])? )
+        parse_herdr_snapshot(&self.run(&["api", "snapshot"])?)
     }
 
     fn create_workspace(&mut self) -> Result<()> {
@@ -313,14 +314,16 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
                 provenance: vec!["explicit ProjectRef -> Herdr workspace binding".into()],
             }
         }));
-        bindings.extend(self.agent_session_bindings.iter().map(|(canonical, native)| {
-            ProviderNativeBinding {
-                kind: NativeBindingKind::AgentSession,
-                native_id: native.clone(),
-                canonical_ref: Some(canonical.clone()),
-                provenance: vec!["explicit AgentSessionRef -> Herdr agent/pane binding".into()],
-            }
-        }));
+        bindings.extend(
+            self.agent_session_bindings
+                .iter()
+                .map(|(canonical, native)| ProviderNativeBinding {
+                    kind: NativeBindingKind::AgentSession,
+                    native_id: native.clone(),
+                    canonical_ref: Some(canonical.clone()),
+                    provenance: vec!["explicit AgentSessionRef -> Herdr agent/pane binding".into()],
+                }),
+        );
         WorkingEnvironmentObservation {
             schema: WORKING_ENVIRONMENT_PROVIDER_VERSION.into(),
             provider: self.provider.clone(),

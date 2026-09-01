@@ -99,7 +99,13 @@ fn five_thousand_resource_search_meets_the_keystroke_budget() {
         .collect();
     let mut backend = Fixture::new(directory.path(), capsules);
     let service = ApplicationService::new(&mut backend);
-    let queries = ["tool-0042", "tool-0281", "tool-49", "performance/tool-17", "tool-0008"];
+    let queries = [
+        "tool-0042",
+        "tool-0281",
+        "tool-49",
+        "performance/tool-17",
+        "tool-0008",
+    ];
     let mut samples = Vec::with_capacity(50);
 
     for query in queries.into_iter().cycle().take(50) {

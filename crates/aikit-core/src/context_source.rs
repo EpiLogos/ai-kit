@@ -69,7 +69,9 @@ pub struct ContextSourceOperationalState {
 #[serde(rename_all = "kebab-case")]
 pub enum Freshness {
     Current,
-    Stale { reason: String },
+    Stale {
+        reason: String,
+    },
     #[default]
     Unknown,
 }
@@ -333,25 +335,27 @@ impl ContextSourceIndex {
     }
 
     pub fn explain(&self, resource: &ResourceRef) -> Option<ContextSourceExplanation> {
-        self.entries.get(resource).map(|entry| ContextSourceExplanation {
-            resource: entry.id().clone(),
-            relation: entry.relation.clone(),
-            freshness: entry.freshness.clone(),
-            disclosure: entry.disclosure,
-            operational: entry.operational,
-            privacy: entry.privacy,
-            availability: entry.availability(),
-            eligibility: entry.resource.eligibility.clone(),
-            sources: entry.resource.descriptor.sources.clone(),
-            providers: entry
-                .resource
-                .providers
-                .iter()
-                .map(|offer| (offer.provider.clone(), offer.state.clone()))
-                .collect(),
-            provider_descriptors: entry.provider_descriptors.clone(),
-            absence: entry.absence.clone(),
-        })
+        self.entries
+            .get(resource)
+            .map(|entry| ContextSourceExplanation {
+                resource: entry.id().clone(),
+                relation: entry.relation.clone(),
+                freshness: entry.freshness.clone(),
+                disclosure: entry.disclosure,
+                operational: entry.operational,
+                privacy: entry.privacy,
+                availability: entry.availability(),
+                eligibility: entry.resource.eligibility.clone(),
+                sources: entry.resource.descriptor.sources.clone(),
+                providers: entry
+                    .resource
+                    .providers
+                    .iter()
+                    .map(|offer| (offer.provider.clone(), offer.state.clone()))
+                    .collect(),
+                provider_descriptors: entry.provider_descriptors.clone(),
+                absence: entry.absence.clone(),
+            })
     }
 
     pub fn set_disclosure(
@@ -382,13 +386,19 @@ impl ContextSourceIndex {
             return absent(AbsenceKind::Missing, "ContextSource is not indexed");
         };
         if provider.provider() != &request.provider {
-            return absent(AbsenceKind::Missing, "provider binding does not match request");
+            return absent(
+                AbsenceKind::Missing,
+                "provider binding does not match request",
+            );
         }
         if !entry.resource.eligibility.is_eligible() {
             return absent(AbsenceKind::Bound, "ContextSource is not eligible");
         }
         if !entry.disclosure.askable {
-            return absent(AbsenceKind::Latent, "ContextSource is not presently askable");
+            return absent(
+                AbsenceKind::Latent,
+                "ContextSource is not presently askable",
+            );
         }
         if let Some(bound) = privacy_boundary(entry.privacy, request.target) {
             return ContextSourceReadOutcome::Absent(bound);
@@ -400,14 +410,20 @@ impl ContextSourceIndex {
             .iter()
             .find(|offer| offer.provider == request.provider)
         else {
-            return absent(AbsenceKind::Missing, "ContextSource has no matching provider offer");
+            return absent(
+                AbsenceKind::Missing,
+                "ContextSource has no matching provider offer",
+            );
         };
         match &offer.state {
             ProviderState::Unresolved => {
                 return absent(AbsenceKind::Unknown, "provider availability is unresolved");
             }
             ProviderState::Unavailable { .. } => {
-                return absent(AbsenceKind::Missing, "ContextSource provider is unavailable");
+                return absent(
+                    AbsenceKind::Missing,
+                    "ContextSource provider is unavailable",
+                );
             }
             ProviderState::Available => {}
         }
@@ -415,7 +431,10 @@ impl ContextSourceIndex {
         let provider_status = provider.status();
         match &provider_status {
             ContextSourceProviderStatus::Unresolved => {
-                return absent(AbsenceKind::Unknown, "provider capability state is unresolved");
+                return absent(
+                    AbsenceKind::Unknown,
+                    "provider capability state is unresolved",
+                );
             }
             ContextSourceProviderStatus::Unavailable { .. } => {
                 return absent(AbsenceKind::Missing, "provider capability is unavailable");
@@ -425,7 +444,10 @@ impl ContextSourceIndex {
         }
         let capabilities = provider.capabilities();
         if !capabilities.supports(ContextSourceOperation::Read) {
-            return absent(AbsenceKind::Bound, "provider does not advertise read capability");
+            return absent(
+                AbsenceKind::Bound,
+                "provider does not advertise read capability",
+            );
         }
 
         entry.provider_descriptors.insert(

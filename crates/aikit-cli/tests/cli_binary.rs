@@ -99,8 +99,11 @@ fn search_json_finds_a_capability_by_name() {
 #[test]
 fn an_unknown_capability_is_a_resolution_failure_with_exit_code_three() {
     let (home, project) = scene();
-    let (output, value) =
-        run_json(home.path(), project.path(), &["explain", "script/no/such", "--json"]);
+    let (output, value) = run_json(
+        home.path(),
+        project.path(),
+        &["explain", "script/no/such", "--json"],
+    );
 
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "resolution.unknown_capability");
@@ -130,7 +133,13 @@ fn a_bad_scope_argument_is_a_usage_error_with_exit_code_two() {
     let (_output, value) = run_json(
         home.path(),
         project.path(),
-        &["enable", "script/demo/greet", "--scope", "nonsense", "--json"],
+        &[
+            "enable",
+            "script/demo/greet",
+            "--scope",
+            "nonsense",
+            "--json",
+        ],
     );
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "cli.usage");

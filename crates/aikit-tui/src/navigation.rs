@@ -5,7 +5,7 @@
 //! and mouse presentations share. Resolver, provider and ranking semantics remain
 //! in the application/core layer.
 
-use aikit_core::resource::{ContextualActionDescriptor, ResourceSearchHit, ResourceRef};
+use aikit_core::resource::{ContextualActionDescriptor, ResourceRef, ResourceSearchHit};
 
 use crate::application::PresentationMode;
 
@@ -105,10 +105,13 @@ pub fn mouse_invoke_action(action: &ContextualActionDescriptor) -> NavigationInt
 /// Space may stage only an Action relation whose canonical descriptor explicitly
 /// declares it stageable. A non-stageable Action has no staging intent at all.
 pub fn stage_action(action: &ContextualActionDescriptor) -> Option<NavigationIntent> {
-    action.stageability.is_stageable().then(|| NavigationIntent::StageAction {
-        action: action.action.clone(),
-        subject: action.subject.clone(),
-    })
+    action
+        .stageability
+        .is_stageable()
+        .then(|| NavigationIntent::StageAction {
+            action: action.action.clone(),
+            subject: action.subject.clone(),
+        })
 }
 
 pub fn keyboard_set_presentation(mode: PresentationMode) -> NavigationIntent {
@@ -173,7 +176,10 @@ mod tests {
     #[test]
     fn keyboard_and_mouse_invoke_the_same_contextual_action_relation() {
         let action = action(ActionStageability::NotStageable);
-        assert_eq!(keyboard_invoke_action(&action), mouse_invoke_action(&action));
+        assert_eq!(
+            keyboard_invoke_action(&action),
+            mouse_invoke_action(&action)
+        );
         assert_eq!(
             keyboard_invoke_action(&action),
             NavigationIntent::InvokeAction {

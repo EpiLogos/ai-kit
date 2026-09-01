@@ -408,7 +408,10 @@ fn select_disclosure<'a>(
         let exact = candidates
             .into_iter()
             .filter(|disclosure| {
-                disclosure.source_revision.as_ref().map(SourceRevision::as_str)
+                disclosure
+                    .source_revision
+                    .as_ref()
+                    .map(SourceRevision::as_str)
                     == Some(expected_revision)
             })
             .collect::<Vec<_>>();
@@ -444,7 +447,7 @@ fn select_disclosure<'a>(
 }
 
 fn thought_subject_ref(run_ref: &str, thought_id: &str) -> Result<ResourceRef> {
-    ResourceRef::parse(&format!("{run_ref}/thought/{thought_id}"))
+    ResourceRef::parse(format!("{run_ref}/thought/{thought_id}"))
 }
 
 fn thought_markdown<'a>(
@@ -657,7 +660,10 @@ mod tests {
         let thought_ref = r("run:01ARZ3NDEKTSV4RRFFQ69G5FAB/thought/pattern-reading");
         assert_eq!(projected.thoughts[0].subject_ref, thought_ref);
         assert_eq!(projected.compilation.edges.len(), 1);
-        assert_eq!(projected.compilation.edges[0].origin, WikiEdgeOrigin::Authored);
+        assert_eq!(
+            projected.compilation.edges[0].origin,
+            WikiEdgeOrigin::Authored
+        );
         assert_eq!(projected.compilation.edges[0].from_ref, thought_ref);
         assert_eq!(projected.compilation.edges[0].to_ref, r("wiki:node:beta"));
         assert_eq!(
@@ -738,10 +744,7 @@ mod tests {
             &[],
         )
         .unwrap_err();
-        assert_eq!(
-            error.code(),
-            "factory_run_thought.source_revision_mismatch"
-        );
+        assert_eq!(error.code(), "factory_run_thought.source_revision_mismatch");
     }
 
     #[test]

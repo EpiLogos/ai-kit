@@ -101,8 +101,7 @@ mod tests {
             vec![],
         );
 
-        let resolution =
-            application_context_resolution(&context, &view, &[], &resources).unwrap();
+        let resolution = application_context_resolution(&context, &view, &[], &resources).unwrap();
 
         assert!(matches!(
             resolution.host,
@@ -122,8 +121,8 @@ mod tests {
         let view = resolved(&context, vec![layer.clone()]);
         let resources = ResourceSearchIndex::default();
 
-        let resolution = application_context_resolution(&context, &view, &[layer], &resources)
-            .unwrap();
+        let resolution =
+            application_context_resolution(&context, &view, &[layer], &resources).unwrap();
 
         assert_eq!(resolution.scopes.len(), 1);
         assert_eq!(resolution.scopes[0].kind, ScopeKind::Project);

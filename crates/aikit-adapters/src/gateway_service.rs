@@ -130,7 +130,10 @@ pub fn persist_gateway_state(gateway: &AgencyGateway, state_file: Option<&Path>)
         fs::create_dir_all(parent).map_err(|error| {
             AikitError::new(
                 "agency_gateway_service.state_directory",
-                format!("create gateway state directory {}: {error}", parent.display()),
+                format!(
+                    "create gateway state directory {}: {error}",
+                    parent.display()
+                ),
             )
         })?;
     }
@@ -285,7 +288,9 @@ fn serve_websocket_listener(
                 stream.set_nonblocking(false).map_err(|error| {
                     AikitError::new(
                         "agency_gateway_service.websocket_connection_blocking",
-                        format!("configure accepted WebSocket gateway connection as blocking: {error}"),
+                        format!(
+                            "configure accepted WebSocket gateway connection as blocking: {error}"
+                        ),
                     )
                 })?;
                 let gateway = Arc::clone(&gateway);
@@ -391,7 +396,10 @@ fn serve_unix_socket(
         fs::remove_file(&path).map_err(|error| {
             AikitError::new(
                 "agency_gateway_service.unix_remove_stale",
-                format!("remove stale Unix gateway socket {}: {error}", path.display()),
+                format!(
+                    "remove stale Unix gateway socket {}: {error}",
+                    path.display()
+                ),
             )
         })?;
     }
@@ -399,7 +407,10 @@ fn serve_unix_socket(
         fs::create_dir_all(parent).map_err(|error| {
             AikitError::new(
                 "agency_gateway_service.unix_directory",
-                format!("create Unix gateway socket directory {}: {error}", parent.display()),
+                format!(
+                    "create Unix gateway socket directory {}: {error}",
+                    parent.display()
+                ),
             )
         })?;
     }
@@ -412,7 +423,10 @@ fn serve_unix_socket(
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|error| {
         AikitError::new(
             "agency_gateway_service.unix_permissions",
-            format!("set Unix gateway socket permissions {}: {error}", path.display()),
+            format!(
+                "set Unix gateway socket permissions {}: {error}",
+                path.display()
+            ),
         )
     })?;
     listener.set_nonblocking(true).map_err(|error| {
@@ -435,7 +449,8 @@ fn serve_unix_socket(
                 let shutdown = Arc::clone(&shutdown);
                 let state_file = state_file.clone();
                 thread::spawn(move || {
-                    let _ = handle_line_connection(stream, gateway, shutdown, state_file.as_deref());
+                    let _ =
+                        handle_line_connection(stream, gateway, shutdown, state_file.as_deref());
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -470,7 +485,9 @@ where
     let mut reader = BufReader::new(stream);
     loop {
         let mut line = String::new();
-        let count = reader.read_line(&mut line).map_err(io_error("read gateway line"))?;
+        let count = reader
+            .read_line(&mut line)
+            .map_err(io_error("read gateway line"))?;
         if count == 0 {
             return Ok(());
         }
@@ -487,7 +504,9 @@ where
             stream
                 .write_all(b"\n")
                 .map_err(io_error("write gateway line terminator"))?;
-            stream.flush().map_err(io_error("flush gateway line response"))?;
+            stream
+                .flush()
+                .map_err(io_error("flush gateway line response"))?;
         }
         if should_shutdown {
             shutdown.store(true, Ordering::SeqCst);
@@ -654,7 +673,9 @@ fn write_http_error<W: Write>(writer: &mut W, status: u16, reason: &str) -> Resu
         "HTTP/1.1 {status} {reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
     )
     .map_err(io_error("write HTTP error response"))?;
-    writer.flush().map_err(io_error("flush HTTP error response"))?;
+    writer
+        .flush()
+        .map_err(io_error("flush HTTP error response"))?;
     Ok(())
 }
 
@@ -713,9 +734,7 @@ fn read_websocket_frame<R: Read>(reader: &mut R, max_frame_bytes: usize) -> Resu
     if length > max_frame_bytes as u64 {
         return Err(AikitError::new(
             "agency_gateway_service.websocket_frame_too_large",
-            format!(
-                "WebSocket frame {length} bytes exceeds gateway limit {max_frame_bytes}"
-            ),
+            format!("WebSocket frame {length} bytes exceeds gateway limit {max_frame_bytes}"),
         ));
     }
     if matches!(opcode, 0x8..=0xA) && length > 125 {
@@ -821,11 +840,9 @@ fn sha1(input: &[u8]) -> [u8; 20] {
             words[index] = u32::from_be_bytes(*bytes);
         }
         for index in 16..80 {
-            words[index] = (words[index - 3]
-                ^ words[index - 8]
-                ^ words[index - 14]
-                ^ words[index - 16])
-                .rotate_left(1);
+            words[index] =
+                (words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16])
+                    .rotate_left(1);
         }
 
         let mut a = h0;
@@ -867,8 +884,7 @@ fn sha1(input: &[u8]) -> [u8; 20] {
 }
 
 fn base64_encode(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let a = chunk[0];
@@ -891,12 +907,7 @@ fn base64_encode(input: &[u8]) -> String {
 }
 
 fn io_error(context: &'static str) -> impl FnOnce(io::Error) -> AikitError {
-    move |error| {
-        AikitError::new(
-            "agency_gateway_service.io",
-            format!("{context}: {error}"),
-        )
-    }
+    move |error| AikitError::new("agency_gateway_service.io", format!("{context}: {error}"))
 }
 
 #[cfg(test)]
@@ -928,8 +939,8 @@ mod tests {
         assert_eq!(
             sha1(b"abc"),
             [
-                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71,
-                0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
+                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+                0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
             ]
         );
     }
@@ -961,8 +972,13 @@ mod tests {
         let mut reader = BufReader::new(&request[..]);
         let mut response = Vec::new();
         let error = websocket_handshake(&mut reader, &mut response, "correct").unwrap_err();
-        assert_eq!(error.code(), "agency_gateway_service.websocket_unauthorised");
-        assert!(String::from_utf8(response).unwrap().starts_with("HTTP/1.1 401"));
+        assert_eq!(
+            error.code(),
+            "agency_gateway_service.websocket_unauthorised"
+        );
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 401"));
     }
 
     #[test]
@@ -1001,7 +1017,10 @@ mod tests {
         frame.extend_from_slice(&5000u16.to_be_bytes());
         frame.extend_from_slice(&[1, 2, 3, 4]);
         let error = read_websocket_frame(&mut &frame[..], 1024).unwrap_err();
-        assert_eq!(error.code(), "agency_gateway_service.websocket_frame_too_large");
+        assert_eq!(
+            error.code(),
+            "agency_gateway_service.websocket_frame_too_large"
+        );
     }
 
     fn masked_text_frame(text: &str) -> Vec<u8> {
@@ -1079,7 +1098,9 @@ mod tests {
                 last_four.copy_from_slice(&handshake[handshake.len() - 4..]);
             }
         }
-        assert!(String::from_utf8(handshake).unwrap().starts_with("HTTP/1.1 101"));
+        assert!(String::from_utf8(handshake)
+            .unwrap()
+            .starts_with("HTTP/1.1 101"));
 
         let protocol = serde_json::json!({
             "request_id":"p1",
@@ -1109,7 +1130,10 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(shutdown.load(Ordering::SeqCst));
-        done_rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
     }
 
     #[cfg(unix)]
@@ -1128,14 +1152,21 @@ mod tests {
             max_frame_bytes: DEFAULT_GATEWAY_MAX_FRAME_BYTES,
         };
         let (done_tx, done_rx) = mpsc::channel();
-        thread::spawn(move || done_tx.send(run_gateway_service(gateway(), config)).unwrap());
+        thread::spawn(move || {
+            done_tx
+                .send(run_gateway_service(gateway(), config))
+                .unwrap()
+        });
 
         let deadline = Instant::now() + Duration::from_secs(3);
         while !socket.exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(socket.exists());
-        assert_eq!(fs::metadata(&socket).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         let mut stream = UnixStream::connect(&socket).unwrap();
         writeln!(
@@ -1156,7 +1187,10 @@ mod tests {
             serde_json::json!({"request_id":"stop","command":{"type":"shutdown"}})
         )
         .unwrap();
-        done_rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
         assert!(state.exists());
         assert!(!socket.exists());
     }

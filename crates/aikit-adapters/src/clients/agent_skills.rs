@@ -54,11 +54,7 @@ impl AgentSkill {
     /// `Link` is one item for the whole directory, which is both cheaper and
     /// automatically correct — a symlinked skill cannot drift from its capsule.
     /// `Copy` enumerates the files, preserving every subdirectory.
-    pub fn project(
-        &self,
-        prefix: &Path,
-        mode: MaterializationMode,
-    ) -> Result<Vec<ProjectionItem>> {
+    pub fn project(&self, prefix: &Path, mode: MaterializationMode) -> Result<Vec<ProjectionItem>> {
         let destination = prefix.join(&self.name);
         match mode {
             MaterializationMode::Copy => self
@@ -94,7 +90,10 @@ impl AgentSkill {
         let source = std::fs::read_to_string(self.root.join(SKILL_FILE)).map_err(|error| {
             AikitError::new(
                 "skill.unreadable",
-                format!("could not read {}: {error}", self.root.join(SKILL_FILE).display()),
+                format!(
+                    "could not read {}: {error}",
+                    self.root.join(SKILL_FILE).display()
+                ),
             )
         })?;
         let rendered = render_effective_skill(&source, overlays)?;
@@ -116,14 +115,14 @@ impl AgentSkill {
         Ok(items)
     }
 
-    pub fn effective_markdown(
-        &self,
-        overlays: &[AppliedSkillUsageOverlay],
-    ) -> Result<String> {
+    pub fn effective_markdown(&self, overlays: &[AppliedSkillUsageOverlay]) -> Result<String> {
         let source = std::fs::read_to_string(self.root.join(SKILL_FILE)).map_err(|error| {
             AikitError::new(
                 "skill.unreadable",
-                format!("could not read {}: {error}", self.root.join(SKILL_FILE).display()),
+                format!(
+                    "could not read {}: {error}",
+                    self.root.join(SKILL_FILE).display()
+                ),
             )
         })?;
         if overlays.is_empty() {
@@ -139,10 +138,7 @@ impl AgentSkill {
     }
 }
 
-fn render_effective_skill(
-    source: &str,
-    overlays: &[AppliedSkillUsageOverlay],
-) -> Result<String> {
+fn render_effective_skill(source: &str, overlays: &[AppliedSkillUsageOverlay]) -> Result<String> {
     let (frontmatter, body) = split_frontmatter(source)?;
     let mut yaml: serde_yaml::Mapping = serde_yaml::from_str(frontmatter).map_err(|error| {
         AikitError::new(
@@ -207,7 +203,10 @@ fn render_effective_skill(
             rendered.push_str(&format!("- Reviewed against: {revision}\n"));
         }
         if let Some(description) = &overlay.description {
-            rendered.push_str(&format!("\n**Routing orientation:** {}\n", description.trim()));
+            rendered.push_str(&format!(
+                "\n**Routing orientation:** {}\n",
+                description.trim()
+            ));
         }
         if let Some(guidance) = &overlay.guidance {
             rendered.push('\n');
@@ -263,7 +262,8 @@ pub fn validate(root: &Path) -> Result<AgentSkill> {
         AikitError::new("skill.invalid", detail).with("skill", root.display().to_string())
     })?;
 
-    let frontmatter = parse_frontmatter(&source).map_err(|e| e.with("skill", root.display().to_string()))?;
+    let frontmatter =
+        parse_frontmatter(&source).map_err(|e| e.with("skill", root.display().to_string()))?;
 
     let invalid = |detail: String| {
         AikitError::new("skill.invalid", detail)
@@ -324,7 +324,8 @@ pub fn validate(root: &Path) -> Result<AgentSkill> {
 pub fn parse_frontmatter(source: &str) -> Result<BTreeMap<String, String>> {
     let body = source.strip_prefix("---").and_then(|rest| {
         // Accept `---\n` and `---\r\n`, but not `----`.
-        rest.strip_prefix("\r\n").or_else(|| rest.strip_prefix('\n'))
+        rest.strip_prefix("\r\n")
+            .or_else(|| rest.strip_prefix('\n'))
     });
     let Some(body) = body else {
         return Err(AikitError::new(

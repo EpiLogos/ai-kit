@@ -39,13 +39,23 @@ fn shipped_workspace_exposes_one_canonical_product_field() {
     )
     .unwrap();
     assert_eq!(surface.semantic().presentation, PresentationMode::Workspace);
-    assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Context");
-    assert!(surface.semantic().selected.is_none(), "search must not silently create semantic selection");
+    assert_eq!(
+        workspace_section_label(surface.semantic().workspace_section),
+        "Context"
+    );
+    assert!(
+        surface.semantic().selected.is_none(),
+        "search must not silently create semantic selection"
+    );
     surface
         .handle(&mut backend, key(KeyCode::Down, KeyModifiers::NONE))
         .unwrap();
     assert_eq!(
-        surface.semantic().selected.as_ref().map(ResourceRef::as_str),
+        surface
+            .semantic()
+            .selected
+            .as_ref()
+            .map(ResourceRef::as_str),
         Some("skill/rust/review")
     );
 }
@@ -67,17 +77,20 @@ fn final_surface_preserves_identity_across_field_navigation_and_relation_views()
         surface
             .handle(&mut backend, key(KeyCode::Right, KeyModifiers::ALT))
             .unwrap();
-        assert_eq!(workspace_section_label(surface.semantic().workspace_section), expected);
+        assert_eq!(
+            workspace_section_label(surface.semantic().workspace_section),
+            expected
+        );
         assert_eq!(surface.semantic().selected, selected);
     }
 
     surface
-        .handle(
-            &mut backend,
-            key(KeyCode::Char('t'), KeyModifiers::CONTROL),
-        )
+        .handle(&mut backend, key(KeyCode::Char('t'), KeyModifiers::CONTROL))
         .unwrap();
-    assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Knowledge");
+    assert_eq!(
+        workspace_section_label(surface.semantic().workspace_section),
+        "Knowledge"
+    );
     assert_eq!(surface.semantic().relation_view, RelationView::Tree);
     assert_eq!(surface.semantic().selected, selected);
 }
@@ -95,33 +108,24 @@ fn final_surface_owns_the_only_staging_preview_confirmation_apply_route() {
         .unwrap();
 
     surface
-        .handle(
-            &mut backend,
-            key(KeyCode::Char(' '), KeyModifiers::CONTROL),
-        )
+        .handle(&mut backend, key(KeyCode::Char(' '), KeyModifiers::CONTROL))
         .unwrap();
     assert_eq!(surface.semantic().staged.len(), 1);
     assert_eq!(surface.semantic().query, "deploy");
 
     surface
-        .handle(
-            &mut backend,
-            key(KeyCode::Char('s'), KeyModifiers::CONTROL),
-        )
+        .handle(&mut backend, key(KeyCode::Char('s'), KeyModifiers::CONTROL))
         .unwrap();
-    assert_eq!(surface.semantic().overlay, Some(Overlay::CompositionPreview));
+    assert_eq!(
+        surface.semantic().overlay,
+        Some(Overlay::CompositionPreview)
+    );
     surface
-        .handle(
-            &mut backend,
-            key(KeyCode::Char('s'), KeyModifiers::CONTROL),
-        )
+        .handle(&mut backend, key(KeyCode::Char('s'), KeyModifiers::CONTROL))
         .unwrap();
     assert_eq!(surface.semantic().overlay, Some(Overlay::ConfirmApply));
     surface
-        .handle(
-            &mut backend,
-            key(KeyCode::Char('s'), KeyModifiers::CONTROL),
-        )
+        .handle(&mut backend, key(KeyCode::Char('s'), KeyModifiers::CONTROL))
         .unwrap();
 
     assert!(surface.semantic().staged.is_empty());
@@ -139,7 +143,13 @@ fn final_surface_renders_narrow_medium_and_wide_without_alternate_state() {
         .unwrap();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         surface.draw_terminal(&mut terminal).unwrap();
-        let rendered = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect::<String>();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
         assert!(rendered.contains("AIKit"));
         assert!(rendered.contains("Search"));
     }

@@ -10,8 +10,8 @@ use aikit_adapters::{
 use aikit_core::resource::ResourceRef;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let gateway_ref = std::env::var("AIKIT_GATEWAY_REF")
-        .unwrap_or_else(|_| "agency-gateway/local".to_string());
+    let gateway_ref =
+        std::env::var("AIKIT_GATEWAY_REF").unwrap_or_else(|_| "agency-gateway/local".to_string());
     let gateway = AgencyGateway::new(ResourceRef::parse(gateway_ref)?);
     let args = std::env::args().skip(1).collect::<Vec<_>>();
 
@@ -28,10 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     run_stdio(gateway)
 }
 
-fn run_service(
-    gateway: AgencyGateway,
-    args: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run_service(gateway: AgencyGateway, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut websocket_bind = None;
     let mut unix_socket = None;
     let mut state_file = None;
@@ -42,9 +39,9 @@ fn run_service(
         let flag = &args[index];
         let value = |index: &mut usize| -> Result<String, io::Error> {
             *index += 1;
-            args.get(*index).cloned().ok_or_else(|| {
-                invalid_input(format!("{flag} requires a value"))
-            })
+            args.get(*index)
+                .cloned()
+                .ok_or_else(|| invalid_input(format!("{flag} requires a value")))
         };
         match flag.as_str() {
             "--ws" => websocket_bind = Some(value(&mut index)?),
@@ -63,9 +60,7 @@ fn run_service(
                 );
                 return Ok(());
             }
-            other => {
-                return Err(invalid_input(format!("unknown serve option `{other}`")).into())
-            }
+            other => return Err(invalid_input(format!("unknown serve option `{other}`")).into()),
         }
         index += 1;
     }

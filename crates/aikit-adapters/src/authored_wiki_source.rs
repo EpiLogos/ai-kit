@@ -379,14 +379,9 @@ fn authored_edge_ref(
     })?;
     let material = format!(
         "{}\0{}\0{}\0{}\0{}\0{}",
-        subject_ref,
-        evidence.source_ref,
-        evidence.relation,
-        target,
-        channel,
-        anchor
+        subject_ref, evidence.source_ref, evidence.relation, target, channel, anchor
     );
-    ResourceRef::parse(&format!(
+    ResourceRef::parse(format!(
         "wiki:edge:authored:{:016x}",
         stable_hash64(material.as_bytes())
     ))
@@ -411,9 +406,9 @@ fn authored_edge_revision(evidence: &AuthoredRelationEvidence) -> u64 {
 fn stable_hash64(bytes: &[u8]) -> u64 {
     const OFFSET: u64 = 0xcbf29ce484222325;
     const PRIME: u64 = 0x100000001b3;
-    bytes
-        .iter()
-        .fold(OFFSET, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(PRIME))
+    bytes.iter().fold(OFFSET, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
+    })
 }
 
 #[cfg(test)]
@@ -569,7 +564,10 @@ The [[Living Wiki]] becomes inhabitable through [[Future Concept]].
         let compilation = compile_authored_wiki_relations(&[source], &[], &[]).unwrap();
         assert!(compilation.edges.is_empty());
         assert_eq!(compilation.pending.len(), 1);
-        assert_eq!(compilation.pending[0].source_authority, SourceAuthority::Observed);
+        assert_eq!(
+            compilation.pending[0].source_authority,
+            SourceAuthority::Observed
+        );
         assert_eq!(compilation.pending[0].evidence.raw_target, "Future Concept");
         assert!(matches!(
             compilation.pending[0].evidence.resolution,
@@ -636,7 +634,10 @@ The [[Living Wiki]] becomes inhabitable through [[Future Concept]].
         assert_eq!(dependencies.len(), 1);
         assert_eq!(dependencies[0].dependent.as_str(), "wiki:node:flow");
         assert_eq!(dependencies[0].source.as_str(), "source:flow");
-        assert_eq!(dependencies[0].basis_revision.as_ref().unwrap().as_str(), "rev-9");
+        assert_eq!(
+            dependencies[0].basis_revision.as_ref().unwrap().as_str(),
+            "rev-9"
+        );
         assert_eq!(dependencies[0].relation, "authored-source:references");
         assert!(!dependencies[0].integrative);
     }

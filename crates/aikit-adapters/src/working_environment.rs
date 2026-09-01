@@ -11,16 +11,14 @@ use std::collections::BTreeMap;
 use aikit_core::resource::ResourceRef;
 use aikit_core::session::SessionPlan;
 use aikit_core::session_space::{
-    SessionSpaceActivationDriver, SessionSpaceActivationObservation,
-    SessionSpaceActivationRequest,
+    SessionSpaceActivationDriver, SessionSpaceActivationObservation, SessionSpaceActivationRequest,
 };
 use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::mux::{MuxAdapter, MuxTarget, ReconcileMode, SessionBinding};
 
-pub const WORKING_ENVIRONMENT_PROVIDER_VERSION: &str =
-    "aikit.working-environment-provider/v1";
+pub const WORKING_ENVIRONMENT_PROVIDER_VERSION: &str = "aikit.working-environment-provider/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -412,7 +410,11 @@ impl<A: MuxAdapter> SessionSpaceActivationDriver for MuxSessionSpaceActivationDr
         request: &SessionSpaceActivationRequest,
     ) -> Result<SessionSpaceActivationObservation> {
         for surface in &request.surfaces {
-            if !self.environment.surface_bindings.contains_key(&surface.resource) {
+            if !self
+                .environment
+                .surface_bindings
+                .contains_key(&surface.resource)
+            {
                 return Ok(SessionSpaceActivationObservation::Degraded {
                     provider: self.environment.provider.clone(),
                     reason: format!(

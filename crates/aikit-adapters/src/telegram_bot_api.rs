@@ -52,7 +52,11 @@ impl TelegramConnectorConfig {
                 "Telegram long-poll timeout must be between 0 and 50 seconds",
             ));
         }
-        if self.allowed_updates.iter().any(|item| item.trim().is_empty()) {
+        if self
+            .allowed_updates
+            .iter()
+            .any(|item| item.trim().is_empty())
+        {
             return Err(AikitError::new(
                 "telegram_gateway.empty_allowed_update",
                 "Telegram allowed_updates cannot contain empty names",
@@ -169,7 +173,10 @@ impl<T: TelegramBotApiTransport> TelegramConnector<T> {
         match response.and_then(telegram_result) {
             Ok(result) => {
                 let id = required_i64(&result, "id", "telegram_gateway.get_me")?;
-                let is_bot = result.get("is_bot").and_then(Value::as_bool).unwrap_or(true);
+                let is_bot = result
+                    .get("is_bot")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
                 self.bot = Some(TelegramBotIdentity {
                     id,
                     is_bot,
@@ -213,10 +220,7 @@ impl<T: TelegramBotApiTransport> TelegramConnector<T> {
         }
         params.insert("timeout".into(), json!(self.config.poll_timeout_seconds));
         if !self.config.allowed_updates.is_empty() {
-            params.insert(
-                "allowed_updates".into(),
-                json!(self.config.allowed_updates),
-            );
+            params.insert("allowed_updates".into(), json!(self.config.allowed_updates));
         }
 
         self.health.state = ConnectorConnectionState::Connected;
@@ -237,7 +241,12 @@ impl<T: TelegramBotApiTransport> TelegramConnector<T> {
         })?;
 
         let mut ordered = updates.iter().collect::<Vec<_>>();
-        ordered.sort_by_key(|update| update.get("update_id").and_then(Value::as_i64).unwrap_or(i64::MAX));
+        ordered.sort_by_key(|update| {
+            update
+                .get("update_id")
+                .and_then(Value::as_i64)
+                .unwrap_or(i64::MAX)
+        });
         for update in ordered {
             let update_id = required_i64(update, "update_id", "telegram_gateway.update_id")?;
             self.next_update_offset = Some(
@@ -538,7 +547,10 @@ fn telegram_callback_to_inbound(
             .and_then(Value::as_i64)
             .map(|id| id.to_string()),
         reply_to_native_message_id: None,
-        text: callback.get("data").and_then(Value::as_str).map(str::to_owned),
+        text: callback
+            .get("data")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         media: Vec::new(),
         observed_at: None,
         native: BTreeMap::from([("callback_query".into(), callback.clone())]),
@@ -585,10 +597,7 @@ fn telegram_sender(message: &Value) -> SenderIdentity {
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "telegram-sender-chat".into()),
             kind: SenderKind::Unknown,
-            display_name: chat
-                .get("title")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            display_name: chat.get("title").and_then(Value::as_str).map(str::to_owned),
             metadata: BTreeMap::from([("telegram_sender_chat".into(), chat.clone().to_string())]),
         };
     }
@@ -620,7 +629,11 @@ fn telegram_user_sender(user: &Value) -> SenderIdentity {
             .and_then(Value::as_i64)
             .map(|id| id.to_string())
             .unwrap_or_else(|| "telegram-unknown-user".into()),
-        kind: if is_bot { SenderKind::Bot } else { SenderKind::Human },
+        kind: if is_bot {
+            SenderKind::Bot
+        } else {
+            SenderKind::Human
+        },
         display_name: (!display_name.is_empty()).then_some(display_name),
         metadata,
     }
@@ -801,7 +814,10 @@ fn telegram_outbound_request(operation: &OutboundOperation) -> Result<(&'static 
         }
         OutboundOperationKind::Typing { active } => {
             if !active {
-                return Ok(("sendChatAction", json!({"chat_id": chat_id, "action":"cancel"})));
+                return Ok((
+                    "sendChatAction",
+                    json!({"chat_id": chat_id, "action":"cancel"}),
+                ));
             }
             let mut params = Map::from_iter([
                 ("chat_id".into(), json!(chat_id)),
@@ -856,7 +872,11 @@ fn telegram_media_group(
     Ok(("sendMediaGroup", Value::Object(params)))
 }
 
-fn add_thread_and_reply(params: &mut Map<String, Value>, thread_id: Option<i64>, reply: Option<i64>) {
+fn add_thread_and_reply(
+    params: &mut Map<String, Value>,
+    thread_id: Option<i64>,
+    reply: Option<i64>,
+) {
     if let Some(thread_id) = thread_id {
         params.insert("message_thread_id".into(), json!(thread_id));
     }
@@ -898,9 +918,10 @@ fn telegram_message_id(result: &Value) -> Option<String> {
 }
 
 fn required_i64(value: &Value, key: &str, code: &'static str) -> Result<i64> {
-    value.get(key).and_then(Value::as_i64).ok_or_else(|| {
-        AikitError::new(code, format!("Telegram payload requires integer `{key}`"))
-    })
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| AikitError::new(code, format!("Telegram payload requires integer `{key}`")))
 }
 
 fn optional_string(value: &Value, key: &str) -> Option<String> {
@@ -908,13 +929,18 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
 }
 
 fn parse_i64(value: &str, code: &'static str, message: &'static str) -> Result<i64> {
-    value.parse::<i64>().map_err(|_| AikitError::new(code, message))
+    value
+        .parse::<i64>()
+        .map_err(|_| AikitError::new(code, message))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway_runtime::{text_send, AgencyGateway, GatewayBinding, GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult};
+    use crate::gateway_runtime::{
+        text_send, AgencyGateway, GatewayBinding, GatewayIngressDecision, GatewayIngressPolicy,
+        GatewayIngressResult,
+    };
     use std::collections::VecDeque;
 
     #[derive(Debug, Default)]
@@ -1132,11 +1158,15 @@ mod tests {
             operation_ref: r("gateway-operation/2"),
             connector_ref: r("gateway-connector/telegram/main"),
             address: ConversationAddress {
-                platform: "telegram".into(), scope_id: None,
-                conversation_id: "55".into(), thread_id: None,
+                platform: "telegram".into(),
+                scope_id: None,
+                conversation_id: "55".into(),
+                thread_id: None,
             },
             operation: OutboundOperationKind::Send {
-                text: Some("plot".into()), media: vec![media], reply_to_native_message_id: None,
+                text: Some("plot".into()),
+                media: vec![media],
+                reply_to_native_message_id: None,
             },
             agent_session_ref: Some(r("agent-session/root")),
             actuation_stream_ref: Some(r("actuation-stream/root")),
@@ -1161,8 +1191,10 @@ mod tests {
             operation_ref: r("gateway-operation/3"),
             connector_ref: r("gateway-connector/telegram/main"),
             address: ConversationAddress {
-                platform: "telegram".into(), scope_id: None,
-                conversation_id: "55".into(), thread_id: None,
+                platform: "telegram".into(),
+                scope_id: None,
+                conversation_id: "55".into(),
+                thread_id: None,
             },
             operation: text_send("hello"),
             agent_session_ref: Some(r("agent-session/root")),
@@ -1172,7 +1204,10 @@ mod tests {
         let receipt = connector.execute_now(operation).unwrap();
         assert_eq!(receipt.state, DeliveryState::Failed);
         assert!(receipt.detail.unwrap().contains("429"));
-        assert_eq!(connector.health_now().state, ConnectorConnectionState::Degraded);
+        assert_eq!(
+            connector.health_now().state,
+            ConnectorConnectionState::Degraded
+        );
     }
 
     #[test]
@@ -1191,28 +1226,35 @@ mod tests {
 
         let mut gateway = AgencyGateway::new(r("agency-gateway/local"));
         gateway.register_connector(connector.descriptor()).unwrap();
-        gateway.bind(GatewayBinding {
-            binding_ref: r("gateway-binding/telegram-55"),
-            connector_ref: r("gateway-connector/telegram/main"),
-            address: ConversationAddress {
-                platform: "telegram".into(), scope_id: Some("private".into()),
-                conversation_id: "55".into(), thread_id: None,
-            },
-            agent_session_ref: r("agent-session/root"),
-            agency_ref: r("agency/root"),
-            actuation_ref: r("actuation/root"),
-            actuation_stream_ref: r("actuation-stream/root"),
-            agent_ref: Some(r("agent/root")),
-            harness_ref: Some(r("harness/codex")),
-            surface_ref: Some(r("surface/telegram")),
-            ingress: GatewayIngressPolicy {
-                default: GatewayIngressDecision::Allow,
-                sender_overrides: BTreeMap::new(),
-            },
-            provenance: vec!["Telegram fixture".into()],
-        }).unwrap();
+        gateway
+            .bind(GatewayBinding {
+                binding_ref: r("gateway-binding/telegram-55"),
+                connector_ref: r("gateway-connector/telegram/main"),
+                address: ConversationAddress {
+                    platform: "telegram".into(),
+                    scope_id: Some("private".into()),
+                    conversation_id: "55".into(),
+                    thread_id: None,
+                },
+                agent_session_ref: r("agent-session/root"),
+                agency_ref: r("agency/root"),
+                actuation_ref: r("actuation/root"),
+                actuation_stream_ref: r("actuation-stream/root"),
+                agent_ref: Some(r("agent/root")),
+                harness_ref: Some(r("harness/codex")),
+                surface_ref: Some(r("surface/telegram")),
+                ingress: GatewayIngressPolicy {
+                    default: GatewayIngressDecision::Allow,
+                    sender_overrides: BTreeMap::new(),
+                },
+                provenance: vec!["Telegram fixture".into()],
+            })
+            .unwrap();
         let result = gateway.ingest(event).unwrap();
-        let GatewayIngressResult::Appended { stream_ref, event, .. } = result else {
+        let GatewayIngressResult::Appended {
+            stream_ref, event, ..
+        } = result
+        else {
             panic!("Telegram event should append");
         };
         assert_eq!(stream_ref, r("actuation-stream/root"));

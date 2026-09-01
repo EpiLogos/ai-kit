@@ -191,5 +191,8 @@ fn epi_manifest_subject_round_trips_to_exact_ql_c_symbol_and_evidence() {
     assert_eq!(law.mappings[0].coordinate, BIMBA_COORDINATE);
     assert_eq!(code.path, "c/src/primitive.c");
     assert_eq!(code.symbol.as_deref(), Some("ql_position_invert"));
-    assert_eq!(code.revision.as_ref().map(SourceRevision::as_str), Some(QL_HEAD));
+    assert_eq!(
+        code.revision.as_ref().map(SourceRevision::as_str),
+        Some(QL_HEAD)
+    );
 }

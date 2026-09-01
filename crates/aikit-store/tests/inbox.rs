@@ -15,8 +15,8 @@ use std::fs;
 
 use aikit_core::catalog::Catalog;
 use aikit_core::{Kind, Maturity, RegistrySource};
+use aikit_store::inbox::{CandidateState, Capture, Inbox, PromotionEdits, SimilarityBasis};
 use aikit_store::index::Index;
-use aikit_store::inbox::{Capture, CandidateState, Inbox, PromotionEdits, SimilarityBasis};
 use aikit_store::registry::load_registry;
 use aikit_store::AikitHome;
 
@@ -77,7 +77,10 @@ fn a_shebang_is_classified_as_a_script_and_prose_as_guidance() {
     let (home, index) = setup(tmp.path());
     let inbox = Inbox::new(&home, &index);
 
-    let script = inbox.capture(capture("ci", CLEAN_SCRIPT)).unwrap().candidate;
+    let script = inbox
+        .capture(capture("ci", CLEAN_SCRIPT))
+        .unwrap()
+        .candidate;
     assert_eq!(script.kind, Kind::Script);
 
     let prose = inbox
@@ -193,7 +196,10 @@ fn rejecting_a_candidate_moves_it_out_of_the_queue() {
     let (home, index) = setup(tmp.path());
     let inbox = Inbox::new(&home, &index);
 
-    let candidate = inbox.capture(capture("ci", CLEAN_SCRIPT)).unwrap().candidate;
+    let candidate = inbox
+        .capture(capture("ci", CLEAN_SCRIPT))
+        .unwrap()
+        .candidate;
     let rejected = inbox.reject(&candidate.id, "we already have one").unwrap();
 
     assert_eq!(rejected.state, CandidateState::Rejected);
@@ -219,7 +225,10 @@ fn capturing_the_identical_body_twice_reports_a_duplicate_rather_than_filing_it_
     let second = inbox.capture(capture("ci again", CLEAN_SCRIPT)).unwrap();
 
     assert!(first.duplicate_of.is_none());
-    assert_eq!(second.duplicate_of.as_deref(), Some(first.candidate.id.as_str()));
+    assert_eq!(
+        second.duplicate_of.as_deref(),
+        Some(first.candidate.id.as_str())
+    );
     assert_eq!(inbox.candidates().unwrap().len(), 1);
 }
 
@@ -298,7 +307,10 @@ fn an_identical_body_already_in_the_catalog_is_reported_as_exactly_that() {
 
     assert_eq!(outcome.similar[0].basis, SimilarityBasis::ExactContent);
     assert_eq!(outcome.similar[0].percentage, 100);
-    assert!(outcome.similar[0].summary.to_lowercase().contains("identical"));
+    assert!(outcome.similar[0]
+        .summary
+        .to_lowercase()
+        .contains("identical"));
 }
 
 #[test]
@@ -315,7 +327,10 @@ fn a_capsule_that_shares_only_an_export_name_is_still_worth_mentioning() {
         "script",
         "entry = \"payload/run.sh\"\nexports = [\"nt\"]",
         "",
-        &[("payload/run.sh", "#!/usr/bin/env python3\nprint('totally different')\n")],
+        &[(
+            "payload/run.sh",
+            "#!/usr/bin/env python3\nprint('totally different')\n",
+        )],
     );
     let load = load_registry(fixture.root(), RegistrySource::personal()).unwrap();
 
@@ -371,7 +386,10 @@ fn promotion_writes_a_capsule_the_registry_loader_can_read_without_anyone_writin
     let inbox = Inbox::new(&home, &index);
     let registry = tmp.path().join("registry");
 
-    let candidate = inbox.capture(capture("ci tests", CLEAN_SCRIPT)).unwrap().candidate;
+    let candidate = inbox
+        .capture(capture("ci tests", CLEAN_SCRIPT))
+        .unwrap()
+        .candidate;
 
     let edits = PromotionEdits::new(
         cid("script/test/cargo-nextest"),
@@ -395,11 +413,20 @@ fn promotion_writes_a_capsule_the_registry_loader_can_read_without_anyone_writin
     let capsule = load.catalog.get(&cid("script/test/cargo-nextest")).unwrap();
     assert_eq!(capsule.kind, Kind::Script);
     assert_eq!(capsule.name, "nextest");
-    assert_eq!(capsule.description, "Runs the workspace test suite the way CI does.");
-    assert_eq!(capsule.tags, vec!["testing".to_string(), "rust".to_string()]);
+    assert_eq!(
+        capsule.description,
+        "Runs the workspace test suite the way CI does."
+    );
+    assert_eq!(
+        capsule.tags,
+        vec!["testing".to_string(), "rust".to_string()]
+    );
     assert_eq!(capsule.maturity, Maturity::Candidate);
     assert_eq!(capsule.exported_commands(), vec!["nt".to_string()]);
-    assert!(capsule.revision.is_some(), "it gets a content revision like any other");
+    assert!(
+        capsule.revision.is_some(),
+        "it gets a content revision like any other"
+    );
 
     // The payload is the captured body, and it can actually run.
     let body = fs::read_to_string(&promoted.payload_path).unwrap();
@@ -408,7 +435,11 @@ fn promotion_writes_a_capsule_the_registry_loader_can_read_without_anyone_writin
     {
         use std::os::unix::fs::PermissionsExt;
         assert_ne!(
-            fs::metadata(&promoted.payload_path).unwrap().permissions().mode() & 0o111,
+            fs::metadata(&promoted.payload_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
             0
         );
     }
@@ -421,7 +452,10 @@ fn a_promoted_candidate_is_marked_promoted_and_leaves_the_queue() {
     let inbox = Inbox::new(&home, &index);
     let registry = tmp.path().join("registry");
 
-    let candidate = inbox.capture(capture("ci", CLEAN_SCRIPT)).unwrap().candidate;
+    let candidate = inbox
+        .capture(capture("ci", CLEAN_SCRIPT))
+        .unwrap()
+        .candidate;
     inbox
         .promote(
             &candidate.id,
@@ -447,10 +481,13 @@ fn promotion_refuses_to_overwrite_an_existing_capsule() {
 
     let fixture = RegistryFixture::at(tmp.path().join("registry"));
     fixture.script("script/test/nt");
-    let existing = fs::read_to_string(fixture.capsule_dir("script/test/nt").join("manifest.toml"))
-        .unwrap();
+    let existing =
+        fs::read_to_string(fixture.capsule_dir("script/test/nt").join("manifest.toml")).unwrap();
 
-    let candidate = inbox.capture(capture("ci", CLEAN_SCRIPT)).unwrap().candidate;
+    let candidate = inbox
+        .capture(capture("ci", CLEAN_SCRIPT))
+        .unwrap()
+        .candidate;
     let error = inbox
         .promote(
             &candidate.id,
@@ -477,7 +514,10 @@ fn promotion_refuses_edits_that_would_produce_an_invalid_manifest() {
     let inbox = Inbox::new(&home, &index);
     let registry = tmp.path().join("registry");
 
-    let candidate = inbox.capture(capture("ci", CLEAN_SCRIPT)).unwrap().candidate;
+    let candidate = inbox
+        .capture(capture("ci", CLEAN_SCRIPT))
+        .unwrap()
+        .candidate;
     let error = inbox
         .promote(
             &candidate.id,
@@ -523,7 +563,10 @@ fn promoting_a_guidance_capture_produces_a_guidance_capsule_with_the_right_entry
     assert_eq!(capsule.kind, Kind::Guidance);
     let entry = &capsule.guidance().unwrap().entry;
     assert!(
-        registry.join(capsule.id.registry_path()).join(entry).is_file(),
+        registry
+            .join(capsule.id.registry_path())
+            .join(entry)
+            .is_file(),
         "the manifest's entry has to name a file that exists"
     );
 }
@@ -537,7 +580,10 @@ fn a_promoted_capsule_starts_unreviewed_however_it_was_captured() {
     let inbox = Inbox::new(&home, &index);
     let registry = tmp.path().join("registry");
 
-    let candidate = inbox.capture(capture("ci", CLEAN_SCRIPT)).unwrap().candidate;
+    let candidate = inbox
+        .capture(capture("ci", CLEAN_SCRIPT))
+        .unwrap()
+        .candidate;
     inbox
         .promote(
             &candidate.id,

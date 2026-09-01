@@ -95,7 +95,11 @@ impl GatewayBinding {
                 ),
             ));
         }
-        if !self.address.platform.eq_ignore_ascii_case(&descriptor.platform) {
+        if !self
+            .address
+            .platform
+            .eq_ignore_ascii_case(&descriptor.platform)
+        {
             return Err(AikitError::new(
                 "agency_gateway.platform_drift",
                 format!(
@@ -460,7 +464,10 @@ impl AgencyGateway {
         let descriptor = self.connectors.get(&event.connector_ref).ok_or_else(|| {
             AikitError::new(
                 "agency_gateway.unknown_connector",
-                format!("inbound event {} uses an unregistered connector", event.event_ref),
+                format!(
+                    "inbound event {} uses an unregistered connector",
+                    event.event_ref
+                ),
             )
         })?;
         event.validate(descriptor)?;
@@ -588,15 +595,18 @@ impl AgencyGateway {
     }
 
     pub fn record_delivery(&mut self, receipt: DeliveryReceipt) -> Result<()> {
-        let pending = self.pending_deliveries.get(&receipt.operation_ref).ok_or_else(|| {
-            AikitError::new(
-                "agency_gateway.unknown_delivery",
-                format!(
-                    "delivery receipt refers to unknown operation {}",
-                    receipt.operation_ref
-                ),
-            )
-        })?;
+        let pending = self
+            .pending_deliveries
+            .get(&receipt.operation_ref)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "agency_gateway.unknown_delivery",
+                    format!(
+                        "delivery receipt refers to unknown operation {}",
+                        receipt.operation_ref
+                    ),
+                )
+            })?;
         if pending.connector_ref != receipt.connector_ref {
             return Err(AikitError::new(
                 "agency_gateway.delivery_connector_drift",
@@ -755,13 +765,22 @@ fn portable_inbound_event(
         InboundEventKind::Membership => ("custom", Some("gateway-inbound/membership")),
         InboundEventKind::Custom => (
             "custom",
-            inbound.custom_kind.as_deref().or(Some("gateway-inbound/custom")),
+            inbound
+                .custom_kind
+                .as_deref()
+                .or(Some("gateway-inbound/custom")),
         ),
     };
 
     let mut metadata = Map::new();
-    metadata.insert("connector_ref".into(), json!(inbound.connector_ref.to_string()));
-    metadata.insert("connector_event_ref".into(), json!(inbound.event_ref.to_string()));
+    metadata.insert(
+        "connector_ref".into(),
+        json!(inbound.connector_ref.to_string()),
+    );
+    metadata.insert(
+        "connector_event_ref".into(),
+        json!(inbound.event_ref.to_string()),
+    );
     metadata.insert("platform".into(), json!(inbound.address.platform));
     metadata.insert(
         "conversation_id".into(),
@@ -822,13 +841,11 @@ fn portable_inbound_event(
     if !inbound.media.is_empty() {
         event.insert(
             "resource_refs".into(),
-            json!(
-                inbound
-                    .media
-                    .iter()
-                    .map(|media| media.media_ref.to_string())
-                    .collect::<Vec<_>>()
-            ),
+            json!(inbound
+                .media
+                .iter()
+                .map(|media| media.media_ref.to_string())
+                .collect::<Vec<_>>()),
         );
     }
     if let Some(observed_at) = &inbound.observed_at {
@@ -843,10 +860,18 @@ pub enum GatewayCommand {
     Protocol,
     Discover,
     Status,
-    RegisterConnector { descriptor: ConnectorDescriptor },
-    Bind { binding: GatewayBinding },
-    Unbind { binding_ref: ResourceRef },
-    Ingest { event: InboundEvent },
+    RegisterConnector {
+        descriptor: ConnectorDescriptor,
+    },
+    Bind {
+        binding: GatewayBinding,
+    },
+    Unbind {
+        binding_ref: ResourceRef,
+    },
+    Ingest {
+        event: InboundEvent,
+    },
     Replay {
         stream_ref: ResourceRef,
         #[serde(default)]
@@ -857,14 +882,20 @@ pub enum GatewayCommand {
         binding_ref: ResourceRef,
         operation: OutboundOperationKind,
     },
-    RecordDelivery { receipt: DeliveryReceipt },
-    SetConnectorHealth { health: ConnectorHealth },
+    RecordDelivery {
+        receipt: DeliveryReceipt,
+    },
+    SetConnectorHealth {
+        health: ConnectorHealth,
+    },
     Control {
         binding_ref: ResourceRef,
         operation: GatewayActuationControlOperation,
     },
     Snapshot,
-    Restore { snapshot: GatewaySnapshot },
+    Restore {
+        snapshot: GatewaySnapshot,
+    },
     Shutdown,
 }
 
@@ -883,19 +914,45 @@ pub enum GatewayResponse {
         connector_wire_version: String,
         actuation_stream_schema: String,
     },
-    Discovery { discovery: GatewayDiscovery },
-    Status { status: GatewayStatus },
-    Registered { connector_ref: ResourceRef },
-    Bound { binding_ref: ResourceRef },
-    Unbound { binding_ref: ResourceRef },
-    Ingress { result: GatewayIngressResult },
-    Replay { replay: GatewayReplay },
-    OperationPrepared { operation: OutboundOperation },
-    DeliveryRecorded { operation_ref: ResourceRef },
-    ConnectorHealthRecorded { connector_ref: ResourceRef },
-    ControlIntent { intent: GatewayActuationControlIntent },
-    Snapshot { snapshot: GatewaySnapshot },
-    Restored { status: GatewayStatus },
+    Discovery {
+        discovery: GatewayDiscovery,
+    },
+    Status {
+        status: GatewayStatus,
+    },
+    Registered {
+        connector_ref: ResourceRef,
+    },
+    Bound {
+        binding_ref: ResourceRef,
+    },
+    Unbound {
+        binding_ref: ResourceRef,
+    },
+    Ingress {
+        result: GatewayIngressResult,
+    },
+    Replay {
+        replay: GatewayReplay,
+    },
+    OperationPrepared {
+        operation: OutboundOperation,
+    },
+    DeliveryRecorded {
+        operation_ref: ResourceRef,
+    },
+    ConnectorHealthRecorded {
+        connector_ref: ResourceRef,
+    },
+    ControlIntent {
+        intent: GatewayActuationControlIntent,
+    },
+    Snapshot {
+        snapshot: GatewaySnapshot,
+    },
+    Restored {
+        status: GatewayStatus,
+    },
     Shutdown,
 }
 
@@ -1135,7 +1192,9 @@ mod tests {
     fn one_conversation_routes_into_canonical_actuation_stream() {
         let mut gateway = gateway();
         gateway.register_connector(connector("telegram")).unwrap();
-        gateway.bind(binding("telegram", "chat-42", "telegram")).unwrap();
+        gateway
+            .bind(binding("telegram", "chat-42", "telegram"))
+            .unwrap();
         let result = gateway
             .ingest(inbound("telegram", "chat-42", "1", "user-7"))
             .unwrap();
@@ -1150,10 +1209,7 @@ mod tests {
         assert_eq!(event.event["kind"], "human-message");
         assert_eq!(event.event["surface_ref"], "surface/telegram");
         assert_eq!(event.event["content"], "hello 1");
-        assert_eq!(
-            event.event["metadata"]["native_sender_id"],
-            "user-7"
-        );
+        assert_eq!(event.event["metadata"]["native_sender_id"], "user-7");
     }
 
     #[test]
@@ -1161,8 +1217,12 @@ mod tests {
         let mut gateway = gateway();
         gateway.register_connector(connector("telegram")).unwrap();
         gateway.register_connector(connector("slack")).unwrap();
-        gateway.bind(binding("telegram", "chat-42", "telegram")).unwrap();
-        gateway.bind(binding("slack", "channel-7", "slack")).unwrap();
+        gateway
+            .bind(binding("telegram", "chat-42", "telegram"))
+            .unwrap();
+        gateway
+            .bind(binding("slack", "channel-7", "slack"))
+            .unwrap();
         gateway
             .ingest(inbound("telegram", "chat-42", "1", "user-7"))
             .unwrap();
@@ -1207,15 +1267,12 @@ mod tests {
     fn replay_is_cursor_bounded_and_deterministic() {
         let mut gateway = gateway();
         gateway.register_connector(connector("telegram")).unwrap();
-        gateway.bind(binding("telegram", "chat-42", "telegram")).unwrap();
+        gateway
+            .bind(binding("telegram", "chat-42", "telegram"))
+            .unwrap();
         for id in 1..=4 {
             gateway
-                .ingest(inbound(
-                    "telegram",
-                    "chat-42",
-                    &id.to_string(),
-                    "user-7",
-                ))
+                .ingest(inbound("telegram", "chat-42", &id.to_string(), "user-7"))
                 .unwrap();
         }
         let replay = gateway.replay(&r("actuation-stream/root"), 1, 2).unwrap();
@@ -1236,7 +1293,9 @@ mod tests {
     fn outbound_operation_keeps_session_and_stream_attribution() {
         let mut gateway = gateway();
         gateway.register_connector(connector("telegram")).unwrap();
-        gateway.bind(binding("telegram", "chat-42", "telegram")).unwrap();
+        gateway
+            .bind(binding("telegram", "chat-42", "telegram"))
+            .unwrap();
         let operation = gateway
             .prepare_operation(&r("gateway-binding/telegram"), text_send("done"))
             .unwrap();
@@ -1266,7 +1325,9 @@ mod tests {
     fn semantic_snapshot_survives_material_restart_without_identity_drift() {
         let mut gateway = gateway();
         gateway.register_connector(connector("telegram")).unwrap();
-        gateway.bind(binding("telegram", "chat-42", "telegram")).unwrap();
+        gateway
+            .bind(binding("telegram", "chat-42", "telegram"))
+            .unwrap();
         gateway
             .ingest(inbound("telegram", "chat-42", "1", "user-7"))
             .unwrap();
@@ -1293,7 +1354,9 @@ mod tests {
     fn snapshot_contains_no_workcell_or_process_identity_requirement() {
         let mut gateway = gateway();
         gateway.register_connector(connector("telegram")).unwrap();
-        gateway.bind(binding("telegram", "chat-42", "telegram")).unwrap();
+        gateway
+            .bind(binding("telegram", "chat-42", "telegram"))
+            .unwrap();
         let encoded = serde_json::to_value(gateway.snapshot()).unwrap();
         let text = serde_json::to_string(&encoded).unwrap();
         assert!(!text.contains("pid"));
@@ -1307,7 +1370,9 @@ mod tests {
     fn control_intent_preserves_actuation_identity_and_does_not_fake_execution() {
         let mut gateway = gateway();
         gateway.register_connector(connector("telegram")).unwrap();
-        gateway.bind(binding("telegram", "chat-42", "telegram")).unwrap();
+        gateway
+            .bind(binding("telegram", "chat-42", "telegram"))
+            .unwrap();
         let intent = gateway
             .control_intent(
                 &r("gateway-binding/telegram"),

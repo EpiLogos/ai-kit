@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::knowledge_navigation::KnowledgeApplication;
-use crate::knowledge_wiki::{SemanticRevision, WikiObject, WikiReading, WikiProvenanceRef};
+use crate::knowledge_wiki::{SemanticRevision, WikiObject, WikiProvenanceRef, WikiReading};
 use crate::method::Method;
 use crate::model_runtime::ModelRuntimeReadModel;
 use crate::project::ProjectRef;
@@ -264,7 +264,10 @@ fn validate_basis_dag(nodes: &[ReadingBasisNode], edges: &[ReadingBasisEdge]) ->
             ));
         }
         *indegree.get_mut(&edge.to).expect("endpoint checked") += 1;
-        outgoing.entry(edge.from.clone()).or_default().push(edge.to.clone());
+        outgoing
+            .entry(edge.from.clone())
+            .or_default()
+            .push(edge.to.clone());
     }
 
     let mut queue = indegree
@@ -651,7 +654,10 @@ mod tests {
             KnowledgeFreshness::IntegrationPending
         );
         assert!(!impact.automatic_agent_or_model_invocation);
-        assert_eq!(impact.changed_sources, vec![source("central:source:position")]);
+        assert_eq!(
+            impact.changed_sources,
+            vec![source("central:source:position")]
+        );
     }
 
     #[test]
@@ -659,12 +665,10 @@ mod tests {
         let mut h = horizon();
         h.sources.clear();
         let impact = deterministic_knowledge_impact(&h, &dependencies()).unwrap();
-        assert!(
-            impact
-                .affected
-                .iter()
-                .all(|item| item.freshness == KnowledgeFreshness::BasisUnavailable)
-        );
+        assert!(impact
+            .affected
+            .iter()
+            .all(|item| item.freshness == KnowledgeFreshness::BasisUnavailable));
     }
 
     #[test]
@@ -701,12 +705,10 @@ mod tests {
             KnowledgeFreshness::Fresh,
         )
         .unwrap();
-        assert!(
-            built
-                .reading
-                .extensions
-                .contains_key(INTEGRATIVE_READING_EXTENSION)
-        );
+        assert!(built
+            .reading
+            .extensions
+            .contains_key(INTEGRATIVE_READING_EXTENSION));
     }
 
     #[test]
