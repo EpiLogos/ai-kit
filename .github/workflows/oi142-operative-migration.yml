@@ -7,6 +7,7 @@ on:
     paths:
       - 'scripts/oi142-path-familiarity-preflight.py'
       - 'scripts/oi142-path-familiarity-migrate.py'
+      - 'scripts/oi142-path-familiarity-integration.py'
 
 permissions:
   contents: write
@@ -24,6 +25,7 @@ jobs:
         run: |
           python3 scripts/oi142-path-familiarity-preflight.py
           python3 scripts/oi142-path-familiarity-migrate.py
+          python3 scripts/oi142-path-familiarity-integration.py
       - name: Format current workspace
         run: cargo fmt --all
       - name: Verify AIKit
@@ -35,6 +37,7 @@ jobs:
           git add crates/aikit-core/src/lib.rs \
                   crates/aikit-core/src/familiarity.rs \
                   crates/aikit-core/src/explain_history.rs \
+                  crates/aikit-core/src/knowledge.rs \
                   crates/aikit-core/src/resource/index.rs \
                   crates/aikit-core/src/resource/mod.rs \
                   crates/aikit-core/src/resource/operative.rs \
