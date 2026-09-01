@@ -24,6 +24,7 @@ pub mod gateway_runtime;
 pub mod gateway_service;
 pub mod gitnexus;
 pub mod herdr;
+pub mod hyprland;
 pub mod interactive_connection;
 pub mod local_source_discovery;
 pub mod mux;
@@ -119,6 +120,10 @@ pub use gateway_service::{
 pub use herdr::{
     parse_herdr_snapshot, HerdrAgentObservation, HerdrAgentStatus, HerdrSnapshot,
     HerdrWorkingEnvironment, HERDR_PROVIDER_VERSION, HERDR_UPSTREAM_REVISION,
+};
+pub use hyprland::{
+    parse_hyprland_clients, HyprlandWindowObservation, HyprlandWorkingEnvironment,
+    HYPRLAND_PROVIDER_VERSION, HYPRLAND_UPSTREAM_REVISION,
 };
 pub use interactive_connection::{
     AcpStableConnectionAdapter, AcpStableSessionCapabilities, InteractiveAgentConnectionAdapter,
