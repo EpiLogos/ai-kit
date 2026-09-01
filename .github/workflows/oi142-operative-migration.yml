@@ -14,6 +14,7 @@ on:
       - 'scripts/oi142-method-consumers-migrate.py'
       - 'scripts/oi142-aperture-ranking-migrate.py'
       - 'scripts/oi142-search-application-migrate.py'
+      - 'scripts/oi142-search-compat-migrate.py'
 
 permissions:
   contents: write
@@ -38,6 +39,7 @@ jobs:
           python3 scripts/oi142-method-consumers-migrate.py
           python3 scripts/oi142-aperture-ranking-migrate.py
           python3 scripts/oi142-search-application-migrate.py
+          python3 scripts/oi142-search-compat-migrate.py
       - name: Format current workspace
         # Main currently carries pre-existing rustfmt drift outside #142. Format
         # the checkout so the implementation under test is canonical, but do not
