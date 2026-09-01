@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+# acceptance trigger: preserve zero-query navigation while explicit @ remains open, 2026-09-01
+
 path = Path("crates/aikit-tui/src/application_service.rs")
 source = path.read_text()
 
