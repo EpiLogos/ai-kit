@@ -97,7 +97,7 @@ pub enum FamiliarityUse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         knowledge_route: Option<ResourceRef>,
         steps: Vec<RouteStepEvidence>,
-        operative: OperativePathEvidence,
+        operative: Box<OperativePathEvidence>,
     },
 }
 
@@ -206,7 +206,7 @@ impl FamiliarityObservation {
             use_kind: FamiliarityUse::ResolvePath {
                 knowledge_route,
                 steps,
-                operative,
+                operative: Box::new(operative),
             },
             source_surface: None,
             source_action: None,
