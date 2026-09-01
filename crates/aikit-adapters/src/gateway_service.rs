@@ -282,6 +282,12 @@ fn serve_websocket_listener(
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _peer)) => {
+                stream.set_nonblocking(false).map_err(|error| {
+                    AikitError::new(
+                        "agency_gateway_service.websocket_connection_blocking",
+                        format!("configure accepted WebSocket gateway connection as blocking: {error}"),
+                    )
+                })?;
                 let gateway = Arc::clone(&gateway);
                 let shutdown = Arc::clone(&shutdown);
                 let token = token.clone();
@@ -419,6 +425,12 @@ fn serve_unix_socket(
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _address)) => {
+                stream.set_nonblocking(false).map_err(|error| {
+                    AikitError::new(
+                        "agency_gateway_service.unix_connection_blocking",
+                        format!("configure accepted Unix gateway connection as blocking: {error}"),
+                    )
+                })?;
                 let gateway = Arc::clone(&gateway);
                 let shutdown = Arc::clone(&shutdown);
                 let state_file = state_file.clone();
@@ -933,14 +945,14 @@ mod tests {
     fn semantic_state_round_trips_through_atomic_file_without_material_identity() {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("gateway.json");
-        let initial_gateway = gateway();
-        persist_gateway_state(&initial_gateway, Some(&state)).unwrap();
+        let original_gateway = gateway();
+        persist_gateway_state(&original_gateway, Some(&state)).unwrap();
         let encoded = fs::read_to_string(&state).unwrap();
         assert!(!encoded.contains("pid"));
         assert!(!encoded.contains("socket"));
         assert!(!encoded.contains("workcell"));
         let restored = restore_gateway_state(gateway(), Some(&state)).unwrap();
-        assert_eq!(restored.status(), initial_gateway.status());
+        assert_eq!(restored.status(), original_gateway.status());
     }
 
     #[test]
