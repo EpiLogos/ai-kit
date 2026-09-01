@@ -19,31 +19,32 @@ jobs:
           ref: feat/current-world-composition-readiness
           fetch-depth: 0
       - name: Repair inherited gateway test shadowing and remove repair carrier
-        shell: python
         run: |
+          python3 - <<'PY'
           from pathlib import Path
           path = Path('crates/aikit-adapters/src/gateway_service.rs')
           text = path.read_text()
           before = '''        let gateway = gateway();
-        persist_gateway_state(&gateway, Some(&state)).unwrap();
-        let encoded = fs::read_to_string(&state).unwrap();
-        assert!(!encoded.contains("pid"));
-        assert!(!encoded.contains("socket"));
-        assert!(!encoded.contains("workcell"));
-        let restored = restore_gateway_state(gateway(), Some(&state)).unwrap();
-        assert_eq!(restored.status(), gateway.status());'''
+          persist_gateway_state(&gateway, Some(&state)).unwrap();
+          let encoded = fs::read_to_string(&state).unwrap();
+          assert!(!encoded.contains("pid"));
+          assert!(!encoded.contains("socket"));
+          assert!(!encoded.contains("workcell"));
+          let restored = restore_gateway_state(gateway(), Some(&state)).unwrap();
+          assert_eq!(restored.status(), gateway.status());'''
           after = '''        let initial_gateway = gateway();
-        persist_gateway_state(&initial_gateway, Some(&state)).unwrap();
-        let encoded = fs::read_to_string(&state).unwrap();
-        assert!(!encoded.contains("pid"));
-        assert!(!encoded.contains("socket"));
-        assert!(!encoded.contains("workcell"));
-        let restored = restore_gateway_state(gateway(), Some(&state)).unwrap();
-        assert_eq!(restored.status(), initial_gateway.status());'''
+          persist_gateway_state(&initial_gateway, Some(&state)).unwrap();
+          let encoded = fs::read_to_string(&state).unwrap();
+          assert!(!encoded.contains("pid"));
+          assert!(!encoded.contains("socket"));
+          assert!(!encoded.contains("workcell"));
+          let restored = restore_gateway_state(gateway(), Some(&state)).unwrap();
+          assert_eq!(restored.status(), initial_gateway.status());'''
           if text.count(before) != 1:
               raise SystemExit('expected exact inherited gateway test block once')
           path.write_text(text.replace(before, after))
           Path('.github/workflows/oi158-source-repair.yml').unlink()
+          PY
       - name: Commit exact repair
         run: |
           git config user.name 'github-actions[bot]'
