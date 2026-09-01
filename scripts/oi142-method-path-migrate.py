@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+# acceptance trigger: Method authored expected Resolve seam, 2026-09-01
+
 
 def patch(path: str, old: str, new: str, count: int = 1) -> None:
     p = Path(path)
