@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+# acceptance trigger: compiler-discovered path-familiarity consumers, 2026-09-01
+
 
 def patch(path: str, old: str, new: str) -> None:
     target = Path(path)
