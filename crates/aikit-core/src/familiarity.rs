@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::resource::ResourceRef;
+use crate::resource::{AddressHorizon, RelationOp, ResolveExpression, ResourceRef};
 use crate::{AikitError, Result};
 
 pub const FAMILIARITY_SCHEMA_VERSION: &str = "aikit.familiarity/v2";
@@ -64,12 +64,37 @@ impl FitnessEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperativePathEvidence {
+    pub path_identity: String,
+    pub expression: ResolveExpression,
+    #[serde(default)]
+    pub relation_ops: Vec<RelationOp>,
+    #[serde(default)]
+    pub horizons: Vec<AddressHorizon>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<ResourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ResourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<ResourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<ResourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_ref: Option<ResourceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum FamiliarityUse {
     Destination,
     Route {
         route: ResourceRef,
         steps: Vec<RouteStepEvidence>,
+    },
+    ResolvePath {
+        route: ResourceRef,
+        steps: Vec<RouteStepEvidence>,
+        operative: OperativePathEvidence,
     },
 }
 
@@ -137,6 +162,43 @@ impl FamiliarityObservation {
             destination,
             context,
             use_kind: FamiliarityUse::Route { route, steps },
+            source_surface: None,
+            source_action: None,
+            observed_at_ms,
+            fitness: None,
+        })
+    }
+
+    pub fn resolve_path(
+        observation_id: impl Into<String>,
+        route: ResourceRef,
+        destination: ResourceRef,
+        steps: Vec<RouteStepEvidence>,
+        operative: OperativePathEvidence,
+        context: FamiliarityContext,
+        observed_at_ms: u64,
+    ) -> Result<Self> {
+        if steps.is_empty() {
+            return Err(AikitError::new(
+                "familiarity.empty_resolve_path",
+                "a ResolvePath observation needs route steps",
+            ));
+        }
+        if steps.last().is_none_or(|step| step.resource != destination) {
+            return Err(AikitError::new(
+                "familiarity.resolve_path_destination_mismatch",
+                "the final ResolvePath step must be the destination",
+            ));
+        }
+        Ok(Self {
+            observation_id: observation_id.into(),
+            destination,
+            context,
+            use_kind: FamiliarityUse::ResolvePath {
+                route,
+                steps,
+                operative,
+            },
             source_surface: None,
             source_action: None,
             observed_at_ms,
@@ -327,7 +389,8 @@ impl FamiliarityStore {
             }
             let route_matches = match (route, &observation.use_kind) {
                 (None, FamiliarityUse::Destination) => true,
-                (Some(wanted), FamiliarityUse::Route { route, .. }) => route == wanted,
+                (Some(wanted), FamiliarityUse::Route { route, .. })
+                | (Some(wanted), FamiliarityUse::ResolvePath { route, .. }) => route == wanted,
                 _ => false,
             };
             if route_matches {
@@ -422,15 +485,16 @@ impl FamiliarityStore {
                 !(matches!(observation.use_kind, FamiliarityUse::Destination)
                     && &observation.destination == destination)
             }
-            ForgetScope::Route(route) => !matches!(
-                &observation.use_kind,
+            ForgetScope::Route(route) => match &observation.use_kind {
                 FamiliarityUse::Route {
                     route: observed, ..
-                } if observed == route
-            ),
-            ForgetScope::Project(project) => {
-                observation.context.project.as_ref() != Some(project)
-            }
+                }
+                | FamiliarityUse::ResolvePath {
+                    route: observed, ..
+                } => observed != route,
+                _ => true,
+            },
+            ForgetScope::Project(project) => observation.context.project.as_ref() != Some(project),
             ForgetScope::All => false,
         });
         before - self.observations.len()
@@ -443,6 +507,11 @@ impl FamiliarityStore {
                 FamiliarityUse::Route {
                     route: observed,
                     steps,
+                }
+                | FamiliarityUse::ResolvePath {
+                    route: observed,
+                    steps,
+                    ..
                 } if observed == route => Some(
                     steps
                         .iter()
@@ -463,5 +532,7 @@ fn contexts_match(requested: &FamiliarityContext, observed: &FamiliarityContext)
 }
 
 fn optional_axis_matches<T: Eq>(requested: &Option<T>, observed: &Option<T>) -> bool {
-    requested.as_ref().is_none_or(|value| observed.as_ref() == Some(value))
+    requested
+        .as_ref()
+        .is_none_or(|value| observed.as_ref() == Some(value))
 }

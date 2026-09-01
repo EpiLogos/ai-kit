@@ -18,7 +18,7 @@ mod versioned_world;
 
 pub use action_search::search_contextual_actions;
 pub use factory::{FactoryInteropView, FactoryResourceImport};
-pub use index::{MemoryResourceIndex, ResourceIndex};
+pub use index::{MemoryResourceIndex, ResolveRankingSignals, ResourceIndex};
 pub use model::{
     Eligibility, PreferenceIntent, ProviderOffer, ProviderState, ResourceDescriptor,
     ResourceExplanation, ResourceKind, ResourceLocator, ResourceRecord, ResourceSource,

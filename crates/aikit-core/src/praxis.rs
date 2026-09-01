@@ -55,7 +55,10 @@ pub fn resolve_praxis(
     let mut warnings = Vec::new();
 
     for reference in selected {
-        let Some(method) = available_methods.iter().find(|method| &method.id == reference) else {
+        let Some(method) = available_methods
+            .iter()
+            .find(|method| &method.id == reference)
+        else {
             warnings.push(format!(
                 "selected Method {reference} is absent from the source-loaded Method field"
             ));
@@ -106,7 +109,7 @@ pub fn explain_praxis(praxis: &PraxisResolution) -> Vec<ExplainEvidence> {
                     summary: format!("Method source is {}", resolution.source),
                     canonical_refs: source_ref.clone().into_iter().collect(),
                     provenance: vec![EvidenceProvenance {
-                        source: source_ref,
+                        source: source_ref.clone(),
                         revision: resolution.revision.as_ref().map(ToString::to_string),
                         ..EvidenceProvenance::default()
                     }],
@@ -122,6 +125,20 @@ pub fn explain_praxis(praxis: &PraxisResolution) -> Vec<ExplainEvidence> {
                     provenance: Vec::new(),
                 },
             ];
+
+            if let Some(expected) = &resolution.expected_resolve {
+                facts.push(ExplainFact {
+                    relation: "expected-resolve".into(),
+                    authority: Some(SourceAuthority::Authored),
+                    summary: format!("Method expects Resolve pattern {}", expected.render()),
+                    canonical_refs: Vec::new(),
+                    provenance: vec![EvidenceProvenance {
+                        source: source_ref.clone(),
+                        revision: resolution.revision.as_ref().map(ToString::to_string),
+                        ..EvidenceProvenance::default()
+                    }],
+                });
+            }
 
             for reference in resolved_refs(resolution) {
                 facts.push(ExplainFact {
@@ -176,7 +193,12 @@ pub fn praxis_history_evidence(praxis: &PraxisResolution) -> Vec<HistoryEvidence
             let mut canonical_refs = BTreeSet::from([selected.method.clone()]);
             canonical_refs.extend(praxis.focus.iter().cloned());
             canonical_refs.extend(resolved_refs(resolution));
-            canonical_refs.extend(resolution.overlays.iter().map(|overlay| overlay.skill.clone()));
+            canonical_refs.extend(
+                resolution
+                    .overlays
+                    .iter()
+                    .map(|overlay| overlay.skill.clone()),
+            );
 
             let source = ResourceRef::parse(resolution.source.as_str()).ok();
             if let Some(source) = &source {
@@ -203,9 +225,19 @@ pub fn praxis_history_evidence(praxis: &PraxisResolution) -> Vec<HistoryEvidence
                 resolution
                     .overlays
                     .iter()
-                    .map(|overlay| format!("{}@{}#{}", overlay.skill, overlay.scope, overlay.digest))
+                    .map(|overlay| {
+                        format!("{}@{}#{}", overlay.skill, overlay.scope, overlay.digest)
+                    })
                     .collect::<Vec<_>>()
                     .join(","),
+            );
+            details.insert(
+                "expectedResolve".into(),
+                resolution
+                    .expected_resolve
+                    .as_ref()
+                    .map(|expected| expected.render())
+                    .unwrap_or_default(),
             );
             details.insert(
                 "expectedReturns".into(),
@@ -217,8 +249,7 @@ pub fn praxis_history_evidence(praxis: &PraxisResolution) -> Vec<HistoryEvidence
                 schema: EXPLAIN_HISTORY_VERSION.into(),
                 id: format!(
                     "praxis:{}:{}",
-                    selected.method,
-                    praxis.context_resolution_version
+                    selected.method, praxis.context_resolution_version
                 ),
                 // `Recent` is intentionally used as the generic evidence class;
                 // Method does not need a parallel History ontology merely to be
@@ -232,9 +263,17 @@ pub fn praxis_history_evidence(praxis: &PraxisResolution) -> Vec<HistoryEvidence
                     selected.method,
                     praxis.context_resolution_version,
                     resolved_refs(resolution).len(),
-                    if resolved_refs(resolution).len() == 1 { "" } else { "s" },
+                    if resolved_refs(resolution).len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
                     resolution.overlays.len(),
-                    if resolution.overlays.len() == 1 { "" } else { "s" }
+                    if resolution.overlays.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
                 ),
                 canonical_refs: canonical_refs.into_iter().collect(),
                 provenance: vec![EvidenceProvenance {
@@ -271,10 +310,10 @@ mod tests {
     use crate::project::{
         ProjectBinding, ProjectBindingLocator, ProjectConstituentRef, ProjectRef,
     };
+    use crate::resolve::{resolve, ResolveRequest};
     use crate::resource::{
         MemoryResourceIndex, ResourceDescriptor, ResourceKind, ResourceRecord, SourceRef,
     };
-    use crate::resolve::{resolve, ResolveRequest};
     use crate::trust::AlwaysTrusted;
     use crate::{ContextDescriptor, ManagedPolicy, MemoryCatalog};
 
@@ -332,6 +371,7 @@ mod tests {
             capabilities: vec![],
             context_sources: vec![],
             verification: vec![],
+            expected_resolve: None,
             expected_return_forms: vec!["evidence".into()],
         };
         let resolved = resolve_praxis(
@@ -375,6 +415,10 @@ mod tests {
             capabilities: vec![],
             context_sources: vec![ResourceRef::parse("context:ground").unwrap()],
             verification: vec![],
+            expected_resolve: Some(
+                crate::resource::parse_resolve_expression("@0 context:ground x @5 cap:wayfinder")
+                    .unwrap(),
+            ),
             expected_return_forms: vec!["evidence".into(), "returned-difference".into()],
         };
         let praxis = resolve_praxis(
@@ -386,10 +430,20 @@ mod tests {
         );
         let explained = explain_praxis(&praxis);
         assert_eq!(explained.len(), 1);
-        assert!(explained[0]
-            .facts
-            .iter()
-            .any(|fact| fact.relation == "usage-overlay" && fact.summary.contains(&"a".repeat(64))));
+        assert!(
+            explained[0]
+                .facts
+                .iter()
+                .any(|fact| fact.relation == "usage-overlay"
+                    && fact.summary.contains(&"a".repeat(64)))
+        );
+        assert!(explained[0].facts.iter().any(|fact| {
+            fact.relation == "expected-resolve"
+                && fact.authority == Some(SourceAuthority::Authored)
+                && fact
+                    .summary
+                    .contains("@0 context:ground x @5 cap:wayfinder")
+        }));
         let history = praxis_history_evidence(&praxis);
         assert_eq!(history.len(), 1);
         assert!(history[0]
@@ -399,6 +453,10 @@ mod tests {
         assert_eq!(
             history[0].details.get("contextResolutionVersion"),
             Some(&context.version)
+        );
+        assert_eq!(
+            history[0].details.get("expectedResolve"),
+            Some(&"@0 context:ground x @5 cap:wayfinder".into())
         );
     }
 }

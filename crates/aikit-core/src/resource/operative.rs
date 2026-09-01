@@ -93,7 +93,9 @@ impl RelationOp {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "node", rename_all = "kebab-case")]
 pub enum ResolveExpression {
-    Subject { value: String },
+    Subject {
+        value: String,
+    },
     Address {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         horizon: Option<AddressHorizon>,
@@ -108,12 +110,16 @@ pub enum ResolveExpression {
         left: Box<ResolveExpression>,
         right: Box<ResolveExpression>,
     },
-    Frame { expression: Box<ResolveExpression> },
+    Frame {
+        expression: Box<ResolveExpression>,
+    },
 }
 
 impl ResolveExpression {
     pub fn subject(value: impl Into<String>) -> Self {
-        Self::Subject { value: value.into() }
+        Self::Subject {
+            value: value.into(),
+        }
     }
 
     pub fn universal(expression: Self) -> Self {
@@ -177,7 +183,23 @@ fn render_child(expression: &ResolveExpression) -> String {
 }
 
 fn render_subject(value: &str) -> String {
-    let reserved = matches!(value, "@" | "@#" | "@0" | "@1" | "@2" | "@3" | "@4" | "@5" | "-" | "+" | "x" | "/" | "=" | "(" | ")");
+    let reserved = matches!(
+        value,
+        "@" | "@#"
+            | "@0"
+            | "@1"
+            | "@2"
+            | "@3"
+            | "@4"
+            | "@5"
+            | "-"
+            | "+"
+            | "x"
+            | "/"
+            | "="
+            | "("
+            | ")"
+    );
     if value.is_empty()
         || reserved
         || value.chars().any(char::is_whitespace)
@@ -226,6 +248,12 @@ pub fn parse_or_search_expression(raw: &str) -> Result<ResolveExpression> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(ResolveExpression::ordinary_search(""));
+    }
+    if trimmed.starts_with('"') || trimmed.starts_with('\'') || trimmed.contains('\\') {
+        return match parse_resolve_expression(trimmed)? {
+            ResolveExpression::Subject { value } => Ok(ResolveExpression::ordinary_search(value)),
+            expression => Ok(expression),
+        };
     }
     if has_operative_syntax(trimmed) {
         parse_resolve_expression(trimmed)
@@ -297,9 +325,8 @@ fn lex(raw: &str) -> Result<Vec<Token>> {
             continue;
         }
 
-        let previous_boundary = i == 0
-            || chars[i - 1].1.is_whitespace()
-            || matches!(chars[i - 1].1, '(' | ')');
+        let previous_boundary =
+            i == 0 || chars[i - 1].1.is_whitespace() || matches!(chars[i - 1].1, '(' | ')');
         let next = |offset: usize| chars.get(i + offset).map(|(_, value)| *value);
         let boundary_after = |offset: usize| {
             next(offset).is_none_or(|value| value.is_whitespace() || matches!(value, '(' | ')'))
@@ -414,7 +441,10 @@ impl Parser {
 
     fn parse_context(&mut self) -> Result<ResolveExpression> {
         let mut left = self.parse_relate()?;
-        while matches!(self.peek(), Some(Token::Relation(RelationOp::Contextualise))) {
+        while matches!(
+            self.peek(),
+            Some(Token::Relation(RelationOp::Contextualise))
+        ) {
             self.next();
             let right = self.parse_relate()?;
             left = ResolveExpression::Binary {
@@ -444,12 +474,22 @@ impl Parser {
         match self.peek().cloned() {
             Some(Token::Address(horizon)) => {
                 self.next();
+                let expression =
+                    if self.peek().is_none() || matches!(self.peek(), Some(Token::RParen)) {
+                        ResolveExpression::Subject {
+                            value: String::new(),
+                        }
+                    } else {
+                        self.parse_unary()?
+                    };
                 Ok(ResolveExpression::Address {
                     horizon,
-                    expression: Box::new(self.parse_unary()?),
+                    expression: Box::new(expression),
                 })
             }
-            Some(Token::Relation(op @ (RelationOp::Potential | RelationOp::Distinguish | RelationOp::Affirm))) => {
+            Some(Token::Relation(
+                op @ (RelationOp::Potential | RelationOp::Distinguish | RelationOp::Affirm),
+            )) => {
                 self.next();
                 Ok(ResolveExpression::Unary {
                     op,
@@ -508,7 +548,11 @@ pub struct ResolveCandidate {
     pub kind: ResourceKind,
     pub horizons: BTreeSet<AddressHorizon>,
     pub exact: bool,
+    /// Primary textual/exact relevance. Derived ranking signals remain separate
+    /// so learned use cannot numerically overpower relevance or authorship.
     pub score: i64,
+    #[serde(default)]
+    pub ranking: super::ResolveRankingSignals,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -560,6 +604,44 @@ pub fn resolve_expression(
             .exact
             .cmp(&left.exact)
             .then_with(|| right.score.cmp(&left.score))
+            .then_with(|| {
+                right
+                    .ranking
+                    .authored_preference_rank
+                    .is_some()
+                    .cmp(&left.ranking.authored_preference_rank.is_some())
+            })
+            .then_with(|| {
+                right
+                    .ranking
+                    .authored_preference_rank
+                    .unwrap_or_default()
+                    .cmp(&left.ranking.authored_preference_rank.unwrap_or_default())
+            })
+            .then_with(|| {
+                right
+                    .ranking
+                    .learned_contextual_frecency_milli
+                    .cmp(&left.ranking.learned_contextual_frecency_milli)
+            })
+            .then_with(|| {
+                right
+                    .ranking
+                    .learned_contextual_fitness_milli
+                    .unwrap_or_default()
+                    .cmp(
+                        &left
+                            .ranking
+                            .learned_contextual_fitness_milli
+                            .unwrap_or_default(),
+                    )
+            })
+            .then_with(|| {
+                right
+                    .ranking
+                    .learned_frecency_milli
+                    .cmp(&left.ranking.learned_frecency_milli)
+            })
             .then_with(|| left.resource.cmp(&right.resource))
     });
     candidates.dedup_by(|left, right| left.resource == right.resource);
@@ -579,7 +661,11 @@ pub fn resolve_expression(
 }
 
 pub fn resolve_search(query: &str, resources: &dyn ResourceIndex, limit: usize) -> ResolvePath {
-    resolve_expression(&ResolveExpression::ordinary_search(query.trim()), resources, limit)
+    resolve_expression(
+        &ResolveExpression::ordinary_search(query.trim()),
+        resources,
+        limit,
+    )
 }
 
 fn evaluate(
@@ -592,7 +678,10 @@ fn evaluate(
             let candidates = subject_candidates(value, resources);
             steps.push(ResolvePathStep::Subject {
                 value: value.clone(),
-                candidates: candidates.iter().map(|candidate| candidate.resource.clone()).collect(),
+                candidates: candidates
+                    .iter()
+                    .map(|candidate| candidate.resource.clone())
+                    .collect(),
             });
             candidates
         }
@@ -606,7 +695,10 @@ fn evaluate(
             }
             steps.push(ResolvePathStep::Address {
                 horizon: *horizon,
-                candidates: candidates.iter().map(|candidate| candidate.resource.clone()).collect(),
+                candidates: candidates
+                    .iter()
+                    .map(|candidate| candidate.resource.clone())
+                    .collect(),
             });
             candidates
         }
@@ -667,6 +759,7 @@ fn subject_candidates(value: &str, resources: &dyn ResourceIndex) -> Vec<Resolve
                 horizons: horizons_for_resource(record),
                 exact,
                 score,
+                ranking: resources.resolve_ranking(&record.descriptor.id),
             })
         })
         .collect()
@@ -703,9 +796,9 @@ pub fn horizons_for_resource(record: &ResourceRecord) -> BTreeSet<AddressHorizon
         ResourceKind::KnowledgeSource
         | ResourceKind::KnowledgeSpace
         | ResourceKind::ContextSource => BTreeSet::from([AddressHorizon::H0]),
-        ResourceKind::KnowledgeNode | ResourceKind::KnowledgeFrame | ResourceKind::KnowledgeRoute => {
-            BTreeSet::from([AddressHorizon::H0, AddressHorizon::H2])
-        }
+        ResourceKind::KnowledgeNode
+        | ResourceKind::KnowledgeFrame
+        | ResourceKind::KnowledgeRoute => BTreeSet::from([AddressHorizon::H0, AddressHorizon::H2]),
         ResourceKind::CodeReference | ResourceKind::Contract | ResourceKind::Component => {
             BTreeSet::from([AddressHorizon::H1, AddressHorizon::H3])
         }
@@ -715,7 +808,9 @@ pub fn horizons_for_resource(record: &ResourceRecord) -> BTreeSet<AddressHorizon
         ResourceKind::Agent | ResourceKind::Agency => {
             BTreeSet::from([AddressHorizon::H2, AddressHorizon::H4, AddressHorizon::H5])
         }
-        ResourceKind::Surface => BTreeSet::from([AddressHorizon::H3, AddressHorizon::H4, AddressHorizon::H5]),
+        ResourceKind::Surface => {
+            BTreeSet::from([AddressHorizon::H3, AddressHorizon::H4, AddressHorizon::H5])
+        }
         ResourceKind::SkillSet
         | ResourceKind::Capability
         | ResourceKind::Action
@@ -760,7 +855,10 @@ impl ActionRef {
         if record.descriptor.kind != ResourceKind::Action {
             return Err(AikitError::new(
                 "resolve.action_wrong_kind",
-                format!("{reference} is {}, not an Action", record.descriptor.kind.as_str()),
+                format!(
+                    "{reference} is {}, not an Action",
+                    record.descriptor.kind.as_str()
+                ),
             ));
         }
         Ok(Self(reference))
@@ -831,10 +929,12 @@ pub fn six_horizon_disclosure(
             .into_iter()
             .filter(|record| wanted.contains(&record.descriptor.id))
             .filter(|record| horizons_for_resource(record).contains(&horizon))
-            .map(|record| ResolveExpression::horizon(
-                horizon,
-                ResolveExpression::subject(record.descriptor.id.to_string()),
-            ))
+            .map(|record| {
+                ResolveExpression::horizon(
+                    horizon,
+                    ResolveExpression::subject(record.descriptor.id.to_string()),
+                )
+            })
             .collect::<Vec<_>>();
         for member in members {
             clauses.push(ResolveExpression::Unary {
@@ -916,11 +1016,14 @@ mod tests {
         ];
         for raw in cases {
             let expression = parse_or_search_expression(raw).unwrap();
-            assert_eq!(expression, ResolveExpression::ordinary_search(match raw {
-                "\"literal x / + @5 = material\"" => "literal x / + @5 = material",
-                "source:escaped\\ x" => "source:escaped x",
-                _ => raw,
-            }));
+            assert_eq!(
+                expression,
+                ResolveExpression::ordinary_search(match raw {
+                    "\"literal x / + @5 = material\"" => "literal x / + @5 = material",
+                    "source:escaped\\ x" => "source:escaped x",
+                    _ => raw,
+                })
+            );
         }
     }
 
@@ -958,8 +1061,32 @@ mod tests {
     #[test]
     fn ordinary_search_is_potential_universal_resolution() {
         let expression = parse_or_search_expression("orient project").unwrap();
-        assert_eq!(expression, ResolveExpression::ordinary_search("orient project"));
+        assert_eq!(
+            expression,
+            ResolveExpression::ordinary_search("orient project")
+        );
         assert_eq!(expression.render(), "@# @ \"orient project\"");
+    }
+
+    #[test]
+    fn bare_horizon_is_an_open_aperture_and_potential_horizon_is_executable() {
+        let mut resources = MemoryResourceIndex::default();
+        resources.insert(record("action:verify", ResourceKind::Action));
+        resources.insert(record("project:demo", ResourceKind::Project));
+
+        let horizon = parse_resolve_expression("@5").unwrap();
+        let path = resolve_expression(&horizon, &resources, 16);
+        assert_eq!(horizon.render(), "@5 \"\"");
+        assert_eq!(path.candidates.len(), 1);
+        assert_eq!(path.candidates[0].resource.as_str(), "action:verify");
+
+        let potential = parse_resolve_expression("@# @5").unwrap();
+        let potential_path = resolve_expression(&potential, &resources, 16);
+        assert_eq!(potential_path.candidates.len(), 1);
+        assert_eq!(
+            potential_path.candidates[0].resource.as_str(),
+            "action:verify"
+        );
     }
 
     #[test]
@@ -970,7 +1097,8 @@ mod tests {
         resources.insert(record("method:orient", ResourceKind::Method));
         resources.insert(record("action:verify", ResourceKind::Action));
 
-        let expression = parse_resolve_expression("+ @4 project:demo / + @5 action:verify").unwrap();
+        let expression =
+            parse_resolve_expression("+ @4 project:demo / + @5 action:verify").unwrap();
         let path = resolve_expression(&expression, &resources, 10);
         assert!(path
             .candidates
@@ -981,7 +1109,9 @@ mod tests {
             .iter()
             .any(|candidate| candidate.resource.as_str() == "action:verify"));
         assert!(ActionRef::parse(ResourceRef::parse("action:verify").unwrap(), &resources).is_ok());
-        assert!(ActionRef::parse(ResourceRef::parse("method:orient").unwrap(), &resources).is_err());
+        assert!(
+            ActionRef::parse(ResourceRef::parse("method:orient").unwrap(), &resources).is_err()
+        );
     }
 
     #[test]

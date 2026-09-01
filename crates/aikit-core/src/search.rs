@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::capsule::Kind;
 use crate::id::CapsuleId;
 use crate::resolve::ResolvedView;
+use crate::resource::{parse_or_search_expression, ResolveExpression};
 use crate::scope::ScopeKind;
 use crate::trust::TrustState;
 
@@ -50,18 +51,14 @@ pub enum FastPrefix {
 }
 
 impl FastPrefix {
-    pub const ALL: [FastPrefix; 4] = [
-        FastPrefix::Run,
-        FastPrefix::Capabilities,
-        FastPrefix::Sessions,
-        FastPrefix::Manage,
-    ];
+    /// Only non-conflicting historical lanes remain front-character shortcuts.
+    /// `+` and `@` stay deserializable enum values for compatibility, but new
+    /// input parses them as O:I operative syntax.
+    pub const ALL: [FastPrefix; 2] = [FastPrefix::Run, FastPrefix::Manage];
 
     pub fn from_char(c: char) -> Option<Self> {
         Some(match c {
             '>' => FastPrefix::Run,
-            '+' => FastPrefix::Capabilities,
-            '@' => FastPrefix::Sessions,
             ':' => FastPrefix::Manage,
             _ => return None,
         })
@@ -117,6 +114,8 @@ impl StatusFilter {
 pub struct Query {
     pub raw: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<ResolveExpression>,
     #[serde(default)]
     pub prefix: Option<FastPrefix>,
     pub kinds: Vec<Kind>,
@@ -188,6 +187,8 @@ pub fn parse_query(raw: &str) -> Query {
         raw: raw.to_string(),
         ..Default::default()
     };
+
+    query.expression = parse_or_search_expression(raw).ok();
 
     let trimmed = raw.trim_start();
     let body = match trimmed.chars().next().and_then(FastPrefix::from_char) {
@@ -497,6 +498,23 @@ mod tests {
         let q = parse_query("what: ");
         assert_eq!(q.text, "what:");
         assert!(!q.has_filters());
+    }
+
+    #[test]
+    fn operative_at_and_plus_are_not_legacy_fast_prefixes() {
+        let addressed = parse_query("@ project:demo");
+        assert_eq!(addressed.prefix, None);
+        assert!(matches!(
+            addressed.expression,
+            Some(ResolveExpression::Address { .. })
+        ));
+
+        let affirmed = parse_query("+ @5 action:verify");
+        assert_eq!(affirmed.prefix, None);
+        assert!(matches!(
+            affirmed.expression,
+            Some(ResolveExpression::Unary { .. })
+        ));
     }
 
     #[test]

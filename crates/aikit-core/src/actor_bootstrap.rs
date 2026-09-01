@@ -13,7 +13,10 @@ use crate::context_resolution::{
 };
 use crate::platform::TargetId;
 use crate::project::ProjectBinding;
-use crate::resource::{ProviderOffer, ResourceKind, ResourceRef, ResourceSource};
+use crate::resource::{
+    AddressHorizon, ProviderOffer, RelationOp, ResolveExpression, ResourceKind, ResourceRef,
+    ResourceSource,
+};
 use crate::{AikitError, Result};
 
 pub const ACTOR_BOOTSTRAP_VERSION: &str = "aikit.actor-bootstrap/v2";
@@ -167,7 +170,11 @@ pub fn project_actor_bootstrap(
     let agency = resolution.agency.as_ref().map(summarize_reference);
     let host = resolution.host.as_ref().map(summarize_reference);
     let harness = request.selected_harness.as_ref().map(|selected| {
-        summarize_selected(selected, ResourceKind::Harness, &resolution.harness_candidates)
+        summarize_selected(
+            selected,
+            ResourceKind::Harness,
+            &resolution.harness_candidates,
+        )
     });
     let model = request.selected_model.as_ref().map(|selected| {
         summarize_selected(selected, ResourceKind::Model, &resolution.model_candidates)
@@ -181,7 +188,11 @@ pub fn project_actor_bootstrap(
         version: ACTOR_BOOTSTRAP_VERSION.to_string(),
         project: resolution.project_binding.clone(),
         run: request.run,
-        profiles: resolution.profiles.iter().map(ToString::to_string).collect(),
+        profiles: resolution
+            .profiles
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         scopes: resolution.scopes.clone(),
         agent,
         agency,
@@ -300,7 +311,9 @@ fn validate_body_identity(
         if session != body_session {
             return Err(AikitError::new(
                 "bootstrap.runtime_body_session_mismatch",
-                format!("runtime body session {body_session} does not match bound session {session}"),
+                format!(
+                    "runtime body session {body_session} does not match bound session {session}"
+                ),
             ));
         }
     }
@@ -329,11 +342,7 @@ fn validate_body_identity(
     Ok(())
 }
 
-fn identity_error(
-    role: &str,
-    resolved: &ResourceRef,
-    body: &ResourceRef,
-) -> AikitError {
+fn identity_error(role: &str, resolved: &ResourceRef, body: &ResourceRef) -> AikitError {
     AikitError::new(
         "bootstrap.runtime_body_identity_mismatch",
         format!("runtime body {role} {body} does not match resolved {role} {resolved}"),
@@ -341,4 +350,89 @@ fn identity_error(
     .with("role", role)
     .with("resolved", resolved.to_string())
     .with("runtime_body", body.to_string())
+}
+
+/// Express the actual actor bootstrap as the shared six-horizon O:I disclosure.
+pub fn actor_world_disclosure(bootstrap: &ActorBootstrap) -> ResolveExpression {
+    fn actual(reference: &Option<BootstrapReference>) -> Option<ResourceRef> {
+        match reference {
+            Some(BootstrapReference::Resolved { resource, .. }) => Some(resource.clone()),
+            _ => None,
+        }
+    }
+
+    fn clause(horizon: AddressHorizon, resource: ResourceRef) -> ResolveExpression {
+        ResolveExpression::Unary {
+            op: RelationOp::Affirm,
+            expression: Box::new(ResolveExpression::horizon(
+                horizon,
+                ResolveExpression::subject(resource.to_string()),
+            )),
+        }
+    }
+
+    let mut clauses = Vec::new();
+    clauses.extend(
+        bootstrap
+            .context_sources
+            .examples
+            .iter()
+            .cloned()
+            .map(|resource| clause(AddressHorizon::H0, resource)),
+    );
+    clauses.extend(
+        [
+            actual(&bootstrap.host),
+            actual(&bootstrap.harness),
+            actual(&bootstrap.model),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|resource| clause(AddressHorizon::H1, resource)),
+    );
+    clauses.extend(
+        [actual(&bootstrap.agent), actual(&bootstrap.agency)]
+            .into_iter()
+            .flatten()
+            .map(|resource| clause(AddressHorizon::H2, resource)),
+    );
+    clauses.extend(
+        [actual(&bootstrap.harness), actual(&bootstrap.model)]
+            .into_iter()
+            .flatten()
+            .map(|resource| clause(AddressHorizon::H3, resource)),
+    );
+    if let Ok(project) = ResourceRef::parse(bootstrap.project.project.as_str()) {
+        clauses.push(clause(AddressHorizon::H4, project));
+    }
+    if let Some(run) = bootstrap.run.clone() {
+        clauses.push(clause(AddressHorizon::H4, run));
+    }
+    clauses.extend(
+        [actual(&bootstrap.agent), actual(&bootstrap.host)]
+            .into_iter()
+            .flatten()
+            .map(|resource| clause(AddressHorizon::H4, resource)),
+    );
+    clauses.extend(
+        bootstrap
+            .capabilities
+            .examples
+            .iter()
+            .chain(&bootstrap.actions.examples)
+            .cloned()
+            .map(|resource| clause(AddressHorizon::H5, resource)),
+    );
+
+    let expression = clauses
+        .into_iter()
+        .reduce(|left, right| ResolveExpression::Binary {
+            op: RelationOp::Contextualise,
+            left: Box::new(left),
+            right: Box::new(right),
+        })
+        .unwrap_or_else(|| ResolveExpression::ordinary_search(""));
+    ResolveExpression::Frame {
+        expression: Box::new(expression),
+    }
 }

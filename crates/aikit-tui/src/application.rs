@@ -14,7 +14,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use aikit_core::resource::{
-    search_contextual_actions, ContextualActionDescriptor, ResourceKind, ResourceRef,
+    search_contextual_actions, ContextualActionDescriptor, ResolveExpression, ResolvePath,
+    ResourceKind, ResourceRef,
 };
 use aikit_core::scope::ScopeKind;
 use aikit_core::{
@@ -97,6 +98,16 @@ pub struct ResourceListReadModel {
     /// interpret or mint it.
     pub revision: String,
     pub resources: Vec<ResourceListItem>,
+}
+
+/// One human/Agent Search projection of the same typed Resolve operation.
+/// The list is presentation; `expression` and `path` are the semantic request and
+/// its actual canonical-Ref traversal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedSearchReadModel {
+    pub expression: ResolveExpression,
+    pub path: ResolvePath,
+    pub resources: ResourceListReadModel,
 }
 
 impl ResourceListReadModel {

@@ -1454,26 +1454,41 @@ fn parse_knowledge_address(raw: &str) -> Result<aikit_core::KnowledgeAddress> {
 }
 
 fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
-    use aikit_cli::app::SearchRequest;
-    let service = Service::discover(cwd)?;
-    let results = service.search(SearchRequest {
-        query: a.query,
-        limit: a.limit,
-    })?;
-    let rows: Vec<Value> = results
-        .rows
+    let mut service = Service::discover(cwd)?;
+    let resolved = {
+        let application = ApplicationService::new(&mut service);
+        application.resolve_search(&a.query)?
+    };
+    let rows: Vec<Value> = resolved
+        .resources
+        .resources
         .iter()
-        .map(|r| {
+        .take(a.limit)
+        .map(|row| {
+            let capsule = CapsuleId::parse(row.resource.as_str()).ok();
+            let package = capsule
+                .as_ref()
+                .and_then(|id| service.resolved().catalog_index.get(id));
             jval!({
-                "id": r.id.to_string(),
-                "name": r.name,
-                "kind": r.kind.as_str(),
-                "active": r.active,
-                "runnable": r.runnable,
+                "id": row.resource.to_string(),
+                "name": row.label,
+                "kind": package.map(|entry| entry.kind.as_str()).unwrap_or(row.kind.as_str()),
+                "resource_kind": row.kind.as_str(),
+                "summary": row.summary,
+                "active": capsule.as_ref().is_some_and(|id| service.resolved().is_active(id)),
+                "runnable": capsule.as_ref().is_some_and(|id| service.resolved().can_run(id)),
             })
         })
         .collect();
-    Ok(reply(&service, jval!({ "rows": rows }), results.warnings))
+    Ok(reply(
+        &service,
+        jval!({
+            "expression": resolved.expression,
+            "path": resolved.path,
+            "rows": rows,
+        }),
+        diagnostic_warnings(&service),
+    ))
 }
 
 fn cmd_status(cwd: &std::path::Path, a: StatusArgs) -> Result<Reply> {

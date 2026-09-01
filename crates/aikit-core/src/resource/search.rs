@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::familiarity::{AccessibilityAssessment, FamiliarityContext, FamiliarityStore};
 use crate::{AikitError, Result};
 
-use super::{ResourceIndex, ResourceKind, ResourceRecord, ResourceRef};
+use super::{ResolveRankingSignals, ResourceIndex, ResourceKind, ResourceRecord, ResourceRef};
 
 const FAMILIARITY_EVIDENCE_PREFIX: &str = "familiarity:";
 
@@ -52,7 +52,10 @@ pub struct NavigationEvidence {
 
 impl NavigationEvidence {
     pub fn new(class: NavigationEvidenceClass) -> Self {
-        Self { class, detail: None }
+        Self {
+            class,
+            detail: None,
+        }
     }
 
     #[must_use]
@@ -259,8 +262,7 @@ impl ResourceSearchIndex {
                 detail.push_str(&format!("; contextual fitness {fitness:.0}/1000"));
             }
             indexed.evidence.push(
-                NavigationEvidence::new(NavigationEvidenceClass::LearnedUsage)
-                    .with_detail(detail),
+                NavigationEvidence::new(NavigationEvidenceClass::LearnedUsage).with_detail(detail),
             );
             indexed.familiarity = Some(assessment);
         }
@@ -410,6 +412,25 @@ impl ResourceIndex for ResourceSearchIndex {
             .map(|indexed| &indexed.record)
             .collect()
     }
+
+    fn resolve_ranking(&self, id: &ResourceRef) -> ResolveRankingSignals {
+        let Some(indexed) = self.resources.get(id) else {
+            return ResolveRankingSignals::default();
+        };
+        let familiarity = indexed.familiarity.as_ref();
+        ResolveRankingSignals {
+            authored_preference_rank: indexed.record.preference.as_ref().map(|value| value.rank),
+            learned_observations: familiarity.map_or(0, |value| value.observations),
+            learned_contextual_observations: familiarity
+                .map_or(0, |value| value.contextual_observations),
+            learned_frecency_milli: familiarity.map_or(0, |value| quantise_milli(value.frecency)),
+            learned_contextual_frecency_milli: familiarity
+                .map_or(0, |value| quantise_milli(value.contextual_frecency)),
+            learned_contextual_fitness_milli: familiarity
+                .and_then(|value| value.contextual_fitness_milli)
+                .map(|value| value.round() as i32),
+        }
+    }
 }
 
 fn resource_hit(indexed: &IndexedResource, score: i64) -> ResourceSearchHit {
@@ -427,8 +448,7 @@ fn resource_hit(indexed: &IndexedResource, score: i64) -> ResourceSearchHit {
             learned_observations: familiarity.map_or(0, |value| value.observations),
             learned_contextual_observations: familiarity
                 .map_or(0, |value| value.contextual_observations),
-            learned_frecency_milli: familiarity
-                .map_or(0, |value| quantise_milli(value.frecency)),
+            learned_frecency_milli: familiarity.map_or(0, |value| quantise_milli(value.frecency)),
             learned_contextual_frecency_milli: familiarity
                 .map_or(0, |value| quantise_milli(value.contextual_frecency)),
             learned_contextual_fitness_milli: familiarity
@@ -469,7 +489,12 @@ fn compare_hits(left: &ResourceSearchHit, right: &ResourceSearchHit) -> std::cmp
                 .ranking
                 .learned_contextual_fitness_milli
                 .unwrap_or_default()
-                .cmp(&left.ranking.learned_contextual_fitness_milli.unwrap_or_default())
+                .cmp(
+                    &left
+                        .ranking
+                        .learned_contextual_fitness_milli
+                        .unwrap_or_default(),
+                )
         })
         .then_with(|| {
             right
@@ -569,10 +594,7 @@ mod tests {
 
         assert_eq!(ResourceIndex::resources(&index).len(), 1);
         assert_eq!(
-            ResourceIndex::resource(&index, &id)
-                .unwrap()
-                .descriptor
-                .id,
+            ResourceIndex::resource(&index, &id).unwrap().descriptor.id,
             id
         );
     }

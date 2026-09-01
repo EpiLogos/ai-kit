@@ -267,6 +267,53 @@ pub fn familiarity_history_evidence(observation: &FamiliarityObservation) -> His
                 HistoryRecoverability::ReplayNavigation,
             )
         }
+        FamiliarityUse::ResolvePath {
+            route,
+            steps,
+            operative,
+        } => {
+            canonical_refs.insert(route.clone());
+            for reference in [
+                &operative.method,
+                &operative.action,
+                &operative.surface,
+                &operative.activity,
+                &operative.return_ref,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                canonical_refs.insert(reference.clone());
+            }
+            for step in steps {
+                canonical_refs.insert(step.resource.clone());
+                if let Some(provider) = &step.provider {
+                    provenance.push(EvidenceProvenance {
+                        provider: Some(provider.clone()),
+                        lens: step.lens.clone(),
+                        revision: step.revision.clone(),
+                        ..EvidenceProvenance::default()
+                    });
+                } else if step.lens.is_some() || step.revision.is_some() {
+                    provenance.push(EvidenceProvenance {
+                        lens: step.lens.clone(),
+                        revision: step.revision.clone(),
+                        ..EvidenceProvenance::default()
+                    });
+                }
+            }
+            (
+                HistoryKind::KnowledgeRoute,
+                format!(
+                    "resolved operative path {} via {route} to {} through {} step{}",
+                    operative.path_identity,
+                    observation.destination,
+                    steps.len(),
+                    if steps.len() == 1 { "" } else { "s" }
+                ),
+                HistoryRecoverability::ReplayNavigation,
+            )
+        }
     };
 
     let mut details = BTreeMap::new();

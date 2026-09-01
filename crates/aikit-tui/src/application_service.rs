@@ -11,8 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aikit_core::composition_mutation::{changed_ground, CompositionBasis};
 use aikit_core::id::{CapsuleId, EventId};
 use aikit_core::resource::{
-    ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass, ResourceIndex,
-    ResourceKind, ResourceRef, ResourceSearchIndex,
+    parse_or_search_expression, resolve_expression, ContextualActionDescriptor, NavigationEvidence,
+    NavigationEvidenceClass, ResolveExpression, ResourceDescriptor, ResourceIndex, ResourceKind,
+    ResourceRecord, ResourceRef, ResourceSearchIndex,
 };
 use aikit_core::{
     explain_history_actions_for, install_explain_history_actions, AikitError, FamiliarityContext,
@@ -25,8 +26,8 @@ use serde_json::{json, to_string_pretty, to_value, Value};
 
 use crate::application::{
     ActionOutcome, ActivationIntent, ApplyReceipt, CompositionPreview, HistoryEntry,
-    RelationReadModel, ResourceListItem, ResourceListReadModel, StagedChanges,
-    TuiApplicationService,
+    RelationReadModel, ResolvedSearchReadModel, ResourceListItem, ResourceListReadModel,
+    StagedChanges, TuiApplicationService,
 };
 use crate::backend::{PaletteBackend, Toggle};
 use crate::staging::is_on;
@@ -64,6 +65,91 @@ impl<'a> ApplicationService<'a> {
             );
         }
         Ok(index)
+    }
+
+    /// Resolve Search once against the canonical heterogeneous Resource field.
+    /// Deep Knowledge providers may contribute canonical refs for subject terms
+    /// before the expression is evaluated; they do not receive punctuation as a
+    /// fake prose query and they do not mint a second path identity.
+    pub fn resolve_search(&self, query: &str) -> Result<ResolvedSearchReadModel> {
+        let mut index = self.navigation_index()?;
+        let expression = parse_or_search_expression(query)?;
+
+        for subject in resolve_subjects(&expression) {
+            if subject.trim().is_empty() {
+                continue;
+            }
+            if let Some(knowledge) = self.backend.knowledge_search(subject, 256)? {
+                for hit in knowledge.hits {
+                    if ResourceIndex::resource(&index, &hit.resource).is_some() {
+                        continue;
+                    }
+                    let mut descriptor = ResourceDescriptor::new(
+                        hit.resource.clone(),
+                        hit.kind,
+                        hit.label,
+                        hit.snippet,
+                    );
+                    descriptor
+                        .annotations
+                        .insert("knowledge.provider".into(), hit.provider.to_string());
+                    descriptor
+                        .annotations
+                        .insert("knowledge.authority".into(), format!("{:?}", hit.authority));
+                    index.insert_resource(ResourceRecord::new(descriptor), Vec::new());
+                }
+            }
+        }
+
+        let path = resolve_expression(&expression, &index, 256);
+        // Empty human Search is the existing zero-query navigation state, not an
+        // explicit `@` aperture. Preserve its evidence-only presentation while
+        // the typed expression/path remains inspectable. Explicit `@` is non-empty
+        // input and therefore discloses the full addressable field.
+        let zero_query_hits = query.trim().is_empty().then(|| index.search("", 256));
+        let resources = path
+            .candidates
+            .iter()
+            .filter(|candidate| {
+                zero_query_hits
+                    .as_ref()
+                    .is_none_or(|hits| hits.iter().any(|hit| hit.resource == candidate.resource))
+            })
+            .filter_map(|candidate| {
+                let record = ResourceIndex::resource(&index, &candidate.resource)?;
+                let evidence = index
+                    .search(candidate.resource.as_str(), 256)
+                    .into_iter()
+                    .find(|hit| hit.resource == candidate.resource)
+                    .map(|hit| hit.navigation_evidence)
+                    .unwrap_or_default();
+                Some(ResourceListItem {
+                    resource: candidate.resource.clone(),
+                    kind: candidate.kind,
+                    label: record.descriptor.name.clone(),
+                    summary: summary_with_navigation_evidence(
+                        record.descriptor.description.clone(),
+                        &evidence,
+                    ),
+                })
+            })
+            .collect::<Vec<_>>();
+        let revision = format!(
+            "aikit.resolve-search/v1:{}:{}:{}:{}",
+            self.backend.view().catalog_revision,
+            self.backend.view().hash,
+            query,
+            path.identity
+        );
+
+        Ok(ResolvedSearchReadModel {
+            expression,
+            path,
+            resources: ResourceListReadModel {
+                revision,
+                resources,
+            },
+        })
     }
 
     /// Resolve the deliberately retained package compatibility identity for a
@@ -155,40 +241,7 @@ impl<'a> ApplicationService<'a> {
 
 impl TuiApplicationService for ApplicationService<'_> {
     fn search(&self, query: &str) -> Result<ResourceListReadModel> {
-        let index = self.navigation_index()?;
-        let mut resources = index
-            .search(query, 256)
-            .into_iter()
-            .map(|hit| ResourceListItem {
-                resource: hit.resource,
-                kind: hit.kind,
-                label: hit.label,
-                summary: summary_with_navigation_evidence(hit.summary, &hit.navigation_evidence),
-            })
-            .collect::<Vec<_>>();
-        if let Some(knowledge) = self.backend.knowledge_search(query, 256)? {
-            for hit in knowledge.hits {
-                if resources.iter().any(|item| item.resource == hit.resource) {
-                    continue;
-                }
-                let provider = hit.provider.to_string();
-                resources.push(ResourceListItem {
-                    resource: hit.resource,
-                    kind: hit.kind,
-                    label: hit.label,
-                    summary: format!("{} · {provider} · {:?}", hit.snippet, hit.authority),
-                });
-            }
-        }
-        Ok(ResourceListReadModel {
-            revision: format!(
-                "aikit.resource-search/v2:{}:{}:{}",
-                self.backend.view().catalog_revision,
-                self.backend.view().hash,
-                query
-            ),
-            resources,
-        })
+        Ok(self.resolve_search(query)?.resources)
     }
 
     fn context_disclosure(&self, resource: &ResourceRef) -> Result<Value> {
@@ -469,6 +522,18 @@ impl TuiApplicationService for ApplicationService<'_> {
                                     plural(steps.len())
                                 )
                             }
+                            FamiliarityUse::ResolvePath {
+                                route,
+                                steps,
+                                operative,
+                            } => {
+                                format!(
+                                    "resolve {} · route {route} · {} step{}",
+                                    operative.path_identity,
+                                    steps.len(),
+                                    plural(steps.len())
+                                )
+                            }
                         };
                         let action = observation
                             .source_action
@@ -671,6 +736,29 @@ impl TuiApplicationService for ApplicationService<'_> {
         };
         self.record_action_use(action)?;
         Ok(outcome)
+    }
+}
+
+fn resolve_subjects(expression: &ResolveExpression) -> Vec<&str> {
+    let mut subjects = Vec::new();
+    collect_resolve_subjects(expression, &mut subjects);
+    subjects.sort_unstable();
+    subjects.dedup();
+    subjects
+}
+
+fn collect_resolve_subjects<'a>(expression: &'a ResolveExpression, subjects: &mut Vec<&'a str>) {
+    match expression {
+        ResolveExpression::Subject { value } => subjects.push(value.as_str()),
+        ResolveExpression::Address { expression, .. }
+        | ResolveExpression::Unary { expression, .. }
+        | ResolveExpression::Frame { expression } => {
+            collect_resolve_subjects(expression, subjects);
+        }
+        ResolveExpression::Binary { left, right, .. } => {
+            collect_resolve_subjects(left, subjects);
+            collect_resolve_subjects(right, subjects);
+        }
     }
 }
 
