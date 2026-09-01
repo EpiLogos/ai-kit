@@ -5,9 +5,7 @@ on:
     branches:
       - feat/oi142-operative-resolve-syntax
     paths:
-      - 'scripts/oi142-path-familiarity-preflight.py'
-      - 'scripts/oi142-path-familiarity-migrate.py'
-      - 'scripts/oi142-path-familiarity-integration.py'
+      - 'scripts/oi142-action-invocation-migrate.py'
 
 permissions:
   contents: write
@@ -21,11 +19,8 @@ jobs:
           ref: feat/oi142-operative-resolve-syntax
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Apply bounded path-familiarity migration
-        run: |
-          python3 scripts/oi142-path-familiarity-preflight.py
-          python3 scripts/oi142-path-familiarity-migrate.py
-          python3 scripts/oi142-path-familiarity-integration.py
+      - name: Apply bounded Action qualification/invocation migration
+        run: python3 scripts/oi142-action-invocation-migrate.py
       - name: Format current workspace
         run: cargo fmt --all
       - name: Verify AIKit
@@ -34,18 +29,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git add crates/aikit-core/src/lib.rs \
-                  crates/aikit-core/src/familiarity.rs \
-                  crates/aikit-core/src/explain_history.rs \
-                  crates/aikit-core/src/knowledge.rs \
-                  crates/aikit-core/src/resource/index.rs \
+          git add crates/aikit-core/src/explain_history_actions.rs \
                   crates/aikit-core/src/resource/mod.rs \
                   crates/aikit-core/src/resource/operative.rs \
                   crates/aikit-core/src/resource/search.rs \
-                  crates/aikit-core/tests/familiarity_v2.rs \
-                  crates/aikit-tui/src/application_service.rs
+                  crates/aikit-tui/src/application.rs \
+                  crates/aikit-tui/src/application_service.rs \
+                  crates/aikit-tui/src/backend.rs \
+                  crates/aikit-tui/tests/application_service_backend_v2.rs \
+                  crates/aikit-tui/tests/common/mod.rs
           git diff --cached --quiet && exit 0
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m '[OI142] Learn ResolvePath accessibility independently of routes'
+          git commit -m '[OI142] Qualify syntax-resolved Actions through native invocation'
           git push origin HEAD:feat/oi142-operative-resolve-syntax
