@@ -5,16 +5,8 @@ on:
     branches:
       - feat/oi142-operative-resolve-syntax
     paths:
-      - 'scripts/oi142-migrate.py'
-      - 'scripts/oi142-tui-migrate.py'
-      - 'scripts/oi142-baseline-migrate.py'
-      - 'scripts/oi142-parser-fix.py'
-      - 'scripts/oi142-search-test-migrate.py'
-      - 'scripts/oi142-method-path-migrate.py'
-      - 'scripts/oi142-method-consumers-migrate.py'
-      - 'scripts/oi142-aperture-ranking-migrate.py'
-      - 'scripts/oi142-search-application-migrate.py'
-      - 'scripts/oi142-search-compat-migrate.py'
+      - 'scripts/oi142-path-familiarity-preflight.py'
+      - 'scripts/oi142-path-familiarity-migrate.py'
 
 permissions:
   contents: write
@@ -28,22 +20,11 @@ jobs:
           ref: feat/oi142-operative-resolve-syntax
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Apply bounded migration
+      - name: Apply bounded path-familiarity migration
         run: |
-          python3 scripts/oi142-migrate.py
-          python3 scripts/oi142-tui-migrate.py
-          python3 scripts/oi142-baseline-migrate.py
-          python3 scripts/oi142-parser-fix.py
-          python3 scripts/oi142-search-test-migrate.py
-          python3 scripts/oi142-method-path-migrate.py
-          python3 scripts/oi142-method-consumers-migrate.py
-          python3 scripts/oi142-aperture-ranking-migrate.py
-          python3 scripts/oi142-search-application-migrate.py
-          python3 scripts/oi142-search-compat-migrate.py
+          python3 scripts/oi142-path-familiarity-preflight.py
+          python3 scripts/oi142-path-familiarity-migrate.py
       - name: Format current workspace
-        # Main currently carries pre-existing rustfmt drift outside #142. Format
-        # the checkout so the implementation under test is canonical, but do not
-        # make unrelated workspace formatting an acceptance gate for this branch.
         run: cargo fmt --all
       - name: Verify AIKit
         run: cargo test --workspace --all-targets
@@ -51,26 +32,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git add crates/aikit-core/src/resource/index.rs \
+          git add crates/aikit-core/src/lib.rs \
+                  crates/aikit-core/src/familiarity.rs \
+                  crates/aikit-core/src/explain_history.rs \
+                  crates/aikit-core/src/resource/index.rs \
                   crates/aikit-core/src/resource/mod.rs \
                   crates/aikit-core/src/resource/operative.rs \
                   crates/aikit-core/src/resource/search.rs \
-                  crates/aikit-core/src/search.rs \
-                  crates/aikit-core/src/familiarity.rs \
-                  crates/aikit-core/src/explain_history.rs \
-                  crates/aikit-core/src/actor_bootstrap.rs \
-                  crates/aikit-core/src/knowledge.rs \
-                  crates/aikit-core/src/knowledge_living.rs \
-                  crates/aikit-core/src/method.rs \
-                  crates/aikit-core/src/praxis.rs \
-                  crates/aikit-core/src/flow.rs \
-                  crates/aikit-core/tests/search.rs \
-                  crates/aikit-tui/src/application.rs \
-                  crates/aikit-tui/src/application_service.rs \
-                  crates/aikit-cli/src/main.rs \
-                  crates/aikit-adapters/src/gateway_service.rs
+                  crates/aikit-core/tests/familiarity_v2.rs \
+                  crates/aikit-tui/src/application_service.rs
           git diff --cached --quiet && exit 0
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m '[OI142] Verify operative syntax over current exact-main baseline'
+          git commit -m '[OI142] Learn ResolvePath accessibility independently of routes'
           git push origin HEAD:feat/oi142-operative-resolve-syntax
