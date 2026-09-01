@@ -11,6 +11,7 @@ mod index;
 mod model;
 #[path = "../model_roster.rs"]
 mod model_roster;
+mod operative;
 mod refs;
 mod search;
 mod versioned_world;
@@ -28,6 +29,12 @@ pub use model_roster::{
     ModelAccessProfileView, ModelPriceObservation, ModelRankingExplanation, ModelRankingPolicy,
     ModelRoster, ModelRosterCandidate, ModelRosterDemand, ModelRosterEntry, RankingComponent,
     MODEL_ROSTER_VERSION,
+};
+pub use operative::{
+    horizons_for_resource, parse_or_search_expression, parse_resolve_expression,
+    resolve_action_candidates, resolve_expression, resolve_search, six_horizon_disclosure,
+    ActionRef, AddressHorizon, RelationOp, ResolveCandidate, ResolveExpression, ResolvePath,
+    ResolvePathStep, ResolvedActionCandidate, OPERATIVE_SYNTAX_VERSION,
 };
 pub use refs::{OwnerRef, ProviderRef, ResourceRef, SourceRef, SourceRevision};
 pub use search::{
