@@ -14,8 +14,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use aikit_core::resource::{
-    search_contextual_actions, ContextualActionDescriptor, ResolveExpression, ResolvePath,
-    ResourceKind, ResourceRef,
+    search_contextual_actions, ActionSemanticProfile, ContextualActionDescriptor,
+    ResolveExpression, ResolvePath, ResolvedActionCandidate, ResourceKind, ResourceRef,
 };
 use aikit_core::scope::ScopeKind;
 use aikit_core::{
@@ -108,6 +108,23 @@ pub struct ResolvedSearchReadModel {
     pub expression: ResolveExpression,
     pub path: ResolvePath,
     pub resources: ResourceListReadModel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedActionReadModel {
+    pub expression: ResolveExpression,
+    pub path: ResolvePath,
+    pub candidate: ResolvedActionCandidate,
+    pub semantic_profile: ActionSemanticProfile,
+    pub action: ContextualActionDescriptor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionInvocationReceipt {
+    pub action: ResourceRef,
+    pub subject: ResourceRef,
+    pub observed_path: ResolvePath,
+    pub outcome: ActionOutcome,
 }
 
 impl ResourceListReadModel {

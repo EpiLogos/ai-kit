@@ -22,7 +22,8 @@ use aikit_core::projection::ActivationEffect;
 use aikit_core::resolve::ResolvedView;
 use aikit_core::resource::{
     ActionStageability, ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass,
-    ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
+    OwnerRef, ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
+    ResourceSource, SourceAuthority, SourceRef, SourceState,
 };
 use aikit_core::scope::{ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
@@ -219,6 +220,32 @@ impl PromotionDraft {
     }
 }
 
+fn native_application_action_record(
+    id: ResourceRef,
+    name: &str,
+    description: &str,
+    expected_return_forms: &str,
+) -> ResourceRecord {
+    let mut descriptor = ResourceDescriptor::new(id, ResourceKind::Action, name, description);
+    descriptor.owner = Some(
+        OwnerRef::parse("aikit/application-service")
+            .expect("static native Action owner reference must be valid"),
+    );
+    descriptor.sources.push(ResourceSource {
+        source: SourceRef::parse("source/aikit/application-service")
+            .expect("static native Action source reference must be valid"),
+        authority: Some(SourceAuthority::Authored),
+        revision: None,
+        locator: None,
+        state: SourceState::Available,
+    });
+    descriptor.annotations.insert(
+        "action.expected-return-forms".into(),
+        expected_return_forms.into(),
+    );
+    ResourceRecord::new(descriptor)
+}
+
 fn session_space_store(home: Option<&AikitHome>) -> Result<SessionSpaceApplicationStore> {
     let home = home.cloned().ok_or_else(|| {
         aikit_core::AikitError::new(
@@ -353,30 +380,30 @@ pub trait PaletteBackend {
         let toggle_capability = ResourceRef::parse("action/capability/toggle")
             .expect("static V2 Action ResourceRef must be valid");
         index.insert_resource(
-            ResourceRecord::new(ResourceDescriptor::new(
+            native_application_action_record(
                 open_project.clone(),
-                ResourceKind::Action,
                 "Open project",
                 "enter the selected Project workspace",
-            )),
+                "opened",
+            ),
             Vec::new(),
         );
         index.insert_resource(
-            ResourceRecord::new(ResourceDescriptor::new(
+            native_application_action_record(
                 explain_capability.clone(),
-                ResourceKind::Action,
                 "Explain capability",
                 "show why this Capability has its current resolved state",
-            )),
+                "explanation",
+            ),
             Vec::new(),
         );
         index.insert_resource(
-            ResourceRecord::new(ResourceDescriptor::new(
+            native_application_action_record(
                 toggle_capability.clone(),
-                ResourceKind::Action,
                 "Toggle capability",
                 "stage an enable/disable change at the selected mutation scope",
-            )),
+                "staged-change",
+            ),
             Vec::new(),
         );
 

@@ -344,6 +344,13 @@ impl ResourceSearchIndex {
             .collect()
     }
 
+    pub fn subjects_for_action(&self, action: &ResourceRef) -> Vec<&ContextualActionDescriptor> {
+        self.actions
+            .values()
+            .filter(|contextual| &contextual.action == action)
+            .collect()
+    }
+
     pub fn len(&self) -> usize {
         self.resources.len()
     }

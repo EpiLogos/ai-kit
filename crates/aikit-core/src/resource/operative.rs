@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::context_resolution::{Availability, ContextResolution};
 use crate::{AikitError, Result};
 
-use super::{ResourceIndex, ResourceKind, ResourceRecord, ResourceRef};
+use super::{OwnerRef, ResourceIndex, ResourceKind, ResourceRecord, ResourceRef, ResourceSource};
 
 pub const OPERATIVE_SYNTAX_VERSION: &str = "aikit.operative-resolve/v1";
 
@@ -910,6 +910,30 @@ pub struct ResolvedActionCandidate {
     pub available_in_context: bool,
 }
 
+/// Contextual semantic qualification of one real ActionRef. The profile is
+/// derived from current ResolvePath + Resource/subject evidence; it is not a new
+/// Action registry and it confers no execution authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionSemanticProfile {
+    pub action_ref: ActionRef,
+    #[serde(default)]
+    pub relation_affinities: BTreeSet<RelationOp>,
+    #[serde(default)]
+    pub horizon_affinities: BTreeSet<AddressHorizon>,
+    #[serde(default)]
+    pub subject_ref_kinds: BTreeSet<ResourceKind>,
+    #[serde(default)]
+    pub method_relations: Vec<ResourceRef>,
+    #[serde(default)]
+    pub focus_relations: Vec<String>,
+    #[serde(default)]
+    pub expected_return_forms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_owner: Option<OwnerRef>,
+    #[serde(default)]
+    pub provenance: Vec<ResourceSource>,
+}
+
 /// Lift Action candidates from a path while preserving the actual Action identity
 /// and asking current ContextResolution—not syntax—to decide operativity.
 pub fn resolve_action_candidates(
@@ -942,6 +966,84 @@ pub fn resolve_action_candidates(
             })
         })
         .collect()
+}
+
+/// Describe why one syntax-resolved Action is meaningful for the selected subject.
+/// Relation affinities are the operators that actually participated in this
+/// qualification; horizon affinities come from the general resource classifier.
+/// Method and Focus relations are likewise current path/context evidence rather
+/// than invented declarations. Expected return forms are native-owner annotations.
+pub fn action_semantic_profile(
+    candidate: &ResolvedActionCandidate,
+    path: &ResolvePath,
+    subject: &ResourceRef,
+    focus: Option<&str>,
+    resources: &dyn ResourceIndex,
+) -> Result<ActionSemanticProfile> {
+    let action_record = resources
+        .resource(candidate.action.resource())
+        .ok_or_else(|| {
+            AikitError::new(
+                "resolve.action_profile_missing",
+                format!(
+                    "Action {} disappeared during semantic qualification",
+                    candidate.action.resource()
+                ),
+            )
+        })?;
+    let subject_record = resources.resource(subject).ok_or_else(|| {
+        AikitError::new(
+            "resolve.action_subject_missing",
+            format!("Action subject {subject} is absent from the Resource field"),
+        )
+    })?;
+
+    let relation_affinities = path
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            ResolvePathStep::Relation { op } => Some(*op),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let horizon_affinities = horizons_for_resource(action_record);
+    let method_relations = path
+        .candidates
+        .iter()
+        .filter(|resolved| resolved.kind == ResourceKind::Method)
+        .map(|resolved| resolved.resource.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let focus_relations = focus
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| vec![value.to_string()])
+        .unwrap_or_default();
+    let expected_return_forms = action_record
+        .descriptor
+        .annotations
+        .get("action.expected-return-forms")
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(ActionSemanticProfile {
+        action_ref: candidate.action.clone(),
+        relation_affinities,
+        horizon_affinities,
+        subject_ref_kinds: BTreeSet::from([subject_record.descriptor.kind]),
+        method_relations,
+        focus_relations,
+        expected_return_forms,
+        native_owner: action_record.descriptor.owner.clone(),
+        provenance: action_record.descriptor.sources.clone(),
+    })
 }
 
 /// Build the thin sixfold disclosure object from real currently-addressable refs.

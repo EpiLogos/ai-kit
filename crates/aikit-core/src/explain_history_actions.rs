@@ -6,28 +6,51 @@
 //! without manufacturing per-Surface/per-kind Action identities.
 
 use crate::resource::{
-    ActionStageability, ContextualActionDescriptor, ResourceDescriptor, ResourceIndex,
-    ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
+    ActionStageability, ContextualActionDescriptor, OwnerRef, ResourceDescriptor, ResourceIndex,
+    ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex, ResourceSource,
+    SourceAuthority, SourceRef, SourceState,
 };
 use crate::Result;
 
 pub const EXPLAIN_ACTION_REF: &str = "action/aikit/explain";
 pub const HISTORY_ACTION_REF: &str = "action/aikit/history";
 
+fn native_explain_history_action_record(
+    id: ResourceRef,
+    name: &str,
+    description: &str,
+    expected_return_forms: &str,
+) -> Result<ResourceRecord> {
+    let mut descriptor = ResourceDescriptor::new(id, ResourceKind::Action, name, description);
+    descriptor.owner = Some(OwnerRef::parse("aikit/explain-history")?);
+    descriptor.sources.push(ResourceSource {
+        source: SourceRef::parse("source/aikit-core/explain-history-actions")?,
+        authority: Some(SourceAuthority::Authored),
+        revision: None,
+        locator: None,
+        state: SourceState::Available,
+    });
+    descriptor.annotations.insert(
+        "action.expected-return-forms".into(),
+        expected_return_forms.into(),
+    );
+    Ok(ResourceRecord::new(descriptor))
+}
+
 pub fn explain_history_action_resources() -> Result<[ResourceRecord; 2]> {
     Ok([
-        ResourceRecord::new(ResourceDescriptor::new(
+        native_explain_history_action_record(
             ResourceRef::parse(EXPLAIN_ACTION_REF)?,
-            ResourceKind::Action,
             "Explain",
             "Explain why the selected Resource is present, unavailable, degraded, staged, projected or learned-easy from owner-held evidence.",
-        )),
-        ResourceRecord::new(ResourceDescriptor::new(
+            "explanation",
+        )?,
+        native_explain_history_action_record(
             ResourceRef::parse(HISTORY_ACTION_REF)?,
-            ResourceKind::Action,
             "History",
             "Read evidence-bearing recent, familiar, changed and recoverable history for the selected Resource without creating a second history authority.",
-        )),
+            "history-evidence",
+        )?,
     ])
 }
 
