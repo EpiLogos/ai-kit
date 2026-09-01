@@ -6,6 +6,7 @@ on:
       - feat/oi142-operative-resolve-syntax
     paths:
       - 'scripts/oi142-migrate.py'
+      - 'scripts/oi142-tui-migrate.py'
 
 permissions:
   contents: write
@@ -20,7 +21,9 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Apply bounded migration
-        run: python3 scripts/oi142-migrate.py
+        run: |
+          python3 scripts/oi142-migrate.py
+          python3 scripts/oi142-tui-migrate.py
       - name: Format current workspace
         # Main currently carries pre-existing rustfmt drift outside #142. Format
         # the checkout so the implementation under test is canonical, but do not
@@ -36,7 +39,8 @@ jobs:
                   crates/aikit-core/src/search.rs \
                   crates/aikit-core/src/familiarity.rs \
                   crates/aikit-core/src/explain_history.rs \
-                  crates/aikit-core/src/actor_bootstrap.rs
+                  crates/aikit-core/src/actor_bootstrap.rs \
+                  crates/aikit-tui/src/application_service.rs
           git diff --cached --quiet && exit 0
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
