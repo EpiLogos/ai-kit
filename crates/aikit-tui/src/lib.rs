@@ -11,6 +11,7 @@ pub mod application;
 pub mod application_service;
 pub mod application_surface;
 pub mod backend;
+pub mod credential_surface;
 pub mod event;
 pub mod explain_history_service;
 pub mod host;
@@ -45,6 +46,9 @@ pub use application_surface::{
 };
 pub use backend::{
     ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
+};
+pub use credential_surface::{
+    credential_setup_widget, render_credential_setup_panel, CredentialSetupView,
 };
 pub use event::{EventSource, PaletteEvent, ScriptedEvents};
 pub use explain_history_service::ExplainHistoryApplicationService;
