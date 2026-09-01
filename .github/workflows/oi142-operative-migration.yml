@@ -6,6 +6,7 @@ on:
       - feat/oi142-operative-resolve-syntax
     paths:
       - 'scripts/oi142-operative-provider-migrate.py'
+      - 'scripts/oi142-provider-trigger.txt'
 
 permissions:
   contents: write
