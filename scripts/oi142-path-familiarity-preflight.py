@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+# acceptance trigger: independent path identity/frecency tranche, 2026-09-01
+
 path = Path("scripts/oi142-path-familiarity-migrate.py")
 source = path.read_text()
 
