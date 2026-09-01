@@ -8,6 +8,7 @@ on:
       - 'scripts/oi142-migrate.py'
       - 'scripts/oi142-tui-migrate.py'
       - 'scripts/oi142-baseline-migrate.py'
+      - 'scripts/oi142-parser-fix.py'
 
 permissions:
   contents: write
@@ -26,6 +27,7 @@ jobs:
           python3 scripts/oi142-migrate.py
           python3 scripts/oi142-tui-migrate.py
           python3 scripts/oi142-baseline-migrate.py
+          python3 scripts/oi142-parser-fix.py
       - name: Format current workspace
         # Main currently carries pre-existing rustfmt drift outside #142. Format
         # the checkout so the implementation under test is canonical, but do not
