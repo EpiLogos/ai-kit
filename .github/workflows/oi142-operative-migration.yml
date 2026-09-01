@@ -51,6 +51,7 @@ jobs:
                   crates/aikit-core/src/explain_history.rs \
                   crates/aikit-core/src/actor_bootstrap.rs \
                   crates/aikit-core/src/knowledge.rs \
+                  crates/aikit-core/src/knowledge_living.rs \
                   crates/aikit-core/src/method.rs \
                   crates/aikit-core/src/praxis.rs \
                   crates/aikit-core/src/flow.rs \
