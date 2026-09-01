@@ -13,10 +13,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::resource::ResourceKind;
+use crate::resource::ResourceRef;
 use crate::scope::ScopeKind;
 use crate::{AikitError, Result};
-use crate::resource::ResourceRef;
 
+pub const COMPOSITION_BODY_VERSION: &str = "aikit.composition-body/v1";
 pub const HARNESS_COMPOSITION_VERSION: &str = "aikit.harness-composition/v2";
 
 /// Why a declaration participated in the resolution. This is deliberately the
@@ -377,8 +378,12 @@ pub struct CompositionCatalog {
 }
 
 impl CompositionCatalog {
-    pub fn insert_component(&mut self, component: ComponentDescriptor) -> Option<ComponentDescriptor> {
-        self.components.insert(component.resource.clone(), component)
+    pub fn insert_component(
+        &mut self,
+        component: ComponentDescriptor,
+    ) -> Option<ComponentDescriptor> {
+        self.components
+            .insert(component.resource.clone(), component)
     }
 
     pub fn insert_surface(&mut self, surface: SurfaceDescriptor) -> Option<SurfaceDescriptor> {
@@ -400,6 +405,23 @@ impl CompositionCatalog {
     pub fn surface(&self, resource: &ResourceRef) -> Option<&SurfaceDescriptor> {
         self.surfaces.get(resource)
     }
+}
+
+/// Scope-neutral request for the reusable Component/Contract/Contribution/Surface body.
+///
+/// Harness, Project, Agent, Agency, AgentSession and provider-local host identity
+/// deliberately do not participate here. Those relations wrap or bind this body
+/// at their own semantic altitude.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompositionBodyRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ResourceRef>,
+    #[serde(default)]
+    pub selections: Vec<ComponentSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -473,6 +495,30 @@ pub enum CompositionState {
     ObservedActive,
 }
 
+/// Scope-neutral resolved composition body. This is the reusable kernel beneath
+/// HarnessComposition and host/environment composition. Provider-local bindings
+/// remain observations outside this body unless represented by canonical
+/// Component/Contract/Contribution/Surface relations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompositionBody {
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ResourceRef>,
+    pub component_bindings: Vec<ComponentBinding>,
+    pub contract_bindings: Vec<ContractBinding>,
+    pub contributions: Vec<ComponentContribution>,
+    pub surfaces: Vec<SurfaceDescriptor>,
+    pub projections: Vec<ProjectionBinding>,
+    pub absences: Vec<CompositionAbsence>,
+    pub state: CompositionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    /// Deterministic fingerprint of only the scope-neutral resolved body.
+    pub fingerprint: String,
+}
+
 /// The derived current/desired body of one Harness + actor/session relation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessComposition {
@@ -499,8 +545,10 @@ pub struct HarnessComposition {
     pub target_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<String>,
-    /// Deterministic fingerprint of the resolved body, independent from Project,
-    /// Agent and Harness semantic identities.
+    /// Deterministic fingerprint of this Harness-scoped wrapper. Project, Agent,
+    /// Agency and session identity remain outside it; Harness identity participates
+    /// for backward-compatible HarnessComposition history. Use CompositionBody's
+    /// fingerprint for scope-neutral composition identity.
     pub fingerprint: String,
 }
 
@@ -526,13 +574,80 @@ pub fn resolve_harness_composition(
     catalog: &CompositionCatalog,
     request: HarnessCompositionRequest,
 ) -> Result<HarnessComposition> {
+    let HarnessCompositionRequest {
+        harness,
+        project,
+        agent,
+        agency,
+        session,
+        model,
+        selections,
+        target_revision,
+        generation,
+    } = request;
+
+    let body = resolve_composition_body(
+        catalog,
+        CompositionBodyRequest {
+            model,
+            selections,
+            target_revision,
+            generation,
+        },
+    )?;
+
+    // Preserve the existing HarnessComposition fingerprint contract while the
+    // reusable body now has its own identity independent of Harness semantics.
+    let fingerprint = fingerprint(&(
+        &harness,
+        &body.model,
+        &body.component_bindings,
+        &body.contract_bindings,
+        &body.contributions,
+        &body.surfaces,
+        &body.projections,
+        &body.absences,
+        &body.target_revision,
+        &body.generation,
+    ))?;
+
+    Ok(HarnessComposition {
+        version: HARNESS_COMPOSITION_VERSION.to_string(),
+        harness,
+        project,
+        agent,
+        agency,
+        session,
+        model: body.model,
+        component_bindings: body.component_bindings,
+        contract_bindings: body.contract_bindings,
+        contributions: body.contributions,
+        surfaces: body.surfaces,
+        projections: body.projections,
+        absences: body.absences,
+        state: body.state,
+        target_revision: body.target_revision,
+        generation: body.generation,
+        fingerprint,
+    })
+}
+
+/// Resolve the reusable composition body without requiring a Harness, actor,
+/// SessionSpace, host, renderer or provider-native identity.
+pub fn resolve_composition_body(
+    catalog: &CompositionCatalog,
+    request: CompositionBodyRequest,
+) -> Result<CompositionBody> {
     let mut selections = request.selections;
     selections.sort_by(|left, right| left.component.cmp(&right.component));
     for pair in selections.windows(2) {
         if pair[0].component == pair[1].component {
             return Err(AikitError::new(
                 "composition.duplicate_component",
-                format!("component {} was selected more than once", pair[0].component),
+                format!(
+                    "component {} was selected more than once",
+                    pair[0].component
+                ),
             ));
         }
     }
@@ -552,11 +667,16 @@ pub fn resolve_harness_composition(
         let descriptor = catalog.component(&selection.component).ok_or_else(|| {
             AikitError::new(
                 "composition.unknown_component",
-                format!("selected component {} is not present in the composition catalog", selection.component),
+                format!(
+                    "selected component {} is not present in the composition catalog",
+                    selection.component
+                ),
             )
         })?;
         if !descriptor.activation_modes.is_empty()
-            && !descriptor.activation_modes.contains(&selection.activation_mode)
+            && !descriptor
+                .activation_modes
+                .contains(&selection.activation_mode)
         {
             return Err(AikitError::new(
                 "composition.unsupported_activation_mode",
@@ -593,8 +713,6 @@ pub fn resolve_harness_composition(
             if catalog.available_resources.contains(&requirement.resource)
                 || selected.contains(&requirement.resource)
             {
-                // A direct canonical resource requirement is satisfied without a
-                // Contract-provider binding. Its identity remains the resource.
                 continue;
             }
 
@@ -645,19 +763,24 @@ pub fn resolve_harness_composition(
                 let surface = catalog.surface(surface_ref).ok_or_else(|| {
                     AikitError::new(
                         "composition.unknown_surface",
-                        format!("contribution {} references unknown surface {surface_ref}", contribution.id),
+                        format!(
+                            "contribution {} references unknown surface {surface_ref}",
+                            contribution.id
+                        ),
                     )
                 })?;
                 surfaces.insert(surface.resource.clone(), surface.clone());
                 match (&contribution.exposed_ref, contribution.exposed_kind) {
-                    (Some(canonical_ref), Some(canonical_kind)) => projections.push(ProjectionBinding {
-                        canonical_ref: canonical_ref.clone(),
-                        canonical_kind,
-                        contribution: contribution.id.clone(),
-                        component: descriptor.resource.clone(),
-                        surface: surface_ref.clone(),
-                        target_native_surface: surface.target_native_id.clone(),
-                    }),
+                    (Some(canonical_ref), Some(canonical_kind)) => {
+                        projections.push(ProjectionBinding {
+                            canonical_ref: canonical_ref.clone(),
+                            canonical_kind,
+                            contribution: contribution.id.clone(),
+                            component: descriptor.resource.clone(),
+                            surface: surface_ref.clone(),
+                            target_native_surface: surface.target_native_id.clone(),
+                        })
+                    }
                     (None, None) => {}
                     _ => {
                         return Err(AikitError::new(
@@ -694,7 +817,6 @@ pub fn resolve_harness_composition(
     let surfaces = surfaces.into_values().collect::<Vec<_>>();
 
     let fingerprint = fingerprint(&(
-        &request.harness,
         &request.model,
         &component_bindings,
         &contract_bindings,
@@ -706,13 +828,8 @@ pub fn resolve_harness_composition(
         &request.generation,
     ))?;
 
-    Ok(HarnessComposition {
-        version: HARNESS_COMPOSITION_VERSION.to_string(),
-        harness: request.harness,
-        project: request.project,
-        agent: request.agent,
-        agency: request.agency,
-        session: request.session,
+    Ok(CompositionBody {
+        version: COMPOSITION_BODY_VERSION.to_string(),
         model: request.model,
         component_bindings,
         contract_bindings,
