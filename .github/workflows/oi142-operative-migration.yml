@@ -7,6 +7,7 @@ on:
     paths:
       - 'scripts/oi142-migrate.py'
       - 'scripts/oi142-tui-migrate.py'
+      - 'scripts/oi142-baseline-migrate.py'
 
 permissions:
   contents: write
@@ -24,6 +25,7 @@ jobs:
         run: |
           python3 scripts/oi142-migrate.py
           python3 scripts/oi142-tui-migrate.py
+          python3 scripts/oi142-baseline-migrate.py
       - name: Format current workspace
         # Main currently carries pre-existing rustfmt drift outside #142. Format
         # the checkout so the implementation under test is canonical, but do not
@@ -41,9 +43,10 @@ jobs:
                   crates/aikit-core/src/explain_history.rs \
                   crates/aikit-core/src/actor_bootstrap.rs \
                   crates/aikit-core/src/knowledge.rs \
-                  crates/aikit-tui/src/application_service.rs
+                  crates/aikit-tui/src/application_service.rs \
+                  crates/aikit-adapters/src/gateway_service.rs
           git diff --cached --quiet && exit 0
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m '[OI142] Migrate Search familiarity and actor disclosure onto operative syntax'
+          git commit -m '[OI142] Verify operative syntax over current exact-main baseline'
           git push origin HEAD:feat/oi142-operative-resolve-syntax
