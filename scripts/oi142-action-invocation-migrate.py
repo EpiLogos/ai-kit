@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+# acceptance trigger: Resolve -> ActionRef -> ContextResolution -> native invocation, 2026-09-01
+
 
 def patch(path: str, old: str, new: str, count: int = 1) -> None:
     target = Path(path)
@@ -24,12 +26,6 @@ patch(
     '''#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\npub struct ResolvedActionCandidate {\n    pub action: ActionRef,\n    #[serde(default, skip_serializing_if = "Option::is_none")]\n    pub horizon: Option<AddressHorizon>,\n    #[serde(default, skip_serializing_if = "Option::is_none")]\n    pub relation: Option<RelationOp>,\n    /// ContextResolution remains the authority for whether this Action is\n    /// actually available for invocation in the current world.\n    pub available_in_context: bool,\n}\n''',
     '''#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\npub struct ResolvedActionCandidate {\n    pub action: ActionRef,\n    #[serde(default, skip_serializing_if = "Option::is_none")]\n    pub horizon: Option<AddressHorizon>,\n    #[serde(default, skip_serializing_if = "Option::is_none")]\n    pub relation: Option<RelationOp>,\n    /// ContextResolution remains the authority for whether this Action is\n    /// actually available for invocation in the current world.\n    pub available_in_context: bool,\n}\n\n/// Contextual semantic qualification of one real ActionRef. The profile is\n/// derived from current ResolvePath + Resource/subject evidence; it is not a new\n/// Action registry and it confers no execution authority.\n#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\npub struct ActionSemanticProfile {\n    pub action_ref: ActionRef,\n    #[serde(default)]\n    pub relation_affinities: BTreeSet<RelationOp>,\n    #[serde(default)]\n    pub horizon_affinities: BTreeSet<AddressHorizon>,\n    #[serde(default)]\n    pub subject_ref_kinds: BTreeSet<ResourceKind>,\n    #[serde(default)]\n    pub method_relations: Vec<ResourceRef>,\n    #[serde(default)]\n    pub focus_relations: Vec<String>,\n    #[serde(default)]\n    pub expected_return_forms: Vec<String>,\n    #[serde(default, skip_serializing_if = "Option::is_none")]\n    pub native_owner: Option<OwnerRef>,\n    #[serde(default)]\n    pub provenance: Vec<ResourceSource>,\n}\n''',
 )
-patch(
-    op,
-    '''pub fn resolve_action_candidates(\n    path: &ResolvePath,\n    resources: &dyn ResourceIndex,\n    context: &ContextResolution,\n) -> Vec<ResolvedActionCandidate> {\n''',
-    '''pub fn resolve_action_candidates(\n    path: &ResolvePath,\n    resources: &dyn ResourceIndex,\n    context: &ContextResolution,\n) -> Vec<ResolvedActionCandidate> {\n''',
-)
-# Insert qualification after the candidate resolver.
 anchor = '''        .collect()\n}\n\n/// Build the thin sixfold disclosure object from real currently-addressable refs.\n'''
 insert = '''        .collect()\n}\n\n/// Describe why one syntax-resolved Action is meaningful for the selected subject.\n/// Relation affinities are the operators that actually participated in this\n/// qualification; horizon affinities come from the general resource classifier.\n/// Method and Focus relations are likewise current path/context evidence rather\n/// than invented declarations. Expected return forms are native-owner annotations.\npub fn action_semantic_profile(\n    candidate: &ResolvedActionCandidate,\n    path: &ResolvePath,\n    subject: &ResourceRef,\n    focus: Option<&str>,\n    resources: &dyn ResourceIndex,\n) -> Result<ActionSemanticProfile> {\n    let action_record = resources.resource(candidate.action.resource()).ok_or_else(|| {\n        AikitError::new(\n            "resolve.action_profile_missing",\n            format!("Action {} disappeared during semantic qualification", candidate.action.resource()),\n        )\n    })?;\n    let subject_record = resources.resource(subject).ok_or_else(|| {\n        AikitError::new(\n            "resolve.action_subject_missing",\n            format!("Action subject {subject} is absent from the Resource field"),\n        )\n    })?;\n\n    let relation_affinities = path\n        .steps\n        .iter()\n        .filter_map(|step| match step {\n            ResolvePathStep::Relation { op } => Some(*op),\n            _ => None,\n        })\n        .collect::<BTreeSet<_>>();\n    let horizon_affinities = horizons_for_resource(action_record);\n    let method_relations = path\n        .candidates\n        .iter()\n        .filter(|resolved| resolved.kind == ResourceKind::Method)\n        .map(|resolved| resolved.resource.clone())\n        .collect::<BTreeSet<_>>()\n        .into_iter()\n        .collect();\n    let focus_relations = focus\n        .filter(|value| !value.trim().is_empty())\n        .map(|value| vec![value.to_string()])\n        .unwrap_or_default();\n    let expected_return_forms = action_record\n        .descriptor\n        .annotations\n        .get("action.expected-return-forms")\n        .map(|value| {\n            value\n                .split(',')\n                .map(str::trim)\n                .filter(|value| !value.is_empty())\n                .map(ToString::to_string)\n                .collect()\n        })\n        .unwrap_or_default();\n\n    Ok(ActionSemanticProfile {\n        action_ref: candidate.action.clone(),\n        relation_affinities,\n        horizon_affinities,\n        subject_ref_kinds: BTreeSet::from([subject_record.descriptor.kind]),\n        method_relations,\n        focus_relations,\n        expected_return_forms,\n        native_owner: action_record.descriptor.owner.clone(),\n        provenance: action_record.descriptor.sources.clone(),\n    })\n}\n\n/// Build the thin sixfold disclosure object from real currently-addressable refs.\n'''
 patch(op, anchor, insert)
@@ -41,8 +37,6 @@ patch(
     '''    action_semantic_profile, horizons_for_resource, parse_or_search_expression,\n    parse_resolve_expression, resolve_action_candidates, resolve_expression, resolve_path_identity,\n    resolve_search, six_horizon_disclosure, ActionRef, ActionSemanticProfile, AddressHorizon,\n    RelationOp, ResolveCandidate, ResolveExpression, ResolvePath, ResolvePathStep,\n    ResolvedActionCandidate, OPERATIVE_SYNTAX_VERSION,\n''',
 )
 
-# ResourceSearchIndex can recover every contextual subject relation for one
-# canonical Action without manufacturing per-subject identities.
 search = "crates/aikit-core/src/resource/search.rs"
 patch(
     search,
@@ -50,11 +44,6 @@ patch(
     '''    pub fn actions_for(&self, subject: &ResourceRef) -> Vec<&ContextualActionDescriptor> {\n        self.actions\n            .iter()\n            .filter_map(|((candidate, _), action)| (candidate == subject).then_some(action))\n            .collect()\n    }\n\n    pub fn subjects_for_action(&self, action: &ResourceRef) -> Vec<&ContextualActionDescriptor> {\n        self.actions\n            .values()\n            .filter(|contextual| &contextual.action == action)\n            .collect()\n    }\n\n    pub fn len(&self) -> usize {\n''',
 )
 
-# ---------------------------------------------------------------------------
-# Native Action records carry real application ownership/source availability.
-# ContextResolution can therefore qualify them as available instead of syntax
-# silently granting authority merely because an ActionRef exists.
-# ---------------------------------------------------------------------------
 backend = "crates/aikit-tui/src/backend.rs"
 patch(
     backend,
@@ -84,10 +73,6 @@ patch(
     '''fn native_explain_history_action_record(\n    id: ResourceRef,\n    name: &str,\n    description: &str,\n    expected_return_forms: &str,\n) -> Result<ResourceRecord> {\n    let mut descriptor = ResourceDescriptor::new(id, ResourceKind::Action, name, description);\n    descriptor.owner = Some(OwnerRef::parse("aikit/explain-history")?);\n    descriptor.sources.push(ResourceSource {\n        source: SourceRef::parse("source/aikit-core/explain-history-actions")?,\n        authority: Some(SourceAuthority::Authored),\n        revision: None,\n        locator: None,\n        state: SourceState::Available,\n    });\n    descriptor.annotations.insert(\n        "action.expected-return-forms".into(),\n        expected_return_forms.into(),\n    );\n    Ok(ResourceRecord::new(descriptor))\n}\n\npub fn explain_history_action_resources() -> Result<[ResourceRecord; 2]> {\n    Ok([\n        native_explain_history_action_record(\n            ResourceRef::parse(EXPLAIN_ACTION_REF)?,\n            "Explain",\n            "Explain why the selected Resource is present, unavailable, degraded, staged, projected or learned-easy from owner-held evidence.",\n            "explanation",\n        )?,\n        native_explain_history_action_record(\n            ResourceRef::parse(HISTORY_ACTION_REF)?,\n            "History",\n            "Read evidence-bearing recent, familiar, changed and recoverable history for the selected Resource without creating a second history authority.",\n            "history-evidence",\n        )?,\n    ])\n}\n''',
 )
 
-# ---------------------------------------------------------------------------
-# Application seam: Resolve -> Action qualification -> existing invocation.
-# The resolved receipt carries the actual path and records that path in #29.
-# ---------------------------------------------------------------------------
 application = "crates/aikit-tui/src/application.rs"
 patch(
     application,
@@ -132,10 +117,6 @@ patch(
     '''    fn record_action_use(&mut self, action: &ContextualActionDescriptor) -> Result<()> {\n        let observation = FamiliarityObservation::destination(\n            EventId::generate().as_str().to_string(),\n            action.subject.clone(),\n            familiarity_context(self.backend.context()),\n            now_ms(),\n        )\n        .via_action(action.action.clone())\n        .from_surface(\n            ResourceRef::parse("surface/aikit/tui")\n                .expect("static V2 TUI surface ResourceRef must be valid"),\n        );\n        self.backend.record_familiarity(observation)\n    }\n\n    fn record_resolve_path_use(\n        &mut self,\n        path: &ResolvePath,\n        resolved: &ResolvedActionReadModel,\n    ) -> Result<()> {\n        let surface = ResourceRef::parse("surface/aikit/tui")\n            .expect("static V2 TUI surface ResourceRef must be valid");\n        let mut relation_ops = path\n            .steps\n            .iter()\n            .filter_map(|step| match step {\n                ResolvePathStep::Relation { op } => Some(*op),\n                _ => None,\n            })\n            .collect::<Vec<_>>();\n        relation_ops.sort();\n        relation_ops.dedup();\n        let mut horizons = path\n            .steps\n            .iter()\n            .filter_map(|step| match step {\n                ResolvePathStep::Address { horizon, .. } => *horizon,\n                _ => None,\n            })\n            .collect::<Vec<_>>();\n        horizons.sort();\n        horizons.dedup();\n\n        let steps = vec![\n            RouteStepEvidence {\n                resource: resolved.action.action.clone(),\n                provider: None,\n                lens: None,\n                revision: None,\n            },\n            RouteStepEvidence {\n                resource: resolved.action.subject.clone(),\n                provider: None,\n                lens: None,\n                revision: None,\n            },\n        ];\n        let observation = FamiliarityObservation::resolve_path(\n            EventId::generate().as_str().to_string(),\n            None,\n            resolved.action.subject.clone(),\n            steps,\n            OperativePathEvidence {\n                path_identity: path.identity.clone(),\n                expression: path.expression.clone(),\n                relation_ops,\n                horizons,\n                method: resolved.semantic_profile.method_relations.first().cloned(),\n                action: Some(resolved.action.action.clone()),\n                surface: Some(surface.clone()),\n                activity: None,\n                return_ref: None,\n            },\n            familiarity_context(self.backend.context()),\n            now_ms(),\n        )?\n        .via_action(resolved.action.action.clone())\n        .from_surface(surface);\n        self.backend.record_familiarity(observation)\n    }\n}\n''',
 )
 
-# ---------------------------------------------------------------------------
-# Test backend uses the same #29 store so the application acceptance can observe
-# both destination and ResolvePath evidence produced by the real invocation seam.
-# ---------------------------------------------------------------------------
 common = "crates/aikit-tui/tests/common/mod.rs"
 patch(
     common,
