@@ -20,6 +20,14 @@ patch(
     '''        verification: vec![],\n        expected_resolve: None,\n        expected_return_forms: vec![\n''',
 )
 
+# Living Knowledge's test Method likewise asserts its existing return-form contract
+# only; no operative relation path is authored by that fixture.
+patch(
+    "crates/aikit-core/src/knowledge_living.rs",
+    '''            verification: vec![],\n            expected_return_forms: vec!["integrative-reading".into()],\n''',
+    '''            verification: vec![],\n            expected_resolve: None,\n            expected_return_forms: vec!["integrative-reading".into()],\n''',
+)
+
 # The Method source supports more than one Explain fact; keep its provenance
 # reusable rather than moving the Option into the first fact.
 patch(
