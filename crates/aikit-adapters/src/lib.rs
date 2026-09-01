@@ -25,6 +25,7 @@ pub mod gitnexus;
 pub mod interactive_connection;
 pub mod local_source_discovery;
 pub mod mux;
+pub mod native_git;
 pub mod okf;
 pub mod projectcentral;
 pub mod projectcentral_authored_wiki;
@@ -116,6 +117,9 @@ pub use interactive_connection::{
 pub use local_source_discovery::{
     discover_local_sources, DiscoveredLocalSource, LocalSourceDiscovery,
     LocalSourceDiscoveryLimits, NativeSourceRelation, LOCAL_SOURCE_DISCOVERY_VERSION,
+};
+pub use native_git::{
+    NativeGitProvider, NATIVE_GIT_PROVIDER_REF, NATIVE_GIT_PROVIDER_VERSION,
 };
 pub use okf::{parse_authored_markdown_relations, parse_okf_markdown, render_okf_markdown};
 pub use projectcentral::{ProjectCentralFileProvider, ProjectCentralFilesystemBinding};
