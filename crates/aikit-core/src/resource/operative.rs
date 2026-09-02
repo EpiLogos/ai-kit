@@ -795,44 +795,37 @@ fn subject_candidates(
         .collect()
 }
 
+fn direct_handle_score(query: &str, value: &str) -> Option<i64> {
+    let value = value.to_lowercase();
+    let query_len = query.len() as i64;
+    if value == query {
+        Some(90_000)
+    } else if value.starts_with(query) {
+        Some(20_000 - query_len)
+    } else if value.ends_with(query) {
+        // A terminal handle is a tighter direct address than an interior match:
+        // `nextest` means `cargo-nextest` before `cargo-nextest-helper`.
+        Some(15_000 - query_len)
+    } else if value.contains(query) {
+        Some(10_000 - query_len)
+    } else {
+        None
+    }
+}
+
 fn text_score(query: &str, record: &ResourceRecord) -> Option<i64> {
     let id = record.descriptor.id.as_str().to_lowercase();
     let name = record.descriptor.name.to_lowercase();
     let description = record.descriptor.description.to_lowercase();
-    if id == query || name == query {
-        return Some(90_000);
-    }
 
-    for annotation in ["aikit.search-exports", "aikit.search-tags"] {
-        if let Some(handles) = record.descriptor.annotations.get(annotation) {
-            for handle in handles.split(',').map(str::trim).filter(|value| !value.is_empty()) {
-                let handle = handle.to_lowercase();
-                if handle == query {
-                    return Some(90_000);
-                }
-            }
-        }
-    }
-
-    let mut score = None;
-    if id.starts_with(query) || name.starts_with(query) {
-        score = score.max(Some(20_000 - query.len() as i64));
-    }
-    if id.contains(query) || name.contains(query) {
-        score = score.max(Some(10_000 - query.len() as i64));
-    }
+    let mut score = direct_handle_score(query, &id).max(direct_handle_score(query, &name));
     if description.contains(query) {
         score = score.max(Some(5_000 - query.len() as i64));
     }
     for annotation in ["aikit.search-exports", "aikit.search-tags"] {
         if let Some(handles) = record.descriptor.annotations.get(annotation) {
             for handle in handles.split(',').map(str::trim).filter(|value| !value.is_empty()) {
-                let handle = handle.to_lowercase();
-                if handle.starts_with(query) {
-                    score = score.max(Some(20_000 - query.len() as i64));
-                } else if handle.contains(query) {
-                    score = score.max(Some(10_000 - query.len() as i64));
-                }
+                score = score.max(direct_handle_score(query, handle));
             }
         }
     }
@@ -1303,6 +1296,39 @@ mod tests {
             path.destination().map(ResourceRef::as_str),
             Some("script/cargo-nextest")
         );
+    }
+
+    #[test]
+    fn tail_handle_beats_the_same_text_as_an_interior_fragment() {
+        let mut nextest = ResourceDescriptor::new(
+            ResourceRef::parse("script/test/cargo-nextest").unwrap(),
+            ResourceKind::Capability,
+            "cargo-nextest",
+            "test runner",
+        );
+        nextest
+            .annotations
+            .insert("aikit.search-exports".into(), "cargo-nextest".into());
+        let mut helper = ResourceDescriptor::new(
+            ResourceRef::parse("script/test/cargo-nextest-helper").unwrap(),
+            ResourceKind::Capability,
+            "cargo-nextest-helper",
+            "test helper",
+        );
+        helper
+            .annotations
+            .insert("aikit.search-exports".into(), "cargo-nextest-helper".into());
+
+        let mut resources = MemoryResourceIndex::default();
+        resources.insert(ResourceRecord::new(nextest));
+        resources.insert(ResourceRecord::new(helper));
+
+        let path = resolve_search("nextest", &resources, 10);
+        assert_eq!(
+            path.destination().map(ResourceRef::as_str),
+            Some("script/test/cargo-nextest")
+        );
+        assert!(path.candidates[0].score > path.candidates[1].score);
     }
 
     #[test]
