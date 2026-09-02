@@ -13,6 +13,38 @@ if text.count(old) != 1:
     raise SystemExit("ResourceKind as_str insertion point drifted")
 model.write_text(text.replace(old, new, 1))
 
+backend = Path("crates/aikit-tui/src/backend.rs")
+text = backend.read_text()
+old = """    fn application_home(&self) -> Option<&AikitHome> {
+        None
+    }
+
+    /// Historical package-search documents retained for the public package/CLI
+"""
+new = """    fn application_home(&self) -> Option<&AikitHome> {
+        None
+    }
+
+    /// SessionSpace state that may participate in ordinary Resource navigation.
+    ///
+    /// Navigation-only/fake backends deliberately have no canonical AIKit home,
+    /// so they contribute no SessionSpace resources. Explicit SessionSpace
+    /// operations retain their stronger contract and still fail when persistence
+    /// is unavailable. A backend with another legitimate source can override this
+    /// projection without fabricating `AikitHome`.
+    fn session_space_navigation(&self) -> Result<Vec<SessionSpaceAuthoredState>> {
+        if self.application_home().is_none() {
+            return Ok(Vec::new());
+        }
+        self.session_space_list()
+    }
+
+    /// Historical package-search documents retained for the public package/CLI
+"""
+if text.count(old) != 1:
+    raise SystemExit("PaletteBackend capability insertion point drifted")
+backend.write_text(text.replace(old, new, 1))
+
 service = Path("crates/aikit-tui/src/session_space_service.rs")
 text = service.read_text()
 old = "use aikit_core::project::ProjectRef;\nuse aikit_core::session_space::{SessionSpaceReadModel, SessionSpaceRef};\n"
@@ -128,10 +160,32 @@ old = """    fn navigation_index(&self) -> Result<ResourceSearchIndex> {
 """
 new = """    fn navigation_index(&self) -> Result<ResourceSearchIndex> {
         let mut index = self.backend.navigation_index();
-        let session_spaces = self.backend.session_space_list()?;
+        let session_spaces = self.backend.session_space_navigation()?;
         install_session_space_navigation_resources(&mut index, &session_spaces);
         install_explain_history_actions(&mut index)?;
 """
 if text.count(old) != 1:
     raise SystemExit("application_service navigation insertion point drifted")
 app.write_text(text.replace(old, new, 1))
+
+cli = Path("crates/aikit-cli/src/app/mod.rs")
+text = cli.read_text()
+old = """    fn view(&self) -> &ResolvedView {
+        &self.view
+    }
+
+    fn scope_layers(&self) -> Option<&[ScopeLayer]> {
+"""
+new = """    fn view(&self) -> &ResolvedView {
+        &self.view
+    }
+
+    fn application_home(&self) -> Option<&AikitHome> {
+        Some(&self.home)
+    }
+
+    fn scope_layers(&self) -> Option<&[ScopeLayer]> {
+"""
+if text.count(old) != 1:
+    raise SystemExit("production Service application_home insertion point drifted")
+cli.write_text(text.replace(old, new, 1))
