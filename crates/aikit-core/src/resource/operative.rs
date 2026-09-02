@@ -874,6 +874,7 @@ pub fn horizons_for_resource(record: &ResourceRecord) -> BTreeSet<AddressHorizon
         | ResourceKind::Capability
         | ResourceKind::Action
         | ResourceKind::Procedure
+        | ResourceKind::Routine
         | ResourceKind::Harness
         | ResourceKind::ExecutionOffer => BTreeSet::from([AddressHorizon::H5]),
         ResourceKind::Model | ResourceKind::Host => {

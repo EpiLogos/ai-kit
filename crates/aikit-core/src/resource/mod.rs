@@ -14,6 +14,8 @@ mod model_roster;
 mod operative;
 mod operative_provider;
 mod refs;
+#[path = "../routine.rs"]
+pub mod routine;
 mod search;
 mod versioned_world;
 
@@ -44,6 +46,12 @@ pub use operative_provider::{
     OPERATIVE_SEMANTIC_PROVIDER_VERSION,
 };
 pub use refs::{OwnerRef, ProviderRef, ResourceRef, SourceRef, SourceRevision};
+pub use routine::{
+    prove_method, MethodProofInput, ProvenMethodBasis, Routine, RoutineAuthority,
+    RoutineExplanation, RoutineInvocation, RoutineSchedulerBinding, RoutineSchedulerState,
+    RoutineState, RoutineTrigger, RoutineTriggerObservation, METHOD_PROOF_VERSION,
+    ROUTINE_VERSION,
+};
 pub use search::{
     ActionStageability, ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass,
     ResourceRankingSignals, ResourceSearchHit, ResourceSearchHitKind, ResourceSearchIndex,

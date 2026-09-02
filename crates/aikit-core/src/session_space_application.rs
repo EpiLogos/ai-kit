@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::context_activation::ContextActivationReceipt;
 use crate::context_resolution::{ContextResolution, ReferenceResolution, ScopeResolution};
 use crate::project::{ProjectBinding, ProjectRef};
 use crate::resource::ResourceRef;
@@ -51,6 +52,11 @@ pub struct ContextResolutionBasis {
     pub context_sources: Vec<ResourceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<ResourceRef>,
+    /// Material activation evidence is part of the operative resolution basis,
+    /// while remaining distinct from the deterministic resolver hash above.
+    /// Empty evidence is omitted so pre-activation references do not churn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_activations: Vec<ContextActivationReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +69,8 @@ pub struct ContextResolutionEvidence {
 
 impl ContextResolutionEvidence {
     pub fn from_resolution(resolution: &ContextResolution) -> Result<Self> {
+        let mut context_activations = resolution.context_activations.clone();
+        context_activations.sort();
         let basis = ContextResolutionBasis {
             project_binding: resolution.project_binding.clone(),
             resolver_hash: resolution.deterministic.hash.to_string(),
@@ -70,6 +78,7 @@ impl ContextResolutionEvidence {
             scopes: resolution.scopes.clone(),
             context_sources: resolution.retrieval.context_sources.clone(),
             host: resolution.host.as_ref().map(reference_identity),
+            context_activations,
         };
         let encoded = serde_json::to_vec(&basis).map_err(|error| {
             AikitError::new(
@@ -791,6 +800,7 @@ mod tests {
                 ResourceRef::parse(&format!("context-source/{name}")).unwrap(),
             ],
             host: None,
+            context_activations: Vec::new(),
         };
         let bytes = serde_json::to_vec(&basis).unwrap();
         let digest = blake3::hash(&bytes).to_hex().to_string();
