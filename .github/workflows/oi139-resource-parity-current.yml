@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          fetch-depth: 5
+          fetch-depth: 6
 
       - name: Install Rust 1.98 with fmt and Clippy
         uses: dtolnay/rust-toolchain@1.98.0
@@ -36,7 +36,7 @@ jobs:
       - name: Format intended files and restore unrelated repository drift
         run: |
           cargo fmt --all
-          allowed='^(crates/aikit-core/src/resource/model.rs|crates/aikit-tui/src/backend.rs|crates/aikit-tui/src/session_space_service.rs|crates/aikit-tui/src/application_service.rs|crates/aikit-cli/src/app/mod.rs)$'
+          allowed='^(crates/aikit-core/src/resource/model.rs|crates/aikit-core/src/resource/operative.rs|crates/aikit-tui/src/backend.rs|crates/aikit-tui/src/session_space_service.rs|crates/aikit-tui/src/application_service.rs|crates/aikit-cli/src/app/mod.rs)$'
           git diff --name-only HEAD | while IFS= read -r path; do
             case "$path" in
               .github/oi139_apply_current.py|.github/workflows/oi139-resource-parity-current.yml) ;;
@@ -56,13 +56,14 @@ jobs:
           cargo test -p aikit-core -p aikit-tui -p aikit-cli
           git diff --check
 
-      - name: Collapse proof branch to helper-free five-file product tree
+      - name: Collapse proof branch to helper-free six-file product tree
         run: |
-          allowed='^(crates/aikit-core/src/resource/model.rs|crates/aikit-tui/src/backend.rs|crates/aikit-tui/src/session_space_service.rs|crates/aikit-tui/src/application_service.rs|crates/aikit-cli/src/app/mod.rs)$'
+          allowed='^(crates/aikit-core/src/resource/model.rs|crates/aikit-core/src/resource/operative.rs|crates/aikit-tui/src/backend.rs|crates/aikit-tui/src/session_space_service.rs|crates/aikit-tui/src/application_service.rs|crates/aikit-cli/src/app/mod.rs)$'
           product_paths="$(git diff --name-only HEAD | grep -E "$allowed" | sort -u)"
           expected="$(printf '%s\n' \
             crates/aikit-cli/src/app/mod.rs \
             crates/aikit-core/src/resource/model.rs \
+            crates/aikit-core/src/resource/operative.rs \
             crates/aikit-tui/src/application_service.rs \
             crates/aikit-tui/src/backend.rs \
             crates/aikit-tui/src/session_space_service.rs | sort)"
