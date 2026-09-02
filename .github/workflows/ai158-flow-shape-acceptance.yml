@@ -1,0 +1,61 @@
+name: AIKit 158 Flow shape acceptance
+
+on:
+  push:
+    branches:
+      - agent/158-ql-shape-parity
+    paths:
+      - '.github/workflows/ai158-flow-shape-acceptance.yml'
+      - 'scripts/ai158-flow-shape-acceptance.py'
+
+permissions:
+  contents: write
+
+jobs:
+  flow-shape-return:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/158-ql-shape-parity
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Apply bounded Flow-shape composition
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ai158-flow-shape-acceptance.py
+          cargo fmt --all
+
+      - name: Verify Flow and QL-shape acceptance specimens
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p aikit-core flow::tests::etymological_flow_enters_shape_generates_whole_and_returns_to_exact_source_basis -- --exact
+          cargo test -p aikit-core knowledge_wiki_shape::tests::complete_constellation_exposes_positive_grain_nine_d3_fields_and_higher_shapes -- --exact
+          cargo test -p aikit-core knowledge_wiki_shape::tests::relational_generation_is_attributed_without_promoting_it_to_authored_ground -- --exact
+          cargo test -p aikit-core flow::tests::contemplate_flow_uses_bounded_living_context_current_praxis_and_exactly_one_invocation -- --exact
+
+      - name: Verify full AIKit workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --workspace --all-targets
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+      - name: Commit returned implementation and retire migration scaffolding
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/ai158-flow-shape-acceptance.yml scripts/ai158-flow-shape-acceptance.py
+          git add crates/aikit-core/src/knowledge_wiki_shape.rs crates/aikit-core/src/flow.rs crates/aikit-core/src/lib.rs
+          git commit -m '[AIKIT158] Compose Flow with QL-shaped Contemplate return'
+          git push origin HEAD:agent/158-ql-shape-parity
