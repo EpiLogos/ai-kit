@@ -11,6 +11,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
 
+use crate::flow::{
+    explicit_flow_contemplate, flow_contemplate_preflight, FlowContemplateExecutor,
+    FlowContemplateGenerated, FlowContemplateOutcome, FlowContemplatePreflight,
+    FlowContemplateRequest,
+};
 use crate::knowledge_living::{
     ContemplateGenerated, ContemplateOutcome, ContemplateRequest, IntegrativeWikiReading,
 };
@@ -24,6 +29,7 @@ use crate::resource::{ResolveExpression, ResolvePath, ResourceRef};
 use crate::{AikitError, Result};
 
 pub const WIKI_QL_SHAPE_VERSION: &str = "aikit.wiki-ql-shape/v1";
+pub const WIKI_QL_SHAPED_FLOW_VERSION: &str = "aikit.wiki-ql-shaped-flow/v1";
 pub const QL_SHAPE_CONTRACT_VERSION: &str = "1.0.0";
 pub const QL_SHAPE_CONTRACT_REF: &str = "ql.shape@1.0.0";
 pub const QL_SHAPE_UPSTREAM_BLOB: &str = "9056a460a9ce25e727cab83e6db25355e60a0b85";
@@ -614,6 +620,88 @@ pub fn attribute_ql_relational_generation_from_resolve(
         .insert(QL_OPERATIVE_CONTEXT_EXTENSION.into(), value);
     WikiObject::Reading(reading.reading.clone()).validate()?;
     Ok(reading)
+}
+
+/// One composition of the accepted Flow and QL-shaped Living Knowledge preflights.
+/// It does not introduce another Flow store, Wiki, parser or contemplation aperture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QlShapedFlowContemplatePreflight {
+    pub version: String,
+    pub flow: FlowContemplatePreflight,
+    pub shaped: QlShapedContemplatePreflight,
+    /// Both constituent preflights are deterministic and remain outside the Agent/model aperture.
+    pub automatic_agent_or_model_invocation: bool,
+}
+
+pub trait QlShapedFlowContemplateExecutor {
+    /// Explicit execution still crosses the existing `Contemplate(FlowRef)` aperture exactly once.
+    fn execute(
+        &mut self,
+        preflight: &QlShapedFlowContemplatePreflight,
+    ) -> Result<FlowContemplateGenerated>;
+}
+
+pub fn ql_shaped_flow_contemplate_preflight(
+    request: &FlowContemplateRequest<'_>,
+    shape_budget: usize,
+) -> Result<QlShapedFlowContemplatePreflight> {
+    let flow = flow_contemplate_preflight(request)?;
+    let shaped = ql_shaped_contemplate_preflight(
+        request.living,
+        request.resource_dependencies,
+        request.object_budget,
+        request.relation_depth,
+        shape_budget,
+    )?;
+    if flow.bounded != shaped.base {
+        return Err(AikitError::new(
+            "knowledge.wiki_ql_shaped_flow_preflight_drift",
+            "Flow and QL-shaped Contemplate must disclose the same bounded Living Knowledge field",
+        ));
+    }
+    Ok(QlShapedFlowContemplatePreflight {
+        version: WIKI_QL_SHAPED_FLOW_VERSION.into(),
+        flow,
+        shaped,
+        automatic_agent_or_model_invocation: false,
+    })
+}
+
+struct QlShapedFlowExecutorAdapter<'a> {
+    preflight: &'a QlShapedFlowContemplatePreflight,
+    executor: &'a mut dyn QlShapedFlowContemplateExecutor,
+}
+
+impl FlowContemplateExecutor for QlShapedFlowExecutorAdapter<'_> {
+    fn execute(&mut self, flow: &FlowContemplatePreflight) -> Result<FlowContemplateGenerated> {
+        if flow != &self.preflight.flow {
+            return Err(AikitError::new(
+                "knowledge.wiki_ql_shaped_flow_preflight_drift",
+                "Flow preflight changed between QL-shape assembly and explicit execution",
+            ));
+        }
+        self.executor.execute(self.preflight)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QlShapedFlowContemplateOutcome {
+    pub preflight: QlShapedFlowContemplatePreflight,
+    pub flow: FlowContemplateOutcome,
+}
+
+pub fn explicit_ql_shaped_flow_contemplate(
+    request: &FlowContemplateRequest<'_>,
+    shape_budget: usize,
+    executor: &mut dyn QlShapedFlowContemplateExecutor,
+) -> Result<QlShapedFlowContemplateOutcome> {
+    let preflight = ql_shaped_flow_contemplate_preflight(request, shape_budget)?;
+    let mut adapter = QlShapedFlowExecutorAdapter {
+        preflight: &preflight,
+        executor,
+    };
+    let flow = explicit_flow_contemplate(request, &mut adapter)?;
+    Ok(QlShapedFlowContemplateOutcome { preflight, flow })
 }
 
 struct QlShapedExecutorAdapter<'a> {
