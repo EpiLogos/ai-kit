@@ -35,7 +35,65 @@ The production CLI exposes the same faculty as `aikit knowledge search|read|rela
 5. Use `frame`/context-pack projection to collect selected refs, ordered route, readings, source evidence, revision/freshness, explanations and explicit absences for the current act. A frame is derived retrieval material, not a new canonical ContextSource.
 6. Use `sources` and `explain` to preserve provider/lens/authority/provenance distinctions. Keep authored, observed, derived and learned evidence distinguishable. When familiarity affects search, retain provider-native relevance separately from application-level navigation score and expose destination/route familiarity evidence rather than silently rewriting provider rank.
 7. Use `history` to recover durable AIKit-owned route/frame receipts in the same Project/actor/Focus context without manufacturing provider graph history. `forget` resets learned familiarity influence only; it does not erase canonical Resource identity, provider truth or the operation audit trail.
-8. When a provider is absent/degraded, return that state honestly and use other eligible sources only if the effective context authorises them. Baseline address/fuzzy navigation must remain useful without rich providers or QL/MEF.
+8. When a provider is absent/degraded, return that state honestly and use other eligible sources only if the effective context authorises them. Baseline address/fuzzy navigation must remain useful without rich providers or a live QL/MEF provider.
+
+## QL-shaped whole navigation and Contemplate
+
+SemanticWiki is a concrete QL instrument. Its ordinary surfaces may speak in native Wiki language rather than requiring QL terminology, but relation, whole-shape, conjugacy, recursion and Return are operative structure rather than optional decoration. AIKit pins the deterministic QL shape contract locally; deeper MEF/refraction remains independently attributable through the QL-MEF provider seam.
+
+When the act requires more than straightforward retrieval, recover the smallest materially relevant **whole** and its active `WikiFrame` before composing an answer. Treat the current constellation grain as a positive disclosed shape: anchor, pair/twofold, threefold, fourfold, 4+1, sixfold, progressively conjugated form or twelvefold may each be the actual whole available here. Do not fill absent members merely to make a larger form look complete.
+
+Follow the QL relation grammar through the actual field:
+
+```text
+position
+  -> relation
+  -> complement
+  -> conjugacy
+  -> nesting / active Context Frame
+  -> shape disclosure
+  -> relational generation where warranted
+  -> recursive re-entry
+  -> Return
+```
+
+A/B/C are canonical relation-family routes through the six positions. D1/D2/D3 are conjugation/completion degrees of a selected pair; D3 discloses the complete four-coordinate square `{x, y, x′, y′}`. Preserve family and derivation identity even when two routes reach the same unordered vertices.
+
+Where the actual constellation supports them, use the pinned QL shapes as sparse relational accounting fields:
+
+```text
+D3 square
+    -> 4×4 local relational field
+    -> 16 addresses
+
+complete 6 / 6′
+    -> 6×6 direct/conjugate relational field
+    -> 36 addresses
+
+same-position direct/conjugate sites
+    -> six generation sites
+    -> 6 / 6′ -> 6+6′
+```
+
+A shape address is **where a relational question can be asked**, not a semantic edge that becomes true by construction. Empty, asymmetric, plural or unresolved addresses are information. Do not manufacture an opposite, conjugate, synthesis or completed matrix merely because the structural address exists.
+
+For explicit `Contemplate`, use the bounded deterministic preflight to recover the relevant Wiki objects, provenance, basis relations, source revisions, Return paths and materially present QL shapes before opening the Agent/model aperture. No source change, incomplete shape or empty matrix cell is permission for automatic model invocation.
+
+When relation genuinely generates a new determination, retain the slash rather than flattening it away:
+
+```text
+X / X′
+    -> attributable relational operation in this Frame
+    -> generated determination G
+    -> exact basis + shape/operator + provenance + Return
+    -> G may become a later basis / whole
+```
+
+A generated determination remains Agent-derived knowledge unless separately authored or adopted. Attach exact QL contract/shape/operator identity, active Frame, basis refs, relevant generation positions and Return anchor to the integrative `WikiReading`. Reading-on-reading basis then supplies recursive re-entry without losing derivation. An unresolved relation, tension or no-generation result is a legitimate contemplation return.
+
+For developing linguistic, etymological or conceptual work, keep the living thread in `Flow`; use `Contemplate(FlowRef)` to situate it in the relevant Wiki whole, traverse its actual relations, and return durable attributable readings when something has genuinely been determined. Human-authored source language remains separately authoritative throughout that growth.
+
+Use `explain` when the exact QL shape/operator provenance is useful to the human or Agent. Plain-language presentation may say whole, counterpart, square, relational field or return; this does not change the underlying QL contract being operated.
 
 ## Project reflection: meaning ↔ description ↔ code
 
@@ -158,4 +216,4 @@ For optional account/document integration, hand `product-understanding` and `str
 
 ## Verification
 
-Use AIKit knowledge-navigation/source-pool/wiki/familiarity/relation tests plus the real bkmr and GitNexus conformance lanes. Acceptance requires stable canonical refs; inspectable provider/lens/revision/source provenance; bounded relations; route/familiarity separation; exact addressed results protected from learned ranking; and no-QL-provider parity. Project reflection additionally requires bidirectional semantic↔code traversal through explicit bindings, local-description/source authority remaining distinct from implementation truth, and stale/flattened reflection becoming explicit discrepancy evidence rather than silent retargeting. ProjectCentral acceptance additionally requires no README dependency, arbitrary nesting, recursive `.no-agent-retrieval`, unresolved aperture material not acquiring human authority, exact accepted source/provenance/truth-standing consumption, retained native human source participation without movement, canonical Project/root Wiki paths, adopted-source participation without canonical replacement, lazy Project entry, explicit exact retrieval, provenance-bearing Agent Wiki maintenance, no silent human-source mutation and explicit revision proposals. This Skill does not encode TUI keybindings and does not grant provider, retrieval, trust or mutation authority.
+Use AIKit knowledge-navigation/source-pool/wiki/familiarity/relation tests plus the real bkmr and GitNexus conformance lanes. QL-shaped acceptance additionally requires the pinned `ql.shape@1.0.0` fixture to match its exact upstream QL-MEF blob; positive constellation grains to remain usable without forced completion; D3 4×4 fields to expose exactly 16 addresses with A/B/C derivation provenance; complete 6/6′ fields to expose exactly 36 addresses plus six same-position relational-generation sites; deterministic shaped preflight to invoke no Agent/model; and generated readings to retain exact Frame/basis/operator/Return attribution for recursive reuse. Acceptance requires stable canonical refs; inspectable provider/lens/revision/source provenance; bounded relations; route/familiarity separation; exact addressed results protected from learned ranking; and no-live-QL-provider parity. Project reflection additionally requires bidirectional semantic↔code traversal through explicit bindings, local-description/source authority remaining distinct from implementation truth, and stale/flattened reflection becoming explicit discrepancy evidence rather than silent retargeting. ProjectCentral acceptance additionally requires no README dependency, arbitrary nesting, recursive `.no-agent-retrieval`, unresolved aperture material not acquiring human authority, exact accepted source/provenance/truth-standing consumption, retained native human source participation without movement, canonical Project/root Wiki paths, adopted-source participation without canonical replacement, lazy Project entry, explicit exact retrieval, provenance-bearing Agent Wiki maintenance, no silent human-source mutation and explicit revision proposals. This Skill does not encode TUI keybindings and does not grant provider, retrieval, trust or mutation authority.
