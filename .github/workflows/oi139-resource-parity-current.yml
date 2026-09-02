@@ -14,20 +14,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          fetch-depth: 2
+          fetch-depth: 4
 
       - name: Install Rust 1.98 with fmt and Clippy
         uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt, clippy
 
-      - name: Assert proof parent and accepted-main tree are identical
+      - name: Assert proof product tree is exactly accepted credential main
         run: |
-          test "$(git rev-parse HEAD^)" = "4e459c3bd11485db8a39dbf288400b97e463d318"
           git fetch --depth 1 origin main
-          test "$(git show -s --format=%T HEAD^)" = "be00c1b30c65154540399450d3c4d314e6ecd671"
-          test "$(git show -s --format=%T origin/main)" = "be00c1b30c65154540399450d3c4d314e6ecd671"
+          git fetch --depth 1 origin 4e459c3bd11485db8a39dbf288400b97e463d318
           test "$(git rev-parse origin/main)" = "2e41f78e4bb0e2b52ec23ca798522dc0e1f2f6a6"
+          test "$(git show -s --format=%T 4e459c3bd11485db8a39dbf288400b97e463d318)" = "be00c1b30c65154540399450d3c4d314e6ecd671"
+          test "$(git show -s --format=%T origin/main)" = "be00c1b30c65154540399450d3c4d314e6ecd671"
+          test -z "$(git diff --name-only 4e459c3bd11485db8a39dbf288400b97e463d318 HEAD -- . ':!.github/oi139_apply_current.py' ':!.github/workflows/oi139-resource-parity-current.yml')"
 
       - name: Apply only the guarded H7 semantic hunks
         run: python .github/oi139_apply_current.py
@@ -49,7 +50,7 @@ jobs:
           cargo test -p aikit-core -p aikit-tui -p aikit-cli
           git diff --check
 
-      - name: Collapse proof branch to helper-free five-file product commit
+      - name: Collapse proof branch to helper-free five-file product tree
         run: |
           allowed='^(crates/aikit-core/src/resource/model.rs|crates/aikit-tui/src/backend.rs|crates/aikit-tui/src/session_space_service.rs|crates/aikit-tui/src/application_service.rs|crates/aikit-cli/src/app/mod.rs)$'
           product_paths="$(git diff --name-only HEAD | grep -E "$allowed" | sort -u)"
