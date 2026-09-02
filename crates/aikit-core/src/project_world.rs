@@ -18,6 +18,7 @@ use crate::platform::TargetId;
 use crate::project::ProjectBinding;
 use crate::resource::{
     Eligibility, PreferenceIntent, ProviderOffer, ResourceKind, ResourceRef, ResourceSource,
+    VersionedProjectWorld,
 };
 
 pub const PROJECT_WORLD_VERSION: &str = "aikit.project-world/v2";
@@ -147,7 +148,32 @@ pub struct ProjectWorldReadModel {
     pub actor_runtime: ActorRuntimeDisclosure,
     pub projection: ProjectionDisclosure,
     pub effective_revision: EffectiveRevisionDisclosure,
+    /// Optional material/version reading from an accepted provider such as native
+    /// Git. This is attached only after Project identity has already been resolved.
+    /// Repository/worktree/branch/commit identity therefore remains subordinate
+    /// material/history evidence rather than a second Project resolver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub versioned_world: Option<VersionedProjectWorld>,
     pub warnings: Vec<String>,
+}
+
+impl ProjectWorldReadModel {
+    /// Attach an already-observed versioned material World to this resolved
+    /// Project reading. A provider cannot use this operation to rename/rebind the
+    /// canonical Project: mismatched ProjectRefs are rejected.
+    pub fn with_versioned_world(mut self, versioned: VersionedProjectWorld) -> crate::Result<Self> {
+        if versioned.project != self.project.project {
+            return Err(crate::AikitError::new(
+                "project_world.versioned_project_mismatch",
+                format!(
+                    "versioned material belongs to {}, resolved Project is {}",
+                    versioned.project, self.project.project
+                ),
+            ));
+        }
+        self.versioned_world = Some(versioned);
+        Ok(self)
+    }
 }
 
 pub fn disclose_project_world(
@@ -192,6 +218,7 @@ pub fn disclose_project_world(
             catalog_revision: resolution.deterministic.catalog_revision.to_string(),
             resolution_hash: resolution.deterministic.hash.to_string(),
         },
+        versioned_world: None,
         warnings: resolution.warnings.clone(),
     }
 }
@@ -241,9 +268,12 @@ fn disclose_actor(resolution: Option<&ReferenceResolution>, role: &str) -> Actor
 mod tests {
     use super::*;
     use crate::context_source::{ContextSourceEntry, DisclosureState};
+    use crate::project::{ProjectBindingLocator, ProjectConstituentRef, ProjectRef};
     use crate::resource::{
-        ProviderOffer, ProviderRef, ProviderState, ResourceDescriptor, ResourceRecord,
-        ResourceSource, SourceAuthority, SourceRef, SourceState,
+        GitRepositoryRelation, GitWorkingState, ProviderOffer, ProviderRef, ProviderState,
+        ResourceDescriptor, ResourceRecord, ResourceSource, SourceAuthority, SourceRef, SourceState,
+        VersionRevision, VersionedWorldCapability, VersionedWorldProviderDescriptor,
+        VersionedWorldProviderStatus, VERSIONED_WORLD_VERSION,
     };
 
     fn resource(id: &str, kind: ResourceKind) -> ResolvedResource {
@@ -279,6 +309,56 @@ mod tests {
             availability: Availability::Unavailable {
                 reasons: vec!["provider local-provider unavailable: offline".into()],
             },
+        }
+    }
+
+    fn project_world(project_ref: &str) -> ProjectWorldReadModel {
+        let project = ProjectRef::parse(project_ref).unwrap();
+        ProjectWorldReadModel {
+            version: PROJECT_WORLD_VERSION.to_string(),
+            project: ProjectBinding::new(
+                project,
+                ProjectConstituentRef::parse("source:working-tree").unwrap(),
+                ProjectBindingLocator::LocalDirectory { path: "/tmp/example".into() },
+            ),
+            context: ContextDescriptor::for_project("/tmp/example"),
+            resolution_basis: ResolutionBasisDisclosure { profiles: vec![], scopes: vec![] },
+            capability_horizon: CapabilityHorizonDisclosure::default(),
+            information_horizon: InformationHorizonDisclosure::default(),
+            actor_runtime: ActorRuntimeDisclosure::default(),
+            projection: ProjectionDisclosure { targets: vec![], active_capabilities: vec![] },
+            effective_revision: EffectiveRevisionDisclosure {
+                generation: None,
+                catalog_revision: "catalog@1".into(),
+                resolution_hash: "resolution@1".into(),
+            },
+            versioned_world: None,
+            warnings: vec![],
+        }
+    }
+
+    fn versioned_world(project_ref: &str) -> VersionedProjectWorld {
+        VersionedProjectWorld {
+            version: VERSIONED_WORLD_VERSION.to_string(),
+            project: ProjectRef::parse(project_ref).unwrap(),
+            provider: VersionedWorldProviderDescriptor {
+                provider: ProviderRef::parse("native-git").unwrap(),
+                status: VersionedWorldProviderStatus::Available,
+                capabilities: vec![VersionedWorldCapability::Inspect, VersionedWorldCapability::History],
+                implementation_version: Some("git test".into()),
+            },
+            repository: GitRepositoryRelation {
+                repository_root: "/tmp/example".into(),
+                worktree_root: "/tmp/example".into(),
+                head: VersionRevision::new("abc123"),
+                branch: Some("main".into()),
+                detached: false,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+            },
+            working: GitWorkingState::default(),
+            worktrees: vec![],
         }
     }
 
@@ -342,5 +422,26 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert!(!hits[0].disclosure.retrieved);
         assert!(!index.get(&hits[0].resource).unwrap().operational.invoked);
+    }
+
+    #[test]
+    fn matching_versioned_world_attaches_without_rebinding_project_identity() {
+        let reading = project_world("project:alpha")
+            .with_versioned_world(versioned_world("project:alpha"))
+            .unwrap();
+        assert_eq!(reading.project.project.as_str(), "project:alpha");
+        assert_eq!(reading.versioned_world.as_ref().unwrap().project.as_str(), "project:alpha");
+        assert_eq!(
+            reading.versioned_world.as_ref().unwrap().repository.branch.as_deref(),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn versioned_provider_cannot_rebind_the_resolved_project() {
+        let error = project_world("project:alpha")
+            .with_versioned_world(versioned_world("project:other"))
+            .unwrap_err();
+        assert_eq!(error.code(), "project_world.versioned_project_mismatch");
     }
 }
