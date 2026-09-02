@@ -1,20 +1,28 @@
 //! `aikit z <words…>` — the single verb.
 //!
-//! `z` no longer owns a catalogue matcher or ranking policy. It consumes the same
-//! ResourceRef-native operative Resolve path as Search/TUI, then applies only its
-//! stricter interaction decision: act on one textually clear package winner, open
-//! the palette when direct intent is contested, or report nothing.
+//! `z` no longer owns a catalogue matcher or ranking policy. It consumes AIKit's
+//! canonical shallow ResourceRef field and the same operative resolver/ranking law
+//! as Search/TUI, then applies only its stricter interaction decision: act on one
+//! textually clear package winner, open the palette when direct intent is
+//! contested, or report nothing.
 //!
-//! Context, Project and learned familiarity may therefore order otherwise equal
+//! Keeping this on the shallow Resource index preserves the zoxide-style quick
+//! path: deep Knowledge providers are not invoked just to jump to a known local
+//! capability. Context, Project and learned familiarity may order otherwise equal
 //! destinations for disclosure, but they never turn ambiguity into consent. And
 //! **`z` never activates anything**: an executable is run; guidance is shown;
 //! activation remains a separate explicit operation.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use aikit_core::capsule::Kind;
 use aikit_core::frecency::{self, Candidate, Jump};
 use aikit_core::id::CapsuleId;
-use aikit_core::Result;
-use aikit_tui::application_service::ApplicationService;
+use aikit_core::resource::{
+    resolve_expression, resolve_path_identity, ResolveExpression, ResourceRef,
+};
+use aikit_core::{FamiliarityContext, Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS};
+use aikit_tui::backend::PaletteBackend;
 
 use crate::app::Service;
 
@@ -86,23 +94,42 @@ fn action_for(service: &Service, capsule: &CapsuleId) -> JumpAction {
     }
 }
 
-/// Resolve package destinations through the one canonical application Search and
+/// Resolve package destinations through the canonical shallow Resource field and
 /// apply only `z`'s act/disambiguate consent boundary.
 ///
 /// Every catalogued capability remains reachable whether active or inactive.
 /// Non-package Resources may participate in general Search but are not executable
 /// `z` destinations, so filtering them here does not create a second identity or
-/// ranking pass; the retained package rows keep their canonical relative order.
-pub fn plan(service: &mut Service, query: &str) -> Result<JumpPlan> {
+/// ranking pass; retained package rows keep their canonical relative order.
+pub fn plan(service: &Service, query: &str) -> Result<JumpPlan> {
     let trimmed = query.trim();
-    let resolved = {
-        let application = ApplicationService::new(service);
-        application.resolve_search(trimmed)?
-    };
+    let mut index = PaletteBackend::navigation_index(service);
+    let context = familiarity_context(service);
+    let now = now_ms();
+    if let Some(familiarity) = PaletteBackend::familiarity(service)? {
+        index.apply_familiarity(
+            &familiarity,
+            &context,
+            now,
+            DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+        );
+    }
+
+    let expression = ResolveExpression::ordinary_search(trimmed);
+    if let Some(familiarity) = PaletteBackend::familiarity(service)? {
+        index.apply_resolve_path_familiarity(
+            &familiarity,
+            &resolve_path_identity(&expression),
+            &context,
+            now,
+            DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+        );
+    }
+    let path = resolve_expression(&expression, &index, 256);
     let exported_commands = service.resolved().exported_commands();
 
     let mut ranked = Vec::new();
-    for resolved_candidate in resolved.path.candidates {
+    for resolved_candidate in path.candidates {
         let Ok(id) = CapsuleId::parse(resolved_candidate.resource.as_str()) else {
             continue;
         };
@@ -139,4 +166,24 @@ pub fn plan(service: &mut Service, query: &str) -> Result<JumpPlan> {
         jump,
         ranked,
     })
+}
+
+fn familiarity_context(service: &Service) -> FamiliarityContext {
+    FamiliarityContext {
+        project: service
+            .descriptor()
+            .project_id
+            .as_ref()
+            .and_then(|project| ResourceRef::parse(&format!("project/{project}")).ok()),
+        actor: None,
+        agency: None,
+        focus: service.descriptor().task.clone(),
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or_default()
 }
