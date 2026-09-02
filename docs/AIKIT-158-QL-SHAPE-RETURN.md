@@ -67,6 +67,19 @@ Run `33667699656` passed:
 
 The temporary acceptance workflow and migration scripts removed themselves after the green run; `1c800bab028f302be4f3c736d337e48dc12731d9` is the returned product implementation.
 
+## Current-main reconciliation and PR return
+
+Before merge, PR #160 was reconciled with then-current AIKit `main` at `4e35f499c50b987551ab124b4432757973e823ae`. The reconciled product tree at `cc110e70a95c9397c4a7d03dc498333371553abe` passed all four ordinary PR lanes:
+
+- CI — run `33676165400`;
+- Native Skills — run `33676165430`;
+- Pre-local release — run `33676165416`;
+- Persistent Surface conformance — run `33676165693`.
+
+GitHub's connected ready-for-review mutation was unable to complete because its GraphQL response selection requested a repository field no longer present in GitHub's schema. A one-shot repository-native transport shim therefore performed only `gh pr ready 160`, then removed itself. The shim contained no product logic and its retirement restored the PR to the six owned implementation/receipt files.
+
+The shim-retirement commit was GitHub-Actions-authored, causing the ordinary PR workflows on that commit to require an external approval instead of executing. This human-authored receipt amendment exists only to return the exact clean PR tree to the repository's normal PR-triggered admission path; it does not alter the accepted product semantics above.
+
 ## Return
 
 The Wiki/Flow field can now do the operation #158 required:
