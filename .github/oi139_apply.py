@@ -17,9 +17,7 @@ service = Path("crates/aikit-tui/src/session_space_service.rs")
 text = service.read_text()
 old = "use aikit_core::project::ProjectRef;\nuse aikit_core::session_space::{SessionSpaceReadModel, SessionSpaceRef};\n"
 new = """use aikit_core::project::ProjectRef;
-use aikit_core::resource::{
-    ResourceDescriptor, ResourceIndex, ResourceKind, ResourceRecord, ResourceSearchIndex,
-};
+use aikit_core::resource::{ResourceDescriptor, ResourceKind, ResourceRecord, ResourceSearchIndex};
 use aikit_core::session_space::{SessionSpaceReadModel, SessionSpaceRef};
 """
 if text.count(old) != 1:
@@ -74,8 +72,9 @@ tests = """
 #[cfg(test)]
 mod resource_projection_tests {
     use super::*;
+    use aikit_core::resource::ResourceIndex;
     use aikit_core::{
-        install_explain_history_actions, ResourceIndex, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
+        install_explain_history_actions, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
     };
 
     #[test]
