@@ -22,8 +22,7 @@ use aikit_core::projection::ActivationEffect;
 use aikit_core::resolve::ResolvedView;
 use aikit_core::resource::{
     ActionStageability, ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass,
-    OwnerRef, ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
-    ResourceSource, SourceAuthority, SourceRef, SourceState,
+    ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
 };
 use aikit_core::scope::{ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
@@ -220,32 +219,6 @@ impl PromotionDraft {
     }
 }
 
-fn native_application_action_record(
-    id: ResourceRef,
-    name: &str,
-    description: &str,
-    expected_return_forms: &str,
-) -> ResourceRecord {
-    let mut descriptor = ResourceDescriptor::new(id, ResourceKind::Action, name, description);
-    descriptor.owner = Some(
-        OwnerRef::parse("aikit/application-service")
-            .expect("static native Action owner reference must be valid"),
-    );
-    descriptor.sources.push(ResourceSource {
-        source: SourceRef::parse("source/aikit/application-service")
-            .expect("static native Action source reference must be valid"),
-        authority: Some(SourceAuthority::Authored),
-        revision: None,
-        locator: None,
-        state: SourceState::Available,
-    });
-    descriptor.annotations.insert(
-        "action.expected-return-forms".into(),
-        expected_return_forms.into(),
-    );
-    ResourceRecord::new(descriptor)
-}
-
 fn session_space_store(home: Option<&AikitHome>) -> Result<SessionSpaceApplicationStore> {
     let home = home.cloned().ok_or_else(|| {
         aikit_core::AikitError::new(
@@ -274,6 +247,20 @@ pub trait PaletteBackend {
     /// rather than falling back to process-global discovery.
     fn application_home(&self) -> Option<&AikitHome> {
         None
+    }
+
+    /// SessionSpace state that may participate in ordinary Resource navigation.
+    ///
+    /// Navigation-only/fake backends deliberately have no canonical AIKit home,
+    /// so they contribute no SessionSpace resources. Explicit SessionSpace
+    /// operations retain their stronger contract and still fail when persistence
+    /// is unavailable. A backend with another legitimate source can override this
+    /// projection without fabricating `AikitHome`.
+    fn session_space_navigation(&self) -> Result<Vec<SessionSpaceAuthoredState>> {
+        if self.application_home().is_none() {
+            return Ok(Vec::new());
+        }
+        self.session_space_list()
     }
 
     /// Historical package-search documents retained for the public package/CLI
@@ -380,30 +367,30 @@ pub trait PaletteBackend {
         let toggle_capability = ResourceRef::parse("action/capability/toggle")
             .expect("static V2 Action ResourceRef must be valid");
         index.insert_resource(
-            native_application_action_record(
+            ResourceRecord::new(ResourceDescriptor::new(
                 open_project.clone(),
+                ResourceKind::Action,
                 "Open project",
                 "enter the selected Project workspace",
-                "opened",
-            ),
+            )),
             Vec::new(),
         );
         index.insert_resource(
-            native_application_action_record(
+            ResourceRecord::new(ResourceDescriptor::new(
                 explain_capability.clone(),
+                ResourceKind::Action,
                 "Explain capability",
                 "show why this Capability has its current resolved state",
-                "explanation",
-            ),
+            )),
             Vec::new(),
         );
         index.insert_resource(
-            native_application_action_record(
+            ResourceRecord::new(ResourceDescriptor::new(
                 toggle_capability.clone(),
+                ResourceKind::Action,
                 "Toggle capability",
                 "stage an enable/disable change at the selected mutation scope",
-                "staged-change",
-            ),
+            )),
             Vec::new(),
         );
 
