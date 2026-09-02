@@ -21,6 +21,12 @@ replace_once(
     '            Self::Surface => "surface",\n            Self::SessionSpace => "session-space",\n            Self::Host => "host",\n',
     "ResourceKind as_str insertion",
 )
+replace_once(
+    "crates/aikit-core/src/resource/operative.rs",
+    """        ResourceKind::Surface => {\n            BTreeSet::from([AddressHorizon::H3, AddressHorizon::H4, AddressHorizon::H5])\n        }\n        ResourceKind::SkillSet\n""",
+    """        ResourceKind::Surface => {\n            BTreeSet::from([AddressHorizon::H3, AddressHorizon::H4, AddressHorizon::H5])\n        }\n        ResourceKind::SessionSpace => {\n            BTreeSet::from([AddressHorizon::H4, AddressHorizon::H5])\n        }\n        ResourceKind::SkillSet\n""",
+    "SessionSpace operative horizon classification",
+)
 
 replace_once(
     "crates/aikit-tui/src/backend.rs",
@@ -53,7 +59,7 @@ service.write_text(
 #[cfg(test)]
 mod resource_projection_tests {
     use super::*;
-    use aikit_core::resource::ResourceIndex;
+    use aikit_core::resource::{horizons_for_resource, AddressHorizon, ResourceIndex};
     use aikit_core::{install_explain_history_actions, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF};
 
     #[test]
@@ -73,6 +79,10 @@ mod resource_projection_tests {
         assert_eq!(
             resource.descriptor.annotations.get("session-space-revision"),
             Some(&"7".to_string())
+        );
+        assert_eq!(
+            horizons_for_resource(resource),
+            [AddressHorizon::H4, AddressHorizon::H5].into_iter().collect()
         );
 
         install_explain_history_actions(&mut index).unwrap();
