@@ -1420,6 +1420,10 @@ impl PaletteBackend for Service {
         &self.view
     }
 
+    fn application_home(&self) -> Option<&AikitHome> {
+        Some(&self.home)
+    }
+
     fn scope_layers(&self) -> Option<&[ScopeLayer]> {
         Some(&self.layers)
     }
