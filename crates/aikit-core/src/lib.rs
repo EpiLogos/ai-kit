@@ -140,10 +140,11 @@ pub use context_source::{
     StructuredAbsence, CONTEXT_SOURCE_INDEX_VERSION,
 };
 pub use credential::{
-    resolve_credential, CredentialBindingState, CredentialProviderRejection, CredentialRef,
-    CredentialResolution, CredentialResolutionRequest, ProviderResolutionExplanation,
-    SecretMaterialisationClass, SecretProviderDescriptor, SecretProviderRef, SecretProviderTier,
-    SecretRequirement, SecretRequirementRef, CREDENTIAL_RESOLUTION_VERSION,
+    resolve_credential, resolve_registered_credential, CredentialBindingState,
+    CredentialProviderRejection, CredentialRef, CredentialResolution, CredentialResolutionRequest,
+    ProviderResolutionExplanation, SecretMaterialisationClass, SecretProvider,
+    SecretProviderDescriptor, SecretProviderRef, SecretProviderTier, SecretRequirement,
+    SecretRequirementRef, SecretValue, CREDENTIAL_RESOLUTION_VERSION,
 };
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
