@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use aikit_adapters::runner::SystemRunner;
 use aikit_core::hooks::{
     BypassScope, BypassToken, Dispatcher, HookChain, HookDecision, HookEvent, HookEventKind,
     HookStep, StepResult,
@@ -59,7 +60,19 @@ pub fn dispatch(
         }
     };
 
-    let decision = dispatcher.run(chain, event, &mut runner);
+    let mut decision = dispatcher.run(chain, event, &mut runner);
+
+    // Central owns temporal continuity; AIKit owns lifecycle delivery. Re-read
+    // the owner at each causal orientation event rather than caching a session
+    // prompt. A missing/non-Central world remains a normal AIKit world.
+    let central_root = crate::temporal::process_central_root(event.cwd.as_deref());
+    crate::temporal::reground(
+        &mut decision,
+        event,
+        event.cwd.as_deref(),
+        central_root.as_deref(),
+        &SystemRunner::new(),
+    );
 
     if decision.bypass_consumed {
         if let Some(record) = &active {
@@ -179,7 +192,8 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Option<Duration>)
 /// The payload is passed through verbatim; only the fields AIKit routes on — the
 /// event kind and, where the event carries one, the tool name — are lifted out so
 /// a hook's matcher can be evaluated without every hook re-parsing the client's
-/// JSON.
+/// JSON. The event's current working directory is also retained because it is the
+/// concrete Project-world coordinate used by context and temporal providers.
 pub fn normalize(client: &str, event: &str, payload: serde_json::Value) -> HookEvent {
     let kind = HookEventKind::parse(event);
     let carries_tool_name = kind.carries_tool_name();
@@ -192,6 +206,16 @@ pub fn normalize(client: &str, event: &str, payload: serde_json::Value) -> HookE
         {
             normalized = normalized.with_tool_name(tool);
         }
+    }
+    let cwd = payload
+        .get("cwd")
+        .or_else(|| payload.get("working_directory"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(cwd) = cwd {
+        normalized = normalized.in_cwd(cwd);
     }
     normalized
 }
