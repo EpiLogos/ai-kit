@@ -29,9 +29,7 @@ use std::time::Duration;
 use rusqlite::{params, OptionalExtension};
 
 use aikit_core::error::err;
-use aikit_core::{
-    ContextBinding, ContextId, Isolation, MuxKind, ProjectId, Result, SessionId,
-};
+use aikit_core::{ContextBinding, ContextId, Isolation, MuxKind, ProjectId, Result, SessionId};
 
 use crate::events::Timestamp;
 use crate::index::{sql_error, Index};
@@ -156,7 +154,10 @@ impl<'a> StateStore<'a> {
                 params![
                     record.session_id.as_str(),
                     record.name,
-                    record.project_root.as_ref().map(|p| p.display().to_string()),
+                    record
+                        .project_root
+                        .as_ref()
+                        .map(|p| p.display().to_string()),
                     record.project_marker.as_ref().map(|p| p.as_str()),
                     record.mux.as_str(),
                     record.mux_session,
@@ -186,7 +187,9 @@ impl<'a> StateStore<'a> {
         let mut stmt = self
             .index
             .conn()
-            .prepare(&format!("{SESSION_COLUMNS} ORDER BY created_ns, session_id"))
+            .prepare(&format!(
+                "{SESSION_COLUMNS} ORDER BY created_ns, session_id"
+            ))
             .map_err(|e| sql_error("state.query_failed", &e))?;
         let rows = stmt
             .query_map([], session_row)
@@ -293,7 +296,10 @@ impl<'a> StateStore<'a> {
                     record.context_id.as_str(),
                     record.session_id.as_ref().map(|s| s.as_str()),
                     record.project_id.as_ref().map(|p| p.as_str()),
-                    record.project_root.as_ref().map(|p| p.display().to_string()),
+                    record
+                        .project_root
+                        .as_ref()
+                        .map(|p| p.display().to_string()),
                     record.task,
                     record.isolation.as_str(),
                     record.created_at.as_nanos(),
@@ -321,7 +327,9 @@ impl<'a> StateStore<'a> {
         let mut stmt = self
             .index
             .conn()
-            .prepare(&format!("{CONTEXT_COLUMNS} ORDER BY created_ns, context_id"))
+            .prepare(&format!(
+                "{CONTEXT_COLUMNS} ORDER BY created_ns, context_id"
+            ))
             .map_err(|e| sql_error("state.query_failed", &e))?;
         let rows = stmt
             .query_map([], context_row)
@@ -451,7 +459,10 @@ fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<SessionRecord
             session_id: SessionId::parse(&session_id)?,
             name,
             project_root: project_root.map(PathBuf::from),
-            project_marker: project_marker.as_deref().map(ProjectId::parse).transpose()?,
+            project_marker: project_marker
+                .as_deref()
+                .map(ProjectId::parse)
+                .transpose()?,
             mux: MuxKind::from_str(&mux)?,
             mux_session,
             state: SessionState::from_str(&state)?,

@@ -20,8 +20,8 @@ use aikit_core::resource::ResourceRef;
 use aikit_core::scope::ScopeKind;
 use aikit_core::session::SessionPlan;
 use aikit_core::{
-    SessionSpaceActivationDriver, SessionSpaceActivationObservation,
-    SessionSpaceActivationRequest, SessionSpaceDefinition, SessionSpaceRef, SessionSpaceRuntime,
+    SessionSpaceActivationDriver, SessionSpaceActivationObservation, SessionSpaceActivationRequest,
+    SessionSpaceDefinition, SessionSpaceRef, SessionSpaceRuntime,
 };
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -141,10 +141,8 @@ fn real_tmux_survives_adapter_restart_recovers_relations_and_never_mints_canonic
     let session_plan = plan("aikit-space-real", temp.path());
     let request = activation_request();
 
-    let mut driver = MuxSessionSpaceActivationDriver::new(environment(
-        guard.name(),
-        session_plan.clone(),
-    ));
+    let mut driver =
+        MuxSessionSpaceActivationDriver::new(environment(guard.name(), session_plan.clone()));
     let activated = driver.activate(&request).unwrap();
     assert!(matches!(
         activated,
@@ -185,19 +183,16 @@ fn real_tmux_survives_adapter_restart_recovers_relations_and_never_mints_canonic
         .focus_surface(&r("surface/terminal/shell"))
         .unwrap();
 
-    let provider_session = driver
-        .environment()
-        .last_binding()
-        .unwrap()
-        .session
-        .clone();
+    let provider_session = driver.environment().last_binding().unwrap().session.clone();
 
     // Dropping AIKit's adapter object is the provider-facing analogue of process
     // restart. The private tmux server/session continues independently.
     drop(driver);
     let mut restarted = environment(guard.name(), session_plan.clone());
     let after_restart = restarted.observe().unwrap();
-    assert!(after_restart.canonical_native_id(&r("surface/terminal/agent")).is_some());
+    assert!(after_restart
+        .canonical_native_id(&r("surface/terminal/agent"))
+        .is_some());
     assert!(restarted.adapter().session_exists(&session_plan).unwrap());
 
     // A fresh SessionSpace runtime does not acquire AgentSession continuity merely
@@ -245,5 +240,8 @@ fn real_tmux_survives_adapter_restart_recovers_relations_and_never_mints_canonic
     restarted
         .detach_surface(&r("surface/terminal/shell"))
         .unwrap();
-    assert_eq!(r("surface/terminal/shell").to_string(), "surface/terminal/shell");
+    assert_eq!(
+        r("surface/terminal/shell").to_string(),
+        "surface/terminal/shell"
+    );
 }

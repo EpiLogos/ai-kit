@@ -17,12 +17,12 @@ use crate::knowledge_living::{
     explicit_contemplate, ContemplateExecutor, ContemplateGenerated, ContemplateOutcome,
     ContemplatePreflight, ContemplateRequest, KnowledgeDependency,
 };
-use crate::knowledge_living_transport::parse_contemplate_generated;
 use crate::knowledge_living_context::{
     bounded_contemplate_preflight, BoundedContemplatePreflight, DEFAULT_CONTEMPLATE_OBJECT_BUDGET,
     DEFAULT_CONTEMPLATE_RELATION_DEPTH,
 };
 use crate::knowledge_living_relations::KnowledgeResourceDependency;
+use crate::knowledge_living_transport::parse_contemplate_generated;
 use crate::method::{Method, MethodSkillRef};
 use crate::praxis::PraxisResolution;
 use crate::project::ProjectRef;
@@ -521,7 +521,6 @@ pub struct FlowContemplateGenerated {
     pub flow_mutations: Vec<FlowMutationIntent>,
 }
 
-
 #[derive(Debug, Deserialize)]
 struct FlowContemplateReturnEnvelope {
     version: String,
@@ -563,7 +562,8 @@ pub fn parse_flow_contemplate_generated(input: &str) -> Result<FlowContemplateGe
 }
 
 pub trait FlowContemplateExecutor {
-    fn execute(&mut self, preflight: &FlowContemplatePreflight) -> Result<FlowContemplateGenerated>;
+    fn execute(&mut self, preflight: &FlowContemplatePreflight)
+        -> Result<FlowContemplateGenerated>;
 }
 
 struct FlowExecutorAdapter<'a> {
@@ -735,8 +735,8 @@ mod tests {
     use crate::context::ContextDescriptor;
     use crate::context_resolution::{compose_context_resolution, RequestedActors};
     use crate::knowledge_living::{
-        ContemplateGenerated, KnowledgeChangeHorizon, KnowledgeChangeKind,
-        KnowledgeObservedSource, KnowledgeSourceChange,
+        ContemplateGenerated, KnowledgeChangeHorizon, KnowledgeChangeKind, KnowledgeObservedSource,
+        KnowledgeSourceChange,
     };
     use crate::knowledge_wiki::WikiObject;
     use crate::model_runtime::{
@@ -992,7 +992,8 @@ mod tests {
     #[test]
     fn central_and_non_central_containers_use_same_flow_provider_seam() {
         let context = context();
-        let central = MemoryFlowProvider::central_style("ProjectCentral/now/flows/2026-08-24-0100.md");
+        let central =
+            MemoryFlowProvider::central_style("ProjectCentral/now/flows/2026-08-24-0100.md");
         let notes = MemoryFlowProvider::non_central_style("notes/2026-08-24-0100.md");
         let a = bind_flow_for_act(
             &central,
@@ -1015,7 +1016,10 @@ mod tests {
         assert_ne!(a.binding.flow_ref, b.binding.flow_ref);
         assert_ne!(a.binding.provider, b.binding.provider);
         assert_eq!(b.binding.provider.as_str(), "provider:notes-house-flow");
-        assert_eq!(notes.flow.container_hint.as_deref(), Some("notes/2026-08-24-0100.md"));
+        assert_eq!(
+            notes.flow.container_hint.as_deref(),
+            Some("notes/2026-08-24-0100.md")
+        );
         assert_eq!(a.disclosed_body(), Some("current Flow body"));
         assert_eq!(b.disclosed_body(), Some("current Flow body"));
         assert!(!a.automatic_agent_or_model_invocation);
@@ -1112,12 +1116,15 @@ mod tests {
         );
         let mut current = basis.clone();
         current.revision = revision("central.content-fnv1a64/v1:9:bbbbbbbbbbbbbbbb");
-        let impact = crate::deterministic_knowledge_impact(&horizon(&current), &[dependency])
-            .unwrap();
+        let impact =
+            crate::deterministic_knowledge_impact(&horizon(&current), &[dependency]).unwrap();
         assert!(!impact.automatic_agent_or_model_invocation);
         assert_eq!(impact.changed_sources, vec![basis.source_ref.clone()]);
         assert_eq!(impact.affected.len(), 1);
-        assert_eq!(impact.affected[0].freshness, crate::KnowledgeFreshness::IntegrationPending);
+        assert_eq!(
+            impact.affected[0].freshness,
+            crate::KnowledgeFreshness::IntegrationPending
+        );
     }
 
     #[derive(Default)]
@@ -1170,7 +1177,9 @@ mod tests {
                     tensions: vec!["open question".into()],
                     human_source_proposals: vec![HumanSourceRevisionProposal {
                         source: source("source:human-ground:test"),
-                        reason: "Flow contemplation exposes a possible authored-position refinement".into(),
+                        reason:
+                            "Flow contemplation exposes a possible authored-position refinement"
+                                .into(),
                         evidence: vec![preflight.standing.binding.source_ref.clone()],
                     }],
                 },
@@ -1261,7 +1270,10 @@ mod tests {
         let preflight = flow_contemplate_preflight(&request).unwrap();
         assert!(!preflight.automatic_agent_or_model_invocation);
         assert_eq!(preflight.praxis.methods[0].method, method.id);
-        assert_eq!(preflight.standing.disclosed_body(), Some("current Flow body"));
+        assert_eq!(
+            preflight.standing.disclosed_body(),
+            Some("current Flow body")
+        );
         assert!(preflight
             .authority_refs
             .iter()
@@ -1277,7 +1289,10 @@ mod tests {
         );
         assert_eq!(outcome.living.candidates, vec!["candidate understanding"]);
         assert_eq!(outcome.living.integrative_readings.len(), 1);
-        assert_eq!(outcome.living.integrative_readings[0].reading.reading_type, "integrative-flow");
+        assert_eq!(
+            outcome.living.integrative_readings[0].reading.reading_type,
+            "integrative-flow"
+        );
         assert!(outcome
             .living
             .agent_wiki
@@ -1286,7 +1301,9 @@ mod tests {
             .any(|object| matches!(object, WikiObject::Reading(reading) if reading.ref_id.as_str() == "wiki:reading:flow-whole")));
         assert_eq!(outcome.living.agent_wiki.human_source_proposals.len(), 1);
         assert_eq!(
-            outcome.living.agent_wiki.human_source_proposals[0].source.as_str(),
+            outcome.living.agent_wiki.human_source_proposals[0]
+                .source
+                .as_str(),
             "source:human-ground:test"
         );
         assert!(outcome.preflight.authority_refs.iter().any(|entry| {
@@ -1329,8 +1346,14 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.living.candidates, vec!["candidate:flow"]);
         assert_eq!(parsed.flow_mutations.len(), 1);
-        assert_eq!(parsed.flow_mutations[0].flow_ref.as_str(), "flow:notes-house:thread-1");
-        assert_eq!(parsed.flow_mutations[0].expected_revision.as_str(), "notes-house-r7");
+        assert_eq!(
+            parsed.flow_mutations[0].flow_ref.as_str(),
+            "flow:notes-house:thread-1"
+        );
+        assert_eq!(
+            parsed.flow_mutations[0].expected_revision.as_str(),
+            "notes-house-r7"
+        );
 
         let prose = parse_flow_contemplate_generated("please edit the Flow").unwrap_err();
         assert_eq!(prose.code(), "flow.contemplate_return_invalid_json");
@@ -1338,7 +1361,10 @@ mod tests {
             r#"{"version":"aikit.flow-contemplate-return/v1","living":{"version":"wrong"}}"#,
         )
         .unwrap_err();
-        assert_eq!(bad_nested.code(), "knowledge.contemplate_return_version_unsupported");
+        assert_eq!(
+            bad_nested.code(),
+            "knowledge.contemplate_return_version_unsupported"
+        );
     }
 
     #[test]

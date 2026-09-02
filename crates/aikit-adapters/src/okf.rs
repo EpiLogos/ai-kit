@@ -57,7 +57,8 @@ pub fn parse_authored_markdown_relations(
     for line in markdown[body_start..].split_inclusive('\n') {
         let trimmed = line.trim_start();
         if let Some((marker, minimum)) = fence {
-            if fence_marker(trimmed).is_some_and(|(found, count)| found == marker && count >= minimum)
+            if fence_marker(trimmed)
+                .is_some_and(|(found, count)| found == marker && count >= minimum)
             {
                 fence = None;
             }
@@ -70,13 +71,7 @@ pub fn parse_authored_markdown_relations(
             continue;
         }
 
-        parse_inline_links(
-            source_ref,
-            source_revision,
-            line,
-            base,
-            &mut relations,
-        );
+        parse_inline_links(source_ref, source_revision, line, base, &mut relations);
         base += line.len();
     }
 
@@ -169,11 +164,7 @@ fn parse_wikilink_inner(inner: &str) -> Option<(String, Option<String>, Option<S
     if target.is_empty() {
         return None;
     }
-    Some((
-        target.to_string(),
-        display,
-        fragment.map(ToOwned::to_owned),
-    ))
+    Some((target.to_string(), display, fragment.map(ToOwned::to_owned)))
 }
 
 fn parse_markdown_destination(destination: &str) -> Option<(String, Option<String>)> {
@@ -347,7 +338,9 @@ mod tests {
             "knowledge.okf_missing_frontmatter"
         );
         assert_eq!(
-            parse_okf_markdown("---\ntype: [\n---\n").unwrap_err().code(),
+            parse_okf_markdown("---\ntype: [\n---\n")
+                .unwrap_err()
+                .code(),
             "knowledge.okf_invalid_yaml"
         );
     }
@@ -362,7 +355,10 @@ mod tests {
         assert_eq!(relations[0].raw_target, "Flow");
         assert_eq!(relations[0].raw_token, "[[Flow]]");
         assert_eq!(relations[0].channel, AuthoredRelationChannel::Body);
-        assert!(matches!(relations[0].resolution, AuthoredRelationResolution::Unresolved));
+        assert!(matches!(
+            relations[0].resolution,
+            AuthoredRelationResolution::Unresolved
+        ));
 
         assert_eq!(relations[1].raw_target, "knowledge/Living Wiki");
         assert_eq!(relations[1].fragment.as_deref(), Some("Current whole"));
@@ -372,7 +368,8 @@ mod tests {
         assert_eq!(relations[2].fragment.as_deref(), Some("impact"));
         assert_eq!(relations[2].display.as_deref(), Some("Change Horizon"));
         assert_eq!(
-            &markdown[relations[2].anchor.start_byte.unwrap()..relations[2].anchor.end_byte.unwrap()],
+            &markdown
+                [relations[2].anchor.start_byte.unwrap()..relations[2].anchor.end_byte.unwrap()],
             relations[2].raw_token
         );
     }

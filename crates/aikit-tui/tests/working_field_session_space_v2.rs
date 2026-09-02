@@ -76,7 +76,8 @@ fn model(component_state: SessionSpaceActivationState) -> SessionSpaceReadModel 
 
 #[test]
 fn tui_projects_same_live_space_session_component_surface_and_connection() {
-    let field = working_field_from_session_space(&model(SessionSpaceActivationState::Active)).unwrap();
+    let field =
+        working_field_from_session_space(&model(SessionSpaceActivationState::Active)).unwrap();
     assert_eq!(field.enclosing_world, Some(r("session-space/live-field")));
     assert!(matches!(
         field
@@ -90,7 +91,10 @@ fn tui_projects_same_live_space_session_component_surface_and_connection() {
     let component = field
         .item(&r("component/deepseek/client-ui-conversation"))
         .unwrap();
-    assert!(matches!(component.availability, WorkingFieldAvailability::Available));
+    assert!(matches!(
+        component.availability,
+        WorkingFieldAvailability::Available
+    ));
     assert_eq!(component.surfaces.len(), 1);
     assert!(!component.surfaces[0].terminal_representation);
     assert!(component.surfaces[0]
@@ -106,7 +110,8 @@ fn tui_projects_same_live_space_session_component_surface_and_connection() {
 
 #[test]
 fn tui_observes_degradation_instead_of_counterfeiting_active() {
-    let field = working_field_from_session_space(&model(SessionSpaceActivationState::Degraded)).unwrap();
+    let field =
+        working_field_from_session_space(&model(SessionSpaceActivationState::Degraded)).unwrap();
     let component = field
         .item(&r("component/deepseek/client-ui-conversation"))
         .unwrap();

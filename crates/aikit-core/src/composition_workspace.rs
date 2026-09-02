@@ -196,13 +196,19 @@ mod tests {
             &["operator".into(), "developer".into()],
         );
 
-        let operator = relations.iter().find(|r| r.skill_set == "operator").unwrap();
+        let operator = relations
+            .iter()
+            .find(|r| r.skill_set == "operator")
+            .unwrap();
         assert!(operator.authored);
         assert!(!operator.inherited);
         assert!(operator.effective);
         assert!(operator.available);
 
-        let developer = relations.iter().find(|r| r.skill_set == "developer").unwrap();
+        let developer = relations
+            .iter()
+            .find(|r| r.skill_set == "developer")
+            .unwrap();
         assert!(!developer.authored);
         assert!(developer.inherited);
         assert!(developer.effective);
@@ -210,7 +216,10 @@ mod tests {
         let missing = relations.iter().find(|r| r.skill_set == "missing").unwrap();
         assert!(missing.effective);
         assert!(!missing.available);
-        assert!(missing.provenance.iter().any(|p| p == "provider-unavailable"));
+        assert!(missing
+            .provenance
+            .iter()
+            .any(|p| p == "provider-unavailable"));
     }
 
     #[test]

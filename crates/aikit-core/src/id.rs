@@ -77,8 +77,11 @@ impl CapsuleId {
             );
         }
         let kind = Kind::from_str(kind_str).map_err(|_| {
-            AikitError::new("id.malformed", format!("`{kind_str}` is not a capsule kind"))
-                .with("id", raw)
+            AikitError::new(
+                "id.malformed",
+                format!("`{kind_str}` is not a capsule kind"),
+            )
+            .with("id", raw)
         })?;
         for segment in &rest {
             if !valid_segment(segment) {
@@ -449,7 +452,10 @@ mod tests {
     #[test]
     fn profile_ids_require_the_profile_prefix() {
         assert!(ProfileId::parse("profile/code/rust").is_ok());
-        assert_eq!(ProfileId::parse("code/rust").unwrap_err().code(), "id.malformed");
+        assert_eq!(
+            ProfileId::parse("code/rust").unwrap_err().code(),
+            "id.malformed"
+        );
     }
 
     #[test]

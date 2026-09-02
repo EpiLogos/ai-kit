@@ -186,5 +186,8 @@ fn generic_host_never_falls_through_package_identity() {
     assert_eq!(relations.subject, host);
     assert!(relations.value.get("contextualActions").is_some());
     assert!(relations.value.get("resolverRelated").is_some());
-    assert_eq!(relations.value["resolverRelated"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        relations.value["resolverRelated"].as_array().unwrap().len(),
+        0
+    );
 }

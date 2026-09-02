@@ -7,7 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::resource::{ResourceIndex, ResourceKind, ResourceRecord, ResourceRef, SourceRef, SourceRevision};
+use crate::resource::{
+    ResourceIndex, ResourceKind, ResourceRecord, ResourceRef, SourceRef, SourceRevision,
+};
 use crate::{AikitError, Result};
 
 pub const METHOD_VERSION: &str = "aikit.method/v1";
@@ -188,18 +190,40 @@ pub fn resolve_method(method: &Method, resources: &dyn ResourceIndex) -> Result<
     method.validate()?;
     let mut warnings = Vec::new();
 
-    let focus = resolve_many(&method.focus, ResourceKind::KnowledgeNode, resources, &mut warnings, false);
-    let project_domain = resolve_many(&method.project_domain, ResourceKind::Project, resources, &mut warnings, false);
+    let focus = resolve_many(
+        &method.focus,
+        ResourceKind::KnowledgeNode,
+        resources,
+        &mut warnings,
+        false,
+    );
+    let project_domain = resolve_many(
+        &method.project_domain,
+        ResourceKind::Project,
+        resources,
+        &mut warnings,
+        false,
+    );
     // Native Skills are currently V2 Capability resources; Skill identity/source
     // remains the capsule/source system rather than a duplicate ResourceKind.
     let skills = resolve_many(
-        &method.skills.iter().map(|value| value.skill.clone()).collect::<Vec<_>>(),
+        &method
+            .skills
+            .iter()
+            .map(|value| value.skill.clone())
+            .collect::<Vec<_>>(),
         ResourceKind::Capability,
         resources,
         &mut warnings,
         true,
     );
-    let actions = resolve_many(&method.actions, ResourceKind::Action, resources, &mut warnings, true);
+    let actions = resolve_many(
+        &method.actions,
+        ResourceKind::Action,
+        resources,
+        &mut warnings,
+        true,
+    );
     let capabilities = resolve_many(
         &method.capabilities,
         ResourceKind::Capability,
@@ -298,7 +322,9 @@ fn resolve_any(
                 resolved: true,
             },
             None => {
-                warnings.push(format!("Method verification reference {reference} is absent"));
+                warnings.push(format!(
+                    "Method verification reference {reference} is absent"
+                ));
                 MethodResolvedRef {
                     reference: reference.clone(),
                     expected_kind: ResourceKind::Capability,
@@ -329,7 +355,10 @@ mod tests {
         let mut resources = MemoryResourceIndex::default();
         resources.insert(record("cap:wayfinder", ResourceKind::Capability));
         resources.insert(record("action:verify", ResourceKind::Action));
-        resources.insert(record("context:project-ground", ResourceKind::ContextSource));
+        resources.insert(record(
+            "context:project-ground",
+            ResourceKind::ContextSource,
+        ));
         resources.insert(record("project:demo", ResourceKind::Project));
 
         let method = Method {
@@ -361,7 +390,10 @@ mod tests {
         assert_eq!(resolved.skills.len(), 1);
         assert_eq!(resolved.overlays.len(), 1);
         assert_eq!(resolved.expected_return_forms.len(), 2);
-        assert_eq!(method.resource_record().descriptor.kind, ResourceKind::Method);
+        assert_eq!(
+            method.resource_record().descriptor.kind,
+            ResourceKind::Method
+        );
     }
 
     #[test]

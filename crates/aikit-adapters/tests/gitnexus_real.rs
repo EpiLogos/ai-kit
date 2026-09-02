@@ -9,9 +9,7 @@ use aikit_core::project_reflection::{
     project_reflection, verify_reflection_law, ReflectionIssueKind, ReflectionLaw,
     ReflectionMapping,
 };
-use aikit_core::resource::{
-    ResourceKind, ResourceRef, SourceAuthority, SourceRef, SourceRevision,
-};
+use aikit_core::resource::{ResourceKind, ResourceRef, SourceAuthority, SourceRef, SourceRevision};
 use tempfile::tempdir;
 
 fn git(root: &std::path::Path, args: &[&str]) {
@@ -31,7 +29,7 @@ fn revision(root: &std::path::Path) -> SourceRevision {
         .unwrap();
     assert!(output.status.success());
     let revision = String::from_utf8(output.stdout).unwrap();
-    SourceRevision::parse(&format!("git:{}", revision.trim())).unwrap()
+    SourceRevision::parse(format!("git:{}", revision.trim())).unwrap()
 }
 
 fn endpoint(
@@ -52,7 +50,13 @@ fn endpoint(
     }
 }
 
-fn bind(map: &mut ProjectMap, from: &ResourceRef, to: &ResourceRef, relation: &str, authority: SourceAuthority) {
+fn bind(
+    map: &mut ProjectMap,
+    from: &ResourceRef,
+    to: &ResourceRef,
+    relation: &str,
+    authority: SourceAuthority,
+) {
     map.bind(ProjectMapBinding {
         from: from.clone(),
         to: to.clone(),
@@ -105,10 +109,34 @@ fn reflection_map(
     ] {
         map.add_endpoint(value).unwrap();
     }
-    bind(map.borrow_mut(), semantic, description, "described-by", SourceAuthority::Authored);
-    bind(map.borrow_mut(), description, code, "describes", SourceAuthority::Authored);
-    bind(map.borrow_mut(), semantic, code, "implemented-by", SourceAuthority::Authored);
-    bind(map.borrow_mut(), code, verification, "verified-by", SourceAuthority::Observed);
+    bind(
+        map.borrow_mut(),
+        semantic,
+        description,
+        "described-by",
+        SourceAuthority::Authored,
+    );
+    bind(
+        map.borrow_mut(),
+        description,
+        code,
+        "describes",
+        SourceAuthority::Authored,
+    );
+    bind(
+        map.borrow_mut(),
+        semantic,
+        code,
+        "implemented-by",
+        SourceAuthority::Authored,
+    );
+    bind(
+        map.borrow_mut(),
+        code,
+        verification,
+        "verified-by",
+        SourceAuthority::Observed,
+    );
     map
 }
 
@@ -308,7 +336,12 @@ export function logout(): boolean {
         .detect_changes("unstaged", None)
         .expect("real GitNexus detect-changes");
     assert!(changes.detail.is_string());
-    assert!(!changes.detail.as_str().unwrap_or_default().trim().is_empty());
+    assert!(!changes
+        .detail
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .is_empty());
     let structural = provider
         .structural_check()
         .expect("real GitNexus cycle check");

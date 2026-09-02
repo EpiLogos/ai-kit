@@ -144,15 +144,11 @@ impl UnavailableReason {
         match self {
             UnavailableReason::NotInCatalog => "not present in any registry".to_string(),
             UnavailableReason::DeniedByPolicy => "denied by managed policy".to_string(),
-            UnavailableReason::PlatformUnsupported => {
-                "not supported on this platform".to_string()
-            }
+            UnavailableReason::PlatformUnsupported => "not supported on this platform".to_string(),
             UnavailableReason::NoSupportedTarget => {
                 "supports none of this context's targets".to_string()
             }
-            UnavailableReason::TrustRequired => {
-                "this revision has not been reviewed".to_string()
-            }
+            UnavailableReason::TrustRequired => "this revision has not been reviewed".to_string(),
             UnavailableReason::Quarantined => "quarantined".to_string(),
             UnavailableReason::Blocked => "blocked".to_string(),
             UnavailableReason::DependencyUnavailable { dependency } => {
@@ -871,17 +867,16 @@ impl<'a> Resolver<'a> {
                 }
             }
             if overlay.has_content() {
-                skill_usage_overlays
-                    .entry(id.clone())
-                    .or_default()
-                    .push(AppliedSkillUsageOverlay {
+                skill_usage_overlays.entry(id.clone()).or_default().push(
+                    AppliedSkillUsageOverlay {
                         description: overlay.description.clone(),
                         guidance: overlay.guidance.clone(),
                         reviewed_against: overlay.reviewed_against.clone(),
                         scope: layer.kind,
                         origin: layer.origin.clone(),
                         via_profile: via_profile.cloned(),
-                    });
+                    },
+                );
             }
         }
     }
@@ -1112,10 +1107,7 @@ impl<'a> Resolver<'a> {
                 let mut error = AikitError::new(
                     "resolution.conflict",
                     match &conflict.reason {
-                        Some(reason) => format!(
-                            "{} conflicts with {}: {reason}",
-                            pair.0, pair.1
-                        ),
+                        Some(reason) => format!("{} conflicts with {}: {reason}", pair.0, pair.1),
                         None => format!("{} conflicts with {}", pair.0, pair.1),
                     },
                 )

@@ -53,9 +53,9 @@ impl StagedHarnessComposition {
         // One staged answer per Component identity. Re-staging replaces the prior
         // answer rather than creating ordering-sensitive duplicate intent.
         self.mutations.retain(|mutation| match mutation {
-            HarnessCompositionMutation::Select { selection: existing } => {
-                existing.component != selection.component
-            }
+            HarnessCompositionMutation::Select {
+                selection: existing,
+            } => existing.component != selection.component,
             HarnessCompositionMutation::Retract { component } => component != &selection.component,
         });
         self.mutations
@@ -65,7 +65,9 @@ impl StagedHarnessComposition {
     pub fn retract(&mut self, component: ResourceRef) {
         self.mutations.retain(|mutation| match mutation {
             HarnessCompositionMutation::Select { selection } => selection.component != component,
-            HarnessCompositionMutation::Retract { component: existing } => existing != &component,
+            HarnessCompositionMutation::Retract {
+                component: existing,
+            } => existing != &component,
         });
         self.mutations
             .push(HarnessCompositionMutation::Retract { component });
@@ -212,7 +214,8 @@ impl CompositionBasis {
     }
 
     pub fn matches(&self, view: &ResolvedView) -> bool {
-        self.catalog_revision == view.catalog_revision && self.resolution_hash == view.hash.to_string()
+        self.catalog_revision == view.catalog_revision
+            && self.resolution_hash == view.hash.to_string()
     }
 }
 
@@ -262,7 +265,10 @@ impl StagedProfileComposition {
     pub fn authored_after(&self, authored_before: &PoolPatch) -> PoolPatch {
         let mut after = authored_before.clone();
         for (capability, intent) in &self.changes {
-            after.set(capability, matches!(intent, ProfileActivationIntent::Enable));
+            after.set(
+                capability,
+                matches!(intent, ProfileActivationIntent::Enable),
+            );
         }
         after
     }
@@ -334,12 +340,15 @@ impl StagedSkillSetRelations {
         let mut after = sets.to_vec();
         for mutation in &self.mutations {
             let (name, capability) = relation_key(mutation);
-            let set = after.iter_mut().find(|set| set.name == name).ok_or_else(|| {
-                AikitError::new(
-                    "composition.skillset_not_found",
-                    format!("SkillSet `{name}` is not present in the inspected composition"),
-                )
-            })?;
+            let set = after
+                .iter_mut()
+                .find(|set| set.name == name)
+                .ok_or_else(|| {
+                    AikitError::new(
+                        "composition.skillset_not_found",
+                        format!("SkillSet `{name}` is not present in the inspected composition"),
+                    )
+                })?;
             if !set.provenance.is_writable() {
                 return Err(AikitError::new(
                     "composition.skillset_read_only",
@@ -348,7 +357,8 @@ impl StagedSkillSetRelations {
             }
             match mutation {
                 SkillSetRelationMutation::Add { .. } => {
-                    set.members.insert(capability.clone(), SetMembership::Explicit);
+                    set.members
+                        .insert(capability.clone(), SetMembership::Explicit);
                 }
                 SkillSetRelationMutation::Remove { .. } => {
                     set.members.remove(capability);
@@ -494,7 +504,10 @@ pub fn inspect_profile_composition(
     }
 }
 
-fn inspect_skill_set_relation(set: &SkillSet, effective: &ResolvedView) -> SkillSetRelationReadModel {
+fn inspect_skill_set_relation(
+    set: &SkillSet,
+    effective: &ResolvedView,
+) -> SkillSetRelationReadModel {
     let projection = project_skill_set(set, effective);
     let projected: BTreeSet<CapsuleId> = projection.projected.into_iter().collect();
     let withheld: BTreeMap<CapsuleId, String> = projection
@@ -579,8 +592,10 @@ pub fn preview_profile_composition_change(
 ) -> Result<ProfileCompositionPreview> {
     let authored_after = staged_profile.authored_after(authored_before);
     let skill_sets_after = staged_skill_sets.authored_after(skill_sets_before)?;
-    let before = inspect_profile_composition(scope, authored_before, effective_before, skill_sets_before);
-    let after = inspect_profile_composition(scope, &authored_after, effective_after, &skill_sets_after);
+    let before =
+        inspect_profile_composition(scope, authored_before, effective_before, skill_sets_before);
+    let after =
+        inspect_profile_composition(scope, &authored_after, effective_after, &skill_sets_after);
     let changed_ground = changed_ground(effective_before, effective_after);
     Ok(ProfileCompositionPreview {
         basis_before: before.basis.clone(),
@@ -606,8 +621,14 @@ pub fn ensure_profile_composition_preview_current(
         "composition.preview_stale",
         "the accepted composition preview was produced against a different resolution basis",
     )
-    .with("expected_catalog_revision", preview.basis_before.catalog_revision.clone())
-    .with("expected_resolution_hash", preview.basis_before.resolution_hash.clone())
+    .with(
+        "expected_catalog_revision",
+        preview.basis_before.catalog_revision.clone(),
+    )
+    .with(
+        "expected_resolution_hash",
+        preview.basis_before.resolution_hash.clone(),
+    )
     .with("current_catalog_revision", current.catalog_revision.clone())
     .with("current_resolution_hash", current.hash.to_string()))
 }
@@ -661,7 +682,13 @@ pub fn changed_ground(before: &ResolvedView, after: &ResolvedView) -> ChangedGro
                 reason: reason.clone(),
             })
             .collect(),
-        warnings_added: after_warnings.difference(&before_warnings).cloned().collect(),
-        warnings_removed: before_warnings.difference(&after_warnings).cloned().collect(),
+        warnings_added: after_warnings
+            .difference(&before_warnings)
+            .cloned()
+            .collect(),
+        warnings_removed: before_warnings
+            .difference(&after_warnings)
+            .cloned()
+            .collect(),
     }
 }

@@ -23,8 +23,7 @@ use crate::authored_wiki_source::{
 };
 use crate::ProjectCentralFilesystemBinding;
 
-pub const PROJECTCENTRAL_AUTHORED_WIKI_VERSION: &str =
-    "aikit.projectcentral-authored-wiki/v1";
+pub const PROJECTCENTRAL_AUTHORED_WIKI_VERSION: &str = "aikit.projectcentral-authored-wiki/v1";
 
 /// Materialized read model for one ProjectCentral world. Every field is
 /// rebuildable from Central-owned source descriptors/files plus the canonical
@@ -84,8 +83,7 @@ pub fn projectcentral_authored_wiki(
     }
 
     source_projections.sort_by(|left, right| left.source_ref.cmp(&right.source_ref));
-    let compilation =
-        compile_authored_wiki_relations(&source_projections, &wiki_objects, &[])?;
+    let compilation = compile_authored_wiki_relations(&source_projections, &wiki_objects, &[])?;
     let dependencies = authored_relation_dependencies(&source_projections);
     let index = rebuild_semantic_wiki_with_authored_relations(&wiki_objects, &compilation)?;
 

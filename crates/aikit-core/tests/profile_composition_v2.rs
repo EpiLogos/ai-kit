@@ -34,7 +34,8 @@ fn set() -> SkillSet {
 }
 
 #[test]
-fn authored_profile_and_effective_profile_remain_distinct_and_skillset_projection_uses_effective_truth() {
+fn authored_profile_and_effective_profile_remain_distinct_and_skillset_projection_uses_effective_truth(
+) {
     let patch = authored(&["skill/a"]);
     let fixture = Fixture::new(vec![skill("skill/a"), skill("skill/b")])
         .with_layers(vec![project_layer(patch.clone())]);
@@ -99,7 +100,10 @@ fn preview_is_resolver_backed_reports_changed_ground_and_rejects_a_stale_basis()
         preview.after.authored.enabled,
         vec![cid("skill/a"), cid("skill/b")]
     );
-    assert_eq!(preview.changed_ground.capabilities_added, vec![cid("skill/b")]);
+    assert_eq!(
+        preview.changed_ground.capabilities_added,
+        vec![cid("skill/b")]
+    );
     assert!(preview.changed_ground.capabilities_removed.is_empty());
     assert!(ensure_profile_composition_preview_current(&preview, &before).is_ok());
 
@@ -115,13 +119,17 @@ fn skillset_relation_stage_add_remove_is_write_free_and_observed_sets_remain_rea
     let mut staged = StagedSkillSetRelations::default();
     staged.add("operator", cid("skill/b"));
 
-    let after = staged.authored_after(std::slice::from_ref(&project_set)).unwrap();
+    let after = staged
+        .authored_after(std::slice::from_ref(&project_set))
+        .unwrap();
     assert_eq!(project_set, snapshot);
     assert!(after[0].members.contains_key(&cid("skill/a")));
     assert!(after[0].members.contains_key(&cid("skill/b")));
 
     staged.remove("operator", cid("skill/a"));
-    let after = staged.authored_after(std::slice::from_ref(&project_set)).unwrap();
+    let after = staged
+        .authored_after(std::slice::from_ref(&project_set))
+        .unwrap();
     assert!(!after[0].members.contains_key(&cid("skill/a")));
     assert!(after[0].members.contains_key(&cid("skill/b")));
 

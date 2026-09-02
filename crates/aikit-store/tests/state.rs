@@ -74,7 +74,11 @@ fn a_restored_session_is_rebound_by_name_and_project_not_by_mux_id() {
         "AIKit's own id is authoritative; the mux id is a binding"
     );
     assert_eq!(rebound.mux_session.as_deref(), Some("$7"));
-    assert_eq!(state.sessions().unwrap().len(), 1, "no duplicate was created");
+    assert_eq!(
+        state.sessions().unwrap().len(),
+        1,
+        "no duplicate was created"
+    );
 
     let reloaded = state.session(&original.session_id).unwrap().unwrap();
     assert_eq!(reloaded.mux_session.as_deref(), Some("$7"));
@@ -91,7 +95,9 @@ fn rebinding_does_not_reach_across_projects_that_happen_to_share_a_name() {
 
     let mine = ProjectId::generate();
     let theirs = ProjectId::generate();
-    state.put_session(&session("payments", &mine, "$3")).unwrap();
+    state
+        .put_session(&session("payments", &mine, "$3"))
+        .unwrap();
 
     assert!(state
         .rebind_session("payments", Some(&theirs), MuxKind::Tmux, Some("$9"))
@@ -106,7 +112,9 @@ fn rebinding_does_not_reach_across_multiplexers() {
     let index = index(tmp.path());
     let state = StateStore::new(&index);
     let project = ProjectId::generate();
-    state.put_session(&session("payments", &project, "$3")).unwrap();
+    state
+        .put_session(&session("payments", &project, "$3"))
+        .unwrap();
 
     assert!(
         state
@@ -149,9 +157,7 @@ fn a_session_not_seen_for_a_while_is_reported_stale_without_being_deleted() {
     state.put_session(&old).unwrap();
     state.put_session(&fresh).unwrap();
 
-    let stale = state
-        .stale_sessions(Duration::from_secs(600), now)
-        .unwrap();
+    let stale = state.stale_sessions(Duration::from_secs(600), now).unwrap();
 
     assert_eq!(stale.len(), 1);
     assert_eq!(stale[0].session_id, old.session_id);
@@ -173,7 +179,10 @@ fn touching_a_session_clears_its_staleness() {
     record.last_seen = Timestamp::from_nanos(now.as_nanos() - 3_600_000_000_000);
     state.put_session(&record).unwrap();
     assert_eq!(
-        state.stale_sessions(Duration::from_secs(60), now).unwrap().len(),
+        state
+            .stale_sessions(Duration::from_secs(60), now)
+            .unwrap()
+            .len(),
         1
     );
 
@@ -264,7 +273,13 @@ fn one_session_can_own_several_contexts() {
 
     let contexts = state.contexts_of_session(&session_id).unwrap();
     assert_eq!(contexts.len(), 3);
-    assert_eq!(contexts.iter().filter(|c| c.isolation.is_isolated()).count(), 1);
+    assert_eq!(
+        contexts
+            .iter()
+            .filter(|c| c.isolation.is_isolated())
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -290,7 +305,11 @@ fn a_context_binding_survives_being_rewritten_when_the_pane_moves() {
     state.bind_context(&binding).unwrap();
 
     let bindings = state.bindings().unwrap();
-    assert_eq!(bindings.len(), 1, "rebinding replaces rather than accumulates");
+    assert_eq!(
+        bindings.len(),
+        1,
+        "rebinding replaces rather than accumulates"
+    );
     assert_eq!(bindings[0].mux_surface.as_deref(), Some("%11"));
 }
 
@@ -307,7 +326,9 @@ fn the_promotion_queue_holds_candidates_with_the_reason_they_were_queued() {
     state
         .queue_promotion("cnd_01ABC", "run three times in two days")
         .unwrap();
-    state.queue_promotion("cnd_01DEF", "captured from a hook").unwrap();
+    state
+        .queue_promotion("cnd_01DEF", "captured from a hook")
+        .unwrap();
 
     let queued = state.promotion_queue().unwrap();
     assert_eq!(queued.len(), 2);

@@ -4,9 +4,7 @@ use aikit_cli::app::Service;
 use aikit_cli::SessionSpaceServiceOps;
 use aikit_core::project::ProjectRef;
 use aikit_core::session_space::SessionSpaceRef;
-use aikit_core::session_space_application::{
-    SessionSpaceMutation, SessionSpacePreview,
-};
+use aikit_core::session_space_application::{SessionSpaceMutation, SessionSpacePreview};
 use aikit_core::{AikitError, Result};
 use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
@@ -87,7 +85,10 @@ fn run() -> Result<()> {
     let cwd = match cli.cwd {
         Some(cwd) => cwd,
         None => std::env::current_dir().map_err(|error| {
-            AikitError::new("cli.cwd_unavailable", format!("could not read cwd: {error}"))
+            AikitError::new(
+                "cli.cwd_unavailable",
+                format!("could not read cwd: {error}"),
+            )
         })?,
     };
     let service = Service::discover(&cwd)?;
@@ -132,18 +133,12 @@ fn run() -> Result<()> {
         Command::RestorePreview { space, sequence } => {
             emit(&service.session_space_stage_restore(&space_ref(&space)?, sequence)?)
         }
-        Command::Reconstruct { space } => emit(&service.session_space_reconstruct(
-            &space_ref(&space)?,
-            None,
-            &[],
-            &[],
-        )?),
-        Command::Reconcile { space } => emit(&service.session_space_reconcile(
-            &space_ref(&space)?,
-            None,
-            &[],
-            &[],
-        )?),
+        Command::Reconstruct { space } => {
+            emit(&service.session_space_reconstruct(&space_ref(&space)?, None, &[], &[])?)
+        }
+        Command::Reconcile { space } => {
+            emit(&service.session_space_reconcile(&space_ref(&space)?, None, &[], &[])?)
+        }
         Command::Explain { space } => {
             emit(&service.session_space_explain(&space_ref(&space)?, None)?)
         }

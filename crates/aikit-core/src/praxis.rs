@@ -55,7 +55,10 @@ pub fn resolve_praxis(
     let mut warnings = Vec::new();
 
     for reference in selected {
-        let Some(method) = available_methods.iter().find(|method| &method.id == reference) else {
+        let Some(method) = available_methods
+            .iter()
+            .find(|method| &method.id == reference)
+        else {
             warnings.push(format!(
                 "selected Method {reference} is absent from the source-loaded Method field"
             ));
@@ -176,7 +179,12 @@ pub fn praxis_history_evidence(praxis: &PraxisResolution) -> Vec<HistoryEvidence
             let mut canonical_refs = BTreeSet::from([selected.method.clone()]);
             canonical_refs.extend(praxis.focus.iter().cloned());
             canonical_refs.extend(resolved_refs(resolution));
-            canonical_refs.extend(resolution.overlays.iter().map(|overlay| overlay.skill.clone()));
+            canonical_refs.extend(
+                resolution
+                    .overlays
+                    .iter()
+                    .map(|overlay| overlay.skill.clone()),
+            );
 
             let source = ResourceRef::parse(resolution.source.as_str()).ok();
             if let Some(source) = &source {
@@ -203,7 +211,9 @@ pub fn praxis_history_evidence(praxis: &PraxisResolution) -> Vec<HistoryEvidence
                 resolution
                     .overlays
                     .iter()
-                    .map(|overlay| format!("{}@{}#{}", overlay.skill, overlay.scope, overlay.digest))
+                    .map(|overlay| {
+                        format!("{}@{}#{}", overlay.skill, overlay.scope, overlay.digest)
+                    })
                     .collect::<Vec<_>>()
                     .join(","),
             );
@@ -217,8 +227,7 @@ pub fn praxis_history_evidence(praxis: &PraxisResolution) -> Vec<HistoryEvidence
                 schema: EXPLAIN_HISTORY_VERSION.into(),
                 id: format!(
                     "praxis:{}:{}",
-                    selected.method,
-                    praxis.context_resolution_version
+                    selected.method, praxis.context_resolution_version
                 ),
                 // `Recent` is intentionally used as the generic evidence class;
                 // Method does not need a parallel History ontology merely to be
@@ -232,9 +241,17 @@ pub fn praxis_history_evidence(praxis: &PraxisResolution) -> Vec<HistoryEvidence
                     selected.method,
                     praxis.context_resolution_version,
                     resolved_refs(resolution).len(),
-                    if resolved_refs(resolution).len() == 1 { "" } else { "s" },
+                    if resolved_refs(resolution).len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
                     resolution.overlays.len(),
-                    if resolution.overlays.len() == 1 { "" } else { "s" }
+                    if resolution.overlays.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
                 ),
                 canonical_refs: canonical_refs.into_iter().collect(),
                 provenance: vec![EvidenceProvenance {
@@ -271,10 +288,10 @@ mod tests {
     use crate::project::{
         ProjectBinding, ProjectBindingLocator, ProjectConstituentRef, ProjectRef,
     };
+    use crate::resolve::{resolve, ResolveRequest};
     use crate::resource::{
         MemoryResourceIndex, ResourceDescriptor, ResourceKind, ResourceRecord, SourceRef,
     };
-    use crate::resolve::{resolve, ResolveRequest};
     use crate::trust::AlwaysTrusted;
     use crate::{ContextDescriptor, ManagedPolicy, MemoryCatalog};
 
@@ -386,10 +403,13 @@ mod tests {
         );
         let explained = explain_praxis(&praxis);
         assert_eq!(explained.len(), 1);
-        assert!(explained[0]
-            .facts
-            .iter()
-            .any(|fact| fact.relation == "usage-overlay" && fact.summary.contains(&"a".repeat(64))));
+        assert!(
+            explained[0]
+                .facts
+                .iter()
+                .any(|fact| fact.relation == "usage-overlay"
+                    && fact.summary.contains(&"a".repeat(64)))
+        );
         let history = praxis_history_evidence(&praxis);
         assert_eq!(history.len(), 1);
         assert!(history[0]

@@ -96,7 +96,10 @@ fn a_resolution_failure_serialises_code_message_and_details() {
 #[test]
 fn exit_codes_follow_the_published_table() {
     // 0 ok is not an error; the table below is the error mapping.
-    assert_eq!(json::exit_code(&err("resolution.required_capability_disabled")), 3);
+    assert_eq!(
+        json::exit_code(&err("resolution.required_capability_disabled")),
+        3
+    );
     assert_eq!(json::exit_code(&err("resolution.conflict")), 3);
     assert_eq!(json::exit_code(&err("policy.denied")), 4);
     assert_eq!(json::exit_code(&err("trust.required")), 5);

@@ -34,9 +34,7 @@ fn presentation_and_provider_refresh_never_take_ownership_of_semantic_state() {
         mutation_scope: Some(ScopeKind::Project),
         ..Default::default()
     };
-    state
-        .staged
-        .stage(staged.clone(), ActivationIntent::Enable);
+    state.staged.stage(staged.clone(), ActivationIntent::Enable);
 
     state = reduce_tui(
         state,
@@ -49,10 +47,7 @@ fn presentation_and_provider_refresh_never_take_ownership_of_semantic_state() {
     // A provider/index refresh may reorder Resources without changing identity.
     state = reduce_tui(
         state,
-        UiAction::Refresh(model(
-            "r2",
-            &["capability/beta", "capability/alpha"],
-        )),
+        UiAction::Refresh(model("r2", &["capability/beta", "capability/alpha"])),
     )
     .state;
     assert_eq!(state.selected, Some(selected.clone()));
@@ -60,23 +55,19 @@ fn presentation_and_provider_refresh_never_take_ownership_of_semantic_state() {
 
     // Temporary provider loss may remove the staged Resource from the read model,
     // but presentation refresh has no authority to discard authored staged intent.
-    state = reduce_tui(
-        state,
-        UiAction::Refresh(model("r3", &["capability/alpha"])),
-    )
-    .state;
+    state = reduce_tui(state, UiAction::Refresh(model("r3", &["capability/alpha"]))).state;
     assert_eq!(state.selected, Some(selected.clone()));
-    assert_eq!(unresolved_staged(&state), [staged.clone()].into_iter().collect());
+    assert_eq!(
+        unresolved_staged(&state),
+        [staged.clone()].into_iter().collect()
+    );
     assert_eq!(state.staged.get(&staged), Some(ActivationIntent::Enable));
 
     // When provider/index state recovers, stable identity reconnects without a new
     // controller or a second staging store.
     state = reduce_tui(
         state,
-        UiAction::Refresh(model(
-            "r4",
-            &["capability/alpha", "capability/beta"],
-        )),
+        UiAction::Refresh(model("r4", &["capability/alpha", "capability/beta"])),
     )
     .state;
 

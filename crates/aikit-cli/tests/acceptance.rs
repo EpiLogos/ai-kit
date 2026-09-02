@@ -66,8 +66,8 @@ use aikit_cli::app::Service;
 
 use aikit_store::generation::{self, GenerationBuilder};
 use aikit_store::home::AikitHome;
-use aikit_store::index::Index;
 use aikit_store::inbox::{CandidateState, Capture, Inbox};
+use aikit_store::index::Index;
 use aikit_store::registry::load_registry;
 use aikit_store::trust::TrustStore;
 
@@ -156,7 +156,10 @@ fn trust(fixture: &Fixture, ids: &[&str]) {
             .catalog
             .get(&id)
             .unwrap_or_else(|| panic!("seed registry is missing {id_str}"));
-        let revision = capsule.revision.clone().expect("a loaded capsule has a revision");
+        let revision = capsule
+            .revision
+            .clone()
+            .expect("a loaded capsule has a revision");
         let key = TrustKey::new(RegistrySource::new(SEED_SOURCE), id, revision);
         store.record(&key, TrustState::Trusted, None).unwrap();
     }
@@ -164,7 +167,9 @@ fn trust(fixture: &Fixture, ids: &[&str]) {
 
 fn aikit(fixture: &Fixture, cwd: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
     let mut cmd = Command::new(cargo_bin("aikit"));
-    cmd.args(args).env("AIKIT_HOME", &fixture.path).current_dir(cwd);
+    cmd.args(args)
+        .env("AIKIT_HOME", &fixture.path)
+        .current_dir(cwd);
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -317,7 +322,10 @@ impl TmuxServer {
     fn raw(&self, args: &[&str]) -> Output {
         let mut argv = vec!["-L", self.socket.as_str()];
         argv.extend_from_slice(args);
-        Command::new("tmux").args(&argv).output().expect("tmux runs")
+        Command::new("tmux")
+            .args(&argv)
+            .output()
+            .expect("tmux runs")
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -339,7 +347,11 @@ impl Drop for TmuxServer {
 fn tmux_socket_path(socket: &str) -> Option<PathBuf> {
     let base = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
     let uid = String::from_utf8(Command::new("id").arg("-u").output().ok()?.stdout).ok()?;
-    Some(PathBuf::from(base).join(format!("tmux-{}", uid.trim())).join(socket))
+    Some(
+        PathBuf::from(base)
+            .join(format!("tmux-{}", uid.trim()))
+            .join(socket),
+    )
 }
 
 fn wait_for_file(path: &Path) -> String {
@@ -358,43 +370,142 @@ fn wait_for_file(path: &Path) -> String {
 fn two_tmux_sessions_for_the_same_project_carry_different_skill_sets() {
     require_tmux!("two_tmux_sessions_for_the_same_project_carry_different_skill_sets");
     let home = fresh_home();
-    trust(&home, &["skill/rust/rust-review", "skill/rust/unsafe-audit"]);
+    trust(
+        &home,
+        &["skill/rust/rust-review", "skill/rust/unsafe-audit"],
+    );
     let project = project_repo();
-    let (o, v) = run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_tmuxalpha")], &["enable", "skill/rust/rust-review", "--scope", "session", "--json"]);
+    let (o, v) = run_json(
+        &home,
+        project.path(),
+        &[("AIKIT_SESSION_ID", "ses_tmuxalpha")],
+        &[
+            "enable",
+            "skill/rust/rust-review",
+            "--scope",
+            "session",
+            "--json",
+        ],
+    );
     expect_ok(&o, &v, "enable rust-review for session alpha");
-    let (o, v) = run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_tmuxbeta")], &["enable", "skill/rust/unsafe-audit", "--scope", "session", "--json"]);
+    let (o, v) = run_json(
+        &home,
+        project.path(),
+        &[("AIKIT_SESSION_ID", "ses_tmuxbeta")],
+        &[
+            "enable",
+            "skill/rust/unsafe-audit",
+            "--scope",
+            "session",
+            "--json",
+        ],
+    );
     expect_ok(&o, &v, "enable unsafe-audit for session beta");
 
     let server = TmuxServer::start();
     let scratch = TempDir::new().unwrap();
     let out_a = scratch.path().join("alpha.json");
     let out_b = scratch.path().join("beta.json");
-    launch_status_pane(&server, "alpha", &home.path, project.path(), "ses_tmuxalpha", &out_a);
-    launch_status_pane(&server, "beta", &home.path, project.path(), "ses_tmuxbeta", &out_b);
+    launch_status_pane(
+        &server,
+        "alpha",
+        &home.path,
+        project.path(),
+        "ses_tmuxalpha",
+        &out_a,
+    );
+    launch_status_pane(
+        &server,
+        "beta",
+        &home.path,
+        project.path(),
+        "ses_tmuxbeta",
+        &out_b,
+    );
     let va: Value = serde_json::from_str(wait_for_file(&out_a).trim()).unwrap();
     let vb: Value = serde_json::from_str(wait_for_file(&out_b).trim()).unwrap();
     assert_eq!(active_skills(&va), vec!["skill/rust/rust-review"]);
     assert_eq!(active_skills(&vb), vec!["skill/rust/unsafe-audit"]);
 }
 
-fn launch_status_pane(server: &TmuxServer, name: &str, home: &Path, project: &Path, session_id: &str, out: &Path) {
+fn launch_status_pane(
+    server: &TmuxServer,
+    name: &str,
+    home: &Path,
+    project: &Path,
+    session_id: &str,
+    out: &Path,
+) {
     let bin = cargo_bin("aikit");
-    let pane = server.ok(&["new-session", "-d", "-s", name, "-c", project.to_str().unwrap(), "-P", "-F", "#{pane_id}"]);
-    server.ok(&["set-environment", "-t", name, "AIKIT_HOME", home.to_str().unwrap()]);
-    server.ok(&["set-environment", "-t", name, "AIKIT_SESSION_ID", session_id]);
+    let pane = server.ok(&[
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-c",
+        project.to_str().unwrap(),
+        "-P",
+        "-F",
+        "#{pane_id}",
+    ]);
+    server.ok(&[
+        "set-environment",
+        "-t",
+        name,
+        "AIKIT_HOME",
+        home.to_str().unwrap(),
+    ]);
+    server.ok(&[
+        "set-environment",
+        "-t",
+        name,
+        "AIKIT_SESSION_ID",
+        session_id,
+    ]);
     let err = out.with_extension("err");
-    let command = format!("'{}' --cwd '{}' status --json >'{}' 2>'{}'", bin.display(), project.display(), out.display(), err.display());
+    let command = format!(
+        "'{}' --cwd '{}' status --json >'{}' 2>'{}'",
+        bin.display(),
+        project.display(),
+        out.display(),
+        err.display()
+    );
     server.ok(&["respawn-pane", "-k", "-t", &pane, &command]);
 }
 
 #[test]
 fn two_cmux_workspaces_for_the_same_project_carry_different_session_overlays() {
     let home = fresh_home();
-    trust(&home, &["skill/rust/rust-review", "skill/rust/unsafe-audit"]);
+    trust(
+        &home,
+        &["skill/rust/rust-review", "skill/rust/unsafe-audit"],
+    );
     let project = project_repo();
-    let (o, v) = run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_cmuxone")], &["enable", "skill/rust/rust-review", "--scope", "session", "--json"]);
+    let (o, v) = run_json(
+        &home,
+        project.path(),
+        &[("AIKIT_SESSION_ID", "ses_cmuxone")],
+        &[
+            "enable",
+            "skill/rust/rust-review",
+            "--scope",
+            "session",
+            "--json",
+        ],
+    );
     expect_ok(&o, &v, "enable rust-review for cmux workspace one");
-    let (o, v) = run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_cmuxtwo")], &["enable", "skill/rust/unsafe-audit", "--scope", "session", "--json"]);
+    let (o, v) = run_json(
+        &home,
+        project.path(),
+        &[("AIKIT_SESSION_ID", "ses_cmuxtwo")],
+        &[
+            "enable",
+            "skill/rust/unsafe-audit",
+            "--scope",
+            "session",
+            "--json",
+        ],
+    );
     expect_ok(&o, &v, "enable unsafe-audit for cmux workspace two");
     let plan = plan_from_spec("schema = 1\nid = \"payments\"\nname = \"payments\"\n[[views]]\nid = \"work\"\n[[views.panes]]\nid = \"agent\"\ncommand = [\"claude\"]\n");
     let one = Cmux::new(cmux_full_runner()).with_identity(session_identity("ses_cmuxone"));
@@ -413,9 +524,23 @@ fn a_project_profile_change_does_not_mutate_another_projects_context() {
     trust(&home, &["skill/rust/rust-review"]);
     let p1 = project_repo();
     let p2 = project_repo();
-    let (o, v) = run_json(&home, p1.path(), &[], &["enable", "skill/rust/rust-review", "--scope", "project", "--json"]);
+    let (o, v) = run_json(
+        &home,
+        p1.path(),
+        &[],
+        &[
+            "enable",
+            "skill/rust/rust-review",
+            "--scope",
+            "project",
+            "--json",
+        ],
+    );
     expect_ok(&o, &v, "enable rust-review in p1");
-    assert_eq!(active_skills(&run_json(&home, p1.path(), &[], &["status", "--json"]).1), vec!["skill/rust/rust-review"]);
+    assert_eq!(
+        active_skills(&run_json(&home, p1.path(), &[], &["status", "--json"]).1),
+        vec!["skill/rust/rust-review"]
+    );
     assert!(active_skills(&run_json(&home, p2.path(), &[], &["status", "--json"]).1).is_empty());
 }
 
@@ -424,10 +549,41 @@ fn a_session_toggle_cannot_affect_a_non_child_context() {
     let home = fresh_home();
     trust(&home, &["skill/rust/rust-review"]);
     let project = project_repo();
-    let (o, v) = run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_child")], &["enable", "skill/rust/rust-review", "--scope", "session", "--json"]);
+    let (o, v) = run_json(
+        &home,
+        project.path(),
+        &[("AIKIT_SESSION_ID", "ses_child")],
+        &[
+            "enable",
+            "skill/rust/rust-review",
+            "--scope",
+            "session",
+            "--json",
+        ],
+    );
     expect_ok(&o, &v, "enable rust-review in the child session");
-    assert_eq!(active_skills(&run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_child")], &["status", "--json"]).1), vec!["skill/rust/rust-review"]);
-    assert!(active_skills(&run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_sibling")], &["status", "--json"]).1).is_empty());
+    assert_eq!(
+        active_skills(
+            &run_json(
+                &home,
+                project.path(),
+                &[("AIKIT_SESSION_ID", "ses_child")],
+                &["status", "--json"]
+            )
+            .1
+        ),
+        vec!["skill/rust/rust-review"]
+    );
+    assert!(active_skills(
+        &run_json(
+            &home,
+            project.path(),
+            &[("AIKIT_SESSION_ID", "ses_sibling")],
+            &["status", "--json"]
+        )
+        .1
+    )
+    .is_empty());
 }
 
 #[test]
@@ -437,20 +593,31 @@ fn the_same_portable_session_capsule_launches_in_tmux_and_cmux() {
     let plan = compiled_rust_dev_plan(&home);
     let server = TmuxServer::start();
     let tmux = MuxTmux::new(SystemRunner::new()).with_socket(&server.socket);
-    let binding = tmux.ensure_session(&plan, ReconcileMode::default()).unwrap();
+    let binding = tmux
+        .ensure_session(&plan, ReconcileMode::default())
+        .unwrap();
     assert!(binding.created);
     let cmux = Cmux::new(cmux_full_runner()).with_identity(session_identity("ses_rustdev"));
-    let cmux_binding = cmux.ensure_session(&plan, ReconcileMode::default()).unwrap();
+    let cmux_binding = cmux
+        .ensure_session(&plan, ReconcileMode::default())
+        .unwrap();
     assert!(cmux_binding.created);
 }
 
 fn compiled_rust_dev_plan(fixture: &Fixture) -> SessionPlan {
-    let load = load_registry(&fixture.home.registry(SEED_SOURCE), RegistrySource::new(SEED_SOURCE)).unwrap();
+    let load = load_registry(
+        &fixture.home.registry(SEED_SOURCE),
+        RegistrySource::new(SEED_SOURCE),
+    )
+    .unwrap();
     let id = CapsuleId::parse("session/dev/rust-dev").unwrap();
     let capsule = load.catalog.get(&id).unwrap();
     let section = capsule.session().unwrap();
     let text = fs::read_to_string(capsule.root.as_ref().unwrap().join(&section.spec)).unwrap();
-    SessionSpec::from_toml_str(&text).unwrap().compile().unwrap()
+    SessionSpec::from_toml_str(&text)
+        .unwrap()
+        .compile()
+        .unwrap()
 }
 
 #[test]
@@ -458,17 +625,44 @@ fn a_failed_projection_leaves_the_previous_generation_active() {
     let home = fresh_home();
     trust(&home, &["skill/rust/rust-review"]);
     let project = project_repo();
-    let (o, v) = run_json(&home, project.path(), &[], &["enable", "skill/rust/rust-review", "--scope", "project", "--json"]);
+    let (o, v) = run_json(
+        &home,
+        project.path(),
+        &[],
+        &[
+            "enable",
+            "skill/rust/rust-review",
+            "--scope",
+            "project",
+            "--json",
+        ],
+    );
     expect_ok(&o, &v, "enable rust-review at project scope");
     let service = Service::open(home.home.clone(), project.path(), no_env).unwrap();
     let view = service.resolved().clone();
     let roots = service.snapshot().capsule_roots();
-    let ctx_dir = home.home.ensure_context_dir(&view.context.context_id).unwrap();
-    let good = ClaudeAdapter::new(ctx_dir.join("claude")).plan(&resolved_context(&view, &roots)).unwrap();
-    let g1 = GenerationBuilder::new().build(&ctx_dir, &view, &[good]).unwrap().commit(None).unwrap();
-    let doomed = ProjectionPlan::new(TargetId::claude_code(), ActivationEffect::live()).with_item(ProjectionItem::link("/no/such/payload/rust-review", ".claude/skills/rust-review").unwrap());
-    assert!(GenerationBuilder::new().build(&ctx_dir, &view, &[doomed]).is_err());
-    assert_eq!(generation::current(&ctx_dir).unwrap().as_ref(), Some(&g1.id));
+    let ctx_dir = home
+        .home
+        .ensure_context_dir(&view.context.context_id)
+        .unwrap();
+    let good = ClaudeAdapter::new(ctx_dir.join("claude"))
+        .plan(&resolved_context(&view, &roots))
+        .unwrap();
+    let g1 = GenerationBuilder::new()
+        .build(&ctx_dir, &view, &[good])
+        .unwrap()
+        .commit(None)
+        .unwrap();
+    let doomed = ProjectionPlan::new(TargetId::claude_code(), ActivationEffect::live()).with_item(
+        ProjectionItem::link("/no/such/payload/rust-review", ".claude/skills/rust-review").unwrap(),
+    );
+    assert!(GenerationBuilder::new()
+        .build(&ctx_dir, &view, &[doomed])
+        .is_err());
+    assert_eq!(
+        generation::current(&ctx_dir).unwrap().as_ref(),
+        Some(&g1.id)
+    );
 }
 
 #[test]
@@ -476,13 +670,34 @@ fn a_claude_session_receives_a_session_specific_skill_projection_after_restart()
     let home = fresh_home();
     trust(&home, &["skill/rust/rust-review"]);
     let project = project_repo();
-    let (o, v) = run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_claudehas")], &["enable", "skill/rust/rust-review", "--scope", "session", "--json"]);
+    let (o, v) = run_json(
+        &home,
+        project.path(),
+        &[("AIKIT_SESSION_ID", "ses_claudehas")],
+        &[
+            "enable",
+            "skill/rust/rust-review",
+            "--scope",
+            "session",
+            "--json",
+        ],
+    );
     expect_ok(&o, &v, "enable the skill in the Claude session");
-    let svc = Service::open(home.home.clone(), project.path(), env_map(&[("AIKIT_SESSION_ID", "ses_claudehas")])).unwrap();
+    let svc = Service::open(
+        home.home.clone(),
+        project.path(),
+        env_map(&[("AIKIT_SESSION_ID", "ses_claudehas")]),
+    )
+    .unwrap();
     let view = svc.resolved().clone();
     let roots = svc.snapshot().capsule_roots();
-    let ctx_dir = home.home.ensure_context_dir(&view.context.context_id).unwrap();
-    let plan = ClaudeAdapter::new(ctx_dir.join("claude")).plan(&resolved_context(&view, &roots)).unwrap();
+    let ctx_dir = home
+        .home
+        .ensure_context_dir(&view.context.context_id)
+        .unwrap();
+    let plan = ClaudeAdapter::new(ctx_dir.join("claude"))
+        .plan(&resolved_context(&view, &roots))
+        .unwrap();
     assert!(plan.items.iter().any(|i| item_targets(i, "rust-review")));
 }
 
@@ -491,15 +706,57 @@ fn an_isolated_codex_task_gets_an_isolated_projection_and_a_shared_task_falls_ba
     let home = fresh_home();
     trust(&home, &["skill/rust/rust-review"]);
     let project = project_repo();
-    let (o, v) = run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_codextask")], &["enable", "skill/rust/rust-review", "--scope", "session", "--json"]);
+    let (o, v) = run_json(
+        &home,
+        project.path(),
+        &[("AIKIT_SESSION_ID", "ses_codextask")],
+        &[
+            "enable",
+            "skill/rust/rust-review",
+            "--scope",
+            "session",
+            "--json",
+        ],
+    );
     expect_ok(&o, &v, "enable the session-only skill");
-    let svc_iso = Service::open(home.home.clone(), project.path(), env_map(&[("AIKIT_SESSION_ID", "ses_codextask"), ("AIKIT_ISOLATION", "worktree"), ("AIKIT_TASK", "review")])).unwrap();
+    let svc_iso = Service::open(
+        home.home.clone(),
+        project.path(),
+        env_map(&[
+            ("AIKIT_SESSION_ID", "ses_codextask"),
+            ("AIKIT_ISOLATION", "worktree"),
+            ("AIKIT_TASK", "review"),
+        ]),
+    )
+    .unwrap();
     let iso_tree = TempDir::new().unwrap();
-    let plan_iso = CodexAdapter::new(iso_tree.path()).plan(&resolved_context(&svc_iso.resolved().clone(), &svc_iso.snapshot().capsule_roots())).unwrap();
-    assert!(matches!(plan_iso.effect, ActivationEffect::NextSessionOnly { .. }));
-    let svc_sh = Service::open(home.home.clone(), project.path(), env_map(&[("AIKIT_SESSION_ID", "ses_codextask"), ("AIKIT_ISOLATION", "shared"), ("AIKIT_TASK", "review")])).unwrap();
+    let plan_iso = CodexAdapter::new(iso_tree.path())
+        .plan(&resolved_context(
+            &svc_iso.resolved().clone(),
+            &svc_iso.snapshot().capsule_roots(),
+        ))
+        .unwrap();
+    assert!(matches!(
+        plan_iso.effect,
+        ActivationEffect::NextSessionOnly { .. }
+    ));
+    let svc_sh = Service::open(
+        home.home.clone(),
+        project.path(),
+        env_map(&[
+            ("AIKIT_SESSION_ID", "ses_codextask"),
+            ("AIKIT_ISOLATION", "shared"),
+            ("AIKIT_TASK", "review"),
+        ]),
+    )
+    .unwrap();
     let shared_tree = TempDir::new().unwrap();
-    let plan_sh = CodexAdapter::new(shared_tree.path()).plan(&resolved_context(&svc_sh.resolved().clone(), &svc_sh.snapshot().capsule_roots())).unwrap();
+    let plan_sh = CodexAdapter::new(shared_tree.path())
+        .plan(&resolved_context(
+            &svc_sh.resolved().clone(),
+            &svc_sh.snapshot().capsule_roots(),
+        ))
+        .unwrap();
     assert!(matches!(plan_sh.effect, ActivationEffect::Brokered { .. }));
 }
 
@@ -509,10 +766,30 @@ fn a_hook_bypass_is_visible_and_recorded() {
     trust(&home, &["hook/guard/project-boundary"]);
     let project = project_repo();
     let ctx: &[(&str, &str)] = &[("AIKIT_CONTEXT_ID", "ctx_bypasscase")];
-    let (o, v) = run_json(&home, project.path(), ctx, &["enable", "hook/guard/project-boundary", "--scope", "project", "--json"]);
+    let (o, v) = run_json(
+        &home,
+        project.path(),
+        ctx,
+        &[
+            "enable",
+            "hook/guard/project-boundary",
+            "--scope",
+            "project",
+            "--json",
+        ],
+    );
     expect_ok(&o, &v, "enable the boundary gate");
     let deny = br#"{"tool":"Bash","tool_input":{"command":"cat /etc/passwd"}}"#;
-    assert_eq!(json_of(&aikit_stdin(&home, project.path(), ctx, &["hook", "dispatch", "claude", "PreToolUse", "--json"], deny))["data"]["allowed"], false);
+    assert_eq!(
+        json_of(&aikit_stdin(
+            &home,
+            project.path(),
+            ctx,
+            &["hook", "dispatch", "claude", "PreToolUse", "--json"],
+            deny
+        ))["data"]["allowed"],
+        false
+    );
 }
 
 #[test]
@@ -521,12 +798,25 @@ fn a_captured_secret_never_enters_the_ordinary_registry() {
     let leaky = "#!/bin/sh\nexport AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n";
     let candidate_id = {
         let index = Index::open(&home.home.database()).unwrap();
-        let outcome = Inbox::new(&home.home, &index).capture(Capture::new("leaky deploy", leaky)).unwrap();
+        let outcome = Inbox::new(&home.home, &index)
+            .capture(Capture::new("leaky deploy", leaky))
+            .unwrap();
         assert_eq!(outcome.candidate.state, CandidateState::Quarantined);
         outcome.candidate.id.clone()
     };
     let cwd = TempDir::new().unwrap();
-    let (out, v) = run_json(&home, cwd.path(), &[], &["promote", &candidate_id, "--id", "script/captured/leaky", "--json"]);
+    let (out, v) = run_json(
+        &home,
+        cwd.path(),
+        &[],
+        &[
+            "promote",
+            &candidate_id,
+            "--id",
+            "script/captured/leaky",
+            "--json",
+        ],
+    );
     assert!(!out.status.success());
     assert_eq!(v["error"]["code"], "inbox.quarantined");
 }
@@ -537,20 +827,43 @@ fn promotion_completes_without_hand_writing_a_manifest() {
     let clean = "#!/bin/sh\nexec cargo fmt --all\n";
     let candidate_id = {
         let index = Index::open(&home.home.database()).unwrap();
-        Inbox::new(&home.home, &index).capture(Capture::new("format all", clean)).unwrap().candidate.id
+        Inbox::new(&home.home, &index)
+            .capture(Capture::new("format all", clean))
+            .unwrap()
+            .candidate
+            .id
     };
     let cwd = TempDir::new().unwrap();
-    let (out, v) = run_json(&home, cwd.path(), &[], &["promote", &candidate_id, "--id", "script/captured/fmt-all", "--json"]);
+    let (out, v) = run_json(
+        &home,
+        cwd.path(),
+        &[],
+        &[
+            "promote",
+            &candidate_id,
+            "--id",
+            "script/captured/fmt-all",
+            "--json",
+        ],
+    );
     expect_ok(&out, &v, "promote the clean candidate");
-    assert!(fs::read_to_string(v["data"]["manifest"].as_str().unwrap()).unwrap().contains("Generated by `aikit promote`"));
+    assert!(fs::read_to_string(v["data"]["manifest"].as_str().unwrap())
+        .unwrap()
+        .contains("Generated by `aikit promote`"));
 }
 
 #[test]
 fn the_entire_cli_works_without_a_running_daemon() {
     let home = fresh_home();
     let project = project_repo();
-    assert!(!aikit(&home, project.path(), &[], &["daemon"]).status.success());
-    for args in [&["status", "--json"][..], &["search", "rust", "--json"][..], &["context", "current", "--json"][..]] {
+    assert!(!aikit(&home, project.path(), &[], &["daemon"])
+        .status
+        .success());
+    for args in [
+        &["status", "--json"][..],
+        &["search", "rust", "--json"][..],
+        &["context", "current", "--json"][..],
+    ] {
         assert!(aikit(&home, project.path(), &[], args).status.success());
     }
 }
@@ -559,7 +872,12 @@ fn the_entire_cli_works_without_a_running_daemon() {
 fn aikit_task_spawn_review_creates_no_git_worktree_and_shares_the_session_tree() {
     let home = fresh_home();
     let project = project_repo();
-    let (out, v) = run_json(&home, project.path(), &[], &["task", "spawn", "review", "--json"]);
+    let (out, v) = run_json(
+        &home,
+        project.path(),
+        &[],
+        &["task", "spawn", "review", "--json"],
+    );
     expect_ok(&out, &v, "task spawn review");
     assert_eq!(v["data"]["isolation"], "shared");
 }
@@ -568,7 +886,12 @@ fn aikit_task_spawn_review_creates_no_git_worktree_and_shares_the_session_tree()
 fn aikit_task_spawn_review_worktree_creates_one() {
     let home = fresh_home();
     let project = project_repo();
-    let (out, v) = run_json(&home, project.path(), &[], &["task", "spawn", "review", "--worktree", "--json"]);
+    let (out, v) = run_json(
+        &home,
+        project.path(),
+        &[],
+        &["task", "spawn", "review", "--worktree", "--json"],
+    );
     expect_ok(&out, &v, "task spawn review --worktree");
     assert_eq!(v["data"]["isolation"], "worktree");
 }
@@ -578,7 +901,18 @@ fn the_codex_projection_differs_between_a_shared_and_a_worktree_task_and_says_wh
     let home = fresh_home();
     trust(&home, &["skill/rust/rust-review"]);
     let project = project_repo();
-    let (o, v) = run_json(&home, project.path(), &[("AIKIT_SESSION_ID", "ses_wtcodex")], &["enable", "skill/rust/rust-review", "--scope", "session", "--json"]);
+    let (o, v) = run_json(
+        &home,
+        project.path(),
+        &[("AIKIT_SESSION_ID", "ses_wtcodex")],
+        &[
+            "enable",
+            "skill/rust/rust-review",
+            "--scope",
+            "session",
+            "--json",
+        ],
+    );
     expect_ok(&o, &v, "enable the session-only skill");
 }
 
@@ -586,10 +920,24 @@ fn the_codex_projection_differs_between_a_shared_and_a_worktree_task_and_says_wh
 fn task_close_refuses_to_delete_a_dirty_worktree_without_force() {
     let home = fresh_home();
     let project = project_repo();
-    let v = run_json(&home, project.path(), &[], &["task", "spawn", "dirty", "--worktree", "--json"]).1;
+    let v = run_json(
+        &home,
+        project.path(),
+        &[],
+        &["task", "spawn", "dirty", "--worktree", "--json"],
+    )
+    .1;
     let wt = v["data"]["worktree"]["path"].as_str().unwrap().to_string();
     fs::write(Path::new(&wt).join("scratch.txt"), "unsaved work\n").unwrap();
-    assert!(!run_json(&home, project.path(), &[], &["task", "close", "dirty", "--json"]).0.status.success());
+    assert!(!run_json(
+        &home,
+        project.path(),
+        &[],
+        &["task", "close", "dirty", "--json"]
+    )
+    .0
+    .status
+    .success());
 }
 
 fn session_identity(session_id: &str) -> SessionIdentity {
@@ -608,7 +956,11 @@ fn plan_from_spec(src: &str) -> SessionPlan {
 }
 
 fn command_line(cmux: &Cmux<ScriptedRunner>) -> String {
-    cmux.runner().call_lines().into_iter().find(|l| l.contains("--command")).unwrap()
+    cmux.runner()
+        .call_lines()
+        .into_iter()
+        .find(|l| l.contains("--command"))
+        .unwrap()
 }
 
 fn cmux_full_runner() -> ScriptedRunner {
@@ -639,15 +991,22 @@ fn cmux_full_runner() -> ScriptedRunner {
 const CMUX_CAPABILITIES: &str = r#"{"version":"0.63.1","build":"78","commands":["new-window","new-workspace","new-split","list-panes","list-pane-surfaces","rename-tab"],"features":{"workspaces":true,"workspace_groups":true,"windows":true,"panes":true}}"#;
 const CMUX_NEW_WORKSPACE_3: &str = "OK workspace:3";
 const CMUX_NEW_WORKSPACE_4: &str = "OK workspace:4";
-const CMUX_NEW_SPLIT_5: &str = r#"{ "surface_ref": "surface:5", "pane_ref": "pane:4", "type": "terminal" }"#;
-const CMUX_NEW_SPLIT_6: &str = r#"{ "surface_ref": "surface:6", "pane_ref": "pane:5", "type": "terminal" }"#;
+const CMUX_NEW_SPLIT_5: &str =
+    r#"{ "surface_ref": "surface:5", "pane_ref": "pane:4", "type": "terminal" }"#;
+const CMUX_NEW_SPLIT_6: &str =
+    r#"{ "surface_ref": "surface:6", "pane_ref": "pane:5", "type": "terminal" }"#;
 const CMUX_IDENTIFY: &str = r#"{"workspace":{"id":"workspace:2","title":"rust-dev · code"},"surface":{"id":"surface:7","type":"terminal"},"window":{"id":"window:1"},"host":"localhost","cwd":"/work/payments"}"#;
 
 #[test]
 fn an_unreviewed_script_is_refused_without_confirmation_even_when_inactive() {
     let fixture = fresh_home();
     let repo = project_repo();
-    let (out, v) = run_json(&fixture, repo.path(), &[], &["run", "script/rust/cargo-nextest", "--json"]);
+    let (out, v) = run_json(
+        &fixture,
+        repo.path(),
+        &[],
+        &["run", "script/rust/cargo-nextest", "--json"],
+    );
     assert!(!out.status.success());
     assert_eq!(v["error"]["code"], "trust.required");
 }
@@ -656,7 +1015,12 @@ fn an_unreviewed_script_is_refused_without_confirmation_even_when_inactive() {
 fn confirming_crosses_the_gate_so_the_failure_is_no_longer_about_trust() {
     let fixture = fresh_home();
     let repo = project_repo();
-    let out = aikit(&fixture, repo.path(), &[], &["run", "script/rust/cargo-nextest", "--confirm", "--json"]);
+    let out = aikit(
+        &fixture,
+        repo.path(),
+        &[],
+        &["run", "script/rust/cargo-nextest", "--confirm", "--json"],
+    );
     if let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) {
         assert_ne!(v["error"]["code"], "trust.required");
     }
@@ -667,7 +1031,12 @@ fn a_reviewed_script_needs_no_confirmation() {
     let fixture = fresh_home();
     let repo = project_repo();
     trust(&fixture, &["script/rust/cargo-nextest"]);
-    let out = aikit(&fixture, repo.path(), &[], &["run", "script/rust/cargo-nextest", "--json"]);
+    let out = aikit(
+        &fixture,
+        repo.path(),
+        &[],
+        &["run", "script/rust/cargo-nextest", "--json"],
+    );
     if let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) {
         assert_ne!(v["error"]["code"], "trust.required");
     }

@@ -374,7 +374,11 @@ pub fn glob_matches(pattern: &str, value: &str) -> bool {
         if pattern[0] == b'*' {
             // `**` crosses `/`; a single `*` does not.
             let crosses = pattern.len() > 1 && pattern[1] == b'*';
-            let rest = if crosses { &pattern[2..] } else { &pattern[1..] };
+            let rest = if crosses {
+                &pattern[2..]
+            } else {
+                &pattern[1..]
+            };
             let mut index = 0;
             loop {
                 if matches(rest, &value[index..]) {

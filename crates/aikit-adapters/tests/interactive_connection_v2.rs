@@ -69,14 +69,8 @@ fn stable_acp_wrapper_preserves_string_permission_ids_and_exact_selected_outcome
         )
         .unwrap();
     assert_eq!(response.payload["id"], "permission-7");
-    assert_eq!(
-        response.payload["result"]["outcome"]["outcome"],
-        "selected"
-    );
-    assert_eq!(
-        response.payload["result"]["outcome"]["optionId"],
-        "allow"
-    );
+    assert_eq!(response.payload["result"]["outcome"]["outcome"], "selected");
+    assert_eq!(response.payload["result"]["outcome"]["optionId"], "allow");
 }
 
 #[test]
@@ -123,10 +117,7 @@ fn invalid_permission_choice_does_not_consume_the_pending_request() {
         )
         .unwrap();
     assert_eq!(response.payload["id"], "permission-retry");
-    assert_eq!(
-        response.payload["result"]["outcome"]["optionId"],
-        "allow"
-    );
+    assert_eq!(response.payload["result"]["outcome"]["optionId"], "allow");
 }
 
 #[test]

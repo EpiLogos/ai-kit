@@ -88,7 +88,10 @@ mod tests {
             standing_flow_authored_wiki_source(&standing, SourceAuthority::Authored).unwrap();
         assert_eq!(projection.subject_ref.as_str(), "flow:thread:42");
         assert_eq!(projection.source_ref.as_str(), "source:flow:42");
-        assert_eq!(projection.source_revision.as_ref().unwrap().as_str(), "rev-42");
+        assert_eq!(
+            projection.source_revision.as_ref().unwrap().as_str(),
+            "rev-42"
+        );
         assert_eq!(projection.source_authority, SourceAuthority::Authored);
         assert_eq!(projection.relations.len(), 2);
         assert_eq!(projection.relations[0].relation, "references");

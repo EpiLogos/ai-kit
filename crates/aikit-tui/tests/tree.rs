@@ -13,7 +13,11 @@ fn compatibility_tree_is_a_read_only_expand_and_filter_projection() {
         },
         "active",
     );
-    let root = Node::branch(NodeKind::Root(Root::Kinds), "1 catalogued", vec![capability]);
+    let root = Node::branch(
+        NodeKind::Root(Root::Kinds),
+        "1 catalogued",
+        vec![capability],
+    );
     let mut state = TreeState::new(vec![root]);
 
     assert_eq!(state.rows().len(), 1);
@@ -23,7 +27,11 @@ fn compatibility_tree_is_a_read_only_expand_and_filter_projection() {
 
     state.filter = "review".into();
     let rows = state.rows();
-    assert_eq!(rows.len(), 2, "filter preserves the path to a matching child");
+    assert_eq!(
+        rows.len(),
+        2,
+        "filter preserves the path to a matching child"
+    );
 }
 
 #[test]
@@ -34,7 +42,11 @@ fn compatibility_tree_rendering_has_no_staging_or_mutation_markers() {
         },
         "active",
     );
-    let root = Node::branch(NodeKind::Root(Root::Kinds), "1 catalogued", vec![capability]);
+    let root = Node::branch(
+        NodeKind::Root(Root::Kinds),
+        "1 catalogued",
+        vec![capability],
+    );
     let mut state = TreeState::new(vec![root]);
     state.expanded.insert("kinds".into());
 

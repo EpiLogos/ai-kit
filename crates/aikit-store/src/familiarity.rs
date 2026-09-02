@@ -146,7 +146,11 @@ pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
         let (event_id, kind, arguments_json) = row.map_err(db_error)?;
         let arguments: BTreeMap<String, String> =
             serde_json::from_str(&arguments_json).map_err(|error| {
-                decode_error(&kind, &event_id, format!("invalid event arguments: {error}"))
+                decode_error(
+                    &kind,
+                    &event_id,
+                    format!("invalid event arguments: {error}"),
+                )
             })?;
         let payload = arguments.get(FAMILIARITY_PAYLOAD_KEY).ok_or_else(|| {
             decode_error(
@@ -158,9 +162,8 @@ pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
 
         match kind.as_str() {
             FAMILIARITY_OBSERVATION_EVENT => {
-                let stored: StoredObservation = serde_json::from_str(payload).map_err(|error| {
-                    decode_error(&kind, &event_id, error.to_string())
-                })?;
+                let stored: StoredObservation = serde_json::from_str(payload)
+                    .map_err(|error| decode_error(&kind, &event_id, error.to_string()))?;
                 if stored.schema != FAMILIARITY_SCHEMA_VERSION {
                     return Ok(invalidated(stored.schema, &kind, &event_id));
                 }
@@ -168,9 +171,8 @@ pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
                 observation_events += 1;
             }
             FAMILIARITY_RESET_EVENT => {
-                let stored: StoredReset = serde_json::from_str(payload).map_err(|error| {
-                    decode_error(&kind, &event_id, error.to_string())
-                })?;
+                let stored: StoredReset = serde_json::from_str(payload)
+                    .map_err(|error| decode_error(&kind, &event_id, error.to_string()))?;
                 if stored.schema != FAMILIARITY_SCHEMA_VERSION {
                     return Ok(invalidated(stored.schema, &kind, &event_id));
                 }
@@ -217,7 +219,10 @@ fn encode<T: Serialize>(value: &T) -> Result<String> {
 fn decode_error(kind: &str, event_id: &str, detail: impl Into<String>) -> AikitError {
     AikitError::new(
         "familiarity.event_decode_failed",
-        format!("could not decode {kind} event {event_id}: {}", detail.into()),
+        format!(
+            "could not decode {kind} event {event_id}: {}",
+            detail.into()
+        ),
     )
     .with("event_kind", kind)
     .with("event_id", event_id)

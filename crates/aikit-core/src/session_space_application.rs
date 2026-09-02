@@ -249,7 +249,10 @@ impl SessionSpaceAuthoredState {
         if self.version != SESSION_SPACE_APPLICATION_VERSION {
             return Err(AikitError::new(
                 "session_space.unsupported_application_version",
-                format!("unsupported SessionSpace application state {}", self.version),
+                format!(
+                    "unsupported SessionSpace application state {}",
+                    self.version
+                ),
             ));
         }
         for (project, context) in &self.project_contexts {
@@ -326,17 +329,31 @@ pub enum SessionSpaceMutation {
 #[serde(tag = "operation", rename_all = "kebab-case")]
 pub enum SessionSpaceOperation {
     List,
-    Show { space: SessionSpaceRef },
-    Open { space: SessionSpaceRef },
+    Show {
+        space: SessionSpaceRef,
+    },
+    Open {
+        space: SessionSpaceRef,
+    },
     Discover {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<ProjectRef>,
     },
-    Mutate { intent: Box<SessionSpaceMutation> },
-    Reconcile { space: SessionSpaceRef },
-    Reconstruct { space: SessionSpaceRef },
-    Explain { space: SessionSpaceRef },
-    History { space: SessionSpaceRef },
+    Mutate {
+        intent: Box<SessionSpaceMutation>,
+    },
+    Reconcile {
+        space: SessionSpaceRef,
+    },
+    Reconstruct {
+        space: SessionSpaceRef,
+    },
+    Explain {
+        space: SessionSpaceRef,
+    },
+    History {
+        space: SessionSpaceRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,7 +445,11 @@ fn apply_intent(
             let member = ResourceRef::parse(project.as_str())?;
             state.definition.projects.remove(&member);
             state.project_contexts.remove(project);
-            if state.focus.as_ref().is_some_and(|focus| focus.target == member) {
+            if state
+                .focus
+                .as_ref()
+                .is_some_and(|focus| focus.target == member)
+            {
                 state.focus = None;
             }
             changed.push(change("project-context", project.as_str(), "unbound"));
@@ -470,7 +491,11 @@ fn apply_intent(
         }
         SessionSpaceMutation::DetachSurface { surface } => {
             state.surfaces.remove(surface);
-            if state.focus.as_ref().is_some_and(|focus| focus.target == *surface) {
+            if state
+                .focus
+                .as_ref()
+                .is_some_and(|focus| focus.target == *surface)
+            {
                 state.focus = None;
             }
             changed.push(change(
@@ -647,7 +672,9 @@ pub fn reconstruct_session_space(
                 "transport/provider reconnection observed, but AgentSession continuity is unproven"
                     .into(),
             ),
-            _ => Some("authored AgentSession attachment intent restored; live session absent".into()),
+            _ => {
+                Some("authored AgentSession attachment intent restored; live session absent".into())
+            }
         };
         relations.push(ReconstructionRelation {
             relation: "agent-session".into(),
@@ -787,9 +814,7 @@ mod tests {
                 depth: 0,
                 origin: origin.into(),
             }],
-            context_sources: vec![
-                ResourceRef::parse(&format!("context-source/{name}")).unwrap(),
-            ],
+            context_sources: vec![ResourceRef::parse(&format!("context-source/{name}")).unwrap()],
             host: None,
         };
         let bytes = serde_json::to_vec(&basis).unwrap();
@@ -853,12 +878,9 @@ mod tests {
     #[test]
     fn staging_is_write_free_and_basis_moves_only_in_proposed_state() {
         let id = SessionSpaceRef::parse("session-space/stage").unwrap();
-        let current = stage_session_space(
-            None,
-            SessionSpaceMutation::Create { id, label: None },
-        )
-        .unwrap()
-        .proposed;
+        let current = stage_session_space(None, SessionSpaceMutation::Create { id, label: None })
+            .unwrap()
+            .proposed;
         let before = current.clone();
         let preview = stage_session_space(
             Some(&current),

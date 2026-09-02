@@ -1,8 +1,6 @@
 use aikit_core::resource::ResourceRef;
 use aikit_core::{explain_history_actions_for, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF};
-use aikit_tui::{
-    keyboard_invoke_action, mouse_invoke_action, stage_action, NavigationIntent,
-};
+use aikit_tui::{keyboard_invoke_action, mouse_invoke_action, stage_action, NavigationIntent};
 
 fn r(raw: &str) -> ResourceRef {
     ResourceRef::parse(raw).unwrap()
@@ -15,8 +13,14 @@ fn explain_and_history_are_the_same_actions_through_keyboard_and_mouse() {
 
     assert_eq!(explain.action.as_str(), EXPLAIN_ACTION_REF);
     assert_eq!(history.action.as_str(), HISTORY_ACTION_REF);
-    assert_eq!(keyboard_invoke_action(&explain), mouse_invoke_action(&explain));
-    assert_eq!(keyboard_invoke_action(&history), mouse_invoke_action(&history));
+    assert_eq!(
+        keyboard_invoke_action(&explain),
+        mouse_invoke_action(&explain)
+    );
+    assert_eq!(
+        keyboard_invoke_action(&history),
+        mouse_invoke_action(&history)
+    );
     assert_eq!(
         keyboard_invoke_action(&explain),
         NavigationIntent::InvokeAction {

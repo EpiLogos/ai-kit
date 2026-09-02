@@ -282,12 +282,15 @@ impl WikiObject {
         })?;
         require_profile(object)?;
         reject_provider_identity(object)?;
-        let kind = object.get("object").and_then(Value::as_str).ok_or_else(|| {
-            AikitError::new(
-                "knowledge.wiki_invalid_object",
-                "OKF Wiki object requires an `object` discriminator",
-            )
-        })?;
+        let kind = object
+            .get("object")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "knowledge.wiki_invalid_object",
+                    "OKF Wiki object requires an `object` discriminator",
+                )
+            })?;
         let mut payload = value.clone();
         payload
             .as_object_mut()
@@ -438,12 +441,15 @@ fn initial_revision() -> u64 {
 }
 
 fn require_profile(object: &serde_json::Map<String, Value>) -> Result<()> {
-    let profile = object.get("profile").and_then(Value::as_str).ok_or_else(|| {
-        AikitError::new(
-            "knowledge.wiki_profile_unsupported",
-            format!("Wiki object must declare profile `{OKF_WIKI_PROFILE}`"),
-        )
-    })?;
+    let profile = object
+        .get("profile")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            AikitError::new(
+                "knowledge.wiki_profile_unsupported",
+                format!("Wiki object must declare profile `{OKF_WIKI_PROFILE}`"),
+            )
+        })?;
     if profile == OKF_WIKI_PROFILE {
         Ok(())
     } else {
@@ -487,7 +493,10 @@ fn validate_profile(profile: &str, extensions: &BTreeMap<String, Value>) -> Resu
         "db_id",
         "dbId",
     ];
-    if let Some(key) = FORBIDDEN.into_iter().find(|key| extensions.contains_key(*key)) {
+    if let Some(key) = FORBIDDEN
+        .into_iter()
+        .find(|key| extensions.contains_key(*key))
+    {
         return Err(AikitError::new(
             "knowledge.wiki_provider_identity_forbidden",
             format!("provider/index field `{key}` cannot define canonical Wiki identity"),
@@ -566,13 +575,17 @@ mod tests {
         }"#;
         let objects = parse_wiki_objects(fixture).unwrap();
         assert_eq!(objects.len(), 3);
-        let WikiObject::Edge(edge) = &objects[1] else { panic!("expected edge") };
+        let WikiObject::Edge(edge) = &objects[1] else {
+            panic!("expected edge")
+        };
         assert_eq!(edge.origin, WikiEdgeOrigin::Inferred);
         assert!(matches!(
             edge.provenance[0].source_revision,
             Some(SemanticRevision::Number(2))
         ));
-        let WikiObject::Frame(frame) = &objects[2] else { panic!("expected frame") };
+        let WikiObject::Frame(frame) = &objects[2] else {
+            panic!("expected frame")
+        };
         frame.constellations[0].validate().unwrap();
         assert_eq!(
             frame.constellations[0].returns[0].ground_ref.as_str(),

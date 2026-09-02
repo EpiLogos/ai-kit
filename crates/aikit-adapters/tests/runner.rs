@@ -55,7 +55,9 @@ fn a_missing_binary_is_an_error_with_a_stable_code() {
 
     assert_eq!(error.code(), "mux.command_spawn_failed");
     assert!(
-        error.message().contains("/definitely/not/a/binary/aikit-test"),
+        error
+            .message()
+            .contains("/definitely/not/a/binary/aikit-test"),
         "the message must name the binary, got: {}",
         error.message()
     );
@@ -83,7 +85,11 @@ fn the_system_runner_can_be_given_a_working_directory_and_environment() {
     );
 
     let marker = runner
-        .run(&argv(&["/bin/sh", "-c", "printf %s \"$AIKIT_TEST_MARKER\""]))
+        .run(&argv(&[
+            "/bin/sh",
+            "-c",
+            "printf %s \"$AIKIT_TEST_MARKER\"",
+        ]))
         .unwrap();
     assert_eq!(marker.stdout, "present");
 }
@@ -122,7 +128,10 @@ fn a_scripted_runner_answers_from_recorded_responses_and_records_what_was_asked(
 
     assert_eq!(
         runner.calls(),
-        vec![argv(&["cmux", "version"]), argv(&["cmux", "list-workspaces"])]
+        vec![
+            argv(&["cmux", "version"]),
+            argv(&["cmux", "list-workspaces"])
+        ]
     );
 }
 
