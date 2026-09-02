@@ -549,7 +549,7 @@ pub struct ResolveCandidate {
     pub horizons: BTreeSet<AddressHorizon>,
     pub exact: bool,
     /// Primary textual/exact relevance. Derived ranking signals remain separate
-    /// so learned use cannot numerically overpower relevance or authorship.
+    /// so contextual or learned use cannot numerically overpower relevance.
     pub score: i64,
     #[serde(default)]
     pub ranking: super::ResolveRankingSignals,
@@ -588,10 +588,9 @@ impl ResolvePath {
     }
 }
 
-/// Resolve one expression against the heterogeneous Resource field.  Exact
-/// `ResourceRef` identity wins; otherwise deterministic shallow text relevance is
-/// used.  Deep knowledge/search providers can subsequently resolve the returned
-/// canonical refs without changing expression identity.
+/// Resolve one expression against the heterogeneous Resource field. Exact
+/// ResourceRef/text relevance remains primary; authored and present-context
+/// evidence then order otherwise comparable candidates before learned familiarity.
 pub fn resolve_expression(
     expression: &ResolveExpression,
     resources: &dyn ResourceIndex,
@@ -619,6 +618,8 @@ pub fn resolve_expression(
                     .unwrap_or_default()
                     .cmp(&left.ranking.authored_preference_rank.unwrap_or_default())
             })
+            .then_with(|| right.ranking.current_project.cmp(&left.ranking.current_project))
+            .then_with(|| right.ranking.active_in_context.cmp(&left.ranking.active_in_context))
             .then_with(|| {
                 right
                     .ranking
@@ -801,20 +802,55 @@ fn text_score(query: &str, record: &ResourceRecord) -> Option<i64> {
     if id == query || name == query {
         return Some(90_000);
     }
+
+    for annotation in ["aikit.search-exports", "aikit.search-tags"] {
+        if let Some(handles) = record.descriptor.annotations.get(annotation) {
+            for handle in handles.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+                let handle = handle.to_lowercase();
+                if handle == query {
+                    return Some(90_000);
+                }
+            }
+        }
+    }
+
+    let mut score = None;
     if id.starts_with(query) || name.starts_with(query) {
-        return Some(20_000 - query.len() as i64);
+        score = score.max(Some(20_000 - query.len() as i64));
     }
     if id.contains(query) || name.contains(query) {
-        return Some(10_000 - query.len() as i64);
+        score = score.max(Some(10_000 - query.len() as i64));
     }
     if description.contains(query) {
-        return Some(5_000 - query.len() as i64);
+        score = score.max(Some(5_000 - query.len() as i64));
     }
+    for annotation in ["aikit.search-exports", "aikit.search-tags"] {
+        if let Some(handles) = record.descriptor.annotations.get(annotation) {
+            for handle in handles.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+                let handle = handle.to_lowercase();
+                if handle.starts_with(query) {
+                    score = score.max(Some(20_000 - query.len() as i64));
+                } else if handle.contains(query) {
+                    score = score.max(Some(10_000 - query.len() as i64));
+                }
+            }
+        }
+    }
+    if score.is_some() {
+        return score;
+    }
+
     let terms = query.split_whitespace().collect::<Vec<_>>();
-    (!terms.is_empty()
-        && terms
+    let annotations_match = |term: &&str| {
+        ["aikit.search-exports", "aikit.search-tags"]
             .iter()
-            .all(|term| id.contains(term) || name.contains(term) || description.contains(term)))
+            .filter_map(|key| record.descriptor.annotations.get(*key))
+            .any(|value| value.to_lowercase().contains(**term))
+    };
+    (!terms.is_empty()
+        && terms.iter().all(|term| {
+            id.contains(term) || name.contains(term) || description.contains(term) || annotations_match(term)
+        }))
     .then_some(1_000 - terms.len() as i64)
 }
 
@@ -1246,6 +1282,27 @@ mod tests {
         assert!(ActionRef::parse(ResourceRef::parse("action:verify").unwrap(), &resources).is_ok());
         assert!(
             ActionRef::parse(ResourceRef::parse("method:orient").unwrap(), &resources).is_err()
+        );
+    }
+
+    #[test]
+    fn search_handles_are_part_of_resolve_without_changing_identity() {
+        let mut descriptor = ResourceDescriptor::new(
+            ResourceRef::parse("script/cargo-nextest").unwrap(),
+            ResourceKind::Capability,
+            "Cargo nextest",
+            "test runner",
+        );
+        descriptor
+            .annotations
+            .insert("aikit.search-exports".into(), "nextest,nx".into());
+        let mut resources = MemoryResourceIndex::default();
+        resources.insert(ResourceRecord::new(descriptor));
+
+        let path = resolve_search("nx", &resources, 10);
+        assert_eq!(
+            path.destination().map(ResourceRef::as_str),
+            Some("script/cargo-nextest")
         );
     }
 
