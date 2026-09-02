@@ -16,7 +16,7 @@
 //!   registries/<name>/capsules/... profiles/...
 //!   profiles/<group>/<name>.toml
 //!   inbox/{ready,quarantine,rejected}/
-//!   state/{aikit.sqlite3,contexts/,sessions/,locks/,trust/}
+//!   state/{aikit.sqlite3,contexts/,sessions/,locks/,trust/,credentials/}
 //!   cache/
 //!   logs/events.jsonl
 //! ```
@@ -51,10 +51,7 @@ impl AikitHome {
     /// The pure half of [`Self::discover`], so the precedence rule is testable
     /// without mutating the process environment — which is a global, and which
     /// two tests running in parallel would fight over.
-    pub fn from_env_values(
-        aikit_home: Option<&OsStr>,
-        user_home: Option<&OsStr>,
-    ) -> Result<Self> {
+    pub fn from_env_values(aikit_home: Option<&OsStr>, user_home: Option<&OsStr>) -> Result<Self> {
         if let Some(explicit) = aikit_home.filter(|v| !v.is_empty()) {
             return Ok(Self::at(PathBuf::from(explicit)));
         }
@@ -148,6 +145,12 @@ impl AikitHome {
         self.state().join("trust")
     }
 
+    /// Provider-neutral credential binding metadata. Raw secrets never live here;
+    /// native providers retain them in their own secure stores.
+    pub fn credentials(&self) -> PathBuf {
+        self.state().join("credentials")
+    }
+
     pub fn event_log(&self) -> PathBuf {
         self.logs().join("events.jsonl")
     }
@@ -204,6 +207,7 @@ impl AikitHome {
             self.sessions(),
             self.locks(),
             self.trust_dir(),
+            self.credentials(),
             self.cache(),
             self.logs(),
         ] {
