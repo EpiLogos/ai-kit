@@ -1,0 +1,54 @@
+{
+  "contract_id": "ql.shape",
+  "version": "1.0.0",
+  "upstream": {
+    "repository": "EpiLogos/QL-MEF",
+    "issue": 85,
+    "path": "fixtures/kernel/ql-shape-contract-v1.json",
+    "blob": "9056a460a9ce25e727cab83e6db25355e60a0b85"
+  },
+  "structural_contract_version": "2.0.0",
+  "whole_anchor": "0/1",
+  "pair_families": {
+    "A": [[0, 1], [2, 3], [4, 5]],
+    "B": [[1, 2], [3, 4], [5, 0]],
+    "C": [[0, 5], [1, 4], [2, 3]]
+  },
+  "d_completion": {
+    "D1": 2,
+    "D2": 3,
+    "D3": 4
+  },
+  "four_by_four": {
+    "source": "D3",
+    "coordinate_order": ["left/direct", "right/direct", "left/conjugate", "right/conjugate"],
+    "axis_cardinality": 4,
+    "address_cardinality": 16,
+    "shape_ref_template": "ql:shape:1.0.0:4x4:{family}:{pair_index}"
+  },
+  "six_by_six": {
+    "row_face": "direct",
+    "column_face": "conjugate",
+    "position_order": [0, 1, 2, 3, 4, 5],
+    "axis_cardinality": 6,
+    "address_cardinality": 36,
+    "shape_ref": "ql:shape:1.0.0:6x6:direct-conjugate"
+  },
+  "relational_sixfold": {
+    "expression": "6 / 6-prime -> 6+6-prime",
+    "pairing": "same-position direct/conjugate",
+    "positions": [0, 1, 2, 3, 4, 5],
+    "site_cardinality": 6,
+    "direct_basis_ref": "ql:shape:1.0.0:sixfold:direct",
+    "conjugate_basis_ref": "ql:shape:1.0.0:sixfold:conjugate",
+    "shape_ref": "ql:shape:1.0.0:6-plus-6-prime",
+    "operator_ref": "ql:shape:1.0.0:generation:same-position-direct-conjugate",
+    "return_through": "0/1"
+  },
+  "laws": {
+    "shape_address_asserts_semantic_relation": false,
+    "pair_family_provenance_is_load_bearing": true,
+    "partial_shapes_are_valid_disclosed_wholes": true,
+    "generated_semantic_content_is_client_attributable": true
+  }
+}
