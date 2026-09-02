@@ -200,6 +200,7 @@ mod tests {
                 catalog_revision: "r1".into(),
                 resolution_hash: "hash".into(),
             },
+            versioned_world: None,
             warnings: Vec::new(),
         }
     }
