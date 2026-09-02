@@ -306,7 +306,13 @@ pub trait PaletteBackend {
             .map(|intent| intent.capsule)
             .collect();
         let mut index = ResourceSearchIndex::default();
-        let current = vec![
+        let current_context = vec![
+            NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                .with_detail("part of the resolved operating context"),
+        ];
+        let current_project = vec![
+            NavigationEvidence::new(NavigationEvidenceClass::CurrentProject)
+                .with_detail("the Project currently being inhabited"),
             NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
                 .with_detail("part of the resolved operating context"),
         ];
@@ -335,7 +341,7 @@ pub trait PaletteBackend {
                         name,
                         description,
                     )),
-                    current.clone(),
+                    current_project.clone(),
                 );
                 project_subject = Some(resource);
             }
@@ -350,18 +356,30 @@ pub trait PaletteBackend {
                         self.context().host.clone(),
                         format!("current host · {}", self.context().platform),
                     )),
-                    current.clone(),
+                    current_context.clone(),
                 );
             }
         }
 
         // Package-backed capabilities are projected directly from the resolved
-        // catalogue. `SearchDoc` is intentionally absent from this path.
-        for id in self.view().catalog_index.keys() {
+        // catalogue. Search handles remain annotations on the same ResourceRef;
+        // they do not create a second search/package identity.
+        for (id, entry) in &self.view().catalog_index {
             let Ok(resource) = ResourceRef::parse(&id.to_string()) else {
                 continue;
             };
             let mut evidence = Vec::new();
+            if self
+                .view()
+                .declared
+                .get(id)
+                .is_some_and(|declared| matches!(declared.scope, ScopeKind::Project | ScopeKind::ProjectLocal))
+            {
+                evidence.push(
+                    NavigationEvidence::new(NavigationEvidenceClass::CurrentProject)
+                        .with_detail("declared by the current Project scope"),
+                );
+            }
             if self.view().is_active(id) {
                 evidence.push(
                     NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
@@ -374,15 +392,30 @@ pub trait PaletteBackend {
                         .with_detail("present in recent run history"),
                 );
             }
+            let description = if entry.description.trim().is_empty() {
+                format!("package-backed {} capability", id.kind().as_str())
+            } else {
+                entry.description.clone()
+            };
             let mut descriptor = ResourceDescriptor::new(
                 resource.clone(),
                 ResourceKind::Capability,
-                id.leaf(),
-                format!("package-backed {} capability", id.kind().as_str()),
+                entry.name.clone(),
+                description,
             );
             descriptor
                 .annotations
                 .insert("capsule-kind".into(), id.kind().as_str().into());
+            if !entry.exports.is_empty() {
+                descriptor
+                    .annotations
+                    .insert("aikit.search-exports".into(), entry.exports.join(","));
+            }
+            if !entry.tags.is_empty() {
+                descriptor
+                    .annotations
+                    .insert("aikit.search-tags".into(), entry.tags.join(","));
+            }
             index.insert_resource(ResourceRecord::new(descriptor), evidence);
             capability_subjects.push(resource);
         }

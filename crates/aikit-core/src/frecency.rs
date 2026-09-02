@@ -101,15 +101,7 @@ impl Candidate {
     /// Recency-decayed successful uses. **Success, not invocation**: a script you
     /// run and abort five times a day should not become your top match.
     pub fn frecency(&self, half_life: std::time::Duration) -> f32 {
-        if self.usage.successful_runs == 0 {
-            return 0.0;
-        }
-        let Some(age) = self.usage.last_success_age else {
-            return 0.0;
-        };
-        let half_life = half_life.as_secs_f32().max(f32::EPSILON);
-        let decay = 0.5f32.powf(age.as_secs_f32() / half_life);
-        self.usage.successful_runs as f32 * decay
+        self.usage.frecency(half_life)
     }
 
     /// Which rung of the ladder decided this candidate against `other`.
