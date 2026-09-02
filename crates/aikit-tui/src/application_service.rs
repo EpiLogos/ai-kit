@@ -33,6 +33,7 @@ use crate::application::{
     ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService,
 };
 use crate::backend::{PaletteBackend, Toggle};
+use crate::session_space_service::install_session_space_navigation_resources;
 use crate::staging::is_on;
 
 /// One V2 application service over the already-resolved backend.
@@ -58,6 +59,8 @@ impl<'a> ApplicationService<'a> {
 
     fn navigation_index(&self) -> Result<ResourceSearchIndex> {
         let mut index = self.backend.navigation_index();
+        let session_spaces = self.backend.session_space_navigation()?;
+        install_session_space_navigation_resources(&mut index, &session_spaces);
         install_explain_history_actions(&mut index)?;
         if let Some(familiarity) = self.backend.familiarity()? {
             index.apply_familiarity(

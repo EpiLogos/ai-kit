@@ -26,6 +26,8 @@ pub enum ResourceKind {
     Contract,
     /// Encounter/operation locus (CLI, tool, TUI region, API, trajectory, etc.).
     Surface,
+    /// Durable semantic workspace identity; provider/native workspaces remain bindings/evidence.
+    SessionSpace,
     Host,
     ExecutionOffer,
     KnowledgeSpace,
@@ -54,6 +56,7 @@ impl ResourceKind {
             Self::Component => "component",
             Self::Contract => "contract",
             Self::Surface => "surface",
+            Self::SessionSpace => "session-space",
             Self::Host => "host",
             Self::ExecutionOffer => "execution-offer",
             Self::KnowledgeSpace => "knowledge-space",
@@ -90,7 +93,9 @@ pub enum SourceState {
     /// A source reference was imported, but AIKit has not observed its current availability.
     Unresolved,
     Available,
-    Unavailable { reason: String },
+    Unavailable {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,7 +116,9 @@ pub enum ProviderState {
     /// A provider reference was declared, but AIKit has not resolved a live offer yet.
     Unresolved,
     Available,
-    Unavailable { reason: String },
+    Unavailable {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,7 +135,9 @@ pub enum Eligibility {
     #[default]
     Undetermined,
     Eligible,
-    Ineligible { reasons: Vec<String> },
+    Ineligible {
+        reasons: Vec<String>,
+    },
 }
 
 impl Eligibility {
