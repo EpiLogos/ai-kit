@@ -1,4 +1,4 @@
-name: AIKit158 clean shape-parity fix
+name: AIKit158 reconcile current main and verify shape parity
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  fix-verify-commit:
+  reconcile-verify-commit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -22,22 +22,35 @@ jobs:
         run: |
           rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
           rustup default 1.98.0
-      - name: Remove stale import and verify shape parity
+      - name: Reconcile current main
         shell: bash
         run: |
           set -euo pipefail
-          sed -i '/^use serde_json::Value;$/d' crates/aikit-core/src/knowledge_wiki_shape.rs
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin main
+          git merge --no-edit origin/main
+      - name: Keep JSON fixture typing test-only and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/aikit-core/src/knowledge_wiki_shape.rs')
+          source = path.read_text()
+          source = source.replace('use serde_json::Value;\n', '#[cfg(test)]\nuse serde_json::Value;\n', 1)
+          path.write_text(source)
+          PY
           cargo fmt --all
-          cargo clippy --locked -p aikit-core --all-targets -- -D warnings
-          cargo test --locked -p aikit-core
-      - name: Commit clean branch result and remove migration workflow
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --locked --workspace
+      - name: Commit clean result and remove migration workflow
         shell: bash
         run: |
           set -euo pipefail
           git rm .github/workflows/aikit158-clean-fix.yml
           git add crates/aikit-core/src/knowledge_wiki_shape.rs
-          git diff --cached --quiet && exit 0
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m '[AIKIT158] Verify QL shape-parity implementation'
+          if ! git diff --cached --quiet; then
+            git commit -m '[AIKIT158] Reconcile main and verify QL shape parity'
+          fi
           git push origin HEAD:agent/158-ql-shape-parity
