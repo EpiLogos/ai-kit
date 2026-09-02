@@ -815,10 +815,10 @@ fn sha1(input: &[u8]) -> [u8; 20] {
     let mut h3 = 0x10325476u32;
     let mut h4 = 0xC3D2E1F0u32;
 
-    for chunk in message.chunks_exact(64) {
+    for chunk in message.as_chunks::<64>().0 {
         let mut words = [0u32; 80];
-        for (index, bytes) in chunk.chunks_exact(4).enumerate() {
-            words[index] = u32::from_be_bytes(bytes.try_into().expect("four-byte SHA-1 word"));
+        for (index, bytes) in chunk.as_chunks::<4>().0.iter().enumerate() {
+            words[index] = u32::from_be_bytes(*bytes);
         }
         for index in 16..80 {
             words[index] = (words[index - 3]

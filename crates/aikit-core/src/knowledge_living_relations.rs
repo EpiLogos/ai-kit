@@ -779,7 +779,7 @@ mod tests {
         );
         assert_eq!(integrated_through_cursor(&first), Some(8));
         assert_eq!(
-            integrating_readings(&resource("wiki:node:purpose"), &[first.clone()]),
+            integrating_readings(&resource("wiki:node:purpose"), std::slice::from_ref(&first)),
             vec![resource("wiki:reading:whole")]
         );
 
