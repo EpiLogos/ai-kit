@@ -387,7 +387,7 @@ mod tests {
         let source = result
             .sources
             .iter()
-            .find(|source| source.relative_path == PathBuf::from("AGENTS.md"))
+            .find(|source| source.relative_path == Path::new("AGENTS.md"))
             .unwrap();
         match &source.classification {
             LocalSourceClassification::Classified(evidence) => {

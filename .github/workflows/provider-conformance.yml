@@ -3,6 +3,9 @@ name: Provider conformance
 on:
   pull_request:
     paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
       - 'crates/aikit-adapters/**'
       - 'provider-fixtures/**'
       - '.github/workflows/provider-conformance.yml'
