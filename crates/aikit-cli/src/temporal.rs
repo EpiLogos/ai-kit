@@ -72,7 +72,6 @@ pub fn process_central_root(project_root: Option<&Path>) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use aikit_adapters::runner::ScriptedRunner;
-    use aikit_core::hooks::HookDecision;
     use serde_json::json;
 
     fn success(data: serde_json::Value) -> String {
@@ -80,7 +79,17 @@ mod tests {
     }
 
     fn decision(kind: HookEventKind) -> HookDecision {
-        HookDecision::allowed(kind, json!({}))
+        HookDecision {
+            event: kind,
+            allowed: true,
+            denial: None,
+            payload: json!({}),
+            injected: vec![],
+            warnings: vec![],
+            steps: vec![],
+            groups: vec![],
+            bypass_consumed: false,
+        }
     }
 
     #[test]
@@ -110,9 +119,9 @@ mod tests {
             "automatic_agent_or_model_invocation":false
         }));
         let runner = ScriptedRunner::new()
-            .on_sequence("projectcentral.now.inspect", &[&now, &now])
-            .on_sequence("projectcentral.flow.list", &[&list, &list])
-            .on_sequence("projectcentral.flow.read", &[&read_a, &read_b]);
+            .sequence("projectcentral.now.inspect", &[&now, &now])
+            .sequence("projectcentral.flow.list", &[&list, &list])
+            .sequence("projectcentral.flow.read", &[&read_a, &read_b]);
         let central = Path::new("/home/me/Central");
         let project = Path::new("/home/me/Central/Work/example");
 
@@ -132,7 +141,7 @@ mod tests {
 
     #[test]
     fn central_failure_is_visible_but_never_becomes_hook_denial() {
-        let runner = ScriptedRunner::new().on_failure("projectcentral.now.inspect", 9, "owner unavailable");
+        let runner = ScriptedRunner::new().failing("projectcentral.now.inspect", 9, "owner unavailable");
         let event = HookEvent::new("codex", HookEventKind::PreCompact, json!({}));
         let mut result = decision(HookEventKind::PreCompact);
         reground(
