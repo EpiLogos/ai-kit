@@ -249,6 +249,20 @@ pub trait PaletteBackend {
         None
     }
 
+    /// SessionSpace state that may participate in ordinary Resource navigation.
+    ///
+    /// Navigation-only/fake backends deliberately have no canonical AIKit home,
+    /// so they contribute no SessionSpace resources. Explicit SessionSpace
+    /// operations retain their stronger contract and still fail when persistence
+    /// is unavailable. A backend with another legitimate source can override this
+    /// projection without fabricating `AikitHome`.
+    fn session_space_navigation(&self) -> Result<Vec<SessionSpaceAuthoredState>> {
+        if self.application_home().is_none() {
+            return Ok(Vec::new());
+        }
+        self.session_space_list()
+    }
+
     /// Historical package-search documents retained for the public package/CLI
     /// compatibility surface only. Canonical V2 navigation does not call this.
     fn documents(&self) -> Vec<SearchDoc>;

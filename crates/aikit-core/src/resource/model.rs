@@ -26,6 +26,8 @@ pub enum ResourceKind {
     Contract,
     /// Encounter/operation locus (CLI, tool, TUI region, API, trajectory, etc.).
     Surface,
+    /// Durable semantic workspace identity; provider/native workspaces remain bindings/evidence.
+    SessionSpace,
     Host,
     ExecutionOffer,
     KnowledgeSpace,
@@ -54,6 +56,7 @@ impl ResourceKind {
             Self::Component => "component",
             Self::Contract => "contract",
             Self::Surface => "surface",
+            Self::SessionSpace => "session-space",
             Self::Host => "host",
             Self::ExecutionOffer => "execution-offer",
             Self::KnowledgeSpace => "knowledge-space",
