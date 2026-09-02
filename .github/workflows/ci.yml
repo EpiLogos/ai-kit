@@ -19,10 +19,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Install Rust 1.88
+      - name: Install Rust 1.98
         run: |
-          rustup toolchain install 1.88.0 --profile minimal --component clippy
-          rustup default 1.88.0
+          rustup toolchain install 1.98.0 --profile minimal --component clippy
+          rustup default 1.98.0
       - name: Install tmux
         run: brew install tmux
       - name: Verify repository
@@ -49,10 +49,10 @@ jobs:
         package: [aikit-core, aikit-store, aikit-adapters, aikit-tui, aikit-cli]
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Install Rust 1.88
+      - name: Install Rust 1.98
         run: |
-          rustup toolchain install 1.88.0 --profile minimal
-          rustup default 1.88.0
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
       - name: Test ${{ matrix.package }}
         shell: bash
         run: |
@@ -73,10 +73,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Install Rust 1.88 with clippy
+      - name: Install Rust 1.98 with clippy
         run: |
-          rustup toolchain install 1.88.0 --profile minimal --component clippy
-          rustup default 1.88.0
+          rustup toolchain install 1.98.0 --profile minimal --component clippy
+          rustup default 1.98.0
       - name: Clippy all targets
         shell: bash
         run: |
@@ -101,10 +101,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Install Rust 1.88
+      - name: Install Rust 1.98
         run: |
-          rustup toolchain install 1.88.0 --profile minimal
-          rustup default 1.88.0
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -121,10 +121,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Install Rust 1.88
+      - name: Install Rust 1.98
         run: |
-          rustup toolchain install 1.88.0 --profile minimal
-          rustup default 1.88.0
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
       - uses: actions/setup-node@v6
         with:
           node-version: "24.11.0"
@@ -152,10 +152,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Install Rust 1.88
+      - name: Install Rust 1.98
         run: |
-          rustup toolchain install 1.88.0 --profile minimal
-          rustup default 1.88.0
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
       - uses: actions/setup-node@v6
         with:
           node-version: "24.11.0"
