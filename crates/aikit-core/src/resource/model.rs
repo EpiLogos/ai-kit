@@ -90,7 +90,9 @@ pub enum SourceState {
     /// A source reference was imported, but AIKit has not observed its current availability.
     Unresolved,
     Available,
-    Unavailable { reason: String },
+    Unavailable {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,7 +113,9 @@ pub enum ProviderState {
     /// A provider reference was declared, but AIKit has not resolved a live offer yet.
     Unresolved,
     Available,
-    Unavailable { reason: String },
+    Unavailable {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,7 +132,9 @@ pub enum Eligibility {
     #[default]
     Undetermined,
     Eligible,
-    Ineligible { reasons: Vec<String> },
+    Ineligible {
+        reasons: Vec<String>,
+    },
 }
 
 impl Eligibility {

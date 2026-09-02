@@ -159,7 +159,9 @@ fn one_session_space_keeps_identity_across_several_provider_relations_and_isolat
         "component/reference/harness-native",
     ] {
         assert_eq!(
-            runtime.activate_component(&lease, &r(id), &mut driver).unwrap(),
+            runtime
+                .activate_component(&lease, &r(id), &mut driver)
+                .unwrap(),
             SessionSpaceActivationState::Active
         );
     }
@@ -218,7 +220,11 @@ fn one_session_space_keeps_identity_across_several_provider_relations_and_isolat
         .iter()
         .filter_map(|connection| connection.native_session_id.clone())
         .collect::<BTreeSet<_>>();
-    assert_eq!(native_ids.len(), 4, "native identities remain distinct evidence");
+    assert_eq!(
+        native_ids.len(),
+        4,
+        "native identities remain distinct evidence"
+    );
     let canonical_surfaces = before
         .surfaces
         .iter()

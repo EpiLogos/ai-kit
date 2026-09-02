@@ -59,7 +59,7 @@ use serde::{Deserialize, Serialize};
 use aikit_core::error::err;
 use aikit_core::projection::{MaterializationMode, ProjectionItem, ProjectionPlan};
 use aikit_core::{
-    ActivationEffect, AikitError, GenerationId, Isolation, Result, ResolvedView, TargetId,
+    ActivationEffect, AikitError, GenerationId, Isolation, ResolvedView, Result, TargetId,
 };
 
 use crate::events::Timestamp;
@@ -379,8 +379,8 @@ impl GenerationBuilder {
 
         let mut notes: Vec<String> = degradation.into_iter().collect();
         for plan in plans {
-            if let ActivationEffect::Brokered { reason } | ActivationEffect::Unsupported { reason } =
-                &plan.effect
+            if let ActivationEffect::Brokered { reason }
+            | ActivationEffect::Unsupported { reason } = &plan.effect
             {
                 notes.push(format!("{}: {reason}", plan.target));
             }
@@ -512,7 +512,10 @@ fn validate(staging: &Path, plans: &[ProjectionPlan]) -> Result<()> {
     read_lock(staging).map_err(|e| {
         AikitError::new(
             "generation.validation_failed",
-            format!("the generation's own lock file is not re-readable: {}", e.message()),
+            format!(
+                "the generation's own lock file is not re-readable: {}",
+                e.message()
+            ),
         )
     })?;
 
@@ -532,7 +535,10 @@ fn validate(staging: &Path, plans: &[ProjectionPlan]) -> Result<()> {
             if fs::symlink_metadata(&path).is_err() {
                 return Err(AikitError::new(
                     "generation.validation_failed",
-                    format!("{} was planned but is not present in the built tree", path.display()),
+                    format!(
+                        "{} was planned but is not present in the built tree",
+                        path.display()
+                    ),
                 )
                 .with("path", path.display().to_string())
                 .with("target", plan.target.as_str()));
@@ -692,7 +698,9 @@ fn stale_base(expected: Option<&GenerationId>, actual: Option<&GenerationId>) ->
         format!(
             "this apply was built against generation {}, but the context is now at {}; \
              re-resolve and apply again rather than discarding the other change",
-            expected.map(|g| g.to_string()).unwrap_or_else(|| none.clone()),
+            expected
+                .map(|g| g.to_string())
+                .unwrap_or_else(|| none.clone()),
             actual.map(|g| g.to_string()).unwrap_or(none),
         ),
     )

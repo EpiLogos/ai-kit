@@ -18,8 +18,7 @@ use crate::working_environment::{
     WorkingEnvironmentCapabilities, WorkingEnvironmentObservation, WorkingEnvironmentProvider,
 };
 
-pub const WORKING_ENVIRONMENT_CONTROL_VERSION: &str =
-    "aikit.working-environment-control/v1";
+pub const WORKING_ENVIRONMENT_CONTROL_VERSION: &str = "aikit.working-environment-control/v1";
 
 /// Explicit relation between an already-opened connection-native session and a
 /// caller-owned canonical conversation Surface. The provider is allowed to bind
@@ -66,11 +65,23 @@ pub trait AgentSessionWorkingEnvironmentProvider: WorkingEnvironmentProvider {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "operation", rename_all = "kebab-case")]
 enum ControlRequest {
-    Describe { schema: String },
-    Observe { schema: String },
-    Open { schema: String },
-    FocusSurface { schema: String, surface: ResourceRef },
-    DetachSurface { schema: String, surface: ResourceRef },
+    Describe {
+        schema: String,
+    },
+    Observe {
+        schema: String,
+    },
+    Open {
+        schema: String,
+    },
+    FocusSurface {
+        schema: String,
+        surface: ResourceRef,
+    },
+    DetachSurface {
+        schema: String,
+        surface: ResourceRef,
+    },
     AttachAgentSession {
         schema: String,
         binding: AgentSessionSurfaceBinding,
@@ -212,12 +223,14 @@ impl WorkingEnvironmentControlClient {
         })?;
 
         let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).map_err(|error| {
-            AikitError::new(
-                "working_environment.control_read_failed",
-                format!("could not read provider control response: {error}"),
-            )
-        })?;
+        BufReader::new(stream)
+            .read_line(&mut line)
+            .map_err(|error| {
+                AikitError::new(
+                    "working_environment.control_read_failed",
+                    format!("could not read provider control response: {error}"),
+                )
+            })?;
         if line.trim().is_empty() {
             return Err(AikitError::new(
                 "working_environment.control_disconnected",

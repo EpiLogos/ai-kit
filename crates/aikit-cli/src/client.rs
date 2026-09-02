@@ -32,10 +32,9 @@ fn adapter_for(service: &Service, client: &str) -> Result<(Box<dyn ClientAdapter
         .unwrap_or_else(|| PathBuf::from("."));
 
     match client {
-        "claude" | "claude-code" => Ok((
-            Box::new(ClaudeAdapter::new(ctx_dir)),
-            home.join(".claude"),
-        )),
+        "claude" | "claude-code" => {
+            Ok((Box::new(ClaudeAdapter::new(ctx_dir)), home.join(".claude")))
+        }
         "codex" => Ok((Box::new(CodexAdapter::new(tree)), home.join(".codex"))),
         "broker" => Ok((Box::new(BrokerAdapter::new()), home.join(".aikit"))),
         other => Err(AikitError::new(
@@ -76,12 +75,12 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
                 });
             }
             // An install emits configuration, never payload links.
-            other => {
-                return Err(AikitError::new(
-                    "client.unexpected_install_item",
-                    format!("the {client} adapter asked for an install item AIKit cannot stage: {other:?}"),
-                ))
-            }
+            other => return Err(AikitError::new(
+                "client.unexpected_install_item",
+                format!(
+                    "the {client} adapter asked for an install item AIKit cannot stage: {other:?}"
+                ),
+            )),
         }
     }
 

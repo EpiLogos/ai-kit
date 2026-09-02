@@ -53,11 +53,12 @@ pub fn project(view: &ResolvedView, home: &Path) -> Result<Vec<ProjectionItem>> 
 }
 
 /// The four documented bkmr variables (`docs/integrations/bkmr.md` §4).
-fn bkmr_env(
-    config: &aikit_core::profile::ConfigTable,
-    home: &Path,
-) -> Result<Vec<ProjectionItem>> {
-    let Some(db) = config.get("db").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
+fn bkmr_env(config: &aikit_core::profile::ConfigTable, home: &Path) -> Result<Vec<ProjectionItem>> {
+    let Some(db) = config
+        .get("db")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
         // The tool is active but no database is bound. That is not an error — the
         // user may be using bkmr's own config — so nothing is exported and nothing
         // is claimed.

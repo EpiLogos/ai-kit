@@ -154,12 +154,20 @@ impl VersionedWorldProvider for NativeGitProvider {
         let detached = branch.is_none();
         let upstream = self.optional(
             locator,
-            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            [
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ],
         )?;
         let (ahead, behind) = if upstream.is_some() {
-            self.optional(locator, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])?
-                .and_then(|value| parse_ahead_behind(&value))
-                .unwrap_or((0, 0))
+            self.optional(
+                locator,
+                ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+            )?
+            .and_then(|value| parse_ahead_behind(&value))
+            .unwrap_or((0, 0))
         } else {
             (0, 0)
         };
@@ -290,7 +298,9 @@ fn parse_ahead_behind(value: &str) -> Option<(u64, u64)> {
 
 fn parse_porcelain_v1_z(raw: &[u8]) -> GitWorkingState {
     let mut state = GitWorkingState::default();
-    let mut records = raw.split(|byte| *byte == 0).filter(|record| !record.is_empty());
+    let mut records = raw
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty());
     while let Some(record) = records.next() {
         if record.len() < 3 {
             continue;
@@ -302,9 +312,7 @@ fn parse_porcelain_v1_z(raw: &[u8]) -> GitWorkingState {
             state.untracked.push(path);
             continue;
         }
-        let conflicted = x == 'U'
-            || y == 'U'
-            || matches!((x, y), ('A', 'A') | ('D', 'D'));
+        let conflicted = x == 'U' || y == 'U' || matches!((x, y), ('A', 'A') | ('D', 'D'));
         if conflicted {
             state.conflicted.push(path.clone());
         } else {
@@ -337,7 +345,12 @@ fn parse_worktrees(raw: &str) -> Result<Vec<GitWorktreeRelation>> {
             } else if let Some(value) = line.strip_prefix("HEAD ") {
                 head = Some(VersionRevision::new(value));
             } else if let Some(value) = line.strip_prefix("branch ") {
-                branch = Some(value.strip_prefix("refs/heads/").unwrap_or(value).to_string());
+                branch = Some(
+                    value
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(value)
+                        .to_string(),
+                );
             } else if line == "detached" {
                 detached = true;
             } else if line.starts_with("locked") {
@@ -380,8 +393,14 @@ fn parse_history(raw: &str) -> Vec<VersionHistoryEntry> {
                 .map(VersionRevision::new)
                 .collect();
             let subject = fields.next().unwrap_or_default().to_string();
-            let author = fields.next().filter(|value| !value.is_empty()).map(str::to_string);
-            let authored_at = fields.next().filter(|value| !value.is_empty()).map(str::to_string);
+            let author = fields
+                .next()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let authored_at = fields
+                .next()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
             Some(VersionHistoryEntry {
                 revision,
                 parents,
@@ -401,7 +420,8 @@ mod tests {
 
     #[test]
     fn porcelain_parser_separates_working_states() {
-        let state = parse_porcelain_v1_z(b"M  staged.rs\0 M unstaged.rs\0?? new.rs\0UU conflict.rs\0");
+        let state =
+            parse_porcelain_v1_z(b"M  staged.rs\0 M unstaged.rs\0?? new.rs\0UU conflict.rs\0");
         assert_eq!(state.staged, vec!["staged.rs"]);
         assert_eq!(state.unstaged, vec!["unstaged.rs"]);
         assert_eq!(state.untracked, vec!["new.rs"]);
@@ -411,11 +431,18 @@ mod tests {
     #[test]
     fn native_git_reconciles_external_cli_and_manages_isolated_worktree() {
         let provider = NativeGitProvider::new().unwrap();
-        if !matches!(provider.descriptor().status, VersionedWorldProviderStatus::Available) {
+        if !matches!(
+            provider.descriptor().status,
+            VersionedWorldProviderStatus::Available
+        ) {
             return;
         }
-        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("aikit-native-git-{}-{unique}", std::process::id()));
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("aikit-native-git-{}-{unique}", std::process::id()));
         let worktree = root.with_extension("worktree");
         fs::create_dir_all(&root).unwrap();
         run(&root, ["init", "-q"]);
@@ -447,8 +474,13 @@ mod tests {
             base: reconciled.repository.head.clone(),
             branch: Some("agent/test-worktree".into()),
         };
-        let isolated = provider.create_worktree(&project, &root_str, &request).unwrap();
-        assert_eq!(isolated.repository.branch.as_deref(), Some("agent/test-worktree"));
+        let isolated = provider
+            .create_worktree(&project, &root_str, &request)
+            .unwrap();
+        assert_eq!(
+            isolated.repository.branch.as_deref(),
+            Some("agent/test-worktree")
+        );
         assert_eq!(isolated.project, project);
         provider
             .remove_worktree(&project, &root_str, &request.path)
@@ -459,7 +491,12 @@ mod tests {
     }
 
     fn run<const N: usize>(cwd: &Path, args: [&str; N]) {
-        let status = Command::new("git").arg("-C").arg(cwd).args(args).status().unwrap();
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .status()
+            .unwrap();
         assert!(status.success());
     }
 }

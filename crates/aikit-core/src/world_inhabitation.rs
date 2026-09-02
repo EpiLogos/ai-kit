@@ -257,7 +257,11 @@ impl ParticipantAddress {
     pub fn new(to: Vec<ParticipantTarget>, mentions: Vec<ParticipantTarget>) -> Result<Self> {
         let mut seen = BTreeSet::new();
         for target in to.iter().chain(mentions.iter()) {
-            let key = (target.kind, target.participant.clone(), target.address.clone());
+            let key = (
+                target.kind,
+                target.participant.clone(),
+                target.address.clone(),
+            );
             if !seen.insert(key) {
                 return Err(AikitError::new(
                     "participant_address.duplicate_target",
@@ -565,8 +569,7 @@ mod tests {
             resources: [resource("context/decision")].into_iter().collect(),
             provenance: vec!["target-session disclosure grant".into()],
         };
-        let decision =
-            decide_co_internal_read(&request(), &[invocation(true)], &[grant]).unwrap();
+        let decision = decide_co_internal_read(&request(), &[invocation(true)], &[grant]).unwrap();
         assert_eq!(decision.decision, CoInternalDecision::Allowed);
         assert_eq!(
             decision.disclosed_resources,

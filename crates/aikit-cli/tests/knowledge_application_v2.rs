@@ -126,7 +126,9 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
         );
 
         let explanation = service.knowledge_explain(&source).unwrap();
-        let detail = explanation.detail.expect("Explain carries ranking evidence");
+        let detail = explanation
+            .detail
+            .expect("Explain carries ranking evidence");
         assert_eq!(detail["ranking"]["route"]["observations"], 2);
         assert_eq!(detail["signalClasses"][0], "provider-relevance");
         assert_eq!(detail["signalClasses"][1], "frecency");

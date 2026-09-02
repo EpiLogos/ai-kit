@@ -1,14 +1,15 @@
-use aikit_adapters::{
-    SessionSpaceFileObservationProvider, SESSION_SPACE_OBSERVATION_FILE_VERSION,
+use aikit_adapters::{SessionSpaceFileObservationProvider, SESSION_SPACE_OBSERVATION_FILE_VERSION};
+use aikit_core::{
+    SessionSpaceDefinition, SessionSpaceLifecycle, SessionSpaceRef, SessionSpaceRuntime,
 };
-use aikit_core::{SessionSpaceDefinition, SessionSpaceLifecycle, SessionSpaceRef, SessionSpaceRuntime};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn runtime_publishes_real_read_model_and_external_reader_observes_new_revision() {
     let space = SessionSpaceRef::parse("session-space/local-observation-proof").unwrap();
-    let mut runtime = SessionSpaceRuntime::open(SessionSpaceDefinition::new(space.clone())).unwrap();
+    let mut runtime =
+        SessionSpaceRuntime::open(SessionSpaceDefinition::new(space.clone())).unwrap();
     let path = unique_observation_path();
 
     let publisher = SessionSpaceFileObservationProvider::publish(&path, &runtime).unwrap();
@@ -30,7 +31,8 @@ fn runtime_publishes_real_read_model_and_external_reader_observes_new_revision()
         Some(SESSION_SPACE_OBSERVATION_FILE_VERSION)
     );
     assert_eq!(
-        raw.pointer("/read_model/id").and_then(serde_json::Value::as_str),
+        raw.pointer("/read_model/id")
+            .and_then(serde_json::Value::as_str),
         Some("session-space/local-observation-proof")
     );
 

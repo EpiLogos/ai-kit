@@ -42,18 +42,33 @@ fn the_curator_proposes_review_of_stale_capabilities_and_archives_nothing() {
     index.reindex(&load).unwrap();
 
     let now = Timestamp::now();
-    ran(&index, "script/test/old", Timestamp::from_nanos(now.as_nanos() - 200 * DAY_NS));
-    ran(&index, "script/test/fresh", Timestamp::from_nanos(now.as_nanos() - DAY_NS));
+    ran(
+        &index,
+        "script/test/old",
+        Timestamp::from_nanos(now.as_nanos() - 200 * DAY_NS),
+    );
+    ran(
+        &index,
+        "script/test/fresh",
+        Timestamp::from_nanos(now.as_nanos() - DAY_NS),
+    );
 
     let report = curate(&index, &LifecycleThresholds::default(), now).unwrap();
 
-    assert_eq!(report.stale.len(), 1, "only the long-idle capability is stale");
+    assert_eq!(
+        report.stale.len(),
+        1,
+        "only the long-idle capability is stale"
+    );
     assert_eq!(report.stale[0].id, cid("script/test/old"));
 
     let item = report.published.expect("a stale tree files a report");
     assert_eq!(item.kind, InboxKind::ProcedureReport);
     assert!(item.body.contains("script/test/old"));
-    assert!(!item.body.contains("script/test/fresh"), "fresh is not flagged");
+    assert!(
+        !item.body.contains("script/test/fresh"),
+        "fresh is not flagged"
+    );
 
     // The curator only proposes: nothing was archived, the capsule is still
     // catalogued exactly as before.
@@ -83,7 +98,11 @@ fn a_healthy_tree_files_nothing() {
         .unwrap();
 
     let now = Timestamp::now();
-    ran(&index, "script/test/fresh", Timestamp::from_nanos(now.as_nanos() - DAY_NS));
+    ran(
+        &index,
+        "script/test/fresh",
+        Timestamp::from_nanos(now.as_nanos() - DAY_NS),
+    );
 
     let report = curate(&index, &LifecycleThresholds::default(), now).unwrap();
     assert!(report.stale.is_empty());
@@ -102,7 +121,11 @@ fn drift_is_detected_when_a_projected_payload_changes_and_filed_as_a_notice() {
     let index = index(tmp.path());
 
     // The projected payload is edited out of band → a new content revision B.
-    fixture.write_payload("script/test/nt", "payload/run.sh", "#!/bin/sh\necho CHANGED\n");
+    fixture.write_payload(
+        "script/test/nt",
+        "payload/run.sh",
+        "#!/bin/sh\necho CHANGED\n",
+    );
     let reloaded = load_registry(fixture.root(), RegistrySource::personal()).unwrap();
 
     let drifts = detect_drift(&resolved.view, &reloaded.catalog);

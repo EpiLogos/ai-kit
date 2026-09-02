@@ -11,17 +11,16 @@ use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use aikit_core::{
-    parse_wiki_objects, AbsenceKind, AgentWikiMaintenancePlan, AikitError,
-    ContextSourceOperation, ContextSourceProvider, ContextSourceProviderCapabilities,
-    ContextSourceProviderStatus, ContextSourceReadRequest, ProjectCentralBinding,
-    ProjectCentralProvenance, ProjectCentralSourceDescriptor, ProjectCentralSourceKind,
-    ProjectCentralStanding, ProjectCentralTreatment, ProjectCentralTruthStanding,
-    ProviderReadResult, ProviderRef, ResourceRef, ResourceSource, Result, SourceRef,
-    SourceRevision, SourceState, StructuredAbsence, CENTRAL_GROUND_RELATIONS_SCHEMA,
-    CENTRAL_PROJECT_SCHEMA, CENTRAL_ROOT_WIKI_SOURCE, CENTRAL_WIKI_PROFILE,
-    NO_AGENT_RETRIEVAL_MARKER, PROJECTCENTRAL_BINDING_VERSION, PROJECTCENTRAL_FILESYSTEM_PROVIDER,
-    PROJECTCENTRAL_GOVERNANCE_ROOT, PROJECTCENTRAL_GROUND_RELATIONS_SOURCE,
-    PROJECTCENTRAL_HUMAN_ROOT, PROJECTCENTRAL_WIKI_SOURCE,
+    parse_wiki_objects, AbsenceKind, AgentWikiMaintenancePlan, AikitError, ContextSourceOperation,
+    ContextSourceProvider, ContextSourceProviderCapabilities, ContextSourceProviderStatus,
+    ContextSourceReadRequest, ProjectCentralBinding, ProjectCentralProvenance,
+    ProjectCentralSourceDescriptor, ProjectCentralSourceKind, ProjectCentralStanding,
+    ProjectCentralTreatment, ProjectCentralTruthStanding, ProviderReadResult, ProviderRef,
+    ResourceRef, ResourceSource, Result, SourceRef, SourceRevision, SourceState, StructuredAbsence,
+    CENTRAL_GROUND_RELATIONS_SCHEMA, CENTRAL_PROJECT_SCHEMA, CENTRAL_ROOT_WIKI_SOURCE,
+    CENTRAL_WIKI_PROFILE, NO_AGENT_RETRIEVAL_MARKER, PROJECTCENTRAL_BINDING_VERSION,
+    PROJECTCENTRAL_FILESYSTEM_PROVIDER, PROJECTCENTRAL_GOVERNANCE_ROOT,
+    PROJECTCENTRAL_GROUND_RELATIONS_SOURCE, PROJECTCENTRAL_HUMAN_ROOT, PROJECTCENTRAL_WIKI_SOURCE,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -110,12 +109,18 @@ impl ProjectCentralFilesystemBinding {
 
         let project = aikit_core::ProjectRef::parse(&manifest.project_id)?;
         let manifest_source = source(&format!("source:central:{}:manifest", manifest.project_id))?;
-        let human_root = source(&format!("source:central:{}:human-root", manifest.project_id))?;
+        let human_root = source(&format!(
+            "source:central:{}:human-root",
+            manifest.project_id
+        ))?;
         let governance_root = source(&format!(
             "source:central:{}:governance-root",
             manifest.project_id
         ))?;
-        let canonical_wiki = source(&format!("source:central:{}:agent-wiki", manifest.project_id))?;
+        let canonical_wiki = source(&format!(
+            "source:central:{}:agent-wiki",
+            manifest.project_id
+        ))?;
         let native_project_root = source(&format!("source:project:{}:root", manifest.project_id))?;
 
         let mut sources = Vec::new();
@@ -202,8 +207,8 @@ impl ProjectCentralFilesystemBinding {
         }
 
         let governance_path = project_root.join(PROJECTCENTRAL_GOVERNANCE_ROOT);
-        let governance_allowed = governance_path.exists()
-            && !governance_path.join(NO_AGENT_RETRIEVAL_MARKER).exists();
+        let governance_allowed =
+            governance_path.exists() && !governance_path.join(NO_AGENT_RETRIEVAL_MARKER).exists();
         push_source(
             &mut sources,
             &mut paths,
@@ -508,12 +513,10 @@ impl ContextSourceProvider for ProjectCentralFileProvider {
         };
         let payload = match String::from_utf8(bytes) {
             Ok(payload) => payload,
-            Err(_) => {
-                return ProviderReadResult::Absent(StructuredAbsence::new(
-                    AbsenceKind::Bound,
-                    "source exists and is readable, but this text provider cannot interpret its format",
-                ))
-            }
+            Err(_) => return ProviderReadResult::Absent(StructuredAbsence::new(
+                AbsenceKind::Bound,
+                "source exists and is readable, but this text provider cannot interpret its format",
+            )),
         };
         let standing = self
             .standing
@@ -540,7 +543,10 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
     if manifest.schema != CENTRAL_PROJECT_SCHEMA {
         return Err(AikitError::new(
             "projectcentral.unsupported_schema",
-            format!("expected {CENTRAL_PROJECT_SCHEMA}, found {}", manifest.schema),
+            format!(
+                "expected {CENTRAL_PROJECT_SCHEMA}, found {}",
+                manifest.schema
+            ),
         ));
     }
     if manifest.human_source != PROJECTCENTRAL_HUMAN_ROOT {
@@ -563,7 +569,10 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn read_ground_relations(project_root: &Path, project_id: &str) -> Result<Option<GroundRelationsFile>> {
+fn read_ground_relations(
+    project_root: &Path,
+    project_id: &str,
+) -> Result<Option<GroundRelationsFile>> {
     let path = project_root.join(PROJECTCENTRAL_GROUND_RELATIONS_SOURCE);
     if !path.is_file() {
         return Ok(None);
@@ -573,7 +582,10 @@ fn read_ground_relations(project_root: &Path, project_id: &str) -> Result<Option
     let relations: GroundRelationsFile = serde_json::from_str(&input).map_err(|error| {
         AikitError::new(
             "projectcentral.ground_relations_invalid",
-            format!("{} is not valid Central ground relations: {error}", path.display()),
+            format!(
+                "{} is not valid Central ground relations: {error}",
+                path.display()
+            ),
         )
     })?;
     if relations.schema != CENTRAL_GROUND_RELATIONS_SCHEMA {
@@ -732,14 +744,7 @@ fn scan_governance_tree(
             continue;
         }
         if file_type.is_dir() {
-            scan_governance_tree(
-                project_root,
-                &path,
-                project_id,
-                sources,
-                paths,
-                standings,
-            )?;
+            scan_governance_tree(project_root, &path, project_id, sources, paths, standings)?;
             continue;
         }
         if !file_type.is_file() {
@@ -880,7 +885,7 @@ fn revision_for(path: &Path) -> Option<SourceRevision> {
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_nanos();
-    SourceRevision::parse(&format!("fs:{modified}:{}", metadata.len())).ok()
+    SourceRevision::parse(format!("fs:{modified}:{}", metadata.len())).ok()
 }
 
 fn source(raw: &str) -> Result<SourceRef> {
@@ -960,9 +965,7 @@ mod tests {
 
     fn wiki_json(title: &str, source_ref: Option<&str>) -> String {
         let provenance = source_ref
-            .map(|source| {
-                format!(r#"[{{"source_ref":"{source}","source_revision":"r1"}}]"#)
-            })
+            .map(|source| format!(r#"[{{"source_ref":"{source}","source_revision":"r1"}}]"#))
             .unwrap_or_else(|| "[]".into());
         format!(
             r#"{{"profile":"okf-wiki/v1","objects":[
@@ -1037,7 +1040,10 @@ mod tests {
         let orientation = binding.semantic.orientation().unwrap();
         assert_eq!(orientation.human_material_count, 1);
         assert_eq!(orientation.recognised_human_source_count, 2);
-        assert_eq!(orientation.ground_status, ProjectCentralGroundStatus::Established);
+        assert_eq!(
+            orientation.ground_status,
+            ProjectCentralGroundStatus::Established
+        );
         assert!(binding.semantic.sources.iter().any(|source| {
             source.kind == ProjectCentralSourceKind::HumanMaterial
                 && source.relative_path.ends_with("research/deep/purpose.md")
@@ -1094,9 +1100,18 @@ mod tests {
             .unwrap();
         assert_eq!(vision.relative_path, PathBuf::from("VISION.md"));
         assert_eq!(vision.provenance, ProjectCentralProvenance::HumanAdopted);
-        assert_eq!(vision.truth_standing, ProjectCentralTruthStanding::DesignCommitment);
-        assert_eq!(vision.treatment, ProjectCentralTreatment::RetainNativeInPlace);
-        assert_eq!(fs::read_to_string(project.join("VISION.md")).unwrap(), "Retained native human vision");
+        assert_eq!(
+            vision.truth_standing,
+            ProjectCentralTruthStanding::DesignCommitment
+        );
+        assert_eq!(
+            vision.treatment,
+            ProjectCentralTreatment::RetainNativeInPlace
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("VISION.md")).unwrap(),
+            "Retained native human vision"
+        );
     }
 
     #[test]
@@ -1225,10 +1240,9 @@ mod tests {
     fn wiki_maintenance_persists_agent_knowledge_with_provenance_and_not_human_source() {
         let (_temp, central, project) = fixture();
         let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
-        let before = fs::read_to_string(
-            project.join("ProjectCentral/user/research/deep/purpose.md"),
-        )
-        .unwrap();
+        let before =
+            fs::read_to_string(project.join("ProjectCentral/user/research/deep/purpose.md"))
+                .unwrap();
         let current = binding.load_project_wiki().unwrap();
         let source_ref = SourceRef::parse(PURPOSE_REF).unwrap();
         let update = WikiObject::Node(WikiNode {

@@ -13,15 +13,25 @@ use aikit_core::id::CapsuleId;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeKind {
     Root(Root),
-    Set { name: String, observed: bool },
-    Group { label: String },
-    Capability { id: CapsuleId },
+    Set {
+        name: String,
+        observed: bool,
+    },
+    Group {
+        label: String,
+    },
+    Capability {
+        id: CapsuleId,
+    },
     HookStep {
         capsule: CapsuleId,
         phase: String,
         position: usize,
     },
-    Entry { label: String, detail: String },
+    Entry {
+        label: String,
+        detail: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -159,9 +169,7 @@ impl TreeState {
             return true;
         }
         let needle = self.filter.to_lowercase();
-        if path.to_lowercase().contains(&needle)
-            || node.summary.to_lowercase().contains(&needle)
-        {
+        if path.to_lowercase().contains(&needle) || node.summary.to_lowercase().contains(&needle) {
             return true;
         }
         node.children

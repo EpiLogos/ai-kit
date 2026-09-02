@@ -33,8 +33,14 @@ fn a_wide_terminal_shows_the_list_and_the_preview_at_once() {
     let panes = layout.split(Rect::new(0, 0, 120, 20));
     let preview = panes.preview.expect("a wide layout has a preview pane");
 
-    assert!(panes.list.width >= 50, "the list must stay readable: {panes:?}");
-    assert!(preview.width >= 30, "a preview narrower than this explains nothing");
+    assert!(
+        panes.list.width >= 50,
+        "the list must stay readable: {panes:?}"
+    );
+    assert!(
+        preview.width >= 30,
+        "a preview narrower than this explains nothing"
+    );
     assert_eq!(
         panes.list.x + panes.list.width,
         preview.x,
@@ -129,7 +135,10 @@ fn a_capability_active_only_through_a_dependency_is_not_shown_as_declared() {
         g.declared(Declared::Undeclared),
         g.declared(Declared::Enabled)
     );
-    assert_eq!(g.effective(DocStatus::Active), g.effective(DocStatus::Active));
+    assert_eq!(
+        g.effective(DocStatus::Active),
+        g.effective(DocStatus::Active)
+    );
 }
 
 #[test]
@@ -143,11 +152,21 @@ fn every_glyph_in_a_set_is_distinct_so_no_two_states_look_alike() {
     for set in [Glyphs::unicode(), Glyphs::ascii()] {
         let mut seen = std::collections::BTreeSet::new();
         for d in [Declared::Enabled, Declared::Disabled, Declared::Undeclared] {
-            assert!(seen.insert(set.declared(d)), "duplicate declared glyph for {d:?}");
+            assert!(
+                seen.insert(set.declared(d)),
+                "duplicate declared glyph for {d:?}"
+            );
         }
         let mut seen = std::collections::BTreeSet::new();
-        for s in [DocStatus::Active, DocStatus::Inactive, DocStatus::Unavailable] {
-            assert!(seen.insert(set.effective(s)), "duplicate effective glyph for {s:?}");
+        for s in [
+            DocStatus::Active,
+            DocStatus::Inactive,
+            DocStatus::Unavailable,
+        ] {
+            assert!(
+                seen.insert(set.effective(s)),
+                "duplicate effective glyph for {s:?}"
+            );
         }
     }
 }
@@ -159,7 +178,11 @@ fn the_ascii_fallback_carries_the_same_information_without_a_single_non_ascii_by
     for d in [Declared::Enabled, Declared::Disabled, Declared::Undeclared] {
         glyphs.push(ascii.declared(d));
     }
-    for s in [DocStatus::Active, DocStatus::Inactive, DocStatus::Unavailable] {
+    for s in [
+        DocStatus::Active,
+        DocStatus::Inactive,
+        DocStatus::Unavailable,
+    ] {
         glyphs.push(ascii.effective(s));
     }
     glyphs.push(ascii.staged());
@@ -215,7 +238,10 @@ fn an_unavailable_row_carries_the_reason_core_gave_and_not_a_paraphrase() {
         aikit_tui::layout::state_note(DocStatus::Unavailable, Some(&reason)),
         "unavailable — this revision has not been reviewed"
     );
-    assert_eq!(aikit_tui::layout::state_note(DocStatus::Active, None), "active");
+    assert_eq!(
+        aikit_tui::layout::state_note(DocStatus::Active, None),
+        "active"
+    );
     assert_eq!(
         aikit_tui::layout::state_note(DocStatus::Inactive, None),
         "inactive"

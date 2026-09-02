@@ -30,6 +30,7 @@ blake3 = { workspace = true }
 ulid = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
+crossterm = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -37,4 +38,3 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 serde_json = { workspace = true }
 ratatui = { workspace = true }
-crossterm = { workspace = true }

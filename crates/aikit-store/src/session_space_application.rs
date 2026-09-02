@@ -284,15 +284,19 @@ impl SessionSpaceApplicationStore {
         if file.state.id() != space {
             return Err(AikitError::new(
                 "session_space.identity_mismatch",
-                format!("{} contains SessionSpace {}", path.display(), file.state.id()),
+                format!(
+                    "{} contains SessionSpace {}",
+                    path.display(),
+                    file.state.id()
+                ),
             ));
         }
         Ok(file)
     }
 
     fn read_file_at(&self, path: &Path) -> Result<SessionSpaceCanonicalFile> {
-        let bytes = fs::read(path)
-            .map_err(|error| io_error("session_space.read_failed", path, &error))?;
+        let bytes =
+            fs::read(path).map_err(|error| io_error("session_space.read_failed", path, &error))?;
         let file: SessionSpaceCanonicalFile = serde_json::from_slice(&bytes).map_err(|error| {
             AikitError::new(
                 "session_space.invalid_state",
@@ -303,7 +307,11 @@ impl SessionSpaceApplicationStore {
         if file.version != SESSION_SPACE_STORE_VERSION {
             return Err(AikitError::new(
                 "session_space.unsupported_store_version",
-                format!("{} uses unsupported version {}", path.display(), file.version),
+                format!(
+                    "{} uses unsupported version {}",
+                    path.display(),
+                    file.version
+                ),
             ));
         }
         file.state.validate()?;
@@ -377,7 +385,9 @@ fn validate_basis(
 }
 
 fn space_key(space: &SessionSpaceRef) -> String {
-    let digest = blake3::hash(space.to_string().as_bytes()).to_hex().to_string();
+    let digest = blake3::hash(space.to_string().as_bytes())
+        .to_hex()
+        .to_string();
     digest[..24].to_string()
 }
 
@@ -464,12 +474,13 @@ mod tests {
             .stage(
                 Some(&id),
                 SessionSpaceMutation::AttachSurface {
-                    attachment: aikit_core::session_space_application::SessionSpaceSurfaceAttachmentIntent {
-                        surface: ResourceRef::parse("surface/editor").unwrap(),
-                        component: None,
-                        purpose: Some("primary editing surface".into()),
-                        provenance: vec!["authored".into()],
-                    },
+                    attachment:
+                        aikit_core::session_space_application::SessionSpaceSurfaceAttachmentIntent {
+                            surface: ResourceRef::parse("surface/editor").unwrap(),
+                            component: None,
+                            purpose: Some("primary editing surface".into()),
+                            provenance: vec!["authored".into()],
+                        },
                 },
             )
             .unwrap();

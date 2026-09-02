@@ -48,7 +48,9 @@ fn run() -> Result<()> {
     provider.detach_agent_session(&agent_session)?;
     let detached = provider.observe()?;
     if detached.canonical_native_id(&agent_session).is_some()
-        || detached.canonical_native_id(&conversation_surface).is_some()
+        || detached
+            .canonical_native_id(&conversation_surface)
+            .is_some()
     {
         return Err(AikitError::new(
             "working_environment.probe_detach_failed",
@@ -81,7 +83,9 @@ fn run() -> Result<()> {
     provider.focus_surface(&conversation_surface)?;
     provider.detach_surface(&conversation_surface)?;
     let surface_detached = provider.observe()?;
-    if surface_detached.canonical_native_id(&agent_session).is_some()
+    if surface_detached
+        .canonical_native_id(&agent_session)
+        .is_some()
         || surface_detached
             .canonical_native_id(&conversation_surface)
             .is_some()
@@ -107,9 +111,9 @@ fn binding(
 ) -> Result<AgentSessionSurfaceBinding> {
     let mut session = NativeSessionBinding::unbound(native_session_id, opened_as)
         .bind_agent_session(agent_session.clone());
-    session.provenance.push(
-        "explicit connection-native session supplied by aikit.connection-adapter/v1".into(),
-    );
+    session
+        .provenance
+        .push("explicit connection-native session supplied by aikit.connection-adapter/v1".into());
     AgentSessionSurfaceBinding::new(session, surface.clone())
 }
 
