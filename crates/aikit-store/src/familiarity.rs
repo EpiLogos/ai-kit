@@ -1,11 +1,13 @@
 //! Durable familiarity evidence on AIKit's existing append-only event log.
 //!
 //! Familiarity is derived operational memory, not canonical resource state. We
-//! therefore persist `resource-use` observations and explicit reset events in the
-//! same `usage_events` stream that already backs History/usage evidence, then
-//! reconstruct the learned-accessibility store by replay. Unknown familiarity
-//! schemas explicitly invalidate only the learned replay; unrelated events and
-//! canonical Resource identities remain untouched.
+//! persist explicit `resource-use` observations and reset events in the same
+//! `usage_events` stream that already owns successful Run evidence, then rebuild
+//! one learned-accessibility store by replaying both forms in temporal order.
+//! Successful Runs therefore remain useful navigation evidence without a second
+//! frecency store or scorer; failed/denied/skipped Runs never become familiarity.
+//! Unknown familiarity schemas explicitly invalidate only the learned replay;
+//! unrelated events and canonical Resource identities remain untouched.
 
 use std::collections::BTreeMap;
 
@@ -13,8 +15,8 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
 use aikit_core::{
-    AikitError, FamiliarityObservation, FamiliarityStore, ForgetScope, Result,
-    FAMILIARITY_SCHEMA_VERSION,
+    AikitError, FamiliarityContext, FamiliarityObservation, FamiliarityStore, ForgetScope,
+    ResourceRef, Result, FAMILIARITY_SCHEMA_VERSION,
 };
 
 use crate::{Event, EventAction, Index, Timestamp};
@@ -22,6 +24,8 @@ use crate::{Event, EventAction, Index, Timestamp};
 pub const FAMILIARITY_OBSERVATION_EVENT: &str = "resource-use";
 pub const FAMILIARITY_RESET_EVENT: &str = "familiarity-reset";
 const FAMILIARITY_PAYLOAD_KEY: &str = "familiarity";
+const RUN_EVENT: &str = "run";
+const SUCCESS_OUTCOME: &str = "success";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredObservation {
@@ -39,6 +43,8 @@ struct StoredReset {
 pub enum FamiliarityReplay {
     Loaded {
         store: FamiliarityStore,
+        /// Every use observation admitted to learned accessibility: explicit
+        /// `resource-use` observations plus successful legacy/native Runs.
         observation_events: usize,
         reset_events: usize,
         observations_removed_by_resets: usize,
@@ -111,27 +117,34 @@ pub fn append_familiarity_reset(index: &Index, scope: ForgetScope, at_ms: u64) -
 
 /// Rebuild current learned accessibility from the append-only event stream.
 ///
-/// Only the two familiarity event kinds are queried, so ordinary Run/Apply/etc.
-/// evidence remains entirely independent. A schema mismatch returns
-/// `Invalidated` immediately instead of mixing old and new ranking semantics.
+/// Explicit ResourceUse events and successful Runs are two observations of the
+/// same underlying fact: an actor actually used an addressable destination. They
+/// are replayed into one [`FamiliarityStore`] in event order, so an explicit reset
+/// applies equally to both and historical Run frecency cannot survive a Forget.
+/// Failed, denied and skipped Runs are ignored. A schema mismatch in an explicit
+/// familiarity event returns `Invalidated` instead of mixing ranking semantics.
 pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
     let mut stmt = index
         .conn()
         .prepare(
-            "SELECT event_id, action, arguments
+            "SELECT event_id, timestamp_ns, action, project_id, capsule_id, outcome, arguments
              FROM usage_events
-             WHERE action IN (?1, ?2)
+             WHERE action IN (?1, ?2, ?3)
              ORDER BY timestamp_ns ASC, event_id ASC",
         )
         .map_err(db_error)?;
     let rows = stmt
         .query_map(
-            params![FAMILIARITY_OBSERVATION_EVENT, FAMILIARITY_RESET_EVENT],
+            params![FAMILIARITY_OBSERVATION_EVENT, FAMILIARITY_RESET_EVENT, RUN_EVENT],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             },
         )
@@ -143,7 +156,28 @@ pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
     let mut observations_removed_by_resets = 0usize;
 
     for row in rows {
-        let (event_id, kind, arguments_json) = row.map_err(db_error)?;
+        let (event_id, timestamp_ns, kind, project_id, capsule_id, outcome, arguments_json) =
+            row.map_err(db_error)?;
+
+        if kind == RUN_EVENT {
+            if outcome != SUCCESS_OUTCOME {
+                continue;
+            }
+            let Some(capsule_id) = capsule_id else {
+                // A run with no capsule cannot identify a Resource destination and
+                // therefore cannot contribute learned accessibility.
+                continue;
+            };
+            learned.record(run_observation(
+                &event_id,
+                timestamp_ns,
+                &capsule_id,
+                project_id.as_deref(),
+            )?)?;
+            observation_events += 1;
+            continue;
+        }
+
         let arguments: BTreeMap<String, String> =
             serde_json::from_str(&arguments_json).map_err(|error| {
                 decode_error(&kind, &event_id, format!("invalid event arguments: {error}"))
@@ -158,9 +192,8 @@ pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
 
         match kind.as_str() {
             FAMILIARITY_OBSERVATION_EVENT => {
-                let stored: StoredObservation = serde_json::from_str(payload).map_err(|error| {
-                    decode_error(&kind, &event_id, error.to_string())
-                })?;
+                let stored: StoredObservation = serde_json::from_str(payload)
+                    .map_err(|error| decode_error(&kind, &event_id, error.to_string()))?;
                 if stored.schema != FAMILIARITY_SCHEMA_VERSION {
                     return Ok(invalidated(stored.schema, &kind, &event_id));
                 }
@@ -168,16 +201,15 @@ pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
                 observation_events += 1;
             }
             FAMILIARITY_RESET_EVENT => {
-                let stored: StoredReset = serde_json::from_str(payload).map_err(|error| {
-                    decode_error(&kind, &event_id, error.to_string())
-                })?;
+                let stored: StoredReset = serde_json::from_str(payload)
+                    .map_err(|error| decode_error(&kind, &event_id, error.to_string()))?;
                 if stored.schema != FAMILIARITY_SCHEMA_VERSION {
                     return Ok(invalidated(stored.schema, &kind, &event_id));
                 }
                 observations_removed_by_resets += learned.forget(&stored.scope);
                 reset_events += 1;
             }
-            _ => unreachable!("SQL query restricts familiarity event kinds"),
+            _ => unreachable!("SQL query restricts replay event kinds"),
         }
     }
 
@@ -187,6 +219,35 @@ pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
         reset_events,
         observations_removed_by_resets,
     })
+}
+
+fn run_observation(
+    event_id: &str,
+    timestamp_ns: i64,
+    capsule_id: &str,
+    project_id: Option<&str>,
+) -> Result<FamiliarityObservation> {
+    let destination = ResourceRef::parse(capsule_id).map_err(|error| {
+        AikitError::new(
+            "familiarity.run_destination_invalid",
+            format!("successful Run {event_id} has an invalid Resource destination: {error}"),
+        )
+        .with("event_id", event_id)
+        .with("capsule_id", capsule_id)
+    })?;
+    let project = project_id
+        .map(|project| ResourceRef::parse(&format!("project/{project}")))
+        .transpose()?;
+    let observed_at_ms = timestamp_ns.max(0) as u64 / 1_000_000;
+    Ok(FamiliarityObservation::destination(
+        event_id.to_string(),
+        destination,
+        FamiliarityContext {
+            project,
+            ..FamiliarityContext::default()
+        },
+        observed_at_ms,
+    ))
 }
 
 fn timestamp_from_ms(value: u64) -> Timestamp {
