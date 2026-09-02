@@ -1,0 +1,73 @@
+name: OI153 current-main context activation reconstruction
+
+on:
+  push:
+    branches:
+      - 'reconstruct/context-activation-current'
+
+permissions:
+  contents: write
+
+jobs:
+  reconstruct:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 2
+
+      - name: Install Rust 1.98 with fmt and Clippy
+        uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Assert exact accepted H7 parent
+        run: |
+          test "$(git rev-parse HEAD^)" = "ed1607086fd6accaeb7d1a394aa112c94c4109df"
+          git fetch --depth 1 origin main
+          test "$(git rev-parse origin/main)" = "ed1607086fd6accaeb7d1a394aa112c94c4109df"
+          test "$(git show -s --format=%T origin/main)" = "e4f1006ecea4372891a146d0b090ffaf6c054cb4"
+
+      - name: Apply only additive current-main root exports
+        run: python .github/oi153_apply_current.py
+
+      - name: Format intended files only
+        run: |
+          rustfmt --edition 2021 \
+            crates/aikit-core/src/lib.rs \
+            crates/aikit-core/src/context_activation.rs \
+            crates/aikit-core/src/context_resolution.rs \
+            crates/aikit-core/tests/context_activation_v2.rs
+
+      - name: Prove current composed product tree
+        run: |
+          grep -q '^pub mod context_activation;$' crates/aikit-core/src/lib.rs
+          grep -q 'OperativePathEvidence' crates/aikit-core/src/lib.rs
+          grep -q 'resolve_registered_credential' crates/aikit-core/src/lib.rs
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --workspace --all-targets --locked
+          git diff --check
+
+      - name: Collapse to one helper-free direct-current-main product commit
+        run: |
+          rm .github/oi153_apply_current.py .github/workflows/oi153-context-activation-current.yml
+          git add -A
+          allowed='^(crates/aikit-core/src/context_activation.rs|crates/aikit-core/src/context_resolution.rs|crates/aikit-core/src/lib.rs|crates/aikit-core/tests/context_activation_v2.rs)$'
+          unexpected="$(git diff --cached --name-only HEAD^ | grep -Ev "$allowed" || true)"
+          if [ -n "$unexpected" ]; then
+            echo "unexpected product paths:" >&2
+            echo "$unexpected" >&2
+            exit 1
+          fi
+          paths="$(git diff --cached --name-only HEAD^ | sort)"
+          expected="$(printf '%s\n' \
+            crates/aikit-core/src/context_activation.rs \
+            crates/aikit-core/src/context_resolution.rs \
+            crates/aikit-core/src/lib.rs \
+            crates/aikit-core/tests/context_activation_v2.rs | sort)"
+          test "$paths" = "$expected"
+          git config user.name Epii
+          git config user.email frank.g.taylor97@gmail.com
+          git reset --soft HEAD^
+          git commit -m '[CONTEXT-ACTIVATION] Make operative context activation explainable'
+          git push --force-with-lease origin HEAD:reconstruct/context-activation-current
