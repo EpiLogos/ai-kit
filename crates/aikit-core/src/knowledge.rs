@@ -14,9 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::familiarity::{FamiliarityContext, FamiliarityObservation, RouteStepEvidence};
-use crate::resource::{
-    ProviderRef, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
-};
+use crate::resource::{ProviderRef, ResourceKind, ResourceRef, SourceAuthority, SourceRef};
 use crate::{AikitError, Result};
 
 pub const DEFAULT_RELATION_DEPTH: u8 = 1;
@@ -195,7 +193,11 @@ impl KnowledgeRelationView {
     }
 
     pub fn push_node(&mut self, node: RelationNode) -> bool {
-        if self.nodes.iter().any(|existing| existing.resource == node.resource) {
+        if self
+            .nodes
+            .iter()
+            .any(|existing| existing.resource == node.resource)
+        {
             return true;
         }
         if self.nodes.len() >= self.query.max_nodes {
@@ -209,9 +211,8 @@ impl KnowledgeRelationView {
     /// Add an edge only when both endpoint identities are already represented.
     /// Providers therefore cannot create invisible vertices by accident.
     pub fn push_edge(&mut self, edge: RelationEdge) -> Result<bool> {
-        let known = |resource: &ResourceRef| {
-            self.nodes.iter().any(|node| &node.resource == resource)
-        };
+        let known =
+            |resource: &ResourceRef| self.nodes.iter().any(|node| &node.resource == resource);
         if !known(&edge.from) || !known(&edge.to) {
             return Err(AikitError::new(
                 "knowledge.relation_endpoint_missing",
@@ -455,7 +456,11 @@ mod tests {
         };
         let mut view = KnowledgeRelationView::focus_only(
             query,
-            RelationNode::new(r("knowledge-node/auth"), ResourceKind::KnowledgeNode, "Auth"),
+            RelationNode::new(
+                r("knowledge-node/auth"),
+                ResourceKind::KnowledgeNode,
+                "Auth",
+            ),
         )
         .unwrap();
         assert!(view.push_node(RelationNode::new(
@@ -525,7 +530,13 @@ mod tests {
                 assert_eq!(route, r("knowledge-route/auth-to-code"));
                 assert_eq!(steps.len(), 2);
                 assert_eq!(steps[0].lens.as_deref(), Some("semantic-wiki"));
-                assert_eq!(steps[1].provider.as_ref().unwrap().as_str(), "provider/gitnexus");
+                assert_eq!(
+                    steps[1].provider.as_ref().unwrap().as_str(),
+                    "provider/gitnexus"
+                );
+            }
+            crate::FamiliarityUse::ResolvePath { .. } => {
+                panic!("KnowledgeRoute familiarity must remain route evidence")
             }
             crate::FamiliarityUse::Destination => panic!("route evidence must remain a route"),
         }

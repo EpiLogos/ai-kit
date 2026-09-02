@@ -20,6 +20,7 @@ pub const EXPLAIN_HISTORY_VERSION: &str = "aikit.explain-history/v1";
 pub enum HistoryKind {
     Recent,
     Familiarity,
+    ResolvePath,
     KnowledgeRoute,
     KnowledgeFrame,
     Generation,
@@ -267,6 +268,59 @@ pub fn familiarity_history_evidence(observation: &FamiliarityObservation) -> His
                 HistoryRecoverability::ReplayNavigation,
             )
         }
+        FamiliarityUse::ResolvePath {
+            knowledge_route,
+            steps,
+            operative,
+        } => {
+            if let Some(route) = knowledge_route {
+                canonical_refs.insert(route.clone());
+            }
+            for reference in [
+                &operative.method,
+                &operative.action,
+                &operative.surface,
+                &operative.activity,
+                &operative.return_ref,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                canonical_refs.insert(reference.clone());
+            }
+            for step in steps {
+                canonical_refs.insert(step.resource.clone());
+                if let Some(provider) = &step.provider {
+                    provenance.push(EvidenceProvenance {
+                        provider: Some(provider.clone()),
+                        lens: step.lens.clone(),
+                        revision: step.revision.clone(),
+                        ..EvidenceProvenance::default()
+                    });
+                } else if step.lens.is_some() || step.revision.is_some() {
+                    provenance.push(EvidenceProvenance {
+                        lens: step.lens.clone(),
+                        revision: step.revision.clone(),
+                        ..EvidenceProvenance::default()
+                    });
+                }
+            }
+            let route = knowledge_route
+                .as_ref()
+                .map(|route| format!(" via {route}"))
+                .unwrap_or_default();
+            (
+                HistoryKind::ResolvePath,
+                format!(
+                    "resolved operative path {}{route} to {} through {} step{}",
+                    operative.path_identity,
+                    observation.destination,
+                    steps.len(),
+                    if steps.len() == 1 { "" } else { "s" }
+                ),
+                HistoryRecoverability::ReplayNavigation,
+            )
+        }
     };
 
     let mut details = BTreeMap::new();
@@ -277,6 +331,45 @@ pub fn familiarity_history_evidence(observation: &FamiliarityObservation) -> His
     if let Some(fitness) = &observation.fitness {
         details.insert("fitnessMilli".into(), fitness.score_milli.to_string());
         details.insert("fitnessProvenance".into(), fitness.provenance.clone());
+    }
+    if let FamiliarityUse::ResolvePath {
+        knowledge_route,
+        operative,
+        ..
+    } = &observation.use_kind
+    {
+        details.insert("pathIdentity".into(), operative.path_identity.clone());
+        details.insert("expression".into(), operative.expression.render());
+        details.insert(
+            "relationOps".into(),
+            operative
+                .relation_ops
+                .iter()
+                .map(|op| op.symbol())
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        details.insert(
+            "horizons".into(),
+            operative
+                .horizons
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        for (key, reference) in [
+            ("knowledgeRoute", knowledge_route.as_ref()),
+            ("method", operative.method.as_ref()),
+            ("action", operative.action.as_ref()),
+            ("surface", operative.surface.as_ref()),
+            ("activity", operative.activity.as_ref()),
+            ("return", operative.return_ref.as_ref()),
+        ] {
+            if let Some(reference) = reference {
+                details.insert(key.into(), reference.to_string());
+            }
+        }
     }
 
     HistoryEvidence {

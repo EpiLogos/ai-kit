@@ -158,7 +158,7 @@ pub use explain_history_actions::{
 pub use familiarity::{
     AccessibilityAssessment, AccessibilitySignal, AccessibilitySignalClass, FamiliarityContext,
     FamiliarityObservation, FamiliaritySnapshot, FamiliaritySnapshotLoad, FamiliarityStore,
-    FamiliarityUse, FitnessEvidence, ForgetScope, RouteStepEvidence,
+    FamiliarityUse, FitnessEvidence, ForgetScope, OperativePathEvidence, RouteStepEvidence,
     DEFAULT_FAMILIARITY_HALF_LIFE_MS, FAMILIARITY_SCHEMA_VERSION,
 };
 pub use flow::{

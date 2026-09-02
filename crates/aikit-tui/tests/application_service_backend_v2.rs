@@ -5,7 +5,7 @@ use common::*;
 use aikit_core::projection::ActivationEffect;
 use aikit_core::scope::ScopeKind;
 use aikit_core::search::UsageStats;
-use aikit_core::TargetId;
+use aikit_core::{FamiliarityUse, ResourceRef, TargetId};
 use aikit_tui::{
     ActivationIntent, ApplicationService, ClientEffect, StagedChanges, TuiApplicationService,
 };
@@ -105,6 +105,90 @@ fn production_application_previews_target_activation_semantics_before_apply() {
 }
 
 #[test]
+fn operative_action_is_qualified_then_invoked_through_the_existing_application_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = Fixture::new(dir.path(), vec![script("script/ops/deploy")]);
+    let subject = ResourceRef::parse("script/ops/deploy").unwrap();
+
+    let resolved = {
+        let service = ApplicationService::new(&mut backend);
+        service
+            .resolve_action_for_subject("+ @5 action/capability/explain", &subject)
+            .unwrap()
+    };
+
+    assert_eq!(resolved.action.action.as_str(), "action/capability/explain");
+    assert_eq!(resolved.action.subject, subject);
+    assert!(resolved.candidate.available_in_context);
+    assert!(resolved
+        .semantic_profile
+        .relation_affinities
+        .contains(&aikit_core::resource::RelationOp::Affirm));
+    assert!(resolved
+        .semantic_profile
+        .horizon_affinities
+        .contains(&aikit_core::resource::AddressHorizon::H5));
+    assert!(resolved
+        .semantic_profile
+        .subject_ref_kinds
+        .contains(&aikit_core::resource::ResourceKind::Capability));
+    assert_eq!(
+        resolved.semantic_profile.expected_return_forms,
+        vec!["explanation"]
+    );
+    assert!(resolved.semantic_profile.native_owner.is_some());
+    assert!(!resolved.semantic_profile.provenance.is_empty());
+
+    let receipt = {
+        let mut service = ApplicationService::new(&mut backend);
+        service.invoke_resolved_action(&resolved).unwrap()
+    };
+    assert_eq!(receipt.action.as_str(), "action/capability/explain");
+    assert_eq!(receipt.subject, subject);
+    assert_eq!(receipt.observed_path.identity, resolved.path.identity);
+    assert!(receipt.outcome.summary().contains("script/ops/deploy"));
+
+    let snapshot = backend.familiarity.snapshot();
+    assert!(snapshot.observations.iter().any(|observation| {
+        matches!(
+            &observation.use_kind,
+            FamiliarityUse::ResolvePath { operative, .. }
+                if operative.path_identity == resolved.path.identity
+                    && operative.action.as_ref() == Some(&resolved.action.action)
+        )
+    }));
+}
+
+#[test]
+fn express_operator_qualifies_action_without_crossing_the_invocation_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backend = Fixture::new(dir.path(), vec![script("script/ops/deploy")]);
+    let subject = ResourceRef::parse("script/ops/deploy").unwrap();
+    let before = backend.familiarity.len();
+
+    let resolved = {
+        let service = ApplicationService::new(&mut backend);
+        service
+            .resolve_action_for_subject(
+                "@5 action/capability/explain = @5 action/capability/explain",
+                &subject,
+            )
+            .unwrap()
+    };
+
+    assert_eq!(resolved.action.action.as_str(), "action/capability/explain");
+    assert!(resolved
+        .semantic_profile
+        .relation_affinities
+        .contains(&aikit_core::resource::RelationOp::Express));
+    assert_eq!(
+        backend.familiarity.len(),
+        before,
+        "Resolve/`=` must remain side-effect free until native invocation"
+    );
+}
+
+#[test]
 fn production_application_never_calls_restart_only_effect_live() {
     let dir = tempfile::tempdir().unwrap();
     let mut backend = Fixture::new(dir.path(), vec![skill("skill/rust/review")]);
@@ -186,5 +270,8 @@ fn generic_host_never_falls_through_package_identity() {
     assert_eq!(relations.subject, host);
     assert!(relations.value.get("contextualActions").is_some());
     assert!(relations.value.get("resolverRelated").is_some());
-    assert_eq!(relations.value["resolverRelated"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        relations.value["resolverRelated"].as_array().unwrap().len(),
+        0
+    );
 }

@@ -118,11 +118,13 @@ fn filters_are_case_insensitive_on_their_keys_and_values() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn each_fast_prefix_maps_to_its_documented_lane() {
+fn retained_fast_prefixes_map_to_their_documented_lanes_and_operative_tokens_do_not() {
     assert_eq!(parse_query(">cargo").prefix, Some(FastPrefix::Run));
-    assert_eq!(parse_query("+rust").prefix, Some(FastPrefix::Capabilities));
-    assert_eq!(parse_query("@payments").prefix, Some(FastPrefix::Sessions));
     assert_eq!(parse_query(":apply").prefix, Some(FastPrefix::Manage));
+    assert_eq!(parse_query("+rust").prefix, None);
+    assert_eq!(parse_query("@payments").prefix, None);
+    assert!(parse_query("+rust").expression.is_some());
+    assert!(parse_query("@payments").expression.is_some());
 }
 
 #[test]
@@ -165,15 +167,18 @@ fn the_run_prefix_respects_a_capability_that_is_currently_unrunnable() {
 }
 
 #[test]
-fn the_session_prefix_only_matches_session_capsules() {
-    assert!(parse_query("@dev").matches_filters(&doc("session/work/dev")));
-    assert!(!parse_query("@dev").matches_filters(&doc("script/test/dev")));
+fn universal_address_is_not_a_session_only_filter() {
+    let query = parse_query("@dev");
+    assert!(query.prefix.is_none());
+    assert!(query.expression.is_some());
+    assert!(query.matches_filters(&doc("session/work/dev")));
+    assert!(query.matches_filters(&doc("script/test/dev")));
 }
 
 #[test]
-fn the_capability_and_management_prefixes_do_not_narrow_the_capsule_list() {
-    // They select a different palette source, which is the TUI's job. Core records
-    // the intent without inventing a capsule filter for it.
+fn affirm_and_management_do_not_invent_capsule_filters() {
+    // `+` is now the general Affirm relation while `:` remains the management
+    // convenience lane. Neither changes the legacy capsule filter predicate.
     let capability = doc("skill/rust/review");
     assert!(parse_query("+review").matches_filters(&capability));
     assert!(parse_query(":review").matches_filters(&capability));
@@ -233,8 +238,12 @@ fn a_search_doc_is_built_from_a_real_resolved_view() {
     )]);
     let view = f.resolve().unwrap();
 
-    let active = SearchDoc::from_view(&view, &cid("script/test/cargo-nextest"), UsageStats::default())
-        .expect("a catalogued capsule must produce a document");
+    let active = SearchDoc::from_view(
+        &view,
+        &cid("script/test/cargo-nextest"),
+        UsageStats::default(),
+    )
+    .expect("a catalogued capsule must produce a document");
     assert_eq!(active.status, DocStatus::Active);
     assert_eq!(active.scope, Some(ScopeKind::Project));
     assert!(active.in_current_project);
@@ -242,13 +251,11 @@ fn a_search_doc_is_built_from_a_real_resolved_view() {
     assert!(active.runnable);
     assert_eq!(active.exports, vec!["cargo-nextest", "nt"]);
 
-    let idle = SearchDoc::from_view(&view, &cid("skill/rust/review"), UsageStats::default()).unwrap();
+    let idle =
+        SearchDoc::from_view(&view, &cid("skill/rust/review"), UsageStats::default()).unwrap();
     assert_eq!(idle.status, DocStatus::Inactive);
     assert!(!idle.in_active_context);
-    assert!(
-        !idle.runnable,
-        "a skill is never runnable, active or not"
-    );
+    assert!(!idle.runnable, "a skill is never runnable, active or not");
     assert_eq!(idle.scope, None);
 }
 
@@ -263,7 +270,8 @@ fn a_capability_held_back_by_trust_is_a_document_with_unavailable_status() {
         .untrust("hook/gate/boundary");
     let view = f.resolve().unwrap();
 
-    let doc = SearchDoc::from_view(&view, &cid("hook/gate/boundary"), UsageStats::default()).unwrap();
+    let doc =
+        SearchDoc::from_view(&view, &cid("hook/gate/boundary"), UsageStats::default()).unwrap();
     assert_eq!(doc.status, DocStatus::Unavailable);
     assert!(parse_query("status:unavailable").matches_filters(&doc));
 }

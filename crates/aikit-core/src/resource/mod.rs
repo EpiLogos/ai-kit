@@ -11,13 +11,15 @@ mod index;
 mod model;
 #[path = "../model_roster.rs"]
 mod model_roster;
+mod operative;
+mod operative_provider;
 mod refs;
 mod search;
 mod versioned_world;
 
 pub use action_search::search_contextual_actions;
 pub use factory::{FactoryInteropView, FactoryResourceImport};
-pub use index::{MemoryResourceIndex, ResourceIndex};
+pub use index::{MemoryResourceIndex, ResolveRankingSignals, ResourceIndex};
 pub use model::{
     Eligibility, PreferenceIntent, ProviderOffer, ProviderState, ResourceDescriptor,
     ResourceExplanation, ResourceKind, ResourceLocator, ResourceRecord, ResourceSource,
@@ -28,6 +30,18 @@ pub use model_roster::{
     ModelAccessProfileView, ModelPriceObservation, ModelRankingExplanation, ModelRankingPolicy,
     ModelRoster, ModelRosterCandidate, ModelRosterDemand, ModelRosterEntry, RankingComponent,
     MODEL_ROSTER_VERSION,
+};
+pub use operative::{
+    action_semantic_profile, horizons_for_resource, parse_or_search_expression,
+    parse_resolve_expression, resolve_action_candidates, resolve_expression, resolve_path_identity,
+    resolve_search, six_horizon_disclosure, ActionRef, ActionSemanticProfile, AddressHorizon,
+    RelationOp, ResolveCandidate, ResolveExpression, ResolvePath, ResolvePathStep,
+    ResolvedActionCandidate, OPERATIVE_SYNTAX_VERSION,
+};
+pub use operative_provider::{
+    OperativeSemanticOperation, OperativeSemanticProvider, OperativeSemanticProviderCapabilities,
+    OperativeSemanticProviderDescriptor, OperativeSemanticProviderStatus,
+    OPERATIVE_SEMANTIC_PROVIDER_VERSION,
 };
 pub use refs::{OwnerRef, ProviderRef, ResourceRef, SourceRef, SourceRevision};
 pub use search::{

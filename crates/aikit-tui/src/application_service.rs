@@ -8,25 +8,29 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aikit_core::application_context::application_context_resolution;
 use aikit_core::composition_mutation::{changed_ground, CompositionBasis};
 use aikit_core::id::{CapsuleId, EventId};
 use aikit_core::resource::{
-    ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass, ResourceIndex,
-    ResourceKind, ResourceRef, ResourceSearchIndex,
+    action_semantic_profile, parse_or_search_expression, resolve_action_candidates,
+    resolve_expression, resolve_path_identity, ContextualActionDescriptor, NavigationEvidence,
+    NavigationEvidenceClass, ResolveExpression, ResolvePath, ResolvePathStep, ResourceDescriptor,
+    ResourceIndex, ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
 };
 use aikit_core::{
     explain_history_actions_for, install_explain_history_actions, AikitError, FamiliarityContext,
     FamiliarityObservation, FamiliarityUse, ForgetScope, KnowledgeAddress, KnowledgeContextPack,
-    KnowledgeProviderStatus, KnowledgeReading, KnowledgeRoute, KnowledgeSources, Result,
-    DEFAULT_FAMILIARITY_HALF_LIFE_MS, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
+    KnowledgeProviderStatus, KnowledgeReading, KnowledgeRoute, KnowledgeSources,
+    OperativePathEvidence, Result, RouteStepEvidence, DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+    EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
 };
 use aikit_store::KnowledgeHistoryOperation;
 use serde_json::{json, to_string_pretty, to_value, Value};
 
 use crate::application::{
-    ActionOutcome, ActivationIntent, ApplyReceipt, CompositionPreview, HistoryEntry,
-    RelationReadModel, ResourceListItem, ResourceListReadModel, StagedChanges,
-    TuiApplicationService,
+    ActionInvocationReceipt, ActionOutcome, ActivationIntent, ApplyReceipt, CompositionPreview,
+    HistoryEntry, RelationReadModel, ResolvedActionReadModel, ResolvedSearchReadModel,
+    ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService,
 };
 use crate::backend::{PaletteBackend, Toggle};
 use crate::staging::is_on;
@@ -64,6 +68,178 @@ impl<'a> ApplicationService<'a> {
             );
         }
         Ok(index)
+    }
+
+    /// Resolve Search once against the canonical heterogeneous Resource field.
+    /// Deep Knowledge providers may contribute canonical refs for subject terms
+    /// before the expression is evaluated; they do not receive punctuation as a
+    /// fake prose query and they do not mint a second path identity.
+    pub fn resolve_search(&self, query: &str) -> Result<ResolvedSearchReadModel> {
+        let mut index = self.navigation_index()?;
+        let expression = parse_or_search_expression(query)?;
+
+        for subject in resolve_subjects(&expression) {
+            if subject.trim().is_empty() {
+                continue;
+            }
+            if let Some(knowledge) = self.backend.knowledge_search(subject, 256)? {
+                for hit in knowledge.hits {
+                    if ResourceIndex::resource(&index, &hit.resource).is_some() {
+                        continue;
+                    }
+                    let mut descriptor = ResourceDescriptor::new(
+                        hit.resource.clone(),
+                        hit.kind,
+                        hit.label,
+                        hit.snippet,
+                    );
+                    descriptor
+                        .annotations
+                        .insert("knowledge.provider".into(), hit.provider.to_string());
+                    descriptor
+                        .annotations
+                        .insert("knowledge.authority".into(), format!("{:?}", hit.authority));
+                    index.insert_resource(ResourceRecord::new(descriptor), Vec::new());
+                }
+            }
+        }
+
+        if let Some(familiarity) = self.backend.familiarity()? {
+            index.apply_resolve_path_familiarity(
+                &familiarity,
+                &resolve_path_identity(&expression),
+                &familiarity_context(self.backend.context()),
+                now_ms(),
+                DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+            );
+        }
+        let path = resolve_expression(&expression, &index, 256);
+        // Empty human Search is the existing zero-query navigation state, not an
+        // explicit `@` aperture. Preserve its evidence-only presentation while
+        // the typed expression/path remains inspectable. Explicit `@` is non-empty
+        // input and therefore discloses the full addressable field.
+        let zero_query_hits = query.trim().is_empty().then(|| index.search("", 256));
+        let resources = path
+            .candidates
+            .iter()
+            .filter(|candidate| {
+                zero_query_hits
+                    .as_ref()
+                    .is_none_or(|hits| hits.iter().any(|hit| hit.resource == candidate.resource))
+            })
+            .filter_map(|candidate| {
+                let record = ResourceIndex::resource(&index, &candidate.resource)?;
+                let evidence = index
+                    .search(candidate.resource.as_str(), 256)
+                    .into_iter()
+                    .find(|hit| hit.resource == candidate.resource)
+                    .map(|hit| hit.navigation_evidence)
+                    .unwrap_or_default();
+                Some(ResourceListItem {
+                    resource: candidate.resource.clone(),
+                    kind: candidate.kind,
+                    label: record.descriptor.name.clone(),
+                    summary: summary_with_navigation_evidence(
+                        record.descriptor.description.clone(),
+                        &evidence,
+                    ),
+                })
+            })
+            .collect::<Vec<_>>();
+        let revision = format!(
+            "aikit.resolve-search/v1:{}:{}:{}:{}",
+            self.backend.view().catalog_revision,
+            self.backend.view().hash,
+            query,
+            path.identity
+        );
+
+        Ok(ResolvedSearchReadModel {
+            expression,
+            path,
+            resources: ResourceListReadModel {
+                revision,
+                resources,
+            },
+        })
+    }
+
+    /// Discover and qualify one canonical Action for the explicit selected subject.
+    /// This is side-effect free: even an `=` expression stops at qualification.
+    /// ContextResolution, not punctuation, decides whether invocation is available.
+    pub fn resolve_action_for_subject(
+        &self,
+        query: &str,
+        subject: &ResourceRef,
+    ) -> Result<ResolvedActionReadModel> {
+        let resolved = self.resolve_search(query)?;
+        let index = self.navigation_index()?;
+        let scope_layers = self.backend.scope_layers().unwrap_or(&[]);
+        let context = application_context_resolution(
+            self.backend.context(),
+            self.backend.view(),
+            scope_layers,
+            &index,
+        )?;
+        let candidates = resolve_action_candidates(&resolved.path, &index, &context);
+
+        for candidate in candidates {
+            let Some(action) = index
+                .actions_for(subject)
+                .into_iter()
+                .find(|contextual| contextual.action == *candidate.action.resource())
+                .cloned()
+            else {
+                continue;
+            };
+            let semantic_profile = action_semantic_profile(
+                &candidate,
+                &resolved.path,
+                subject,
+                self.backend.context().task.as_deref(),
+                &index,
+            )?;
+            return Ok(ResolvedActionReadModel {
+                expression: resolved.expression,
+                path: resolved.path,
+                candidate,
+                semantic_profile,
+                action,
+            });
+        }
+
+        Err(AikitError::new(
+            "application.resolve_action_no_contextual_candidate",
+            format!(
+                "Resolve expression `{query}` did not produce a canonical Action applicable to {subject}"
+            ),
+        ))
+    }
+
+    /// Cross the already-existing native invocation boundary with a previously
+    /// qualified Action. The receipt returns the exact observed ResolvePath and
+    /// #29 records path accessibility beside ordinary destination familiarity.
+    pub fn invoke_resolved_action(
+        &mut self,
+        resolved: &ResolvedActionReadModel,
+    ) -> Result<ActionInvocationReceipt> {
+        if !resolved.candidate.available_in_context {
+            return Err(AikitError::new(
+                "application.resolve_action_unavailable",
+                format!(
+                    "Action {} is not available in the current ContextResolution",
+                    resolved.action.action
+                ),
+            ));
+        }
+        let outcome = <Self as TuiApplicationService>::invoke_action(self, &resolved.action)?;
+        self.record_resolve_path_use(&resolved.path, resolved)?;
+        Ok(ActionInvocationReceipt {
+            action: resolved.action.action.clone(),
+            subject: resolved.action.subject.clone(),
+            observed_path: resolved.path.clone(),
+            outcome,
+        })
     }
 
     /// Resolve the deliberately retained package compatibility identity for a
@@ -151,44 +327,77 @@ impl<'a> ApplicationService<'a> {
         );
         self.backend.record_familiarity(observation)
     }
+
+    fn record_resolve_path_use(
+        &mut self,
+        path: &ResolvePath,
+        resolved: &ResolvedActionReadModel,
+    ) -> Result<()> {
+        let surface = ResourceRef::parse("surface/aikit/tui")
+            .expect("static V2 TUI surface ResourceRef must be valid");
+        let mut relation_ops = path
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                ResolvePathStep::Relation { op } => Some(*op),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        relation_ops.sort();
+        relation_ops.dedup();
+        let mut horizons = path
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                ResolvePathStep::Address { horizon, .. } => *horizon,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        horizons.sort();
+        horizons.dedup();
+
+        let steps = vec![
+            RouteStepEvidence {
+                resource: resolved.action.action.clone(),
+                provider: None,
+                lens: None,
+                revision: None,
+            },
+            RouteStepEvidence {
+                resource: resolved.action.subject.clone(),
+                provider: None,
+                lens: None,
+                revision: None,
+            },
+        ];
+        let observation = FamiliarityObservation::resolve_path(
+            EventId::generate().as_str().to_string(),
+            None,
+            resolved.action.subject.clone(),
+            steps,
+            OperativePathEvidence {
+                path_identity: path.identity.clone(),
+                expression: path.expression.clone(),
+                relation_ops,
+                horizons,
+                method: resolved.semantic_profile.method_relations.first().cloned(),
+                action: Some(resolved.action.action.clone()),
+                surface: Some(surface.clone()),
+                activity: None,
+                return_ref: None,
+            },
+            familiarity_context(self.backend.context()),
+            now_ms(),
+        )?
+        .via_action(resolved.action.action.clone())
+        .from_surface(surface);
+        self.backend.record_familiarity(observation)
+    }
 }
 
 impl TuiApplicationService for ApplicationService<'_> {
     fn search(&self, query: &str) -> Result<ResourceListReadModel> {
-        let index = self.navigation_index()?;
-        let mut resources = index
-            .search(query, 256)
-            .into_iter()
-            .map(|hit| ResourceListItem {
-                resource: hit.resource,
-                kind: hit.kind,
-                label: hit.label,
-                summary: summary_with_navigation_evidence(hit.summary, &hit.navigation_evidence),
-            })
-            .collect::<Vec<_>>();
-        if let Some(knowledge) = self.backend.knowledge_search(query, 256)? {
-            for hit in knowledge.hits {
-                if resources.iter().any(|item| item.resource == hit.resource) {
-                    continue;
-                }
-                let provider = hit.provider.to_string();
-                resources.push(ResourceListItem {
-                    resource: hit.resource,
-                    kind: hit.kind,
-                    label: hit.label,
-                    summary: format!("{} · {provider} · {:?}", hit.snippet, hit.authority),
-                });
-            }
-        }
-        Ok(ResourceListReadModel {
-            revision: format!(
-                "aikit.resource-search/v2:{}:{}:{}",
-                self.backend.view().catalog_revision,
-                self.backend.view().hash,
-                query
-            ),
-            resources,
-        })
+        Ok(self.resolve_search(query)?.resources)
     }
 
     fn context_disclosure(&self, resource: &ResourceRef) -> Result<Value> {
@@ -469,6 +678,22 @@ impl TuiApplicationService for ApplicationService<'_> {
                                     plural(steps.len())
                                 )
                             }
+                            FamiliarityUse::ResolvePath {
+                                knowledge_route,
+                                steps,
+                                operative,
+                            } => {
+                                let route = knowledge_route
+                                    .as_ref()
+                                    .map(|route| format!(" · route {route}"))
+                                    .unwrap_or_default();
+                                format!(
+                                    "resolve {}{route} · {} step{}",
+                                    operative.path_identity,
+                                    steps.len(),
+                                    plural(steps.len())
+                                )
+                            }
                         };
                         let action = observation
                             .source_action
@@ -671,6 +896,29 @@ impl TuiApplicationService for ApplicationService<'_> {
         };
         self.record_action_use(action)?;
         Ok(outcome)
+    }
+}
+
+fn resolve_subjects(expression: &ResolveExpression) -> Vec<&str> {
+    let mut subjects = Vec::new();
+    collect_resolve_subjects(expression, &mut subjects);
+    subjects.sort_unstable();
+    subjects.dedup();
+    subjects
+}
+
+fn collect_resolve_subjects<'a>(expression: &'a ResolveExpression, subjects: &mut Vec<&'a str>) {
+    match expression {
+        ResolveExpression::Subject { value } => subjects.push(value.as_str()),
+        ResolveExpression::Address { expression, .. }
+        | ResolveExpression::Unary { expression, .. }
+        | ResolveExpression::Frame { expression } => {
+            collect_resolve_subjects(expression, subjects);
+        }
+        ResolveExpression::Binary { left, right, .. } => {
+            collect_resolve_subjects(left, subjects);
+            collect_resolve_subjects(right, subjects);
+        }
     }
 }
 

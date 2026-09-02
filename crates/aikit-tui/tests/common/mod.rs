@@ -25,7 +25,7 @@ use aikit_core::resolve::{resolve, ResolveRequest, ResolvedView};
 use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
 use aikit_core::search::{SearchDoc, UsageStats};
 use aikit_core::trust::{MemoryTrust, TrustState};
-use aikit_core::{AikitError, Result};
+use aikit_core::{AikitError, FamiliarityObservation, FamiliarityStore, Result};
 
 use aikit_store::events::Timestamp;
 use aikit_store::inbox::{Candidate, CandidateState, PromotionEdits, Similarity, SimilarityBasis};
@@ -172,6 +172,7 @@ pub struct Fixture {
     pub job: JobOutput,
     pub applied: Vec<(ScopeKind, Vec<Toggle>)>,
     pub promoted: Vec<CapsuleId>,
+    pub familiarity: FamiliarityStore,
 }
 
 impl Fixture {
@@ -219,6 +220,7 @@ impl Fixture {
             job: JobOutput::default(),
             applied: Vec::new(),
             promoted: Vec::new(),
+            familiarity: FamiliarityStore::new(),
         };
         fixture.write_overlay();
         fixture.refresh();
@@ -363,6 +365,14 @@ impl PaletteBackend for Fixture {
 
     fn view(&self) -> &ResolvedView {
         &self.view
+    }
+
+    fn familiarity(&self) -> Result<Option<FamiliarityStore>> {
+        Ok(Some(self.familiarity.clone()))
+    }
+
+    fn record_familiarity(&mut self, observation: FamiliarityObservation) -> Result<()> {
+        self.familiarity.record(observation)
     }
 
     fn documents(&self) -> Vec<SearchDoc> {
