@@ -11,28 +11,35 @@ jobs:
   prove:
     if: ${{ !contains(github.event.head_commit.message, '[oi139-resource-parity]') }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           ref: feat/oi139-session-space-resource-parity
           fetch-depth: 0
-      - name: Install Rust proof components
-        run: rustup component add --toolchain 1.98.0 rustfmt clippy
+      - name: Install Rust 1.98 proof components
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component clippy
+          rustup default 1.98.0
       - name: Apply bounded SessionSpace Resource projection
         run: python3 .github/oi139_apply.py
-      - name: Format bounded H7 parity seam
-        run: cargo fmt --all
-      - name: Prove bounded H7 parity seam
+      - name: Prove H7 capability-boundary parity seam
         run: |
-          cargo clippy --locked -p aikit-core -p aikit-tui --all-targets -- -D warnings
+          cargo clippy --locked -p aikit-core -p aikit-tui -p aikit-cli --all-targets -- -D warnings
           cargo test --locked -p aikit-core --all-targets -- --test-threads=1
           cargo test --locked -p aikit-tui --all-targets -- --test-threads=1
+          cargo test --locked -p aikit-cli --all-targets -- --test-threads=1
       - name: Commit helper-free product change
         shell: bash
         run: |
           set -euo pipefail
           git rm .github/workflows/oi139-session-space-resource-parity.yml .github/oi139_apply.py
-          git add crates/aikit-core/src/resource/model.rs crates/aikit-tui/src/session_space_service.rs crates/aikit-tui/src/application_service.rs
+          git add \
+            crates/aikit-core/src/resource/model.rs \
+            crates/aikit-tui/src/backend.rs \
+            crates/aikit-tui/src/session_space_service.rs \
+            crates/aikit-tui/src/application_service.rs \
+            crates/aikit-cli/src/app/mod.rs
           git diff --cached --check
           git config user.name 'Epii'
           git config user.email 'frank.g.taylor97@gmail.com'
