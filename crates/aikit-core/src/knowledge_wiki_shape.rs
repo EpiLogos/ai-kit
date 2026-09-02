@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
 
 use crate::knowledge_living::{
@@ -188,7 +189,8 @@ pub struct QlShapedContemplateOutcome {
 
 pub trait QlShapedContemplateExecutor {
     /// Explicit Agent/model execution over the bounded deterministic Wiki + QL shape field.
-    fn execute(&mut self, preflight: &QlShapedContemplatePreflight) -> Result<ContemplateGenerated>;
+    fn execute(&mut self, preflight: &QlShapedContemplatePreflight)
+        -> Result<ContemplateGenerated>;
 }
 
 fn positioned_members(
@@ -312,12 +314,7 @@ pub fn wiki_ql_shape_fields(constellation: &WikiConstellation) -> Result<Vec<Wik
         WikiQlRelationFamily::C,
     ] {
         for (pair_index, (left, right)) in family.pairs().into_iter().enumerate() {
-            let required = [
-                (left, false),
-                (right, false),
-                (left, true),
-                (right, true),
-            ];
+            let required = [(left, false), (right, false), (left, true), (right, true)];
             let Some(axis) = required
                 .iter()
                 .map(|key| members.get(key).copied())
@@ -406,13 +403,19 @@ pub fn wiki_ql_shape_fields(constellation: &WikiConstellation) -> Result<Vec<Wik
     Ok(fields)
 }
 
-fn frame_is_relevant(frame: &crate::knowledge_wiki::WikiFrame, relevant: &BTreeSet<ResourceRef>) -> bool {
+fn frame_is_relevant(
+    frame: &crate::knowledge_wiki::WikiFrame,
+    relevant: &BTreeSet<ResourceRef>,
+) -> bool {
     relevant.contains(&frame.ref_id)
         || frame
             .inquiry_ref
             .as_ref()
             .is_some_and(|value| relevant.contains(value))
-        || frame.member_refs.iter().any(|value| relevant.contains(value))
+        || frame
+            .member_refs
+            .iter()
+            .any(|value| relevant.contains(value))
         || frame.constellations.iter().any(|constellation| {
             relevant.contains(&constellation.anchor_ref)
                 || constellation
@@ -435,12 +438,8 @@ pub fn ql_shaped_contemplate_preflight(
             "QL shape budget must be greater than zero",
         ));
     }
-    let base = bounded_contemplate_preflight(
-        request,
-        resource_dependencies,
-        max_objects,
-        relation_depth,
-    )?;
+    let base =
+        bounded_contemplate_preflight(request, resource_dependencies, max_objects, relation_depth)?;
     let relevant = base
         .field
         .objects
@@ -657,8 +656,7 @@ mod tests {
             shape.kind == WikiQlShapeKind::SixBySix && shape.addresses.len() == 36
         }));
         assert!(shapes.iter().any(|shape| {
-            shape.kind == WikiQlShapeKind::RelationalSixfold
-                && shape.generation_sites.len() == 6
+            shape.kind == WikiQlShapeKind::RelationalSixfold && shape.generation_sites.len() == 6
         }));
     }
 
@@ -697,9 +695,7 @@ mod tests {
         let anchor = resource("wiki:anchor");
         let constellation = WikiConstellation {
             anchor_ref: anchor,
-            members: (0_u8..6)
-                .map(|position| member(position, false))
-                .collect(),
+            members: (0_u8..6).map(|position| member(position, false)).collect(),
             returns: Vec::new(),
             conjugate_ref: None,
             extensions: BTreeMap::new(),
@@ -750,12 +746,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            attributed
-                .reading
-                .extensions
-                .contains_key(QL_RELATIONAL_GENERATION_EXTENSION)
-        );
+        assert!(attributed
+            .reading
+            .extensions
+            .contains_key(QL_RELATIONAL_GENERATION_EXTENSION));
     }
 
     #[test]
