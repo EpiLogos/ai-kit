@@ -20,7 +20,7 @@ use crate::knowledge_living_context::{
 };
 use crate::knowledge_living_relations::KnowledgeResourceDependency;
 use crate::knowledge_wiki::{WikiConstellation, WikiConstellationMember, WikiObject};
-use crate::resource::ResourceRef;
+use crate::resource::{ResolveExpression, ResolvePath, ResourceRef};
 use crate::{AikitError, Result};
 
 pub const WIKI_QL_SHAPE_VERSION: &str = "aikit.wiki-ql-shape/v1";
@@ -33,6 +33,7 @@ pub const QL_RELATIONAL_SIXFOLD_SHAPE_REF: &str = "ql:shape:1.0.0:6-plus-6-prime
 pub const QL_RELATIONAL_SIXFOLD_OPERATOR_REF: &str =
     "ql:shape:1.0.0:generation:same-position-direct-conjugate";
 pub const QL_RELATIONAL_GENERATION_EXTENSION: &str = "aikit.ql-relational-generation/v1";
+pub const QL_OPERATIVE_CONTEXT_EXTENSION: &str = "aikit.ql-operative-context/v1";
 pub const DEFAULT_QL_SHAPE_BUDGET: usize = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,10 +156,34 @@ pub struct WikiQlShapeField {
     pub return_anchor_ref: ResourceRef,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QlOperativeContext {
+    pub resolve_path_identity: String,
+    pub expression: ResolveExpression,
+    #[serde(default)]
+    pub resolved_refs: Vec<ResourceRef>,
+}
+
+impl QlOperativeContext {
+    pub fn from_resolve_path(path: &ResolvePath) -> Self {
+        Self {
+            resolve_path_identity: path.identity.clone(),
+            expression: path.expression.clone(),
+            resolved_refs: path
+                .candidates
+                .iter()
+                .map(|candidate| candidate.resource.clone())
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QlShapedContemplatePreflight {
     pub version: String,
     pub base: BoundedContemplatePreflight,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operative: Option<QlOperativeContext>,
     #[serde(default)]
     pub shapes: Vec<WikiQlShapeField>,
     pub shape_budget: usize,
@@ -477,11 +502,31 @@ pub fn ql_shaped_contemplate_preflight(
     Ok(QlShapedContemplatePreflight {
         version: WIKI_QL_SHAPE_VERSION.into(),
         base,
+        operative: None,
         shapes,
         shape_budget,
         truncated,
         automatic_agent_or_model_invocation: false,
     })
+}
+
+pub fn ql_shaped_resolve_contemplate_preflight(
+    request: &ContemplateRequest<'_>,
+    resource_dependencies: &[KnowledgeResourceDependency],
+    resolve_path: &ResolvePath,
+    max_objects: usize,
+    relation_depth: usize,
+    shape_budget: usize,
+) -> Result<QlShapedContemplatePreflight> {
+    let mut preflight = ql_shaped_contemplate_preflight(
+        request,
+        resource_dependencies,
+        max_objects,
+        relation_depth,
+        shape_budget,
+    )?;
+    preflight.operative = Some(QlOperativeContext::from_resolve_path(resolve_path));
+    Ok(preflight)
 }
 
 pub fn attribute_ql_relational_generation(
@@ -550,6 +595,27 @@ pub fn attribute_ql_relational_generation(
     Ok(reading)
 }
 
+pub fn attribute_ql_relational_generation_from_resolve(
+    reading: IntegrativeWikiReading,
+    attribution: QlRelationalGenerationAttribution,
+    resolve_path: &ResolvePath,
+) -> Result<IntegrativeWikiReading> {
+    let mut reading = attribute_ql_relational_generation(reading, attribution)?;
+    let context = QlOperativeContext::from_resolve_path(resolve_path);
+    let value = serde_json::to_value(&context).map_err(|error| {
+        AikitError::new(
+            "knowledge.wiki_ql_operative_context_serialization_failed",
+            format!("failed to serialize operative Resolve context: {error}"),
+        )
+    })?;
+    reading
+        .reading
+        .extensions
+        .insert(QL_OPERATIVE_CONTEXT_EXTENSION.into(), value);
+    WikiObject::Reading(reading.reading.clone()).validate()?;
+    Ok(reading)
+}
+
 struct QlShapedExecutorAdapter<'a> {
     shaped: &'a QlShapedContemplatePreflight,
     executor: &'a mut dyn QlShapedContemplateExecutor,
@@ -578,6 +644,40 @@ pub fn explicit_ql_shaped_contemplate(
     let preflight = ql_shaped_contemplate_preflight(
         request,
         resource_dependencies,
+        max_objects,
+        relation_depth,
+        shape_budget,
+    )?;
+    let mut adapter = QlShapedExecutorAdapter {
+        shaped: &preflight,
+        executor,
+    };
+    let bounded = explicit_bounded_contemplate(
+        request,
+        resource_dependencies,
+        max_objects,
+        relation_depth,
+        &mut adapter,
+    )?;
+    Ok(QlShapedContemplateOutcome {
+        preflight,
+        outcome: bounded.outcome,
+    })
+}
+
+pub fn explicit_ql_shaped_resolve_contemplate(
+    request: &ContemplateRequest<'_>,
+    resource_dependencies: &[KnowledgeResourceDependency],
+    resolve_path: &ResolvePath,
+    max_objects: usize,
+    relation_depth: usize,
+    shape_budget: usize,
+    executor: &mut dyn QlShapedContemplateExecutor,
+) -> Result<QlShapedContemplateOutcome> {
+    let preflight = ql_shaped_resolve_contemplate_preflight(
+        request,
+        resource_dependencies,
+        resolve_path,
         max_objects,
         relation_depth,
         shape_budget,
@@ -750,6 +850,32 @@ mod tests {
             .reading
             .extensions
             .contains_key(QL_RELATIONAL_GENERATION_EXTENSION));
+    }
+
+    #[test]
+    fn operative_context_retains_the_exact_resolve_expression_and_path_identity() {
+        let expression = ResolveExpression::Binary {
+            op: crate::resource::RelationOp::Contextualise,
+            left: Box::new(ResolveExpression::horizon(
+                crate::resource::AddressHorizon::H1,
+                ResolveExpression::subject("source:criterion"),
+            )),
+            right: Box::new(ResolveExpression::horizon(
+                crate::resource::AddressHorizon::H2,
+                ResolveExpression::subject("wiki:reading:distinction"),
+            )),
+        };
+        let resolve_path = ResolvePath {
+            version: crate::resource::OPERATIVE_SYNTAX_VERSION.into(),
+            identity: "resolve:path:criterion-through-distinction".into(),
+            expression: expression.clone(),
+            steps: Vec::new(),
+            candidates: Vec::new(),
+        };
+        let context = QlOperativeContext::from_resolve_path(&resolve_path);
+        assert_eq!(context.resolve_path_identity, resolve_path.identity);
+        assert_eq!(context.expression, expression);
+        assert!(context.resolved_refs.is_empty());
     }
 
     #[test]
