@@ -19,8 +19,10 @@ jobs:
       - name: Install Rust proof components
         run: rustup component add --toolchain 1.98.0 rustfmt clippy
       - name: Apply bounded SessionSpace Resource projection
-        shell: python
+        shell: bash
         run: |
+          set -euo pipefail
+          python3 - <<'PY'
           from pathlib import Path
 
           model = Path('crates/aikit-core/src/resource/model.rs')
@@ -146,9 +148,11 @@ mod resource_projection_tests {
           if text.count(old) != 1:
               raise SystemExit('application_service navigation insertion point drifted')
           app.write_text(text.replace(old, new, 1))
+          PY
+      - name: Format bounded H7 parity seam
+        run: cargo fmt --all
       - name: Prove bounded H7 parity seam
         run: |
-          cargo fmt --all -- --check
           cargo clippy --locked -p aikit-core -p aikit-tui --all-targets -- -D warnings
           cargo test --locked -p aikit-core --all-targets -- --test-threads=1
           cargo test --locked -p aikit-tui --all-targets -- --test-threads=1
