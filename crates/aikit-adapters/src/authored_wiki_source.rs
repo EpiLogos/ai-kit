@@ -386,7 +386,7 @@ fn authored_edge_ref(
         channel,
         anchor
     );
-    ResourceRef::parse(&format!(
+    ResourceRef::parse(format!(
         "wiki:edge:authored:{:016x}",
         stable_hash64(material.as_bytes())
     ))
