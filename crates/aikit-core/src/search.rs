@@ -232,7 +232,7 @@ fn apply_filter(query: &mut Query, key: &str, value: &str) -> bool {
         },
         "tag" => {
             if !query.tags.iter().any(|t| t == value) {
-                query.tags.push(t.to_string());
+                query.tags.push(value.to_string());
             }
             true
         }
@@ -347,7 +347,6 @@ pub struct SearchDoc {
     pub runnable: bool,
     pub usage: UsageStats,
 }
-
 impl SearchDoc {
     /// Build a document for one catalogued capsule.
     ///
