@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::context_activation::ContextActivationReceipt;
 use crate::id::ProfileId;
 use crate::platform::TargetId;
 use crate::project::ProjectBinding;
@@ -129,6 +130,11 @@ pub struct ContextResolution {
     pub execution_offers: Vec<ResolvedResource>,
     pub projection: ProjectionIntent,
     pub retrieval: RetrievalPlan,
+    /// Additive evidence about how ContextSources actually became operative.
+    /// Source standing/authority remains on the source record; target-native
+    /// activation and precedence remain independently explainable here.
+    #[serde(default)]
+    pub context_activations: Vec<ContextActivationReceipt>,
     pub warnings: Vec<String>,
 }
 
@@ -213,6 +219,7 @@ pub fn compose_context_resolution(
         execution_offers: take_group(&mut grouped, ResourceKind::ExecutionOffer),
         projection,
         retrieval,
+        context_activations: Vec::new(),
         warnings,
     }
 }
