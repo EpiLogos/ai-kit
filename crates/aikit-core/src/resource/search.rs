@@ -5,10 +5,10 @@
 //! already-addressable resources elsewhere; the Quick path only ranks the
 //! descriptors and navigation evidence already present here.
 //!
-//! Familiarity is applied as derived navigation evidence. Search relevance and
-//! authored preference remain lexicographically above learned accessibility, so
+//! Search relevance is primary. Authored preference and explicit current
+//! Project/context evidence are ordered separately from learned accessibility, so
 //! repetition can make an otherwise-equivalent destination easier to recover but
-//! can never turn use into authority, preference, eligibility or truth.
+//! can never turn use into relevance, authority, preference, eligibility or truth.
 
 use std::collections::BTreeMap;
 
@@ -24,6 +24,9 @@ const FAMILIARITY_EVIDENCE_PREFIX: &str = "familiarity:";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NavigationEvidenceClass {
+    /// Active/present in the current resolved operating context. Project
+    /// membership is a distinct ranking fact carried by the evidence detail, not
+    /// a new presentation-state class that every surface must understand.
     CurrentContext,
     ExplicitPin,
     Recent,
@@ -32,6 +35,13 @@ pub enum NavigationEvidenceClass {
 }
 
 impl NavigationEvidenceClass {
+    /// Source-compatibility name for callers constructing Project-context
+    /// evidence. It deliberately serializes/discloses as `current-context`; the
+    /// ranking layer distinguishes Project membership from active context using
+    /// the evidence detail supplied by the native Project owner.
+    #[allow(non_upper_case_globals)]
+    pub const CurrentProject: Self = Self::CurrentContext;
+
     fn zero_query_rank(self) -> i32 {
         match self {
             Self::CurrentContext => 500,
@@ -140,6 +150,10 @@ pub struct ResourceRankingSignals {
     pub text_relevance: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authored_preference_rank: Option<i32>,
+    #[serde(default)]
+    pub current_project: bool,
+    #[serde(default)]
+    pub active_in_context: bool,
     #[serde(default)]
     pub learned_observations: usize,
     #[serde(default)]
@@ -362,10 +376,8 @@ impl ResourceSearchIndex {
     /// Search the already-resolved navigation field.
     ///
     /// Ordering is deliberately lexicographic rather than a blended magic score:
-    /// primary text/current-navigation relevance → explicit authored preference →
+    /// text relevance → authored preference → current Project → active context →
     /// learned contextual accessibility/fitness → deterministic identity ties.
-    /// This makes it impossible for repetition to outrank a more relevant match or
-    /// authored preference merely by growing a large numeric weight.
     pub fn search(&self, query: &str, limit: usize) -> Vec<ResourceSearchHit> {
         if limit == 0 {
             return Vec::new();
@@ -410,6 +422,14 @@ impl ResourceSearchIndex {
             .iter()
             .filter_map(|candidate| fuzzy_score(query, candidate))
             .max();
+
+            for annotation in ["aikit.search-exports", "aikit.search-tags"] {
+                if let Some(handles) = descriptor.annotations.get(annotation) {
+                    for handle in handles.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+                        score = score.max(fuzzy_score(query, handle));
+                    }
+                }
+            }
 
             // Action relationship vocabulary is useful for finding the canonical
             // Action resource, but it may never create one row per subject.
@@ -466,6 +486,27 @@ impl ResourceIndex for ResourceSearchIndex {
     }
 }
 
+fn is_current_project_evidence(evidence: &NavigationEvidence) -> bool {
+    evidence.class == NavigationEvidenceClass::CurrentContext
+        && evidence
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.to_ascii_lowercase().contains("project"))
+}
+
+fn is_active_context_evidence(evidence: &NavigationEvidence) -> bool {
+    evidence.class == NavigationEvidenceClass::CurrentContext
+        && !is_current_project_evidence(evidence)
+}
+
+fn has_current_project_evidence(indexed: &IndexedResource) -> bool {
+    indexed.evidence.iter().any(is_current_project_evidence)
+}
+
+fn has_active_context_evidence(indexed: &IndexedResource) -> bool {
+    indexed.evidence.iter().any(is_active_context_evidence)
+}
+
 fn resolve_ranking_signals(
     indexed: &IndexedResource,
     path_identity: Option<&str>,
@@ -474,6 +515,8 @@ fn resolve_ranking_signals(
     let path = path_identity.and_then(|identity| indexed.resolve_path_familiarity.get(identity));
     ResolveRankingSignals {
         authored_preference_rank: indexed.record.preference.as_ref().map(|value| value.rank),
+        current_project: has_current_project_evidence(indexed),
+        active_in_context: has_active_context_evidence(indexed),
         learned_path_observations: path.map_or(0, |value| value.observations),
         learned_path_contextual_observations: path.map_or(0, |value| value.contextual_observations),
         learned_path_frecency_milli: path.map_or(0, |value| quantise_milli(value.frecency)),
@@ -506,6 +549,8 @@ fn resource_hit(indexed: &IndexedResource, score: i64) -> ResourceSearchHit {
         ranking: ResourceRankingSignals {
             text_relevance: score,
             authored_preference_rank: indexed.record.preference.as_ref().map(|value| value.rank),
+            current_project: has_current_project_evidence(indexed),
+            active_in_context: has_active_context_evidence(indexed),
             learned_observations: familiarity.map_or(0, |value| value.observations),
             learned_contextual_observations: familiarity
                 .map_or(0, |value| value.contextual_observations),
@@ -539,6 +584,8 @@ fn compare_hits(left: &ResourceSearchHit, right: &ResourceSearchHit) -> std::cmp
                 .unwrap_or_default()
                 .cmp(&left.ranking.authored_preference_rank.unwrap_or_default())
         })
+        .then_with(|| right.ranking.current_project.cmp(&left.ranking.current_project))
+        .then_with(|| right.ranking.active_in_context.cmp(&left.ranking.active_in_context))
         .then_with(|| {
             right
                 .ranking
@@ -635,6 +682,67 @@ mod tests {
         let scattered = fuzzy_score("proj", "profile object relation job").unwrap();
         assert!(prefix > scattered);
         assert!(fuzzy_score("xyz", "project").is_none());
+    }
+
+    #[test]
+    fn equal_text_prefers_current_project_then_active_context() {
+        use super::super::ResourceDescriptor;
+
+        let mut index = ResourceSearchIndex::default();
+        let project = ResourceRef::parse("capability/project").unwrap();
+        let active = ResourceRef::parse("capability/active").unwrap();
+        let plain = ResourceRef::parse("capability/plain").unwrap();
+        for (id, evidence) in [
+            (
+                project.clone(),
+                vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentProject)
+                    .with_detail("declared by the current Project scope")],
+            ),
+            (
+                active.clone(),
+                vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                    .with_detail("active in the resolved context")],
+            ),
+            (plain, Vec::new()),
+        ] {
+            index.insert_resource(
+                ResourceRecord::new(ResourceDescriptor::new(
+                    id,
+                    ResourceKind::Capability,
+                    "Verify",
+                    "same direct relevance",
+                )),
+                evidence,
+            );
+        }
+
+        let hits = index.search("verify", 3);
+        assert_eq!(hits[0].resource, project);
+        assert_eq!(hits[1].resource, active);
+        assert!(hits[0].ranking.current_project);
+        assert!(!hits[0].ranking.active_in_context);
+        assert!(hits[1].ranking.active_in_context);
+    }
+
+    #[test]
+    fn search_handles_are_reachable_without_changing_resource_identity() {
+        use super::super::ResourceDescriptor;
+
+        let id = ResourceRef::parse("script/cargo-nextest").unwrap();
+        let mut descriptor = ResourceDescriptor::new(
+            id.clone(),
+            ResourceKind::Capability,
+            "Cargo nextest",
+            "test runner",
+        );
+        descriptor
+            .annotations
+            .insert("aikit.search-exports".into(), "nextest,nx".into());
+        let mut index = ResourceSearchIndex::default();
+        index.insert_resource(ResourceRecord::new(descriptor), Vec::new());
+
+        let hit = index.search("nx", 1).remove(0);
+        assert_eq!(hit.resource, id);
     }
 
     #[test]

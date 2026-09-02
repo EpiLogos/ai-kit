@@ -1,19 +1,28 @@
 //! `aikit z <words…>` — the single verb.
 //!
-//! Builds ranked candidates from the resolved view plus the store's usage records,
-//! and decides what to do: act on one clear winner, open the palette pre-filtered
-//! when the top is contested, or report nothing. The ranking policy itself lives in
-//! `aikit_core::frecency`; this module is the wiring that gives it real data.
+//! `z` no longer owns a catalogue matcher or ranking policy. It consumes AIKit's
+//! canonical shallow ResourceRef field and the same operative resolver/ranking law
+//! as Search/TUI, then applies only its stricter interaction decision: act on one
+//! textually clear package winner, open the palette when direct intent is
+//! contested, or report nothing.
 //!
-//! **It never activates anything.** `z` on a capability that no scope selects
-//! proposes *running* it, which is a different act from making it active (Part I
-//! rule 6). The distinction is not pedantry: activation changes what every future
-//! session in this context sees, and a fuzzy match is not consent to that.
+//! Keeping this on the shallow Resource index preserves the zoxide-style quick
+//! path: deep Knowledge providers are not invoked just to jump to a known local
+//! capability. Context, Project and learned familiarity may order otherwise equal
+//! destinations for disclosure, but they never turn ambiguity into consent. And
+//! **`z` never activates anything**: an executable is run; guidance is shown;
+//! activation remains a separate explicit operation.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aikit_core::capsule::Kind;
-use aikit_core::frecency::{self, Candidate, Jump, DEFAULT_HALF_LIFE};
+use aikit_core::frecency::{self, Candidate, Jump};
 use aikit_core::id::CapsuleId;
-use aikit_core::Result;
+use aikit_core::resource::{
+    resolve_expression, resolve_path_identity, ResolveExpression, ResourceRef,
+};
+use aikit_core::{FamiliarityContext, Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS};
+use aikit_tui::backend::PaletteBackend;
 
 use crate::app::Service;
 
@@ -22,7 +31,7 @@ use crate::app::Service;
 pub struct JumpPlan {
     pub query: String,
     pub jump: Jump,
-    /// Every candidate that matched at all, best first.
+    /// Package-backed candidates from canonical Resolve, already best first.
     pub ranked: Vec<Candidate>,
 }
 
@@ -85,56 +94,73 @@ fn action_for(service: &Service, capsule: &CapsuleId) -> JumpAction {
     }
 }
 
-/// Rank the catalogue against `query` and decide.
+/// Resolve package destinations through the canonical shallow Resource field and
+/// apply only `z`'s act/disambiguate consent boundary.
 ///
-/// Every catalogued capability is a candidate, not only the active ones: `z` is how
-/// you reach something you have not enabled, and restricting it to the active set
-/// would make it useless for exactly the case it exists for.
+/// Every catalogued capability remains reachable whether active or inactive.
+/// Non-package Resources may participate in general Search but are not executable
+/// `z` destinations, so filtering them here does not create a second identity or
+/// ranking pass; retained package rows keep their canonical relative order.
 pub fn plan(service: &Service, query: &str) -> Result<JumpPlan> {
-    let view = service.resolved();
-    let exports = view.exported_commands();
     let trimmed = query.trim();
+    let mut index = PaletteBackend::navigation_index(service);
+    let context = familiarity_context(service);
+    let now = now_ms();
+    if let Some(familiarity) = PaletteBackend::familiarity(service)? {
+        index.apply_familiarity(
+            &familiarity,
+            &context,
+            now,
+            DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+        );
+    }
 
-    let mut ranked: Vec<Candidate> = Vec::new();
-    for (id, entry) in &view.catalog_index {
-        let score = frecency::match_quality(trimmed, id);
-        // An exported command name is its own strongest handle: `z nextest` should
-        // find the capsule that exports `nextest` even if its id says otherwise.
-        let exact_export = exports
-            .iter()
-            .any(|(name, owner)| owner == id && name.eq_ignore_ascii_case(trimmed));
-        let export_score = entry
-            .exports
-            .iter()
-            .map(|name| export_match_quality(trimmed, name))
-            .fold(0.0f32, f32::max);
+    let expression = ResolveExpression::ordinary_search(trimmed);
+    if let Some(familiarity) = PaletteBackend::familiarity(service)? {
+        index.apply_resolve_path_familiarity(
+            &familiarity,
+            &resolve_path_identity(&expression),
+            &context,
+            now,
+            DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+        );
+    }
+    let path = resolve_expression(&expression, &index, 256);
+    let exported_commands = service.resolved().exported_commands();
 
-        let score = score.max(export_score);
-        if score <= 0.0 && !exact_export {
+    let mut ranked = Vec::new();
+    for resolved_candidate in path.candidates {
+        let Ok(id) = CapsuleId::parse(resolved_candidate.resource.as_str()) else {
+            continue;
+        };
+        if !service.resolved().catalog_index.contains_key(&id) {
             continue;
         }
 
-        let mut candidate = Candidate::new(id.clone(), if exact_export { 1.0 } else { score });
+        // Preserve the historical `z` consent distinction: an exact exported
+        // command is an unambiguous act request even when another destination has
+        // equal textual relevance. This affects the decision only; canonical
+        // Resolve has already determined ordering.
+        let exact_export = exported_commands
+            .iter()
+            .any(|(name, owner)| owner == &id && name.eq_ignore_ascii_case(trimmed));
+        let direct_score = if exact_export {
+            1.0
+        } else {
+            (resolved_candidate.score as f32 / 100_000.0).clamp(0.0, 1.0)
+        };
+        let mut candidate = Candidate::new(id.clone(), direct_score);
         candidate.exact_export_name = exact_export;
-        candidate.active_in_context = view.is_active(id);
-        candidate.in_current_project = view
-            .declared
-            .get(id)
-            .map(|d| {
-                matches!(
-                    d.scope,
-                    aikit_core::scope::ScopeKind::Project
-                        | aikit_core::scope::ScopeKind::ProjectLocal
-                )
-            })
-            .unwrap_or(false);
-        candidate.usage = service.index().usage(id).unwrap_or_default();
+        candidate.in_current_project = resolved_candidate.ranking.current_project;
+        candidate.active_in_context = resolved_candidate.ranking.active_in_context;
+        // Retained only for `z --json` evidence compatibility. Successful Run
+        // history already participates in canonical ordering through the unified
+        // Familiarity replay; there is deliberately no `frecency::rank` call here.
+        candidate.usage = service.index().usage(&id).unwrap_or_default();
         ranked.push(candidate);
     }
 
-    frecency::rank(&mut ranked, DEFAULT_HALF_LIFE);
     let jump = frecency::decide(&ranked);
-
     Ok(JumpPlan {
         query: trimmed.to_string(),
         jump,
@@ -142,21 +168,22 @@ pub fn plan(service: &Service, query: &str) -> Result<JumpPlan> {
     })
 }
 
-/// Match quality against an export name, which has no path segments — so the whole
-/// name is the tail and the leaf rules apply directly.
-fn export_match_quality(query: &str, export: &str) -> f32 {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return 0.0;
+fn familiarity_context(service: &Service) -> FamiliarityContext {
+    FamiliarityContext {
+        project: service
+            .descriptor()
+            .project_id
+            .as_ref()
+            .and_then(|project| ResourceRef::parse(format!("project/{project}")).ok()),
+        actor: None,
+        agency: None,
+        focus: service.descriptor().task.clone(),
     }
-    let export = export.to_lowercase();
-    if export == query {
-        1.0
-    } else if export.starts_with(&query) {
-        0.9
-    } else if export.contains(&query) {
-        0.7
-    } else {
-        0.0
-    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or_default()
 }

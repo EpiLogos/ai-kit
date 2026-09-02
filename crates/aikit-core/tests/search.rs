@@ -15,7 +15,8 @@ use std::time::Duration;
 use aikit_core::capsule::Kind;
 use aikit_core::scope::ScopeKind;
 use aikit_core::search::{
-    parse_query, score, DocStatus, FastPrefix, RankingSignals, SearchDoc, StatusFilter, UsageStats,
+    compare, parse_query, score, DocStatus, FastPrefix, RankingSignals, SearchDoc, StatusFilter,
+    UsageStats,
 };
 use aikit_core::trust::TrustState;
 
@@ -297,13 +298,11 @@ fn an_old_frequently_used_action_does_not_permanently_outrank_a_recent_one() {
     let mut newcomer = doc("script/ops/deploy-new");
     newcomer.usage = used(2, 0);
 
-    // Identical text relevance: only the usage signal can separate them.
-    let veteran_score = score(&q, &veteran, 0.5, &signals);
-    let newcomer_score = score(&q, &newcomer, 0.5, &signals);
-
-    assert!(
-        newcomer_score > veteran_score,
-        "a 90-day-old habit ({veteran_score}) must not outrank today's ({newcomer_score})"
+    // Identical direct relevance: frecency only orders the tie.
+    assert_eq!(
+        compare(&q, (&newcomer, 0.5), (&veteran, 0.5), &signals),
+        std::cmp::Ordering::Less,
+        "a 90-day-old habit must not outrank today's use"
     );
 }
 
@@ -317,7 +316,10 @@ fn with_equal_recency_more_successful_runs_still_ranks_higher() {
     let mut rarely = doc("script/ops/b");
     rarely.usage = used(1, 1);
 
-    assert!(score(&q, &often, 0.5, &signals) > score(&q, &rarely, 0.5, &signals));
+    assert_eq!(
+        compare(&q, (&often, 0.5), (&rarely, 0.5), &signals),
+        std::cmp::Ordering::Less
+    );
 }
 
 #[test]
@@ -339,12 +341,15 @@ fn a_never_used_capability_receives_no_usage_boost_at_all() {
     let signals = RankingSignals::default();
     assert_eq!(signals.usage_boost(&UsageStats::default()), 0.0);
 
-    // Same query, same text relevance, same name shape: only usage differs.
+    // Same direct relevance and context: successful use is the deciding tiebreak.
     let q = parse_query("deploy");
     let unused = doc("script/ops/deploy-a");
     let mut used_once = doc("script/ops/deploy-b");
     used_once.usage = used(1, 0);
-    assert!(score(&q, &used_once, 0.5, &signals) > score(&q, &unused, 0.5, &signals));
+    assert_eq!(
+        compare(&q, (&used_once, 0.5), (&unused, 0.5), &signals),
+        std::cmp::Ordering::Less
+    );
 }
 
 #[test]
@@ -369,8 +374,9 @@ fn no_amount_of_usage_can_outweigh_a_direct_text_match() {
 
     let wanted = doc("skill/rust/review");
 
-    assert!(
-        score(&q, &wanted, 1.0, &signals) > score(&q, &habit, 0.0, &signals),
+    assert_eq!(
+        compare(&q, (&wanted, 1.0), (&habit, 0.0), &signals),
+        std::cmp::Ordering::Less,
         "what the user typed has to win"
     );
 }
@@ -385,7 +391,10 @@ fn an_exact_command_match_beats_a_merely_similar_name() {
     exact.exports = vec!["nt".into()];
     let similar = doc("script/test/nightly");
 
-    assert!(score(&q, &exact, 0.8, &signals) > score(&q, &similar, 0.8, &signals));
+    assert_eq!(
+        compare(&q, (&exact, 0.8), (&similar, 0.8), &signals),
+        std::cmp::Ordering::Less
+    );
 }
 
 #[test]
@@ -399,9 +408,14 @@ fn project_and_context_relevance_both_lift_a_capability() {
     let mut context = plain.clone();
     context.in_active_context = true;
 
-    let base = score(&q, &plain, 0.5, &signals);
-    assert!(score(&q, &project, 0.5, &signals) > base);
-    assert!(score(&q, &context, 0.5, &signals) > base);
+    assert_eq!(
+        compare(&q, (&project, 0.5), (&plain, 0.5), &signals),
+        std::cmp::Ordering::Less
+    );
+    assert_eq!(
+        compare(&q, (&context, 0.5), (&plain, 0.5), &signals),
+        std::cmp::Ordering::Less
+    );
 }
 
 #[test]

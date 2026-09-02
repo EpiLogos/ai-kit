@@ -5,13 +5,20 @@ use serde::{Deserialize, Serialize};
 use super::{ResourceRecord, ResourceRef};
 
 /// Derived ordering inputs visible to Resolve without conferring authority or
-/// mutating Resource identity. Search relevance remains primary; authored
-/// preference then learned contextual accessibility break otherwise comparable
-/// candidates exactly as the production navigation field already does.
+/// mutating Resource identity. Search relevance remains primary; authored and
+/// current-context evidence then break otherwise comparable candidates before
+/// learned accessibility. None of these signals changes eligibility, trust or
+/// canonical identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ResolveRankingSignals {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authored_preference_rank: Option<i32>,
+    /// The Resource is declared by the current Project/ProjectLocal scope.
+    #[serde(default)]
+    pub current_project: bool,
+    /// The Resource is active/present in the current resolved operating context.
+    #[serde(default)]
+    pub active_in_context: bool,
     #[serde(default)]
     pub learned_path_observations: usize,
     #[serde(default)]
