@@ -244,7 +244,7 @@ fn candidate_for(
             Some(relation.source.clone()),
         )
     } else {
-        let source = SourceRef::parse(&format!(
+        let source = SourceRef::parse(format!(
             "source:project-local:{}:{}",
             project.as_str(),
             relative.to_string_lossy()
