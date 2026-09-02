@@ -24,9 +24,9 @@ const FAMILIARITY_EVIDENCE_PREFIX: &str = "familiarity:";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NavigationEvidenceClass {
-    /// Declared by the Project/ProjectLocal scope currently being inhabited.
-    CurrentProject,
-    /// Active/present in the current resolved operating context.
+    /// Active/present in the current resolved operating context. Project
+    /// membership is a distinct ranking fact carried by the evidence detail, not
+    /// a new presentation-state class that every surface must understand.
     CurrentContext,
     ExplicitPin,
     Recent,
@@ -35,10 +35,16 @@ pub enum NavigationEvidenceClass {
 }
 
 impl NavigationEvidenceClass {
+    /// Source-compatibility name for callers constructing Project-context
+    /// evidence. It deliberately serializes/discloses as `current-context`; the
+    /// ranking layer distinguishes Project membership from active context using
+    /// the evidence detail supplied by the native Project owner.
+    #[allow(non_upper_case_globals)]
+    pub const CurrentProject: Self = Self::CurrentContext;
+
     fn zero_query_rank(self) -> i32 {
         match self {
-            Self::CurrentProject => 500,
-            Self::CurrentContext => 450,
+            Self::CurrentContext => 500,
             Self::ExplicitPin => 400,
             Self::ChangedProject => 300,
             Self::Recent => 200,
@@ -480,8 +486,25 @@ impl ResourceIndex for ResourceSearchIndex {
     }
 }
 
-fn has_evidence(indexed: &IndexedResource, class: NavigationEvidenceClass) -> bool {
-    indexed.evidence.iter().any(|evidence| evidence.class == class)
+fn is_current_project_evidence(evidence: &NavigationEvidence) -> bool {
+    evidence.class == NavigationEvidenceClass::CurrentContext
+        && evidence
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.to_ascii_lowercase().contains("project"))
+}
+
+fn is_active_context_evidence(evidence: &NavigationEvidence) -> bool {
+    evidence.class == NavigationEvidenceClass::CurrentContext
+        && !is_current_project_evidence(evidence)
+}
+
+fn has_current_project_evidence(indexed: &IndexedResource) -> bool {
+    indexed.evidence.iter().any(is_current_project_evidence)
+}
+
+fn has_active_context_evidence(indexed: &IndexedResource) -> bool {
+    indexed.evidence.iter().any(is_active_context_evidence)
 }
 
 fn resolve_ranking_signals(
@@ -492,8 +515,8 @@ fn resolve_ranking_signals(
     let path = path_identity.and_then(|identity| indexed.resolve_path_familiarity.get(identity));
     ResolveRankingSignals {
         authored_preference_rank: indexed.record.preference.as_ref().map(|value| value.rank),
-        current_project: has_evidence(indexed, NavigationEvidenceClass::CurrentProject),
-        active_in_context: has_evidence(indexed, NavigationEvidenceClass::CurrentContext),
+        current_project: has_current_project_evidence(indexed),
+        active_in_context: has_active_context_evidence(indexed),
         learned_path_observations: path.map_or(0, |value| value.observations),
         learned_path_contextual_observations: path.map_or(0, |value| value.contextual_observations),
         learned_path_frecency_milli: path.map_or(0, |value| quantise_milli(value.frecency)),
@@ -526,8 +549,8 @@ fn resource_hit(indexed: &IndexedResource, score: i64) -> ResourceSearchHit {
         ranking: ResourceRankingSignals {
             text_relevance: score,
             authored_preference_rank: indexed.record.preference.as_ref().map(|value| value.rank),
-            current_project: has_evidence(indexed, NavigationEvidenceClass::CurrentProject),
-            active_in_context: has_evidence(indexed, NavigationEvidenceClass::CurrentContext),
+            current_project: has_current_project_evidence(indexed),
+            active_in_context: has_active_context_evidence(indexed),
             learned_observations: familiarity.map_or(0, |value| value.observations),
             learned_contextual_observations: familiarity
                 .map_or(0, |value| value.contextual_observations),
@@ -672,11 +695,13 @@ mod tests {
         for (id, evidence) in [
             (
                 project.clone(),
-                vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentProject)],
+                vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentProject)
+                    .with_detail("declared by the current Project scope")],
             ),
             (
                 active.clone(),
-                vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)],
+                vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                    .with_detail("active in the resolved context")],
             ),
             (plain, Vec::new()),
         ] {
@@ -695,6 +720,7 @@ mod tests {
         assert_eq!(hits[0].resource, project);
         assert_eq!(hits[1].resource, active);
         assert!(hits[0].ranking.current_project);
+        assert!(!hits[0].ranking.active_in_context);
         assert!(hits[1].ranking.active_in_context);
     }
 
