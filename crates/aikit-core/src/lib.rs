@@ -29,6 +29,7 @@ pub mod composition_mutation;
 pub mod composition_view;
 pub mod composition_workspace;
 pub mod context;
+pub mod context_activation;
 pub mod context_resolution;
 pub mod context_source;
 pub mod credential;
@@ -124,6 +125,11 @@ pub use composition_view::{
     ContractRebinding, HarnessCompositionDiff, RequirementExplanation, RequirementResolution,
 };
 pub use context::{ContextBinding, ContextDescriptor, Isolation};
+pub use context_activation::{
+    attach_context_activations, explain_context_activation, ContextActivationEvidenceBasis,
+    ContextActivationExplanation, ContextActivationMode, ContextActivationReceipt,
+    CONTEXT_ACTIVATION_VERSION,
+};
 pub use context_resolution::{
     availability as resource_availability, compose_context_resolution, Availability,
     ContextResolution, ProjectionIntent, ReferenceResolution, RequestedActors, ResolvedResource,
@@ -139,11 +145,10 @@ pub use context_source::{
     StructuredAbsence, CONTEXT_SOURCE_INDEX_VERSION,
 };
 pub use credential::{
-    resolve_credential, resolve_registered_credential, CredentialBindingState,
-    CredentialProviderRejection, CredentialRef, CredentialResolution, CredentialResolutionRequest,
-    ProviderResolutionExplanation, SecretMaterialisationClass, SecretProvider,
-    SecretProviderDescriptor, SecretProviderRef, SecretProviderTier, SecretRequirement,
-    SecretRequirementRef, SecretValue, CREDENTIAL_RESOLUTION_VERSION,
+    resolve_credential, CredentialBindingState, CredentialProviderRejection, CredentialRef,
+    CredentialResolution, CredentialResolutionRequest, ProviderResolutionExplanation,
+    SecretMaterialisationClass, SecretProviderDescriptor, SecretProviderRef, SecretProviderTier,
+    SecretRequirement, SecretRequirementRef, CREDENTIAL_RESOLUTION_VERSION,
 };
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
@@ -159,7 +164,7 @@ pub use explain_history_actions::{
 pub use familiarity::{
     AccessibilityAssessment, AccessibilitySignal, AccessibilitySignalClass, FamiliarityContext,
     FamiliarityObservation, FamiliaritySnapshot, FamiliaritySnapshotLoad, FamiliarityStore,
-    FamiliarityUse, FitnessEvidence, ForgetScope, OperativePathEvidence, RouteStepEvidence,
+    FamiliarityUse, FitnessEvidence, ForgetScope, RouteStepEvidence,
     DEFAULT_FAMILIARITY_HALF_LIFE_MS, FAMILIARITY_SCHEMA_VERSION,
 };
 pub use flow::{
