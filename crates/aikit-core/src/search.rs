@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn compatibility_score_is_match_quality_only() {
         let query = parse_query("alpha");
-        let mut contextual = doc("script:alpha-contextual");
+        let mut contextual = doc("script/alpha-contextual");
         contextual.in_current_project = true;
         contextual.in_active_context = true;
         contextual.usage = UsageStats {
@@ -612,8 +612,8 @@ mod tests {
     #[test]
     fn stronger_match_cannot_be_overpowered_by_context_or_frecency() {
         let query = parse_query("alpha");
-        let stronger = doc("script:stronger");
-        let mut habitual = doc("script:habitual");
+        let stronger = doc("script/stronger");
+        let mut habitual = doc("script/habitual");
         habitual.in_current_project = true;
         habitual.in_active_context = true;
         habitual.usage = UsageStats {
@@ -634,19 +634,19 @@ mod tests {
 
     #[test]
     fn equal_matches_follow_exact_project_context_frecency_then_id() {
-        let mut exact = doc("script:exact");
+        let mut exact = doc("script/exact");
         exact.exports.push("alpha".into());
-        let mut project = doc("script:project");
+        let mut project = doc("script/project");
         project.in_current_project = true;
-        let mut active = doc("script:active");
+        let mut active = doc("script/active");
         active.in_active_context = true;
-        let mut used = doc("script:used");
+        let mut used = doc("script/used");
         used.usage = UsageStats {
             successful_runs: 10,
             failed_runs: 0,
             last_success_age: Some(Duration::ZERO),
         };
-        let plain = doc("script:plain");
+        let plain = doc("script/plain");
         let query = parse_query("alpha");
         let signals = RankingSignals::default();
 
