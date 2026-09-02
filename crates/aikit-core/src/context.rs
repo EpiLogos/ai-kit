@@ -102,6 +102,7 @@ impl ContextDescriptor {
                 TargetId::shell(),
                 TargetId::claude_code(),
                 TargetId::codex(),
+                TargetId::deepseek_harness(),
             ],
             mux: None,
             host: hostname(),
