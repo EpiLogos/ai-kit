@@ -490,10 +490,9 @@ pub fn compare(
         .then_with(|| right_doc.in_current_project.cmp(&left_doc.in_current_project))
         .then_with(|| right_doc.in_active_context.cmp(&left_doc.in_active_context))
         .then_with(|| {
-            right_doc
-                .usage
-                .frecency(signals.usage_half_life)
-                .partial_cmp(&left_doc.usage.frecency(signals.usage_half_life))
+            signals
+                .usage_boost(&right_doc.usage)
+                .partial_cmp(&signals.usage_boost(&left_doc.usage))
                 .unwrap_or(Ordering::Equal)
         })
         .then_with(|| left_doc.id.cmp(&right_doc.id))
@@ -520,9 +519,7 @@ pub fn deciding_signal(
     if left_doc.in_active_context != right_doc.in_active_context {
         return Some(RankingDecision::ActiveContext);
     }
-    if left_doc.usage.frecency(signals.usage_half_life)
-        != right_doc.usage.frecency(signals.usage_half_life)
-    {
+    if signals.usage_boost(&left_doc.usage) != signals.usage_boost(&right_doc.usage) {
         return Some(RankingDecision::Frecency);
     }
     (left_doc.id != right_doc.id).then_some(RankingDecision::CapsuleId)
