@@ -1,15 +1,26 @@
 use aikit_core::resource::ResourceRef;
 use aikit_core::{
-    FamiliarityContext, FamiliarityObservation, ForgetScope, DEFAULT_FAMILIARITY_HALF_LIFE_MS,
-    FAMILIARITY_SCHEMA_VERSION,
+    CapsuleId, FamiliarityContext, FamiliarityObservation, ForgetScope, Revision,
+    DEFAULT_FAMILIARITY_HALF_LIFE_MS, FAMILIARITY_SCHEMA_VERSION,
 };
 use aikit_store::{
     append_familiarity_observation, append_familiarity_reset, replay_familiarity, Event,
-    EventAction, FamiliarityReplay, Index, Timestamp, FAMILIARITY_OBSERVATION_EVENT,
+    EventAction, FamiliarityReplay, Index, Outcome, Timestamp, FAMILIARITY_OBSERVATION_EVENT,
 };
 
 fn r(raw: &str) -> ResourceRef {
     ResourceRef::parse(raw).unwrap()
+}
+
+fn capsule(raw: &str) -> CapsuleId {
+    CapsuleId::parse(raw).unwrap()
+}
+
+fn successful_run(raw: &str, observed_at_ms: u64) -> Event {
+    Event::new(EventAction::Run)
+        .at(Timestamp::from_nanos((observed_at_ms as i64) * 1_000_000))
+        .for_capsule(capsule(raw), Revision::from_raw("test"))
+        .with_outcome(Outcome::Success)
 }
 
 #[test]
@@ -91,6 +102,94 @@ fn observations_and_resets_replay_across_index_reopen() {
             )
             .observations,
         1
+    );
+}
+
+#[test]
+fn successful_runs_join_the_same_familiarity_replay_and_failures_do_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = Index::open(&dir.path().join("aikit.db")).unwrap();
+    let destination = r("script/test/deploy");
+
+    index
+        .record_event(&successful_run("script/test/deploy", 1_000))
+        .unwrap();
+    index
+        .record_event(
+            &Event::new(EventAction::Run)
+                .at(Timestamp::from_nanos(2_000_000_000))
+                .for_capsule(capsule("script/test/deploy"), Revision::from_raw("test"))
+                .with_outcome(Outcome::Failure {
+                    code: "test.failure".into(),
+                }),
+        )
+        .unwrap();
+
+    let FamiliarityReplay::Loaded {
+        store,
+        observation_events,
+        ..
+    } = replay_familiarity(&index).unwrap()
+    else {
+        panic!("successful Run evidence should be replayable");
+    };
+    assert_eq!(observation_events, 1);
+    assert_eq!(
+        store
+            .assess_destination(
+                &destination,
+                &FamiliarityContext::default(),
+                3_000,
+                DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+            )
+            .observations,
+        1,
+        "only the successful Run becomes learned accessibility"
+    );
+}
+
+#[test]
+fn familiarity_reset_applies_to_run_history_in_event_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = Index::open(&dir.path().join("aikit.db")).unwrap();
+    let destination = r("script/test/deploy");
+
+    index
+        .record_event(&successful_run("script/test/deploy", 1_000))
+        .unwrap();
+    append_familiarity_reset(
+        &index,
+        ForgetScope::Destination(destination.clone()),
+        2_000,
+    )
+    .unwrap();
+    index
+        .record_event(&successful_run("script/test/deploy", 3_000))
+        .unwrap();
+
+    let FamiliarityReplay::Loaded {
+        store,
+        observation_events,
+        reset_events,
+        observations_removed_by_resets,
+    } = replay_familiarity(&index).unwrap()
+    else {
+        panic!("mixed Run/reset evidence should replay");
+    };
+    assert_eq!(observation_events, 2);
+    assert_eq!(reset_events, 1);
+    assert_eq!(observations_removed_by_resets, 1);
+    assert_eq!(
+        store
+            .assess_destination(
+                &destination,
+                &FamiliarityContext::default(),
+                4_000,
+                DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+            )
+            .observations,
+        1,
+        "only post-reset Run familiarity survives"
     );
 }
 
