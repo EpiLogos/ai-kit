@@ -30,16 +30,33 @@ use crate::resource::{parse_or_search_expression, ResolveExpression};
 use crate::scope::ScopeKind;
 use crate::trust::TrustState;
 
+// ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
+
+/// The single-character lanes at the front of the query box.
+///
+/// They exist because the four things a user reaches for have different shapes:
+/// running something, changing what is active, moving between session spaces, and
+/// operating AIKit itself. Making them one flat list would mean every query
+/// searches three kinds of noun the user was not thinking about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FastPrefix {
+    /// `>` — runnable scripts and tools.
     Run,
+    /// `+` — capability management.
     Capabilities,
+    /// `@` — sessions and tasks.
     Sessions,
+    /// `:` — AIKit management actions.
     Manage,
 }
 
 impl FastPrefix {
+    /// Only non-conflicting historical lanes remain front-character shortcuts.
+    /// `+` and `@` stay deserializable enum values for compatibility, but new
+    /// input parses them as O:I operative syntax.
     pub const ALL: [FastPrefix; 2] = [FastPrefix::Run, FastPrefix::Manage];
 
     pub fn from_char(c: char) -> Option<Self> {
@@ -59,6 +76,7 @@ impl FastPrefix {
         }
     }
 
+    /// The hint shown next to an empty query box.
     pub fn describe(self) -> &'static str {
         match self {
             FastPrefix::Run => "run a script or tool",
@@ -69,6 +87,8 @@ impl FastPrefix {
     }
 }
 
+/// The `status:` filter, which is how the palette lets a user ask the question the
+/// three-state rendering raises: "show me the things that are *not* working".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StatusFilter {
@@ -88,6 +108,11 @@ impl StatusFilter {
     }
 }
 
+/// A parsed query.
+///
+/// Filters within one key widen (OR); different keys narrow (AND). Free text is
+/// never used as a filter here — that would silently overrule a fuzzy match with
+/// a substring check.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Query {
     pub raw: String,
@@ -117,11 +142,17 @@ impl Query {
             || !self.trust.is_empty()
     }
 
+    /// Does this document survive the query's filters?
     pub fn matches_filters(&self, doc: &SearchDoc) -> bool {
         if let Some(prefix) = self.prefix {
             let admitted = match prefix {
+                // "Runnable" is the resolved view's answer, not a kind lookup: a
+                // blocked or quarantined script is not something you can run.
                 FastPrefix::Run => doc.runnable,
                 FastPrefix::Sessions => doc.kind == Kind::Session,
+                // These two switch the palette to a different source (capability
+                // toggles, AIKit's own actions). Narrowing capsules by them here
+                // would be inventing a rule the lanes do not have.
                 FastPrefix::Capabilities | FastPrefix::Manage => true,
             };
             if !admitted {
@@ -149,12 +180,19 @@ impl Query {
     }
 }
 
+/// Parse a palette query.
+///
+/// Unknown filter keys and unknown filter values are treated as free text rather
+/// than as errors. A palette that rejects a half-typed query is a palette people
+/// stop using, and `note:remember` is a perfectly reasonable thing to search for.
 pub fn parse_query(raw: &str) -> Query {
     let mut query = Query {
         raw: raw.to_string(),
         ..Default::default()
     };
+
     query.expression = parse_or_search_expression(raw).ok();
+
     let trimmed = raw.trim_start();
     let body = match trimmed.chars().next().and_then(FastPrefix::from_char) {
         Some(prefix) => {
@@ -163,6 +201,7 @@ pub fn parse_query(raw: &str) -> Query {
         }
         None => trimmed,
     };
+
     let mut free: Vec<&str> = Vec::new();
     for token in body.split_whitespace() {
         match token.split_once(':') {
@@ -178,6 +217,8 @@ pub fn parse_query(raw: &str) -> Query {
     query
 }
 
+/// Returns false when the token is not a recognized filter, so the caller can
+/// keep it as free text.
 fn apply_filter(query: &mut Query, key: &str, value: &str) -> bool {
     match key {
         "kind" => match value.parse::<Kind>() {
@@ -224,11 +265,18 @@ fn apply_filter(query: &mut Query, key: &str, value: &str) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Documents
+// ---------------------------------------------------------------------------
+
+/// *Available*, *enabled* and *loaded* are three different things; this is the
+/// one the palette colours a row by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DocStatus {
     Active,
     Inactive,
+    /// Declared, but held back — policy, trust, platform, a missing dependency.
     Unavailable,
 }
 
@@ -242,15 +290,22 @@ impl DocStatus {
     }
 }
 
+/// Operational usage facts, from the store's event log.
+///
+/// Only *successful* runs carry a boost. Surfacing a command because it keeps
+/// failing would be actively unhelpful.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageStats {
     pub successful_runs: u32,
     pub failed_runs: u32,
+    /// How long ago the last *successful* run was. `None` means never.
     #[serde(default)]
     pub last_success_age: Option<Duration>,
 }
 
 impl UsageStats {
+    /// Recency-decayed successful use, shared by deterministic ranking callers.
+    /// Failed invocations and mere disclosure never contribute.
     pub fn frecency(&self, half_life: Duration) -> f32 {
         if self.successful_runs == 0 {
             return 0.0;
@@ -264,6 +319,12 @@ impl UsageStats {
     }
 }
 
+/// A flat, cheap row: everything ranking and filtering need, and nothing else.
+///
+/// Deliberately owns its strings rather than borrowing the view. The palette
+/// rebuilds and re-ranks this list on every keystroke, and a borrow would force
+/// the whole resolved view to stay pinned in the TUI's state for the lifetime of
+/// the search.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchDoc {
     pub id: CapsuleId,
@@ -273,20 +334,29 @@ pub struct SearchDoc {
     pub tags: Vec<String>,
     pub exports: Vec<String>,
     pub status: DocStatus,
+    /// The scope that declared it, when any did.
     #[serde(default)]
     pub scope: Option<ScopeKind>,
     pub trust: TrustState,
+    /// Declared by this repository rather than inherited from the user's global
+    /// or host profile.
     pub in_current_project: bool,
+    /// In the effective view for the context the palette was opened in.
     pub in_active_context: bool,
+    /// Whether `aikit run` would accept it right now.
     pub runnable: bool,
     pub usage: UsageStats,
 }
-
 impl SearchDoc {
+    /// Build a document for one catalogued capsule.
+    ///
+    /// Returns `None` for a capsule the view has never heard of: a row the palette
+    /// could not explain or act on is worse than no row.
     pub fn from_view(view: &ResolvedView, id: &CapsuleId, usage: UsageStats) -> Option<Self> {
         let entry = view.catalog_index.get(id)?;
         let declared = view.declared.get(id);
         let scope = declared.map(|d| d.scope);
+
         let status = if view.is_active(id) {
             DocStatus::Active
         } else if view.unavailable.contains_key(id) {
@@ -294,6 +364,7 @@ impl SearchDoc {
         } else {
             DocStatus::Inactive
         };
+
         Some(Self {
             id: id.clone(),
             kind: entry.kind,
@@ -314,6 +385,7 @@ impl SearchDoc {
         })
     }
 
+    /// Does the query name one of this capability's commands outright?
     fn is_exact_command_match(&self, query: &Query) -> bool {
         let typed = query.text.trim();
         if typed.is_empty() {
@@ -323,6 +395,15 @@ impl SearchDoc {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ranking
+// ---------------------------------------------------------------------------
+
+/// Retained compatibility/config shape for flat `SearchDoc` callers.
+///
+/// The historical per-signal weights are still deserializable so existing config
+/// does not break, but they no longer blend contextual evidence into relevance.
+/// `usage_half_life` remains operative because frecency is an ordered tiebreak.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RankingSignals {
     pub text_weight: f32,
@@ -349,10 +430,8 @@ impl Default for RankingSignals {
 }
 
 impl RankingSignals {
-    /// Bounded successful-use familiarity for the flat compatibility surface.
-    /// Frequency saturates before recency decay, so a large ancient count cannot
-    /// permanently outweigh a genuinely recent use. This remains only the final
-    /// learned tiebreak after direct relevance, Project and active context tie.
+    /// Historical bounded display helper retained for source compatibility.
+    /// Ranking itself uses [`UsageStats::frecency`] only after stronger signals tie.
     pub fn usage_boost(&self, usage: &UsageStats) -> f32 {
         if usage.successful_runs == 0 {
             return 0.0;
@@ -368,6 +447,7 @@ impl RankingSignals {
     }
 }
 
+/// Explainable signal which decided the ordering of two compatibility rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RankingDecision {
@@ -379,10 +459,17 @@ pub enum RankingDecision {
     CapsuleId,
 }
 
+/// Compatibility score is match quality alone.
+///
+/// Keep this function for callers which still compute a numeric text score, but
+/// never fold exact/project/context/use into that number. New application search
+/// should consume the typed Resource/Resolve service instead.
 pub fn score(_query: &Query, _doc: &SearchDoc, text_score: f32, _signals: &RankingSignals) -> f32 {
     text_score
 }
 
+/// Order two already-matched compatibility rows using the accepted deterministic
+/// `z` law. Higher text quality wins outright; every other signal is a tiebreak.
 pub fn compare(
     query: &Query,
     left: (&SearchDoc, f32),
@@ -391,6 +478,7 @@ pub fn compare(
 ) -> Ordering {
     let (left_doc, left_text_score) = left;
     let (right_doc, right_text_score) = right;
+
     right_text_score
         .partial_cmp(&left_text_score)
         .unwrap_or(Ordering::Equal)
@@ -402,14 +490,16 @@ pub fn compare(
         .then_with(|| right_doc.in_current_project.cmp(&left_doc.in_current_project))
         .then_with(|| right_doc.in_active_context.cmp(&left_doc.in_active_context))
         .then_with(|| {
-            signals
-                .usage_boost(&right_doc.usage)
-                .partial_cmp(&signals.usage_boost(&left_doc.usage))
+            right_doc
+                .usage
+                .frecency(signals.usage_half_life)
+                .partial_cmp(&left_doc.usage.frecency(signals.usage_half_life))
                 .unwrap_or(Ordering::Equal)
         })
         .then_with(|| left_doc.id.cmp(&right_doc.id))
 }
 
+/// State which field first distinguishes two rows under [`compare`].
 pub fn deciding_signal(
     query: &Query,
     left: (&SearchDoc, f32),
@@ -430,7 +520,9 @@ pub fn deciding_signal(
     if left_doc.in_active_context != right_doc.in_active_context {
         return Some(RankingDecision::ActiveContext);
     }
-    if signals.usage_boost(&left_doc.usage) != signals.usage_boost(&right_doc.usage) {
+    if left_doc.usage.frecency(signals.usage_half_life)
+        != right_doc.usage.frecency(signals.usage_half_life)
+    {
         return Some(RankingDecision::Frecency);
     }
     (left_doc.id != right_doc.id).then_some(RankingDecision::CapsuleId)
@@ -491,6 +583,7 @@ mod tests {
             addressed.expression,
             Some(ResolveExpression::Address { .. })
         ));
+
         let affirmed = parse_query("+ @5 action:verify");
         assert_eq!(affirmed.prefix, None);
         assert!(matches!(
@@ -510,7 +603,10 @@ mod tests {
             failed_runs: 0,
             last_success_age: Some(Duration::ZERO),
         };
-        assert_eq!(score(&query, &contextual, 0.42, &RankingSignals::default()), 0.42);
+        assert_eq!(
+            score(&query, &contextual, 0.42, &RankingSignals::default()),
+            0.42
+        );
     }
 
     #[test]
@@ -526,7 +622,10 @@ mod tests {
             last_success_age: Some(Duration::ZERO),
         };
         let signals = RankingSignals::default();
-        assert_eq!(compare(&query, (&stronger, 0.9), (&habitual, 0.8), &signals), Ordering::Less);
+        assert_eq!(
+            compare(&query, (&stronger, 0.9), (&habitual, 0.8), &signals),
+            Ordering::Less
+        );
         assert_eq!(
             deciding_signal(&query, (&stronger, 0.9), (&habitual, 0.8), &signals),
             Some(RankingDecision::MatchQuality)
@@ -550,9 +649,22 @@ mod tests {
         let plain = doc("script/plain");
         let query = parse_query("alpha");
         let signals = RankingSignals::default();
-        assert_eq!(deciding_signal(&query, (&exact, 1.0), (&project, 1.0), &signals), Some(RankingDecision::ExactCommand));
-        assert_eq!(deciding_signal(&query, (&project, 1.0), (&active, 1.0), &signals), Some(RankingDecision::CurrentProject));
-        assert_eq!(deciding_signal(&query, (&active, 1.0), (&used, 1.0), &signals), Some(RankingDecision::ActiveContext));
-        assert_eq!(deciding_signal(&query, (&used, 1.0), (&plain, 1.0), &signals), Some(RankingDecision::Frecency));
+
+        assert_eq!(
+            deciding_signal(&query, (&exact, 1.0), (&project, 1.0), &signals),
+            Some(RankingDecision::ExactCommand)
+        );
+        assert_eq!(
+            deciding_signal(&query, (&project, 1.0), (&active, 1.0), &signals),
+            Some(RankingDecision::CurrentProject)
+        );
+        assert_eq!(
+            deciding_signal(&query, (&active, 1.0), (&used, 1.0), &signals),
+            Some(RankingDecision::ActiveContext)
+        );
+        assert_eq!(
+            deciding_signal(&query, (&used, 1.0), (&plain, 1.0), &signals),
+            Some(RankingDecision::Frecency)
+        );
     }
 }
