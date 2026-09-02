@@ -174,7 +174,7 @@ fn familiarity_context(service: &Service) -> FamiliarityContext {
             .descriptor()
             .project_id
             .as_ref()
-            .and_then(|project| ResourceRef::parse(&format!("project/{project}")).ok()),
+            .and_then(|project| ResourceRef::parse(format!("project/{project}")).ok()),
         actor: None,
         agency: None,
         focus: service.descriptor().task.clone(),
