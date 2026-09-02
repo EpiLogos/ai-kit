@@ -29,6 +29,7 @@ pub mod composition_mutation;
 pub mod composition_view;
 pub mod composition_workspace;
 pub mod context;
+pub mod context_activation;
 pub mod context_resolution;
 pub mod context_source;
 pub mod credential;
@@ -124,6 +125,11 @@ pub use composition_view::{
     ContractRebinding, HarnessCompositionDiff, RequirementExplanation, RequirementResolution,
 };
 pub use context::{ContextBinding, ContextDescriptor, Isolation};
+pub use context_activation::{
+    attach_context_activations, explain_context_activation, ContextActivationEvidenceBasis,
+    ContextActivationExplanation, ContextActivationMode, ContextActivationReceipt,
+    CONTEXT_ACTIVATION_VERSION,
+};
 pub use context_resolution::{
     availability as resource_availability, compose_context_resolution, Availability,
     ContextResolution, ProjectionIntent, ReferenceResolution, RequestedActors, ResolvedResource,
