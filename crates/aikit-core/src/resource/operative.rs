@@ -845,7 +845,7 @@ fn text_score(query: &str, record: &ResourceRecord) -> Option<i64> {
         ["aikit.search-exports", "aikit.search-tags"]
             .iter()
             .filter_map(|key| record.descriptor.annotations.get(*key))
-            .any(|value| value.to_lowercase().contains(**term))
+            .any(|value| value.to_lowercase().contains(*term))
     };
     (!terms.is_empty()
         && terms.iter().all(|term| {
@@ -1197,7 +1197,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn operator_boundaries_do_not_steal_exact_resource_refs() {
         let mut resources = MemoryResourceIndex::default();
