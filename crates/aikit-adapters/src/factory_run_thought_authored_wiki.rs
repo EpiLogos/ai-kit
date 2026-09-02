@@ -444,7 +444,7 @@ fn select_disclosure<'a>(
 }
 
 fn thought_subject_ref(run_ref: &str, thought_id: &str) -> Result<ResourceRef> {
-    ResourceRef::parse(&format!("{run_ref}/thought/{thought_id}"))
+    ResourceRef::parse(format!("{run_ref}/thought/{thought_id}"))
 }
 
 fn thought_markdown<'a>(

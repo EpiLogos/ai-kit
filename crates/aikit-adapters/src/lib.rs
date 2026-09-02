@@ -13,6 +13,7 @@ pub mod bkmr;
 pub mod clients;
 pub mod composition_topology;
 pub mod connection_process;
+pub mod credential_provider;
 pub mod deepseek_harness;
 pub mod deepseek_live;
 pub mod deepseek_maximal;
@@ -44,20 +45,18 @@ pub mod working_environment_control;
 
 pub use actuation_stream_projection::{
     project_connection_signal_to_actuation_stream, ActuationStreamAppendProjection,
-    ActuationStreamProjectionContext, ACTUATION_STREAM_OWNER_REVISION,
-    ACTUATION_STREAM_SCHEMA, CONNECTION_SIGNAL_STREAM_PROJECTION_VERSION,
+    ActuationStreamProjectionContext, ACTUATION_STREAM_OWNER_REVISION, ACTUATION_STREAM_SCHEMA,
+    CONNECTION_SIGNAL_STREAM_PROJECTION_VERSION,
 };
 pub use agent_connection::{
-    AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest,
-    ClassicProcessConnectionAdapter, ConnectionCapabilities, ConnectionCommand,
-    ConnectionDegradation, ConnectionDescriptor, ConnectionProtocol, ConnectionProtocolFamily,
-    ConnectionSignal, ConnectionSignalKind, ConnectionState, NativePermissionChoice,
-    NativePermissionRequest, NativeSessionBinding, PromptRequest, SessionOpenMode,
-    SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION, AGENT_CONNECTION_ADAPTER_VERSION,
+    AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest, ClassicProcessConnectionAdapter,
+    ConnectionCapabilities, ConnectionCommand, ConnectionDegradation, ConnectionDescriptor,
+    ConnectionProtocol, ConnectionProtocolFamily, ConnectionSignal, ConnectionSignalKind,
+    ConnectionState, NativePermissionChoice, NativePermissionRequest, NativeSessionBinding,
+    PromptRequest, SessionOpenMode, SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION,
+    AGENT_CONNECTION_ADAPTER_VERSION,
 };
-pub use authored_wiki_living::{
-    authored_wiki_knowledge_impact, AUTHORED_WIKI_LIVING_VERSION,
-};
+pub use authored_wiki_living::{authored_wiki_knowledge_impact, AUTHORED_WIKI_LIVING_VERSION};
 pub use authored_wiki_read::{
     authored_wiki_subject_relations, AuthoredWikiSubjectRelations, AUTHORED_WIKI_READ_VERSION,
 };
@@ -72,6 +71,11 @@ pub use composition_topology::{
     HARNESS_COMPOSITION_TOPOLOGY_VERSION,
 };
 pub use connection_process::ConnectionProcess;
+#[cfg(target_os = "linux")]
+pub use credential_provider::LinuxEncryptedFallbackProvider;
+pub use credential_provider::{
+    EnvironmentImportProvider, NativeSecureStoreProvider, NativeSecureStoreStatus,
+};
 pub use deepseek_harness::{
     deepseek_harness_conformance, DeepSeekHarnessConformance, DeepSeekShellProvider,
     DEEPSEEK_HARNESS_RELEASE, DEEPSEEK_HARNESS_UPSTREAM_REVISION,
@@ -92,26 +96,23 @@ pub use factory_run_thought_authored_wiki::{
     FACTORY_BUILD_COGNITIVE_PROVIDER_CONTRACT, FACTORY_BUILD_COGNITIVE_VIEW_CONTRACT,
     FACTORY_RUN_THOUGHT_AUTHORED_WIKI_VERSION,
 };
-pub use flow_authored_wiki::{
-    standing_flow_authored_wiki_source, FLOW_AUTHORED_WIKI_VERSION,
-};
+pub use flow_authored_wiki::{standing_flow_authored_wiki_source, FLOW_AUTHORED_WIKI_VERSION};
 pub use gateway_connector::{
     verify_connector_descriptor, ConnectorCapabilities, ConnectorConformance,
     ConnectorConnectionState, ConnectorDescriptor, ConnectorFuture, ConnectorHealth,
-    ConnectorHello, ConnectorOperation, ConnectorWireFrame, ConversationAddress,
-    DeliveryReceipt, DeliveryState, GatewayConnector, InboundEvent, InboundEventKind,
-    MediaReference, OutboundOperation, OutboundOperationKind, SenderIdentity, SenderKind,
-    GATEWAY_CONNECTOR_SCHEMA_PATH, GATEWAY_CONNECTOR_SDK_VERSION,
-    GATEWAY_CONNECTOR_WIRE_VERSION,
+    ConnectorHello, ConnectorOperation, ConnectorWireFrame, ConversationAddress, DeliveryReceipt,
+    DeliveryState, GatewayConnector, InboundEvent, InboundEventKind, MediaReference,
+    OutboundOperation, OutboundOperationKind, SenderIdentity, SenderKind,
+    GATEWAY_CONNECTOR_SCHEMA_PATH, GATEWAY_CONNECTOR_SDK_VERSION, GATEWAY_CONNECTOR_WIRE_VERSION,
 };
 pub use gateway_runtime::{
     connector_descriptor, execute_gateway_command, text_send, AgencyGateway,
     GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayBinding,
     GatewayCommand, GatewayDiscovery, GatewayErrorEnvelope, GatewayIngressDecision,
     GatewayIngressPolicy, GatewayIngressResult, GatewayReplay, GatewayRequestEnvelope,
-    GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus,
-    GatewayStreamEvent, GatewayStreamJournal,
-    ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA, AGENCY_GATEWAY_VERSION,
+    GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
+    GatewayStreamJournal, ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA,
+    AGENCY_GATEWAY_VERSION,
 };
 pub use gateway_service::{
     persist_gateway_state, restore_gateway_state, run_gateway_service, GatewayServiceConfig,
@@ -133,9 +134,7 @@ pub use local_source_discovery::{
     discover_local_sources, DiscoveredLocalSource, LocalSourceDiscovery,
     LocalSourceDiscoveryLimits, NativeSourceRelation, LOCAL_SOURCE_DISCOVERY_VERSION,
 };
-pub use native_git::{
-    NativeGitProvider, NATIVE_GIT_PROVIDER_REF, NATIVE_GIT_PROVIDER_VERSION,
-};
+pub use native_git::{NativeGitProvider, NATIVE_GIT_PROVIDER_REF, NATIVE_GIT_PROVIDER_VERSION};
 pub use okf::{parse_authored_markdown_relations, parse_okf_markdown, render_okf_markdown};
 pub use projectcentral::{ProjectCentralFileProvider, ProjectCentralFilesystemBinding};
 pub use projectcentral_authored_wiki::{
