@@ -840,6 +840,7 @@ pub fn horizons_for_resource(record: &ResourceRecord) -> BTreeSet<AddressHorizon
         ResourceKind::Surface => {
             BTreeSet::from([AddressHorizon::H3, AddressHorizon::H4, AddressHorizon::H5])
         }
+        ResourceKind::SessionSpace => BTreeSet::from([AddressHorizon::H4, AddressHorizon::H5]),
         ResourceKind::SkillSet
         | ResourceKind::Capability
         | ResourceKind::Action
