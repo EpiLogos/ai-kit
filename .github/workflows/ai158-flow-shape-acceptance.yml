@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/ai158-flow-shape-acceptance.yml'
       - 'scripts/ai158-flow-shape-acceptance.py'
+      - 'scripts/ai158-flow-shape-return-fix.py'
 
 permissions:
   contents: write
@@ -30,6 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/ai158-flow-shape-acceptance.py
+          python3 scripts/ai158-flow-shape-return-fix.py
           cargo fmt --all
 
       - name: Verify Flow and QL-shape acceptance specimens
@@ -55,7 +57,7 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git rm .github/workflows/ai158-flow-shape-acceptance.yml scripts/ai158-flow-shape-acceptance.py
+          git rm .github/workflows/ai158-flow-shape-acceptance.yml scripts/ai158-flow-shape-acceptance.py scripts/ai158-flow-shape-return-fix.py
           git add crates/aikit-core/src/knowledge_wiki_shape.rs crates/aikit-core/src/flow.rs crates/aikit-core/src/lib.rs
           git commit -m '[AIKIT158] Compose Flow with QL-shaped Contemplate return'
           git push origin HEAD:agent/158-ql-shape-parity
