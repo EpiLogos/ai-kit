@@ -880,7 +880,7 @@ fn revision_for(path: &Path) -> Option<SourceRevision> {
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_nanos();
-    SourceRevision::parse(&format!("fs:{modified}:{}", metadata.len())).ok()
+    SourceRevision::parse(format!("fs:{modified}:{}", metadata.len())).ok()
 }
 
 fn source(raw: &str) -> Result<SourceRef> {

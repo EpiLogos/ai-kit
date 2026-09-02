@@ -31,7 +31,7 @@ fn revision(root: &std::path::Path) -> SourceRevision {
         .unwrap();
     assert!(output.status.success());
     let revision = String::from_utf8(output.stdout).unwrap();
-    SourceRevision::parse(&format!("git:{}", revision.trim())).unwrap()
+    SourceRevision::parse(format!("git:{}", revision.trim())).unwrap()
 }
 
 fn endpoint(

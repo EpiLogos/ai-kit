@@ -20,7 +20,7 @@ fn source(
     SourceMaterial {
         binding: SourceBinding {
             source: SourceRef::parse(id).expect("fixture source ref"),
-            revision: SourceRevision::parse(&format!("revision:{id}"))
+            revision: SourceRevision::parse(format!("revision:{id}"))
                 .expect("fixture revision"),
             title: title.into(),
             tags: tags.iter().map(|tag| (*tag).into()).collect(),
