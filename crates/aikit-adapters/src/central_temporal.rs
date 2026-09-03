@@ -6,7 +6,7 @@
 //! process adapter so scripted argv tests and real-binary conformance use the same
 //! call path.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use aikit_core::{AikitError, Result};
 use serde_json::{json, Value};
