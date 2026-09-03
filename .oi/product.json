@@ -16,7 +16,7 @@
   },
   "verify": {
     "source_command": ["cargo", "test", "--workspace", "--all-targets", "--locked"],
-    "installed_command": ["aikit", "--version"]
+    "installed_command": ["aikit", "doctor", "--json"]
   },
   "install": {"mode": "oi-managed-binary"},
   "update": {"mode": "suite-manifest"},
