@@ -88,6 +88,20 @@ fn status_json_carries_the_envelope_and_the_active_capability() {
 }
 
 #[test]
+fn doctor_json_is_the_installed_native_verification_path() {
+    let (home, project) = scene();
+    let (output, value) = run_json(home.path(), project.path(), &["doctor", "--json"]);
+
+    assert!(
+        output.status.success(),
+        "doctor should return an observation even when individual checks report findings: {value}"
+    );
+    assert_eq!(value["schema"], 1);
+    assert_eq!(value["ok"], true);
+    assert!(value["data"].is_object());
+}
+
+#[test]
 fn search_json_finds_a_capability_by_name() {
     let (home, project) = scene();
     let (output, value) = run_json(home.path(), project.path(), &["search", "greet", "--json"]);
