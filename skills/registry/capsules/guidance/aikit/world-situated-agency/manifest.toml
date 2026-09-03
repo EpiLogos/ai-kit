@@ -3,7 +3,6 @@ id = "guidance/aikit/world-situated-agency"
 kind = "guidance"
 name = "World-situated agency"
 description = "Standing orientation that locates agent action within human purpose, inherited world, operative context, authority, provenance and return."
-maturity = "experimental"
 tags = ["aikit", "guidance", "agency", "context", "provenance", "return"]
 targets = ["claude-code", "codex"]
 
