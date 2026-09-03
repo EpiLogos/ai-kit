@@ -36,6 +36,7 @@ pub mod session_space_ops;
 pub mod session_space_service;
 pub mod skill_sources;
 pub mod task;
+pub mod temporal;
 pub mod tree_build;
 pub mod ui;
 
