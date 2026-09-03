@@ -1,4 +1,4 @@
-name: Pre-local release
+name: Pre-local verification
 
 on:
   pull_request:
@@ -56,14 +56,16 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Build locked native artifact
         run: cargo build --locked --release --target '${{ matrix.target }}' --package aikit-cli --bin aikit
-      - name: Package
+      - name: Package unratified pre-local artifact
         shell: bash
         run: |
           set -euo pipefail
-          name="ai-kit-0.1.0-${{ matrix.target }}"
+          short_sha="${GITHUB_SHA:0:12}"
+          name="ai-kit-prelocal-${short_sha}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/aikit" "dist/$name/aikit"
           cp .oi/product.json "dist/$name/product.json"
+          printf '%s\n' "$GITHUB_SHA" > "dist/$name/COMMIT"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           shasum -a 256 "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
       - uses: actions/attest@v4
@@ -71,32 +73,8 @@ jobs:
           subject-path: dist/*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
-          name: ai-kit-${{ matrix.target }}
+          name: ai-kit-prelocal-${{ github.sha }}-${{ matrix.target }}
+          retention-days: 14
           path: |
             dist/*.tar.gz
             dist/*.sha256
-
-  release:
-    if: github.event_name == 'push'
-    needs: artifact
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: ai-kit-*
-          path: dist
-          merge-multiple: true
-      - name: Publish immutable pre-local release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag='aikit-v0.1.0-prelocal.2'
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $tag already exists; refusing to mutate an accepted release" >&2
-            exit 1
-          fi
-          gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title 'AIKit 0.1.0 pre-local.2' --notes 'Accepted O:I suite pre-local.2 artifact. Physical workstation acceptance is not claimed.'
