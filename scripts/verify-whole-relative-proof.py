@@ -12,6 +12,10 @@ for required in (
     "Whole-relative adequacy: proof over plausibility",
     "Plausibility does not manufacture epistemic standing.",
     "whole-relative disclosure ledger",
+    "aggregate-under-structure",
+    "anchor, twofold, threefold, fourfold, `4+1`, sixfold",
+    "Current temporal and Run-cognitive aggregates",
+    "Central `NOW` / `DAY`, Factory `RunThoughtField`, Flow",
     "Contemplate may generate a better Claim, candidate interpretation or integrative reading; it does not thereby verify the whole.",
     "plausible determination != verified whole",
 ):
