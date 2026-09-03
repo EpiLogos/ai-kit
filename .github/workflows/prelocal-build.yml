@@ -1,0 +1,79 @@
+name: Pre-local build
+
+on:
+  pull_request:
+    paths:
+      - '.oi/product.json'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - '.github/workflows/prelocal-build.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.oi/product.json'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - '.github/workflows/prelocal-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+      - run: cargo test --workspace --all-targets --locked
+
+  artifact:
+    if: github.event_name == 'push'
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: ${{ matrix.target }}
+      - name: Build locked native artifact
+        run: cargo build --locked --release --target '${{ matrix.target }}' --package aikit-cli --bin aikit
+      - name: Package exact-main build artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA::12}"
+          name="ai-kit-0.1.0-${short_sha}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/aikit" "dist/$name/aikit"
+          cp .oi/product.json "dist/$name/product.json"
+          printf '%s\n' "$GITHUB_SHA" > "dist/$name/source-commit.txt"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          shasum -a 256 "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+      - uses: actions/attest@v4
+        with:
+          subject-path: dist/*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai-kit-${{ matrix.target }}-${{ github.sha }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
