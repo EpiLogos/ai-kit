@@ -76,8 +76,11 @@ jobs:
             dist/*.tar.gz
             dist/*.sha256
 
+  # prelocal.2 is one accepted historical cut, not a rolling main alias.
+  # Newer main pushes still verify/build/attest above; they must not mutate
+  # or recreate this immutable release at a different commit.
   release:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.sha == '9ff28ca31c723b314ddf62b7f85b6e2611d53d66'
     needs: artifact
     runs-on: ubuntu-latest
     permissions:
@@ -95,8 +98,14 @@ jobs:
         run: |
           set -euo pipefail
           tag='aikit-v0.1.0-prelocal.2'
+          accepted_sha='9ff28ca31c723b314ddf62b7f85b6e2611d53d66'
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $tag already exists; refusing to mutate an accepted release" >&2
-            exit 1
+            existing_target="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq '.targetCommitish')"
+            if [[ "$existing_target" != "$accepted_sha" ]]; then
+              echo "release $tag exists at unexpected target $existing_target; refusing mutation" >&2
+              exit 1
+            fi
+            echo "release $tag already exists at accepted immutable cut $accepted_sha; no mutation required"
+            exit 0
           fi
-          gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title 'AIKit 0.1.0 pre-local.2' --notes 'Accepted O:I suite pre-local.2 artifact. Physical workstation acceptance is not claimed.'
+          gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$accepted_sha" --prerelease --title 'AIKit 0.1.0 pre-local.2' --notes 'Accepted O:I suite pre-local.2 artifact. Physical workstation acceptance is not claimed.'
