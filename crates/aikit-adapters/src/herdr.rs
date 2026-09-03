@@ -18,7 +18,7 @@ use crate::working_environment::{
     WORKING_ENVIRONMENT_PROVIDER_VERSION,
 };
 
-pub const HERDR_UPSTREAM_REVISION: &str = "facf0aafca011d147e798ad37e83799bdd29b75e";
+pub const HERDR_UPSTREAM_REVISION: &str = "94f6d9c0d9bb9cf9ffae99d8bbfb09e9bf2fc9e0";
 pub const HERDR_PROVIDER_VERSION: &str = "aikit.herdr-working-environment/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,9 +31,41 @@ pub enum HerdrAgentStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HerdrSplitDirection {
+    Right,
+    Down,
+}
+
+impl HerdrSplitDirection {
+    fn as_cli(self) -> &'static str {
+        match self {
+            Self::Right => "right",
+            Self::Down => "down",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HerdrAgentObservation {
     pub native_id: String,
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub status: HerdrAgentStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HerdrWorkspaceCreation {
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub root_pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HerdrStartedAgent {
+    pub terminal_id: String,
     pub pane_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -83,13 +115,24 @@ fn parse_agent_status(raw: &str) -> Result<HerdrAgentStatus> {
     }
 }
 
+fn agent_status_field(agent: &Value) -> Result<HerdrAgentStatus> {
+    agent
+        .get("agent_status")
+        .or_else(|| agent.get("status"))
+        .and_then(Value::as_str)
+        .map(parse_agent_status)
+        .transpose()
+        .map(|status| status.unwrap_or(HerdrAgentStatus::Unknown))
+}
+
+fn parse_json(raw: &str, code: &'static str, subject: &str) -> Result<Value> {
+    serde_json::from_str(raw).map_err(|error| {
+        AikitError::new(code, format!("could not parse Herdr {subject} response: {error}"))
+    })
+}
+
 pub fn parse_herdr_snapshot(raw: &str) -> Result<HerdrSnapshot> {
-    let envelope: Value = serde_json::from_str(raw).map_err(|error| {
-        AikitError::new(
-            "herdr.invalid_json",
-            format!("could not parse Herdr API response: {error}"),
-        )
-    })?;
+    let envelope = parse_json(raw, "herdr.invalid_json", "API")?;
     if let Some(error) = envelope.get("error") {
         return Err(AikitError::new(
             "herdr.api_error",
@@ -133,17 +176,11 @@ pub fn parse_herdr_snapshot(raw: &str) -> Result<HerdrSnapshot> {
             let native_id = string_field(agent, "terminal_id")
                 .or_else(|| string_field(agent, "name"))
                 .unwrap_or_else(|| pane_id.clone());
-            let status = agent
-                .get("status")
-                .and_then(Value::as_str)
-                .map(parse_agent_status)
-                .transpose()?
-                .unwrap_or(HerdrAgentStatus::Unknown);
             Ok(HerdrAgentObservation {
                 native_id,
                 pane_id,
                 name: string_field(agent, "name"),
-                status,
+                status: agent_status_field(agent)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -231,11 +268,17 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
         Ok(output.stdout)
     }
 
+    fn run_argv(&self, argv: Vec<String>, code: &'static str) -> Result<String> {
+        let output = self.runner.run(&argv)?;
+        let output = output.require(&argv, code)?;
+        Ok(output.stdout)
+    }
+
     pub fn snapshot(&self) -> Result<HerdrSnapshot> {
         parse_herdr_snapshot(&self.run(&["api", "snapshot"])? )
     }
 
-    fn create_workspace(&mut self) -> Result<()> {
+    pub fn create_workspace(&mut self) -> Result<HerdrWorkspaceCreation> {
         let cwd = self.create_cwd.clone().ok_or_else(|| {
             AikitError::new(
                 "herdr.workspace_absent",
@@ -253,25 +296,209 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
         if let Some(label) = &self.create_label {
             argv.extend(["--label".to_string(), label.clone()]);
         }
-        let output = self.runner.run(&argv)?;
-        let output = output.require(&argv, "herdr.workspace_create_failed")?;
-        let envelope: Value = serde_json::from_str(&output.stdout).map_err(|error| {
+        let raw = self.run_argv(argv, "herdr.workspace_create_failed")?;
+        let envelope = parse_json(
+            &raw,
+            "herdr.invalid_create_response",
+            "workspace create",
+        )?;
+        let result = envelope.get("result").ok_or_else(|| {
             AikitError::new(
-                "herdr.invalid_create_response",
-                format!("could not parse Herdr workspace create response: {error}"),
+                "herdr.create_missing_result",
+                "Herdr workspace create response has no result",
             )
         })?;
-        self.workspace_id = envelope
-            .pointer("/result/workspace/workspace_id")
+        let workspace_id = result
+            .pointer("/workspace/workspace_id")
             .and_then(Value::as_str)
-            .map(str::to_owned);
-        if self.workspace_id.is_none() {
+            .ok_or_else(|| {
+                AikitError::new(
+                    "herdr.create_missing_workspace",
+                    "Herdr workspace create response has no workspace_id",
+                )
+            })?
+            .to_string();
+        let tab_id = result
+            .pointer("/tab/tab_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "herdr.create_missing_tab",
+                    "Herdr workspace create response has no initial tab_id",
+                )
+            })?
+            .to_string();
+        let root_pane_id = result
+            .pointer("/root_pane/pane_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "herdr.create_missing_root_pane",
+                    "Herdr workspace create response has no root_pane pane_id",
+                )
+            })?
+            .to_string();
+        self.workspace_id = Some(workspace_id.clone());
+        Ok(HerdrWorkspaceCreation {
+            workspace_id,
+            tab_id,
+            root_pane_id,
+        })
+    }
+
+    pub fn create_workspace_and_bind_root(
+        &mut self,
+        root_surface: ResourceRef,
+    ) -> Result<HerdrWorkspaceCreation> {
+        let created = self.create_workspace()?;
+        self.surface_bindings
+            .insert(root_surface, created.root_pane_id.clone());
+        Ok(created)
+    }
+
+    pub fn focus_workspace(&self) -> Result<()> {
+        let workspace = self.workspace_id.as_deref().ok_or_else(|| {
+            AikitError::new(
+                "herdr.workspace_unbound",
+                "Herdr provider has no current workspace binding",
+            )
+        })?;
+        self.run(&["workspace", "focus", workspace])?;
+        Ok(())
+    }
+
+    pub fn split_surface(
+        &mut self,
+        source_surface: &ResourceRef,
+        new_surface: ResourceRef,
+        direction: HerdrSplitDirection,
+    ) -> Result<String> {
+        let source_pane = self
+            .surface_bindings
+            .get(source_surface)
+            .cloned()
+            .ok_or_else(|| {
+                AikitError::new(
+                    "herdr.surface_unbound",
+                    format!("Surface {source_surface} has no explicit Herdr pane binding"),
+                )
+            })?;
+        let raw = self.run(&[
+            "pane",
+            "split",
+            &source_pane,
+            "--direction",
+            direction.as_cli(),
+            "--no-focus",
+        ])?;
+        let envelope = parse_json(&raw, "herdr.invalid_split_response", "pane split")?;
+        let pane_id = envelope
+            .pointer("/result/pane/pane_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "herdr.split_missing_pane",
+                    "Herdr pane split response has no pane_id",
+                )
+            })?
+            .to_string();
+        self.surface_bindings.insert(new_surface, pane_id.clone());
+        Ok(pane_id)
+    }
+
+    pub fn start_agent_session(
+        &mut self,
+        agent_session: ResourceRef,
+        surface: &ResourceRef,
+        name: &str,
+        kind: &str,
+        timeout_ms: Option<u64>,
+        agent_args: &[String],
+    ) -> Result<HerdrStartedAgent> {
+        let pane_id = self.surface_bindings.get(surface).cloned().ok_or_else(|| {
+            AikitError::new(
+                "herdr.surface_unbound",
+                format!("Surface {surface} has no explicit Herdr pane binding"),
+            )
+        })?;
+        let mut argv = vec![
+            "herdr".to_string(),
+            "agent".to_string(),
+            "start".to_string(),
+            name.to_string(),
+            "--kind".to_string(),
+            kind.to_string(),
+            "--pane".to_string(),
+            pane_id.clone(),
+        ];
+        if let Some(timeout_ms) = timeout_ms {
+            argv.extend(["--timeout".to_string(), timeout_ms.to_string()]);
+        }
+        if !agent_args.is_empty() {
+            argv.push("--".to_string());
+            argv.extend(agent_args.iter().cloned());
+        }
+        let raw = self.run_argv(argv, "herdr.agent_start_failed")?;
+        let envelope = parse_json(&raw, "herdr.invalid_agent_start_response", "agent start")?;
+        let agent = envelope.pointer("/result/agent").ok_or_else(|| {
+            AikitError::new(
+                "herdr.agent_start_missing_agent",
+                "Herdr agent start response has no agent",
+            )
+        })?;
+        let returned_pane = string_field(agent, "pane_id").ok_or_else(|| {
+            AikitError::new(
+                "herdr.agent_start_missing_pane",
+                "Herdr agent start response has no pane_id",
+            )
+        })?;
+        if returned_pane != pane_id {
             return Err(AikitError::new(
-                "herdr.create_missing_workspace",
-                "Herdr workspace create response has no workspace_id",
+                "herdr.agent_pane_drift",
+                format!(
+                    "Herdr started agent in pane {returned_pane}, expected explicitly bound pane {pane_id}"
+                ),
             ));
         }
+        let terminal_id = string_field(agent, "terminal_id").ok_or_else(|| {
+            AikitError::new(
+                "herdr.agent_start_missing_terminal",
+                "Herdr agent start response has no terminal_id",
+            )
+        })?;
+        let returned_name = string_field(agent, "name");
+        if returned_name.as_deref().is_some_and(|returned| returned != name) {
+            return Err(AikitError::new(
+                "herdr.agent_name_drift",
+                format!("Herdr returned agent name {returned_name:?}, expected {name:?}"),
+            ));
+        }
+        let status = agent_status_field(agent)?;
+        self.agent_session_bindings.insert(
+            agent_session,
+            returned_name.clone().unwrap_or_else(|| returned_pane.clone()),
+        );
+        Ok(HerdrStartedAgent {
+            terminal_id,
+            pane_id: returned_pane,
+            name: returned_name,
+            status,
+        })
+    }
+
+    pub fn focus_agent_session(&self, agent_session: &ResourceRef) -> Result<()> {
+        let native = self.agent_session_bindings.get(agent_session).ok_or_else(|| {
+            AikitError::new(
+                "herdr.agent_session_unbound",
+                format!("AgentSession {agent_session} has no explicit Herdr agent/pane binding"),
+            )
+        })?;
+        self.run(&["agent", "focus", native])?;
         Ok(())
+    }
+
+    pub fn reconcile_after_reconnect(&mut self) -> Result<WorkingEnvironmentObservation> {
+        self.observe()
     }
 
     fn observation(&self, snapshot: HerdrSnapshot) -> WorkingEnvironmentObservation {
@@ -318,7 +545,7 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
                 kind: NativeBindingKind::AgentSession,
                 native_id: native.clone(),
                 canonical_ref: Some(canonical.clone()),
-                provenance: vec!["explicit AgentSessionRef -> Herdr agent/pane binding".into()],
+                provenance: vec!["explicit AgentSessionRef -> Herdr live Agent/pane binding".into()],
             }
         }));
         WorkingEnvironmentObservation {
@@ -405,10 +632,18 @@ impl<R: CommandRunner> WorkingEnvironmentProvider for HerdrWorkingEnvironment<R>
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::runner::ScriptedRunner;
+
     use super::*;
 
+    fn r(raw: &str) -> ResourceRef {
+        ResourceRef::parse(raw).unwrap()
+    }
+
     #[test]
-    fn parses_public_session_snapshot_without_collapsing_ids() {
+    fn parses_current_public_session_snapshot_without_collapsing_ids() {
         let raw = r#"{
           "id":"cli:api:snapshot",
           "result":{"type":"session_snapshot","snapshot":{
@@ -418,7 +653,7 @@ mod tests {
             "tabs":[{"tab_id":"w1:t1"}],
             "panes":[{"pane_id":"w1:p1"},{"pane_id":"w1:p2"}],
             "layouts":[],
-            "agents":[{"terminal_id":"term-2","name":"reviewer","pane_id":"w1:p2","status":"blocked"}]
+            "agents":[{"terminal_id":"term-2","name":"reviewer","pane_id":"w1:p2","agent_status":"blocked"}]
           }}
         }"#;
         let snapshot = parse_herdr_snapshot(raw).unwrap();
@@ -430,9 +665,136 @@ mod tests {
     }
 
     #[test]
+    fn keeps_legacy_status_field_compatible() {
+        let raw = r#"{"id":"x","result":{"type":"session_snapshot","snapshot":{"version":"x","protocol":1,"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[{"terminal_id":"t","pane_id":"p","status":"done"}]}}}"#;
+        let snapshot = parse_herdr_snapshot(raw).unwrap();
+        assert_eq!(snapshot.agents[0].status, HerdrAgentStatus::Done);
+    }
+
+    #[test]
     fn rejects_unknown_agent_state_instead_of_inventing_completion() {
-        let raw = r#"{"id":"x","result":{"type":"session_snapshot","snapshot":{"version":"x","protocol":1,"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[{"terminal_id":"t","pane_id":"p","status":"finished"}]}}}"#;
+        let raw = r#"{"id":"x","result":{"type":"session_snapshot","snapshot":{"version":"x","protocol":1,"workspaces":[],"tabs":[],"panes":[],"layouts":[],"agents":[{"terminal_id":"t","pane_id":"p","agent_status":"finished"}]}}}"#;
         let error = parse_herdr_snapshot(raw).unwrap_err();
         assert_eq!(error.code(), "herdr.unknown_agent_status");
+    }
+
+    #[test]
+    fn current_public_automation_binds_only_returned_provider_ids() {
+        let snapshot = r#"{
+          "id":"cli:api:snapshot",
+          "result":{"type":"session_snapshot","snapshot":{
+            "version":"0.9.1","protocol":8,
+            "focused_workspace_id":"w7","focused_tab_id":"w7:t1","focused_pane_id":"w7:p2",
+            "workspaces":[{"workspace_id":"w7"}],
+            "tabs":[{"tab_id":"w7:t1"}],
+            "panes":[{"pane_id":"w7:p1"},{"pane_id":"w7:p2"}],
+            "layouts":[],
+            "agents":[{"terminal_id":"term-2","name":"reviewer","pane_id":"w7:p2","agent_status":"idle"}]
+          }}
+        }"#;
+        let runner = Arc::new(
+            ScriptedRunner::new()
+                .on(
+                    "workspace create --cwd /repo --no-focus --label reference",
+                    r#"{"id":"create","result":{"type":"workspace_created","workspace":{"workspace_id":"w7"},"tab":{"tab_id":"w7:t1"},"root_pane":{"pane_id":"w7:p1"}}}"#,
+                )
+                .on(
+                    "pane split w7:p1 --direction right --no-focus",
+                    r#"{"id":"split","result":{"type":"pane_info","pane":{"pane_id":"w7:p2"}}}"#,
+                )
+                .on(
+                    "agent start reviewer --kind codex --pane w7:p2 -- -m gpt-5.4",
+                    r#"{"id":"start","result":{"type":"agent_info","agent":{"terminal_id":"term-2","name":"reviewer","pane_id":"w7:p2","agent_status":"idle"}}}"#,
+                )
+                .on("workspace focus w7", "{}")
+                .on("agent focus reviewer", "{}")
+                .on("api snapshot", snapshot),
+        );
+        let root_surface = r("surface/reference/root");
+        let review_surface = r("surface/reference/review");
+        let agent_session = r("agent-session/reference/reviewer");
+        let mut provider = HerdrWorkingEnvironment::new(runner.clone(), r("provider/herdr"))
+            .with_create("/repo", Some("reference".into()));
+
+        let created = provider
+            .create_workspace_and_bind_root(root_surface.clone())
+            .unwrap();
+        assert_eq!(created.workspace_id, "w7");
+        assert_eq!(created.tab_id, "w7:t1");
+        assert_eq!(created.root_pane_id, "w7:p1");
+
+        let split = provider
+            .split_surface(
+                &root_surface,
+                review_surface.clone(),
+                HerdrSplitDirection::Right,
+            )
+            .unwrap();
+        assert_eq!(split, "w7:p2");
+
+        let started = provider
+            .start_agent_session(
+                agent_session.clone(),
+                &review_surface,
+                "reviewer",
+                "codex",
+                None,
+                &["-m".into(), "gpt-5.4".into()],
+            )
+            .unwrap();
+        assert_eq!(started.pane_id, "w7:p2");
+        assert_eq!(started.name.as_deref(), Some("reviewer"));
+        assert_eq!(started.status, HerdrAgentStatus::Idle);
+
+        provider.focus_workspace().unwrap();
+        provider.focus_agent_session(&agent_session).unwrap();
+        let observation = provider.reconcile_after_reconnect().unwrap();
+        assert_eq!(observation.health, WorkingEnvironmentHealth::Healthy);
+        assert_eq!(
+            observation.canonical_native_id(&root_surface),
+            Some("w7:p1")
+        );
+        assert_eq!(
+            observation.canonical_native_id(&review_surface),
+            Some("w7:p2")
+        );
+        assert_eq!(
+            observation.canonical_native_id(&agent_session),
+            Some("reviewer")
+        );
+
+        let calls = runner.call_lines();
+        assert!(calls.iter().any(|call| {
+            call == "herdr workspace create --cwd /repo --no-focus --label reference"
+        }));
+        assert!(calls
+            .iter()
+            .any(|call| call == "herdr pane split w7:p1 --direction right --no-focus"));
+        assert!(calls.iter().any(|call| {
+            call == "herdr agent start reviewer --kind codex --pane w7:p2 -- -m gpt-5.4"
+        }));
+        assert!(calls.iter().any(|call| call == "herdr api snapshot"));
+    }
+
+    #[test]
+    fn agent_start_refuses_provider_pane_drift() {
+        let runner = ScriptedRunner::new().on(
+            "agent start reviewer --kind codex --pane w1:p2",
+            r#"{"id":"start","result":{"agent":{"terminal_id":"term-x","name":"reviewer","pane_id":"w9:p9","agent_status":"idle"}}}"#,
+        );
+        let surface = r("surface/reference/review");
+        let mut provider = HerdrWorkingEnvironment::new(runner, r("provider/herdr"))
+            .bind_surface(surface.clone(), "w1:p2");
+        let error = provider
+            .start_agent_session(
+                r("agent-session/reference/reviewer"),
+                &surface,
+                "reviewer",
+                "codex",
+                None,
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "herdr.agent_pane_drift");
     }
 }
