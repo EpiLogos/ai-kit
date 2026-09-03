@@ -17,7 +17,7 @@ use crate::working_environment::{
     WORKING_ENVIRONMENT_PROVIDER_VERSION,
 };
 
-pub const HYPRLAND_UPSTREAM_REVISION: &str = "eb97c46a5318cb05c4a4ce8c9c6d601f82b9e11f";
+pub const HYPRLAND_UPSTREAM_REVISION: &str = "59177602ffd75d81e8995e0456057e2d086a01c8";
 pub const HYPRLAND_PROVIDER_VERSION: &str = "aikit.hyprland-surface-provider/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
