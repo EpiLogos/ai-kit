@@ -29,6 +29,9 @@ It runs the workspace test suite, clippy with warnings denied, the release build
 and `git diff --check`. Keep this operation and the CI invocation aligned rather
 than duplicating verification semantics in workflow YAML.
 
+This is *source* verification. Installed-binary verification is a separate path
+(`aikit doctor --json`); see [docs/USING-AIKIT.md](docs/USING-AIKIT.md#source-verification-and-installed-verification).
+
 The repository contains older formatting that is being cleaned incrementally.
 Format files you materially change, but do not mix a repository-wide mechanical
 reformat into a behavioural pull request.
