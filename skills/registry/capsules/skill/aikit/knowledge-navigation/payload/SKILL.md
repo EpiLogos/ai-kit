@@ -43,6 +43,8 @@ SemanticWiki is a concrete QL instrument. Its ordinary surfaces may speak in nat
 
 When the act requires more than straightforward retrieval, recover the smallest materially relevant **whole** and its active `WikiFrame` before composing an answer. Treat the current constellation grain as a positive disclosed shape: anchor, pair/twofold, threefold, fourfold, 4+1, sixfold, progressively conjugated form or twelvefold may each be the actual whole available here. Do not fill absent members merely to make a larger form look complete.
 
+Operate this first as an **aggregate-under-structure** faculty for information. The active aggregate may be small or deep: anchor, twofold, threefold, fourfold, `4+1`, sixfold, progressively conjugated forms and twelvefold are all positive whole-shapes; D1/D2/D3, `4×4`, `6×6` and `6 / 6′ -> 6+6′` expose more explicit completion, accounting and generation views of those wholes. The point is not to prefer matrices. It is to keep members, positions, relations, absences, provenance and epistemic standing intelligible as one structured whole at the grain the actual material supports.
+
 Follow the QL relation grammar through the actual field:
 
 ```text
@@ -112,7 +114,7 @@ question / Claim
     -> attributable determination at the scope actually warranted
 ```
 
-Do not use one compelling artifact, screenshot, local implementation, test result, source passage, generated synthesis or relational hit as evidence for dimensions it does not establish. A `4×4`, `6×6`, `6+6′`, recursive constellation or Project-native whole is valuable precisely because it makes omissions visible: an unvisited or unsupported material address cannot disappear merely because the Agent has found a plausible centre of gravity.
+Do not use one compelling artifact, screenshot, local implementation, test result, source passage, generated synthesis or relational hit as evidence for dimensions it does not establish. Any positive QL shape — from a small anchor/twofold/threefold/fourfold or `4+1` aggregate through sixfold, progressive conjugation, twelvefold, D1–D3, `4×4`, `6×6` and `6+6′` generation fields — can make omission visible at its own grain. An unvisited or unsupported material position cannot disappear merely because the Agent has found a plausible centre of gravity.
 
 Contemplate may generate a better Claim, candidate interpretation or integrative reading; it does not thereby verify the whole. Where a consequential adequacy/completion statement belongs to Factory or another native verification owner, return the exact whole/basis/Claim/source/evidence refs and unresolved positions to that owner. Do not upgrade a generated WikiReading to `verified` because it fits the QL morphology or because the Agent assesses it as likely.
 
@@ -129,6 +131,28 @@ verified by the native verification owner where such a relation exists
 ```
 
 A sparse field can be a complete **disclosure** when every materially relevant position is honestly accounted for, including absence and openness. It is not a complete **result** merely because all positions have descriptions. This is the knowledge-side expression of the same Claim/Evidence/Closure law used by Factory for long-horizon work.
+
+### Current temporal and Run-cognitive aggregates
+
+The same faculty applies to current source-backed working material without creating another store. Central `NOW` / `DAY`, Factory `RunThoughtField`, Flow and other authorised temporal/cognitive sources can participate as bases when their owner/provider exposes them. Keep the owner objects and exact refs intact; the QL-shaped `WikiFrame` / `WikiReading` is a structured disclosure over selected material, not a replacement NOW, Thought field or transcript.
+
+For example, a bounded current act may disclose an aggregate such as:
+
+```text
+current scratch / human or Agent handoff
++ active Run / RunMap subjects
++ retained RunThought questions / findings / tensions
++ open questions / unresolved refs
++ relevant Evidence / source revisions
+        ↓
+active whole + supported QL grain
+        ↓
+structured reading / Contemplate
+        ↓
+returned Claims / Evidence pressure / unresolved positions
+```
+
+This makes the already-landed NOW/DAY and RunThought sources immediately usable as intelligible aggregates under structure while preserving their native temporal/cognitive lifecycle. It also leaves a clean later execution path: Vāk can address the same whole/grain/positions/relations, and Ta-Onta/Factory orchestration can later act over selected determinations and return evidence into the same disclosed whole. Knowledge Navigation does not itself turn a QL address into an obligation or automatic orchestration step.
 
 ## Project reflection: meaning ↔ description ↔ code
 
@@ -251,4 +275,4 @@ For optional account/document integration, hand `product-understanding` and `str
 
 ## Verification
 
-Use AIKit knowledge-navigation/source-pool/wiki/familiarity/relation tests plus the real bkmr and GitNexus conformance lanes. QL-shaped acceptance additionally requires the pinned `ql.shape@1.0.0` fixture to match its exact upstream QL-MEF blob; positive constellation grains to remain usable without forced completion; D3 4×4 fields to expose exactly 16 addresses with A/B/C derivation provenance; complete 6/6′ fields to expose exactly 36 addresses plus six same-position relational-generation sites; deterministic shaped preflight to invoke no Agent/model; and generated readings to retain exact Frame/basis/operator/Return attribution for recursive reuse. Whole-relative adequacy acceptance additionally requires the Skill to preserve `plausible determination != verified whole`, refuse to infer whole completion from partial/representative evidence, and keep unsupported/unresolved material loci visible in any answer that implies adequacy or completion. Acceptance requires stable canonical refs; inspectable provider/lens/revision/source provenance; bounded relations; route/familiarity separation; exact addressed results protected from learned ranking; and no-live-QL-provider parity. Project reflection additionally requires bidirectional semantic↔code traversal through explicit bindings, local-description/source authority remaining distinct from implementation truth, and stale/flattened reflection becoming explicit discrepancy evidence rather than silent retargeting. ProjectCentral acceptance additionally requires no README dependency, arbitrary nesting, recursive `.no-agent-retrieval`, unresolved aperture material not acquiring human authority, exact accepted source/provenance/truth-standing consumption, retained native human source participation without movement, canonical Project/root Wiki paths, adopted-source participation without canonical replacement, lazy Project entry, explicit exact retrieval, provenance-bearing Agent Wiki maintenance, no silent human-source mutation and explicit revision proposals. This Skill does not encode TUI keybindings and does not grant provider, retrieval, trust or mutation authority.
+Use AIKit knowledge-navigation/source-pool/wiki/familiarity/relation tests plus the real bkmr and GitNexus conformance lanes. QL-shaped acceptance additionally requires the pinned `ql.shape@1.0.0` fixture to match its exact upstream QL-MEF blob; positive constellation grains to remain usable without forced completion; D3 4×4 fields to expose exactly 16 addresses with A/B/C derivation provenance; complete 6/6′ fields to expose exactly 36 addresses plus six same-position relational-generation sites; deterministic shaped preflight to invoke no Agent/model; and generated readings to retain exact Frame/basis/operator/Return attribution for recursive reuse. Whole-relative adequacy acceptance additionally requires the Skill to preserve `plausible determination != verified whole`, refuse to infer whole completion from partial/representative evidence, keep unsupported/unresolved material loci visible in any answer that implies adequacy or completion, and preserve the full positive QL shape repertoire as available aggregate-under-structure grains rather than privileging only matrix forms. Acceptance requires stable canonical refs; inspectable provider/lens/revision/source provenance; bounded relations; route/familiarity separation; exact addressed results protected from learned ranking; and no-live-QL-provider parity. Project reflection additionally requires bidirectional semantic↔code traversal through explicit bindings, local-description/source authority remaining distinct from implementation truth, and stale/flattened reflection becoming explicit discrepancy evidence rather than silent retargeting. ProjectCentral acceptance additionally requires no README dependency, arbitrary nesting, recursive `.no-agent-retrieval`, unresolved aperture material not acquiring human authority, exact accepted source/provenance/truth-standing consumption, retained native human source participation without movement, canonical Project/root Wiki paths, adopted-source participation without canonical replacement, lazy Project entry, explicit exact retrieval, provenance-bearing Agent Wiki maintenance, no silent human-source mutation and explicit revision proposals. This Skill does not encode TUI keybindings and does not grant provider, retrieval, trust or mutation authority.
