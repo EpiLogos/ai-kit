@@ -65,9 +65,16 @@ pub fn render_managed_bootstrap(bootstrap: &ActorBootstrap) -> String {
     if let Some(space) = &bootstrap.session_space {
         body.push_str(&format!("- SessionSpace: `{space}`\n"));
         body.push_str(
-            "  (canonical World identity; inspect its membership and the machine World on demand — do not infer them from this bootstrap)\n",
+            "  (canonical World identity; inspect membership and the machine World on demand — do not infer them from this bootstrap)\n",
         );
     }
+
+    body.push_str(
+        "\n## Operative access\n\n\
+- The World's own CLIs are available here for on-demand inspection: `oi` (recognition/adopt/current-world/dev-world) and `aikit` (search/explain/history/capabilities/context).\n\
+- Skills arrive as the **projected** surface through AIKit's hook dispatcher — the harness skill view is masked/selected, never the whole catalogue; a skill you cannot see was not projected into this context, and that is a selection fact, not a missing file.\n\
+- To act, use these CLIs or an authorised AIKit capability; do not reconstruct O:I/native architecture from prompt prose.\n",
+    );
 
     body.push_str("\n## Horizons\n\n");
     body.push_str(&format!(
