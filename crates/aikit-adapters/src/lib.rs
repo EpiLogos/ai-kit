@@ -4,6 +4,8 @@
 
 extern crate self as aikit_adapters;
 
+pub mod actor_composition;
+pub mod actuation_model_bearing;
 pub mod actuation_stream_projection;
 pub mod agent_connection;
 pub mod agent_session_host;
@@ -11,6 +13,7 @@ pub mod authored_wiki_living;
 pub mod authored_wiki_read;
 pub mod authored_wiki_source;
 pub mod bkmr;
+pub mod central_agent_profile;
 pub mod central_temporal;
 pub mod clients;
 pub mod composition_topology;

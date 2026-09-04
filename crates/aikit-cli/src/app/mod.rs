@@ -40,10 +40,12 @@ use aikit_store::registry::{load_project_local, load_registry, RegistryProblem, 
 use aikit_store::trust::{TrustSnapshot, TrustStore};
 use aikit_store::SessionSpaceApplicationStore;
 
+use aikit_adapters::actor_composition::compose_live_actor_inputs;
 use aikit_adapters::clients::agent_skills;
 use aikit_adapters::clients::broker::BrokerAdapter;
 use aikit_adapters::clients::claude::ClaudeAdapter;
 use aikit_adapters::clients::codex::CodexAdapter;
+use aikit_adapters::runner::SystemRunner;
 
 use aikit_tui::backend::{
     ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
@@ -52,6 +54,7 @@ pub use aikit_tui::staging::StagedDiff;
 
 use crate::discover::{self, DiscoveredProject};
 use crate::run::{self, RunReport};
+use crate::temporal::process_central_root;
 
 mod knowledge;
 
@@ -726,7 +729,27 @@ impl Service {
         }
 
         let actor_bootstrap = if self.descriptor.project_root.is_some() {
-            let resolution = aikit_tui::project_world_service::context_resolution(self)?;
+            // Compose the live actor inputs from the Actuation model-bearing
+            // receipt and the Central-authored profile. Absent or ambiguous
+            // projections resolve to defaults — never guessed; a fetch failure
+            // is fail-soft (no projection), never a resolution failure.
+            let composed = match self.descriptor.project_root.as_deref() {
+                Some(root) => process_central_root(Some(root)).and_then(|central| {
+                    let runner = SystemRunner::new();
+                    compose_live_actor_inputs(&runner, &central, root)
+                        .ok()
+                        .flatten()
+                }),
+                None => None,
+            };
+
+            let resolution = match &composed {
+                Some(composed) => aikit_tui::project_world_service::context_resolution_with_actors(
+                    self,
+                    composed.requested_actors.clone(),
+                )?,
+                None => aikit_tui::project_world_service::context_resolution(self)?,
+            };
             // The World (SessionSpace) identity is discoverable from the
             // Project. When exactly one authored SessionSpace names this
             // Project, disclose it as the canonical World identity; ambiguity
@@ -739,6 +762,9 @@ impl Service {
                 .and_then(|mut states| states.pop())
                 .map(|state| state.id().clone());
             let request = aikit_core::ActorBootstrapRequest {
+                selected_harness: composed.as_ref().and_then(|c| c.selected_harness.clone()),
+                selected_model: composed.as_ref().and_then(|c| c.selected_model.clone()),
+                agent_session: composed.as_ref().and_then(|c| c.agent_session.clone()),
                 session_space,
                 ..aikit_core::ActorBootstrapRequest::default()
             };

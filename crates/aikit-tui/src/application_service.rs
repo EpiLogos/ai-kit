@@ -183,6 +183,7 @@ impl<'a> ApplicationService<'a> {
             self.backend.view(),
             scope_layers,
             &index,
+            aikit_core::RequestedActors::default(),
         )?;
         let candidates = resolve_action_candidates(&resolved.path, &index, &context);
 

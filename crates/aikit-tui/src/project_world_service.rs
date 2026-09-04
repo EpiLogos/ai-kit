@@ -8,7 +8,7 @@ use aikit_core::context_source::{ContextSourceEntry, ContextSourceIndex};
 use aikit_core::resource::ResourceKind;
 use aikit_core::{
     application_context_resolution, disclose_project_world, ContextResolution,
-    ProjectWorldReadModel, Result,
+    ProjectWorldReadModel, RequestedActors, Result,
 };
 
 use crate::PaletteBackend;
@@ -19,12 +19,23 @@ use crate::PaletteBackend;
 /// identity and scope composition are resolved in `aikit-core`, so the renderer
 /// cannot become a semantic boundary around Context.
 pub fn context_resolution(backend: &dyn PaletteBackend) -> Result<ContextResolution> {
+    context_resolution_with_actors(backend, RequestedActors::default())
+}
+
+/// As [`context_resolution`], with the caller's composed actor refs (Actuation
+/// model-bearing + Central authored) supplied explicitly. Host falls back to the
+/// descriptor's machine hostname when `actors.host` is unset.
+pub fn context_resolution_with_actors(
+    backend: &dyn PaletteBackend,
+    actors: RequestedActors,
+) -> Result<ContextResolution> {
     let resources = backend.navigation_index();
     application_context_resolution(
         backend.context(),
         backend.view(),
         backend.scope_layers().unwrap_or(&[]),
         &resources,
+        actors,
     )
 }
 
