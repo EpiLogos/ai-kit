@@ -12,6 +12,7 @@ use aikit_core::project::{
 };
 use aikit_core::projection::{ActivationEffect, ProjectionItem, TargetAdapter};
 use aikit_core::resource::ResourceRef;
+use aikit_core::session_space::SessionSpaceRef;
 
 use common::{write_payload_skill, ContextBuilder};
 
@@ -49,6 +50,7 @@ fn actor_bootstrap() -> ActorBootstrap {
         harness: None,
         model: None,
         agent_session: Some("session/alpha".into()),
+        session_space: Some(SessionSpaceRef::parse("session-space/test").unwrap()),
         capabilities: empty_summary(),
         actions: empty_summary(),
         context_sources: empty_summary(),
@@ -108,6 +110,7 @@ fn the_same_exact_project_and_run_seed_projects_through_claude_and_isolated_code
         assert!(seed.contains("Project: `project/test`"));
         assert!(seed.contains("Run: `run/client-supplied`"));
         assert!(seed.contains("AgentSession: `session/alpha`"));
+        assert!(seed.contains("SessionSpace: `session-space/test`"));
         assert!(!seed.contains("component_bindings"));
         assert!(!seed.contains("HarnessComposition"));
     }

@@ -62,6 +62,12 @@ pub fn render_managed_bootstrap(bootstrap: &ActorBootstrap) -> String {
     if let Some(session) = &bootstrap.agent_session {
         body.push_str(&format!("- AgentSession: `{session}`\n"));
     }
+    if let Some(space) = &bootstrap.session_space {
+        body.push_str(&format!("- SessionSpace: `{space}`\n"));
+        body.push_str(
+            "  (canonical World identity; inspect its membership and the machine World on demand — do not infer them from this bootstrap)\n",
+        );
+    }
 
     body.push_str("\n## Horizons\n\n");
     body.push_str(&format!(

@@ -18,6 +18,7 @@ use aikit_core::resource::{
     MemoryResourceIndex, ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef,
 };
 use aikit_core::scope::ScopeKind;
+use aikit_core::session_space::SessionSpaceRef;
 
 use common::{script, Fixture};
 
@@ -116,6 +117,7 @@ fn bootstrap(
             selected_harness: Some(r("harness:test")),
             selected_model: Some(r("model:test")),
             agent_session: Some(session.into()),
+            session_space: Some(SessionSpaceRef::parse("session-space/test").unwrap()),
             runtime_body: body,
         },
     )
@@ -135,6 +137,10 @@ fn bootstrap_is_thin_but_preserves_actor_provenance_and_runtime_body_pointer() {
     assert_eq!(bootstrap.model.as_ref().unwrap().resource(), &r("model:test"));
     assert_eq!(bootstrap.host.as_ref().unwrap().resource(), &r("host:test-host"));
     assert_eq!(bootstrap.agent_session.as_deref(), Some("session/a"));
+    assert_eq!(
+        bootstrap.session_space.as_ref().unwrap().to_string(),
+        "session-space/test"
+    );
     assert_eq!(
         bootstrap.runtime_body.as_ref().unwrap().fingerprint,
         body.fingerprint

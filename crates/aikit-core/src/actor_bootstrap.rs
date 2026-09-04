@@ -17,6 +17,7 @@ use crate::resource::{
     AddressHorizon, ProviderOffer, RelationOp, ResolveExpression, ResourceKind, ResourceRef,
     ResourceSource,
 };
+use crate::session_space::SessionSpaceRef;
 use crate::{AikitError, Result};
 
 pub const ACTOR_BOOTSTRAP_VERSION: &str = "aikit.actor-bootstrap/v2";
@@ -144,6 +145,11 @@ pub struct ActorBootstrap {
     pub model: Option<BootstrapReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<String>,
+    /// The canonical World identity this actor inhabits (`session-space/…`).
+    /// This is a stable reference, not the World's contents; richer World state
+    /// (recognition account, material capacities) stays resolvable on demand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_space: Option<SessionSpaceRef>,
     pub capabilities: ResourceSetSummary,
     pub actions: ResourceSetSummary,
     pub context_sources: ResourceSetSummary,
@@ -159,6 +165,9 @@ pub struct ActorBootstrapRequest<'a> {
     pub selected_harness: Option<ResourceRef>,
     pub selected_model: Option<ResourceRef>,
     pub agent_session: Option<String>,
+    /// The World/SessionSpace identity to disclose. Supplied by the caller that
+    /// owns the World relation (e.g. the O:I launcher), never inferred here.
+    pub session_space: Option<SessionSpaceRef>,
     pub runtime_body: Option<&'a HarnessComposition>,
 }
 
@@ -200,6 +209,7 @@ pub fn project_actor_bootstrap(
         harness,
         model,
         agent_session: request.agent_session,
+        session_space: request.session_space,
         capabilities: summarize_set(&resolution.capabilities),
         actions: summarize_set(&resolution.actions),
         context_sources: summarize_set(&resolution.context_sources),
@@ -407,6 +417,9 @@ pub fn actor_world_disclosure(bootstrap: &ActorBootstrap) -> ResolveExpression {
     }
     if let Some(run) = bootstrap.run.clone() {
         clauses.push(clause(AddressHorizon::H4, run));
+    }
+    if let Some(space) = bootstrap.session_space.clone() {
+        clauses.push(clause(AddressHorizon::H4, space.as_resource_ref().clone()));
     }
     clauses.extend(
         [actual(&bootstrap.agent), actual(&bootstrap.host)]
