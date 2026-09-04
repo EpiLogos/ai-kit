@@ -14,7 +14,9 @@
 //!   one session can never block another session on the same transport, and no
 //!   caller has to block on `read` to observe its own turn;
 //! * per-session ordered event lanes carrying the adapter's provenance-bearing
-//!   [`ConnectionSignal`]s *as they arrive*, which is what streaming is;
+//!   [`ConnectionSignal`]s *as they arrive*, which is what streaming is; a lane
+//!   ends when the bridge stops, deliberately or not, so a caller parked on it
+//!   learns of the stop instead of blocking on a dead transport;
 //! * a mid-turn interrupt that issues the adapter's coordinated cancel, keeps
 //!   reading until the provider actually stops the turn, and then records the
 //!   interruption on that session's trail;
@@ -60,6 +62,11 @@ pub const DEFAULT_MAX_SIGNALS_PER_TURN: usize = 512;
 /// Signals retained for natives no lane on this host claims. The host does not
 /// silently drop what it cannot attribute.
 const UNATTRIBUTED_LIMIT: usize = 64;
+
+/// What a turn still in flight is told when the host itself stops the
+/// transport. It is a stop the host chose, not a transport failure.
+const DELIBERATE_STOP_REASON: &str =
+    "the host was stopped deliberately while the turn was in flight";
 
 /// Host-level limits, stated rather than ambient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,8 +213,33 @@ struct HostShared {
 
 struct LaneCore {
     agent_session: ResourceRef,
-    sender: Sender<HostEvent>,
+    /// Taken (dropped) when the bridge stops, so a caller parked in `recv`
+    /// wakes and every later read sees the end instead of blocking forever on
+    /// a transport that can no longer produce anything.
+    sender: Mutex<Option<Sender<HostEvent>>>,
     events: Mutex<Receiver<HostEvent>>,
+}
+
+impl LaneCore {
+    fn deliver(&self, event: HostEvent) {
+        let sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(sender) = sender.as_ref() {
+            let _ = sender.send(event);
+        }
+    }
+
+    /// Wake every caller parked on this lane and end every later read. Events
+    /// already queued stay readable; what ends is the lane's future.
+    fn close(&self) {
+        let mut sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *sender = None;
+    }
 }
 
 #[derive(Default)]
@@ -360,7 +392,7 @@ impl AgentSessionHost {
         let (event_sender, event_receiver) = mpsc::channel();
         let lane = Arc::new(LaneCore {
             agent_session: canonical.clone(),
-            sender: event_sender,
+            sender: Mutex::new(Some(event_sender)),
             events: Mutex::new(event_receiver),
         });
         let command = {
@@ -507,25 +539,25 @@ impl AgentSessionHost {
 
     /// Stop the transport. Canonical AgentSession identity is untouched: what
     /// dies here is a process, and continuity is proven from target evidence,
-    /// never from this call.
+    /// never from this call. A turn still in flight is closed as
+    /// [`TurnStop::Failed`] on its own lane, so no caller stays parked on it.
     pub fn shutdown(mut self) -> Result<Option<ExitStatus>> {
-        let status = self.shared.control.terminate();
-        self.stop_reader();
-        status
+        self.stop_reader()
     }
 
-    /// Terminate the process *before* joining the reader: the reader is blocked
-    /// on the child's stdout, and the child is reaped only after the reader
-    /// releases the shared state, so joining first would deadlock. Closing
-    /// stdout is what lets the reader finish.
-    fn stop_reader(&mut self) {
-        if let Ok(mut state) = self.shared.state.lock() {
-            state.closed = true;
-        }
-        let _ = self.shared.control.terminate();
+    /// Wake every lane first (a deliberate stop is not a transport failure,
+    /// but a stopped lane is a stopped lane), then terminate the process
+    /// *before* joining the reader: the reader is blocked on the child's
+    /// stdout, and the child is reaped only after the reader releases the
+    /// shared state, so joining first would deadlock. Closing stdout is what
+    /// lets the reader finish.
+    fn stop_reader(&mut self) -> Result<Option<ExitStatus>> {
+        state_stop_bridge(&self.shared.state, DELIBERATE_STOP_REASON, true);
+        let status = self.shared.control.terminate();
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
+        status
     }
 }
 
@@ -557,7 +589,7 @@ impl std::fmt::Debug for TurnHandle {
 
 impl Drop for AgentSessionHost {
     fn drop(&mut self) {
-        self.stop_reader();
+        let _ = self.stop_reader();
     }
 }
 
@@ -852,13 +884,12 @@ impl HostShared {
     }
 
     fn record_transport_failure(self: &Arc<Self>, error: AikitError) {
-        let deliveries = state_fail_bridge(&self.state, &error.to_string());
-        self.deliver(deliveries);
+        state_stop_bridge(&self.state, &error.to_string(), false);
     }
 
     fn deliver(&self, deliveries: Vec<(Arc<LaneCore>, HostEvent)>) {
         for (lane, event) in deliveries {
-            let _ = lane.sender.send(event);
+            lane.deliver(event);
         }
     }
 
@@ -885,7 +916,10 @@ impl HostShared {
         };
         let mut state = lock(&self.state)?;
         if state.closed {
-            return Err(self.transport_error("the session bridge has stopped"));
+            return Err(stopped_bridge_error(
+                &state,
+                "the session bridge has stopped",
+            ));
         }
         state.control.insert(token, waiter);
         Ok(receiver)
@@ -903,7 +937,10 @@ impl HostShared {
         };
         let mut state = lock(&self.state)?;
         if state.closed {
-            return Err(self.transport_error("the session bridge has stopped"));
+            return Err(stopped_bridge_error(
+                &state,
+                "the session bridge has stopped",
+            ));
         }
         if state.turns.contains_key(&native_session_id) {
             return Err(AikitError::new(
@@ -941,7 +978,10 @@ impl HostShared {
         {
             let mut state = lock(&self.state)?;
             if state.closed {
-                return Err(self.transport_error("the session bridge has stopped"));
+                return Err(stopped_bridge_error(
+                    &state,
+                    "the session bridge has stopped",
+                ));
             }
             let record = state
                 .sessions
@@ -975,15 +1015,31 @@ impl HostShared {
             })?
         };
         let operations: Vec<String> = commands.iter().map(|c| c.operation.clone()).collect();
-        {
+        // The turn may have closed while the cancel was being prepared: the
+        // terminal signal and this request race across the adapter lock. Only
+        // cancel a turn that is still the one that was interrupted.
+        let turn_still_open = {
             let mut state = lock(&self.state)?;
-            if let Some(pending) = state
+            match state
                 .turns
                 .get_mut(&native_session_id)
                 .and_then(|turn| turn.interrupt.as_mut())
             {
-                pending.commands = operations.clone();
+                Some(pending) if pending.requested_at_sequence == requested_at_sequence => {
+                    pending.commands = operations.clone();
+                    true
+                }
+                _ => false,
             }
+        };
+        if !turn_still_open {
+            return Err(AikitError::new(
+                "agent_session_host.no_turn_in_flight",
+                format!(
+                    "native session {native_session_id} ended its turn before the cancel was \
+                     issued"
+                ),
+            ));
         }
         for command in &commands {
             self.dispatch(command)?;
@@ -1036,14 +1092,24 @@ impl HostShared {
     }
 
     fn transport_error(&self, fallback: &str) -> AikitError {
-        let message = self
-            .state
-            .lock()
-            .ok()
-            .and_then(|state| state.transport_error.clone())
-            .unwrap_or_else(|| fallback.to_owned());
-        AikitError::new("agent_session_host.transport_closed", message)
+        match self.state.lock() {
+            Ok(state) => stopped_bridge_error(&state, fallback),
+            Err(_) => AikitError::new("agent_session_host.transport_closed", fallback),
+        }
     }
+}
+
+/// The stopped-bridge error, read from a state lock the caller already holds.
+/// [`HostShared::transport_error`] re-locks `state`, so a caller holding the
+/// state guard must use this instead — re-locking here is a self-deadlock.
+fn stopped_bridge_error(state: &HostState, fallback: &str) -> AikitError {
+    AikitError::new(
+        "agent_session_host.transport_closed",
+        state
+            .transport_error
+            .clone()
+            .unwrap_or_else(|| fallback.to_owned()),
+    )
 }
 
 /// Register an opened session for its native id *before* its caller is woken,
@@ -1090,31 +1156,37 @@ fn state_fail_turn(
     deliveries
 }
 
-/// The stream can no longer be interpreted: close every turn as failed, release
-/// every lane, and record why. A deliberate shutdown is not a failure.
-fn state_fail_bridge(state: &Mutex<HostState>, reason: &str) -> Vec<(Arc<LaneCore>, HostEvent)> {
-    let mut deliveries = Vec::new();
+/// The bridge stops, deliberately or not: queue every in-flight turn's honest
+/// record on its lane, then end every lane, so a caller parked on a transport
+/// that can no longer produce anything drains its record and then sees the
+/// end. A deliberate stop is not a transport failure.
+fn state_stop_bridge(state: &Mutex<HostState>, reason: &str, deliberate: bool) {
     let Ok(mut state) = state.lock() else {
-        return deliveries;
+        return;
     };
     if state.closed {
-        return deliveries;
+        return;
     }
     let natives: Vec<String> = state.turns.keys().cloned().collect();
     for native_session_id in natives {
         if let Some(record) = state.fail_turn(&native_session_id, reason) {
             state.record_turn(&record);
             if let Some(lane) = state.lanes.get(&native_session_id).cloned() {
-                deliveries.push((lane, HostEvent::TurnEnded(record)));
+                // Queue the record before the lane ends: closing the sender
+                // first would drop the very event that explains the stop.
+                lane.deliver(HostEvent::TurnEnded(record));
             }
         }
     }
-    state.transport_error = Some(reason.to_owned());
+    if !deliberate {
+        state.transport_error = Some(reason.to_owned());
+    }
     state.closed = true;
     state.control.clear();
     state.pending_prompts.clear();
-    state.lanes.clear();
-    deliveries
+    for (_, lane) in std::mem::take(&mut state.lanes) {
+        lane.close();
+    }
 }
 
 impl HostState {
@@ -1158,15 +1230,21 @@ impl HostState {
             _ => TurnStop::Cancelled,
         };
         let interruption = match (&turn.interrupt, &stop) {
-            (Some(pending), observed) => Some(TurnInterruption {
+            // A cancel was asked for and the provider stopped the turn: a human
+            // interruption, however the stop was carried on the wire.
+            (Some(pending), TurnStop::Cancelled) => Some(TurnInterruption {
                 agent_session: turn.agent_session.clone(),
                 native_session_id: native_session_id.to_owned(),
                 origin: InterruptOrigin::Human,
                 reason: pending.reason.clone(),
                 commands: pending.commands.clone(),
                 requested_at_sequence: Some(pending.requested_at_sequence),
-                observed_stop: observed.clone(),
+                observed_stop: stop.clone(),
             }),
+            // The turn ran to completion despite the cancel. That is not an
+            // interruption, and recording one would put a human act on the
+            // trail for a turn nobody stopped.
+            (Some(_), TurnStop::Completed { .. }) => None,
             (None, TurnStop::Cancelled) => Some(TurnInterruption {
                 agent_session: turn.agent_session.clone(),
                 native_session_id: native_session_id.to_owned(),
@@ -1177,6 +1255,9 @@ impl HostState {
                 observed_stop: TurnStop::Cancelled,
             }),
             (None, _) => None,
+            // A transport failure is `fail_turn`'s record to make; `close_turn`
+            // only closes turns the provider stopped on the wire.
+            (Some(_), TurnStop::Failed { .. }) => None,
         };
         Some(TurnRecord {
             agent_session: turn.agent_session.clone(),

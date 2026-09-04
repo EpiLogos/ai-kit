@@ -22,7 +22,7 @@ fn r(raw: &str) -> ResourceRef {
 }
 
 const FIXTURE: &str = r#"
-import json, sys, threading, time
+import json, os, sys, threading, time
 
 counter = 0
 turns = {}
@@ -49,16 +49,22 @@ def cancelled(native):
 def run_turn(native, request_id, text):
     slow = "slow" in text
     chunks = 3 if slow else 1
+    # A turn that finishes on its own even though a cancel arrived: the host's
+    # interrupt lost the race, and must not record the turn as interrupted.
+    ignore_cancel = "raceignore" in text
     for index in range(chunks):
-        if cancelled(native):
+        if cancelled(native) and not ignore_cancel:
             break
         send({"jsonrpc": "2.0", "method": "session/update", "params": {
             "sessionId": native,
             "update": {"sessionUpdate": "agent_message_chunk",
                        "content": {"type": "text", "text": "%s#%d:%s" % (native, index, text)}}}})
+        if "die" in text:
+            sys.stdout.flush()
+            os._exit(0)
         if slow:
             time.sleep(0.35)
-    if cancelled(native) or "selfcancel" in text:
+    if (cancelled(native) and not ignore_cancel) or "selfcancel" in text:
         stop = "cancelled"
     else:
         stop = "end_turn"
@@ -531,15 +537,157 @@ fn shutdown_records_no_transport_failure_and_identity_is_untouched() {
 }
 
 #[test]
+fn a_transport_death_ends_its_turns_and_its_lanes() {
+    let Some(host) = launch() else {
+        return;
+    };
+    let canonical = r("agent-session/host-death");
+    let lane = open(&host, "agent-session/host-death");
+
+    // The fixture kills its own process mid-turn: the bridge cannot produce
+    // anything after this, so the turn must end as failed and the lane must
+    // end rather than block a reader forever.
+    let turn = lane
+        .prompt(json!([{ "type": "text", "text": "slow die" }]))
+        .unwrap();
+    let record;
+    loop {
+        match turn.recv().unwrap() {
+            HostEvent::Signal(_) => continue,
+            HostEvent::TurnEnded(ended) => {
+                record = ended;
+                break;
+            }
+        }
+    }
+    assert_eq!(record.agent_session, canonical);
+    assert!(
+        matches!(record.stop, TurnStop::Failed { .. }),
+        "the provider died mid-turn; the turn is failed, not completed or cancelled"
+    );
+    assert_eq!(
+        turn.recv(),
+        None,
+        "a lane whose bridge died ends instead of blocking its reader"
+    );
+    assert_eq!(lane.recv(), None);
+    assert!(
+        host.transport_error().is_some(),
+        "a transport death is recorded, so a caller can say why the lane ended"
+    );
+    // And the stopped bridge refuses new work honestly rather than parking it.
+    assert_eq!(
+        lane.prompt(json!([{ "type": "text", "text": "fast after death" }]))
+            .unwrap_err()
+            .code(),
+        "agent_session_host.transport_closed"
+    );
+    drop(host);
+}
+
+#[test]
+fn stopping_the_host_wakes_a_waiter_parked_on_an_in_flight_turn() {
+    let Some(host) = launch() else {
+        return;
+    };
+    let canonical = r("agent-session/host-stop-wake");
+    let lane = open(&host, "agent-session/host-stop-wake");
+    let turn = lane
+        .prompt(json!([{ "type": "text", "text": "slow stop wake" }]))
+        .unwrap();
+    let first = turn.recv().unwrap();
+    assert!(
+        chunk_text(&first).is_some(),
+        "the turn is in flight when the host stops"
+    );
+
+    // The waiter parks on the turn; the host stopping is the only thing that
+    // can end the wait. If the stop stranded waiters, this join never returned.
+    let waiter = std::thread::spawn(move || turn.wait());
+    host.shutdown().unwrap();
+    let waited = waiter
+        .join()
+        .unwrap()
+        .expect("a caller parked on an in-flight turn must learn of the stop");
+    assert_eq!(waited.agent_session, canonical);
+    assert_eq!(
+        waited.stop,
+        TurnStop::Failed {
+            reason: "the host was stopped deliberately while the turn was in flight".into()
+        }
+    );
+    // The lane ends too, so the next reader is not parked on a dead transport.
+    assert_eq!(lane.recv(), None);
+}
+
+#[test]
+fn an_interrupt_that_loses_the_race_records_no_false_interruption() {
+    let Some(host) = launch() else {
+        return;
+    };
+    let canonical = r("agent-session/host-race");
+    let lane = open(&host, "agent-session/host-race");
+    let turn = lane
+        .prompt(json!([{ "type": "text", "text": "slow raceignore" }]))
+        .unwrap();
+    let first = turn.recv().unwrap();
+    assert!(
+        chunk_text(&first).is_some(),
+        "the cancel races a running turn"
+    );
+
+    // The cancel is issued and delivered, and the fixture finishes the turn on
+    // its own anyway. The host must not dress a completed turn up as an
+    // interrupted one.
+    let receipt = turn.interrupt(Some("raced completion".into())).unwrap();
+    assert_eq!(receipt.agent_session, canonical);
+    assert_eq!(receipt.commands, vec!["session/cancel".to_string()]);
+
+    let record = turn.wait().unwrap();
+    assert_eq!(
+        record.stop,
+        TurnStop::Completed {
+            stop_reason: "end_turn".into()
+        }
+    );
+    assert!(
+        record.interruption.is_none(),
+        "a turn that ran to completion is not an interrupted turn"
+    );
+    assert_eq!(
+        host.interruptions(&canonical).unwrap(),
+        Vec::new(),
+        "the trail records no interruption for a turn nobody stopped"
+    );
+    assert_eq!(
+        host.identity(&canonical).unwrap().state,
+        SessionLaneState::Resident
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
 fn dropping_a_host_without_shutdown_does_not_hang_the_caller() {
     let Some(host) = launch() else {
         return;
     };
-    let _lane = open(&host, "agent-session/host-drop");
-    // Deliberate drop while the fixture is alive and the reader is blocked on
-    // its stdout: the drop path must terminate the process first, or this join
-    // would never return.
+    let lane = open(&host, "agent-session/host-drop");
+    let turn = lane
+        .prompt(json!([{ "type": "text", "text": "slow drop" }]))
+        .unwrap();
+    let first = turn.recv().unwrap();
+    assert!(chunk_text(&first).is_some());
+    let waiter = std::thread::spawn(move || turn.wait());
+    // Deliberate drop while the fixture is alive, the reader is blocked on its
+    // stdout, and a caller is parked on the turn: the drop path must wake the
+    // waiter and terminate the process, or neither this join nor the test
+    // would ever return.
     drop(host);
+    let waited = waiter
+        .join()
+        .unwrap()
+        .expect("a caller parked on an in-flight turn must learn of the drop");
+    assert!(matches!(waited.stop, TurnStop::Failed { .. }));
 }
 
 #[test]
