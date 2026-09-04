@@ -2,7 +2,8 @@
 
 **Date:** 2026-09-04
 **Status:** design, approved for implementation planning
-**Branch:** `feat/actor-bootstrap-session-space` (ai-kit); touches Central/ctrl on its own branch
+**Branch:** ai-kit `main` (the `feat/actor-bootstrap-session-space` line merged);
+ctrl work lands on a branch off Central `main`
 
 ## Purpose
 
