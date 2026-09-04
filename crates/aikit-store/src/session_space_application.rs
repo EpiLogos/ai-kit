@@ -114,7 +114,17 @@ impl SessionSpaceApplicationStore {
     pub fn discover(&self, project: Option<&ProjectRef>) -> Result<Vec<SessionSpaceAuthoredState>> {
         let mut states = self.list()?;
         if let Some(project) = project {
-            states.retain(|state| state.project_contexts.contains_key(project));
+            states.retain(|state| {
+                // Authored membership is the stable "which World is this
+                // Project in" answer; observed project context is richer
+                // evidence but must not be the only discovery signal.
+                state.project_contexts.contains_key(project)
+                    || state
+                        .definition
+                        .projects
+                        .iter()
+                        .any(|member| member.as_str() == project.as_str())
+            });
         }
         Ok(states)
     }
@@ -453,6 +463,37 @@ mod tests {
         let error = store.apply(&stale).unwrap_err();
         assert_eq!(error.code(), "session_space.preview_stale");
         assert!(store.load(&id).unwrap().focus.is_none());
+    }
+
+    #[test]
+    fn authored_membership_alone_makes_a_session_space_discoverable_by_project() {
+        let (_dir, store) = store();
+        let created = create(&store, "membership");
+        let id = created.space;
+
+        let mut target = store.load(&id).unwrap();
+        target
+            .definition
+            .projects
+            .insert(ResourceRef::parse("project:a").unwrap());
+        let preview = store
+            .stage(
+                Some(&id),
+                SessionSpaceMutation::Restore {
+                    target: Box::new(target),
+                    evidence: "authored membership".into(),
+                },
+            )
+            .unwrap();
+        store.apply(&preview).unwrap();
+
+        let project = aikit_core::project::ProjectRef::parse("project:a").unwrap();
+        let discovered = store.discover(Some(&project)).unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].id(), &id);
+
+        let other = aikit_core::project::ProjectRef::parse("project:b").unwrap();
+        assert!(store.discover(Some(&other)).unwrap().is_empty());
     }
 
     #[test]
