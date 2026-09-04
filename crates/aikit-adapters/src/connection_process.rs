@@ -8,6 +8,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
 
 use aikit_core::{AikitError, Result};
 use serde_json::Value;
@@ -27,42 +28,39 @@ pub struct ConnectionProcess {
 
 impl ConnectionProcess {
     pub fn spawn(argv: &[String], cwd: Option<&Path>) -> Result<Self> {
-        let Some((program, args)) = argv.split_first() else {
-            return Err(AikitError::new(
-                "connection.process.empty_argv",
-                "cannot spawn a connection target from empty argv",
-            ));
-        };
-        let mut command = Command::new(program);
-        command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped());
-        if let Some(cwd) = cwd {
-            command.current_dir(cwd);
-        }
-        let mut child = command.spawn().map_err(|error| {
-            AikitError::new(
-                "connection.process.spawn_failed",
-                format!("could not spawn `{}`: {error}", argv.join(" ")),
-            )
-            .with("command", argv.join(" "))
-        })?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            AikitError::new(
-                "connection.process.stdin_unavailable",
-                format!("`{}` did not expose stdin", argv.join(" ")),
-            )
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            AikitError::new(
-                "connection.process.stdout_unavailable",
-                format!("`{}` did not expose stdout", argv.join(" ")),
-            )
-        })?;
+        let (child, stdin, stdout) = spawn_parts(argv, cwd)?;
         Ok(Self {
             child,
             stdin,
             stdout: BufReader::new(stdout),
             argv: argv.to_vec(),
         })
+    }
+
+    /// Spawn and split in one step: the write half may be shared across session
+    /// threads, the read half belongs to one demultiplexing reader, and the
+    /// control half keeps the ordinary process mechanisms. One process owner,
+    /// two halves, no second connection stack.
+    pub fn spawn_split(
+        argv: &[String],
+        cwd: Option<&Path>,
+    ) -> Result<(ConnectionWriter, ConnectionReader, ConnectionControl)> {
+        let (child, stdin, stdout) = spawn_parts(argv, cwd)?;
+        let argv: Arc<Vec<String>> = Arc::new(argv.to_vec());
+        Ok((
+            ConnectionWriter {
+                stdin: Mutex::new(stdin),
+                argv: Arc::clone(&argv),
+            },
+            ConnectionReader {
+                stdout: BufReader::new(stdout),
+                argv: Arc::clone(&argv),
+            },
+            ConnectionControl {
+                child: Arc::new(Mutex::new(child)),
+                argv,
+            },
+        ))
     }
 
     /// Execute one already-encoded ACP/JSON command on the real target.
@@ -83,31 +81,17 @@ impl ConnectionProcess {
         serde_json::from_str(&line).map_err(|error| {
             AikitError::new(
                 "connection.process.invalid_json",
-                format!("target `{}` emitted invalid JSON: {error}", self.argv.join(" ")),
+                format!(
+                    "target `{}` emitted invalid JSON: {error}",
+                    self.argv.join(" ")
+                ),
             )
             .with("line", line)
         })
     }
 
     pub fn write_line(&mut self, line: &str) -> Result<()> {
-        self.stdin.write_all(line.as_bytes()).map_err(|error| {
-            AikitError::new(
-                "connection.process.write_failed",
-                format!("could not write to `{}`: {error}", self.argv.join(" ")),
-            )
-        })?;
-        self.stdin.write_all(b"\n").map_err(|error| {
-            AikitError::new(
-                "connection.process.write_failed",
-                format!("could not terminate line for `{}`: {error}", self.argv.join(" ")),
-            )
-        })?;
-        self.stdin.flush().map_err(|error| {
-            AikitError::new(
-                "connection.process.flush_failed",
-                format!("could not flush `{}` stdin: {error}", self.argv.join(" ")),
-            )
-        })
+        write_line_to(&mut self.stdin, line, &self.argv)
     }
 
     pub fn read_line(&mut self) -> Result<String> {
@@ -199,6 +183,252 @@ impl ConnectionProcess {
     pub fn argv(&self) -> &[String] {
         &self.argv
     }
+}
+
+/// Spawn a connection target and return its raw parts, so [`ConnectionProcess`]
+/// and [`ConnectionProcess::spawn_split`] share one spawn path.
+fn spawn_parts(argv: &[String], cwd: Option<&Path>) -> Result<(Child, ChildStdin, ChildStdout)> {
+    let Some((program, args)) = argv.split_first() else {
+        return Err(AikitError::new(
+            "connection.process.empty_argv",
+            "cannot spawn a connection target from empty argv",
+        ));
+    };
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let mut child = command.spawn().map_err(|error| {
+        AikitError::new(
+            "connection.process.spawn_failed",
+            format!("could not spawn `{}`: {error}", argv.join(" ")),
+        )
+        .with("command", argv.join(" "))
+    })?;
+    let stdin = child.stdin.take().ok_or_else(|| {
+        AikitError::new(
+            "connection.process.stdin_unavailable",
+            format!("`{}` did not expose stdin", argv.join(" ")),
+        )
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        AikitError::new(
+            "connection.process.stdout_unavailable",
+            format!("`{}` did not expose stdout", argv.join(" ")),
+        )
+    })?;
+    Ok((child, stdin, stdout))
+}
+
+/// The write half of a split [`ConnectionProcess`]. Every session thread writes
+/// through the same serialized stdin, so interleaved sessions never interleave
+/// *bytes*.
+pub struct ConnectionWriter {
+    stdin: Mutex<ChildStdin>,
+    argv: Arc<Vec<String>>,
+}
+
+impl ConnectionWriter {
+    pub fn send_json(&self, command: &ConnectionCommand) -> Result<()> {
+        let line = serde_json::to_string(&command.payload).map_err(|error| {
+            AikitError::new(
+                "connection.process.json_encode_failed",
+                format!("could not encode {} command: {error}", command.operation),
+            )
+        })?;
+        self.write_line(&line)
+    }
+
+    pub fn write_line(&self, line: &str) -> Result<()> {
+        let mut stdin = self.stdin.lock().map_err(|_| poisoned("write"))?;
+        write_line_to(&mut stdin, line, &self.argv)
+    }
+
+    pub fn argv(&self) -> &[String] {
+        &self.argv
+    }
+}
+
+/// The read half of a split [`ConnectionProcess`]. Not cloneable: exactly one
+/// reader consumes the target's stdout so observed wire order stays total.
+pub struct ConnectionReader {
+    stdout: BufReader<ChildStdout>,
+    argv: Arc<Vec<String>>,
+}
+
+impl ConnectionReader {
+    pub fn read_json(&mut self) -> Result<Value> {
+        let line = self.read_line()?;
+        serde_json::from_str(&line).map_err(|error| {
+            AikitError::new(
+                "connection.process.invalid_json",
+                format!(
+                    "target `{}` emitted invalid JSON: {error}",
+                    self.argv.join(" ")
+                ),
+            )
+            .with("line", line)
+        })
+    }
+
+    pub fn read_line(&mut self) -> Result<String> {
+        let mut line = String::new();
+        let bytes = self.stdout.read_line(&mut line).map_err(|error| {
+            AikitError::new(
+                "connection.process.read_failed",
+                format!("could not read from `{}`: {error}", self.argv.join(" ")),
+            )
+        })?;
+        if bytes == 0 {
+            return Err(AikitError::new(
+                "connection.process.disconnected",
+                format!("target `{}` closed stdout", self.argv.join(" ")),
+            ));
+        }
+        Ok(line.trim_end_matches(['\r', '\n']).to_string())
+    }
+
+    pub fn argv(&self) -> &[String] {
+        &self.argv
+    }
+}
+
+/// Process control for a split [`ConnectionProcess`]. Signalling and termination
+/// stay host mechanisms; they say nothing about canonical AgentSession
+/// continuity.
+pub struct ConnectionControl {
+    child: Arc<Mutex<Child>>,
+    argv: Arc<Vec<String>>,
+}
+
+impl ConnectionControl {
+    pub fn is_running(&self) -> Result<bool> {
+        let mut child = self.child.lock().map_err(|_| poisoned("status"))?;
+        child
+            .try_wait()
+            .map(|status| status.is_none())
+            .map_err(|error| {
+                AikitError::new(
+                    "connection.process.status_failed",
+                    format!("could not inspect `{}`: {error}", self.argv.join(" ")),
+                )
+            })
+    }
+
+    /// Interrupt a real classic child without changing connection semantics into
+    /// process semantics. The adapter decides that a command means `interrupt`;
+    /// this transport maps that command to the host's ordinary SIGINT mechanism.
+    #[cfg(unix)]
+    pub fn interrupt(&self) -> Result<()> {
+        let id = {
+            let mut child = self.child.lock().map_err(|_| poisoned("interrupt"))?;
+            if child
+                .try_wait()
+                .map_err(|error| {
+                    AikitError::new(
+                        "connection.process.status_failed",
+                        format!("could not inspect `{}`: {error}", self.argv.join(" ")),
+                    )
+                })?
+                .is_some()
+            {
+                return Err(AikitError::new(
+                    "connection.process.disconnected",
+                    format!("target `{}` is not running", self.argv.join(" ")),
+                ));
+            }
+            child.id()
+        };
+        let status = Command::new("kill")
+            .arg("-INT")
+            .arg(id.to_string())
+            .status()
+            .map_err(|error| {
+                AikitError::new(
+                    "connection.process.interrupt_failed",
+                    format!("could not signal `{}`: {error}", self.argv.join(" ")),
+                )
+            })?;
+        if !status.success() {
+            return Err(AikitError::new(
+                "connection.process.interrupt_failed",
+                format!("SIGINT for `{}` exited with {status}", self.argv.join(" ")),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn terminate(&self) -> Result<Option<ExitStatus>> {
+        let mut child = self.child.lock().map_err(|_| poisoned("terminate"))?;
+        if let Some(status) = child.try_wait().map_err(|error| {
+            AikitError::new(
+                "connection.process.status_failed",
+                format!("could not inspect `{}`: {error}", self.argv.join(" ")),
+            )
+        })? {
+            return Ok(Some(status));
+        }
+        child.kill().map_err(|error| {
+            AikitError::new(
+                "connection.process.terminate_failed",
+                format!("could not terminate `{}`: {error}", self.argv.join(" ")),
+            )
+        })?;
+        let status = child.wait().map_err(|error| {
+            AikitError::new(
+                "connection.process.wait_failed",
+                format!("could not wait for `{}`: {error}", self.argv.join(" ")),
+            )
+        })?;
+        Ok(Some(status))
+    }
+
+    pub fn argv(&self) -> &[String] {
+        &self.argv
+    }
+}
+
+impl Drop for ConnectionControl {
+    fn drop(&mut self) {
+        if let Ok(mut child) = self.child.lock() {
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
+fn poisoned(operation: &str) -> AikitError {
+    AikitError::new(
+        "connection.process.lock_poisoned",
+        format!("connection {operation} lock was poisoned by a failed session thread"),
+    )
+}
+
+fn write_line_to(stdin: &mut ChildStdin, line: &str, argv: &[String]) -> Result<()> {
+    stdin.write_all(line.as_bytes()).map_err(|error| {
+        AikitError::new(
+            "connection.process.write_failed",
+            format!("could not write to `{}`: {error}", argv.join(" ")),
+        )
+    })?;
+    stdin.write_all(b"\n").map_err(|error| {
+        AikitError::new(
+            "connection.process.write_failed",
+            format!("could not terminate line for `{}`: {error}", argv.join(" ")),
+        )
+    })?;
+    stdin.flush().map_err(|error| {
+        AikitError::new(
+            "connection.process.flush_failed",
+            format!("could not flush `{}` stdin: {error}", argv.join(" ")),
+        )
+    })
 }
 
 impl Drop for ConnectionProcess {

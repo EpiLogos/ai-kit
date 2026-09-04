@@ -6,6 +6,7 @@ extern crate self as aikit_adapters;
 
 pub mod actuation_stream_projection;
 pub mod agent_connection;
+pub mod agent_session_host;
 pub mod authored_wiki_living;
 pub mod authored_wiki_read;
 pub mod authored_wiki_source;
@@ -56,6 +57,11 @@ pub use agent_connection::{
     ConnectionState, NativePermissionChoice, NativePermissionRequest, NativeSessionBinding,
     PromptRequest, SessionOpenMode, SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION,
     AGENT_CONNECTION_ADAPTER_VERSION,
+};
+pub use agent_session_host::{
+    AgentSessionHost, AgentSessionHostLimits, HostEvent, InterruptOrigin, InterruptReceipt,
+    SessionIdentity, SessionLane, SessionLaneState, TurnHandle, TurnInterruption, TurnRecord,
+    TurnStop, WaitOutcome, AGENT_SESSION_HOST_VERSION, DEFAULT_MAX_SIGNALS_PER_TURN,
 };
 pub use authored_wiki_living::{authored_wiki_knowledge_impact, AUTHORED_WIKI_LIVING_VERSION};
 pub use authored_wiki_read::{
