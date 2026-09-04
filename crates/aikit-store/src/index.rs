@@ -206,7 +206,49 @@ CREATE TABLE inbox_items (
 CREATE INDEX inbox_items_by_state ON inbox_items(state_label);
 CREATE INDEX inbox_items_by_dedup ON inbox_items(dedup_key);
 "#,
-)];
+    ),
+    (
+        "0003-agent-children",
+        r#"
+ALTER TABLE contexts ADD COLUMN parent_context_id TEXT;
+CREATE INDEX contexts_by_parent ON contexts(parent_context_id);
+"#,
+    ),
+    (
+        "0004-spend-ledger",
+        r#"
+CREATE TABLE spend_ledger (
+    context_id   TEXT NOT NULL,
+    tokens_in    INTEGER NOT NULL DEFAULT 0,
+    tokens_out   INTEGER NOT NULL DEFAULT 0,
+    cost_usd     REAL NOT NULL DEFAULT 0,
+    recorded_ns  INTEGER NOT NULL,
+    model        TEXT,
+    note         TEXT
+);
+CREATE INDEX spend_ledger_by_context ON spend_ledger(context_id, recorded_ns);
+"#,
+    ),
+    (
+        "0005-foreign-catalogue",
+        r#"
+CREATE TABLE foreign_capsules (
+    id          TEXT PRIMARY KEY,
+    source      TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL,
+    revision    TEXT NOT NULL,
+    root        TEXT NOT NULL
+);
+CREATE TABLE foreign_index_state (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    refreshed_at INTEGER NOT NULL,
+    root_count   INTEGER NOT NULL
+);
+"#,
+    ),
+];
 
 /// Tables `reindex` is allowed to empty.
 const DERIVED_TABLES: &[&str] = &["capsules", "profiles"];
