@@ -13,10 +13,7 @@ use aikit_core::Result;
 
 pub const MANAGED_BOOTSTRAP_SKILL: &str = "aikit-context";
 
-pub fn managed_bootstrap_item(
-    prefix: &Path,
-    bootstrap: &ActorBootstrap,
-) -> Result<ProjectionItem> {
+pub fn managed_bootstrap_item(prefix: &Path, bootstrap: &ActorBootstrap) -> Result<ProjectionItem> {
     ProjectionItem::write(
         prefix.join(MANAGED_BOOTSTRAP_SKILL).join("SKILL.md"),
         render_managed_bootstrap(bootstrap),
@@ -40,7 +37,10 @@ pub fn render_managed_bootstrap(bootstrap: &ActorBootstrap) -> String {
     );
 
     body.push_str(&format!("- Bootstrap: `{}`\n", bootstrap.version));
-    body.push_str(&format!("- Project: `{}`\n", bootstrap.project.project.as_str()));
+    body.push_str(&format!(
+        "- Project: `{}`\n",
+        bootstrap.project.project.as_str()
+    ));
     if let Some(run) = &bootstrap.run {
         body.push_str(&format!("- Run: `{run}`\n"));
     }
@@ -73,7 +73,8 @@ pub fn render_managed_bootstrap(bootstrap: &ActorBootstrap) -> String {
         "\n## Operative access\n\n\
 - The World's own CLIs are available here for on-demand inspection: `oi` (recognition/adopt/current-world/dev-world) and `aikit` (search/explain/history/capabilities/context).\n\
 - Skills arrive as the **projected** surface through AIKit's hook dispatcher — the harness skill view is masked/selected, never the whole catalogue; a skill you cannot see was not projected into this context, and that is a selection fact, not a missing file.\n\
-- To act, use these CLIs or an authorised AIKit capability; do not reconstruct O:I/native architecture from prompt prose.\n",
+- To act, use these CLIs or an authorised AIKit capability; do not reconstruct O:I/native architecture from prompt prose.\n\
+- Authority boundary: consequential action remains under Routine/authority (Invocation → evidence/proof → authorised Routine); these CLIs are your read/reconcile faculty, not an ambient grant of action.\n",
     );
 
     body.push_str("\n## Horizons\n\n");
@@ -113,7 +114,10 @@ pub fn render_managed_bootstrap(bootstrap: &ActorBootstrap) -> String {
     if let Some(runtime) = &bootstrap.runtime_body {
         body.push_str("\n## Runtime body\n\n");
         body.push_str(&format!("- Harness: `{}`\n", runtime.harness));
-        body.push_str(&format!("- Composition fingerprint: `{}`\n", runtime.fingerprint));
+        body.push_str(&format!(
+            "- Composition fingerprint: `{}`\n",
+            runtime.fingerprint
+        ));
         body.push_str(&format!("- State: `{:?}`\n", runtime.state));
         if let Some(revision) = &runtime.target_revision {
             body.push_str(&format!("- Target revision: `{revision}`\n"));
