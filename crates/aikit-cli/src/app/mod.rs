@@ -38,6 +38,7 @@ use aikit_store::home::AikitHome;
 use aikit_store::index::Index;
 use aikit_store::registry::{load_project_local, load_registry, RegistryProblem, Snapshot};
 use aikit_store::trust::{TrustSnapshot, TrustStore};
+use aikit_store::SessionSpaceApplicationStore;
 
 use aikit_adapters::clients::agent_skills;
 use aikit_adapters::clients::broker::BrokerAdapter;
@@ -726,10 +727,22 @@ impl Service {
 
         let actor_bootstrap = if self.descriptor.project_root.is_some() {
             let resolution = aikit_tui::project_world_service::context_resolution(self)?;
-            Some(aikit_core::project_actor_bootstrap(
-                &resolution,
-                aikit_core::ActorBootstrapRequest::default(),
-            )?)
+            // The World (SessionSpace) identity is discoverable from the
+            // Project. When exactly one authored SessionSpace names this
+            // Project, disclose it as the canonical World identity; ambiguity
+            // is never silently resolved, and a SessionSpace is never inferred
+            // from provider presence.
+            let session_space = SessionSpaceApplicationStore::new(self.home.clone())
+                .discover(Some(&resolution.project_binding.project))
+                .ok()
+                .filter(|states| states.len() == 1)
+                .and_then(|mut states| states.pop())
+                .map(|state| state.id().clone());
+            let request = aikit_core::ActorBootstrapRequest {
+                session_space,
+                ..aikit_core::ActorBootstrapRequest::default()
+            };
+            Some(aikit_core::project_actor_bootstrap(&resolution, request)?)
         } else {
             None
         };
