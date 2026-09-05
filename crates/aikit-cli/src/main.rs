@@ -181,6 +181,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Search(a)) => cmd_search(cwd, a),
         Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
         Some(Command::Method(a)) => cmd_method(cwd, a),
+        Some(Command::Trust(a)) => cmd_trust(cwd, a),
         Some(Command::Wiki(c)) => cmd_wiki(cwd, c),
         Some(Command::Status(a)) => cmd_status(cwd, a),
         Some(Command::Explain(a)) => cmd_explain(cwd, a),
@@ -1574,6 +1575,99 @@ fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
         }),
         diagnostic_warnings(&service),
     ))
+}
+
+/// `aikit trust` — record and show review decisions for catalogued capsules.
+///
+/// A capsule that reaches a home through a managed skill source is reviewed by
+/// `source promote --trust`. A capsule that reaches it through an installed
+/// registry — the first-party AIKit registry, an adoption — had no verb at all:
+/// catalogued forever, projectable never. This is that verb. It writes exactly
+/// what promotion writes, into the same trust table, keyed on the same
+/// content-hashed revision.
+fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let (capability_text, requested_source, note) = match &a.command {
+        TrustSub::Record(args) => (args.capability.clone(), args.source.clone(), args.note.clone()),
+        TrustSub::Show(args) => (args.capability.clone(), None, None),
+    };
+    let capability = CapsuleId::parse(&capability_text)
+        .map_err(|error| AikitError::new("trust.unknown_capsule", format!("{capability_text}: {error}")))?;
+    let index = aikit_store::index::Index::open(&service.home().database())?;
+    let store = aikit_store::trust::TrustStore::new(&index);
+    let load = aikit_cli::app::load_catalog(service.home(), None)?;
+    use aikit_core::catalog::Catalog;
+    let found = load
+        .catalog
+        .capsules()
+        .into_iter()
+        .find(|capsule| &capsule.id == &capability)
+        .map(|capsule| (capsule.source.clone(), capsule.revision.clone()));
+    let Some((catalog_source, revision)) = found else {
+        return Ok(reply(
+            &service,
+            jval!({
+                "capability": capability.to_string(),
+                "state": "unseen",
+                "reason": "not present in any registry",
+            }),
+            Vec::new(),
+        ));
+    };
+    let source = match requested_source {
+        Some(name) => aikit_core::id::RegistrySource::new(name),
+        None => catalog_source.ok_or_else(|| {
+            AikitError::new(
+                "trust.no_source",
+                format!("{} has no registry source; pass --source", capability),
+            )
+            .with("capability", capability.to_string())
+        })?,
+    };
+    let Some(revision) = revision else {
+        return Err(AikitError::new(
+            "trust.no_revision",
+            format!("{} has no content revision in source {}", capability, source.as_str()),
+        )
+        .with("capability", capability.to_string()));
+    };
+    match &a.command {
+        TrustSub::Record(_) => {
+            store.record(
+                &aikit_core::trust::TrustKey::new(source.clone(), capability.clone(), revision.clone()),
+                aikit_core::trust::TrustState::Trusted,
+                note.as_deref().or(Some("explicit registry review")),
+            )?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "capability": capability.to_string(),
+                    "source": source.as_str(),
+                    "revision": revision.as_str(),
+                    "state": "trusted",
+                    "note": note,
+                }),
+                Vec::new(),
+            ))
+        }
+        TrustSub::Show(_) => {
+            let state = store.state_of(&aikit_core::trust::TrustKey::new(
+                source.clone(),
+                capability.clone(),
+                revision.clone(),
+            ))?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "capability": capability.to_string(),
+                    "source": source.as_str(),
+                    "revision": revision.as_str(),
+                    "state": state.as_str(),
+                }),
+                Vec::new(),
+            ))
+        }
+    }
 }
 
 fn cmd_status(cwd: &std::path::Path, a: StatusArgs) -> Result<Reply> {

@@ -120,6 +120,8 @@ pub enum Command {
     Jobs(JobsArgs),
     /// Discover Methods: skills whose description carries the METHOD: prefix.
     Method(MethodArgs),
+    /// Record review decisions for catalogued capsule revisions.
+    Trust(TrustCmd),
     /// List recently run invocations.
     Recent(RecentArgs),
     /// Show usage statistics.
@@ -1080,6 +1082,42 @@ pub enum MethodCommand {
         /// Only show methods whose name or payload contains this substring.
         filter: Option<String>,
     },
+}
+
+/// Record review decisions for catalogued capsule revisions. The only designed
+/// path for a capsule that arrives through a home or project registry rather
+/// than a managed skill source — those carry no `source promote --trust`.
+#[derive(Debug, Args)]
+pub struct TrustCmd {
+    #[command(subcommand)]
+    pub command: TrustSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TrustSub {
+    /// Record that a catalogued capsule revision was reviewed and is trusted.
+    Record(TrustRecordArgs),
+    /// Show the recorded trust state of a catalogued capsule's revisions.
+    Show(TrustShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TrustRecordArgs {
+    #[arg(value_name = "CAPABILITY")]
+    pub capability: String,
+    /// Record against this registry source rather than the one that supplied
+    /// the capsule.
+    #[arg(long, value_name = "SOURCE")]
+    pub source: Option<String>,
+    /// A short review note recorded with the decision.
+    #[arg(long, value_name = "TEXT")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct TrustShowArgs {
+    #[arg(value_name = "CAPABILITY")]
+    pub capability: String,
 }
 
 #[derive(Debug, Args)]
