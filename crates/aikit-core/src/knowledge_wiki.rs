@@ -16,6 +16,24 @@ use crate::{AikitError, Result};
 
 pub const OKF_WIKI_PROFILE: &str = "okf-wiki/v1";
 
+/// The Space every participating project Wiki federates under.
+pub const ROOT_WIKI_SPACE_REF: &str = "central:wiki:root";
+/// The ref prefix ctrl federates project Wiki Spaces under.
+pub const PROJECT_WIKI_SPACE_REF_PREFIX: &str = "central:wiki:project:";
+
+/// `central:wiki:project:{project_id}` — the Space ref ctrl writes for a project.
+pub fn project_wiki_space_ref(project_id: &str) -> Result<ResourceRef> {
+    ResourceRef::parse(format!("{PROJECT_WIKI_SPACE_REF_PREFIX}{project_id}"))
+}
+
+/// The project id inside a `central:wiki:project:{project_id}` Space ref.
+pub fn project_id_from_space_ref(space_ref: &ResourceRef) -> Option<&str> {
+    space_ref
+        .as_str()
+        .strip_prefix(PROJECT_WIKI_SPACE_REF_PREFIX)
+        .filter(|project_id| !project_id.is_empty())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SemanticRevision {

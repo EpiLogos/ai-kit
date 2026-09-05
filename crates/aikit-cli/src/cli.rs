@@ -64,6 +64,8 @@ pub enum Command {
     Search(SearchArgs),
     /// Navigate provider-neutral project knowledge through the shared application faculty.
     Knowledge(KnowledgeCmd),
+    /// Validate, write and repair `okf-wiki/v1` Agent Wiki files.
+    Wiki(WikiCmd),
     /// Show the effective view for the current context.
     Status(StatusArgs),
     /// Explain why a capability or V2 Resource has its current effective evidence.
@@ -673,6 +675,218 @@ pub struct KnowledgeForgetResourceArgs {
 
 #[derive(Debug, Args)]
 pub struct KnowledgeForgetAllArgs {}
+
+/// `aikit wiki` — the write side of the Agent Wiki.
+///
+/// Wiki tooling is AVAILABLE, NOT ENFORCED: every command names the file it
+/// touches, validates the post-mutation whole before persisting, writes through a
+/// temp-file rename and advances the revision of whatever it changed. Nothing
+/// here discovers a file to mutate or couples to a bootstrap process.
+#[derive(Debug, Args)]
+pub struct WikiCmd {
+    #[command(subcommand)]
+    pub command: WikiSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WikiSub {
+    /// Parse a Wiki file, rebuild the index over it and publish every finding.
+    Validate(WikiValidateArgs),
+    /// Write a WikiNode into a Wiki file.
+    Node(WikiNodeCmd),
+    /// Write a WikiEdge into a Wiki file.
+    Edge(WikiEdgeCmd),
+    /// Write a WikiSpace, or federate two of them.
+    Space(WikiSpaceCmd),
+    /// Doctor, prune and adopt the Central root Wiki.
+    Root(WikiRootCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct WikiValidateArgs {
+    /// The wiki.json object collection to audit.
+    #[arg(value_name = "PATH")]
+    pub path: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct WikiNodeCmd {
+    #[command(subcommand)]
+    pub command: WikiNodeSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WikiNodeSub {
+    /// Add a node; refuses a ref the file already holds.
+    Create(WikiNodeArgs),
+    /// Replace a node's body and advance its revision by one.
+    Update(WikiNodeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WikiNodeArgs {
+    /// The canonical node ref (`wiki:node:…`).
+    #[arg(value_name = "REF")]
+    pub node_ref: String,
+    /// The wiki.json file to write.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
+    /// Space the node belongs to. Repeatable; the node is recorded in the
+    /// membership list of each named Space this file holds.
+    #[arg(long, value_name = "SPACE_REF")]
+    pub space: Vec<String>,
+    /// The node type. The ontology is open: unknown types are preserved, never
+    /// translated.
+    #[arg(long = "type", value_name = "TYPE")]
+    pub node_type: Option<String>,
+    #[arg(long, value_name = "TITLE")]
+    pub title: Option<String>,
+    /// A source the node is grounded in. Repeatable; each becomes provenance.
+    #[arg(long, value_name = "SOURCE_REF")]
+    pub source: Vec<String>,
+    /// Read the whole node JSON body from stdin instead of these flags. The body
+    /// replaces the node wholesale; identity and revision stay with the file.
+    #[arg(long, conflicts_with_all = ["space", "node_type", "title", "source"])]
+    pub stdin: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WikiEdgeCmd {
+    #[command(subcommand)]
+    pub command: WikiEdgeSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WikiEdgeSub {
+    /// Add a directed relation between two Wiki objects.
+    Add(WikiEdgeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WikiEdgeArgs {
+    /// The ref the relation starts from.
+    #[arg(value_name = "FROM_REF")]
+    pub from_ref: String,
+    /// The relation. Open vocabulary, preserved verbatim.
+    #[arg(long, value_name = "RELATION")]
+    pub relation: String,
+    /// The ref the relation points at.
+    #[arg(long = "to", value_name = "TO_REF")]
+    pub to_ref: String,
+    /// Where the relation came from: authored, mechanical, compiled, inferred,
+    /// learned, QL-derived or MEF-derived.
+    #[arg(long, value_name = "ORIGIN")]
+    pub origin: String,
+    /// The run, source or proposal the relation is attributed to.
+    #[arg(long, value_name = "REF")]
+    pub origin_ref: Option<String>,
+    /// The edge's own ref. Defaults to a deterministic name from its endpoints.
+    #[arg(long, value_name = "REF")]
+    pub edge_ref: Option<String>,
+    /// The wiki.json file to write.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
+    /// Permit endpoints that resolve in a peer Wiki file. They are reported as a
+    /// warning either way; this flag only says the warning is expected.
+    #[arg(long)]
+    pub allow_dangling: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WikiSpaceCmd {
+    #[command(subcommand)]
+    pub command: WikiSpaceSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WikiSpaceSub {
+    /// Add a WikiSpace to a Wiki file.
+    Create(WikiSpaceCreateArgs),
+    /// Federate a parent and a child Space, reciprocally and idempotently.
+    Link(WikiSpaceLinkArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WikiSpaceCreateArgs {
+    /// The canonical Space ref (`wiki:space:…`).
+    #[arg(value_name = "REF")]
+    pub space_ref: String,
+    /// The Space this one federates under. Omitted for a detached root Space.
+    #[arg(long, value_name = "PARENT_REF")]
+    pub parent: Option<String>,
+    #[arg(long, value_name = "TITLE")]
+    pub title: String,
+    /// The wiki.json file to write.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct WikiSpaceLinkArgs {
+    /// The federating Space.
+    #[arg(value_name = "PARENT_REF")]
+    pub parent_ref: String,
+    /// The federated Space.
+    #[arg(value_name = "CHILD_REF")]
+    pub child_ref: String,
+    /// The wiki.json file that holds the parent Space.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
+    /// The wiki.json file that holds the child Space, when it is not `--file`.
+    /// Both sides of the federation are written, each with its own revision.
+    #[arg(long, value_name = "PATH")]
+    pub child_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct WikiRootCmd {
+    #[command(subcommand)]
+    pub command: WikiRootSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WikiRootSub {
+    /// Resolve every `child_space_refs` entry of the root Space against the
+    /// filesystem and print the dangling set. Read-only.
+    Doctor(WikiRootArgs),
+    /// Retract one child ref from the root Space. Dry run unless `--apply`.
+    Prune(WikiRootPruneArgs),
+    /// Idempotently federate an existing project Wiki into the root Space.
+    Adopt(WikiRootAdoptArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WikiRootArgs {
+    /// The Central root directory, or its wiki.json. Defaults to discovery from
+    /// the working directory: the nearest ancestor holding
+    /// `Control/agents/wiki/wiki.json`.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct WikiRootPruneArgs {
+    /// The child Space ref to retract.
+    #[arg(value_name = "CHILD_REF")]
+    pub child_ref: String,
+    /// Write the retraction. Without it the command only reports what it would do.
+    #[arg(long)]
+    pub apply: bool,
+    /// The Central root directory, or its wiki.json.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct WikiRootAdoptArgs {
+    /// The project directory whose ProjectCentral Wiki is already authored and
+    /// only needs federating.
+    #[arg(value_name = "PROJECT_PATH")]
+    pub project_path: std::path::PathBuf,
+    /// The Central root directory, or its wiki.json.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+}
 
 #[derive(Debug, Args)]
 pub struct StatusArgs {
