@@ -100,6 +100,10 @@ enum Reply {
         context: EnvelopeContext,
         data: Value,
         warnings: Vec<String>,
+        /// The exit status to report even though the envelope printed fine.
+        /// `wiki validate` publishes findings *and* fails; every other command
+        /// reports `EXIT_OK`.
+        exit_code: i32,
     },
     /// Raw text to print verbatim, envelope or not (`shell init`, an explanation).
     Text(String),
@@ -114,6 +118,7 @@ fn reply(service: &Service, data: Value, warnings: Vec<String>) -> Reply {
         context: EnvelopeContext::from_descriptor(service.descriptor()),
         data,
         warnings,
+        exit_code: json::EXIT_OK,
     }
 }
 
@@ -129,6 +134,7 @@ fn emit(reply: Reply, json_mode: bool) -> i32 {
             context,
             data,
             warnings,
+            exit_code,
         } => {
             if json_mode {
                 println!("{}", json::line(&json::success(&context, data, warnings)));
@@ -138,7 +144,7 @@ fn emit(reply: Reply, json_mode: bool) -> i32 {
                     eprintln!("warning: {warning}");
                 }
             }
-            json::EXIT_OK
+            exit_code
         }
         Reply::Text(text) => {
             println!("{text}");
@@ -174,6 +180,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
         Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
+        Some(Command::Wiki(c)) => cmd_wiki(cwd, c),
         Some(Command::Status(a)) => cmd_status(cwd, a),
         Some(Command::Explain(a)) => cmd_explain(cwd, a),
         Some(Command::History(a)) => cmd_history(cwd, a),
@@ -1422,6 +1429,24 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         }
     };
     Ok(reply(&service, data, warnings))
+}
+
+/// `aikit wiki` — the write side of the Agent Wiki.
+///
+/// These commands stand alone: they name the file they write and need no AIKit
+/// home, so the envelope context is built directly rather than discovered.
+fn cmd_wiki(cwd: &std::path::Path, c: WikiCmd) -> Result<Reply> {
+    let outcome = aikit_cli::wiki::run(cwd, c)?;
+    Ok(Reply::Data {
+        context: EnvelopeContext {
+            context_id: None,
+            session_id: None,
+            project_root: Some(cwd.display().to_string()),
+        },
+        data: outcome.data,
+        warnings: outcome.warnings,
+        exit_code: outcome.exit_code,
+    })
 }
 
 fn parse_knowledge_address(raw: &str) -> Result<aikit_core::KnowledgeAddress> {

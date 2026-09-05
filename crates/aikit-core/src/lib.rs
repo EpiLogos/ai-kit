@@ -59,6 +59,7 @@ pub mod knowledge_wiki;
 pub mod knowledge_wiki_index;
 pub mod knowledge_wiki_provider;
 pub mod knowledge_wiki_shape;
+pub mod knowledge_wiki_write;
 pub mod lifecycle;
 pub mod live_activation_history;
 pub mod method;
@@ -267,6 +268,10 @@ pub use knowledge_wiki_provider::{
     SemanticWikiProvider, SemanticWikiProviderStatus, WikiExplanation,
     NATIVE_SEMANTIC_WIKI_PROVIDER,
 };
+pub use knowledge_wiki::{
+    project_id_from_space_ref, project_wiki_space_ref, PROJECT_WIKI_SPACE_REF_PREFIX,
+    ROOT_WIKI_SPACE_REF,
+};
 pub use knowledge_wiki_shape::{
     attribute_ql_relational_generation, attribute_ql_relational_generation_from_resolve,
     explicit_ql_shaped_contemplate, explicit_ql_shaped_flow_contemplate,
@@ -282,6 +287,10 @@ pub use knowledge_wiki_shape::{
     QL_RELATIONAL_SIXFOLD_SHAPE_REF, QL_SHAPE_CONTRACT_REF, QL_SHAPE_CONTRACT_VERSION,
     QL_SHAPE_UPSTREAM_BLOB, QL_SIX_BY_SIX_SHAPE_REF, WIKI_QL_SHAPED_FLOW_VERSION,
     WIKI_QL_SHAPE_VERSION,
+};
+pub use knowledge_wiki_write::{
+    apply_wiki_mutation, WikiDanglingRef, WikiDocument, WikiDocumentError, WikiMutationLedger,
+    WikiMutationOutcome, WikiTouchedObject, WikiValidationReport,
 };
 pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
 pub use live_activation_history::live_activation_history_evidence;
