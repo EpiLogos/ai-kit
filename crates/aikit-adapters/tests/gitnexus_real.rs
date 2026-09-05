@@ -272,7 +272,7 @@ export function login(token: string): boolean {
     let description = ResourceRef::parse("source:local-description:auth-module").unwrap();
     let code = login.resource_ref();
     let verification =
-        ResourceRef::parse(&format!("verification:gitnexus:{GITNEXUS_TESTED_VERSION}")).unwrap();
+        ResourceRef::parse(format!("verification:gitnexus:{GITNEXUS_TESTED_VERSION}")).unwrap();
     let map = reflection_map(
         &semantic,
         &description,

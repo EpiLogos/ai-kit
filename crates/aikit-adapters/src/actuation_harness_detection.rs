@@ -9,10 +9,9 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::runner::CommandRunner;
-use aikit_core::{AikitError, Result};
+use aikit_core::Result;
 
 pub const ACTUATION_HARNESS_DETECTION_SCHEMA: &str = "actuation.harness-detection/v1";
 
@@ -168,9 +167,83 @@ pub fn intake_actuation_detection(
         },
     }
 }
+
+/// Distil a detection outcome into the core-owned ground that rides on a
+/// `ContextResolution`. A failed run becomes the disclosed `Unavailable`
+/// ground — never `None`, which means "detection did not run", a different
+/// fact under the three-state law.
+pub fn detection_summary(
+    outcome: &DetectionOutcome,
+) -> aikit_core::context_resolution::HarnessDetectionGround {
+    use aikit_core::context_resolution::HarnessDetectionGround;
+    let record = match outcome {
+        DetectionOutcome::Record(record) => record.as_ref(),
+        DetectionOutcome::Unavailable { reason } => {
+            return HarnessDetectionGround::Unavailable {
+                reason: reason.clone(),
+            };
+        }
+    };
+    let mut states = BTreeMap::new();
+    let mut reasons = BTreeMap::new();
+    for entry in &record.harnesses {
+        let state = match entry.state {
+            DetectionState::Detected => "detected",
+            DetectionState::Unavailable => "unavailable",
+            DetectionState::NotInstalled => "not-installed",
+        };
+        states.insert(entry.slug.clone(), state.to_string());
+        if let Some(reason) = &entry.unavailable_reason {
+            reasons.insert(entry.slug.clone(), reason.clone());
+        }
+    }
+    HarnessDetectionGround::Observed {
+        detection_ref: record.detection_ref.clone(),
+        catalog_revision: record.catalog_revision,
+        states,
+        reasons,
+    }
+}
+
+/// One ephemeral candidate resource for a detected harness. Never persisted
+/// to any index: detection is a live observation, not authored ground. The
+/// detection_ref rides in the descriptor annotations so the freshness chain
+/// stays inspectable downstream.
+pub fn detected_harness_resource(
+    slug: &str,
+    harness_ref: &str,
+    detection_ref: &str,
+) -> Result<aikit_core::context_resolution::ResolvedResource> {
+    use aikit_core::context_resolution::{Availability, ResolvedResource};
+    use aikit_core::resource::{ResourceDescriptor, ResourceKind, ResourceRef, ResourceRecord, ResourceSource, SourceRef, SourceState};
+
+    let mut descriptor = ResourceDescriptor::new(
+        ResourceRef::parse(harness_ref)?,
+        ResourceKind::Harness,
+        format!("detected harness {slug}"),
+        format!("detected live by Actuation in {detection_ref}"),
+    );
+    descriptor.sources.push(ResourceSource {
+        source: SourceRef::parse("source/actuation-detection")?,
+        authority: None,
+        revision: None,
+        locator: None,
+        state: SourceState::Available,
+    });
+    descriptor
+        .annotations
+        .insert("detection_ref".to_string(), detection_ref.to_string());
+    Ok(ResolvedResource {
+        resource: ResourceRecord::new(descriptor),
+        availability: Availability::Available,
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::runner::Output;
+    use aikit_core::AikitError;
 
     struct EchoRunner;
     impl CommandRunner for EchoRunner {
@@ -251,76 +324,4 @@ mod tests {
             DetectionOutcome::Record(_) => panic!("garbage must not yield a record"),
         }
     }
-}
-
-/// Distil a detection outcome into the core-owned ground that rides on a
-/// `ContextResolution`. A failed run becomes the disclosed `Unavailable`
-/// ground — never `None`, which means "detection did not run", a different
-/// fact under the three-state law.
-pub fn detection_summary(
-    outcome: &DetectionOutcome,
-) -> aikit_core::context_resolution::HarnessDetectionGround {
-    use aikit_core::context_resolution::HarnessDetectionGround;
-    let record = match outcome {
-        DetectionOutcome::Record(record) => record.as_ref(),
-        DetectionOutcome::Unavailable { reason } => {
-            return HarnessDetectionGround::Unavailable {
-                reason: reason.clone(),
-            };
-        }
-    };
-    let mut states = BTreeMap::new();
-    let mut reasons = BTreeMap::new();
-    for entry in &record.harnesses {
-        let state = match entry.state {
-            DetectionState::Detected => "detected",
-            DetectionState::Unavailable => "unavailable",
-            DetectionState::NotInstalled => "not-installed",
-        };
-        states.insert(entry.slug.clone(), state.to_string());
-        if let Some(reason) = &entry.unavailable_reason {
-            reasons.insert(entry.slug.clone(), reason.clone());
-        }
-    }
-    HarnessDetectionGround::Observed {
-        detection_ref: record.detection_ref.clone(),
-        catalog_revision: record.catalog_revision,
-        states,
-        reasons,
-    }
-}
-
-/// One ephemeral candidate resource for a detected harness. Never persisted
-/// to any index: detection is a live observation, not authored ground. The
-/// detection_ref rides in the descriptor annotations so the freshness chain
-/// stays inspectable downstream.
-pub fn detected_harness_resource(
-    slug: &str,
-    harness_ref: &str,
-    detection_ref: &str,
-) -> Result<aikit_core::context_resolution::ResolvedResource> {
-    use aikit_core::context_resolution::{Availability, ResolvedResource};
-    use aikit_core::resource::{ResourceDescriptor, ResourceKind, SourceState};
-    use aikit_core::resource::{ResourceRef, SourceRef};
-
-    let mut descriptor = ResourceDescriptor::new(
-        aikit_core::resource::ResourceRef::parse(harness_ref)?,
-        aikit_core::resource::ResourceKind::Harness,
-        format!("detected harness {slug}"),
-        format!("detected live by Actuation in {detection_ref}"),
-    );
-    descriptor.sources.push(aikit_core::resource::ResourceSource {
-        source: aikit_core::resource::SourceRef::parse("source/actuation-detection")?,
-        authority: None,
-        revision: None,
-        locator: None,
-        state: SourceState::Available,
-    });
-    descriptor
-        .annotations
-        .insert("detection_ref".to_string(), detection_ref.to_string());
-    Ok(ResolvedResource {
-        resource: aikit_core::resource::ResourceRecord::new(descriptor),
-        availability: Availability::Available,
-    })
 }

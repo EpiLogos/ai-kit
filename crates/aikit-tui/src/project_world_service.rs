@@ -23,7 +23,7 @@ pub fn context_resolution(backend: &dyn PaletteBackend) -> Result<ContextResolut
 }
 
 /// As [`context_resolution`], with the caller's composed actor refs (Actuation
-/// model-bearing + Central authored) supplied explicitly. Host falls back to the
+/// instantiation receipt + Central authored) supplied explicitly. Host falls back to the
 /// descriptor's machine hostname when `actors.host` is unset.
 pub fn context_resolution_with_actors(
     backend: &dyn PaletteBackend,

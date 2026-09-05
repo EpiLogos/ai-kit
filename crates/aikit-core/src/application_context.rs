@@ -23,7 +23,7 @@ use crate::Result;
 /// allowed to infer Project or Host identity from a row/cursor/presentation state.
 ///
 /// `actors` carries the canonical who-is-acting refs (agent/agency) composed from
-/// the Actuation model-bearing and Central authored projections. Host falls back to
+/// the Actuation instantiation receipt and Central authored projections. Host falls back to
 /// the descriptor's machine hostname when the caller supplies none; a caller-supplied
 /// host always wins, so the Actuation/Central machine relation stays authoritative.
 pub fn application_context_resolution(

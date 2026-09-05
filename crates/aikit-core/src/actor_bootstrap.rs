@@ -28,7 +28,7 @@ pub const BOOTSTRAP_RESOURCE_SAMPLE_LIMIT: usize = 12;
 /// bare "missing" into a reasoned one: under the three-state law,
 /// not-installed, could-not-prove, and never-looked are different facts
 /// and must not read as each other.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cause", rename_all = "kebab-case")]
 pub enum MissingCause {
     /// Detection ran and records the referenced harness not installed here.
@@ -42,13 +42,8 @@ pub enum MissingCause {
     /// The reference names nothing in the detection catalog.
     UnknownToDetection { detection_ref: String },
     /// No detection ground rode on this resolution; presence unproven.
+    #[default]
     Unproven,
-}
-
-impl Default for MissingCause {
-    fn default() -> Self {
-        Self::Unproven
-    }
 }
 
 impl MissingCause {

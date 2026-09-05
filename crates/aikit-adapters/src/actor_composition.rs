@@ -1,6 +1,6 @@
 //! Live fetch + composition of the Actuation and Central projections.
 //!
-//! The intakes (`ActuationModelBearingProjection`, `CentralAgentProfileProjection`)
+//! The intakes (`ActuationInstantiationProjection`, `CentralAgentProfileProjection`)
 //! are pure deserializers. This module is the only place that fetches them from
 //! their native surfaces and composes the resolution inputs. Discovery is
 //! explicit and never guesses: a Central profile is used only when exactly one
@@ -13,8 +13,8 @@ use aikit_core::context_resolution::RequestedActors;
 use aikit_core::{AikitError, Result};
 use serde_json::{json, Value};
 
-use crate::actuation_model_bearing::{
-    compose_actor_inputs, ActuationModelBearingProjection, ComposedActorInputs,
+use crate::actuation_instantiation::{
+    compose_actor_inputs, ActuationInstantiationProjection, ComposedActorInputs,
 };
 use crate::central_agent_profile::CentralAgentProfileProjection;
 use crate::runner::CommandRunner;
@@ -35,7 +35,7 @@ pub fn compose_live_actor_inputs<R: CommandRunner>(
     let central = read_project_agent_profile(runner, central_root, project_root)?
         .map(|profile| profile.authored_projection())
         .unwrap_or_default();
-    let actuation = read_actuation_model_bearing(project_root)?;
+    let actuation = read_actuation_instantiation(project_root)?;
 
     match actuation {
         Some(actuation) => Ok(Some(compose_actor_inputs(&actuation, &central))),
@@ -89,9 +89,9 @@ fn read_project_agent_profile<R: CommandRunner>(
 
 /// Read an authored Actuation model-bearing receipt. Absence is `None`, never an
 /// error and never a synthesized model-bearing object.
-fn read_actuation_model_bearing(
+fn read_actuation_instantiation(
     project_root: &Path,
-) -> Result<Option<ActuationModelBearingProjection>> {
+) -> Result<Option<ActuationInstantiationProjection>> {
     let path = project_root.join(ACTUATION_MODEL_BEARING_FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -109,7 +109,7 @@ fn read_actuation_model_bearing(
             format!("{}: {error}", path.display()),
         )
     })?;
-    Ok(Some(ActuationModelBearingProjection::parse(&value)?))
+    Ok(Some(ActuationInstantiationProjection::parse(&value)?))
 }
 
 /// Central Action invocation, mirroring the temporal adapter's owner-call path:

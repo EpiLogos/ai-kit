@@ -12,7 +12,7 @@ use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::actuation_model_bearing::CentralAuthoredProjection;
+use crate::actuation_instantiation::CentralAuthoredProjection;
 
 pub const CENTRAL_AGENT_PROFILE_SCHEMA: &str = "central.agent-profile/v1";
 

@@ -1,4 +1,6 @@
-//! AIKit intake of the Actuation-owned `actuation.model-bearing/v1` object.
+//! AIKit intake of the Actuation-owned `actuation.instantiation/v1` receipt
+//! (legacy `actuation.model-bearing/v1` documents read unchanged in the
+//! accept window).
 //!
 //! Actuation owns model/harness/loop infrastructure. AIKit consumes the full
 //! object as *refs + facts* and never re-authors Agency, Model, Harness or loop
@@ -15,11 +17,17 @@ use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const ACTUATION_MODEL_BEARING_SCHEMA: &str = "actuation.model-bearing/v1";
+pub const ACTUATION_INSTANTIATION_SCHEMA: &str = "actuation.instantiation/v1";
+
+/// Legacy window: the receipt contract was renamed from
+/// `actuation.model-bearing/v1`; documents carrying the old schema string
+/// read as instantiation receipts during the accept window, in step with
+/// Actuation's own contract rename.
+pub const LEGACY_MODEL_BEARING_SCHEMA: &str = "actuation.model-bearing/v1";
 
 /// One `allowed`/`denied` access set from the model-bearing access profile.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelBearingAccessSet {
+pub struct InstantiationSet {
     #[serde(default)]
     pub allowed: Vec<String>,
     #[serde(default)]
@@ -28,7 +36,7 @@ pub struct ModelBearingAccessSet {
 
 /// Interior access carries an explicit depth grant beside its access set.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelBearingInterior {
+pub struct InstantiationInterior {
     #[serde(default)]
     pub allowed: Vec<String>,
     #[serde(default)]
@@ -39,18 +47,18 @@ pub struct ModelBearingInterior {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelBearingAccessProfile {
+pub struct InstantiationAccessProfile {
     #[serde(default)]
-    pub inference: ModelBearingAccessSet,
+    pub inference: InstantiationSet,
     #[serde(default)]
-    pub control: ModelBearingAccessSet,
+    pub control: InstantiationSet,
     #[serde(default)]
-    pub interior: ModelBearingInterior,
+    pub interior: InstantiationInterior,
 }
 
 /// `model_relation` — nested refs/facts, never promoted to root identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ModelBearingModelRelation {
+pub struct InstantiationModelRelation {
     pub model_ref: ResourceRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant_ref: Option<ResourceRef>,
@@ -67,7 +75,7 @@ pub struct ModelBearingModelRelation {
 
 /// The full Actuation model-bearing projection, consumed as refs + facts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ActuationModelBearingProjection {
+pub struct ActuationInstantiationProjection {
     pub actuation_ref: ResourceRef,
     pub agency_ref: ResourceRef,
     pub world_binding_ref: ResourceRef,
@@ -77,9 +85,9 @@ pub struct ActuationModelBearingProjection {
     pub harness_composition_ref: Option<ResourceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_ref: Option<ResourceRef>,
-    pub model_relation: ModelBearingModelRelation,
+    pub model_relation: InstantiationModelRelation,
     #[serde(default)]
-    pub access_profile: ModelBearingAccessProfile,
+    pub access_profile: InstantiationAccessProfile,
     #[serde(default)]
     pub bounds_refs: Vec<ResourceRef>,
     #[serde(default)]
@@ -90,15 +98,29 @@ pub struct ActuationModelBearingProjection {
     pub observed_at: Option<String>,
 }
 
-impl ActuationModelBearingProjection {
+impl ActuationInstantiationProjection {
     /// Deserialize a raw `actuation.model-bearing/v1` value and validate it.
     /// The caller is responsible for having fetched the object from Actuation's
     /// native surface; this intake never invokes Actuation itself.
     pub fn parse(value: &Value) -> Result<Self> {
+        // Accept window: documents carrying the legacy schema string read as
+        // instantiation receipts; anything else is refused loudly.
+        let schema = value.get("schema").and_then(Value::as_str).unwrap_or_default();
+        match schema {
+            ACTUATION_INSTANTIATION_SCHEMA | LEGACY_MODEL_BEARING_SCHEMA => {}
+            other => {
+                return Err(AikitError::new(
+                    "actuation_instantiation.wrong_schema",
+                    format!(
+                        "schema must be {ACTUATION_INSTANTIATION_SCHEMA} (legacy {LEGACY_MODEL_BEARING_SCHEMA} accepted); got {other:?}"
+                    ),
+                ));
+            }
+        }
         let projection: Self = serde_json::from_value(value.clone()).map_err(|error| {
             AikitError::new(
-                "actuation_model_bearing.parse",
-                format!("could not read {ACTUATION_MODEL_BEARING_SCHEMA}: {error}"),
+                "actuation_instantiation.parse",
+                format!("could not read {ACTUATION_INSTANTIATION_SCHEMA}: {error}"),
             )
         })?;
         projection.validate()?;
@@ -116,14 +138,14 @@ impl ActuationModelBearingProjection {
         for (index, (left_name, left)) in required.iter().enumerate() {
             if left.as_str().is_empty() {
                 return Err(AikitError::new(
-                    "actuation_model_bearing.invalid_ref",
+                    "actuation_instantiation.invalid_ref",
                     format!("{left_name} must not be empty"),
                 ));
             }
             for (right_name, right) in required.iter().skip(index + 1) {
                 if left == right {
                     return Err(AikitError::new(
-                        "actuation_model_bearing.identity_collapse",
+                        "actuation_instantiation.identity_collapse",
                         format!("{left_name} and {right_name} must remain distinct"),
                     ));
                 }
@@ -131,7 +153,7 @@ impl ActuationModelBearingProjection {
         }
         if self.model_relation.model_ref.as_str().is_empty() {
             return Err(AikitError::new(
-                "actuation_model_bearing.invalid_ref",
+                "actuation_instantiation.invalid_ref",
                 "model_relation.model_ref must not be empty",
             ));
         }
@@ -142,7 +164,7 @@ impl ActuationModelBearingProjection {
             if let Some(candidate) = candidate {
                 if candidate.as_str().is_empty() {
                     return Err(AikitError::new(
-                        "actuation_model_bearing.invalid_ref",
+                        "actuation_instantiation.invalid_ref",
                         format!("{name} must not be empty"),
                     ));
                 }
@@ -214,7 +236,7 @@ pub struct ComposedActorInputs {
 }
 
 pub fn compose_actor_inputs(
-    actuation: &ActuationModelBearingProjection,
+    actuation: &ActuationInstantiationProjection,
     central: &CentralAuthoredProjection,
 ) -> ComposedActorInputs {
     ComposedActorInputs {
@@ -270,7 +292,7 @@ mod tests {
 
     #[test]
     fn parses_full_model_bearing_object_as_refs_and_nested_facts() {
-        let projection = ActuationModelBearingProjection::parse(&projection_value()).unwrap();
+        let projection = ActuationInstantiationProjection::parse(&projection_value()).unwrap();
         assert_eq!(projection.actuation_ref.as_str(), "actuation/root");
         assert_eq!(projection.agency_ref.as_str(), "agency/mahamaya-build");
         assert_eq!(
@@ -302,8 +324,28 @@ mod tests {
     }
 
     #[test]
+    fn legacy_schema_reads_as_instantiation_receipt() {
+        // The fixture itself is a legacy document; it must parse unchanged.
+        let projection = ActuationInstantiationProjection::parse(&projection_value()).unwrap();
+        assert_eq!(projection.actuation_ref.as_str(), "actuation/root");
+    }
+
+    #[test]
+    fn current_schema_and_wrong_schema_are_distinguished() {
+        let mut current = projection_value();
+        current["schema"] = serde_json::json!(ACTUATION_INSTANTIATION_SCHEMA);
+        ActuationInstantiationProjection::parse(&current).unwrap();
+
+        let mut wrong = projection_value();
+        wrong["schema"] = serde_json::json!("actuation.model-bearing/v2");
+        let error = ActuationInstantiationProjection::parse(&wrong).unwrap_err();
+        assert!(error.to_string().contains("schema must be actuation.instantiation/v1"));
+        assert!(error.to_string().contains("legacy actuation.model-bearing/v1 accepted"));
+    }
+
+    #[test]
     fn promoted_refs_compose_into_resolution_inputs_without_reowning() {
-        let projection = ActuationModelBearingProjection::parse(&projection_value()).unwrap();
+        let projection = ActuationInstantiationProjection::parse(&projection_value()).unwrap();
         let request = ActorBootstrapRequest {
             selected_harness: projection.harness(),
             selected_model: projection.model(),
@@ -332,10 +374,10 @@ mod tests {
         let mut value = projection_value();
         value["agency_ref"] = serde_json::json!("actuation/root");
         assert_eq!(
-            ActuationModelBearingProjection::parse(&value)
+            ActuationInstantiationProjection::parse(&value)
                 .unwrap_err()
                 .code(),
-            "actuation_model_bearing.identity_collapse"
+            "actuation_instantiation.identity_collapse"
         );
     }
 
@@ -344,16 +386,16 @@ mod tests {
         let mut value = projection_value();
         value["model_relation"]["model_ref"] = serde_json::json!("");
         assert_eq!(
-            ActuationModelBearingProjection::parse(&value)
+            ActuationInstantiationProjection::parse(&value)
                 .unwrap_err()
                 .code(),
-            "actuation_model_bearing.invalid_ref"
+            "actuation_instantiation.invalid_ref"
         );
     }
 
     #[test]
     fn composition_joins_actuation_live_and_central_authored_without_reowning() {
-        let actuation = ActuationModelBearingProjection::parse(&projection_value()).unwrap();
+        let actuation = ActuationInstantiationProjection::parse(&projection_value()).unwrap();
         let central = CentralAuthoredProjection {
             agent_ref: Some(ResourceRef::parse("agent/mahamaya").unwrap()),
             host_ref: Some(ResourceRef::parse("host/central").unwrap()),

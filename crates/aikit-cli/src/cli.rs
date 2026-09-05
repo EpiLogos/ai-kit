@@ -94,7 +94,7 @@ pub enum Command {
     Context(ContextCmd),
     /// Bring up, attach to and reconcile session topologies.
     Session(SessionCmd),
-    /// Compose the launch plan: Central profile + Actuation model-bearing → actor bootstrap.
+    /// Compose the launch plan: Central profile + Actuation instantiation receipt → actor bootstrap.
     Compose(ComposeArgs),
     /// Spawn, list and close agent tasks.
     Task(TaskCmd),

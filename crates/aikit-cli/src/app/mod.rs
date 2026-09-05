@@ -729,7 +729,7 @@ impl Service {
         }
 
         let actor_bootstrap = if self.descriptor.project_root.is_some() {
-            // Compose the live actor inputs from the Actuation model-bearing
+            // Compose the live actor inputs from the Actuation instantiation
             // receipt and the Central-authored profile. Absent or ambiguous
             // projections resolve to defaults — never guessed; a fetch failure
             // is fail-soft (no projection), never a resolution failure.
@@ -822,7 +822,7 @@ impl Service {
     }
 
     /// Compose the live actor launch plan for the current project context:
-    /// Central-authored profile + Actuation model-bearing receipt → requested
+    /// Central-authored profile + Actuation instantiation receipt → requested
     /// actors → actor bootstrap. This is the CLI form of the composition the
     /// palette performs during project-world resolution; harness and model are
     /// disclosed only when a surface actually selected them, never guessed.
@@ -996,7 +996,7 @@ impl Service {
         if plan.harness.is_none() {
             composition_notes.push(format!(
                 "no harness selected by an authored source — detected candidates: [{}]; \
-                 selection happens via Central profile / Actuation model-bearing, not here",
+                 selection happens via Central profile / Actuation instantiation receipt, not here",
                 plan.harness_candidates.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ")
             ));
         }
