@@ -743,13 +743,50 @@ impl Service {
                 None => None,
             };
 
-            let resolution = match &composed {
+            let mut resolution = match &composed {
                 Some(composed) => aikit_tui::project_world_service::context_resolution_with_actors(
                     self,
                     composed.requested_actors.clone(),
                 )?,
                 None => aikit_tui::project_world_service::context_resolution(self)?,
             };
+            // Detection intake, same law as compose_plan: Actuation owns
+            // what operative bodies exist; detected harnesses join the
+            // candidates as ephemeral resources; a failed run is disclosed
+            // unavailability riding on the resolution, never absence.
+            let detection = aikit_adapters::actuation_harness_detection
+                ::intake_actuation_detection(&SystemRunner::new(), "actuation");
+            resolution.harness_detection = Some(
+                aikit_adapters::actuation_harness_detection::detection_summary(&detection),
+            );
+            if let aikit_adapters::actuation_harness_detection::DetectionOutcome::Record(record) =
+                &detection
+            {
+                let known: Vec<String> = resolution
+                    .harness_candidates
+                    .iter()
+                    .map(|candidate| candidate.resource.descriptor.id.to_string())
+                    .collect();
+                for entry in record.harnesses.iter().filter(|entry| {
+                    matches!(
+                        entry.state,
+                        aikit_adapters::actuation_harness_detection::DetectionState::Detected
+                    )
+                }) {
+                    if known.iter().any(|id| id == &entry.harness_ref) {
+                        continue;
+                    }
+                    if let Ok(resource) = aikit_adapters::actuation_harness_detection
+                        ::detected_harness_resource(
+                            &entry.slug,
+                            &entry.harness_ref,
+                            &record.detection_ref,
+                        )
+                    {
+                        resolution.harness_candidates.push(resource);
+                    }
+                }
+            }
             // The World (SessionSpace) identity is discoverable from the
             // Project. When exactly one authored SessionSpace names this
             // Project, disclose it as the canonical World identity; ambiguity
@@ -809,13 +846,78 @@ impl Service {
             }
         });
 
-        let resolution = match &composed {
+        let mut resolution = match &composed {
             Some(composed) => aikit_tui::project_world_service::context_resolution_with_actors(
                 self,
                 composed.requested_actors.clone(),
             )?,
             None => aikit_tui::project_world_service::context_resolution(self)?,
         };
+        // Harness detection is owned by Actuation and consumed here — one
+        // live `actuation harness detect` run discloses which operative
+        // bodies exist on this machine. Detected harnesses join the
+        // candidate set as ephemeral resources (never persisted to any
+        // index); a failed run is disclosed unavailability, never an empty
+        // set read as absence.
+        let detection = aikit_adapters::actuation_harness_detection
+            ::intake_actuation_detection(&SystemRunner::new(), "actuation");
+        let mut detection_notes: Vec<String> = Vec::new();
+        resolution.harness_detection = Some(
+            aikit_adapters::actuation_harness_detection::detection_summary(&detection),
+        );
+        match &detection {
+            aikit_adapters::actuation_harness_detection::DetectionOutcome::Record(record) => {
+                let known: Vec<String> = resolution
+                    .harness_candidates
+                    .iter()
+                    .map(|candidate| candidate.resource.descriptor.id.to_string())
+                    .collect();
+                let mut added: Vec<String> = Vec::new();
+                for entry in record.harnesses.iter().filter(|entry| {
+                    matches!(
+                        entry.state,
+                        aikit_adapters::actuation_harness_detection::DetectionState::Detected
+                    )
+                }) {
+                    if known.iter().any(|id| id == &entry.harness_ref) {
+                        continue;
+                    }
+                    match aikit_adapters::actuation_harness_detection
+                        ::detected_harness_resource(
+                            &entry.slug,
+                            &entry.harness_ref,
+                            &record.detection_ref,
+                        ) {
+                        Ok(resource) => {
+                            resolution.harness_candidates.push(resource);
+                            added.push(entry.slug.clone());
+                        }
+                        Err(error) => detection_notes.push(format!(
+                            "harness detection intake failed for {}: {}",
+                            entry.harness_ref, error
+                        )),
+                    }
+                }
+                if !added.is_empty() {
+                    detection_notes.push(format!(
+                        "harness detection via actuation ({} catalog r{}, observed {}): \
+                         detected harnesses joined the candidates as live observations: {}",
+                        record.detector.implementation,
+                        record.catalog_revision,
+                        record.observed_at,
+                        added.join(", ")
+                    ));
+                }
+            }
+            aikit_adapters::actuation_harness_detection::DetectionOutcome::Unavailable {
+                reason,
+            } => {
+                detection_notes.push(format!(
+                    "harness detection unavailable: {reason} — no harness candidates \
+                     disclosed from detection; install or expose `actuation` on PATH to repair"
+                ));
+            }
+        }
         // The World (SessionSpace) identity is discoverable from the Project.
         // Exactly one authored SessionSpace names it as canonical; ambiguity is
         // never silently resolved, and one is never inferred from provider
@@ -904,6 +1006,8 @@ impl Service {
                 plan.model_candidates.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ")
             ));
         }
+
+        composition_notes.extend(detection_notes);
 
         Ok(serde_json::json!({
             "project_root": project_root.display().to_string(),

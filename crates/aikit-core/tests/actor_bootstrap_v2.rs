@@ -2,14 +2,16 @@ mod common;
 
 use std::path::PathBuf;
 
-use aikit_core::actor_bootstrap::{project_actor_bootstrap, ActorBootstrapRequest};
+use aikit_core::actor_bootstrap::{
+    project_actor_bootstrap, ActorBootstrapRequest, BootstrapReference, MissingCause,
+};
 use aikit_core::composition::{
     resolve_harness_composition, ActivationScope, ActivationScopeKind, ComponentDescriptor,
     ComponentSelection, CompositionActivationMode, CompositionCatalog, HarnessComposition,
     HarnessCompositionRequest, LifetimeOwner, LifetimeOwnerKind, ResolutionScope,
 };
 use aikit_core::context_resolution::{
-    compose_context_resolution, ContextResolution, RequestedActors,
+    compose_context_resolution, ContextResolution, HarnessDetectionGround, RequestedActors,
 };
 use aikit_core::project::{
     ProjectBinding, ProjectBindingLocator, ProjectConstituentRef, ProjectRef,
@@ -187,4 +189,111 @@ fn bootstrap_remains_valid_without_a_composition_capable_body() {
     assert!(bootstrap.runtime_body.is_none());
     assert_eq!(bootstrap.harness.as_ref().unwrap().resource(), &r("harness:test"));
     assert_eq!(bootstrap.agent_session.as_deref(), Some("session/thin"));
+}
+
+fn missing_bootstrap(resolution: &ContextResolution, harness_ref: &str) -> aikit_core::ActorBootstrap {
+    project_actor_bootstrap(
+        resolution,
+        ActorBootstrapRequest {
+            selected_harness: Some(r(harness_ref)),
+            ..ActorBootstrapRequest::default()
+        },
+    )
+    .unwrap()
+}
+
+fn observed_ground() -> HarnessDetectionGround {
+    let mut states = std::collections::BTreeMap::new();
+    states.insert("ghost".to_string(), "not-installed".to_string());
+    states.insert("shrouded".to_string(), "unavailable".to_string());
+    states.insert("present".to_string(), "detected".to_string());
+    let mut reasons = std::collections::BTreeMap::new();
+    reasons.insert("shrouded".to_string(), "all probes failed".to_string());
+    HarnessDetectionGround::Observed {
+        detection_ref: "actuation.detection/2026-09-05T00:00:00Z".to_string(),
+        catalog_revision: 1,
+        states,
+        reasons,
+    }
+}
+
+fn missing_cause_of(bootstrap: &aikit_core::ActorBootstrap) -> MissingCause {
+    match bootstrap.harness.as_ref().unwrap() {
+        BootstrapReference::Missing { cause, .. } => cause.clone(),
+        other => panic!("expected Missing, got {other:?}"),
+    }
+}
+
+#[test]
+fn missing_harness_reasons_from_detection_ground() {
+    let mut resolution = resolution();
+    resolution.harness_detection = Some(observed_ground());
+
+    let not_installed = missing_bootstrap(&resolution, "harness/ghost");
+    assert_eq!(
+        missing_cause_of(&not_installed),
+        MissingCause::NotInstalled {
+            detection_ref: "actuation.detection/2026-09-05T00:00:00Z".to_string()
+        }
+    );
+
+    let unprovable = missing_bootstrap(&resolution, "harness/shrouded");
+    assert_eq!(
+        missing_cause_of(&unprovable),
+        MissingCause::DetectionUnavailable {
+            reason: "all probes failed".to_string()
+        }
+    );
+
+    let intake_gap = missing_bootstrap(&resolution, "harness/present");
+    assert!(matches!(
+        missing_cause_of(&intake_gap),
+        MissingCause::DetectedButUnresolved { .. }
+    ));
+
+    let unknown = missing_bootstrap(&resolution, "harness/nobody");
+    assert!(matches!(
+        missing_cause_of(&unknown),
+        MissingCause::UnknownToDetection { .. }
+    ));
+}
+
+#[test]
+fn failed_detection_run_is_disclosed_not_absence() {
+    let mut resolution = resolution();
+    resolution.harness_detection = Some(HarnessDetectionGround::Unavailable {
+        reason: "could not run actuation: no such file".to_string(),
+    });
+    assert_eq!(
+        missing_cause_of(&missing_bootstrap(&resolution, "harness/ghost")),
+        MissingCause::DetectionUnavailable {
+            reason: "could not run actuation: no such file".to_string()
+        }
+    );
+}
+
+#[test]
+fn no_detection_ground_stays_unproven_never_absence() {
+    let resolution = resolution();
+    assert_eq!(resolution.harness_detection, None);
+    assert!(matches!(
+        missing_cause_of(&missing_bootstrap(&resolution, "harness/ghost")),
+        MissingCause::Unproven
+    ));
+
+    // A model reference never borrows harness detection ground.
+    let mut with_ground = resolution.clone();
+    with_ground.harness_detection = Some(observed_ground());
+    let bootstrap = project_actor_bootstrap(
+        &with_ground,
+        ActorBootstrapRequest {
+            selected_model: Some(r("model/ghost")),
+            ..ActorBootstrapRequest::default()
+        },
+    )
+    .unwrap();
+    let BootstrapReference::Missing { cause, .. } = bootstrap.model.as_ref().unwrap() else {
+        panic!("expected Missing");
+    };
+    assert!(matches!(cause, MissingCause::Unproven));
 }

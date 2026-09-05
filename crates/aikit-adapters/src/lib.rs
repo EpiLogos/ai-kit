@@ -5,6 +5,7 @@
 extern crate self as aikit_adapters;
 
 pub mod actor_composition;
+pub mod actuation_harness_detection;
 pub mod actuation_model_bearing;
 pub mod actuation_stream_projection;
 pub mod agent_connection;

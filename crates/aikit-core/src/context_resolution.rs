@@ -103,6 +103,29 @@ pub struct RequestedActors {
     pub host: Option<ResourceRef>,
 }
 
+/// Actuation's live harness-detection ground, as consumed at resolution
+/// time. Two shapes, per the three-state law: an observed record (some
+/// harnesses detected, some not-installed, some unprovable) or a disclosed
+/// unavailability (the detection run itself failed). `None` on the
+/// resolution means detection did not run — which proves nothing about
+/// what is installed on this machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "kebab-case")]
+pub enum HarnessDetectionGround {
+    Observed {
+        detection_ref: String,
+        catalog_revision: u32,
+        /// slug -> state ("detected" | "unavailable" | "not-installed")
+        states: BTreeMap<String, String>,
+        /// slug -> why presence could not be proven (state "unavailable")
+        #[serde(default)]
+        reasons: BTreeMap<String, String>,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
 /// One complete V2 resolution.
 ///
 /// `deterministic` is intentionally the full legacy `ResolvedView`, not a lossy
@@ -127,6 +150,11 @@ pub struct ContextResolution {
     pub context_sources: Vec<ResolvedResource>,
     pub model_candidates: Vec<ResolvedResource>,
     pub harness_candidates: Vec<ResolvedResource>,
+    /// Actuation's detection ground for this resolution. Additive evidence:
+    /// candidates above may include ephemeral detection-sourced resources,
+    /// and missing-reference reasoning consults this ground.
+    #[serde(default)]
+    pub harness_detection: Option<HarnessDetectionGround>,
     pub execution_offers: Vec<ResolvedResource>,
     pub projection: ProjectionIntent,
     pub retrieval: RetrievalPlan,
@@ -216,6 +244,7 @@ pub fn compose_context_resolution(
         context_sources,
         model_candidates: take_group(&mut grouped, ResourceKind::Model),
         harness_candidates: take_group(&mut grouped, ResourceKind::Harness),
+        harness_detection: None,
         execution_offers: take_group(&mut grouped, ResourceKind::ExecutionOffer),
         projection,
         retrieval,

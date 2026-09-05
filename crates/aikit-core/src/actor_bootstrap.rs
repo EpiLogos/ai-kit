@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::composition::{CompositionState, HarnessComposition};
 use crate::context_resolution::{
-    Availability, ContextResolution, ReferenceResolution, ResolvedResource, ScopeResolution,
+    Availability, ContextResolution, HarnessDetectionGround, ReferenceResolution, ResolvedResource,
+    ScopeResolution,
 };
 use crate::platform::TargetId;
 use crate::project::ProjectBinding;
@@ -22,6 +23,53 @@ use crate::{AikitError, Result};
 
 pub const ACTOR_BOOTSTRAP_VERSION: &str = "aikit.actor-bootstrap/v2";
 pub const BOOTSTRAP_RESOURCE_SAMPLE_LIMIT: usize = 12;
+
+/// Why a selected reference resolved to nothing. Detection ground turns a
+/// bare "missing" into a reasoned one: under the three-state law,
+/// not-installed, could-not-prove, and never-looked are different facts
+/// and must not read as each other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "cause", rename_all = "kebab-case")]
+pub enum MissingCause {
+    /// Detection ran and records the referenced harness not installed here.
+    NotInstalled { detection_ref: String },
+    /// Detection could not prove presence or absence — the run failed, or
+    /// this specific harness was unprovable.
+    DetectionUnavailable { reason: String },
+    /// Detection records the harness present, yet no candidate resolved —
+    /// an intake or composition gap, disclosed as such.
+    DetectedButUnresolved { detection_ref: String },
+    /// The reference names nothing in the detection catalog.
+    UnknownToDetection { detection_ref: String },
+    /// No detection ground rode on this resolution; presence unproven.
+    Unproven,
+}
+
+impl Default for MissingCause {
+    fn default() -> Self {
+        Self::Unproven
+    }
+}
+
+impl MissingCause {
+    pub fn explanation(&self) -> String {
+        match self {
+            Self::NotInstalled { detection_ref } => {
+                format!("not installed on this machine per {detection_ref}")
+            }
+            Self::DetectionUnavailable { reason } => {
+                format!("presence unproven: {reason}")
+            }
+            Self::DetectedButUnresolved { detection_ref } => {
+                format!("detected in {detection_ref} but no candidate resolved — intake gap")
+            }
+            Self::UnknownToDetection { detection_ref } => {
+                format!("not in the detection catalog ({detection_ref})")
+            }
+            Self::Unproven => "no detection ground available; presence unproven".to_string(),
+        }
+    }
+}
 
 /// Compact equivalent of ReferenceResolution. Resolved resources retain their
 /// source/provider provenance, but the bootstrap does not copy the resource index
@@ -41,6 +89,8 @@ pub enum BootstrapReference {
     Missing {
         reference: ResourceRef,
         expected: ResourceKind,
+        #[serde(default)]
+        cause: MissingCause,
     },
     WrongKind {
         reference: ResourceRef,
@@ -192,10 +242,11 @@ pub fn project_actor_bootstrap(
             selected,
             ResourceKind::Harness,
             &resolution.harness_candidates,
+            resolution.harness_detection.as_ref(),
         )
     });
     let model = request.selected_model.as_ref().map(|selected| {
-        summarize_selected(selected, ResourceKind::Model, &resolution.model_candidates)
+        summarize_selected(selected, ResourceKind::Model, &resolution.model_candidates, None)
     });
 
     if let Some(body) = request.runtime_body {
@@ -247,6 +298,7 @@ fn summarize_reference(reference: &ReferenceResolution) -> BootstrapReference {
         } => BootstrapReference::Missing {
             reference: reference.clone(),
             expected: *expected,
+            cause: MissingCause::Unproven,
         },
         ReferenceResolution::WrongKind {
             reference,
@@ -264,6 +316,7 @@ fn summarize_selected(
     selected: &ResourceRef,
     expected: ResourceKind,
     candidates: &[ResolvedResource],
+    detection: Option<&HarnessDetectionGround>,
 ) -> BootstrapReference {
     candidates
         .iter()
@@ -272,7 +325,51 @@ fn summarize_selected(
         .unwrap_or_else(|| BootstrapReference::Missing {
             reference: selected.clone(),
             expected,
+            cause: missing_cause(selected, detection),
         })
+}
+
+/// Reason a selected reference that matches no candidate. Only harness
+/// references consult Actuation's detection ground; every other role —
+/// and every case where no ground rode on the resolution — stays honestly
+/// unproven rather than borrowing a harness fact it does not have.
+fn missing_cause(
+    selected: &ResourceRef,
+    detection: Option<&HarnessDetectionGround>,
+) -> MissingCause {
+    let Some(ground) = detection else {
+        return MissingCause::Unproven;
+    };
+    let Some(slug) = selected.as_str().strip_prefix("harness/") else {
+        return MissingCause::Unproven;
+    };
+    match ground {
+        HarnessDetectionGround::Unavailable { reason } => {
+            MissingCause::DetectionUnavailable { reason: reason.clone() }
+        }
+        HarnessDetectionGround::Observed {
+            detection_ref,
+            states,
+            reasons,
+            ..
+        } => match states.get(slug).map(String::as_str) {
+            Some("detected") => MissingCause::DetectedButUnresolved {
+                detection_ref: detection_ref.clone(),
+            },
+            Some("unavailable") => MissingCause::DetectionUnavailable {
+                reason: reasons
+                    .get(slug)
+                    .cloned()
+                    .unwrap_or_else(|| format!("could not prove presence or absence of {slug}")),
+            },
+            Some("not-installed") => MissingCause::NotInstalled {
+                detection_ref: detection_ref.clone(),
+            },
+            _ => MissingCause::UnknownToDetection {
+                detection_ref: detection_ref.clone(),
+            },
+        },
+    }
 }
 
 fn summarize_resolved(resource: &ResolvedResource) -> BootstrapReference {
