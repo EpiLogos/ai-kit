@@ -704,6 +704,35 @@ pub enum WikiSub {
     Space(WikiSpaceCmd),
     /// Doctor, prune and adopt the Central root Wiki.
     Root(WikiRootCmd),
+    /// Stage a source file into the Wiki by its authored QL frontmatter.
+    Stage(WikiStageArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WikiStageArgs {
+    /// The markdown source to stage. Its frontmatter carries the authored QL
+    /// alignment; staging records it, it does not guess one.
+    #[arg(value_name = "SOURCE_PATH")]
+    pub source: std::path::PathBuf,
+    /// The wiki.json file to write.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
+    /// The staged node's ref. Defaults to `wiki:node:staged/<stem>`.
+    #[arg(long, value_name = "REF")]
+    pub node_ref: Option<String>,
+    /// Space the staged node belongs to. Repeatable.
+    #[arg(long, value_name = "SPACE_REF")]
+    pub space: Vec<String>,
+    /// Title override; defaults to the first `# ` heading or the file stem.
+    #[arg(long, value_name = "TITLE")]
+    pub title: Option<String>,
+    /// Provenance source ref override; defaults to `staging/<stem>`.
+    #[arg(long, value_name = "SOURCE_REF")]
+    pub source_ref: Option<String>,
+    /// Replace the node when the ref is already held (advancing its revision);
+    /// the default refuses, exactly like `node create`.
+    #[arg(long)]
+    pub update: bool,
 }
 
 #[derive(Debug, Args)]

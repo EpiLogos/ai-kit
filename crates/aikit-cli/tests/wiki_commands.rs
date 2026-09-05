@@ -639,3 +639,159 @@ fn an_adopt_refuses_a_project_that_has_no_authored_wiki() {
     );
     assert_eq!(read(&root), before);
 }
+
+// ---------------------------------------------------------------------------
+// stage
+// ---------------------------------------------------------------------------
+
+const GOVERNANCE_SOURCE: &str = "\
+---
+ql:
+  position: 3
+  unit: documentation
+  face: direct
+---
+# Propose, not write
+
+You may propose a change to my source. The proposal is yours; the source is
+mine. Return can reach me without rewriting me.
+";
+
+#[test]
+fn stage_records_the_authored_alignment_and_leaves_the_prose_alone() {
+    let (work, scratch) = fixture();
+    let wiki_json = work.path().join("wiki.json");
+    let source = work.path().join("propose-not-write.md");
+    write(&source, GOVERNANCE_SOURCE);
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "stage", source.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["ref"], Value::from("wiki:node:staged/propose-not-write"));
+    assert_eq!(envelope["data"]["alignment"]["position"], Value::from(3));
+    assert_eq!(envelope["data"]["alignment"]["unit"], Value::from("documentation"));
+    assert_eq!(envelope["data"]["alignment"]["face"], Value::from("direct"));
+
+    // The written node: alignment rides as the `ql` extension, the title from
+    // the heading, provenance pointing back at the staged source, and the
+    // prose body never copied into the Wiki.
+    let staged: Value = serde_json::from_str(&read(&wiki_json)).unwrap();
+    let node = staged["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["ref"] == "wiki:node:staged/propose-not-write")
+        .expect("the staged node is held");
+    assert_eq!(node["type"], Value::from("staged-source"));
+    assert_eq!(node["title"], Value::from("Propose, not write"));
+    assert_eq!(node["ql"]["position"], Value::from(3));
+    assert_eq!(node["ql"]["unit"], Value::from("documentation"));
+    assert!(node["source_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry == &Value::from("staging/propose-not-write")));
+
+    // The source file itself is byte-identical: staging records, it never
+    // rewrites the handwriting.
+    assert_eq!(read(&source), GOVERNANCE_SOURCE);
+}
+
+#[test]
+fn stage_without_an_authored_alignment_is_a_refusal_not_a_guess() {
+    let (work, scratch) = fixture();
+    let wiki_json = work.path().join("wiki.json");
+    let before = read(&wiki_json);
+    let source = work.path().join("plain.md");
+    write(&source, "# Plain\n\nNo alignment declared.\n");
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "stage", source.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_ne!(code, 0);
+    assert!(envelope["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("declares no `ql:` frontmatter"));
+    assert_eq!(read(&wiki_json), before, "a refusal leaves the file byte-identical");
+}
+
+#[test]
+fn stage_refuses_positions_outside_the_local_sixfold_and_units_absent() {
+    let (work, scratch) = fixture();
+    let wiki_json = work.path().join("wiki.json");
+    let beyond = work.path().join("beyond.md");
+    write(&beyond, "---\nql:\n  position: 7\n  unit: documentation\n---\n# Beyond\n");
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "stage", beyond.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_ne!(code, 0);
+    assert!(envelope["error"]["message"].as_str().unwrap().contains("0–5"));
+
+    let orphan = work.path().join("orphan.md");
+    write(&orphan, "---\nql:\n  position: 2\n---\n# Orphan\n");
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "stage", orphan.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_ne!(code, 0);
+    assert!(envelope["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("a position requires its unit"));
+}
+
+#[test]
+fn stage_replaces_only_when_told_and_advances_the_revision() {
+    let (work, scratch) = fixture();
+    let wiki_json = work.path().join("wiki.json");
+    let source = work.path().join("flow-note.md");
+    write(
+        &source,
+        "---\nql:\n  position: 0\n  unit: documentation\n  type: flow\n---\n# Flow note\n",
+    );
+
+    let args = [
+        "wiki",
+        "stage",
+        source.to_str().unwrap(),
+        "--file",
+        wiki_json.to_str().unwrap(),
+    ];
+    let (code, _) = wiki(scratch.path(), &args);
+    assert_eq!(code, 0);
+
+    // Held without --update: refusal, byte-identical.
+    let before = read(&wiki_json);
+    let (code, envelope) = wiki(scratch.path(), &args);
+    assert_ne!(code, 0);
+    assert!(envelope["error"]["message"].as_str().unwrap().contains("--update"));
+    assert_eq!(read(&wiki_json), before);
+
+    // With --update: the revision advances, the type label rides through.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "stage",
+            source.to_str().unwrap(),
+            "--file",
+            wiki_json.to_str().unwrap(),
+            "--update",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let staged: Value = serde_json::from_str(&read(&wiki_json)).unwrap();
+    let node = staged["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["ref"] == "wiki:node:staged/flow-note")
+        .unwrap();
+    assert_eq!(node["revision"], Value::from(2));
+    assert_eq!(node["type"], Value::from("flow"));
+}

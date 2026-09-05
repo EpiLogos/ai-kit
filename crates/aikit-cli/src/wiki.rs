@@ -30,7 +30,7 @@ use aikit_core::{AikitError, Result};
 
 use crate::cli::{
     WikiCmd, WikiEdgeArgs, WikiNodeArgs, WikiRootAdoptArgs, WikiRootArgs, WikiRootPruneArgs,
-    WikiSpaceCreateArgs, WikiSpaceLinkArgs,
+    WikiSpaceCreateArgs, WikiSpaceLinkArgs, WikiStageArgs,
 };
 use crate::json;
 
@@ -89,6 +89,7 @@ pub fn run(cwd: &Path, command: WikiCmd) -> Result<WikiOutcome> {
             WikiRootSub::Prune(args) => root_prune(cwd, &args),
             WikiRootSub::Adopt(args) => root_adopt(cwd, &args),
         },
+        WikiSub::Stage(args) => stage(&args),
     }
 }
 
@@ -719,6 +720,267 @@ fn manifest_project_id(manifest: &Path) -> Result<String> {
             )
             .with("manifest", manifest.display().to_string())
         })
+}
+
+// ---------------------------------------------------------------------------
+// stage
+// ---------------------------------------------------------------------------
+
+/// The authored QL alignment a source file's frontmatter declares. The block
+/// is deliberately minimal: `ql:` with flat `key: value` pairs. Positions are
+/// relative to a named unit (the local sixfold that gives 0–5 their meaning),
+/// which is why a position without a unit is refused.
+struct QlAlignment {
+    position: Option<u8>,
+    unit: Option<String>,
+    face: Option<String>,
+    node_type: Option<String>,
+    labels: BTreeMap<String, String>,
+}
+
+impl QlAlignment {
+    /// Parse the `ql:` block out of a document's frontmatter. Only this block
+    /// is read: the prose body stays prose, and the handwriting is never
+    /// rewritten. Unknown keys under `ql:` are preserved verbatim as labels.
+    fn from_markdown(text: &str) -> Result<Option<Self>> {
+        let Some(frontmatter) = strip_frontmatter(text) else {
+            return Ok(None);
+        };
+        let mut in_ql = false;
+        let mut labels = BTreeMap::new();
+        for line in frontmatter.lines() {
+            let trimmed_end = line.trim_end();
+            if !in_ql {
+                if trimmed_end == "ql:" {
+                    in_ql = true;
+                }
+                continue;
+            }
+            if trimmed_end.is_empty() {
+                continue;
+            }
+            if !line.starts_with(' ') && !line.starts_with('\t') {
+                // A new top-level frontmatter key: the ql block is over.
+                break;
+            }
+            let Some((key, value)) = split_label(trimmed_end.trim()) else {
+                return Err(AikitError::new(
+                    "knowledge.wiki_stage_frontmatter",
+                    format!("`{trimmed_end}` is not a `key: value` label under `ql:`"),
+                ));
+            };
+            labels.insert(key.to_string(), unquote(value));
+        }
+        if !in_ql {
+            return Ok(None);
+        }
+        let position = match labels.remove("position") {
+            Some(raw) => {
+                let value: u8 = raw.parse().map_err(|_| {
+                    AikitError::new(
+                        "knowledge.wiki_stage_alignment",
+                        format!(
+                            "`{raw}` is not a position; positions are integers relative to \
+                             their unit's sixfold"
+                        ),
+                    )
+                })?;
+                if value > 5 {
+                    return Err(AikitError::new(
+                        "knowledge.wiki_stage_alignment",
+                        format!(
+                            "position {value} is out of range; a unit's positions run 0–5"
+                        ),
+                    ));
+                }
+                Some(value)
+            }
+            None => None,
+        };
+        let unit = labels.remove("unit");
+        if position.is_some() && unit.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none()
+        {
+            return Err(AikitError::new(
+                "knowledge.wiki_stage_alignment",
+                "a position requires its unit: positions are relative to the local sixfold \
+                 that gives 0–5 their meaning, never global",
+            ));
+        }
+        Ok(Some(Self {
+            position,
+            unit: unit.filter(|value| !value.trim().is_empty()),
+            face: labels.remove("face"),
+            node_type: labels.remove("type"),
+            labels,
+        }))
+    }
+
+    /// The alignment as the node's `ql` extension. What was authored rides
+    /// whole; nothing is added that the frontmatter did not declare.
+    fn extension(&self) -> Value {
+        let mut ql = serde_json::Map::new();
+        if let Some(position) = self.position {
+            ql.insert("position".into(), jval!(position));
+        }
+        if let Some(unit) = &self.unit {
+            ql.insert("unit".into(), jval!(unit));
+        }
+        if let Some(face) = &self.face {
+            ql.insert("face".into(), jval!(face));
+        }
+        for (key, value) in &self.labels {
+            ql.insert(key.clone(), jval!(value));
+        }
+        Value::Object(ql)
+    }
+}
+
+fn strip_frontmatter(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
+}
+
+fn split_label(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = line.split_once(':')?;
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    Some((key, value.trim()))
+}
+
+fn unquote(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        value[1..value.len() - 1].to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+/// Stage one source file into the Wiki by its authored QL frontmatter. The
+/// source stays the ground — the node records its alignment and links back to
+/// it; the prose is never copied or rewritten. A file without an alignment is
+/// a refusal, not a guess: plain nodes belong to `wiki node create`.
+fn stage(args: &WikiStageArgs) -> Result<WikiOutcome> {
+    let text = read(&args.source)?;
+    let alignment = QlAlignment::from_markdown(&text)?.ok_or_else(|| {
+        AikitError::new(
+            "knowledge.wiki_stage_alignment",
+            format!(
+                "{} declares no `ql:` frontmatter; staging records an authored alignment, \
+                 it does not guess one",
+                args.source.display()
+            ),
+        )
+        .with("source", args.source.display().to_string())
+    })?;
+    if let Some(face) = &alignment.face {
+        if face != "direct" && face != "conjugate" {
+            return Err(AikitError::new(
+                "knowledge.wiki_stage_alignment",
+                format!("`{face}` is not a face; use direct or conjugate"),
+            )
+            .with("source", args.source.display().to_string()));
+        }
+    }
+
+    let stem = args
+        .source
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| "source".to_string());
+    let slug: String = stem
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let node_ref = ResourceRef::parse(
+        args.node_ref
+            .as_deref()
+            .unwrap_or(&format!("wiki:node:staged/{slug}")),
+    )?;
+    let node_type = alignment
+        .node_type
+        .clone()
+        .unwrap_or_else(|| "staged-source".to_string());
+    let title = args
+        .title
+        .clone()
+        .or_else(|| first_heading(&text))
+        .unwrap_or_else(|| stem.clone());
+    let source_label = args
+        .source_ref
+        .clone()
+        .unwrap_or_else(|| format!("staging/{slug}"));
+
+    let mut extensions = BTreeMap::new();
+    extensions.insert("ql".to_string(), alignment.extension());
+    let node = WikiNode {
+        profile: OKF_WIKI_PROFILE.to_string(),
+        ref_id: node_ref.clone(),
+        revision: 1,
+        provenance: provenance_from_sources(&[source_label.clone()])?,
+        node_type,
+        title: Some(title),
+        space_refs: parse_refs(&args.space, "space")?,
+        source_refs: parse_source_refs(&[source_label])?,
+        local_space_ref: None,
+        extensions,
+    };
+
+    // A held ref is an update when the caller says so, a refusal otherwise —
+    // the same law as `node create`/`node update`, so staging never quietly
+    // replaces an authored node.
+    let held = WikiDocument::parse(&read(&args.file)?)?;
+    if held.holds(&node.ref_id) && !args.update {
+        return Err(AikitError::new(
+            "knowledge.wiki_ref_exists",
+            format!(
+                "{} is already held by {}; pass --update to advance its revision",
+                node.ref_id,
+                args.file.display()
+            ),
+        )
+        .with("ref", node.ref_id.to_string()));
+    }
+
+    let spaces = node.space_refs.clone();
+    let outcome = mutate_file(&args.file, |doc, ledger| {
+        let written = if held.holds(&node.ref_id) {
+            doc.update_object(WikiObject::Node(node.clone()))?
+        } else {
+            doc.create_object(WikiObject::Node(node.clone()))?
+        };
+        ledger.record(written);
+        let synced = doc.sync_space_memberships(&node)?;
+        ledger.record(synced);
+        Ok(())
+    })?;
+    Ok(WikiOutcome::wrote(
+        jval!({
+            "command": "stage",
+            "file": args.file.display().to_string(),
+            "source": args.source.display().to_string(),
+            "ref": node_ref.to_string(),
+            "spaces": refs_json(&spaces),
+            "alignment": alignment.extension(),
+            "outcome": mutation_outcome(&outcome),
+        }),
+        &outcome,
+    ))
+}
+
+fn first_heading(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("# "))
+        .map(str::trim)
+        .filter(|heading| !heading.is_empty())
+        .map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------
