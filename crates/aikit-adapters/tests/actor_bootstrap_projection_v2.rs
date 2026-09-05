@@ -49,6 +49,8 @@ fn actor_bootstrap() -> ActorBootstrap {
         host: None,
         harness: None,
         model: None,
+    harness_candidates: Vec::new(),
+    model_candidates: Vec::new(),
         agent_session: Some("session/alpha".into()),
         session_space: Some(SessionSpaceRef::parse("session-space/test").unwrap()),
         capabilities: empty_summary(),

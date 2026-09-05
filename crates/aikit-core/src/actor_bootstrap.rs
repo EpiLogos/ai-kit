@@ -143,6 +143,15 @@ pub struct ActorBootstrap {
     pub harness: Option<BootstrapReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<BootstrapReference>,
+    /// Harnesses detected on this machine, whether or not an authored source
+    /// selected one. Detection-first: the full candidate set is disclosed so an
+    /// owner (or a later model-bearing receipt) can narrow it; selection stays
+    /// with authored sources, never with detection.
+    #[serde(default)]
+    pub harness_candidates: Vec<ResourceRef>,
+    /// Models detected as eligible, same contract as `harness_candidates`.
+    #[serde(default)]
+    pub model_candidates: Vec<ResourceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<String>,
     /// The canonical World identity this actor inhabits (`session-space/…`).
@@ -208,6 +217,16 @@ pub fn project_actor_bootstrap(
         host,
         harness,
         model,
+        harness_candidates: resolution
+            .harness_candidates
+            .iter()
+            .map(|resource| resource.resource.descriptor.id.clone())
+            .collect(),
+        model_candidates: resolution
+            .model_candidates
+            .iter()
+            .map(|resource| resource.resource.descriptor.id.clone())
+            .collect(),
         agent_session: request.agent_session,
         session_space: request.session_space,
         capabilities: summarize_set(&resolution.capabilities),

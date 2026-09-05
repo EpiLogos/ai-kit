@@ -835,10 +835,47 @@ impl Service {
         };
         let plan = aikit_core::project_actor_bootstrap(&resolution, request)?;
 
+        // Instructive notes for the absence an owner can actually repair. Each
+        // note names the surface that closes it; none of them fake a selection.
+        let mut composition_notes: Vec<String> = Vec::new();
+        if central_root.is_none() {
+            composition_notes.push(
+                "no Central root resolved for this project — profile composition skipped; \
+                 set the Central root for this project or run under ~/Central/Work"
+                    .to_owned(),
+            );
+        } else if composition_error.is_some() {
+            composition_notes.push(format!(
+                "Central composition failed: {} — detection and projection continue without it",
+                composition_error.as_deref().unwrap_or_default()
+            ));
+        } else if plan.agent.is_none() {
+            composition_notes.push(
+                "no AgentProfile resolves for this project — author one with: \
+                 ctrl action run agent-profile.save {\"scope\":\"project\", ...} \
+                 (owner-authored; detection keeps running without it)"
+                    .to_owned(),
+            );
+        }
+        if plan.harness.is_none() {
+            composition_notes.push(format!(
+                "no harness selected by an authored source — detected candidates: [{}]; \
+                 selection happens via Central profile / Actuation model-bearing, not here",
+                plan.harness_candidates.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if plan.model.is_none() {
+            composition_notes.push(format!(
+                "no model selected by an authored source — detected candidates: [{}]",
+                plan.model_candidates.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+
         Ok(serde_json::json!({
             "project_root": project_root.display().to_string(),
             "central_root": central_root.as_ref().map(|p| p.display().to_string()),
             "composition_error": composition_error,
+            "composition_notes": composition_notes,
             "composed_inputs": composed.as_ref().map(|c| serde_json::json!({
                 "agent": c.requested_actors.agent,
                 "agency": c.requested_actors.agency,
