@@ -126,3 +126,33 @@ For tmux, `aikit mux install tmux` must report `verified: true`, and `Alt-A` mus
 open the popup from an existing pane. For cmux 0.63, `aikit mux install cmux`
 must report the `command-palette:AIKit` binding; opening that entry should run
 the same unified AIKit surface in the current cmux terminal.
+
+## Source verification and installed verification
+
+AIKit distinguishes two verification paths because they answer different
+questions.
+
+**Source verification** checks the development checkout: the full test suite,
+clippy, the release build, and `git diff --check`. The repository-owned entry
+point is `bash scripts/verify`, which runs the same operation as CI. The
+underlying command is `cargo test --workspace --all-targets --locked`.
+
+**Installed verification** checks a built binary on a real or isolated home
+directory. The command is `aikit doctor --json`. It runs the checks defined in
+`crates/aikit-cli/src/doctor.rs` — registry load health, declared-but-unavailable
+capabilities, unreviewed trust gates, home directory layout, credential provider
+visibility, open bypass tokens — and returns the result in the stable CLI
+envelope (§12 of `docs/ARCHITECTURE.md`). A successful run means process exit 0,
+`schema: 1`, `ok: true`, and an object-valued `data` carrying `findings`,
+`count`, and `fixable`. Doctor returns a successful observation envelope even
+when individual checks report findings; success means the diagnostic itself
+completed, not that every check found nothing.
+
+AIKit publishes the installed verification command in `.oi/product.json` under
+`verify.installed_command`, so an O:I-managed installation can verify the binary
+it installed without maintaining a separate copy of the command vocabulary.
+`verify.source_command` in the same descriptor carries the source verification
+command. The acceptance test `doctor_json_is_the_installed_native_verification_path`
+in `crates/aikit-cli/tests/cli_binary.rs` exercises the contract: it runs
+`aikit doctor --json` against an isolated home and asserts process success,
+`schema: 1`, `ok: true`, and an object `data`.

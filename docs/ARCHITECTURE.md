@@ -388,7 +388,10 @@ Errors:
 ```
 
 The JSON shape is a real public interface. Error **codes** are stable; messages
-are not.
+are not. `aikit doctor --json` is the published installed verification entry
+(`.oi/product.json` `verify.installed_command`), so its success envelope is part
+of this contract; the acceptance test
+`doctor_json_is_the_installed_native_verification_path` guards it.
 
 ---
 
