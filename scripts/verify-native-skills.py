@@ -192,6 +192,19 @@ for required in (
     if required not in template_text:
         raise SystemExit(f"HTML account template missing required shell capability: {required}")
 
+knowledge_navigation = (REGISTRY / "skill/aikit/knowledge-navigation/payload/SKILL.md").read_text()
+for required in (
+    "SemanticWiki is a concrete QL instrument",
+    "smallest materially relevant **whole**",
+    "Whole-relative adequacy: proof over plausibility",
+    "Plausibility does not manufacture epistemic standing.",
+    "whole-relative disclosure ledger",
+    "Contemplate may generate a better Claim, candidate interpretation or integrative reading; it does not thereby verify the whole.",
+    "plausible determination != verified whole",
+):
+    if required not in knowledge_navigation:
+        raise SystemExit(f"knowledge-navigation Skill missing whole-relative adequacy law: {required}")
+
 product_understanding = (REGISTRY / "skill/aikit/product-understanding/payload/SKILL.md").read_text()
 for required in (
     "Provenance determines authority for the question being asked",
