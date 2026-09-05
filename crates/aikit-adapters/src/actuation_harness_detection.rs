@@ -168,6 +168,111 @@ pub fn intake_actuation_detection(
     }
 }
 
+/// One env-marker match from a `harness self` record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfMatch {
+    pub slug: String,
+    pub harness_ref: String,
+    #[serde(default)]
+    pub markers: Vec<String>,
+}
+
+/// The `document: "self"` record Actuation emits for
+/// `actuation harness self --json`. Identity evidence only: a resolved self
+/// says which harness environment this process runs inside. It never asserts
+/// presence (that is detection's receipts law) and never substitutes for an
+/// authored or instantiation-bound harness selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActuationSelfRecord {
+    pub schema: String,
+    pub document: String,
+    pub self_ref: String,
+    pub observed_at: String,
+    pub catalog_revision: u32,
+    #[serde(default)]
+    pub matched: Vec<SelfMatch>,
+    pub resolved: Option<SelfMatch>,
+    pub ambiguity: bool,
+    pub detection_ref: String,
+}
+
+/// What self intake yielded. One match resolves; more than one is disclosed
+/// ambiguity (nested harnesses are real, the innermost is never guessed);
+/// zero matches is an honest no-identity, not an error.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelfOutcome {
+    Resolved(Box<ActuationSelfRecord>),
+    Ambiguous { matched: Vec<String> },
+    NoMatch,
+    Unavailable { reason: String },
+}
+
+impl SelfOutcome {
+    /// The resolved harness ref, when exactly one marker set matched.
+    pub fn resolved_harness_ref(&self) -> Option<&str> {
+        match self {
+            SelfOutcome::Resolved(record) => {
+                record.resolved.as_ref().map(|match_| match_.harness_ref.as_str())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Run `actuation harness self --json` through the given runner and parse
+/// the record. A failed or unparsable run is `Unavailable { reason }`;
+/// a valid record with no unique match stays a first-class outcome.
+pub fn intake_actuation_self(runner: &dyn CommandRunner, actuation_bin: &str) -> SelfOutcome {
+    let argv = vec![
+        actuation_bin.to_string(),
+        "harness".to_string(),
+        "self".to_string(),
+        "--json".to_string(),
+    ];
+    let output = match runner.run(&argv) {
+        Ok(output) => output,
+        Err(error) => {
+            return SelfOutcome::Unavailable {
+                reason: format!("could not run {actuation_bin}: {error}"),
+            };
+        }
+    };
+    if output.status != 0 {
+        return SelfOutcome::Unavailable {
+            reason: format!(
+                "{actuation_bin} harness self failed ({}): {}",
+                output.status,
+                output.stderr.trim().chars().take(200).collect::<String>()
+            ),
+        };
+    }
+    let record = match serde_json::from_str::<ActuationSelfRecord>(&output.stdout) {
+        Ok(record) => record,
+        Err(error) => {
+            return SelfOutcome::Unavailable {
+                reason: format!("self output unparsable: {error}"),
+            };
+        }
+    };
+    if record.schema != ACTUATION_HARNESS_DETECTION_SCHEMA || record.document != "self" {
+        return SelfOutcome::Unavailable {
+            reason: format!(
+                "unexpected self document {:?} (schema {:?})",
+                record.document, record.schema
+            ),
+        };
+    }
+    if record.ambiguity || record.resolved.is_none() {
+        if record.matched.is_empty() {
+            return SelfOutcome::NoMatch;
+        }
+        return SelfOutcome::Ambiguous {
+            matched: record.matched.iter().map(|m| m.slug.clone()).collect(),
+        };
+    }
+    SelfOutcome::Resolved(Box::new(record))
+}
+
 /// Distil a detection outcome into the core-owned ground that rides on a
 /// `ContextResolution`. A failed run becomes the disclosed `Unavailable`
 /// ground — never `None`, which means "detection did not run", a different
@@ -322,6 +427,76 @@ mod tests {
                 assert!(reason.contains("unparsable") || reason.contains("schema"));
             }
             DetectionOutcome::Record(_) => panic!("garbage must not yield a record"),
+        }
+    }
+
+    fn sample_self(resolved: bool, ambiguity: bool, matched: usize) -> String {
+        let matches: Vec<String> = (0..matched)
+            .map(|index| {
+                format!(
+                    r#"{{"slug": "h{index}", "harness_ref": "harness/h{index}", "markers": ["M{index}"]}}"#
+                )
+            })
+            .collect();
+        let resolved_json = if resolved {
+            r#"{"slug": "h0", "harness_ref": "harness/h0", "markers": ["M0"]}"#.to_string()
+        } else {
+            "null".to_string()
+        };
+        format!(
+            r#"{{"schema": "actuation.harness-detection/v1", "document": "self",
+                "self_ref": "self:2026-09-05T00:00:00Z", "observed_at": "2026-09-05T00:00:00Z",
+                "catalog_revision": 2, "matched": [{}], "resolved": {resolved_json},
+                "ambiguity": {ambiguity}, "detection_ref": "detection:2026-09-05T00:00:00Z",
+                "detection": {{"states": {{}}}}}}"#,
+            matches.join(",")
+        )
+    }
+
+    struct SelfRunner(String);
+    impl CommandRunner for SelfRunner {
+        fn run(&self, _argv: &[String]) -> Result<Output> {
+            Ok(Output::success(self.0.clone()))
+        }
+    }
+
+    #[test]
+    fn self_intake_resolves_a_unique_match() {
+        let outcome = intake_actuation_self(&SelfRunner(sample_self(true, false, 1)), "actuation");
+        assert_eq!(outcome.resolved_harness_ref(), Some("harness/h0"));
+        match outcome {
+            SelfOutcome::Resolved(record) => {
+                assert_eq!(record.detection_ref, "detection:2026-09-05T00:00:00Z");
+                assert_eq!(record.catalog_revision, 2);
+            }
+            other => panic!("expected resolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn self_intake_discloses_ambiguity_never_guesses() {
+        let outcome = intake_actuation_self(&SelfRunner(sample_self(false, true, 2)), "actuation");
+        assert_eq!(outcome.resolved_harness_ref(), None);
+        match outcome {
+            SelfOutcome::Ambiguous { matched } => assert_eq!(matched, vec!["h0", "h1"]),
+            other => panic!("expected ambiguity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn self_intake_no_match_is_first_class_not_failure() {
+        let outcome = intake_actuation_self(&SelfRunner(sample_self(false, false, 0)), "actuation");
+        assert!(matches!(outcome, SelfOutcome::NoMatch));
+    }
+
+    #[test]
+    fn self_intake_failure_is_unavailable() {
+        let outcome = intake_actuation_self(&FailingRunner, "actuation");
+        match outcome {
+            SelfOutcome::Unavailable { reason } => {
+                assert!(reason.contains("could not run actuation"));
+            }
+            _ => panic!("failure must not resolve"),
         }
     }
 }

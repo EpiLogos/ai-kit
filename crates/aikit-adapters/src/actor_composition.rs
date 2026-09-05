@@ -19,13 +19,13 @@ use crate::actuation_instantiation::{
 use crate::central_agent_profile::CentralAgentProfileProjection;
 use crate::runner::CommandRunner;
 
-/// Authored Actuation model-bearing receipt, relative to the Project root.
+/// Authored Actuation instantiation receipt, relative to the Project root.
 pub const ACTUATION_MODEL_BEARING_FILE: &str = ".aikit/actuation-model-bearing.json";
 
 const AGENT_PROFILE_LIST: &str = "agent-profile.list";
 
 /// Compose the live actor inputs for a Project. Returns `None` when neither a
-/// Central-authored profile nor an Actuation model-bearing receipt is present —
+/// Central-authored profile nor an Actuation instantiation receipt is present —
 /// a valid "no projection" state, never a failure.
 pub fn compose_live_actor_inputs<R: CommandRunner>(
     runner: &R,
@@ -87,7 +87,7 @@ fn read_project_agent_profile<R: CommandRunner>(
     Ok(Some(CentralAgentProfileProjection::parse(source)?))
 }
 
-/// Read an authored Actuation model-bearing receipt. Absence is `None`, never an
+/// Read an authored Actuation instantiation receipt. Absence is `None`, never an
 /// error and never a synthesized model-bearing object.
 fn read_actuation_instantiation(
     project_root: &Path,

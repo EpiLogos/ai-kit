@@ -123,7 +123,7 @@ fn wide_workspace_renders_context_compose_and_explain_from_one_world() {
     assert!(compose.contains("Actor/Runtime"));
     assert!(compose.contains("Projection"));
     assert!(compose.contains("Intent        eligibility unresolved"));
-    assert!(compose.contains("Effective     availability unresolved"));
+    assert!(compose.contains("Effective     available · 0 providers"));
 
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();

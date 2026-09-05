@@ -918,6 +918,50 @@ impl Service {
                 ));
             }
         }
+        // Runtime self-identification: which harness environment this very
+        // invocation runs inside. Actuation owns the marker knowledge; the
+        // resolved self is an observation, never an authored selection —
+        // binding stays with the instantiation receipt. The matching
+        // candidate carries a `self` annotation so surfaces can show it
+        // without treating it as chosen.
+        let self_outcome = aikit_adapters::actuation_harness_detection
+            ::intake_actuation_self(&SystemRunner::new(), "actuation");
+        match &self_outcome {
+            aikit_adapters::actuation_harness_detection::SelfOutcome::Resolved(record) => {
+                if let Some(matched) = &record.resolved {
+                    for candidate in resolution.harness_candidates.iter_mut() {
+                        if candidate.resource.descriptor.id.to_string() == matched.harness_ref {
+                            candidate
+                                .resource
+                                .descriptor
+                                .annotations
+                                .insert("self".to_string(), "true".to_string());
+                        }
+                    }
+                    detection_notes.push(format!(
+                        "this invocation runs inside {} (env markers: {}; \
+                         self-identified via Actuation {})",
+                        matched.harness_ref,
+                        matched.markers.join(", "),
+                        record.detection_ref
+                    ));
+                }
+            }
+            aikit_adapters::actuation_harness_detection::SelfOutcome::Ambiguous { matched } => {
+                detection_notes.push(format!(
+                    "harness self-identification is ambiguous ({}); nested harnesses are real \
+                     and the innermost is never guessed",
+                    matched.join(", ")
+                ));
+            }
+            aikit_adapters::actuation_harness_detection::SelfOutcome::NoMatch => {}
+            aikit_adapters::actuation_harness_detection::SelfOutcome::Unavailable { reason } => {
+                detection_notes.push(format!(
+                    "harness self-identification unavailable: {reason} — \
+                     install or expose `actuation` on PATH to repair"
+                ));
+            }
+        }
         // The World (SessionSpace) identity is discoverable from the Project.
         // Exactly one authored SessionSpace names it as canonical; ambiguity is
         // never silently resolved, and one is never inferred from provider

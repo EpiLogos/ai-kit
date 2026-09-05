@@ -403,6 +403,18 @@ pub trait PaletteBackend {
                 entry.name.clone(),
                 description,
             );
+            // The entry's presence in the resolved catalogue is itself the
+            // source observation: the package backing this capability is
+            // loaded and resolved in the current view. Eligibility and
+            // preference stay independent axes on the record.
+            descriptor.sources.push(ResourceSource {
+                source: SourceRef::parse("source/aikit/resolved-catalogue")
+                    .expect("static catalogue source reference must be valid"),
+                authority: Some(SourceAuthority::Authored),
+                revision: None,
+                locator: None,
+                state: SourceState::Available,
+            });
             descriptor
                 .annotations
                 .insert("capsule-kind".into(), id.kind().as_str().into());
