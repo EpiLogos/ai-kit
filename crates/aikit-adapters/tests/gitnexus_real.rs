@@ -2,7 +2,7 @@ use std::fs;
 use std::process::Command;
 
 use aikit_adapters::gitnexus::GitNexusCodeIndexProvider;
-use aikit_adapters::runner::SystemRunner;
+use aikit_adapters::runner::{CommandRunner, SystemRunner};
 use aikit_core::knowledge_code::{CodeIndexProvider, GITNEXUS_TESTED_VERSION};
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
 use aikit_core::project_reflection::{
@@ -175,16 +175,64 @@ export function login(token: string): boolean {
         );
         return;
     }
-    assert_eq!(before.version.as_deref(), Some(GITNEXUS_TESTED_VERSION));
-    assert!(before.capabilities.index);
-    assert!(before.capabilities.search);
-    assert!(before.capabilities.context);
-    assert!(before.capabilities.impact);
-    assert!(before.capabilities.trace);
-    assert!(before.capabilities.detect_changes);
-    assert!(before.capabilities.structural_check);
-    assert!(before.capabilities.cypher);
-    assert!(!before.capabilities.structured_output);
+    // Detection truth: the reported version must be what the installed CLI
+    // itself reports. A real-environment test never mandates a pinned version;
+    // it proves detection is truthful on whatever is installed.
+    let probe = SystemRunner::new()
+        .run(&["gitnexus".into(), "--version".into()])
+        .expect("gitnexus --version probe");
+    let reported = format!("{} {}", probe.stdout, probe.stderr);
+    let version = before
+        .version
+        .as_deref()
+        .expect("status reports the installed GitNexus version");
+    assert!(
+        reported.contains(version),
+        "detected version {version} must come from the CLI's own --version output"
+    );
+    // The tested pin is metadata, not a mandate: drift is reported, never
+    // enforced.
+    assert_eq!(
+        before.tested_version.as_deref(),
+        Some(GITNEXUS_TESTED_VERSION)
+    );
+    assert_eq!(before.version_drift, version != GITNEXUS_TESTED_VERSION);
+
+    // The behavioural contract below exercises the full reflection surface.
+    // Each faculty is detected from the installed CLI's own help; when a
+    // required one is absent (an older or reduced build), there is nothing
+    // honest to verify and the test skips like any unavailable provider.
+    let required = [
+        ("index", before.capabilities.index),
+        ("search", before.capabilities.search),
+        ("context", before.capabilities.context),
+        ("impact", before.capabilities.impact),
+        ("trace", before.capabilities.trace),
+        ("detect_changes", before.capabilities.detect_changes),
+        ("structural_check", before.capabilities.structural_check),
+    ];
+    let missing: Vec<&str> = required
+        .iter()
+        .filter(|(_, present)| !*present)
+        .map(|(faculty, _)| *faculty)
+        .collect();
+    if !missing.is_empty() {
+        assert!(
+            std::env::var_os("AIKIT_REQUIRE_GITNEXUS_REAL").is_none(),
+            "AIKIT_REQUIRE_GITNEXUS_REAL is set but the installed GitNexus lacks required faculties {missing:?}: {}",
+            before.detail
+        );
+        return;
+    }
+
+    // The strict conformance matrix is opt-in: set AIKIT_GITNEXUS_CONFORMANCE
+    // in an environment pinned to exactly the tested version (e.g. CI).
+    if std::env::var_os("AIKIT_GITNEXUS_CONFORMANCE").is_some() {
+        assert_eq!(version, GITNEXUS_TESTED_VERSION);
+        assert!(!before.version_drift);
+        assert!(before.capabilities.cypher);
+        assert!(!before.capabilities.structured_output);
+    }
 
     let indexed = provider.index(root, true).expect("real GitNexus analyze");
     assert!(indexed.indexed);
@@ -223,7 +271,8 @@ export function login(token: string): boolean {
     let semantic = ResourceRef::parse("wiki:concept:login").unwrap();
     let description = ResourceRef::parse("source:local-description:auth-module").unwrap();
     let code = login.resource_ref();
-    let verification = ResourceRef::parse("verification:gitnexus:1.6.9").unwrap();
+    let verification =
+        ResourceRef::parse(&format!("verification:gitnexus:{GITNEXUS_TESTED_VERSION}")).unwrap();
     let map = reflection_map(
         &semantic,
         &description,

@@ -59,6 +59,20 @@ impl Drop for SocketGuard {
     }
 }
 
+/// Pane commands run asynchronously: tmux returns the session before the
+/// shells inside the panes have executed. The contract is that activation
+/// produces the ready markers, so wait for them with a bounded poll rather
+/// than asserting existence at an instant the environment cannot guarantee.
+fn wait_for_ready(path: &std::path::Path) {
+    for _ in 0..100 {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("{} did not appear within 5s of activation", path.display());
+}
+
 fn plan(name: &str, root: &std::path::Path) -> SessionPlan {
     plan_from(&format!(
         r#"
@@ -150,8 +164,8 @@ fn real_tmux_survives_adapter_restart_recovers_relations_and_never_mints_canonic
         activated,
         SessionSpaceActivationObservation::Active { .. }
     ));
-    assert!(temp.path().join("agent.ready").exists());
-    assert!(temp.path().join("terminal.ready").exists());
+    wait_for_ready(&temp.path().join("agent.ready"));
+    wait_for_ready(&temp.path().join("terminal.ready"));
 
     let first = driver.environment_mut().observe().unwrap();
     assert_eq!(first.health, WorkingEnvironmentHealth::Healthy);

@@ -29,6 +29,11 @@ struct BkmrCliSurface {
     semantic_cli: bool,
     hybrid_json: bool,
     tags: bool,
+    /// Whether the global `--db <PATH>` selector is present. The provider's
+    /// isolated-view integration requires it; older bkmr releases select the
+    /// database only through config/env and are reported as unavailable with
+    /// this gap named, never silently invoked.
+    db_selector: bool,
     reason: Option<String>,
 }
 
@@ -78,6 +83,25 @@ impl<R: CommandRunner> BkmrSourcePoolProvider<R> {
 
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// Why this provider cannot operate against the discovered CLI surface, if
+    /// it cannot. Absence means the surface is operable.
+    fn surface_reason(&self) -> Option<String> {
+        if !self.cli.available {
+            return Some(
+                self.cli
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "bkmr executable is unavailable".into()),
+            );
+        }
+        if !self.cli.db_selector {
+            return Some(
+                "installed bkmr exposes no --db selector; this provider's isolated-view integration requires the bkmr CLI surface that provides it".into(),
+            );
+        }
+        None
     }
 
     fn run(&self, args: &[String], include_db: bool, code: &'static str) -> Result<String> {
@@ -175,15 +199,10 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
     fn capabilities(&self) -> SourceProviderCapabilities {
         let semantic = self.cli.semantic_cli && self.enable_embeddings;
         let hybrid = self.cli.hybrid_json && self.enable_embeddings;
+        let operable = self.surface_reason().is_none();
         let mut reasons = BTreeMap::new();
-        if !self.cli.available {
-            reasons.insert(
-                "provider".into(),
-                self.cli
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "bkmr executable is unavailable".into()),
-            );
+        if let Some(reason) = self.surface_reason() {
+            reasons.insert("provider".into(), reason);
         }
         if self.cli.semantic_cli && !self.enable_embeddings {
             reasons.insert(
@@ -202,24 +221,21 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
         SourceProviderCapabilities {
             provider: self.provider.clone(),
             version: self.cli.version.clone(),
-            fulltext: self.cli.available && self.cli.fulltext_json,
-            fuzzy_interactive: self.cli.available && self.cli.fuzzy_interactive,
-            semantic: self.cli.available && semantic,
-            hybrid: self.cli.available && hybrid,
-            tags: self.cli.available && self.cli.tags,
-            structured_output: self.cli.available && self.cli.fulltext_json && self.cli.hybrid_json,
+            fulltext: operable && self.cli.fulltext_json,
+            fuzzy_interactive: operable && self.cli.fuzzy_interactive,
+            semantic: operable && semantic,
+            hybrid: operable && hybrid,
+            tags: operable && self.cli.tags,
+            structured_output: operable && self.cli.fulltext_json && self.cli.hybrid_json,
             reasons,
         }
     }
 
     fn rebuild(&mut self, material: &[SourceMaterial]) -> Result<()> {
-        if !self.cli.available {
+        if let Some(reason) = self.surface_reason() {
             return Err(AikitError::new(
                 "knowledge.bkmr_unavailable",
-                self.cli
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "bkmr executable is unavailable".into()),
+                reason,
             ));
         }
 
@@ -400,16 +416,20 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
     fn status(&self) -> SourceProviderStatus {
         let capabilities = self.capabilities();
         let version = capabilities.version.clone();
+        let detail = match self.surface_reason() {
+            Some(reason) => format!("db={}; {reason}", self.db_path.display()),
+            None => format!("db={}", self.db_path.display()),
+        };
         SourceProviderStatus {
             provider: self.provider.clone(),
-            available: self.cli.available,
+            available: self.surface_reason().is_none(),
             version: version.clone(),
             tested_version: Some(BKMR_GLADE_CONFORMANCE_VERSION.into()),
             version_drift: version
                 .as_deref()
                 .is_some_and(|value| value != BKMR_GLADE_CONFORMANCE_VERSION),
             capabilities,
-            detail: format!("db={}", self.db_path.display()),
+            detail,
         }
     }
 }
@@ -427,6 +447,7 @@ fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> BkmrCliSurface {
                 semantic_cli: false,
                 hybrid_json: false,
                 tags: false,
+                db_selector: false,
                 reason: Some(format!("bkmr --version exited with status {}", output.status)),
             }
         }
@@ -439,6 +460,7 @@ fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> BkmrCliSurface {
                 semantic_cli: false,
                 hybrid_json: false,
                 tags: false,
+                db_selector: false,
                 reason: Some(error.to_string()),
             }
         }
@@ -455,6 +477,9 @@ fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> BkmrCliSurface {
         semantic_cli: top.contains("sem-search"),
         hybrid_json: top.contains("hsearch") && hybrid.contains("--json"),
         tags: top.contains("tag") && top.contains("tags"),
+        // Exact whitespace-delimited token: "--debug" on older releases must
+        // not false-positive the "--db" probe.
+        db_selector: top.split_whitespace().any(|token| token == "--db"),
         reason: None,
     }
 }
@@ -570,7 +595,7 @@ mod tests {
                 .on("bkmr --version", "bkmr 7.6.7\n")
                 .on(
                     "bkmr --help",
-                    "commands: search sem-search hsearch tag tags create-db add show info\n",
+                    "options: --db <DB>\ncommands: search sem-search hsearch tag tags create-db add show info\n",
                 )
                 .on("bkmr search --help", "options: --json --fzf --tags --np --no-color\n")
                 .on("bkmr hsearch --help", "options: --json --tags --limit --np\n")
@@ -636,5 +661,39 @@ mod tests {
             .call_lines()
             .iter()
             .any(|line| line.contains("search quasars --json --np --no-color")));
+    }
+
+    #[test]
+    fn cli_without_the_db_selector_is_unavailable_with_the_gap_named() {
+        let runner = Arc::new(
+            ScriptedRunner::new()
+                .on("bkmr --version", "bkmr 6.5.0\n")
+                .on(
+                    "bkmr --help",
+                    "options: --debug\ncommands: search sem-search tag tags create-db add show info\n",
+                )
+                .on(
+                    "bkmr search --help",
+                    "options: --json --fzf --tags --np --no-color\n",
+                ),
+        );
+        let provider = BkmrSourcePoolProvider::new(runner, "/tmp/aikit-bkmr-nodb.db", false);
+        let status = provider.status();
+        assert!(!status.available);
+        assert_eq!(status.version.as_deref(), Some("6.5.0"));
+        assert_eq!(status.tested_version.as_deref(), Some("7.6.7"));
+        assert!(status.version_drift);
+        assert!(
+            status.detail.contains("--db"),
+            "the report names the missing selector: {}",
+            status.detail
+        );
+        assert!(
+            status.capabilities.reasons["provider"].contains("--db"),
+            "the machine-readable report names the gap"
+        );
+        assert!(!status.capabilities.fulltext);
+        let mut provider = provider;
+        assert!(provider.rebuild(&[astronomy()]).is_err());
     }
 }

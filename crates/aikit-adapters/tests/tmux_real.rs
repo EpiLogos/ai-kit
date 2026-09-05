@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use aikit_adapters::mux::tmux::{SessionIdentity, Tmux, PANE_TAG, PROFILE_OPTION, SESSION_OPTION};
 use aikit_adapters::mux::{MuxAdapter, MuxTarget, ReconcileMode, SpawnRequest};
-use aikit_adapters::runner::SystemRunner;
+use aikit_adapters::runner::{CommandRunner, SystemRunner};
 use aikit_core::context::Isolation;
 use aikit_core::id::{ContextId, SessionId};
 use aikit_core::platform::MuxKind;
@@ -622,10 +622,17 @@ fn detection_finds_the_real_tmux_and_notices_whether_a_server_is_up() {
 
     let before = server.tmux().detect().unwrap();
     assert!(before.installed);
+    // Detection truth: the reported version comes from the binary's own -V
+    // output. A real-environment test proves detection is truthful; it never
+    // mandates that the world match a version class.
+    let probe = SystemRunner::new()
+        .run(&["tmux".into(), "-V".into()])
+        .expect("tmux -V probe");
+    let reported = format!("{} {}", probe.stdout, probe.stderr);
+    let version = before.version.as_deref().expect("tmux version detected");
     assert!(
-        before.version.as_deref().unwrap_or("").starts_with('3'),
-        "expected a 3.x version, got {:?}",
-        before.version
+        reported.contains(version),
+        "detected version {version} must come from the binary's own -V output"
     );
     assert!(
         !before.server_running,
