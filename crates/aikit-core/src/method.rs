@@ -15,6 +15,22 @@ use crate::{AikitError, Result};
 
 pub const METHOD_VERSION: &str = "aikit.method/v1";
 
+/// The detection convention for situated operational patterns: a Method is
+/// just a Skill whose description carries a `METHOD:` prefix. Nothing else
+/// about the capsule changes — the skill stays authored, versioned, trusted
+/// and resolved exactly like any other. The prefix only makes the Method
+/// discoverable as such.
+pub const METHOD_DESCRIPTION_PREFIX: &str = "METHOD:";
+
+/// The situated payload declared after the prefix, if the description carries
+/// one. Detection is prefix-only: an empty payload is still a declared Method
+/// (the full description remains the skill's description).
+pub fn method_payload(description: &str) -> Option<&str> {
+    let trimmed = description.trim_start();
+    let rest = trimmed.strip_prefix(METHOD_DESCRIPTION_PREFIX)?;
+    Some(rest.trim())
+}
+
 /// Immutable receipt identifying the scoped adaptation of an unchanged Skill.
 ///
 /// Runtime authoring remains the existing `SkillUsageOverlayPatch` mechanism in
@@ -354,6 +370,22 @@ fn resolve_any(
 mod tests {
     use super::*;
     use crate::resource::{MemoryResourceIndex, ResourceDescriptor};
+
+    #[test]
+    fn method_detection_is_prefix_only_and_never_asserts_semantics() {
+        assert_eq!(
+            method_payload("METHOD: inhabit a project wiki from Control state"),
+            Some("inhabit a project wiki from Control state")
+        );
+        // Leading whitespace before the prefix does not hide a Method.
+        assert_eq!(method_payload("  METHOD: situate the work"), Some("situate the work"));
+        // An empty payload is still a declared Method.
+        assert_eq!(method_payload("METHOD:"), Some(""));
+        // Without the prefix there is no Method, and a mid-description
+        // mention does not detect.
+        assert_eq!(method_payload("Review docs before merging."), None);
+        assert_eq!(method_payload("Use a METHOD: prefix here"), None);
+    }
 
     fn record(id: &str, kind: ResourceKind) -> ResourceRecord {
         ResourceRecord::new(ResourceDescriptor::new(

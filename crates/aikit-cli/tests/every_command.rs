@@ -96,6 +96,7 @@ const READ_ONLY: &[&[&str]] = &[
     &["collate"],
     &["z", "greet"],
     &["prune"],
+    &["method", "list"],
 ];
 
 #[test]

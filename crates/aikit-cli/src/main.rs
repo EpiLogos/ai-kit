@@ -180,6 +180,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
         Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
+        Some(Command::Method(a)) => cmd_method(cwd, a),
         Some(Command::Wiki(c)) => cmd_wiki(cwd, c),
         Some(Command::Status(a)) => cmd_status(cwd, a),
         Some(Command::Explain(a)) => cmd_explain(cwd, a),
@@ -1519,6 +1520,57 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
             "expression": resolved.expression,
             "path": resolved.path,
             "rows": rows,
+        }),
+        diagnostic_warnings(&service),
+    ))
+}
+
+/// `aikit method` — Methods are skills whose description carries the
+/// `METHOD:` prefix (see `aikit_core::method::METHOD_DESCRIPTION_PREFIX`).
+/// Detection changes nothing about the skill itself: it stays authored,
+/// versioned and resolved like any other. This verb only makes the
+/// situated operational patterns visible as such, with their effective
+/// state in the current context.
+fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
+    let MethodArgs {
+        command: MethodCommand::List { filter },
+    } = a;
+    let service = Service::discover(cwd)?;
+    let view = service.resolved();
+    let filter = filter.as_deref().map(str::to_lowercase);
+    let mut methods: Vec<Value> = view
+        .catalog_index
+        .values()
+        .filter_map(|entry| {
+            let payload = aikit_core::method::method_payload(&entry.description)?;
+            if let Some(filter) = &filter {
+                let hay = format!("{} {}", entry.name, payload).to_lowercase();
+                if !hay.contains(filter) {
+                    return None;
+                }
+            }
+            Some(jval!({
+                "id": entry.id.to_string(),
+                "name": entry.name,
+                "payload": payload,
+                "kind": entry.kind.as_str(),
+                "active": view.is_active(&entry.id),
+                "declared": view.is_declared_enabled(&entry.id),
+            }))
+        })
+        .collect();
+    methods.sort_by(|left, right| {
+        left["name"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["name"].as_str().unwrap_or_default())
+    });
+    Ok(reply(
+        &service,
+        jval!({
+            "method_prefix": aikit_core::method::METHOD_DESCRIPTION_PREFIX,
+            "count": methods.len(),
+            "methods": methods,
         }),
         diagnostic_warnings(&service),
     ))

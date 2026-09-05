@@ -118,6 +118,8 @@ pub enum Command {
     Capabilities(CapabilitiesCmd),
     /// List tracked background jobs.
     Jobs(JobsArgs),
+    /// Discover Methods: skills whose description carries the METHOD: prefix.
+    Method(MethodArgs),
     /// List recently run invocations.
     Recent(RecentArgs),
     /// Show usage statistics.
@@ -1063,6 +1065,21 @@ pub struct InboxArgs {
     /// Include quarantined and rejected candidates.
     #[arg(long)]
     pub all: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct MethodArgs {
+    #[command(subcommand)]
+    pub command: MethodCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MethodCommand {
+    /// List detected methods with their effective state in this context.
+    List {
+        /// Only show methods whose name or payload contains this substring.
+        filter: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
