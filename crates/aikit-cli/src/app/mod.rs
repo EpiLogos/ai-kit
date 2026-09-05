@@ -43,6 +43,7 @@ use aikit_adapters::clients::agent_skills;
 use aikit_adapters::clients::broker::BrokerAdapter;
 use aikit_adapters::clients::claude::ClaudeAdapter;
 use aikit_adapters::clients::codex::CodexAdapter;
+use aikit_adapters::clients::dsh::DshAdapter;
 
 use aikit_tui::backend::{
     ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
@@ -1024,6 +1025,9 @@ impl Service {
                     plan_effect(&ClaudeAdapter::new(ctx_dir.join("projections/claude")), &rc)
                 }
                 TargetId::CODEX => plan_effect(&CodexAdapter::new(tree.clone()), &rc),
+                TargetId::DEEPSEEK_HARNESS => {
+                    plan_effect(&DshAdapter::new(ctx_dir.join("projections/dsh")), &rc)
+                }
                 _ => plan_effect(&BrokerAdapter::new(), &rc),
             };
             if let Some(effect) = effect {
@@ -1252,6 +1256,7 @@ impl AikitApplication for Service {
             Self::shell_plan(&self.view)?,
             ClaudeAdapter::new(context_dir.join("projections/claude")).plan(&projection_context)?,
             CodexAdapter::new(tree).plan(&projection_context)?,
+            DshAdapter::new(context_dir.join("projections/dsh")).plan(&projection_context)?,
         ];
 
         // A cosmetic label rides on the view as a `[properties]` entry. It is

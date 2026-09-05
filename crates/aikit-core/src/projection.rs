@@ -206,6 +206,7 @@ pub fn target_label(target: &TargetId) -> String {
     match target.as_str() {
         TargetId::CLAUDE_CODE => "Claude".to_string(),
         TargetId::CODEX => "Codex".to_string(),
+        TargetId::DEEPSEEK_HARNESS => "DeepSeek Harness".to_string(),
         TargetId::SHELL => "Shell".to_string(),
         TargetId::AGENT_SKILLS => "Agent skills".to_string(),
         TargetId::HOOKS => "Hooks".to_string(),
