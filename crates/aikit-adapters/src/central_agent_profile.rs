@@ -59,10 +59,6 @@ pub struct CentralAgentProfileProjection {
     #[serde(default)]
     pub placement_intent_refs: Vec<ResourceRef>,
     #[serde(default)]
-    pub operative_requirement_refs: Vec<ResourceRef>,
-    #[serde(default)]
-    pub material_requirement_refs: Vec<ResourceRef>,
-    #[serde(default)]
     pub provenance_refs: Vec<ResourceRef>,
 }
 
@@ -157,8 +153,6 @@ mod tests {
             "knowledge_source_refs": ["source/central"],
             "computer_access_intent_refs": ["computer-access-intent/central"],
             "placement_intent_refs": [],
-            "operative_requirement_refs": [],
-            "material_requirement_refs": [],
             "provenance_refs": ["provenance/central-profile"]
         })
     }
