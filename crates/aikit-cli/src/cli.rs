@@ -886,6 +886,21 @@ pub enum WikiRootSub {
     Prune(WikiRootPruneArgs),
     /// Idempotently federate an existing project Wiki into the root Space.
     Adopt(WikiRootAdoptArgs),
+    /// Ensure a Space is anchored on its root node: the Central root on the
+    /// user identity node, or one project on its project root node.
+    Anchor(WikiRootAnchorArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WikiRootAnchorArgs {
+    /// The Central directory (or its wiki.json). Defaults to discovery from
+    /// the working directory; anchors the root Space on the identity node.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+    /// Anchor this project's Space instead of the Central root. The path is
+    /// the project root holding a ProjectCentral manifest.
+    #[arg(long, value_name = "PATH", conflicts_with = "root")]
+    pub project: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]

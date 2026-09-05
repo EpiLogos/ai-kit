@@ -795,3 +795,119 @@ fn stage_replaces_only_when_told_and_advances_the_revision() {
     assert_eq!(node["revision"], Value::from(2));
     assert_eq!(node["type"], Value::from("flow"));
 }
+
+// ---------------------------------------------------------------------------
+// root anchor
+// ---------------------------------------------------------------------------
+
+#[test]
+fn anchor_root_creates_a_minimal_identity_node_and_is_idempotent() {
+    let (work, scratch) = fixture();
+    let central = work.path().join("Central");
+    let root_wiki = central.join("Control/agents/wiki/wiki.json");
+    write(&root_wiki, &root_document(&[]));
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "root", "anchor", "--root", central.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["anchor"], Value::from("wiki:node:identity"));
+    assert_eq!(envelope["data"]["title"], Value::from("User identity"));
+
+    let held: Value = serde_json::from_str(&read(&root_wiki)).unwrap();
+    let space = held["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["ref"] == "central:wiki:root")
+        .unwrap();
+    assert_eq!(space["anchor_ref"], Value::from("wiki:node:identity"));
+    let identity = held["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["ref"] == "wiki:node:identity")
+        .unwrap();
+    assert_eq!(identity["type"], Value::from("identity"));
+
+    // Second run: nothing changes, the anchored Space reports as such.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "root", "anchor", "--root", central.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["outcome"]["changed"], Value::Bool(false));
+
+    // An authored identity node is never rewritten to become an anchor.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "node", "update", "wiki:node:identity", "--file", root_wiki.to_str().unwrap(), "--title", "Mine"],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    wiki(
+        scratch.path(),
+        &["wiki", "root", "anchor", "--root", central.to_str().unwrap()],
+    );
+    let held: Value = serde_json::from_str(&read(&root_wiki)).unwrap();
+    let identity = held["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["ref"] == "wiki:node:identity")
+        .unwrap();
+    assert_eq!(identity["title"], Value::from("Mine"));
+}
+
+#[test]
+fn anchor_project_names_the_root_node_from_the_project() {
+    let (work, scratch) = fixture();
+    let project = work.path().join("My-Project");
+    write(
+        &project.join("ProjectCentral/project.json"),
+        r#"{ "project_id": "project:my-project" }"#,
+    );
+    write(
+        &project.join("ProjectCentral/agents/wiki/wiki.json"),
+        &format!(
+            "{{\n  \"objects\": [\n    {}\n  ]\n}}\n",
+            project_space("central:wiki:project:project:my-project", 1, "central:wiki:root"),
+        ),
+    );
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "root",
+            "anchor",
+            "--project",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(
+        envelope["data"]["anchor"],
+        Value::from("wiki:node:project-root/my-project")
+    );
+    assert_eq!(envelope["data"]["title"], Value::from("My-Project"));
+
+    let held: Value =
+        serde_json::from_str(&read(&project.join("ProjectCentral/agents/wiki/wiki.json")))
+            .unwrap();
+    let space = held["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["ref"] == "central:wiki:project:project:my-project")
+        .unwrap();
+    assert_eq!(
+        space["anchor_ref"],
+        Value::from("wiki:node:project-root/my-project")
+    );
+    assert!(space["node_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry == &Value::from("wiki:node:project-root/my-project")));
+}

@@ -29,7 +29,8 @@ use aikit_core::resource::{ResourceRef, SourceRef};
 use aikit_core::{AikitError, Result};
 
 use crate::cli::{
-    WikiCmd, WikiEdgeArgs, WikiNodeArgs, WikiRootAdoptArgs, WikiRootArgs, WikiRootPruneArgs,
+    WikiCmd, WikiEdgeArgs, WikiNodeArgs, WikiRootAdoptArgs, WikiRootAnchorArgs, WikiRootArgs,
+    WikiRootPruneArgs,
     WikiSpaceCreateArgs, WikiSpaceLinkArgs, WikiStageArgs,
 };
 use crate::json;
@@ -88,6 +89,7 @@ pub fn run(cwd: &Path, command: WikiCmd) -> Result<WikiOutcome> {
             WikiRootSub::Doctor(args) => root_doctor(cwd, &args),
             WikiRootSub::Prune(args) => root_prune(cwd, &args),
             WikiRootSub::Adopt(args) => root_adopt(cwd, &args),
+            WikiRootSub::Anchor(args) => root_anchor(cwd, &args),
         },
         WikiSub::Stage(args) => stage(&args),
     }
@@ -486,7 +488,7 @@ fn root_doctor(cwd: &Path, args: &WikiRootArgs) -> Result<WikiOutcome> {
             continue;
         };
         let project = Some(project_id.to_string());
-        let expected = central.join("Work").join(project_id);
+        let expected = resolve_project_dir(&central, project_id);
         match project_wiki(&expected, project_id) {
             Ok(wiki_path) => {
                 let holds = std::fs::read_to_string(&wiki_path)
@@ -524,6 +526,10 @@ fn root_doctor(cwd: &Path, args: &WikiRootArgs) -> Result<WikiOutcome> {
         jval!({
             "root": root.display().to_string(),
             "root_ref": root_space.ref_id.to_string(),
+            "anchor": root_space
+                .anchor_ref
+                .as_ref()
+                .map(|anchor| anchor.to_string()),
             "children": root_space.child_space_refs.len(),
             "healthy": healthy,
             "dangling": dangling,
@@ -663,6 +669,164 @@ fn root_adopt(cwd: &Path, args: &WikiRootAdoptArgs) -> Result<WikiOutcome> {
         }),
         &outcome,
     ))
+}
+
+/// Ensure a Space is anchored on its root node: the Central root Space on a
+/// minimal user identity node, or one project's Space on its project root
+/// node named from the project. Minimal by design — the node carries identity
+/// (ref, type, title, source link) and nothing else; content is the world's
+/// business, not the anchor's. Idempotent in both directions: an already
+/// anchored Space reports no change, and an existing node is never rewritten
+/// to become an anchor.
+fn root_anchor(cwd: &Path, args: &WikiRootAnchorArgs) -> Result<WikiOutcome> {
+    let (wiki_path, space_label, mut node) = match &args.project {
+        Some(project) => {
+            let project_id = manifest_project_id(&project.join(PROJECT_MANIFEST_SOURCE))?;
+            let space_ref = project_wiki_space_ref(&project_id)?;
+            let wiki = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+            if !wiki.is_file() {
+                return Err(AikitError::new(
+                    "knowledge.wiki_project_wiki_missing",
+                    format!(
+                        "{} has no Wiki file at {}; anchor anchors an authored Wiki Space",
+                        project.display(),
+                        wiki.display()
+                    ),
+                )
+                .with("project", project_id)
+                .with("expected", wiki.display().to_string()));
+            }
+            let name = project
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| project_id.clone());
+            let slug: String = name
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            (
+                wiki,
+                space_ref.to_string(),
+                minimal_root_node(
+                    &format!("wiki:node:project-root/{slug}"),
+                    "project-root",
+                    &name,
+                    Some("ProjectCentral/project.json"),
+                )?,
+            )
+        }
+        None => {
+            let root = resolve_root_wiki(cwd, args.root.as_deref())?;
+            let identity_file = central_root(&root)?.join("Control/user/identity.md");
+            (
+                root,
+                ROOT_WIKI_SPACE_REF.to_string(),
+                minimal_root_node(
+                    "wiki:node:identity",
+                    "identity",
+                    "User identity",
+                    identity_file.is_file().then_some("Control/user/identity.md"),
+                )?,
+            )
+        }
+    };
+    node.space_refs = vec![ResourceRef::parse(&space_label)?];
+    let node_ref = node.ref_id.clone();
+
+    let outcome = mutate_file(&wiki_path, |doc, ledger| {
+        if !doc.holds(&node.ref_id) {
+            let created = doc.create_object(WikiObject::Node(node.clone()))?;
+            ledger.record(created);
+            let synced = doc.sync_space_memberships(&node)?;
+            ledger.record(synced);
+        }
+        let space_ref = ResourceRef::parse(&space_label)?;
+        let mut space = match doc.object(&space_ref) {
+            Some(WikiObject::Space(space)) => space.clone(),
+            Some(other) => {
+                return Err(AikitError::new(
+                    "knowledge.wiki_root_space_missing",
+                    format!("{space_ref} is held as a {}, not a Space", kind_of(other)),
+                )
+                .with("space", space_ref.to_string()))
+            }
+            None => {
+                return Err(AikitError::new(
+                    "knowledge.wiki_root_space_missing",
+                    format!("the Wiki file holds no {space_ref} Space"),
+                )
+                .with("space", space_ref.to_string()))
+            }
+        };
+        if space.anchor_ref.as_ref() != Some(&node.ref_id) {
+            space.anchor_ref = Some(node.ref_id.clone());
+            let updated = doc.update_object(WikiObject::Space(space))?;
+            ledger.record(updated);
+        }
+        Ok(())
+    })?;
+    Ok(WikiOutcome::wrote(
+        jval!({
+            "command": "root.anchor",
+            "file": wiki_path.display().to_string(),
+            "space": space_label,
+            "anchor": node_ref.to_string(),
+            "title": node.title,
+            "outcome": mutation_outcome(&outcome),
+        }),
+        &outcome,
+    ))
+}
+
+/// The minimal root node: identity and a source link, no content. What the
+/// world hangs off the anchor is authored elsewhere, by its own laws.
+fn minimal_root_node(
+    node_ref: &str,
+    node_type: &str,
+    title: &str,
+    source: Option<&str>,
+) -> Result<WikiNode> {
+    let sources: Vec<String> = source.into_iter().map(str::to_string).collect();
+    Ok(WikiNode {
+        profile: OKF_WIKI_PROFILE.to_string(),
+        ref_id: ResourceRef::parse(node_ref)?,
+        revision: 1,
+        provenance: provenance_from_sources(&sources)?,
+        node_type: node_type.to_string(),
+        title: Some(title.to_string()),
+        space_refs: Vec::new(),
+        source_refs: parse_source_refs(&sources)?,
+        local_space_ref: None,
+        extensions: BTreeMap::new(),
+    })
+}
+
+/// The directory in `Work/` that declares `project_id`. The direct
+/// `Work/<project_id>` path is the norm; when it misses, the manifests are
+/// scanned, because a declared id and its directory name may differ (an id
+/// like `project:ai-kit` lives in `Work/ai-kit`). Unreadable directories are
+/// skipped: the doctor reports what it can see.
+fn resolve_project_dir(central: &Path, project_id: &str) -> PathBuf {
+    let direct = central.join("Work").join(project_id);
+    if direct.join(PROJECT_MANIFEST_SOURCE).is_file() {
+        return direct;
+    }
+    let work = central.join("Work");
+    let Ok(entries) = std::fs::read_dir(&work) else {
+        return direct;
+    };
+    for entry in entries.flatten() {
+        let candidate = entry.path();
+        if candidate.join(PROJECT_MANIFEST_SOURCE).is_file()
+            && manifest_project_id(&candidate.join(PROJECT_MANIFEST_SOURCE))
+                .map(|declared| declared == project_id)
+                .unwrap_or(false)
+        {
+            return candidate;
+        }
+    }
+    direct
 }
 
 /// The project Wiki file for `project_id`, found by scanning the Central
