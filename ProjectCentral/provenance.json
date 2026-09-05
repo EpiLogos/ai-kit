@@ -1,0 +1,12 @@
+{
+  "entries": [
+    {
+      "action": "initialize",
+      "recorded_at_unix_seconds": 1788616265,
+      "source": null,
+      "source_preserved": false,
+      "target": "ProjectCentral/agents/wiki/wiki.json"
+    }
+  ],
+  "schema": "central.project.provenance/v1"
+}

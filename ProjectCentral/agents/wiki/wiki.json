@@ -1,0 +1,39 @@
+{
+  "objects": [
+    {
+      "anchor_ref": "wiki:node:project-root/ai-kit",
+      "child_space_refs": [],
+      "node_refs": [
+        "wiki:node:project-root/ai-kit"
+      ],
+      "object": "space",
+      "parent_space_refs": [
+        "central:wiki:root"
+      ],
+      "profile": "okf-wiki/v1",
+      "provenance": [],
+      "ref": "central:wiki:project:project:ai-kit",
+      "revision": 3,
+      "title": "project:ai-kit"
+    },
+    {
+      "object": "node",
+      "profile": "okf-wiki/v1",
+      "provenance": [
+        {
+          "source_ref": "ProjectCentral/project.json"
+        }
+      ],
+      "ref": "wiki:node:project-root/ai-kit",
+      "revision": 1,
+      "source_refs": [
+        "ProjectCentral/project.json"
+      ],
+      "space_refs": [
+        "central:wiki:project:project:ai-kit"
+      ],
+      "title": "ai-kit",
+      "type": "project-root"
+    }
+  ]
+}
