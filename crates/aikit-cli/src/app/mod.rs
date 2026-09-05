@@ -784,6 +784,73 @@ impl Service {
         self.projection_context_for(&self.view)
     }
 
+    /// Compose the live actor launch plan for the current project context:
+    /// Central-authored profile + Actuation model-bearing receipt → requested
+    /// actors → actor bootstrap. This is the CLI form of the composition the
+    /// palette performs during project-world resolution; harness and model are
+    /// disclosed only when a surface actually selected them, never guessed.
+    pub fn compose_plan(&self) -> Result<serde_json::Value> {
+        let project_root = self.descriptor.project_root.as_deref().ok_or_else(|| {
+            AikitError::new(
+                "compose.no_project",
+                "no project context here — run inside a project directory",
+            )
+        })?;
+        let central_root = process_central_root(Some(project_root));
+        let mut composition_error: Option<String> = None;
+        let composed = central_root.as_ref().and_then(|central| {
+            let runner = SystemRunner::new();
+            match compose_live_actor_inputs(&runner, central, project_root) {
+                Ok(composed) => composed,
+                Err(error) => {
+                    composition_error = Some(error.to_string());
+                    None
+                }
+            }
+        });
+
+        let resolution = match &composed {
+            Some(composed) => aikit_tui::project_world_service::context_resolution_with_actors(
+                self,
+                composed.requested_actors.clone(),
+            )?,
+            None => aikit_tui::project_world_service::context_resolution(self)?,
+        };
+        // The World (SessionSpace) identity is discoverable from the Project.
+        // Exactly one authored SessionSpace names it as canonical; ambiguity is
+        // never silently resolved, and one is never inferred from provider
+        // presence.
+        let session_space = SessionSpaceApplicationStore::new(self.home.clone())
+            .discover(Some(&resolution.project_binding.project))
+            .ok()
+            .filter(|states| states.len() == 1)
+            .and_then(|mut states| states.pop())
+            .map(|state| state.id().clone());
+        let request = aikit_core::ActorBootstrapRequest {
+            selected_harness: composed.as_ref().and_then(|c| c.selected_harness.clone()),
+            selected_model: composed.as_ref().and_then(|c| c.selected_model.clone()),
+            agent_session: composed.as_ref().and_then(|c| c.agent_session.clone()),
+            session_space,
+            ..aikit_core::ActorBootstrapRequest::default()
+        };
+        let plan = aikit_core::project_actor_bootstrap(&resolution, request)?;
+
+        Ok(serde_json::json!({
+            "project_root": project_root.display().to_string(),
+            "central_root": central_root.as_ref().map(|p| p.display().to_string()),
+            "composition_error": composition_error,
+            "composed_inputs": composed.as_ref().map(|c| serde_json::json!({
+                "agent": c.requested_actors.agent,
+                "agency": c.requested_actors.agency,
+                "host": c.requested_actors.host,
+                "selected_harness": c.selected_harness,
+                "selected_model": c.selected_model,
+                "agent_session": c.agent_session,
+            })),
+            "plan": plan,
+        }))
+    }
+
     fn has_project_skill_routing(&self) -> bool {
         self.project_specification().is_some()
     }

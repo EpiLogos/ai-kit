@@ -92,6 +92,8 @@ pub enum Command {
     Context(ContextCmd),
     /// Bring up, attach to and reconcile session topologies.
     Session(SessionCmd),
+    /// Compose the launch plan: Central profile + Actuation model-bearing → actor bootstrap.
+    Compose(ComposeArgs),
     /// Spawn, list and close agent tasks.
     Task(TaskCmd),
     /// Show the capture inbox.
@@ -129,6 +131,11 @@ pub enum Command {
     /// List bypasses issued and spent.
     Bypasses(BypassesArgs),
 }
+
+/// Arguments for `aikit compose` — the composition reads the authored ground;
+/// nothing here selects a model or harness by hand.
+#[derive(Debug, Args)]
+pub struct ComposeArgs {}
 
 #[derive(Debug, Args)]
 pub struct SkillCmd {

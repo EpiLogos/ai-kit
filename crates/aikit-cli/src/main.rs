@@ -190,6 +190,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Hook(c)) => cmd_hook(cwd, c),
         Some(Command::Capabilities(c)) => cmd_capabilities(cwd, c),
         Some(Command::Session(c)) => cmd_session(cwd, c),
+        Some(Command::Compose(a)) => cmd_compose(cwd, a),
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
         Some(Command::Inbox(a)) => cmd_inbox(cwd, a),
         Some(Command::Capture(a)) => cmd_capture(cwd, a),
@@ -302,6 +303,12 @@ fn cmd_skill(cwd: &std::path::Path, command: SkillCmd) -> Result<Reply> {
             ))
         }
     }
+}
+
+fn cmd_compose(cwd: &std::path::Path, _args: ComposeArgs) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let data = service.compose_plan()?;
+    Ok(reply(&service, data, diagnostic_warnings(&service)))
 }
 
 fn require_agent_skill(service: &Service, id: &CapsuleId) -> Result<()> {
