@@ -27,7 +27,7 @@
 //! failure is propagated instead of swallowed.
 
 pub mod agent_skills;
-mod bootstrap;
+pub mod bootstrap;
 pub mod broker;
 pub mod claude;
 pub mod codex;

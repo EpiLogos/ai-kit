@@ -111,6 +111,22 @@ pub fn render_managed_bootstrap(bootstrap: &ActorBootstrap) -> String {
         ));
     }
 
+    let engineering_ground: Vec<String> = bootstrap
+        .context_sources
+        .examples
+        .iter()
+        .map(|example| example.to_string())
+        .filter(|example| example.contains("governance/engineering/"))
+        .collect();
+    if !engineering_ground.is_empty() {
+        body.push_str("\n## Engineering ground\n\n");
+        for reference in &engineering_ground {
+            body.push_str(&format!(
+                "- `{reference}` — distilled from Control governance engineering statements; retrieve on demand with `aikit context`. Named, not copied.\n"
+            ));
+        }
+    }
+
     if let Some(runtime) = &bootstrap.runtime_body {
         body.push_str("\n## Runtime body\n\n");
         body.push_str(&format!("- Harness: `{}`\n", runtime.harness));
