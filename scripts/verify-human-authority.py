@@ -5,9 +5,9 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "skills/fixtures/human-authority/cases.toml"
-PRODUCT_SKILL = ROOT / "skills/registry/capsules/skill/aikit/product-understanding/payload/SKILL.md"
-GUIDANCE = ROOT / "skills/registry/capsules/guidance/aikit/living-project-collaboration/payload/guidance.md"
+FIXTURE = ROOT / "registry/fixtures/human-authority/cases.toml"
+PRODUCT_SKILL = ROOT / "registry/capsules/skill/aikit/product-understanding/payload/SKILL.md"
+GUIDANCE = ROOT / "registry/capsules/guidance/aikit/living-project-collaboration/payload/guidance.md"
 
 cases = tomllib.loads(FIXTURE.read_text(encoding="utf-8"))["case"]
 by_id = {case["id"]: case for case in cases}

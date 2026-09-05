@@ -139,6 +139,6 @@ Use the target's stable semantic/source/code refs where possible. If no such str
 
 ## Specimen
 
-`skills/fixtures/minimal-authored-skill/` is the representative small Skill produced by this procedure. `scripts/verify-native-skills.py` validates both its capsule path/id and its Skill frontmatter.
+`registry/fixtures/minimal-authored-skill/` is the representative small Skill produced by this procedure. `scripts/verify-native-skills.py` validates both its capsule path/id and its Skill frontmatter.
 
 For Method implementation/conformance, use AIKit's native `Method` / `resolve_method` / `resolve_praxis` contracts and their tests rather than inventing a second Method store in this Skill.

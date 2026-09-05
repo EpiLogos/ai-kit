@@ -5,8 +5,8 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REGISTRY = ROOT / "skills/registry/capsules"
-SETS = ROOT / "skills/skillsets"
+REGISTRY = ROOT / "registry/capsules"
+SETS = ROOT / "registry/skillsets"
 EXPECTED_SKILLS = {
     "skill/aikit/operation",
     "skill/aikit/profile-skillset",
@@ -23,6 +23,7 @@ EXPECTED_SKILLS = {
     "skill/aikit/component-surface-authoring",
     "skill/aikit/verification",
     "skill/aikit/meta-harness-craft",
+    "skill/aikit/wiki-inhabitation",
 }
 EXPECTED_GUIDANCE = {
     "guidance/aikit/living-project-collaboration",
@@ -116,14 +117,14 @@ extension_members = {
 if "skill/aikit/harness-adapter-authoring" not in extension_members:
     raise SystemExit("aikit:extension-developer: harness adapter authoring member missing")
 
-fixture = ROOT / "skills/fixtures/minimal-authored-skill"
+fixture = ROOT / "registry/fixtures/minimal-authored-skill"
 fdata = tomllib.loads((fixture / "manifest.toml").read_text(encoding="utf-8"))
 if fdata["id"] != "skill/aikit-fixture/inspect-source" or fdata["kind"] != "skill":
     raise SystemExit("authored Skill fixture manifest invalid")
 if not (fixture / "payload/SKILL.md").read_text().startswith("---\n"):
     raise SystemExit("authored Skill fixture body invalid")
 
-cases = tomllib.loads((ROOT / "skills/fixtures/product-understanding/cases.toml").read_text(encoding="utf-8"))["case"]
+cases = tomllib.loads((ROOT / "registry/fixtures/product-understanding/cases.toml").read_text(encoding="utf-8"))["case"]
 by_id = {case["id"]: case for case in cases}
 if set(by_id) != {
     "straight-retrieval-stops",
@@ -151,7 +152,7 @@ pressure = by_id["returned-reality-proposes-pressure"]
 if not pressure["proposal_only"] or pressure["authored_source_mutated"]:
     raise SystemExit("returned-reality fixture permits silent authored-source mutation")
 
-account_cases = tomllib.loads((ROOT / "skills/fixtures/account-authoring/cases.toml").read_text(encoding="utf-8"))["case"]
+account_cases = tomllib.loads((ROOT / "registry/fixtures/account-authoring/cases.toml").read_text(encoding="utf-8"))["case"]
 account_by_id = {case["id"]: case for case in account_cases}
 if set(account_by_id) != {
     "central-selected-world",
@@ -248,7 +249,7 @@ if len(lean_guidance.split()) > 330:
     raise SystemExit("lean project guidance has become procedural rather than orienting")
 
 operator = (REGISTRY / "skill/aikit/operation/payload/SKILL.md").read_text()
-if "SkillSet selected != Root position" not in (ROOT / "skills/README.md").read_text():
+if "SkillSet selected != Root position" not in (ROOT / "registry/README.md").read_text():
     raise SystemExit("suite authority distinction missing")
 if "projected Skill" not in operator:
     raise SystemExit("operator source/projection distinction missing")

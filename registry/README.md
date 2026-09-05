@@ -1,8 +1,8 @@
 # AIKit first-party operational Skills
 
-This directory publishes AIKit-owned Skills through the **existing capsule and SkillSet model**. It is source material for a managed registry/install path, not a second registry implementation.
+This directory is the AIKit first-party registry. It publishes AIKit-owned Skills through the **existing capsule and SkillSet model** — the same shape the loader consumes from installed homes — so a committed invalid capsule fails CI (`builtin_registry.rs`) instead of surfacing as a runtime problem on a user's machine. It is source material for a managed registry/install path, not a second registry implementation.
 
-`registry/capsules/` follows the same manifest/payload contract as `examples/registry`. `skillsets/` publishes explicit member lists plus stable semantic refs for the small default sets requested by AIKit #73.
+`capsules/` follows the same manifest/payload contract as `examples/registry`; a capsule's directory must agree with its declared id (`<kind>/<namespace>/<name>`), enforced by the loader's anti-masquerade check. `skillsets/` publishes explicit member lists plus stable semantic refs for the small default sets requested by AIKit #73. `fixtures/` holds authoring example skills.
 
 The registry may also contain a deliberately small first-party `guidance` capsule when project-facing orientation belongs in AIKit's existing bounded guidance composer rather than in Skill procedure. The distinction is intentional:
 

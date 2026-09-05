@@ -5,10 +5,10 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills/registry/capsules/skill/aikit/skill-authoring/payload/SKILL.md"
-MANIFEST = ROOT / "skills/registry/capsules/skill/aikit/skill-authoring/manifest.toml"
-REFERENCE = ROOT / "skills/registry/capsules/skill/aikit/skill-authoring/payload/references/instruction-architecture-review.md"
-FIXTURE = ROOT / "skills/fixtures/instruction-craft/cases.toml"
+SKILL = ROOT / "registry/capsules/skill/aikit/skill-authoring/payload/SKILL.md"
+MANIFEST = ROOT / "registry/capsules/skill/aikit/skill-authoring/manifest.toml"
+REFERENCE = ROOT / "registry/capsules/skill/aikit/skill-authoring/payload/references/instruction-architecture-review.md"
+FIXTURE = ROOT / "registry/fixtures/instruction-craft/cases.toml"
 
 skill = SKILL.read_text(encoding="utf-8")
 manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))

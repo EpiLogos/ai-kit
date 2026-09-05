@@ -32,4 +32,4 @@ output = "standalone-html"
 html_is_canonical_source = false
 preserve_projection_identity = true
 agent_requires_html_scrape = false
-required_template = "skills/registry/capsules/skill/aikit/html-account/payload/full-account-template.html"
+required_template = "registry/capsules/skill/aikit/html-account/payload/full-account-template.html"

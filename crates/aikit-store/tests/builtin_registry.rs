@@ -13,7 +13,7 @@ use aikit_store::registry::load_registry;
 #[test]
 fn committed_builtin_registry_has_no_manifest_problems() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let registry_root = repo_root.join("skills/registry");
+    let registry_root = repo_root.join("registry");
 
     let load = load_registry(&registry_root, RegistrySource::personal()).unwrap();
 
