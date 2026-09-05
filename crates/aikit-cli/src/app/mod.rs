@@ -835,6 +835,15 @@ impl Service {
         };
         let plan = aikit_core::project_actor_bootstrap(&resolution, request)?;
 
+        // The AIKit-home agent seed is the standing identity of the O:I agent
+        // (id, name, world tie — nothing else). It is disclosed alongside the
+        // Central composition; it never selects a harness or model, because
+        // binding happens at instantiation, when the live harness registers
+        // itself.
+        let seed_discovery =
+            aikit_adapters::home_agent_profile::discover_home_agent_profiles(self.home.root());
+        let home_seed = seed_discovery.exactly_one().cloned();
+
         // Instructive notes for the absence an owner can actually repair. Each
         // note names the surface that closes it; none of them fake a selection.
         let mut composition_notes: Vec<String> = Vec::new();
@@ -850,12 +859,37 @@ impl Service {
                 composition_error.as_deref().unwrap_or_default()
             ));
         } else if plan.agent.is_none() {
-            composition_notes.push(
-                "no AgentProfile resolves for this project — author one with: \
-                 ctrl action run agent-profile.save {\"scope\":\"project\", ...} \
-                 (owner-authored; detection keeps running without it)"
-                    .to_owned(),
-            );
+            match &home_seed {
+                Some(seed) => composition_notes.push(format!(
+                    "no Central AgentProfile resolves for this project — the AIKit-home seed \
+                     {} ({}) carries the standing agent identity; harness/model bind at \
+                     instantiation, not in the profile",
+                    seed.id,
+                    seed.name.as_deref().unwrap_or("unnamed")
+                )),
+                None => composition_notes.push(
+                    "no AgentProfile resolves for this project and no AIKit-home agent seed \
+                     exists — author one with: ctrl action run agent-profile.save \
+                     {\"scope\":\"project\", ...} (owner-authored; detection keeps running \
+                     without it)"
+                        .to_owned(),
+                ),
+            }
+        }
+        for problem in &seed_discovery.problems {
+            composition_notes.push(format!("home agent seed unreadable: {problem}"));
+        }
+        if seed_discovery.profiles.len() > 1 {
+            let ids = seed_discovery
+                .profiles
+                .iter()
+                .map(|profile| profile.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            composition_notes.push(format!(
+                "multiple home agent seeds found ({ids}) — specify which one this project \
+                 composes; none was guessed"
+            ));
         }
         if plan.harness.is_none() {
             composition_notes.push(format!(
@@ -876,6 +910,11 @@ impl Service {
             "central_root": central_root.as_ref().map(|p| p.display().to_string()),
             "composition_error": composition_error,
             "composition_notes": composition_notes,
+            "home_agent_seed": home_seed.as_ref().map(|seed| serde_json::json!({
+                "id": seed.id,
+                "name": seed.name,
+                "description": seed.description,
+            })),
             "composed_inputs": composed.as_ref().map(|c| serde_json::json!({
                 "agent": c.requested_actors.agent,
                 "agency": c.requested_actors.agency,

@@ -30,6 +30,7 @@ pub mod gateway_runtime;
 pub mod gateway_service;
 pub mod gitnexus;
 pub mod herdr;
+pub mod home_agent_profile;
 pub mod hyprland;
 pub mod interactive_connection;
 pub mod local_source_discovery;
