@@ -779,6 +779,7 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
 /// Append `bytes` to `plain` with escape sequences removed: ESC ( X charset
 /// picks, ESC ] … BEL operating commands, and CSI ESC [ … <final @-~>.
 /// Everything else — text and UTF-8 — passes through untouched.
+#[cfg(target_os = "macos")]
 fn strip_ansi_into(bytes: &[u8], plain: &mut Vec<u8>) {
     #[derive(PartialEq)]
     enum State {
