@@ -32,6 +32,7 @@ pub mod broker;
 pub mod claude;
 pub mod codex;
 pub mod dsh;
+pub mod zcode;
 
 use std::path::Path;
 
