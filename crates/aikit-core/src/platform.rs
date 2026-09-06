@@ -55,6 +55,12 @@ impl TargetId {
     pub const CLAUDE_CODE: &'static str = "claude-code";
     pub const CODEX: &'static str = "codex";
     pub const DEEPSEEK_HARNESS: &'static str = "deepseek-harness";
+    pub const AIDER: &'static str = "aider";
+    pub const CURSOR_CLI: &'static str = "cursor-cli";
+    pub const GEMINI_CLI: &'static str = "gemini-cli";
+    pub const GOOSE: &'static str = "goose";
+    pub const OPENCODE: &'static str = "opencode";
+    pub const QWEN_CODE: &'static str = "qwen-code";
     pub const AGENT_SKILLS: &'static str = "agent-skills";
     pub const HOOKS: &'static str = "hooks";
     pub const GUIDANCE: &'static str = "guidance";
@@ -74,6 +80,24 @@ impl TargetId {
     }
     pub fn deepseek_harness() -> Self {
         Self::new(Self::DEEPSEEK_HARNESS)
+    }
+    pub fn aider() -> Self {
+        Self::new(Self::AIDER)
+    }
+    pub fn cursor_cli() -> Self {
+        Self::new(Self::CURSOR_CLI)
+    }
+    pub fn gemini_cli() -> Self {
+        Self::new(Self::GEMINI_CLI)
+    }
+    pub fn goose() -> Self {
+        Self::new(Self::GOOSE)
+    }
+    pub fn opencode() -> Self {
+        Self::new(Self::OPENCODE)
+    }
+    pub fn qwen_code() -> Self {
+        Self::new(Self::QWEN_CODE)
     }
 
     pub fn as_str(&self) -> &str {
