@@ -58,14 +58,18 @@ impl<'a> ApplicationService<'a> {
     }
 
     fn navigation_index(&self) -> Result<ResourceSearchIndex> {
-        let mut index = self.backend.navigation_index();
-        let session_spaces = self.backend.session_space_navigation()?;
+        Self::navigation_index_from(self.backend)
+    }
+
+    fn navigation_index_from(backend: &dyn PaletteBackend) -> Result<ResourceSearchIndex> {
+        let mut index = backend.navigation_index();
+        let session_spaces = backend.session_space_navigation()?;
         install_session_space_navigation_resources(&mut index, &session_spaces);
         install_explain_history_actions(&mut index)?;
-        if let Some(familiarity) = self.backend.familiarity()? {
+        if let Some(familiarity) = backend.familiarity()? {
             index.apply_familiarity(
                 &familiarity,
-                &familiarity_context(self.backend.context()),
+                &familiarity_context(backend.context()),
                 now_ms(),
                 DEFAULT_FAMILIARITY_HALF_LIFE_MS,
             );
@@ -78,14 +82,22 @@ impl<'a> ApplicationService<'a> {
     /// before the expression is evaluated; they do not receive punctuation as a
     /// fake prose query and they do not mint a second path identity.
     pub fn resolve_search(&self, query: &str) -> Result<ResolvedSearchReadModel> {
-        let mut index = self.navigation_index()?;
+        Self::resolve_search_from(self.backend, query)
+    }
+
+    /// Shared read-only resolver for headless and interactive consumers.
+    pub fn resolve_search_from(
+        backend: &dyn PaletteBackend,
+        query: &str,
+    ) -> Result<ResolvedSearchReadModel> {
+        let mut index = Self::navigation_index_from(backend)?;
         let expression = parse_or_search_expression(query)?;
 
         for subject in resolve_subjects(&expression) {
             if subject.trim().is_empty() {
                 continue;
             }
-            if let Some(knowledge) = self.backend.knowledge_search(subject, 256)? {
+            if let Some(knowledge) = backend.knowledge_search(subject, 256)? {
                 for hit in knowledge.hits {
                     if ResourceIndex::resource(&index, &hit.resource).is_some() {
                         continue;
@@ -107,11 +119,11 @@ impl<'a> ApplicationService<'a> {
             }
         }
 
-        if let Some(familiarity) = self.backend.familiarity()? {
+        if let Some(familiarity) = backend.familiarity()? {
             index.apply_resolve_path_familiarity(
                 &familiarity,
                 &resolve_path_identity(&expression),
-                &familiarity_context(self.backend.context()),
+                &familiarity_context(backend.context()),
                 now_ms(),
                 DEFAULT_FAMILIARITY_HALF_LIFE_MS,
             );
@@ -151,8 +163,8 @@ impl<'a> ApplicationService<'a> {
             .collect::<Vec<_>>();
         let revision = format!(
             "aikit.resolve-search/v1:{}:{}:{}:{}",
-            self.backend.view().catalog_revision,
-            self.backend.view().hash,
+            backend.view().catalog_revision,
+            backend.view().hash,
             query,
             path.identity
         );

@@ -100,8 +100,8 @@ pub use actor_bootstrap::{
 };
 pub use application_context::application_context_resolution;
 pub use capsule::{
-    BypassPolicy, Capsule, Facets, Facing, FailurePolicy, HookPhase, Kind, LanguageFacet, Maturity,
-    Payload, Requirement, Surface,
+    BypassPolicy, Capsule, ControlGround, ControlStanding, Facets, Facing, FailurePolicy, HookPhase,
+    Kind, LanguageFacet, Maturity, Payload, Requirement, Surface,
 };
 pub use catalog::{Catalog, MemoryCatalog};
 pub use composition::{

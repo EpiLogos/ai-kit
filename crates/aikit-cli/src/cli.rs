@@ -60,7 +60,8 @@ pub enum Command {
     Tree(TreeArgs),
     /// Open the palette (the default when no subcommand is given).
     Ui(UiArgs),
-    /// Search the catalogue for capabilities.
+    /// Resolve typed resources and operative expressions through the shared search field.
+    #[command(visible_alias = "resolve")]
     Search(SearchArgs),
     /// Navigate provider-neutral project knowledge through the shared application faculty.
     Knowledge(KnowledgeCmd),
@@ -277,6 +278,11 @@ pub struct SourceAddDirectoryArgs {
     pub id: String,
     #[arg(value_name = "DIR")]
     pub directory: std::path::PathBuf,
+    /// The directory is Control ground: read the sibling `central.skill/v1`
+    /// contract (`skill.json`) beside each skill, so standing and provenance
+    /// become capability metadata and a retired standing never projects.
+    #[arg(long)]
+    pub control_ground: bool,
 }
 
 #[derive(Debug, Args)]

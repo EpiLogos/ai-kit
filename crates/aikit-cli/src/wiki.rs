@@ -1088,7 +1088,7 @@ fn stage(args: &WikiStageArgs) -> Result<WikiOutcome> {
         profile: OKF_WIKI_PROFILE.to_string(),
         ref_id: node_ref.clone(),
         revision: 1,
-        provenance: provenance_from_sources(&[source_label.clone()])?,
+        provenance: provenance_from_sources(std::slice::from_ref(&source_label))?,
         node_type,
         title: Some(title),
         space_refs: parse_refs(&args.space, "space")?,

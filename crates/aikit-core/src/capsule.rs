@@ -288,6 +288,82 @@ impl Facets {
     }
 }
 
+/// The standing a sibling product's Control ground publishes for a skill.
+///
+/// This is `[metadata.control]`: Central's `central.skill/v1` skill manifest
+/// contract (K1), read as capability metadata the way the harness adapters read
+/// Central projections. AIKit parses exactly the published surface — standing,
+/// scope, provenance, the retirement record — and never infers Control semantics
+/// from a path. Like the aikit facets, this **describes**; unlike them, one
+/// value also **withholds**: a `retired` standing is a ground fact that outranks
+/// every availability gate, because the owner has already ruled the skill off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ControlStanding {
+    Active,
+    Retired,
+}
+
+impl ControlStanding {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Retired => "retired",
+        }
+    }
+}
+
+/// `[metadata.control]` — the published Control ground facts for this capsule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ControlGround {
+    pub standing: ControlStanding,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub provenance: Option<String>,
+    #[serde(default)]
+    pub retired_by: Option<String>,
+    #[serde(default)]
+    pub retired_at_unix_seconds: Option<u64>,
+    #[serde(default)]
+    pub retirement_reason: Option<String>,
+}
+
+impl ControlGround {
+    pub fn is_retired(&self) -> bool {
+        self.standing == ControlStanding::Retired
+    }
+
+    /// The owner's own reason for the retirement, present exactly when retired.
+    /// Central's contract makes the retirement record mandatory for a retired
+    /// standing, so this is `Some` for every retired capsule that parses.
+    pub fn retirement_reason(&self) -> Option<&str> {
+        if self.is_retired() {
+            self.retirement_reason.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// The rule mirrored from the sibling contract: a retired standing without
+    /// its retirement record is a fault, because it would make the withholding
+    /// undisclosable — the reason would be silently swallowed.
+    fn validate(&self, id: &CapsuleId) -> Result<()> {
+        if self.is_retired() && self.retirement_reason.as_deref().unwrap_or("").trim().is_empty() {
+            return Err(AikitError::new(
+                "manifest.invalid",
+                format!(
+                    "`{id}` declares standing retired without a retirement reason; the ground \
+                     contract requires who/when/why so the withholding can be disclosed"
+                ),
+            )
+            .with("id", id.to_string()));
+        }
+        Ok(())
+    }
+}
+
 /// A declared dependency on another capsule.
 ///
 /// Deliberately an exact capsule id rather than a virtual provider: a
@@ -755,6 +831,11 @@ pub struct Capsule {
     /// The `[metadata.aikit]` facets, parsed. Describes; never selects.
     #[serde(default)]
     pub facets: Facets,
+    /// The `[metadata.control]` ground facts, parsed from a sibling product's
+    /// published skill manifest contract. Describes — and a retired standing
+    /// withholds, with the owner's reason.
+    #[serde(default)]
+    pub control: Option<ControlGround>,
     /// Every `[metadata.*]` namespace verbatim, including `aikit`, so unknown keys
     /// survive a round trip.
     #[serde(default)]
@@ -888,6 +969,26 @@ impl Capsule {
         };
         facets.validate(&id)?;
 
+        // `[metadata.control]` follows the same shape: one neighbour namespace
+        // parsed typed, every other namespace carried verbatim. A bad table is
+        // a RegistryProblem naming this capsule, not a silently dropped standing.
+        let control = match raw.metadata.get("control") {
+            Some(value) => Some(ControlGround::deserialize(value.clone()).map_err(|e| {
+                AikitError::new(
+                    "manifest.invalid",
+                    format!(
+                        "`{id}` has an unusable [metadata.control] table: {e}; the ground \
+                         contract publishes standing, scope, provenance and the retirement record"
+                    ),
+                )
+                .with("id", id.to_string())
+            })?),
+            None => None,
+        };
+        if let Some(control) = &control {
+            control.validate(&id)?;
+        }
+
         for arg in &raw.args {
             arg.validate_spec()?;
         }
@@ -931,6 +1032,7 @@ impl Capsule {
             config_merge: raw.config_merge,
             related_skills: raw.related_skills,
             facets,
+            control,
             metadata: raw.metadata,
             payload,
             source: None,

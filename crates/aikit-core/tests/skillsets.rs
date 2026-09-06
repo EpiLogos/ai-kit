@@ -176,3 +176,132 @@ fn a_set_asking_for_something_not_installed_says_so_rather_than_failing() {
     assert_eq!(projection.withheld.len(), 1);
     assert!(projection.summarize("sets/wishful").contains("not installed"));
 }
+
+// ---------------------------------------------------------------------------
+// Control ground standing: retirement withholds, with the owner's reason
+// ---------------------------------------------------------------------------
+
+/// A skill carrying `[metadata.control]` standing retired.
+fn retired_skill(id: &str, reason: &str) -> aikit_core::Capsule {
+    skill_with(
+        id,
+        &format!(
+            r#"
+[metadata.control]
+standing = "retired"
+scope = "control-machine"
+provenance = "adopted"
+retired-by = "owner"
+retired-at-unix-seconds = 1788653215
+retirement-reason = "{reason}"
+"#
+        ),
+    )
+}
+
+#[test]
+fn a_retired_member_never_projects_and_the_set_quotes_the_owners_reason() {
+    // OI-GIT-NORM K2: retirement is a standing on Control ground, and projection
+    // is inclusion — so retirement extends what is withheld, it never builds a
+    // second catalogue. The member stays a member; the set's reply carries the
+    // owner's own retirement reason, in the owner's own words.
+    let keeper = skill_with(
+        "skill/control/keeper",
+        r#"
+[metadata.control]
+standing = "active"
+provenance = "human-authored"
+"#,
+    );
+    let retired = retired_skill(
+        "skill/control/archived",
+        "Superseded by the ground-keeping skill.",
+    );
+    let view = Fixture::new(vec![keeper, retired])
+        .with_layers(vec![layer(
+            ScopeKind::Project,
+            &["skill/control/keeper", "skill/control/archived"],
+            &[],
+        )])
+        .resolve()
+        .expect("resolves");
+
+    assert!(
+        !view.is_active(&cid("skill/control/archived")),
+        "a retired standing must never reach the active view, whatever else it passes"
+    );
+    assert!(
+        view.unavailable_reason(&cid("skill/control/archived"))
+            .is_some(),
+        "the resolver, not the projection layer, holds the opinion"
+    );
+
+    let set = set_of("control", &["skill/control/keeper", "skill/control/archived"]);
+    let projection = skillset::project(&set, &view);
+
+    assert_eq!(projection.projected, vec![cid("skill/control/keeper")]);
+    assert_eq!(projection.withheld.len(), 1, "withheld, not dropped");
+    assert_eq!(projection.withheld[0].capsule, cid("skill/control/archived"));
+    let line = projection.withheld[0].describe();
+    assert!(line.contains("retired"), "the reply names retirement: {line}");
+    assert!(
+        line.contains("Superseded by the ground-keeping skill."),
+        "and quotes the owner's reason verbatim: {line}"
+    );
+    assert!(
+        projection.summarize("sets/control").contains("retired"),
+        "the one-line summary says it in one word"
+    );
+}
+
+#[test]
+fn a_retired_member_is_disclosed_retired_even_when_no_scope_selects_it() {
+    // The honesty law: "not enabled in this context" is a lie of emphasis for a
+    // retired member — enabling it would change nothing. The retirement reason
+    // outranks not-selected.
+    let retired = retired_skill(
+        "skill/control/archived",
+        "The experiment ended; the skill misroutes more than it helps.",
+    );
+    let view = Fixture::new(vec![retired])
+        .with_layers(vec![layer(ScopeKind::Project, &[], &[])])
+        .resolve()
+        .expect("resolves");
+
+    let set = set_of("control", &["skill/control/archived"]);
+    let projection = skillset::project(&set, &view);
+
+    assert!(projection.projected.is_empty());
+    let line = projection.withheld[0].describe();
+    assert!(
+        line.contains("retired on its Control ground"),
+        "retirement is the truth, not selection state: {line}"
+    );
+    assert!(
+        line.contains("The experiment ended"),
+        "the reason is still the owner's own: {line}"
+    );
+}
+
+#[test]
+fn an_active_control_standing_changes_nothing_about_selection() {
+    // Standing metadata describes; it never selects. An active standing must not
+    // make a member project any more than an absent one would.
+    let grounded = skill_with(
+        "skill/control/keeper",
+        r#"
+[metadata.control]
+standing = "active"
+provenance = "human-authored"
+"#,
+    );
+    let view = Fixture::new(vec![grounded])
+        .with_layers(vec![layer(ScopeKind::Project, &["skill/control/keeper"], &[])])
+        .resolve()
+        .expect("resolves");
+
+    let set = set_of("control", &["skill/control/keeper"]);
+    let projection = skillset::project(&set, &view);
+    assert_eq!(projection.projected, vec![cid("skill/control/keeper")]);
+    assert!(projection.is_complete());
+}

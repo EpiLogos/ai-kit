@@ -219,8 +219,28 @@ impl Withheld {
 fn withheld_reason(view: &ResolvedView, capsule: &CapsuleId) -> WithheldReason {
     match view.unavailable_reason(capsule) {
         Some(reason) => WithheldReason::Unavailable(reason.clone()),
-        // In the catalogue but not refused: nothing selects it here.
-        None if view.catalog_index.contains_key(capsule) => WithheldReason::NotSelected,
+        None if view.catalog_index.contains_key(capsule) => {
+            // Catalogued and not refused. Usually that means "no scope enables
+            // it here" — but when the catalogue carries a retired standing, that
+            // is the truer answer: the member would never project even if a
+            // scope did enable it. This reads the resolver's own ground metadata
+            // (the view's catalogue index); it forms no second availability
+            // opinion of its own.
+            if let Some(control) = view
+                .catalog_index
+                .get(capsule)
+                .and_then(|entry| entry.control.as_ref())
+                .filter(|control| control.is_retired())
+            {
+                return WithheldReason::Unavailable(UnavailableReason::RetiredStanding {
+                    retirement_reason: control
+                        .retirement_reason()
+                        .unwrap_or("no retirement reason was published")
+                        .to_string(),
+                });
+            }
+            WithheldReason::NotSelected
+        }
         None => WithheldReason::Unavailable(UnavailableReason::NotInCatalog),
     }
 }
@@ -276,6 +296,7 @@ fn short_reason(reason: &UnavailableReason) -> &'static str {
         UnavailableReason::Quarantined => "quarantined",
         UnavailableReason::Blocked => "blocked",
         UnavailableReason::DependencyUnavailable { .. } => "dependency unavailable",
+        UnavailableReason::RetiredStanding { .. } => "retired",
     }
 }
 

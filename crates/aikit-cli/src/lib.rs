@@ -15,6 +15,7 @@ pub mod adopt;
 pub mod app;
 pub mod cli;
 pub mod client;
+pub mod control_ground;
 mod cmux_config;
 pub mod collate;
 pub mod credential;

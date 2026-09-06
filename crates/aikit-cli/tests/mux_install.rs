@@ -789,7 +789,7 @@ fn strip_ansi_into(bytes: &[u8], plain: &mut Vec<u8>) {
         Csi,
     }
     thread_local! {
-        static STATE: std::cell::Cell<State> = std::cell::Cell::new(State::Text);
+        static STATE: std::cell::Cell<State> = const { std::cell::Cell::new(State::Text) };
     }
     STATE.with(|state| {
         for &byte in bytes {

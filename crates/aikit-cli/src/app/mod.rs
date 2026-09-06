@@ -1505,35 +1505,31 @@ impl ScopeWriter {
 
 impl AikitApplication for Service {
     fn search(&self, r: SearchRequest) -> Result<SearchResults> {
-        let query = r.query.to_lowercase();
-        let mut hits: Vec<(i32, SearchHit)> = Vec::new();
-        for (id, entry) in &self.view.catalog_index {
-            let haystack = format!(
-                "{} {} {} {}",
-                id,
-                entry.name,
-                entry.description,
-                entry.tags.join(" ")
-            )
-            .to_lowercase();
-            let score = subsequence_score(&query, &haystack);
-            if query.is_empty() || score > 0 {
-                hits.push((
-                    score,
-                    SearchHit {
-                        id: id.clone(),
-                        name: entry.name.clone(),
-                        kind: entry.kind,
-                        active: self.view.is_active(id),
-                        runnable: self.view.can_run(id),
-                    },
-                ));
-            }
-        }
-        hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
-        hits.truncate(r.limit);
+        let resolved = aikit_tui::application_service::ApplicationService::resolve_search_from(
+            self,
+            &r.query,
+        )?;
+        // This compatibility API returns packages only. Keep the canonical
+        // relative order and apply its limit after narrowing the typed field.
+        let rows = resolved
+            .resources
+            .resources
+            .into_iter()
+            .filter_map(|row| {
+                let id = CapsuleId::parse(row.resource.as_str()).ok()?;
+                let entry = self.view.catalog_index.get(&id)?;
+                Some(SearchHit {
+                    name: entry.name.clone(),
+                    kind: entry.kind,
+                    active: self.view.is_active(&id),
+                    runnable: self.view.can_run(&id),
+                    id,
+                })
+            })
+            .take(r.limit)
+            .collect();
         Ok(SearchResults {
-            rows: hits.into_iter().map(|(_, h)| h).collect(),
+            rows,
             warnings: self.load_warnings(),
         })
     }
@@ -2088,35 +2084,6 @@ fn resolve_or_explain(
     diagnosis
         .view
         .ok_or_else(|| AikitError::new("resolution.failed", "resolution produced no view"))
-}
-
-/// A tiny fuzzy scorer for the CLI's `search`: rewards contiguous, early matches
-/// of the query as a subsequence of the haystack. The palette uses the richer
-/// `nucleo` matcher; the CLI only needs a deterministic, dependency-free order.
-fn subsequence_score(query: &str, haystack: &str) -> i32 {
-    if query.is_empty() {
-        return 1;
-    }
-    let mut score = 0;
-    let mut last: Option<usize> = None;
-    let mut q = query.chars().peekable();
-    for (i, c) in haystack.chars().enumerate() {
-        if let Some(&needle) = q.peek() {
-            if needle == c {
-                score += match last {
-                    Some(prev) if prev + 1 == i => 3, // contiguous
-                    _ => 1,
-                };
-                last = Some(i);
-                q.next();
-            }
-        }
-    }
-    if q.peek().is_some() {
-        0 // not all query chars matched
-    } else {
-        score
-    }
 }
 
 fn plan_effect(adapter: &dyn TargetAdapter, rc: &ResolvedContext) -> Option<ActivationEffect> {

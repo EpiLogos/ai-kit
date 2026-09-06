@@ -137,6 +137,12 @@ pub enum UnavailableReason {
     DependencyUnavailable {
         dependency: CapsuleId,
     },
+    /// The Control ground this skill is authored on has retired it. The owner's
+    /// own reason travels with the withholding — a retired skill is never
+    /// projected, but it is never hidden either.
+    RetiredStanding {
+        retirement_reason: String,
+    },
 }
 
 impl UnavailableReason {
@@ -157,6 +163,9 @@ impl UnavailableReason {
             UnavailableReason::Blocked => "blocked".to_string(),
             UnavailableReason::DependencyUnavailable { dependency } => {
                 format!("its dependency {dependency} is unavailable")
+            }
+            UnavailableReason::RetiredStanding { retirement_reason } => {
+                format!("withheld-retired on its Control ground: {retirement_reason}")
             }
         }
     }
@@ -212,6 +221,11 @@ pub struct CatalogEntry {
     /// `explain`, the palette and the tree. Never a dependency.
     #[serde(default)]
     pub related_skills: Vec<CapsuleId>,
+    /// The Control ground facts this capsule carries (`[metadata.control]`),
+    /// so standing and provenance are disclosable without reaching back to the
+    /// catalog. Absent for skills from sources that publish no contract.
+    #[serde(default)]
+    pub control: Option<crate::capsule::ControlGround>,
 }
 
 /// The resolved graph for one context.
@@ -1036,12 +1050,24 @@ impl<'a> Resolver<'a> {
 
     /// The availability gate. Order matters: a hard refusal (policy, quarantine,
     /// block) must win over a soft one so the message names the real obstacle.
+    /// A retired standing outranks them all: the owner has already ruled the
+    /// skill off its ground, so no gate downstream can say anything truer.
     fn availability(
         &self,
         capsule: &Capsule,
         expansion: &Expansion,
         unavailable: &BTreeMap<CapsuleId, UnavailableReason>,
     ) -> Option<UnavailableReason> {
+        if let Some(control) = &capsule.control {
+            if control.is_retired() {
+                return Some(UnavailableReason::RetiredStanding {
+                    retirement_reason: control
+                        .retirement_reason()
+                        .unwrap_or("no retirement reason was published")
+                        .to_string(),
+                });
+            }
+        }
         if self.request.policy.denies(capsule).is_some() {
             return Some(UnavailableReason::DeniedByPolicy);
         }
@@ -1173,6 +1199,7 @@ impl<'a> Resolver<'a> {
                             .state_for(c.source.as_ref(), &c.id, c.revision.as_ref()),
                         exports: c.exported_commands(),
                         related_skills: c.related_skills.clone(),
+                        control: c.control.clone(),
                     },
                 )
             })

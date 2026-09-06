@@ -322,3 +322,120 @@ fn errors_expose_stable_machine_codes() {
     assert_eq!(err.code(), "id.malformed");
     assert!(!err.to_string().is_empty());
 }
+
+#[test]
+fn control_ground_metadata_parses_as_capability_metadata() {
+    // The sibling contract (`central.skill/v1`) lands in the capsule manifest as
+    // `[metadata.control]`, beside `[metadata.aikit]`. It parses typed, and an
+    // active standing is inert — it describes, it never selects.
+    let capsule = Capsule::from_toml_str(
+        r#"
+schema = 1
+id = "skill/control/keeper"
+kind = "skill"
+name = "keeper"
+description = "Ground-keeping skill."
+
+[metadata.control]
+standing = "active"
+scope = "control-user"
+provenance = "human-authored"
+
+[skill]
+root = "payload"
+"#,
+    )
+    .unwrap();
+    let control = capsule.control.as_ref().expect("control metadata parsed");
+    assert_eq!(control.standing.as_str(), "active");
+    assert!(!control.is_retired());
+    assert_eq!(control.retirement_reason(), None);
+    assert_eq!(control.provenance.as_deref(), Some("human-authored"));
+    assert_eq!(control.scope.as_deref(), Some("control-user"));
+}
+
+#[test]
+fn a_retired_standing_keeps_its_retirement_record_and_reason() {
+    let capsule = Capsule::from_toml_str(
+        r#"
+schema = 1
+id = "skill/control/archived"
+kind = "skill"
+name = "archived"
+description = "Retired skill."
+
+[metadata.control]
+standing = "retired"
+retired-by = "owner"
+retired-at-unix-seconds = 1788653215
+retirement-reason = "Misroutes more than it helps."
+
+[skill]
+root = "payload"
+"#,
+    )
+    .unwrap();
+    let control = capsule.control.as_ref().unwrap();
+    assert!(control.is_retired());
+    assert_eq!(
+        control.retirement_reason(),
+        Some("Misroutes more than it helps.")
+    );
+    assert_eq!(control.retired_by.as_deref(), Some("owner"));
+}
+
+#[test]
+fn a_retired_standing_without_a_reason_is_refused() {
+    // The mirror of the sibling contract's own fault rule: retirement without
+    // who/when/why would make the withholding undisclosable, so it never loads.
+    let error = Capsule::from_toml_str(
+        r#"
+schema = 1
+id = "skill/control/archived"
+kind = "skill"
+name = "archived"
+description = "Retired skill."
+
+[metadata.control]
+standing = "retired"
+
+[skill]
+root = "payload"
+"#,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "manifest.invalid");
+    assert!(error.to_string().contains("retirement reason"));
+}
+
+#[test]
+fn an_unusable_control_table_is_refused_naming_the_capsule() {
+    for bad in [
+        // An unknown field is a loud event, not a silent drop.
+        "standing = \"active\"\nmystery = true\n",
+        // An unresolvable standing must be refused, never projected.
+        "standing = \"unresolved\"\n",
+    ] {
+        let body = format!(
+            r#"
+schema = 1
+id = "skill/control/keeper"
+kind = "skill"
+name = "keeper"
+description = "Ground-keeping skill."
+
+[metadata.control]
+{bad}
+
+[skill]
+root = "payload"
+"#
+        );
+        let error = Capsule::from_toml_str(&body).unwrap_err();
+        assert_eq!(error.code(), "manifest.invalid", "{body}");
+        assert!(
+            error.to_string().contains("skill/control/keeper"),
+            "the problem names the capsule: {error}"
+        );
+    }
+}

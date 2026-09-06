@@ -35,6 +35,12 @@ pub struct SourceSpec {
 pub enum SourceKind {
     Directory {
         path: PathBuf,
+        /// The directory publishes the Control ground skill manifest contract
+        /// (`central.skill/v1`): each member skill may carry a `skill.json`
+        /// whose standing and provenance become capability metadata. Skills
+        /// without one stay ordinary skills.
+        #[serde(default)]
+        control_ground: bool,
     },
     Git {
         repository: String,
@@ -55,6 +61,17 @@ impl SourceKind {
     pub fn portable(&self) -> bool {
         matches!(self, Self::Git { .. })
     }
+
+    /// Whether this source reads the Control ground skill manifest contract.
+    pub fn control_ground(&self) -> bool {
+        matches!(
+            self,
+            Self::Directory {
+                control_ground: true,
+                ..
+            }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -72,6 +89,12 @@ pub struct SnapshotSkill {
     pub id: String,
     pub name: String,
     pub source_path: String,
+    /// The Control ground standing this skill carried into the snapshot, when
+    /// the source reads the contract and the skill published one.
+    #[serde(default)]
+    pub standing: Option<String>,
+    #[serde(default)]
+    pub retirement_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +123,8 @@ struct CapsuleManifest<'a> {
     name: &'a str,
     description: &'a str,
     skill: SkillSection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<MetadataSection<'a>>,
 }
 
 #[derive(Serialize)]
@@ -107,7 +132,35 @@ struct SkillSection {
     root: &'static str,
 }
 
-pub fn add_directory(home: &AikitHome, id: &str, path: &Path) -> Result<SourceSpec> {
+/// `[metadata]`, carrying the Control ground facts under the `control`
+/// namespace exactly as the capsule manifest carries AIKit's own under `aikit`.
+#[derive(Serialize)]
+struct MetadataSection<'a> {
+    control: ControlMetadataSection<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct ControlMetadataSection<'a> {
+    standing: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provenance: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retired_by: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retired_at_unix_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retirement_reason: Option<&'a str>,
+}
+
+pub fn add_directory(
+    home: &AikitHome,
+    id: &str,
+    path: &Path,
+    control_ground: bool,
+) -> Result<SourceSpec> {
     validate_id(id)?;
     let path = fs::canonicalize(path).map_err(|error| {
         AikitError::new(
@@ -127,7 +180,10 @@ pub fn add_directory(home: &AikitHome, id: &str, path: &Path) -> Result<SourceSp
         SourceSpec {
             schema: 1,
             id: id.to_string(),
-            kind: SourceKind::Directory { path },
+            kind: SourceKind::Directory {
+                path,
+                control_ground,
+            },
         },
     )
 }
@@ -252,7 +308,7 @@ pub fn sync(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
 
 fn prepare_source(spec: &SourceSpec, staging: &Path) -> Result<(PathBuf, Option<String>)> {
     match &spec.kind {
-        SourceKind::Directory { path } => Ok((path.clone(), None)),
+        SourceKind::Directory { path, .. } => Ok((path.clone(), None)),
         SourceKind::Git {
             repository,
             revision,
@@ -327,6 +383,17 @@ fn build_snapshot(
     for root in roots {
         reject_symlinks(&root)?;
         let skill = agent_skills::validate(&root)?;
+        // A Control-ground source reads the sibling contract beside each skill;
+        // every other source never opens skill.json at all.
+        let control = if spec.kind.control_ground() {
+            let directory_name = root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            crate::control_ground::read(&root, directory_name)?
+        } else {
+            None
+        };
         let relative = root.strip_prefix(scan_root).unwrap_or(Path::new(""));
         let capsule_tail = if relative.as_os_str().is_empty() {
             skill.name.clone()
@@ -351,6 +418,16 @@ fn build_snapshot(
             name: &skill.name,
             description: &skill.description,
             skill: SkillSection { root: "payload" },
+            metadata: control.as_ref().map(|ground| MetadataSection {
+                control: ControlMetadataSection {
+                    standing: &ground.standing,
+                    scope: ground.scope.as_deref(),
+                    provenance: ground.provenance.as_deref(),
+                    retired_by: ground.retired_by.as_deref(),
+                    retired_at_unix_seconds: ground.retired_at_unix_seconds,
+                    retirement_reason: ground.retirement_reason.as_deref(),
+                },
+            }),
         })
         .map_err(|error| {
             AikitError::new(
@@ -378,10 +455,24 @@ fn build_snapshot(
             hasher.update(&(bytes.len() as u64).to_le_bytes());
             hasher.update(&bytes);
         }
+        // The standing participates in the snapshot identity even though its
+        // source bytes are already hashed: a standing change must always be a
+        // new candidate, never a no-op that leaves the promoted snapshot
+        // speaking for ground that has moved.
+        if let Some(ground) = &control {
+            hash_field(&mut hasher, &format!("control/{}", ground.standing));
+            if let Some(reason) = &ground.retirement_reason {
+                hash_field(&mut hasher, reason);
+            }
+        }
         skills.push(SnapshotSkill {
             id,
             name: skill.name,
             source_path: path_text(relative),
+            standing: control.as_ref().map(|ground| ground.standing.clone()),
+            retirement_reason: control
+                .as_ref()
+                .and_then(|ground| ground.retirement_reason.clone()),
         });
     }
     skills.sort_by(|left, right| left.id.cmp(&right.id));

@@ -402,12 +402,14 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
     let home = service.home();
     match command.command {
         SourceSub::AddDirectory(args) => {
-            let spec = skill_sources::add_directory(home, &args.id, &args.directory)?;
+            let spec =
+                skill_sources::add_directory(home, &args.id, &args.directory, args.control_ground)?;
             Ok(reply(
                 &service,
                 jval!({
                     "id": spec.id,
                     "kind": spec.kind.label(),
+                    "control_ground": spec.kind.control_ground(),
                     "portable": spec.kind.portable(),
                 }),
                 vec![],
@@ -465,17 +467,32 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
         SourceSub::Show(args) => {
             let status = skill_sources::status(home, &args.id)?;
             let active_registry = skill_sources::active_registry(home, &args.id)?;
+            let retired = |record: &Option<skill_sources::SnapshotRecord>| {
+                record
+                    .as_ref()
+                    .map(|snapshot| {
+                        snapshot
+                            .skills
+                            .iter()
+                            .filter(|skill| skill.standing.as_deref() == Some("retired"))
+                            .count()
+                    })
+                    .unwrap_or(0)
+            };
             Ok(reply(
                 &service,
                 jval!({
                     "id": status.spec.id,
                     "kind": status.spec.kind.label(),
+                    "control_ground": status.spec.kind.control_ground(),
                     "portable": status.spec.kind.portable(),
                     "candidate_snapshot": status.state.candidate_snapshot,
                     "active_snapshot": status.state.active_snapshot,
                     "active_registry": active_registry.map(|path| path.display().to_string()),
                     "candidate_skills": status.candidate.as_ref().map(|record| record.skills.len()),
                     "active_skills": status.active.as_ref().map(|record| record.skills.len()),
+                    "candidate_retired_skills": retired(&status.candidate),
+                    "active_retired_skills": retired(&status.active),
                     "rollback_points": status.state.history,
                 }),
                 vec![],
@@ -1601,7 +1618,7 @@ fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
         .catalog
         .capsules()
         .into_iter()
-        .find(|capsule| &capsule.id == &capability)
+        .find(|capsule| capsule.id == capability)
         .map(|capsule| (capsule.source.clone(), capsule.revision.clone()));
     let Some((catalog_source, revision)) = found else {
         return Ok(reply(

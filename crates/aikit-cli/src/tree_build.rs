@@ -87,7 +87,16 @@ fn kinds_root(service: &Service) -> Node {
     let mut by_kind: BTreeMap<Kind, Vec<Node>> = BTreeMap::new();
 
     for (id, entry) in &view.catalog_index {
-        let state = if view.is_active(id) {
+        // A retired standing is disclosed as itself, whatever the selection
+        // state beneath it: "inactive" would imply enabling it somewhere is all
+        // the skill waits for, and for retired ground that is never true.
+        let state = if entry
+            .control
+            .as_ref()
+            .is_some_and(|control| control.is_retired())
+        {
+            "retired · never projects"
+        } else if view.is_active(id) {
             "active"
         } else if view.unavailable.contains_key(id) {
             "unavailable"
