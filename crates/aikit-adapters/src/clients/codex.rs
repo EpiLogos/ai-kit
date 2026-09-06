@@ -57,21 +57,13 @@ use aikit_core::resolve::{ActiveCapability, SelectionOrigin};
 use aikit_core::scope::ScopeKind;
 use aikit_core::{AikitError, Result};
 
+use crate::actuation_harness_capability::{CapabilityOutcome, HarnessCapability};
+
 use super::agent_skills;
 use super::bootstrap;
 use super::ClientAdapter;
 
 pub const CLIENT: &str = "codex";
-
-/// The events AIKit installs a durable dispatcher entry for.
-pub const DISPATCH_EVENTS: [&str; 6] = [
-    "PreToolUse",
-    "PostToolUse",
-    "UserPromptSubmit",
-    "SessionStart",
-    "Stop",
-    "SessionEnd",
-];
 
 /// Codex's discovery path, relative to the tree root.
 const SKILLS_PREFIX: &str = ".agents/skills";
@@ -142,6 +134,7 @@ pub struct CodexAdapter {
     accept_shared_projection: bool,
     materialization: MaterializationMode,
     binary: String,
+    capability: Option<HarnessCapability>,
 }
 
 impl CodexAdapter {
@@ -152,6 +145,37 @@ impl CodexAdapter {
             accept_shared_projection: false,
             materialization: MaterializationMode::default(),
             binary: CLIENT.to_string(),
+            capability: None,
+        }
+    }
+
+    /// Install derives its events from Actuation's capability descriptor.
+    #[must_use]
+    pub fn with_capability(mut self, capability: HarnessCapability) -> Self {
+        self.capability = Some(capability);
+        self
+    }
+
+    fn descriptor_events(&self) -> Result<Vec<(String, String)>> {
+        match &self.capability {
+            Some(capability) => {
+                let (mapped, _unrouted) =
+                    CapabilityOutcome::Descriptor(Box::new(capability.clone())).dispatch_events();
+                if mapped.is_empty() {
+                    return Err(AikitError::new(
+                        "client.capability_without_dispatch_events",
+                        "the codex capability descriptor maps none of its native events onto                          AIKit's dispatch boundaries",
+                    ));
+                }
+                Ok(mapped
+                    .into_iter()
+                    .map(|(kind, native)| (native, kind.as_str().to_string()))
+                    .collect())
+            }
+            None => Err(AikitError::new(
+                "client.capability_unavailable",
+                "no capability descriptor was supplied: AIKit installs only what Actuation                  declares the harness to be, and guessing is not installation",
+            )),
         }
     }
 
@@ -486,15 +510,18 @@ impl ClientAdapter for CodexAdapter {
     }
 
     fn install(&self, _config_dir: &Path) -> Result<Vec<ProjectionItem>> {
+        // (native event name, AIKit boundary name) pairs from the descriptor.
+        let events = self.descriptor_events()?;
         let mut contents = String::from(
             "# >>> aikit >>>\n\
-             # Managed by AIKit. One durable dispatcher entry per Codex event; the chain each\n\
-             # one runs is rebuilt from the current generation on every dispatch, so this file\n\
-             # never has to change when capabilities do.\n",
+             # Managed by AIKit. One durable dispatcher entry per Codex event; the chain each\
+             # one runs is rebuilt from the current generation on every dispatch, so this file\
+             # never has to change when capabilities do. Events are whatever Actuation's\
+             # capability descriptor declares codex to carry.\n",
         );
-        for event in DISPATCH_EVENTS {
+        for (native, boundary) in &events {
             contents.push_str(&format!(
-                "\n[[hooks]]\nevent = \"{event}\"\ncommand = \"aikit hook dispatch {CLIENT} {event}\"\n"
+                "\n[[hooks]]\nevent = \"{native}\"\ncommand = \"aikit hook dispatch {CLIENT} {boundary}\"\n"
             ));
         }
         contents.push_str("\n# <<< aikit <<<\n");

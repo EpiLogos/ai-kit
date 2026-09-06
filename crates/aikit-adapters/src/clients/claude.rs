@@ -38,6 +38,8 @@ use aikit_core::projection::{
 };
 use aikit_core::{AikitError, Result};
 
+use crate::actuation_harness_capability::{CapabilityOutcome, HarnessCapability};
+
 use super::agent_skills;
 use super::bootstrap;
 use super::ClientAdapter;
@@ -45,19 +47,10 @@ use super::ClientAdapter;
 /// The client's own name for itself in a hook command.
 pub const CLIENT: &str = "claude";
 
-/// The events AIKit installs a durable dispatcher entry for.
-///
-/// One entry per event, forever: the chain that runs behind it is rebuilt from
-/// the current generation on every dispatch, so the client's configuration never
-/// has to change again when capabilities do.
-pub const DISPATCH_EVENTS: [HookEventKind; 6] = [
-    HookEventKind::PreToolUse,
-    HookEventKind::PostToolUse,
-    HookEventKind::UserPromptSubmit,
-    HookEventKind::SessionStart,
-    HookEventKind::Stop,
-    HookEventKind::SessionEnd,
-];
+/// The events AIKit installs are read from Actuation's capability descriptor,
+/// never hard-coded here. A descriptor event maps to a dispatch boundary by
+/// its native name, which is the exact key the harness spells in its settings.
+pub type DescriptorEvents = Vec<(HookEventKind, String)>;
 
 /// The projection subdirectory Claude looks in, relative to `--add-dir`.
 const SKILLS_PREFIX: &str = ".claude/skills";
@@ -66,6 +59,7 @@ pub struct ClaudeAdapter {
     generation_root: PathBuf,
     materialization: MaterializationMode,
     binary: String,
+    capability: Option<HarnessCapability>,
 }
 
 impl ClaudeAdapter {
@@ -74,6 +68,40 @@ impl ClaudeAdapter {
             generation_root: generation_root.into(),
             materialization: MaterializationMode::default(),
             binary: CLIENT.to_string(),
+            capability: None,
+        }
+    }
+
+    /// Install derives its events and seams from Actuation's capability
+    /// descriptor. Without one the adapter refuses: hard-coding harness facts
+    /// here is exactly the rediscovery the ownership split forbids.
+    #[must_use]
+    pub fn with_capability(mut self, capability: HarnessCapability) -> Self {
+        self.capability = Some(capability);
+        self
+    }
+
+    fn descriptor_events(&self) -> Result<DescriptorEvents> {
+        match &self.capability {
+            Some(capability) => {
+                let (mut mapped, unrouted) =
+                    CapabilityOutcome::Descriptor(Box::new(capability.clone())).dispatch_events();
+                mapped.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                if mapped.is_empty() {
+                    return Err(AikitError::new(
+                        "client.capability_without_dispatch_events",
+                        format!(
+                            "the {} capability descriptor maps none of its native events onto AIKit's dispatch boundaries (unrouted: {unrouted:?})",
+                            capability.harness_slug
+                        ),
+                    ));
+                }
+                Ok(mapped)
+            }
+            None => Err(AikitError::new(
+                "client.capability_unavailable",
+                "no capability descriptor was supplied: AIKit installs only what Actuation                  declares the harness to be, and guessing is not installation",
+            )),
         }
     }
 
@@ -226,7 +254,18 @@ impl ClientAdapter for ClaudeAdapter {
     }
 
     fn install(&self, config_dir: &Path) -> Result<Vec<ProjectionItem>> {
-        let path = config_dir.join("settings.json");
+        let events = self.descriptor_events()?;
+        let file_name = self
+            .capability
+            .as_ref()
+            .map(|capability| {
+                Path::new(&capability.install_seam.config_path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "settings.json".to_string())
+            })
+            .unwrap_or_else(|| "settings.json".to_string());
+        let path = config_dir.join(&file_name);
         let existing = match std::fs::read_to_string(&path) {
             Ok(contents) => Some(contents),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -239,8 +278,8 @@ impl ClientAdapter for ClaudeAdapter {
             }
         };
 
-        let merged = merge_dispatcher_entries(existing.as_deref())?;
-        Ok(vec![ProjectionItem::write("settings.json", merged)?])
+        let merged = merge_dispatcher_entries(existing.as_deref(), &events)?;
+        Ok(vec![ProjectionItem::write(&file_name, merged)?])
     }
 }
 
@@ -267,7 +306,7 @@ fn is_aikit_entry(command: &str) -> bool {
 /// unrelated events, and the user's own hooks inside events AIKit also uses.
 /// What is *not* preserved is a previous AIKit entry, because leaving one behind
 /// next to a new one would fire the whole chain twice.
-pub fn merge_dispatcher_entries(existing: Option<&str>) -> Result<String> {
+pub fn merge_dispatcher_entries(existing: Option<&str>, events: &DescriptorEvents) -> Result<String> {
     let mut document: serde_json::Value = match existing {
         None => serde_json::json!({}),
         Some(raw) if raw.trim().is_empty() => serde_json::json!({}),
@@ -326,7 +365,7 @@ pub fn merge_dispatcher_entries(existing: Option<&str>) -> Result<String> {
         }
     }
 
-    for event in DISPATCH_EVENTS {
+    for (event, native_name) in events {
         let mut entry = serde_json::Map::new();
         // A matcher is only meaningful where the event carries a tool name;
         // elsewhere it is noise that invites people to edit it.
@@ -335,11 +374,11 @@ pub fn merge_dispatcher_entries(existing: Option<&str>) -> Result<String> {
         }
         entry.insert(
             "hooks".to_string(),
-            serde_json::json!([{ "type": "command", "command": dispatch_command(&event) }]),
+            serde_json::json!([{ "type": "command", "command": dispatch_command(event) }]),
         );
 
         let list = hooks
-            .entry(event.as_str().to_string())
+            .entry(native_name.clone())
             .or_insert_with(|| serde_json::json!([]));
         match list.as_array_mut() {
             Some(array) => array.push(serde_json::Value::Object(entry)),

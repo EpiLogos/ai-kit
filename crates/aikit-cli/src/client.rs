@@ -13,14 +13,62 @@ use aikit_core::procedure::{Inverse, Plan, Procedure, ProcedureKind, WorldEdit};
 use aikit_core::projection::ProjectionItem;
 use aikit_core::{AikitError, Result};
 
+use aikit_adapters::actuation_harness_capability::{
+    intake_actuation_capability, CapabilityOutcome, HarnessCapability,
+};
 use aikit_adapters::clients::{
     broker::BrokerAdapter, claude::ClaudeAdapter, codex::CodexAdapter, ClientAdapter,
 };
+use aikit_adapters::runner::SystemRunner;
 
 use crate::app::Service;
 
-/// The clients AIKit can install for, and where each keeps its configuration.
-fn adapter_for(service: &Service, client: &str) -> Result<(Box<dyn ClientAdapter>, PathBuf)> {
+/// Where each client's dispatch wiring lands, decided the same way every time:
+/// Actuation's capability descriptor declares the seam when it is reachable;
+/// otherwise the row carries the disclosure and the legacy default path is
+/// used for read models only. The broker is AIKit's own config home.
+fn client_home(seam_path: &str) -> Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let expanded = seam_path
+        .strip_prefix("~/")
+        .map(|rest| home.join(rest))
+        .unwrap_or_else(|| PathBuf::from(seam_path));
+    expanded
+        .parent()
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            AikitError::new(
+                "client.seam_has_no_directory",
+                format!("the capability seam `{seam_path}` has no parent directory"),
+            )
+        })
+}
+
+/// Intake of one harness's capability descriptor: a descriptor, or a
+/// disclosed unavailability — never a hard-coded substitute.
+fn capability_for(client: &str, slug: &str) -> Result<HarnessCapability> {
+    match intake_actuation_capability(&SystemRunner::new(), "actuation", slug) {
+        CapabilityOutcome::Descriptor(capability) => Ok(*capability),
+        CapabilityOutcome::Unavailable { reason } => Err(AikitError::new(
+            "client.capability_unavailable",
+            format!(
+                "no capability descriptor for {slug}: AIKit installs only what Actuation \
+                 declares the harness to be ({reason})"
+            ),
+        )
+        .with("client", client.to_string())
+        .with("harness", slug.to_string())),
+    }
+}
+
+/// The adapter plus its configuration home. `capability` is `None` when
+/// Actuation's descriptor is unreachable — readable, but not installable.
+fn adapter_for(
+    service: &Service,
+    client: &str,
+) -> Result<(Box<dyn ClientAdapter>, Option<HarnessCapability>, PathBuf)> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -32,12 +80,37 @@ fn adapter_for(service: &Service, client: &str) -> Result<(Box<dyn ClientAdapter
         .unwrap_or_else(|| PathBuf::from("."));
 
     match client {
-        "claude" | "claude-code" => Ok((
-            Box::new(ClaudeAdapter::new(ctx_dir)),
-            home.join(".claude"),
-        )),
-        "codex" => Ok((Box::new(CodexAdapter::new(tree)), home.join(".codex"))),
-        "broker" => Ok((Box::new(BrokerAdapter::new()), home.join(".aikit"))),
+        "claude" | "claude-code" => match capability_for(client, "claude-code") {
+            Ok(capability) => {
+                let config_dir = client_home(&capability.install_seam.config_path)?;
+                Ok((
+                    Box::new(ClaudeAdapter::new(ctx_dir).with_capability(capability.clone())),
+                    Some(capability),
+                    config_dir,
+                ))
+            }
+            Err(_) => Ok((
+                Box::new(ClaudeAdapter::new(ctx_dir)) as Box<dyn ClientAdapter>,
+                None,
+                home.join(".claude"),
+            )),
+        },
+        "codex" => match capability_for(client, "codex") {
+            Ok(capability) => {
+                let config_dir = client_home(&capability.install_seam.config_path)?;
+                Ok((
+                    Box::new(CodexAdapter::new(tree).with_capability(capability.clone())),
+                    Some(capability),
+                    config_dir,
+                ))
+            }
+            Err(_) => Ok((
+                Box::new(CodexAdapter::new(tree)) as Box<dyn ClientAdapter>,
+                None,
+                home.join(".codex"),
+            )),
+        },
+        "broker" => Ok((Box::new(BrokerAdapter::new()), None, home.join(".aikit"))),
         other => Err(AikitError::new(
             "client.unknown",
             format!("`{other}` is not a client AIKit knows; try claude, codex or broker"),
@@ -48,7 +121,17 @@ fn adapter_for(service: &Service, client: &str) -> Result<(Box<dyn ClientAdapter
 
 /// Plan the install as a Procedure.
 pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
-    let (adapter, config_dir) = adapter_for(service, client)?;
+    let (adapter, capability, config_dir) = adapter_for(service, client)?;
+    if capability.is_none() && client != "broker" {
+        return Err(AikitError::new(
+            "client.capability_unavailable",
+            format!(
+                "cannot install for {client}: Actuation's capability descriptor is unreachable, \
+                 and AIKit installs only what Actuation declares the harness to be"
+            ),
+        )
+        .with("client", client.to_string()));
+    }
     let items = adapter.install(&config_dir)?;
 
     let mut plan = Plan::new().with_note(format!(
@@ -103,7 +186,7 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
 
 /// The argv that starts a client against this context's projection.
 pub fn launch_command(service: &Service, client: &str) -> Result<Vec<String>> {
-    let (adapter, _) = adapter_for(service, client)?;
+    let (adapter, _, _) = adapter_for(service, client)?;
     let rc = service.projection_context()?;
     let argv = adapter.launch_command(&rc);
     if argv.is_empty() {
@@ -133,7 +216,7 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
         if only.is_some_and(|o| o != client && !(o == "claude-code" && client == "claude")) {
             continue;
         }
-        let (adapter, config_dir) = adapter_for(service, client)?;
+        let (adapter, capability, config_dir) = adapter_for(service, client)?;
         let planned = adapter.plan(&rc);
         let semantic_items = match client {
             "claude" | "codex" => rc.view.active_of_kind(Kind::Skill).len(),
@@ -148,6 +231,7 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
             "items": planned.as_ref().ok().map(|_| semantic_items),
             "materialization_items": planned.as_ref().ok().map(|p| p.items.len()),
             "actor_bootstrap": rc.actor_bootstrap.is_some(),
+            "capability": if capability.is_some() { "descriptor" } else { "unavailable" },
             "notes": planned.as_ref().ok().map(|p| p.notes.clone()).unwrap_or_default(),
             "error": planned.as_ref().err().map(|e| e.message().to_string()),
         }));

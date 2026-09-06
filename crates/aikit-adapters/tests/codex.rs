@@ -21,6 +21,7 @@ use common::*;
 
 use std::path::Path;
 
+use aikit_adapters::actuation_harness_capability::HarnessCapability;
 use aikit_adapters::clients::codex::{CodexAdapter, SharedTreeStrategy};
 use aikit_adapters::clients::ClientAdapter;
 use aikit_core::context::Isolation;
@@ -411,11 +412,46 @@ fn a_fallback_effect_survives_a_no_op_apply_rather_than_becoming_immediate() {
     );
 }
 
+/// Actuation's declared codex capability, as a test fixture: the events
+/// codex actually carries (native snake_case names), and the honest absences.
+fn codex_capability() -> HarnessCapability {
+    serde_json::from_value(serde_json::json!({
+        "schema": "actuation.harness-capability/v1",
+        "document": "capability",
+        "harness_slug": "codex",
+        "native_events": [
+            { "event": "session-start", "native_name": "session_start", "transport": "hooks-json-file", "can_block": false, "context_channel": "none" },
+            { "event": "pre-tool-use", "native_name": "pre_tool_use", "transport": "hooks-json-file", "can_block": false, "context_channel": "none" },
+            { "event": "post-tool-use", "native_name": "post_tool_use", "transport": "hooks-json-file", "can_block": false, "context_channel": "none" },
+            { "event": "notification", "native_name": "notify: agent-turn-complete", "transport": "toml-notify", "can_block": false, "context_channel": "none" }
+        ],
+        "injection_channel": { "kind": "none", "mechanism": "no declared injection channel" },
+        "blocking_semantics": { "kind": "none" },
+        "wake_capability": { "kind": "none" },
+        "install_seam": {
+            "config_path": ".codex/hooks.json",
+            "format": "json",
+            "entry_shape": "per-event hook command entries",
+            "ownership_marker": "command resolves to the AIKit dispatch executable",
+            "preserves_foreign_entries": true
+        },
+        "uninstall_seam": {
+            "config_path": ".codex/hooks.json",
+            "format": "json",
+            "entry_shape": "marker-matched entries removed",
+            "ownership_marker": "command resolves to the AIKit dispatch executable",
+            "preserves_foreign_entries": true
+        },
+        "provenance": { "authored_by": "test", "source_refs": ["survey:test"] }
+    }))
+    .unwrap()
+}
+
 #[test]
 fn installing_writes_an_aikit_owned_dispatcher_file_and_is_idempotent() {
     let tree = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
-    let adapter = CodexAdapter::new(tree.path());
+    let adapter = CodexAdapter::new(tree.path()).with_capability(codex_capability());
 
     let items = adapter.install(config.path()).unwrap();
     materialize(&items, config.path());
@@ -425,19 +461,19 @@ fn installing_writes_an_aikit_owned_dispatcher_file_and_is_idempotent() {
     let second = std::fs::read_to_string(config.path().join("hooks/aikit.toml")).unwrap();
 
     assert_eq!(first, second);
-    for event in [
-        "PreToolUse",
-        "PostToolUse",
-        "UserPromptSubmit",
-        "SessionStart",
-        "Stop",
-        "SessionEnd",
-    ] {
+    for event in ["session_start", "pre_tool_use", "post_tool_use"] {
         assert!(
-            first.contains(&format!("aikit hook dispatch codex {event}")),
-            "missing {event} in {first}"
+            first.contains(&format!("event = \"{event}\"")),
+            "missing native event {event} in {first}"
+        );
+        assert!(
+            first.contains("aikit hook dispatch codex"),
+            "the dispatcher command rides the AIKit boundary name: {first}"
         );
     }
+    // The dispatcher command is keyed by AIKit's boundary name, not the native
+    // spelling, so the same chain works on both sides of the seam.
+    assert!(first.contains("aikit hook dispatch codex SessionStart"), "{first}");
 }
 
 #[test]
@@ -449,6 +485,7 @@ fn installing_does_not_touch_the_users_own_codex_configuration() {
 
     materialize(
         &CodexAdapter::new(tree.path())
+            .with_capability(codex_capability())
             .install(config.path())
             .unwrap(),
         config.path(),
