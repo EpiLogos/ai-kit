@@ -176,3 +176,5 @@ pub use working_environment_control::{
 
 /// Pi native RPC connection; no ACP or permission parity is implied.
 pub mod pi_rpc_connection;
+
+pub mod central_wiki;

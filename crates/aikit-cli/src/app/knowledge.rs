@@ -337,7 +337,15 @@ impl Service {
             .as_deref()
             .unwrap_or(&self.invocation_cwd);
         let mut absences = Vec::new();
-        let discovered = discover_material(root, self.home.root(), &mut absences)?;
+        let central_root = root.ancestors().find(|candidate| candidate.join("Control").is_dir() && candidate.join("Work").is_dir());
+        let mut discovered = discover_material(root, self.home.root(), &mut absences, central_root.is_none())?;
+        if let Some(central_root)=central_root {
+            let executable=std::env::var_os("CENTRAL_CTRL_BIN").or_else(||std::env::var_os("OI_CENTRAL_CTRL_BIN")).map(PathBuf::from).unwrap_or_else(||PathBuf::from("ctrl"));
+            match aikit_adapters::central_wiki::read_central_wiki(&SystemRunner::new(), &executable, central_root) {
+                Ok(reading)=>{discovered.wiki=reading.objects;absences.extend(reading.absences);}
+                Err(error)=>absences.push(format!("Central wiki discovery unavailable: {}",error.message())),
+            }
+        }
 
         let wiki = if discovered.wiki.is_empty() {
             absences.push("SemanticWiki material absent from the project horizon".into());
@@ -563,6 +571,7 @@ fn discover_material(
     root: &Path,
     home: &Path,
     absences: &mut Vec<String>,
+    discover_wiki: bool,
 ) -> Result<DiscoveredMaterial> {
     let mut discovered = DiscoveredMaterial::default();
     let mut stack = vec![root.to_path_buf()];
@@ -614,7 +623,7 @@ fn discover_material(
                 Err(_) => continue,
             };
 
-            if text.contains("okf-wiki/v1") {
+            if discover_wiki && text.contains("okf-wiki/v1") {
                 match parse_wiki_objects(&text) {
                     Ok(objects) => discovered.wiki.extend(objects),
                     Err(collection_error) => match OkfWikiBundle::parse_json(&text) {
