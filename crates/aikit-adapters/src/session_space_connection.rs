@@ -34,6 +34,7 @@ pub fn connection_into_session_space(
     })?;
 
     let protocol = match descriptor.protocol.family {
+        ConnectionProtocolFamily::PiRpc => format!("pi-rpc/{}", descriptor.protocol.version),
         ConnectionProtocolFamily::Acp => format!("acp/{}", descriptor.protocol.version),
         ConnectionProtocolFamily::ClassicProcess => {
             format!("classic-process/{}", descriptor.protocol.version)

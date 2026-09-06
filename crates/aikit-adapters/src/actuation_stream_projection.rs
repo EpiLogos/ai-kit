@@ -190,6 +190,9 @@ fn portable_signal(signal: &ConnectionSignal) -> (&'static str, Option<String>, 
             None,
             Some(json!({ "event": "completed", "stop_reason": stop_reason })),
         ),
+        ConnectionSignalKind::Failed { reason } => (
+            "model-result", None, Some(json!({"event":"failed","reason":reason})),
+        ),
         ConnectionSignalKind::Cancelled => ("cancellation", None, None),
         ConnectionSignalKind::Status { message } => {
             ("harness-event", Some(message.clone()), Some(json!({ "event": "status" })))

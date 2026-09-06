@@ -861,7 +861,7 @@ impl HostShared {
                 }
                 let terminal = matches!(
                     signal.kind,
-                    ConnectionSignalKind::Completed { .. } | ConnectionSignalKind::Cancelled
+                    ConnectionSignalKind::Completed { .. } | ConnectionSignalKind::Cancelled | ConnectionSignalKind::Failed { .. }
                 );
                 deliveries.push((Arc::clone(&lane), HostEvent::Signal(signal.clone())));
                 if terminal {
@@ -1227,6 +1227,7 @@ impl HostState {
             ConnectionSignalKind::Completed { stop_reason } => TurnStop::Completed {
                 stop_reason: stop_reason.clone(),
             },
+            ConnectionSignalKind::Failed { reason } => TurnStop::Failed { reason: reason.clone() },
             _ => TurnStop::Cancelled,
         };
         let interruption = match (&turn.interrupt, &stop) {
