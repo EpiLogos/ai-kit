@@ -98,7 +98,7 @@ pub use actor_bootstrap::{
     HarnessCompositionPointer, ResourceSetSummary, RuntimeBodyInspection, ACTOR_BOOTSTRAP_VERSION,
     BOOTSTRAP_RESOURCE_SAMPLE_LIMIT,
 };
-pub use application_context::application_context_resolution;
+pub use application_context::{application_context_resolution, application_context_resolution_with_binding};
 pub use capsule::{
     BypassPolicy, Capsule, ControlGround, ControlStanding, Facets, Facing, FailurePolicy, HookPhase,
     Kind, LanguageFacet, Maturity, Payload, Requirement, Surface,

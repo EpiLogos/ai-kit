@@ -1743,6 +1743,17 @@ fn create_directory_link(target: &Path, link: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 impl PaletteBackend for Service {
+    fn project_binding(&self) -> Result<Option<aikit_core::project::ProjectBinding>> {
+        let Some(root) = self.descriptor.project_root.as_ref() else { return Ok(None) };
+        match std::fs::symlink_metadata(root.join("ProjectCentral/project.json")) {
+            Ok(_) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(AikitError::new("projectcentral.manifest_read", error.to_string())),
+        }
+        let binding = aikit_adapters::ProjectCentralFilesystemBinding::inspect(root, None)?;
+        Ok(Some(binding.project_binding()?))
+    }
+
     fn context(&self) -> &ContextDescriptor {
         &self.descriptor
     }

@@ -51,6 +51,8 @@ Each Project binding must retain its exact `ProjectRef` and an independent, attr
 
 Never merge several Projects into an aggregate Project or flatten their ContextResolution provenance into a space-level resolver. If SessionSpace intent affects Project resolution, make that input explicit at the owning Project/Context operation and preserve it in the resulting evidence.
 
+`aikit-session-space -C <project-directory> project-context` reads that binding from the canonical application ContextResolution. Pass this returned binding to the existing `bind-project-context` typed stage intent; do not construct a resolver hash or invent Project membership in the consumer. The read is not a SessionSpace mutation and does not imply a live AgentSession.
+
 ## Durable mutation law
 
 1. **Inspect.** Read current canonical SessionSpace semantic state separately from live provider/runtime observation.

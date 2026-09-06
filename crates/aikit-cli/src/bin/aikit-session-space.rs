@@ -5,7 +5,7 @@ use aikit_cli::SessionSpaceServiceOps;
 use aikit_core::project::ProjectRef;
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
-    SessionSpaceMutation, SessionSpacePreview,
+    ContextResolutionEvidence, SessionSpaceMutation, SessionSpacePreview, SessionSpaceProjectContextBinding,
 };
 use aikit_core::{AikitError, Result};
 use clap::{Parser, Subcommand};
@@ -28,6 +28,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Read the current canonical Project + ContextResolution binding for typed stage intent.
+    ProjectContext,
     /// List persisted SessionSpaces.
     List,
     /// Show one canonical SessionSpace semantic state.
@@ -93,6 +95,12 @@ fn run() -> Result<()> {
     let service = Service::discover(&cwd)?;
 
     match cli.command {
+        Command::ProjectContext => {
+            let resolution = aikit_tui::project_world_service::context_resolution(&service)?;
+            let context = ContextResolutionEvidence::from_resolution(&resolution)?;
+            let binding = SessionSpaceProjectContextBinding::new(context.project().clone(), context)?;
+            emit(&binding)
+        }
         Command::List => emit(&service.session_space_list()?),
         Command::Show { space } => emit(&service.session_space_show(&space_ref(&space)?)?),
         Command::Open { space } => emit(&service.session_space_open(&space_ref(&space)?)?),

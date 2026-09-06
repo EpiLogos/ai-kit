@@ -73,6 +73,19 @@ pub struct ProjectCentralFilesystemBinding {
 }
 
 impl ProjectCentralFilesystemBinding {
+    /// The context binding of this validated native Central Project. Directory
+    /// basenames and legacy AIKit specification ids never replace its identity.
+    pub fn project_binding(&self) -> Result<aikit_core::project::ProjectBinding> {
+        let mut binding = aikit_core::project::ProjectBinding::new(
+            self.semantic.project.clone(),
+            aikit_core::ProjectConstituentRef::parse(self.semantic.native_project_root.as_str())?,
+            aikit_core::project::ProjectBindingLocator::LocalDirectory { path: self.project_root.clone() },
+        );
+        binding.source = Some(self.semantic.manifest_source.clone());
+        binding.provider = Some(aikit_core::ProviderRef::parse(PROJECTCENTRAL_FILESYSTEM_PROVIDER)?);
+        Ok(binding)
+    }
+
     pub fn inspect(project_root: impl AsRef<Path>, central_root: Option<&Path>) -> Result<Self> {
         let project_root = project_root.as_ref().to_path_buf();
         let manifest_path = project_root.join("ProjectCentral/project.json");
