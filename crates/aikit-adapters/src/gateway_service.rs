@@ -34,7 +34,7 @@ use crate::gateway_runtime::{
 pub const GATEWAY_SERVICE_CARRIER_VERSION: &str = "aikit.gateway-service-carrier/v1";
 pub const DEFAULT_GATEWAY_MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
-const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+pub(crate) const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayServiceConfig {
@@ -787,7 +787,7 @@ fn websocket_accept(key: &str) -> String {
     base64_encode(&sha1(&input))
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
@@ -800,7 +800,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 // RFC 3174 SHA-1. SHA-1 is required by the RFC 6455 WebSocket handshake; it is
 // not used here for credential hashing or any security decision.
-fn sha1(input: &[u8]) -> [u8; 20] {
+pub(crate) fn sha1(input: &[u8]) -> [u8; 20] {
     let bit_len = (input.len() as u64) * 8;
     let mut message = input.to_vec();
     message.push(0x80);
@@ -866,7 +866,7 @@ fn sha1(input: &[u8]) -> [u8; 20] {
     output
 }
 
-fn base64_encode(input: &[u8]) -> String {
+pub(crate) fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(input.len().div_ceil(3) * 4);

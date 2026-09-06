@@ -137,6 +137,67 @@ pub enum Command {
     Failures(FailuresArgs),
     /// List bypasses issued and spent.
     Bypasses(BypassesArgs),
+    /// Run, inspect and query the Agency Gateway service.
+    Gateway(GatewayCmd),
+}
+
+/// `aikit gateway serve` — the persistent service carriers.
+#[derive(Debug, Args)]
+pub struct GatewayServeArgs {
+    /// WebSocket bind address (`HOST:PORT`); requires a token.
+    #[arg(long = "ws", value_name = "HOST:PORT")]
+    pub websocket_bind: Option<String>,
+    /// Bearer token for the WebSocket carrier, or `AIKIT_GATEWAY_TOKEN`.
+    #[arg(long = "ws-token", value_name = "TOKEN")]
+    pub websocket_token: Option<String>,
+    /// Unix-domain socket path for the same-host carrier.
+    #[arg(long = "unix", value_name = "PATH")]
+    pub unix_socket: Option<std::path::PathBuf>,
+    /// Persist semantic state across restarts to this file.
+    #[arg(long = "state-file", value_name = "PATH")]
+    pub state_file: Option<std::path::PathBuf>,
+    /// Semantic gateway ref, or `AIKIT_GATEWAY_REF`.
+    #[arg(long = "gateway-ref", value_name = "REF")]
+    pub gateway_ref: Option<String>,
+}
+
+/// `aikit gateway <query>` — one command against a running gateway.
+#[derive(Debug, Args)]
+pub struct GatewayQueryArgs {
+    /// Query the gateway at this Unix-domain socket.
+    #[arg(long = "unix", value_name = "PATH")]
+    pub unix_socket: Option<std::path::PathBuf>,
+    /// Query the gateway WebSocket carrier at `HOST:PORT`.
+    #[arg(long = "ws", value_name = "HOST:PORT")]
+    pub websocket_bind: Option<String>,
+    /// Request path of the WebSocket upgrade.
+    #[arg(long = "ws-path", value_name = "PATH", default_value = "/")]
+    pub websocket_path: String,
+    /// Bearer token for the WebSocket carrier, or `AIKIT_GATEWAY_TOKEN`.
+    #[arg(long = "ws-token", value_name = "TOKEN")]
+    pub websocket_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayCmd {
+    #[command(subcommand)]
+    pub command: GatewaySub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GatewaySub {
+    /// Run the persistent gateway service until a `shutdown` command.
+    Serve(GatewayServeArgs),
+    /// Negotiate protocol versions with a running gateway.
+    Protocol(GatewayQueryArgs),
+    /// Discover the connectors and bindings of a running gateway.
+    Discover(GatewayQueryArgs),
+    /// Read the counters and connector health of a running gateway.
+    Status(GatewayQueryArgs),
+    /// Read the live agency/session/stream/surface ecology of a running gateway.
+    Ecology(GatewayQueryArgs),
+    /// Read the serialisable semantic snapshot of a running gateway.
+    Snapshot(GatewayQueryArgs),
 }
 
 /// Arguments for `aikit compose` — the composition reads the authored ground;

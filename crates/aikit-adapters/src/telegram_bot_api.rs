@@ -1205,6 +1205,8 @@ mod tests {
             agent_ref: Some(r("agent/root")),
             harness_ref: Some(r("harness/codex")),
             surface_ref: Some(r("surface/telegram")),
+            forked_from: None,
+            context_revision: 1,
             ingress: GatewayIngressPolicy {
                 default: GatewayIngressDecision::Allow,
                 sender_overrides: BTreeMap::new(),

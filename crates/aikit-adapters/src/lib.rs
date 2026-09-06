@@ -26,6 +26,7 @@ pub mod deepseek_live;
 pub mod deepseek_maximal;
 pub mod factory_run_thought_authored_wiki;
 pub mod flow_authored_wiki;
+pub mod gateway_client;
 pub mod gateway_connector;
 #[allow(unused_imports)]
 pub mod gateway_runtime;
@@ -110,6 +111,9 @@ pub use factory_run_thought_authored_wiki::{
     FACTORY_RUN_THOUGHT_AUTHORED_WIKI_VERSION,
 };
 pub use flow_authored_wiki::{standing_flow_authored_wiki_source, FLOW_AUTHORED_WIKI_VERSION};
+pub use gateway_client::{
+    gateway_command, gateway_request, GatewayCarrierTarget, GATEWAY_CLIENT_VERSION,
+};
 pub use gateway_connector::{
     verify_connector_descriptor, ConnectorCapabilities, ConnectorConformance,
     ConnectorConnectionState, ConnectorDescriptor, ConnectorFuture, ConnectorHealth,
@@ -121,11 +125,13 @@ pub use gateway_connector::{
 pub use gateway_runtime::{
     connector_descriptor, execute_gateway_command, text_send, AgencyGateway,
     GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayBinding,
-    GatewayCommand, GatewayDiscovery, GatewayErrorEnvelope, GatewayIngressDecision,
-    GatewayIngressPolicy, GatewayIngressResult, GatewayReplay, GatewayRequestEnvelope,
-    GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
-    GatewayStreamJournal, ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA,
-    AGENCY_GATEWAY_VERSION,
+    GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency,
+    GatewayEcologySession, GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope,
+    GatewayForkOrigin, GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult,
+    GatewayInvocationMode, GatewayReplay, GatewayRequestEnvelope, GatewayResponse,
+    GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
+    GatewayStreamJournal, GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_INVOCATION_MODES,
+    ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA, AGENCY_GATEWAY_VERSION,
 };
 pub use gateway_service::{
     persist_gateway_state, restore_gateway_state, run_gateway_service, GatewayServiceConfig,

@@ -110,6 +110,40 @@ The operational store at `~/.aikit` is never treated as a project marker. A
 project is scoped by its own `.aikit/` directory (or its exported
 `AIKIT_PROJECT_ID`), even when `AIKIT_HOME` points somewhere custom.
 
+## Agency Gateway
+
+The Agency Gateway is the persistent contact plane through which the same
+Agency and attributable ActuationStream stay continuable across Surfaces —
+harness UI, terminal, and connector platforms such as Telegram. It runs as an
+ordinary service and speaks one request/response envelope over two carriers:
+an owner-only Unix-domain socket for same-host queries, and an authenticated
+WebSocket carrier for network control and events.
+
+Run it, then query it:
+
+```sh
+aikit gateway serve --unix /run/aikit/gateway.sock --state-file ~/.aikit/gateway.json
+aikit gateway protocol --unix /run/aikit/gateway.sock
+aikit gateway discover --unix /run/aikit/gateway.sock
+aikit gateway status   --unix /run/aikit/gateway.sock
+aikit gateway ecology  --unix /run/aikit/gateway.sock
+aikit gateway snapshot --unix /run/aikit/gateway.sock
+```
+
+The network carrier needs a bearer token (`--ws HOST:PORT --ws-token`, or
+`AIKIT_GATEWAY_TOKEN`); queries over the network use the same flag pair. The
+`aikit-gateway` binary remains the minimal stdio/serve body for Workcell
+materialisation; the CLI group is the same protocol with the product's JSON
+envelope.
+
+`ecology` answers the gateway ecology read model: which Agencies, Agent
+sessions, Streams and Surfaces this gateway currently constitutes, with fork
+lineage and context revisions, and the invocation vocabulary
+(`communique`, `session-contribution`, `delegation`, `session-fork`,
+`co-actuation`). Presence never implies authority — invocation is a separate
+AIKit capability grant. `serve` persists semantic state to `--state-file` and
+restores it on restart; a `shutdown` command stops the service cleanly.
+
 ## What “working” means
 
 At minimum, all of these should succeed:

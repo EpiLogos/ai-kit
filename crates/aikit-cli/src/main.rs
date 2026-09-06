@@ -216,6 +216,115 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Client(c)) => cmd_client(cwd, c),
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
+        Some(Command::Gateway(c)) => cmd_gateway(c),
+    }
+}
+
+/// The Agency Gateway front door: run the service, or query a running one.
+/// Gateway commands address an external service, so they carry no resolved
+/// context — the envelope context stays empty rather than pretending a scope.
+fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
+    match command.command {
+        GatewaySub::Serve(a) => {
+            let websocket_bearer_token = a
+                .websocket_token
+                .or_else(|| std::env::var("AIKIT_GATEWAY_TOKEN").ok().filter(|t| !t.trim().is_empty()));
+            let config = aikit_adapters::GatewayServiceConfig {
+                websocket_bind: a.websocket_bind,
+                websocket_bearer_token,
+                unix_socket: a.unix_socket,
+                state_file: a.state_file,
+                max_frame_bytes: aikit_adapters::DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+            };
+            config.validate()?;
+            let gateway_ref = a
+                .gateway_ref
+                .or_else(|| std::env::var("AIKIT_GATEWAY_REF").ok())
+                .unwrap_or_else(|| "agency-gateway/local".into());
+            let gateway_ref = aikit_core::resource::ResourceRef::parse(&gateway_ref).map_err(
+                |error| {
+                    AikitError::new(
+                        "cli.gateway_ref_invalid",
+                        format!("parse gateway ref {gateway_ref}: {error}"),
+                    )
+                },
+            )?;
+            aikit_adapters::run_gateway_service(
+                aikit_adapters::AgencyGateway::new(gateway_ref),
+                config,
+            )?;
+            Ok(Reply::Text("gateway service stopped cleanly".into()))
+        }
+        query => {
+            let command = match query {
+                GatewaySub::Protocol(_) => aikit_adapters::GatewayCommand::Protocol,
+                GatewaySub::Discover(_) => aikit_adapters::GatewayCommand::Discover,
+                GatewaySub::Status(_) => aikit_adapters::GatewayCommand::Status,
+                GatewaySub::Ecology(_) => aikit_adapters::GatewayCommand::Ecology,
+                GatewaySub::Snapshot(_) => aikit_adapters::GatewayCommand::Snapshot,
+                GatewaySub::Serve(_) => unreachable!("serve handled above"),
+            };
+            let args = match query {
+                GatewaySub::Protocol(a)
+                | GatewaySub::Discover(a)
+                | GatewaySub::Status(a)
+                | GatewaySub::Ecology(a)
+                | GatewaySub::Snapshot(a) => a,
+                GatewaySub::Serve(_) => unreachable!("serve handled above"),
+            };
+            let target = gateway_carrier_target(&args)?;
+            let response = aikit_adapters::gateway_command(&target, command, None)?;
+            let data = serde_json::to_value(&response).map_err(|error| {
+                AikitError::new(
+                    "cli.gateway_response_encode",
+                    format!("encode gateway response: {error}"),
+                )
+            })?;
+            Ok(Reply::Data {
+                context: EnvelopeContext {
+                    context_id: None,
+                    session_id: None,
+                    project_root: None,
+                },
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+    }
+}
+
+fn gateway_carrier_target(
+    a: &GatewayQueryArgs,
+) -> Result<aikit_adapters::GatewayCarrierTarget> {
+    match (&a.unix_socket, &a.websocket_bind) {
+        #[cfg(unix)]
+        (Some(path), None) => Ok(aikit_adapters::GatewayCarrierTarget::UnixSocket(path.clone())),
+        (None, Some(bind)) => {
+            let bearer_token = a
+                .websocket_token
+                .clone()
+                .or_else(|| std::env::var("AIKIT_GATEWAY_TOKEN").ok())
+                .ok_or_else(|| {
+                    AikitError::new(
+                        "cli.gateway_token_required",
+                        "WebSocket queries need --ws-token or AIKIT_GATEWAY_TOKEN",
+                    )
+                })?;
+            Ok(aikit_adapters::GatewayCarrierTarget::WebSocket {
+                bind: bind.clone(),
+                path: a.websocket_path.clone(),
+                bearer_token,
+            })
+        }
+        (Some(_), Some(_)) => Err(AikitError::new(
+            "cli.gateway_carrier_conflict",
+            "address one carrier: --unix PATH or --ws HOST:PORT, not both",
+        )),
+        _ => Err(AikitError::new(
+            "cli.gateway_carrier_required",
+            "address a running gateway with --unix PATH or --ws HOST:PORT",
+        )),
     }
 }
 
