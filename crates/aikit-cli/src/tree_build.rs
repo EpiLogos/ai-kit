@@ -96,6 +96,8 @@ fn kinds_root(service: &Service) -> Node {
             .is_some_and(|control| control.is_retired())
         {
             "retired · never projects"
+        } else if entry.control.as_ref().is_some_and(|c| c.is_unresolved()) {
+            "unresolved · never projects"
         } else if view.is_active(id) {
             "active"
         } else if view.unavailable.contains_key(id) {

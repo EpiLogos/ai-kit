@@ -10,8 +10,8 @@
 //!
 //! The reading rules, mirrored from the contract itself:
 //!
-//! * absent `skill.json` ⇒ an ordinary skill (backward compatibility with every
-//!   existing source);
+//! * absent `skill.json` ⇒ unresolved Control standing; the source adapter
+//!   preserves that fact and withholds it (ordinary sources remain compatible);
 //! * any other `schema` ⇒ refused, naming the file — a neighbour's future
 //!   contract version is a loud event, not a guess;
 //! * `standing` is `active` or `retired`; anything else is unresolved and
@@ -70,6 +70,17 @@ pub struct ControlMetadata {
 }
 
 impl ControlMetadata {
+    pub fn unresolved() -> Self {
+        Self {
+            standing: "unresolved".into(),
+            scope: None,
+            provenance: None,
+            retired_by: None,
+            retired_at_unix_seconds: None,
+            retirement_reason: None,
+        }
+    }
+
     pub fn is_retired(&self) -> bool {
         self.standing == "retired"
     }
@@ -120,6 +131,23 @@ pub fn read(root: &Path, directory_name: &str) -> Result<Option<ControlMetadata>
              contract requires them to agree",
             contract.name
         )));
+    }
+
+    if !matches!(
+        contract.scope.as_deref(),
+        Some("control-user" | "control-machine" | "projectcentral-user")
+    ) {
+        return Err(refusal(
+            "skill.json must declare a published Central skill scope".into(),
+        ));
+    }
+    if !matches!(
+        contract.provenance.as_deref(),
+        Some("human-authored" | "adopted")
+    ) {
+        return Err(refusal(
+            "skill.json must declare human-authored or adopted provenance".into(),
+        ));
     }
 
     match contract.standing.as_str() {

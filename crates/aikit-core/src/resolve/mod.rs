@@ -126,6 +126,7 @@ pub struct DeclaredState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "kebab-case")]
 pub enum UnavailableReason {
+    UnresolvedControlStanding,
     NotInCatalog,
     DeniedByPolicy,
     PlatformUnsupported,
@@ -148,6 +149,7 @@ pub enum UnavailableReason {
 impl UnavailableReason {
     pub fn describe(&self) -> String {
         match self {
+            UnavailableReason::UnresolvedControlStanding => "withheld-unresolved on its Control ground: skill.json does not declare authored standing".to_string(),
             UnavailableReason::NotInCatalog => "not present in any registry".to_string(),
             UnavailableReason::DeniedByPolicy => "denied by managed policy".to_string(),
             UnavailableReason::PlatformUnsupported => {
@@ -1059,6 +1061,9 @@ impl<'a> Resolver<'a> {
         unavailable: &BTreeMap<CapsuleId, UnavailableReason>,
     ) -> Option<UnavailableReason> {
         if let Some(control) = &capsule.control {
+            if control.is_unresolved() {
+                return Some(UnavailableReason::UnresolvedControlStanding);
+            }
             if control.is_retired() {
                 return Some(UnavailableReason::RetiredStanding {
                     retirement_reason: control

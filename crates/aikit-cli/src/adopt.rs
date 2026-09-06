@@ -500,7 +500,7 @@ pub fn plan(
     })
 }
 
-/// Stage machine skills on authored Control ground through a reviewed Procedure.
+/// Stage personal, project or machine skills on authored Control ground through a reviewed Procedure.
 /// Originals remain intact until the separately reviewed projection cutover.
 /// Existing staged skills are accepted only when their full payload is identical;
 /// their authored standing and provenance are never overwritten.
@@ -520,34 +520,64 @@ pub fn plan_control(
         ));
     }
     let source = std::fs::canonicalize(source).map_err(|e| refusal(e.to_string()))?;
-    let ground = std::fs::canonicalize(ground).map_err(|e| refusal(e.to_string()))?;
-    let machine = ground
+    let parent = ground
         .parent()
-        .ok_or_else(|| refusal("missing machine ground".into()))?;
-    let machines = machine
-        .parent()
-        .ok_or_else(|| refusal("missing machines root".into()))?;
-    let control = machines
-        .parent()
-        .ok_or_else(|| refusal("missing Control root".into()))?;
-    if !source.is_dir()
-        || !ground.is_dir()
-        || ground.file_name().and_then(|s| s.to_str()) != Some("skills")
-        || machines.file_name().and_then(|s| s.to_str()) != Some("machines")
-        || control.file_name().and_then(|s| s.to_str()) != Some("Control")
-        || !control
-            .parent()
-            .map(|p| p.join(".central").is_dir())
-            .unwrap_or(false)
-        || source.starts_with(&ground)
-        || ground.starts_with(&source)
-    {
+        .ok_or_else(|| refusal("missing skill scope".into()))?;
+    let parent = std::fs::canonicalize(parent).map_err(|e| refusal(e.to_string()))?;
+    if ground.file_name().and_then(|s| s.to_str()) != Some("skills") {
         return Err(refusal(
-            "expected disjoint source and existing Central Control/machines/NAME/skills ground"
-                .into(),
+            "the published skill scope must end in skills".into(),
         ));
     }
-    let namespace = valid_slug(requested_namespace.unwrap_or("machine-ground"), "namespace")?;
+    let ground = parent.join("skills");
+    if std::fs::symlink_metadata(&ground)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(refusal(
+            "use the authored skill scope, not a projection link".into(),
+        ));
+    }
+    let owner = parent
+        .parent()
+        .ok_or_else(|| refusal("missing authored scope owner".into()))?;
+    let leaf = |p: &Path| p.file_name().and_then(|s| s.to_str()).map(str::to_owned);
+    let (scope, machine, default_namespace) = if leaf(&parent).as_deref() == Some("user")
+        && leaf(owner).as_deref() == Some("Control")
+        && owner.parent().is_some_and(|p| p.join(".central").is_dir())
+    {
+        ("control-user", None, "personal-ground")
+    } else if leaf(&parent).as_deref() == Some("user")
+        && leaf(owner).as_deref() == Some("ProjectCentral")
+        && owner.join("project.json").is_file()
+    {
+        let project_root = owner
+            .parent()
+            .ok_or_else(|| refusal("missing project root".into()))?;
+        aikit_adapters::projectcentral::ProjectCentralFilesystemBinding::inspect(
+            project_root,
+            None,
+        )?;
+        ("projectcentral-user", None, "project-ground")
+    } else if leaf(owner).as_deref() == Some("machines")
+        && owner.parent().is_some_and(|p| {
+            leaf(p).as_deref() == Some("Control")
+                && p.parent().is_some_and(|r| r.join(".central").is_dir())
+        })
+    {
+        ("control-machine", leaf(&parent), "machine-ground")
+    } else {
+        return Err(refusal("expected Central Control/user/skills, Control/machines/ROLE/skills, or a valid ProjectCentral/user/skills scope".into()));
+    };
+    if !source.is_dir() || source.starts_with(&ground) || ground.starts_with(&source) {
+        return Err(refusal(
+            "source and authored ground must be disjoint directories".into(),
+        ));
+    }
+    let namespace = valid_slug(
+        requested_namespace.unwrap_or(default_namespace),
+        "namespace",
+    )?;
     let mut roots = find_skills(&source)?;
     roots.sort_by(|a, b| a.projection.cmp(&b.projection));
     reject_overlaps(&roots)?;
@@ -576,7 +606,7 @@ pub fn plan_control(
             .ok_or_else(|| refusal("skill name must be UTF-8".into()))?;
         valid_slug(name, "skill")?;
         if !names.insert(name.to_string()) {
-            return Err(refusal(format!("duplicate machine skill name {name}")));
+            return Err(refusal(format!("duplicate skill name {name}")));
         }
         let target = ground.join(name);
         if std::fs::symlink_metadata(&target)
@@ -596,8 +626,14 @@ pub fn plan_control(
         let existing = target.exists();
         if existing {
             reject_symlinks(&target)?;
-            crate::control_ground::read(&target, name)?
+            let contract = crate::control_ground::read(&target, name)?
                 .ok_or_else(|| refusal(format!("{} has no Control manifest", target.display())))?;
+            if contract.scope.as_deref() != Some(scope) {
+                return Err(refusal(format!(
+                    "{} declares a different authored scope",
+                    target.display()
+                )));
+            }
             let staged = agent_skills::validate(&target)?;
             let expected: BTreeSet<_> = skill
                 .files
@@ -642,12 +678,15 @@ pub fn plan_control(
             }
         }
         if !existing {
-            let manifest = serde_json::json!({
+            let mut manifest = serde_json::json!({
                 "schema": "central.skill/v1", "name": name,
-                "scope": "control-machine", "machine": machine.file_name().and_then(|s| s.to_str()),
+                "scope": scope,
                 "standing": "active", "provenance": "adopted",
                 "adopted_from": root.content,
             });
+            if let Some(machine) = &machine {
+                manifest["machine"] = machine.clone().into();
+            }
             plan = plan.with_edit(WorldEdit::WriteFile {
                 path: target.join("skill.json"),
                 contents: serde_json::to_vec_pretty(&manifest)
@@ -659,7 +698,10 @@ pub fn plan_control(
     }
     plan = aikit_store::procedure::bind_current_preconditions(plan)?;
     plan = aikit_store::procedure::bind_read_precondition(plan, &source)?;
-    plan = aikit_store::procedure::bind_read_precondition(plan, &ground)?;
+    plan = aikit_store::procedure::bind_read_precondition(
+        plan,
+        if ground.exists() { &ground } else { &parent },
+    )?;
     let review_digest = plan.review_digest(&[format!("Control ground: {}", ground.display())]);
     let shadow = home.state().join("procedures/.shadow");
     let isolation = select_isolation(&plan, &shadow, aikit_store::procedure::git_repo_of);

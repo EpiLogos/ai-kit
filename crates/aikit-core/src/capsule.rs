@@ -300,6 +300,8 @@ impl Facets {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ControlStanding {
+    /// Derived when explicit Control ground has no authored manifest.
+    Unresolved,
     Active,
     Retired,
 }
@@ -307,6 +309,7 @@ pub enum ControlStanding {
 impl ControlStanding {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Unresolved => "unresolved",
             Self::Active => "active",
             Self::Retired => "retired",
         }
@@ -331,6 +334,10 @@ pub struct ControlGround {
 }
 
 impl ControlGround {
+    pub fn is_unresolved(&self) -> bool {
+        self.standing == ControlStanding::Unresolved
+    }
+
     pub fn is_retired(&self) -> bool {
         self.standing == ControlStanding::Retired
     }

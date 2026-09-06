@@ -365,7 +365,7 @@ fn build_snapshot(
     staging: &Path,
 ) -> Result<SnapshotRecord> {
     let roots = discover_skills(scan_root)?;
-    if roots.is_empty() {
+    if roots.is_empty() && !spec.kind.control_ground() {
         return Err(AikitError::new(
             "source.no_skills",
             format!("skill source `{}` contains no valid Agent Skills", spec.id),
@@ -390,7 +390,10 @@ fn build_snapshot(
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or_default();
-            crate::control_ground::read(&root, directory_name)?
+            Some(
+                crate::control_ground::read(&root, directory_name)?
+                    .unwrap_or_else(crate::control_ground::ControlMetadata::unresolved),
+            )
         } else {
             None
         };

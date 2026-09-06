@@ -79,7 +79,7 @@ fn data(value: &Value) -> &Value {
 }
 
 /// One Control ground fixture: an active skill, a retired skill with its
-/// retirement record, and a plain skill publishing no contract at all.
+/// retirement record, and a second active skill.
 fn ground_fixture(temp: &Path) -> std::path::PathBuf {
     let ground = temp.join("ground");
     write_skill(&ground.join("keeper"), "keeper");
@@ -97,6 +97,10 @@ fn ground_fixture(temp: &Path) -> std::path::PathBuf {
         ),
     );
     write_skill(&ground.join("plain"), "plain");
+    write_manifest(
+        &ground.join("plain"),
+        &active_manifest("plain", "control-machine"),
+    );
     ground
 }
 
@@ -275,23 +279,26 @@ fn a_retired_member_never_projects_and_set_show_discloses_the_reason() {
 
 #[test]
 fn contract_violations_are_refused_at_sync_naming_the_file() {
-    let cases: [(&str, String); 4] = [
+    let cases: [(&str, String); 7] = [
         (
             "wrong schema",
-            r#"{"schema":"central.skill/v2","name":"keeper","scope":"control-machine","standing":"active"}"#.to_string(),
+            r#"{"schema":"central.skill/v2","name":"keeper","scope":"control-machine","provenance":"human-authored","standing":"active"}"#.to_string(),
         ),
         (
             "retired without a retirement record",
-            r#"{"schema":"central.skill/v1","name":"keeper","scope":"control-machine","standing":"retired"}"#.to_string(),
+            r#"{"schema":"central.skill/v1","name":"keeper","scope":"control-machine","provenance":"human-authored","standing":"retired"}"#.to_string(),
         ),
         (
             "unresolvable standing",
-            r#"{"schema":"central.skill/v1","name":"keeper","scope":"control-machine","standing":"unresolved"}"#.to_string(),
+            r#"{"schema":"central.skill/v1","name":"keeper","scope":"control-machine","provenance":"human-authored","standing":"unresolved"}"#.to_string(),
         ),
         (
             "name does not match the directory",
-            r#"{"schema":"central.skill/v1","name":"other","scope":"control-machine","standing":"active"}"#.to_string(),
+            r#"{"schema":"central.skill/v1","name":"other","scope":"control-machine","provenance":"human-authored","standing":"active"}"#.to_string(),
         ),
+        ("missing scope", r#"{"schema":"central.skill/v1","name":"keeper","standing":"active","provenance":"adopted"}"#.into()),
+        ("unknown scope", r#"{"schema":"central.skill/v1","name":"keeper","scope":"control-root","standing":"active","provenance":"adopted"}"#.into()),
+        ("missing provenance", r#"{"schema":"central.skill/v1","name":"keeper","scope":"control-user","standing":"active"}"#.into()),
     ];
 
     for (label, body) in cases {
@@ -515,4 +522,92 @@ fn a_projectcentral_ground_source_routes_per_project_through_existing_bindings()
         assert!(!current.join(relative).join("project-skill").exists());
     }
     assert!(!project_b.join(".agents/skills/project-skill").exists());
+}
+
+#[test]
+fn unresolved_personal_ground_withdraws_a_previously_projected_skill() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let ground = temp.path().join("Control/user/skills");
+    write_skill(&ground.join("curated"), "curated");
+    write_manifest(
+        &ground.join("curated"),
+        &active_manifest("curated", "control-user"),
+    );
+    aikit(
+        &home,
+        &project,
+        &[
+            "source",
+            "add-directory",
+            "personal",
+            ground.to_str().unwrap(),
+            "--control-ground",
+        ],
+    );
+    aikit(&home, &project, &["source", "sync", "personal"]);
+    aikit(
+        &home,
+        &project,
+        &["source", "promote", "personal", "--trust"],
+    );
+    aikit(
+        &home,
+        &project,
+        &["enable", "skill/personal/curated", "--scope", "user"],
+    );
+    aikit(
+        &home,
+        &project,
+        &["set", "create", "curated", "skill/personal/curated"],
+    );
+    let applied = aikit(&home, &project, &["apply"]);
+    let current = home
+        .join("state/contexts")
+        .join(applied["context"]["context_id"].as_str().unwrap())
+        .join("current");
+    assert!(current
+        .join("projections/claude/.claude/skills/curated/SKILL.md")
+        .is_file());
+    fs::remove_file(ground.join("curated/skill.json")).unwrap();
+    aikit(&home, &project, &["source", "sync", "personal"]);
+    aikit(
+        &home,
+        &project,
+        &["source", "promote", "personal", "--trust"],
+    );
+    let shown = aikit(&home, &project, &["set", "show", "curated"]);
+    assert_eq!(data(&shown)["projected"], serde_json::json!([]));
+    assert!(data(&shown)["withheld"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("withheld-unresolved"));
+    aikit(&home, &project, &["apply"]);
+    for relative in [
+        "projections/claude/.claude/skills/curated",
+        "projections/codex/.agents/skills/curated",
+    ] {
+        assert!(!current.join(relative).exists(), "{relative}");
+    }
+    // Reconcile the explicit selection before removing the authored resource.
+    aikit(
+        &home,
+        &project,
+        &["disable", "skill/personal/curated", "--scope", "user"],
+    );
+    // An empty authored collection is a real state, not a failed source refresh.
+    fs::remove_dir_all(ground.join("curated")).unwrap();
+    let empty = aikit(&home, &project, &["source", "sync", "personal"]);
+    assert_eq!(data(&empty)["skills"], 0);
+    aikit(
+        &home,
+        &project,
+        &["source", "promote", "personal", "--trust"],
+    );
+    aikit(&home, &project, &["apply"]);
+    assert!(!current
+        .join("projections/claude/.claude/skills/curated")
+        .exists());
 }

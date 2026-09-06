@@ -659,7 +659,7 @@ fn control_adoption_refuses_changed_review_and_conflicting_staged_bytes() {
     );
     write(
         &ground.join("deep-review/skill.json"),
-        r#"{"schema":"central.skill/v1","name":"deep-review","standing":"active","provenance":"human-authored"}"#,
+        r#"{"schema":"central.skill/v1","name":"deep-review","scope":"control-machine","standing":"active","provenance":"human-authored"}"#,
     );
     let before = fs::read(ground.join("deep-review/SKILL.md")).unwrap();
     assert!(!run(home.path(), project.path(), &args).status.success());
@@ -686,7 +686,7 @@ fn control_adoption_preserves_retirement_and_refuses_external_links() {
             &fs::read_to_string(foreign.path().join(relative)).unwrap(),
         );
     }
-    let manifest = r#"{"schema":"central.skill/v1","name":"deep-review","standing":"retired","provenance":"adopted","retirement":{"retired_by":"human","retired_at_unix_seconds":1788653215,"retirement_reason":"Already retired"}}"#;
+    let manifest = r#"{"schema":"central.skill/v1","name":"deep-review","scope":"control-machine","standing":"retired","provenance":"adopted","retirement":{"retired_by":"human","retired_at_unix_seconds":1788653215,"retirement_reason":"Already retired"}}"#;
     write(&ground.join("deep-review/skill.json"), manifest);
     let args = [
         "adopt",
@@ -710,4 +710,83 @@ fn control_adoption_preserves_retirement_and_refuses_external_links() {
     assert!(!refusal.status.success());
     assert!(!ground.join("external").exists());
     assert!(external.path().join("SKILL.md").is_file());
+}
+
+#[test]
+fn personal_and_project_adoption_use_central_scopes_without_machine_attribution() {
+    for (relative, scope, namespace) in [
+        ("Control/user/skills", "control-user", "personal-ground"),
+        (
+            "Work/project/ProjectCentral/user/skills",
+            "projectcentral-user",
+            "project-ground",
+        ),
+    ] {
+        let (home, project, foreign) = fixture();
+        let central = TempDir::new().unwrap();
+        let ground = central.path().join(relative);
+        fs::create_dir_all(ground.parent().unwrap()).unwrap();
+        fs::create_dir(central.path().join(".central")).unwrap();
+        if scope == "projectcentral-user" {
+            write(
+                &central
+                    .path()
+                    .join("Work/project/ProjectCentral/project.json"),
+                r#"{"schema":"central.project/v1","project_id":"project","human_source":"ProjectCentral/user","wiki":{"profile":"okf-wiki/v1","source":"ProjectCentral/agents/wiki/wiki.json"}}"#,
+            );
+        }
+        let args = [
+            "adopt",
+            foreign.path().to_str().unwrap(),
+            "--control-ground",
+            ground.to_str().unwrap(),
+        ];
+        let preview = run(home.path(), project.path(), &args);
+        assert!(preview.status.success(), "{:?}", envelope(&preview));
+        assert!(
+            !ground.exists(),
+            "preview must not create authored topology"
+        );
+        let body = envelope(&preview);
+        assert_eq!(body["data"]["namespace"], namespace);
+        let mut confirmed = args.to_vec();
+        confirmed.extend([
+            "--yes",
+            "--expect-digest",
+            body["data"]["review_digest"].as_str().unwrap(),
+        ]);
+        let applied = run(home.path(), project.path(), &confirmed);
+        assert!(applied.status.success(), "{:?}", envelope(&applied));
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(ground.join("deep-review/skill.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["scope"], scope);
+        assert!(manifest.get("machine").is_none());
+        assert_eq!(manifest["standing"], "active");
+        assert_eq!(
+            fs::read(ground.join("deep-review/SKILL.md")).unwrap(),
+            fs::read(foreign.path().join("deep-review/SKILL.md")).unwrap()
+        );
+    }
+}
+
+#[test]
+fn adoption_refuses_a_fourth_control_layout() {
+    let (home, project, foreign) = fixture();
+    let central = TempDir::new().unwrap();
+    fs::create_dir_all(central.path().join("Control")).unwrap();
+    fs::create_dir(central.path().join(".central")).unwrap();
+    let ground = central.path().join("Control/skills");
+    let result = run(
+        home.path(),
+        project.path(),
+        &[
+            "adopt",
+            foreign.path().to_str().unwrap(),
+            "--control-ground",
+            ground.to_str().unwrap(),
+        ],
+    );
+    assert!(!result.status.success());
+    assert!(!ground.exists());
 }

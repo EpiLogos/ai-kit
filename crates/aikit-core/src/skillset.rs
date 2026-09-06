@@ -226,6 +226,9 @@ fn withheld_reason(view: &ResolvedView, capsule: &CapsuleId) -> WithheldReason {
             // scope did enable it. This reads the resolver's own ground metadata
             // (the view's catalogue index); it forms no second availability
             // opinion of its own.
+            if view.catalog_index.get(capsule).and_then(|e| e.control.as_ref()).is_some_and(|c| c.is_unresolved()) {
+                return WithheldReason::Unavailable(UnavailableReason::UnresolvedControlStanding);
+            }
             if let Some(control) = view
                 .catalog_index
                 .get(capsule)
@@ -288,6 +291,7 @@ impl SetProjection {
 
 fn short_reason(reason: &UnavailableReason) -> &'static str {
     match reason {
+        UnavailableReason::UnresolvedControlStanding => "unresolved Control standing",
         UnavailableReason::NotInCatalog => "not installed",
         UnavailableReason::DeniedByPolicy => "denied by policy",
         UnavailableReason::PlatformUnsupported => "wrong platform",

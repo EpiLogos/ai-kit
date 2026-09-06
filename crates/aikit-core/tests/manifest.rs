@@ -413,8 +413,8 @@ fn an_unusable_control_table_is_refused_naming_the_capsule() {
     for bad in [
         // An unknown field is a loud event, not a silent drop.
         "standing = \"active\"\nmystery = true\n",
-        // An unresolvable standing must be refused, never projected.
-        "standing = \"unresolved\"\n",
+        // An unknown derived standing must be refused, never projected.
+        "standing = \"unknown\"\n",
     ] {
         let body = format!(
             r#"
