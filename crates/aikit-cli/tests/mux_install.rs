@@ -550,6 +550,10 @@ fn undo_restores_a_user_binding_that_was_explicitly_replaced() {
 
 #[cfg(target_os = "macos")]
 #[test]
+// The unified surface opens in the popup on Alt-A ("AIKit · Workspace" heading),
+// switches in place to tree on Ctrl-T (the " Relations · Tree " pane title,
+// same process), and quits on Ctrl-C — the retired V1 renderer's Esc
+// choreography no longer exists.
 fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
     let server = Server::start();
     let home = tempfile::tempdir().unwrap();
@@ -638,47 +642,42 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
     let mut input = client.stdin.take().unwrap();
     let mut output = client.stdout.take().unwrap();
     let (signal_tx, signal_rx) = std::sync::mpsc::channel();
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_reader = captured.clone();
     let reader = std::thread::spawn(move || {
+        const OPEN_MARKER: &[u8] = "AIKit · Workspace".as_bytes();
+        const TREE_MARKER: &[u8] = "Relations · Tree".as_bytes();
         let mut all = Vec::new();
+        // Markers match the rendered text, not the raw stream: the surface
+        // interleaves ANSI sequences inside a pane title ("┌ R<esc>…elations
+        // · Tree"), so the marker bytes never appear contiguously. Matching
+        // runs over an escape-stripped accumulation of the same bytes.
+        let mut plain = Vec::new();
         let mut buffer = [0_u8; 4096];
-        let mut palette_seen = false;
+        let mut surface_seen = false;
         let mut tree_seen = false;
-        let mut tree_marker_end = None;
-        let mut palette_return_seen = false;
         while let Ok(read) = output.read(&mut buffer) {
             if read == 0 {
                 break;
             }
             all.extend_from_slice(&buffer[..read]);
-            if !palette_seen
-                && all
-                    .windows(b"Ctrl-T tree".len())
-                    .any(|window| window == b"Ctrl-T tree")
+            *captured_reader.lock().unwrap() = all.clone();
+            strip_ansi_into(&buffer[..read], &mut plain);
+            if !surface_seen
+                && plain
+                    .windows(OPEN_MARKER.len())
+                    .any(|window| window == OPEN_MARKER)
             {
-                palette_seen = true;
-                let _ = signal_tx.send("palette");
+                surface_seen = true;
+                let _ = signal_tx.send("surface");
             }
             if !tree_seen
-                && all
-                    .windows(b"AIKit tree".len())
-                    .any(|window| window == b"AIKit tree")
+                && plain
+                    .windows(TREE_MARKER.len())
+                    .any(|window| window == TREE_MARKER)
             {
                 tree_seen = true;
-                tree_marker_end = all
-                    .windows(b"AIKit tree".len())
-                    .position(|window| window == b"AIKit tree")
-                    .map(|start| start + b"AIKit tree".len());
                 let _ = signal_tx.send("tree");
-            }
-            if tree_seen && !palette_return_seen {
-                let start = tree_marker_end.expect("the tree marker has an end");
-                if all[start..]
-                    .windows(b"Ctrl-T tree".len())
-                    .any(|window| window == b"Ctrl-T tree")
-                {
-                    palette_return_seen = true;
-                    let _ = signal_tx.send("palette-return");
-                }
             }
         }
         all
@@ -704,15 +703,22 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
     input.flush().unwrap();
     assert_eq!(
         signal_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
-        "palette",
-        "Alt-A must open the palette mode of the real AIKit binary"
+        "surface",
+        "Alt-A must open the workspace surface of the real AIKit binary"
     );
     let popup_pid = wait_for_popup_process(server_pid);
 
     input.write_all(b"\x14").unwrap();
     input.flush().unwrap();
+    let tree_signal = signal_rx.recv_timeout(Duration::from_secs(10));
+    if tree_signal.is_err() {
+        let captured = captured.lock().unwrap().clone();
+        let start = captured.len().saturating_sub(3000);
+        let tail = String::from_utf8_lossy(&captured[start..]).to_string();
+        panic!("no tree signal; captured tail: {tail:?}");
+    }
     assert_eq!(
-        signal_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+        tree_signal.unwrap(),
         "tree",
         "Ctrl-T must switch the same popup into tree mode"
     );
@@ -722,14 +728,7 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
         "Ctrl-T must preserve the exact aikit ui process, not launch another terminal lifecycle"
     );
 
-    input.write_all(b"\x1b").unwrap();
-    input.flush().unwrap();
-    assert_eq!(
-        signal_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
-        "palette-return",
-        "Esc from tree must return the same popup to palette before it is closed"
-    );
-    input.write_all(b"\x1b").unwrap();
+    input.write_all(b"\x03").unwrap();
     input.flush().unwrap();
     wait_for_process_exit(popup_pid);
 
@@ -755,17 +754,78 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
 
     let status = client.wait().expect("the attached client exits");
     let rendered = reader.join().expect("the output reader exits");
+    let mut plain = Vec::new();
+    strip_ansi_into(&rendered, &mut plain);
+    let rendered_text = String::from_utf8_lossy(&plain);
     assert!(
         status.success(),
         "the PTY client failed; output={}",
         String::from_utf8_lossy(&rendered)
     );
     assert!(
-        String::from_utf8_lossy(&rendered).contains("AIKit tree"),
+        rendered_text.contains("Relations · Tree"),
         "the real popup never rendered tree mode"
     );
     assert!(
-        String::from_utf8_lossy(&rendered).contains("source-project"),
+        rendered_text.contains("AIKit · Workspace"),
+        "the real popup never rendered the workspace surface"
+    );
+    assert!(
+        rendered_text.contains("source-project"),
         "the popup did not inherit and resolve the source pane's working directory"
     );
+}
+
+/// Append `bytes` to `plain` with escape sequences removed: ESC ( X charset
+/// picks, ESC ] … BEL operating commands, and CSI ESC [ … <final @-~>.
+/// Everything else — text and UTF-8 — passes through untouched.
+fn strip_ansi_into(bytes: &[u8], plain: &mut Vec<u8>) {
+    #[derive(PartialEq)]
+    enum State {
+        Text,
+        Escape,
+        Charset,
+        Operating(u8),
+        Csi,
+    }
+    thread_local! {
+        static STATE: std::cell::Cell<State> = std::cell::Cell::new(State::Text);
+    }
+    STATE.with(|state| {
+        for &byte in bytes {
+            let current = state.replace(State::Text);
+            match current {
+                State::Escape => match byte {
+                    b'[' => state.set(State::Csi),
+                    b'(' | b')' => state.set(State::Charset),
+                    b']' => state.set(State::Operating(0)),
+                    _ => {}
+                },
+                State::Charset => {}
+                State::Operating(seen_bell) => {
+                    if seen_bell == 1 || byte == b'\x07' {
+                        state.set(State::Text);
+                    } else if byte == b'\\' {
+                        state.set(State::Operating(1));
+                    } else {
+                        state.set(State::Operating(0));
+                    }
+                }
+                State::Csi => {
+                    if (0x40..=0x7e).contains(&byte) {
+                        state.set(State::Text);
+                    } else {
+                        state.set(State::Csi);
+                    }
+                }
+                State::Text => {
+                    if byte == 0x1b {
+                        state.set(State::Escape);
+                    } else {
+                        plain.push(byte);
+                    }
+                }
+            }
+        }
+    })
 }
