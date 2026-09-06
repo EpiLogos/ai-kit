@@ -265,6 +265,10 @@ pub trait PaletteBackend {
 
     fn view(&self) -> &ResolvedView;
 
+    /// Optional native owner identity. An invalid present binding is an error,
+    /// never permission to derive a replacement identity from presentation.
+    fn project_binding(&self) -> Result<Option<aikit_core::project::ProjectBinding>> { Ok(None) }
+
     fn scope_layers(&self) -> Option<&[ScopeLayer]> {
         None
     }

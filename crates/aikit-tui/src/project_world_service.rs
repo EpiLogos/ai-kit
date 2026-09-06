@@ -30,6 +30,12 @@ pub fn context_resolution_with_actors(
     actors: RequestedActors,
 ) -> Result<ContextResolution> {
     let resources = backend.navigation_index();
+    if let Some(binding) = backend.project_binding()? {
+        return aikit_core::application_context_resolution_with_binding(
+            backend.context(), backend.view(), backend.scope_layers().unwrap_or(&[]),
+            &resources, actors, binding,
+        );
+    }
     application_context_resolution(
         backend.context(),
         backend.view(),

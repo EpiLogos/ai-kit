@@ -36,6 +36,19 @@ pub fn application_context_resolution(
     let project_ref = project_ref(context)?;
     let constituent = ProjectConstituentRef::parse("source:working-tree")?;
     let binding = ProjectBinding::from_legacy_context(project_ref, constituent, context)?;
+    application_context_resolution_with_binding(context, view, scope_layers, resources, actors, binding)
+}
+
+/// Compose with a native owner's already validated Project binding. Preserve its
+/// identity and provenance instead of deriving another ProjectRef from a directory.
+pub fn application_context_resolution_with_binding(
+    context: &ContextDescriptor,
+    view: &ResolvedView,
+    scope_layers: &[ScopeLayer],
+    resources: &dyn ResourceIndex,
+    actors: RequestedActors,
+    binding: ProjectBinding,
+) -> Result<ContextResolution> {
     let host = (!context.host.trim().is_empty())
         .then(|| ResourceRef::parse(&format!("host/{}", context.host)))
         .transpose()?;
