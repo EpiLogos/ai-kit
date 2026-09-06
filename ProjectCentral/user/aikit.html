@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="color-scheme" content="light dark" />
+<title>AIKit — product account</title>
+<meta name="description" content="AIKit: resource composition, knowledge disclosure and situated agent environments.">
+<style>
+:root{
+  --left-w:286px;
+  --right-w:326px;
+  --top-h:56px;
+  --paper:#f5f8fb;
+  --sheet:#ffffff;
+  --sheet-2:#eef4f8;
+  --ink:#132235;
+  --muted:#5e6d7f;
+  --faint:#8c98a7;
+  --line:#d8e1e9;
+  --line-strong:#bdcad6;
+  --blue:#1f5f9d;
+  --blue-deep:#184c7c;
+  --blue-soft:#e7f0fa;
+  --teal:#197f82;
+  --teal-soft:#e6f4f3;
+  --orange:#a45c2e;
+  --orange-soft:#f5ece6;
+  --danger:#9b4e50;
+  --success:#477a5e;
+  --focus:#2a78c5;
+  --shadow:0 12px 34px rgba(22,43,68,.08);
+  --radius:14px;
+  --reading:78ch;
+  --wide:1120px;
+  --full:1400px;
+  --ui:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --serif:Georgia,"Times New Roman",Times,serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+}
+html[data-theme="dark"]{
+  --paper:#071320;
+  --sheet:#0c1b2c;
+  --sheet-2:#10243a;
+  --ink:#e7edf5;
+  --muted:#a7b4c4;
+  --faint:#7c8ba0;
+  --line:#21364d;
+  --line-strong:#35536f;
+  --blue:#77abe5;
+  --blue-deep:#9bc5ef;
+  --blue-soft:#102e4d;
+  --teal:#5ab5b3;
+  --teal-soft:#103536;
+  --orange:#c57a45;
+  --orange-soft:#3b281d;
+  --danger:#ce8587;
+  --success:#80ad92;
+  --focus:#8ec3ff;
+  --shadow:0 18px 42px rgba(0,0,0,.3);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:auto;background:var(--paper)}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--serif);font-size:16.5px;line-height:1.7;text-rendering:optimizeLegibility}
+button,input,textarea,select{font:inherit}
+a{color:var(--blue);text-decoration-thickness:.08em;text-underline-offset:.16em}
+a:hover{color:var(--teal)}
+button{color:inherit}
+::selection{background:var(--blue-soft)}
+:focus-visible{outline:3px solid color-mix(in srgb,var(--focus) 65%,transparent);outline-offset:2px}
+.app{min-height:100vh;display:grid;grid-template-columns:var(--left-w) minmax(0,1fr) var(--right-w);grid-template-rows:var(--top-h) 1fr;grid-template-areas:"top top top" "left main right";transition:grid-template-columns .18s ease}
+body.left-closed .app{grid-template-columns:0 minmax(0,1fr) var(--right-w)}
+body.right-closed .app{grid-template-columns:var(--left-w) minmax(0,1fr) 0}
+body.left-closed.right-closed .app{grid-template-columns:0 minmax(0,1fr) 0}
+.topbar{grid-area:top;position:sticky;top:0;z-index:80;height:var(--top-h);display:flex;align-items:center;gap:9px;padding:0 12px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--sheet) 94%,transparent);backdrop-filter:blur(14px)}
+.brand{min-width:0;margin-right:auto;display:flex;align-items:baseline;gap:10px;font-family:var(--ui)}
+.brand strong{font-size:12px;letter-spacing:.05em;text-transform:uppercase;white-space:nowrap}
+.brand span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:11.5px}
+.icon-btn{width:34px;height:34px;display:grid;place-items:center;padding:0;border:1px solid var(--line);border-radius:9px;background:var(--sheet);cursor:pointer;font:700 13px/1 var(--ui)}
+.icon-btn:hover{background:var(--blue-soft);border-color:var(--line-strong)}
+.route-chip{max-width:230px;height:32px;display:flex;align-items:center;gap:7px;padding:0 10px;border:1px solid var(--line);border-radius:999px;background:var(--sheet);color:var(--muted);font:600 10.5px/1 var(--ui);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.route-chip code{color:var(--teal);font:800 10px/1 var(--mono)}
+.left-rail,.right-rail{position:sticky;top:var(--top-h);height:calc(100vh - var(--top-h));overflow:auto;background:var(--sheet);z-index:50;transition:transform .18s ease,opacity .18s ease}
+.left-rail{grid-area:left;border-right:1px solid var(--line);padding:18px 13px 34px}
+.right-rail{grid-area:right;border-left:1px solid var(--line);padding:18px 16px 34px}
+body.left-closed .left-rail{transform:translateX(-100%);opacity:0;pointer-events:none}
+body.right-closed .right-rail{transform:translateX(100%);opacity:0;pointer-events:none}
+.main{grid-area:main;min-width:0;background:var(--paper);container-type:inline-size;container-name:account-main}
+.rail-label{margin:4px 7px 10px;color:var(--faint);font:750 9.5px/1.2 var(--ui);letter-spacing:.12em;text-transform:uppercase}
+.surface-nav{display:grid;gap:5px}.nav-group{border-radius:10px}.nav-head{display:grid;grid-template-columns:minmax(0,1fr) 30px;align-items:stretch}.nav-select,.nav-toggle{border:0;background:transparent;cursor:pointer}.nav-select{display:grid;grid-template-columns:36px minmax(0,1fr);gap:7px;text-align:left;padding:9px 7px;border-radius:9px 0 0 9px}.nav-toggle{border-radius:0 9px 9px 0;font:800 11px/1 var(--ui);color:var(--muted)}.nav-head:hover .nav-select,.nav-head:hover .nav-toggle{background:var(--blue-soft)}.nav-group.active>.nav-head .nav-select,.nav-group.active>.nav-head .nav-toggle{background:var(--blue-soft)}.nav-group.active>.nav-head .nav-select{box-shadow:inset 3px 0 0 var(--blue)}.nav-q{font:800 10.5px/1.5 var(--mono);color:var(--blue)}.nav-name{font:700 11.5px/1.3 var(--ui);color:var(--ink)}.nav-gloss{display:block;margin-top:2px;color:var(--muted);font:400 10px/1.35 var(--ui)}.nav-toggle span{display:inline-block;transition:transform .15s ease}.nav-group.expanded .nav-toggle span{transform:rotate(90deg)}.subnav{display:none;margin:2px 0 5px 35px;padding:2px 0 5px 7px;border-left:1px solid var(--line)}.nav-group.expanded .subnav{display:grid;gap:1px}.subnav a{display:grid;grid-template-columns:32px minmax(0,1fr);gap:5px;padding:6px 8px;border-radius:7px;color:var(--muted);text-decoration:none;font:10.5px/1.35 var(--ui)}.subnav a:hover{background:var(--sheet-2);color:var(--ink)}.subnav a.active{background:var(--teal-soft);color:var(--ink)}.subnav code{font:800 9.5px/1.35 var(--mono);color:var(--teal)}
+.context-head{padding-bottom:15px;margin-bottom:14px;border-bottom:1px solid var(--line)}.context-kicker{margin-bottom:7px;color:var(--faint);font:750 9.5px/1 var(--ui);letter-spacing:.11em;text-transform:uppercase}.context-head h3{margin:0 0 5px;font:600 17px/1.25 var(--serif)}.context-head p{margin:0;color:var(--muted);font:11.5px/1.5 var(--ui)}.note-field{margin-top:15px}body[data-notes="false"] .note-field{display:none}.note-field label{display:block;margin-bottom:7px;color:var(--muted);font:700 10.5px/1.35 var(--ui)}.note-field textarea{width:100%;min-height:128px;resize:vertical;padding:10px 11px;border:1px solid var(--line);border-radius:10px;background:var(--paper);color:var(--ink);outline:none;font:12.5px/1.55 var(--ui)}.note-field textarea:focus{border-color:var(--blue)}.save-state{margin-top:5px;color:var(--faint);font:9.5px/1.3 var(--ui)}.context-slot{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}.context-slot:empty{display:none}.context-slot h4{margin:0 0 8px;font:750 10px/1.3 var(--ui);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}.right-details{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}.right-details summary{cursor:pointer;color:var(--muted);font:700 10.5px/1.4 var(--ui)}.meta-list{display:grid;gap:7px;margin:10px 0 0}.meta-row{display:grid;grid-template-columns:72px 1fr;gap:8px;font:10px/1.45 var(--ui)}.meta-row dt{color:var(--faint)}.meta-row dd{margin:0;color:var(--muted);overflow-wrap:anywhere}.source-list{display:grid;gap:8px;margin-top:10px}.source-list a{display:block;padding:8px 9px;border:1px solid var(--line);border-radius:9px;background:var(--paper);text-decoration:none;color:var(--ink);font:10.5px/1.4 var(--ui)}.source-list a:hover{border-color:var(--blue)}.source-empty{margin-top:9px;color:var(--faint);font:10px/1.4 var(--ui)}
+.surface{display:none;min-height:calc(100vh - var(--top-h));padding:clamp(34px,4vw,68px) clamp(22px,5vw,84px) 112px}.surface.active{display:block}.surface-inner{width:min(100%,var(--surface-max,var(--full)));margin:0 auto}.hero{margin-bottom:clamp(70px,8vw,118px);padding-bottom:clamp(34px,5vw,58px);border-bottom:1px solid var(--line)}.hero-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:18px;font-family:var(--ui)}.ql-badge{display:inline-flex;align-items:center;height:27px;padding:0 9px;border-radius:999px;background:var(--blue-soft);color:var(--blue);font:800 10.5px/1 var(--mono)}.hero-label{color:var(--muted);font:750 10px/1 var(--ui);letter-spacing:.09em;text-transform:uppercase}h1{max-width:18ch;margin:0;font-family:var(--serif);font-size:clamp(40px,5vw,66px);font-weight:500;line-height:1.02;letter-spacing:-.03em}.hero-deck{max-width:var(--reading);margin:20px 0 0;color:var(--muted);font-size:clamp(18px,1.8vw,22px);line-height:1.5}.hero-meta{display:flex;gap:10px 16px;flex-wrap:wrap;margin-top:22px;color:var(--faint);font:10.5px/1.4 var(--ui)}.ql-node{scroll-margin-top:calc(var(--top-h) + 26px);margin:0 0 clamp(76px,9vw,126px)}.node-head{margin-bottom:clamp(28px,3.4vw,40px)}.node-eyebrow{margin-bottom:10px;color:var(--teal);font:750 9.5px/1.2 var(--ui);letter-spacing:.1em;text-transform:uppercase}.ql-node h2{max-width:25ch;margin:0;font-family:var(--serif);font-size:clamp(26px,3vw,40px);font-weight:500;line-height:1.12;letter-spacing:-.018em}.node-deck{max-width:var(--reading);margin:13px 0 0;color:var(--muted);font-size:17.5px;line-height:1.58}.prose{max-width:var(--reading);font-size:16.5px;line-height:1.72}.prose p{margin:0 0 1em}.prose p:last-child{margin-bottom:0}.prose h3{margin:2.2em 0 .7em;font:600 22px/1.25 var(--serif)}.prose h4{margin:1.8em 0 .55em;font:750 12px/1.35 var(--ui);letter-spacing:.03em}.prose ul,.prose ol{margin:.9em 0 1.2em;padding-left:1.35em}.prose li{margin:.32em 0}.prose blockquote{margin:28px 0;padding:0 0 0 18px;border-left:3px solid var(--teal);color:var(--muted);font-size:18px;line-height:1.6}.prose code{font:90%/1 var(--mono);background:var(--sheet-2);padding:.12em .28em;border-radius:4px}.reading{width:min(100%,var(--reading))}.wide{width:min(100%,var(--wide))}.full{width:min(100%,var(--full))}.centered{margin-left:auto;margin-right:auto}
+.definition,.claim,.note,.warning,.evidence{max-width:var(--reading);margin:28px 0;padding:18px 20px;border-radius:0 12px 12px 0;background:var(--sheet);border:1px solid var(--line);border-left:4px solid var(--blue)}.definition{background:var(--blue-soft)}.claim{border-left-color:var(--teal);background:var(--teal-soft)}.note{border-left-color:var(--line-strong)}.warning{border-left-color:var(--orange);background:var(--orange-soft)}.evidence{border-left-color:var(--success)}.block-label{margin-bottom:7px;color:var(--muted);font:800 9.5px/1.3 var(--ui);letter-spacing:.08em;text-transform:uppercase}.definition p,.claim p,.note p,.warning p,.evidence p{margin:0;font-size:15.5px;line-height:1.6}.figure{margin:34px 0;overflow:hidden;border:1px solid var(--line);border-radius:var(--radius);background:var(--sheet);box-shadow:var(--shadow)}.figure-head{display:flex;justify-content:space-between;gap:14px;align-items:start;padding:14px 16px;border-bottom:1px solid var(--line);font-family:var(--ui)}.figure-head strong{font-size:11.5px;line-height:1.35}.figure-head span{color:var(--muted);font-size:10px;line-height:1.4;text-align:right}.figure-body{padding:clamp(14px,2vw,24px);overflow:auto}.figure figcaption{padding:12px 16px 14px;border-top:1px solid var(--line);color:var(--muted);font:10.8px/1.55 var(--ui)}.svg-wrap svg{display:block;width:100%;height:auto}.svg-wrap.scroll-x svg{min-width:720px}.table-wrap{margin:28px 0;overflow:auto;border:1px solid var(--line);border-radius:12px;background:var(--sheet)}table{width:100%;border-collapse:collapse;font:12.5px/1.5 var(--ui)}th,td{padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top;text-align:left}th{background:var(--sheet-2);color:var(--muted);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase}tr:last-child td{border-bottom:0}.code-block,.equation{margin:28px 0;border:1px solid var(--line);border-radius:12px;background:var(--sheet);overflow:auto}.code-block pre{margin:0;padding:18px 20px;font:12.5px/1.6 var(--mono)}.equation{padding:20px 22px;font:500 clamp(20px,2.6vw,30px)/1.4 var(--serif)}.source-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:28px 0}.source-card{display:block;padding:14px 15px;border:1px solid var(--line);border-radius:12px;background:var(--sheet);text-decoration:none;color:var(--ink)}.source-card:hover{border-color:var(--blue);box-shadow:var(--shadow)}.source-card strong{display:block;font:700 11.5px/1.4 var(--ui)}.source-card span{display:block;margin-top:4px;color:var(--muted);font:10.5px/1.5 var(--ui)}.two-col{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:clamp(24px,4vw,54px);align-items:start}.three-col{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.mockup-frame{margin:32px 0;border:1px solid var(--line-strong);border-radius:16px;background:var(--sheet);overflow:hidden;box-shadow:var(--shadow)}.mockup-toolbar{height:38px;display:flex;align-items:center;gap:6px;padding:0 12px;border-bottom:1px solid var(--line);background:var(--sheet-2)}.mockup-dot{width:8px;height:8px;border-radius:50%;background:var(--line-strong)}.mockup-body{min-height:260px;padding:20px}.controls{display:grid;gap:18px;padding:18px;border:1px solid var(--line);border-radius:12px;background:var(--sheet)}.control-row{display:grid;grid-template-columns:minmax(150px,.5fr) minmax(0,1fr) auto;gap:14px;align-items:center;font-family:var(--ui)}.control-row label{font-size:11.5px;font-weight:700}.control-row output{min-width:64px;text-align:right;color:var(--teal);font:800 11px/1 var(--mono)}input[type="range"]{width:100%;accent-color:var(--teal)}.toggle-row{display:flex;gap:7px;flex-wrap:wrap}.toggle-row button{padding:8px 11px;border:1px solid var(--line);border-radius:9px;background:var(--paper);cursor:pointer;font:700 10.5px/1.2 var(--ui)}.toggle-row button[aria-pressed="true"]{border-color:var(--blue);background:var(--blue);color:#fff}.timeline{position:relative;display:grid;gap:18px;margin:28px 0;padding-left:26px}.timeline:before{content:"";position:absolute;left:7px;top:5px;bottom:5px;width:1px;background:var(--line-strong)}.timeline-item{position:relative}.timeline-item:before{content:"";position:absolute;left:-23px;top:.55em;width:8px;height:8px;border-radius:50%;background:var(--teal);box-shadow:0 0 0 4px var(--paper)}.timeline-item time{display:block;margin-bottom:3px;color:var(--faint);font:700 9.5px/1.3 var(--ui)}.timeline-item h4{margin:0 0 4px;font:650 16px/1.3 var(--serif)}.timeline-item p{margin:0;color:var(--muted);font:11.5px/1.5 var(--ui)}
+@media (max-width:1319px){.app{grid-template-columns:var(--left-w) minmax(0,1fr);grid-template-areas:"top top" "left main"}body.left-closed .app,body.left-closed.right-closed .app{grid-template-columns:0 minmax(0,1fr)}body.right-closed .app{grid-template-columns:var(--left-w) minmax(0,1fr)}.right-rail{position:fixed;top:var(--top-h);right:0;width:var(--right-w);height:calc(100vh - var(--top-h));border-left:1px solid var(--line);box-shadow:-18px 0 40px rgba(16,35,56,.14)}body.right-closed .right-rail{transform:translateX(100%);opacity:0;pointer-events:none}}
+@media (max-width:979px){.app{grid-template-columns:minmax(0,1fr);grid-template-areas:"top" "main"}body.left-closed .app,body.right-closed .app,body.left-closed.right-closed .app{grid-template-columns:minmax(0,1fr)}.left-rail{position:fixed;top:var(--top-h);left:0;width:min(var(--left-w),88vw);height:calc(100vh - var(--top-h));box-shadow:18px 0 40px rgba(16,35,56,.14)}.right-rail{width:min(var(--right-w),90vw)}.route-chip{display:none}.surface{padding-left:clamp(18px,5vw,42px);padding-right:clamp(18px,5vw,42px)}}
+@container account-main (max-width:880px){.two-col,.three-col,.source-grid{grid-template-columns:1fr}.control-row{grid-template-columns:1fr}.control-row output{text-align:left}}
+@container account-main (max-width:620px){.hero{margin-bottom:66px}.ql-node{margin-bottom:78px}.node-head{margin-bottom:26px}.figure-head{display:block}.figure-head span{display:block;margin-top:4px;text-align:left}}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+@media print{:root{--paper:#fff;--sheet:#fff;--ink:#000;--muted:#444;--line:#bbb;--line-strong:#888}.topbar,.left-rail,.right-rail{display:none!important}.app{display:block}.main{display:block}.surface{display:block!important;padding:24mm 18mm;min-height:auto;break-before:page}.surface:first-child{break-before:auto}.hero{margin-bottom:18mm}.ql-node{break-inside:avoid-page}.figure,.table-wrap,.code-block,.equation{box-shadow:none;break-inside:avoid}a{color:#000;text-decoration:none}a[href^="http"]:after{content:" (" attr(href) ")";font-size:8pt;overflow-wrap:anywhere}}
+
+.right-closed .right-rail,.left-closed .left-rail{display:none}
+.svg-wrap{overflow-x:auto}.svg-wrap svg{min-width:640px}
+.unit-sources{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:22px;padding-top:14px;border-top:1px solid var(--line);font-size:12px}.unit-sources a{color:var(--muted)}
+.prose a[data-resource]{text-decoration:underline;text-underline-offset:3px}.source-unresolved{color:#a02d22}.surface-inner{max-width:1120px}.prose li{margin-bottom:.65em}
+@media print{.surface{display:block!important} .left-rail,.right-rail,.topbar{display:none!important} .main{margin:0!important}}
+.prose pre{max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:auto}.capability-links{font-size:.9em;color:var(--muted)}
+[data-surface="whole"] .hero{margin-bottom:40px;padding-bottom:30px}[data-surface="whole"] .ql-node{margin-bottom:42px}[data-surface="whole"] .node-head{margin-bottom:16px}[data-surface="whole"] .ql-node h2{max-width:36ch;font-size:clamp(25px,2.3vw,31px)}
+</style>
+</head>
+<body class="right-closed" data-notes="true">
+<script type="application/json" id="account-provenance">{
+  "uid": "aikit-product-ground",
+  "kind": "html-account",
+  "title": "AIKit product account",
+  "project": "project:aikit",
+  "status": "draft",
+  "standing": "agent-inference",
+  "provenance": "generated-suggestion",
+  "ql": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "created": "2026-09-06",
+  "updated": "2026-09-06",
+  "generator": "Agent-recovered seed and expansion using the human-selected six-question convention",
+  "source_revision": "5cbb1e59b4a2acc1060728e376449e5fd3199d8f",
+  "source_basis": [
+    {
+      "path": "../github-recovery-mirror/mirror/ai-kit/issues/102.comments.json",
+      "sha256": "feb9e77c1a7e06f95c609697a415e14d789111cef0806bd2ef5bd273d83b900d"
+    },
+    {
+      "path": "../github-recovery-mirror/mirror/ai-kit/issues/118.json",
+      "sha256": "5e6632f152faf86998c032e3f5474f99f8a1504df0ff8db81e24e646bb677c84"
+    },
+    {
+      "path": "../github-recovery-mirror/mirror/ai-kit/issues/126.json",
+      "sha256": "432c0be75e1112b157101fe5769fd38e9c37257bae52b72eee8177cb68ed08e8"
+    },
+    {
+      "path": "../github-recovery-mirror/mirror/ai-kit/issues/153.comments.json",
+      "sha256": "092f1e987273cef63baf06f5edafeee935e18f50fde26b3e0c20ff0c20198bef"
+    },
+    {
+      "path": "../github-recovery-mirror/mirror/ai-kit/issues/158.json",
+      "sha256": "da54f3e92018d1f2e824e9802cb9f8de8dff9f17f4c1b1919a86f99d51e3d78e"
+    },
+    {
+      "path": "../github-recovery-mirror/mirror/ai-kit/issues/164.json",
+      "sha256": "d33b89808bc3565cc01ee72b2bc4e58a41a29855c3bcc3cdcb0e97d1911486c5"
+    },
+    {
+      "path": "AGENTS.md",
+      "sha256": "9edca0e55b8184c4c776544abbe5f6df72617d720547fe3b10a66a39cdaee176"
+    },
+    {
+      "path": "README.md",
+      "sha256": "af5fe6ac200cf23adf208133a6d5f44cda1c403054c47aae11d1ae83bd2b1bed"
+    },
+    {
+      "path": "crates/aikit-adapters/src/projectcentral_authored_wiki.rs",
+      "sha256": "7c16ed7f8d6272c67b8d26cf4a7246a7d34d3a9911978674492b7033563df085"
+    },
+    {
+      "path": "crates/aikit-cli/src/wiki.rs",
+      "sha256": "90b39c0190737a813352418df4a36484feb4d8d4041a13a355e22ade789b83f1"
+    },
+    {
+      "path": "crates/aikit-cli/src/cli.rs",
+      "sha256": "c354dd2a84c51fb43c320a4984a134ccfe4abc6c51205dcad834f55228a12f9f"
+    },
+    {
+      "path": "crates/aikit-cli/src/main.rs",
+      "sha256": "5e6f322a9f9880bebb6a9c62e14615ff631e6840835eccfdbca48a1f68f3e5ca"
+    },
+    {
+      "path": "crates/aikit-cli/src/app/knowledge.rs",
+      "sha256": "e0b1b7e2ea41bfba61afa658c572c082b3fca78cd469f1d68afb154e28fea9a6"
+    },
+    {
+      "path": "crates/aikit-adapters/src/actuation_stream_projection.rs",
+      "sha256": "20c0500221852e94f90904cbeac123e1e9bd62cdeab2910ba714c60ae744da84"
+    },
+    {
+      "path": "crates/aikit-adapters/src/agent_connection.rs",
+      "sha256": "43b833515d51c807ed0964223c6b87d1c5a626daa63896d1830ca16fed77b5fe"
+    },
+    {
+      "path": "crates/aikit-adapters/src/agent_session_host.rs",
+      "sha256": "c8decbef224508ceef0864ea3af0d4cb05132d3795a37562cbba9e3843247cf6"
+    },
+    {
+      "path": "crates/aikit-adapters/src/session_space_connection.rs",
+      "sha256": "bd766003243b076f8a94c5829029680c3423d6a6b54c957929ad991d71fa7639"
+    },
+    {
+      "path": "crates/aikit-adapters/src/lib.rs",
+      "sha256": "8373c6a542e91179d08f97b6c03c3639b45e7c362af8b9900f84e22b0fffac20"
+    },
+    {
+      "path": "docs/AGENT-HARNESS-INTEGRATION.md",
+      "sha256": "846a2192e493a2db5076e6ff99af72b41ce10ca37f5924742ceef3f0b1490b80"
+    },
+    {
+      "path": "docs/ARCHITECTURE.md",
+      "sha256": "4001476cbd64ef4f881a3d44fa64f6a744161c483b575f1619a51369b5e48c83"
+    },
+    {
+      "path": "docs/SPEC-II-PROCEDURES-AND-INBOX.md",
+      "sha256": "f0c4d83fa0af58a0202ece2e5150ae94ff679d094476ff1f13b80287d00e0f11"
+    },
+    {
+      "path": "docs/SPEC-III-SKILLSETS-AND-FRECENCY.md",
+      "sha256": "67ba57775469612c9c6c3bf4061f7202dd7beb9fff1aa4f0baf3978edc2d7cb7"
+    },
+    {
+      "path": "docs/v2/01-PRODUCT-AND-OWNERSHIP.md",
+      "sha256": "b7d10d42e8a061c2c8c382f1d25e66611521c94f5d360c9ac448cf0229cd58ba"
+    },
+    {
+      "path": "docs/v2/02-RESOLUTION-AND-CONTEXT-COGNITION.md",
+      "sha256": "b235b5319ddc24729edc1e3533b5fc97beaa82da330d70907901fea0102f5dda"
+    },
+    {
+      "path": "docs/v2/08-VERIFICATION-RUNS-AND-CLOSURE.md",
+      "sha256": "2ada915e1f411ac5a4402344e46d6490ecc8e1c6627755c607dd2673e3e4e161"
+    },
+    {
+      "path": "docs/v2/09-COMPOSABLE-RUNTIME-ENVIRONMENTS.md",
+      "sha256": "0cf6b63abb7573d4f4f0e4a326da8c7489ff9cd34dec3886cafcf050b97a851b"
+    },
+    {
+      "path": "docs/v2/15-MODEL-ROSTER-CAPABILITY-FIT.md",
+      "sha256": "3f54ca1216b91c0b06b088bf1b48095fe37c31e62edb5ffd69e77226c2b2914d"
+    },
+    {
+      "path": "docs/v2/18-PROFILE-COMPOSITION-APPLICATION-PARITY.md",
+      "sha256": "c6da831b114e5b96a533db2c1985cb4a547d282072b7283fb64fdbfd314a5cd9"
+    },
+    {
+      "path": "docs/v2/20-PRAXIS-METHODS-AND-SKILL-COMPOSITION.md",
+      "sha256": "2049536cfd79017400a208e1b854d2195b3bf4e74a5c2881704d6d824740f083"
+    },
+    {
+      "path": "docs/v2/21-PROJECT-REFLECTION-AND-LOCAL-ARTICULATION.md",
+      "sha256": "15d0d3912b3cdb128d1141182500aac438fdb6e85c1d5f17866aba1f1c633303"
+    },
+    {
+      "path": "registry/capsules/skill/aikit/knowledge-navigation/payload/SKILL.md",
+      "sha256": "0fca6972ede735a20b7318b46bb2c5cca391d5c17119479245e3320cb97a10f6"
+    },
+    {
+      "path": "registry/capsules/skill/aikit/wiki-inhabitation/payload/SKILL.md",
+      "sha256": "a2f6e1b653530335cd31791b7950bbbae75e296dfb58ce54eee5929ea1996de4"
+    }
+  ],
+  "seed_basis": {
+    "provenance": "agent-inference",
+    "whole_anchor": "0/1",
+    "meaning": "Recovered candidate from AIKit native product sources and ticket corrections; requires human review"
+  },
+  "relations": [
+    {
+      "type": "capability-reference",
+      "target": "capability-matrix.md"
+    }
+  ],
+  "verification": {
+    "date": "2026-09-06",
+    "coordinating_agent_report": {
+      "wiki_commands": 13,
+      "authored_wiki_adapter_tests": 21
+    },
+    "artifact": {
+      "layout_checks": 35,
+      "seed_navigation_checks": 6,
+      "structural_check": "passed"
+    },
+    "limits": "Selected software and artifact checks; no installed harness or live provider acceptance claimed"
+  },
+  "source_basis_path_base": "repository-root",
+  "reconciled_source_revisions": [
+    {
+      "path": "registry/capsules/skill/aikit/knowledge-navigation/payload/SKILL.md",
+      "read_sha256": "ec6d2384db7dd15ec50972182e327c3203cd29259fea04c2681d3d649c26764d",
+      "current_sha256": "b0d69ae06afe5f96b2e46ae2e1a00e99f7a4727265fad50196f13cefeca5a83e",
+      "reason": "Reviewed protocol/skill refinements made during this consolidation: intended capability gaps and source-format/standing parity.",
+      "date": "2026-09-06"
+    },
+    {
+      "path": "docs/v2/21-PROJECT-REFLECTION-AND-LOCAL-ARTICULATION.md",
+      "previous_sha256": "8959fa5f22d208ef5feb48739b8105944b30b53f6e949d9fbd5d3645139b7aea",
+      "sha256": "15d0d3912b3cdb128d1141182500aac438fdb6e85c1d5f17866aba1f1c633303",
+      "reason": "Reconciled single matrix form, declared views and Central filesystem / AIKit operation ownership; source authority unchanged."
+    },
+    {
+      "path": "registry/capsules/skill/aikit/knowledge-navigation/payload/SKILL.md",
+      "previous_sha256": "b0d69ae06afe5f96b2e46ae2e1a00e99f7a4727265fad50196f13cefeca5a83e",
+      "sha256": "0fca6972ede735a20b7318b46bb2c5cca391d5c17119479245e3320cb97a10f6",
+      "reason": "Reconciled single matrix form, declared views and Central filesystem / AIKit operation ownership; source authority unchanged."
+    },
+    {
+      "path": "registry/capsules/skill/aikit/wiki-inhabitation/payload/SKILL.md",
+      "previous_sha256": "cdf516f3ccd0221b4559ebb64de8b498fb578489a1746cb38029645d2607a68b",
+      "sha256": "a2f6e1b653530335cd31791b7950bbbae75e296dfb58ce54eee5929ea1996de4",
+      "reason": "Reconciled single matrix form, declared views and Central filesystem / AIKit operation ownership; source authority unchanged."
+    }
+  ],
+  "matrix_basis": {
+    "protocol": "ql-capability-matrix/1",
+    "csv_sha256": "ed2d71b46788d4df3c02eb2e382e88d930961e22495663368e82cb43cbcc305f",
+    "manifest_sha256": "f3e56acd29cdbb5f8ccdfdd315e15e15c12fcc5c6f072c46652801049baecc85",
+    "record_sha256": {
+      "cap.aikit.discovery": "042e940232f0d293dcac27c684e9e85b3e0742c0ca459191040efb6584cb3d29",
+      "cap.aikit.adoption": "5785e576fd0dc107b0406ac86ffdd918d69bf175e61c00eba15463b0e987aa97",
+      "cap.aikit.resource-index": "f94c94908819cdf672c63698631d1eb4510f7cbfc7e2c6a7e64ee7cb332a5ea3",
+      "cap.aikit.context-resolution": "e0d65a7c946273df3a43ff6ef8d6ac576a18a5103a97b02d82747b6ce0a04548",
+      "cap.aikit.profiles": "927928506fabf6784aedc32fad8d5e704ee528675b3dbaf41a0f8d39c61b694b",
+      "cap.aikit.generation": "f78333d97e845ab694b142724177ece7fd6282576c77a99d564a70cf67af8337",
+      "cap.aikit.projection": "fb0c3aa22b1a4900be1fa44152107b35cf5f875d9a009d8b3c0e951feeb76b7a",
+      "cap.aikit.source-horizon": "b87b56830b45e0e478239341d4e73740d6005bfca32946d3dde99c4abcdd2d9c",
+      "cap.aikit.knowledge-navigation": "ec3dbff3aa85dbcdf5c89ade461f66fca1645af292fc1085bcbeea6336c47d95",
+      "cap.aikit.wiki-write": "72af135e609a9d0e5106671b036f01fda8f2c8b9c70be541636f74ccfefb4b5f",
+      "cap.aikit.authored-relations": "0f765f2ce5c81d8102812666df5c4d95d7f0d3e495c144488260706e4ad309a6",
+      "cap.aikit.projectcentral": "94ddcefc425f21098596ebae2f703d573b80019359f2a364a0f07c8dc8dc53db",
+      "cap.aikit.living-knowledge": "377fdb4bfb2e8d0102954d0b835fcf2e1e77ee09c5fc014fafd30b7a18dc06eb",
+      "cap.aikit.wiki-shapes": "3b9849f3d79e32ab38eaa5fd12f76ac571639e9cd54ae871edbc50b017de041c",
+      "cap.aikit.reflection": "76aa339b155f74e3a7a3d8ec2fb3efe55eb1a2ed0f4592ccad9e56ceba7a273e",
+      "cap.aikit.methods": "eab92016d5f1c556fefa44d7f8ff2c48b41a28994e07f06e2282f972ee2b37f7",
+      "cap.aikit.routines": "55fb0860c7c5747499c4d01aad69acf9c9f2bdb9a797e69cb72451c5dd5b8bed",
+      "cap.aikit.composition": "54a5fd44ae1a81219b35c4b876e2c257bd26f5e7e6fb8fe628e069ed5a59257a",
+      "cap.aikit.sessions": "37d78abb2bfbcccb6c1e3342bbef2efe882efe558a60380c54b6781932617954",
+      "cap.aikit.models": "c2207a44657225ed50a65d1a883ac12de0b8a7b6f74e3b416765e78e6242b728",
+      "cap.aikit.activation": "156fc83869f2d3fa049f00611a6bafa474cb6bf7e18a83278792f84d27316ff3",
+      "cap.aikit.procedures": "ffd57d29759b7490796e4ac75d430524b962c3268685c7174820b8c147dc9917",
+      "cap.aikit.explain": "7200424aa5c906887840a236b9cfc182921f9e6ce7211093e60074341bca287c",
+      "cap.aikit.familiarity": "6fa3ceb68c48278cd90e506539f3de91bf3e3d61834f931a7c7fffb130de2dc9",
+      "H0->H2": "992744b1cbcad1eb5521b6fea7eebaae9f07bffb6963ef8c8f4a47dc6215efd1",
+      "H0->A2": "f697b3682f4ad7981a9f38ef1255fa5f95d08e171cbd6a7f21dff4b9aed58ef2",
+      "H1->H2": "1375bfddd05b060c87e5142686325addf4cdd78826e0cd35f1b5471ec6143f38",
+      "H1->A2": "d024001af5a4f60fde71101f42d4ec2bf497a221aae578fd62a0b18232ea7181",
+      "H2->H0": "426ccef9ef60a71312e80054ab7cdfeefe9427648b542cdc22f3b3573c8f4641",
+      "H2->H1": "0f1b906fc4fecaa442da4fbacfb569156b43d28f8f7269cb8d731896e1fbc98f",
+      "H2->H2": "eab0a353418d547832346ad1c06aa0029245fdbdd9740b63fc7193c22d42695e",
+      "H2->H3": "2592fb7db1fbd7a17d369d532d80d841aa7b8e6b6871772b27854ef959837fd6",
+      "H2->H4": "06e72ad479650436da85221ab544d0fe54db89639137f9484800a8bb1ab75cff",
+      "H2->H5": "6df72b38508cac8c1a629a0301e28e08cd6287b3f118f548dba1e853fde29d41",
+      "H2->A0": "9d105a298c82cae9dd16f9cb9bdf03dccb6fa73350c8648f75a05471ea034305",
+      "H2->A1": "53ca8c1d83d5a895bff60e2d18905937bc620ef25f435f773c861642916c431e",
+      "H2->A2": "b1e53dfdc8688d588d5e548d0ebdd4a7d16f9e57058f1e8829308023da308e8c",
+      "H2->A3": "9d8abdf2443f651ad374419a251b41f39723db3d238ddf2cf31aa0067895999b",
+      "H2->A4": "4e4380cabe79f21d37994e699c58cac3214dddd7a40adb592fcd8596ff25eec4",
+      "H2->A5": "9849ecc919e0178849a537bec1f4820f295340d1475a403f59f3704cc263cd41",
+      "H3->H2": "de8f6c0597d6a0b72f86630a552f2411eaf81c032ad6ec16b6616e2eb22c5a69",
+      "H3->A2": "89f539841e56cc077a79f2e1efef2eefba2885682b10c7f393ee4daaa1fa8bb3",
+      "H4->H2": "86204dbb48b8ec4df4d947a0d7f164fb6b748cfa978d16d9cfadbb68361cb947",
+      "H4->A2": "d6831671148a8f68342b29155d223fe999ee64c719ea2faf0b6b243a14d8f3ac",
+      "H5->H2": "0e8c634562418eddd964bdc9d53c1a18915ff78584cde636a37b4750902e5f5b",
+      "H5->A2": "7966307d7d8fee17e11a02a008d8a11e74898e48716d1964e743e107b342820b",
+      "A0->H2": "a0cae6724e8c2529988335c8c4af554c02ddc00ab5addf388dc647c5338aa812",
+      "A0->A2": "62fa294c393af1d44a80e80aa9fc3cc16ccfaf22453d5d4f295229ed87f67274",
+      "A1->H2": "efba184e6ec1c4ffb5f5bd64ba79448138d9ac7b4ea17bd402bd0e971cd1a3d2",
+      "A1->A2": "089da8ad14677a2f4f36d20ab453dc0ca389a03aca4847073c6c68bcc15af51d",
+      "A2->H0": "e87cd60f47cd8d335ddbde1915506f20063f4287c573c59e5f5b7a6323c1c191",
+      "A2->H1": "f2b6cc48b07cf5d2b06ee2998414bd4d378bc350ca18fb8a72a5717b90ae03ca",
+      "A2->H2": "309c6638258855d5f6b747f08f67ad3934f8c8a726754cea612be877856f5b75",
+      "A2->H3": "12ef2f208d7b250299766b8e9ad2dd9c854eb73bc33a7c23e6dd1b758a760420",
+      "A2->H4": "3a8eaf947f44daa47fba2382c4fab027c6d7b0d164b965983d77ba5dbc964936",
+      "A2->H5": "63fa2986928f401f3fa37ceeb1b1c937c74d239f697bcc0ac27146bc5001be85",
+      "A2->A0": "5c69fbb89c6df347de87224299523e83730c8041ab95c84217641725f79817dd",
+      "A2->A1": "dd587ea35b8cef6059e234a6dbaee2c2aed15e2acc0347bf12764be5defd876b",
+      "A2->A2": "fa2b0b2afd0d3834323bfcca5f5c28e9a6ebbd6ee47f6a08bc7701551245529b",
+      "A2->A3": "b4a619e741e27e18f5a85339d78b720a73159b9ae68ed147fcda87d933778b1a",
+      "A2->A4": "b817607bc03ab70c0841a2c9629744acab12417088444a3ddbe3e4d1213e67cb",
+      "A2->A5": "c454a543ed042e0e2b4a2f7f4031a9e25637b5fcbc366021642ecb0499e1034b",
+      "A3->H2": "2f20db1c5bfe9f213d7606c910c71149f8a94d340e1f9dab39e13122e4949176",
+      "A3->A2": "126e5f26af06ed7d25aa15517eb458a5cddd756e539042a0e6072aa365a590a5",
+      "A4->H2": "8ac1682997cd73c1a048fa1b9450559c48fb4a015348f6b559f1c14521b3303f",
+      "A4->A2": "0329d0daa695abd1719b8b1ca6e0d2596b99ff4382a9fbb47fc16e951049bce7",
+      "A5->H2": "8b1bab4e5f87adf7d4ab67f26678d7bc1c5ec26497ece5deeb44b403a737cf51",
+      "A5->A2": "78117ddcd13c28f803866682acef6842d479db0176abbb92585791147d246c9b",
+      "rel.aikit.q0.S": "eabf52e9087e89d3994a51c471d2e60cdc3d17f389d98e3ac3bf82afe95c43cf",
+      "rel.aikit.q1.S": "fadedaaa0ee5fb9d457616cc23644e7b9b97e54f760e2885ee3a7d538364d01a",
+      "rel.aikit.q2.S": "db75d71d0f5891d4ee1131ded7d8759210d450830dfeeca61a15626ca3485e0e",
+      "rel.aikit.q3.S": "37353f3475ce4d7da47f0dafbd9f90976e5b03435babe07033f40cf3768cc4f1",
+      "rel.aikit.q4.S": "a7008614080541f71252581a302992299d29a07e53be18049ac845fa8bad3657",
+      "rel.aikit.q5.S": "b9254a535b82f0550c5eec9fdaeabdc609ace483836571e15e46e03a14be5bc8",
+      "rel.aikit.q3.S0": "77494bb57f25a15b0f2f5d1592b69f5dc0ef5739af03a730254e1b95aa9a50ce",
+      "rel.aikit.q3.S1": "b3058291b7082da74d6a6fdba4062d92680f4d03bbd78c4ad1161a0914f7e3bf",
+      "rel.aikit.q3.S3": "2874e5427d8490dfa83f10dbbed05df7475535f72ff6729acc9cca08f3db8867",
+      "rel.aikit.q3.S4": "06782882979224649f47127c7def888a91928b0ea7ff433fe08fe046170e6664",
+      "rel.aikit.q3.S5": "4b18b8ea813187f3342ee755ebde598bbda38d7a445254c49bf514c2b67bd1dd"
+    },
+    "change_ref": "codex:thread:01a07608-d2ec-7b10-9713-74c445adf8a5",
+    "reviewed_at": "2026-09-06T16:46:32.541584+00:00",
+    "reviewed_sections": [
+      "q1",
+      "q2"
+    ]
+  }
+}</script>
+<script type="application/json" id="ground-resources">
+{
+  "aikit:doc:overview": {
+    "title": "AIKit six-question overview",
+    "href": "#whole"
+  },
+  "aikit:matrix:md": {
+    "title": "AIKit capability matrix",
+    "href": "capability-matrix.md"
+  },
+  "aikit:matrix:csv": {
+    "title": "AIKit structured capability records",
+    "href": "capability-matrix.csv"
+  },
+  "source:covenant": {
+    "title": "O:I shared primitives",
+    "href": "../../../O-I/docs/HUMAN-AGENT-COVENANT.md"
+  },
+  "aikit:seed:q0": {
+    "title": "Why?",
+    "href": "#whole/why"
+  },
+  "aikit:seed:q1": {
+    "title": "What?",
+    "href": "#whole/what"
+  },
+  "aikit:seed:q2": {
+    "title": "How?",
+    "href": "#whole/how"
+  },
+  "aikit:seed:q3": {
+    "title": "Who/Whereby?",
+    "href": "#whole/whereby"
+  },
+  "aikit:seed:q4": {
+    "title": "Where/When?",
+    "href": "#whole/context"
+  },
+  "aikit:seed:q5": {
+    "title": "Why-For?",
+    "href": "#whole/purpose"
+  },
+  "aikit:doc:need": {
+    "title": "A capable environment should be understandable",
+    "href": "#q0/need"
+  },
+  "aikit:doc:continuity": {
+    "title": "Keep the person\u2019s existing world in view",
+    "href": "#q0/continuity"
+  },
+  "aikit:doc:orientation": {
+    "title": "A small opening into a larger world",
+    "href": "#q0/orientation"
+  },
+  "aikit:doc:product": {
+    "title": "The CLI, TUI and shared services",
+    "href": "#q1/product"
+  },
+  "aikit:doc:knowledge": {
+    "title": "Knowledge that can be asked for",
+    "href": "#q1/knowledge"
+  },
+  "aikit:doc:praxis": {
+    "title": "Reusable practice and working bodies",
+    "href": "#q1/praxis"
+  },
+  "aikit:doc:start": {
+    "title": "Enter a Project with a useful environment",
+    "href": "#q2/start"
+  },
+  "aikit:doc:investigate": {
+    "title": "Follow a question back to exact source",
+    "href": "#q2/investigate"
+  },
+  "aikit:doc:maintain": {
+    "title": "Turn useful understanding into navigable knowledge",
+    "href": "#q2/maintain"
+  },
+  "aikit:doc:compose": {
+    "title": "Change the working setup with a visible result",
+    "href": "#q2/compose"
+  },
+  "aikit:doc:identity": {
+    "title": "References connect resources to their owners",
+    "href": "#q3/identity"
+  },
+  "aikit:doc:resolution": {
+    "title": "Make every effective choice explainable",
+    "href": "#q3/resolution"
+  },
+  "aikit:doc:source-contract": {
+    "title": "Read source faithfully across different forms",
+    "href": "#q3/source-contract"
+  },
+  "aikit:doc:contexts": {
+    "title": "Carry common practice into particular work",
+    "href": "#q4/contexts"
+  },
+  "aikit:doc:providers": {
+    "title": "Operate through the resources actually present",
+    "href": "#q4/providers"
+  },
+  "aikit:doc:frontier": {
+    "title": "The next documentation-to-Wiki integration",
+    "href": "#q4/frontier"
+  },
+  "aikit:doc:whole": {
+    "title": "The practical return: a usable context",
+    "href": "#q5/whole"
+  },
+  "aikit:doc:acceptance": {
+    "title": "What this account establishes",
+    "href": "#q5/acceptance"
+  },
+  "cap.aikit.discovery": {
+    "title": "Discover existing resources",
+    "href": "capability-matrix.md#cap-aikit-discovery"
+  },
+  "cap.aikit.adoption": {
+    "title": "Adopt an existing Skill source",
+    "href": "capability-matrix.md#cap-aikit-adoption"
+  },
+  "cap.aikit.resource-index": {
+    "title": "Index typed resources",
+    "href": "capability-matrix.md#cap-aikit-resource-index"
+  },
+  "cap.aikit.context-resolution": {
+    "title": "Resolve a situated environment",
+    "href": "capability-matrix.md#cap-aikit-context-resolution"
+  },
+  "cap.aikit.profiles": {
+    "title": "Compose scoped Profiles",
+    "href": "capability-matrix.md#cap-aikit-profiles"
+  },
+  "cap.aikit.generation": {
+    "title": "Publish a complete resolved view",
+    "href": "capability-matrix.md#cap-aikit-generation"
+  },
+  "cap.aikit.projection": {
+    "title": "Expose resources to a harness",
+    "href": "capability-matrix.md#cap-aikit-projection"
+  },
+  "cap.aikit.source-horizon": {
+    "title": "Discover and retrieve source",
+    "href": "capability-matrix.md#cap-aikit-source-horizon"
+  },
+  "cap.aikit.knowledge-navigation": {
+    "title": "Search and traverse knowledge",
+    "href": "capability-matrix.md#cap-aikit-knowledge-navigation"
+  },
+  "cap.aikit.wiki-write": {
+    "title": "Maintain validated Wiki objects",
+    "href": "capability-matrix.md#cap-aikit-wiki-write"
+  },
+  "cap.aikit.authored-relations": {
+    "title": "Compile source relationships",
+    "href": "capability-matrix.md#cap-aikit-authored-relations"
+  },
+  "cap.aikit.projectcentral": {
+    "title": "Encounter ProjectCentral source",
+    "href": "capability-matrix.md#cap-aikit-projectcentral"
+  },
+  "cap.aikit.living-knowledge": {
+    "title": "Inspect change impact",
+    "href": "capability-matrix.md#cap-aikit-living-knowledge"
+  },
+  "cap.aikit.wiki-shapes": {
+    "title": "Read explicit QL structures",
+    "href": "capability-matrix.md#cap-aikit-wiki-shapes"
+  },
+  "cap.aikit.reflection": {
+    "title": "Connect meaning and implementation",
+    "href": "capability-matrix.md#cap-aikit-reflection"
+  },
+  "cap.aikit.methods": {
+    "title": "Compose situated practice",
+    "href": "capability-matrix.md#cap-aikit-methods"
+  },
+  "cap.aikit.routines": {
+    "title": "Establish repeatable Method use",
+    "href": "capability-matrix.md#cap-aikit-routines"
+  },
+  "cap.aikit.composition": {
+    "title": "Compose a runtime body",
+    "href": "capability-matrix.md#cap-aikit-composition"
+  },
+  "cap.aikit.sessions": {
+    "title": "Maintain portable session relations",
+    "href": "capability-matrix.md#cap-aikit-sessions"
+  },
+  "cap.aikit.models": {
+    "title": "Inspect model and provider fit",
+    "href": "capability-matrix.md#cap-aikit-models"
+  },
+  "cap.aikit.activation": {
+    "title": "Record effective instruction activation",
+    "href": "capability-matrix.md#cap-aikit-activation"
+  },
+  "cap.aikit.procedures": {
+    "title": "Review and reverse external changes",
+    "href": "capability-matrix.md#cap-aikit-procedures"
+  },
+  "cap.aikit.explain": {
+    "title": "Explain state and history",
+    "href": "capability-matrix.md#cap-aikit-explain"
+  },
+  "cap.aikit.familiarity": {
+    "title": "Improve access through use",
+    "href": "capability-matrix.md#cap-aikit-familiarity"
+  }
+}
+</script>
+<div class="app">
+  <header class="topbar">
+    <button class="icon-btn" id="leftToggle" aria-label="Toggle contents" aria-controls="leftRail" aria-expanded="true">☰</button>
+    <div class="brand"><strong>AIKit</strong><span>Product ground · review draft</span></div>
+    <div class="route-chip" id="routeChip"><code>#0</code><span>Ground</span></div>
+    <button class="icon-btn" id="themeToggle" aria-label="Switch theme">◐</button>
+    <button class="icon-btn" id="rightToggle" aria-label="Toggle context" aria-controls="rightRail" aria-expanded="false">✎</button>
+  </header>
+  <nav class="left-rail" id="leftRail" aria-label="Account contents"><div class="rail-label">Account</div><div class="surface-nav" id="surfaceNav"></div></nav>
+  <main class="main" id="mainContent"><article class="surface active" data-surface="whole" data-whole-anchor="0/1" data-title="AIKit · overview" data-gloss="0/1 · Six questions"><div class="surface-inner"><header class="hero"><div class="hero-line"><span class="ql-badge">0/1</span><span class="hero-label">Whole-account overview</span></div><h1>AIKit</h1><p class="hero-deck">Compose the resources available to an Agent. Make the knowledge relevant to its work askable.</p><div class="hero-meta"><span>Recovered seed · Agent-inference candidate</span><span>Human review pending</span></div></header><section class="ql-node" id="whole-why" data-node=".0" data-route="why" data-nav="Why? Make the available world usable" data-context="Agent-recovered candidate · review draft" data-vessel="founding-position" data-standing="agent-inference" data-tags="aikit why founding-position" data-resource="aikit:seed:q0"><header class="node-head"><div class="node-eyebrow">#0 · <span data-seed-question="aikit:seed:q0">Why?</span></div><h2>Why? Make the available world usable</h2></header><div class="prose"><div data-seed-content="aikit:seed:q0"><p>Agentic work draws on tools, Skills, knowledge, models and working environments that come from many places. A person needs these resources to become a coherent working context without rebuilding their setup around each Agent. AIKit makes the relevant part of that world discoverable, explainable and usable for the work at hand.</p></div><p><a href="#q0" data-expansion-link="q0">Read the expanded #0 — Why?</a></p></div><footer class="unit-sources"><a data-source href="../../docs/v2/01-PRODUCT-AND-OWNERSHIP.md">docs/v2/01-PRODUCT-AND-OWNERSHIP.md</a></footer></section>
+<section class="ql-node" id="whole-what" data-node=".1" data-route="what" data-nav="What? The composition and disclosure toolkit" data-context="Agent-recovered candidate · review draft" data-vessel="founding-position" data-standing="agent-inference" data-tags="aikit what founding-position" data-resource="aikit:seed:q1"><header class="node-head"><div class="node-eyebrow">#1 · <span data-seed-question="aikit:seed:q1">What?</span></div><h2>What? The composition and disclosure toolkit</h2></header><div class="prose"><div data-seed-content="aikit:seed:q1"><p>AIKit is a Rust CLI, TUI and shared application toolkit for discovering agent resources, selecting them for a Project or task, and projecting the resulting configuration into supported harnesses. It also provides knowledge search and retrieval, semantic Wiki navigation, runtime composition and session integration. Its concrete product is an inspectable answer to what this actor can use and ask about here.</p></div><p><a href="#q1" data-expansion-link="q1">Read the expanded #1 — What?</a></p></div><footer class="unit-sources"><a data-source href="../../docs/v2/01-PRODUCT-AND-OWNERSHIP.md">docs/v2/01-PRODUCT-AND-OWNERSHIP.md</a></footer></section>
+<section class="ql-node" id="whole-how" data-node=".2" data-route="how" data-nav="How? Resolve first, disclose as needed" data-context="Agent-recovered candidate · review draft" data-vessel="founding-position" data-standing="agent-inference" data-tags="aikit how founding-position" data-resource="aikit:seed:q2"><header class="node-head"><div class="node-eyebrow">#2 · <span data-seed-question="aikit:seed:q2">How?</span></div><h2>How? Resolve first, disclose as needed</h2></header><div class="prose"><div data-seed-content="aikit:seed:q2"><p>AIKit registers sources, resolves scoped choices against trust and compatibility, and prepares a target-specific view. It keeps larger bodies of knowledge and instructions addressable so an Agent can retrieve what the task needs. Changes become reviewable plans or generations; explanation connects the effective environment to the choices and observations that produced it.</p></div><p><a href="#q2" data-expansion-link="q2">Read the expanded #2 — How?</a></p></div><footer class="unit-sources"><a data-source href="../../docs/v2/01-PRODUCT-AND-OWNERSHIP.md">docs/v2/01-PRODUCT-AND-OWNERSHIP.md</a></footer></section>
+<section class="ql-node" id="whole-whereby" data-node=".3" data-route="whereby" data-nav="Who/Whereby? One environment, several ways to encounter it" data-context="Agent-recovered candidate · review draft" data-vessel="founding-position" data-standing="agent-inference" data-tags="aikit whereby founding-position" data-resource="aikit:seed:q3"><header class="node-head"><div class="node-eyebrow">#3 · <span data-seed-question="aikit:seed:q3">Who / Whereby?</span></div><h2>Who/Whereby? One environment, several ways to encounter it</h2></header><div class="prose"><div data-seed-content="aikit:seed:q3"><p>People compose and inspect their working environment through the CLI and TUI. Agents discover powers and retrieve relevant knowledge through the same underlying services. Providers and harness adapters connect existing tools while preserving their identities. Central supplies durable source; AIKit makes permitted source and capabilities available in a particular context.</p></div><p><a href="#q3" data-expansion-link="q3">Read the expanded #3 — Who/Whereby?</a></p></div><footer class="unit-sources"><a data-source href="../../docs/v2/01-PRODUCT-AND-OWNERSHIP.md">docs/v2/01-PRODUCT-AND-OWNERSHIP.md</a></footer></section>
+<section class="ql-node" id="whole-context" data-node=".4" data-route="context" data-nav="Where/When? At the boundary of each act" data-context="Agent-recovered candidate · review draft" data-vessel="founding-position" data-standing="agent-inference" data-tags="aikit context founding-position" data-resource="aikit:seed:q4"><header class="node-head"><div class="node-eyebrow">#4 · <span data-seed-question="aikit:seed:q4">Where / When?</span></div><h2>Where/When? At the boundary of each act</h2></header><div class="prose"><div data-seed-content="aikit:seed:q4"><p>AIKit works where a Project, actor, task, client and available machine meet. A shared baseline can be refined for a Project, session or individual invocation. The resulting configuration is situated: a resource may be useful in one context and unavailable in another. Explanations and activation evidence make those differences inspectable.</p></div><p><a href="#q4" data-expansion-link="q4">Read the expanded #4 — Where/When?</a></p></div><footer class="unit-sources"><a data-source href="../../docs/v2/01-PRODUCT-AND-OWNERSHIP.md">docs/v2/01-PRODUCT-AND-OWNERSHIP.md</a></footer></section>
+<section class="ql-node" id="whole-purpose" data-node=".5" data-route="purpose" data-nav="Why-For? A world that grows without overwhelming its actors" data-context="Agent-recovered candidate · review draft" data-vessel="founding-position" data-standing="agent-inference" data-tags="aikit purpose founding-position" data-resource="aikit:seed:q5"><header class="node-head"><div class="node-eyebrow">#5 · <span data-seed-question="aikit:seed:q5">Why-For?</span></div><h2>Why-For? A world that grows without overwhelming its actors</h2></header><div class="prose"><div data-seed-content="aikit:seed:q5"><p>AIKit lets a person build an increasingly capable environment while keeping each encounter understandable. Skills and Methods make ways of working reusable; Wiki and source navigation make accumulated knowledge askable; explicit composition lets the same Project be met through different harnesses. Within O:I it supplies the operative resources through which authorised agency can work on durable human intention.</p></div><p><a href="#q5" data-expansion-link="q5">Read the expanded #5 — Why-For?</a></p></div><footer class="unit-sources"><a data-source href="../../docs/v2/01-PRODUCT-AND-OWNERSHIP.md">docs/v2/01-PRODUCT-AND-OWNERSHIP.md</a></footer></section>
+</div></article>
+<article class="surface" data-surface="q0" data-title="Why? Make the available world usable" data-gloss="Why?" data-seed-ref="aikit:seed:q0" data-seed-sha256="d57463a327bba62808845484fadc35bbcad99bea0a6ce40ee934a15f5435635e"><div class="surface-inner"><header class="hero"><div class="hero-line"><span class="ql-badge">#0</span><span class="hero-label">Why?</span></div><h1>Make the available world usable</h1><div class="hero-meta"><a href="#whole/why">0/1 · Return to the seed</a><span>Expanded account · review draft</span></div></header><section class="ql-node" id="q0-need" data-node=".0" data-route="need" data-nav="A capable environment should be understandable" data-context="Agent-recovered candidate · review draft" data-vessel="vision" data-standing="agent-inference" data-tags="aikit need vision" data-resource="aikit:doc:need"><header class="node-head"><div class="node-eyebrow">vision</div><h2>A capable environment should be understandable</h2></header><div class="prose"><p>A person may already have several model subscriptions, repositories, command-line tools and collections of Skills. Each new harness can introduce another configuration directory and another account of what is installed. The useful question is simple: what can I use for this work, and how do I get to it?</p><p>AIKit aims to make that question answerable from the current Project. Someone entering a repository should discover the relevant capabilities and sources, inspect the applicable choices, and understand the next operation. They should be able to keep a broad collection without repeatedly loading every instruction into every conversation.</p><p>The experience matters for an Agent as well. Before acting, it needs to understand where it is, what it can ask about and which operations are available. A compact orientation can establish this starting point while preserving routes to deeper material. [[cap.aikit.context-resolution|Context resolution]] and [[cap.aikit.source-horizon|source horizons]] provide the functional basis.</p><p>This seed is recovered from the product thesis and development programme. It is an Agent-written candidate for human review. It develops the supplied Central convention while preserving AIKit’s own product purpose.</p></div><footer class="unit-sources"><a data-source href="../../docs/v2/01-PRODUCT-AND-OWNERSHIP.md">docs/v2/01-PRODUCT-AND-OWNERSHIP.md</a></footer></section>
+<section class="ql-node" id="q0-continuity" data-node=".1" data-route="continuity" data-nav="Keep the person’s existing world in view" data-context="Agent-recovered candidate · review draft" data-vessel="design-commitment" data-standing="agent-inference" data-tags="aikit continuity design-commitment" data-resource="aikit:doc:continuity"><header class="node-head"><div class="node-eyebrow">design commitment</div><h2>Keep the person’s existing world in view</h2></header><div class="prose"><p>Existing tools are the starting material. A useful discovery pass can show foreign Skills and their provenance before a user decides whether to manage them through AIKit. Adoption should preserve the original material, explain the proposed change and provide an intelligible route back.</p><p>The same continuity applies to Project source. A design account, ordinary note and repository file can remain in their own locations. AIKit establishes references and retrieval routes over them. The person can then develop a coherent practice without first converting every file into a special document type.</p><p>This reduces repeated setup work and preserves choice. A new harness can receive a suitable projection of an existing selection. A new model can be evaluated against present requirements. The durable purpose remains available even when its current provider changes. [[cap.aikit.discovery|Discovery]], [[cap.aikit.adoption|adoption]] and [[cap.aikit.projection|projection]] serve this continuity.</p></div><footer class="unit-sources"><a data-source href="../../README.md">README.md</a></footer></section>
+<section class="ql-node" id="q0-orientation" data-node=".2" data-route="orientation" data-nav="A small opening into a larger world" data-context="Agent-recovered candidate · review draft" data-vessel="vision" data-standing="agent-inference" data-tags="aikit orientation vision" data-resource="aikit:doc:orientation"><header class="node-head"><div class="node-eyebrow">vision</div><h2>A small opening into a larger world</h2></header><div class="prose"><p>The desired opening experience gives enough information to proceed: Project identity, current focus, relevant capability names, source destinations and any material limitations. Deeper instructions become useful when a person or Agent chooses a particular operation.</p><p>This is a relationship between attention and availability. A reference can be known before its payload is read. A retrieved source can inform one decision without becoming permanent standing context. Keeping these steps explicit makes it possible to investigate a large Project through a small sequence of deliberate questions.</p><p>For documentation, the practical consequence is direct: the overview helps a reader enter; expanded units explain journeys and contracts; the [[aikit:matrix:md|capability matrix]] connects those passages to concrete operations and source evidence. Each layer offers a useful next address.</p></div><footer class="unit-sources"><a data-source href="../../docs/v2/02-RESOLUTION-AND-CONTEXT-COGNITION.md">docs/v2/02-RESOLUTION-AND-CONTEXT-COGNITION.md</a></footer></section>
+</div></article>
+<article class="surface" data-surface="q1" data-title="What? The composition and disclosure toolkit" data-gloss="What?" data-seed-ref="aikit:seed:q1" data-seed-sha256="eeaa885aec8af8592b8027608fdf42172ec47b666f4d0ef40d21604e3fcab10a"><div class="surface-inner"><header class="hero"><div class="hero-line"><span class="ql-badge">#1</span><span class="hero-label">What?</span></div><h1>The composition and disclosure toolkit</h1><div class="hero-meta"><a href="#whole/what">0/1 · Return to the seed</a><span>Expanded account · review draft</span></div></header><section class="ql-node" id="q1-product" data-node=".0" data-route="product" data-nav="The CLI, TUI and shared services" data-context="Agent-recovered candidate · review draft" data-vessel="surface-discovery" data-standing="agent-inference" data-tags="aikit product surface-discovery" data-resource="aikit:doc:product"><header class="node-head"><div class="node-eyebrow">surface discovery</div><h2>The CLI, TUI and shared services</h2></header><div class="prose"><p><strong>AIKit is a toolkit for composing the resources available to an Agent and disclosing the knowledge relevant to its work.</strong> The CLI makes operations scriptable. The TUI provides search, inspection and staged changes. Shared application services carry the same resolution and knowledge meanings across these surfaces.</p><p>The resource field includes Skills, Actions, models, ContextSources and runtime Components. A Profile collects operational choices. A Project binding locates those choices in a particular repository. A generation records a resolved view that an adapter can expose to a target harness.</p><p>The working sequence is discover, select, inspect and apply. A user can register a source, search its resources, choose a SkillSet, inspect the effective environment and publish the relevant projection. [[cap.aikit.resource-index|Resource indexing]], [[cap.aikit.profiles|Profiles]] and [[cap.aikit.generation|generations]] connect these operations.</p><p>The native source contains both established CLI behaviour and newer V2 application services. This account describes their intended relationship and links each capability to its implementation scope. It does not infer full installed or physical acceptance from the breadth of the source tree.</p></div><footer class="unit-sources"><a data-source href="../../docs/v2/01-PRODUCT-AND-OWNERSHIP.md">docs/v2/01-PRODUCT-AND-OWNERSHIP.md</a></footer></section>
+<section class="ql-node" id="q1-knowledge" data-node=".1" data-route="knowledge" data-nav="Knowledge that can be asked for" data-context="Agent-recovered candidate · review draft" data-vessel="surface-discovery" data-standing="agent-inference" data-tags="aikit knowledge surface-discovery" data-resource="aikit:doc:knowledge"><header class="node-head"><div class="node-eyebrow">surface discovery</div><h2>Knowledge that can be asked for</h2></header><div class="prose"><p>A ContextSource is an addressable source of information. AIKit can establish its identity, eligibility and retrieval route before reading its full content. The source may be a local Project document, a SourcePool item, a semantic Wiki or a code intelligence provider.</p><p>The Wiki represents semantic nodes, spaces, relationships and contextual readings. A SourcePool widens the evidential horizon. A code provider offers structural relationships in the implementation. ProjectMap connects these lenses through explicit references so a reader can move from a concept to its source or implementation.</p><p>[[cap.aikit.knowledge-navigation|Knowledge navigation]] offers search and bounded expansion. [[cap.aikit.wiki-write|Wiki maintenance]] gives Agents an explicit way to record and revise navigational structure. [[cap.aikit.authored-relations|Source relation compilation]] preserves links found in supported authored text together with their original source and location.</p></div><footer class="unit-sources"><a data-source href="../../docs/v2/02-RESOLUTION-AND-CONTEXT-COGNITION.md">docs/v2/02-RESOLUTION-AND-CONTEXT-COGNITION.md</a></footer></section>
+<section class="ql-node" id="q1-praxis" data-node=".2" data-route="praxis" data-nav="Reusable practice and working bodies" data-context="Agent-recovered candidate · review draft" data-vessel="surface-discovery" data-standing="agent-inference" data-tags="aikit praxis surface-discovery" data-resource="aikit:doc:praxis"><header class="node-head"><div class="node-eyebrow">surface discovery</div><h2>Reusable practice and working bodies</h2></header><div class="prose"><p>A Skill contains reusable organised practice. A Method situates practice around a purpose, inputs, operations and an expected result. SkillSets and Profiles help select this material for the current work. The result should make a familiar task easier to perform without replacing the task’s particular intention.</p><p>Runtime composition addresses the body through which the work happens. Harnesses and Components declare requirements and contributions. SessionSpace records the relation between an Agent session and the surfaces through which it is encountered. Providers connect those semantics to actual terminal sessions or other working environments.</p><p>[[cap.aikit.methods|Methods]], [[cap.aikit.composition|runtime composition]] and [[cap.aikit.sessions|session integration]] therefore meet different needs. The first organises practice, the second selects a workable body, and the third preserves the relation to an ongoing encounter. [[cap.aikit.routines|Routines]] add a proof and authority basis for repeatable Method execution.</p></div><footer class="unit-sources"><a data-source href="../../docs/v2/20-PRAXIS-METHODS-AND-SKILL-COMPOSITION.md">docs/v2/20-PRAXIS-METHODS-AND-SKILL-COMPOSITION.md</a></footer></section>
+</div></article>
+<article class="surface" data-surface="q2" data-title="How? Resolve first, disclose as needed" data-gloss="How?" data-seed-ref="aikit:seed:q2" data-seed-sha256="9f4fef1b1fc842ccfe9bcd2d4a0b5ff5d3b0223cf3d9cf02db3646b020f51507"><div class="surface-inner"><header class="hero"><div class="hero-line"><span class="ql-badge">#2</span><span class="hero-label">How?</span></div><h1>Resolve first, disclose as needed</h1><div class="hero-meta"><a href="#whole/how">0/1 · Return to the seed</a><span>Expanded account · review draft</span></div></header><section class="ql-node" id="q2-start" data-node=".0" data-route="start" data-nav="Enter a Project with a useful environment" data-context="Agent-recovered candidate · review draft" data-vessel="implementation-guide" data-standing="agent-inference" data-tags="aikit start implementation-guide" data-resource="aikit:doc:start"><header class="node-head"><div class="node-eyebrow">implementation guide</div><h2>Enter a Project with a useful environment</h2></header><div class="prose"><p>Begin from the repository where the work belongs. Inspect its Project binding and effective configuration. Search the resource catalogue for the capability needed by the task, then inspect the source, requirements and explanation before choosing it.</p><p>A project-specific choice should leave unrelated work understandable. A shared baseline can supply common Skills while a local overlay adds the Project’s particular instructions. An invocation-level refinement can serve one task without turning a temporary need into a permanent global default.</p><p>After reviewing the resolved selection, apply the projection through AIKit. The useful result is a reproducible filesystem view for the target client and an explanation of how that view arose. An already-running harness may cache its catalogue; check its reported state or begin a fresh task when loading must be established.</p><p>This journey uses [[cap.aikit.context-resolution|resolution]], [[cap.aikit.profiles|scoped Profiles]], [[cap.aikit.generation|generation publication]] and [[cap.aikit.activation|activation evidence]]. Success means the intended capability is available in the intended context and its operative use can be distinguished from the files that expose it.</p></div><footer class="unit-sources"><a data-source href="../../AGENTS.md">AGENTS.md</a></footer></section>
+<section class="ql-node" id="q2-investigate" data-node=".1" data-route="investigate" data-nav="Follow a question back to exact source" data-context="Agent-recovered candidate · review draft" data-vessel="protocol-method" data-standing="agent-inference" data-tags="aikit investigate protocol-method" data-resource="aikit:doc:investigate"><header class="node-head"><div class="node-eyebrow">protocol method</div><h2>Follow a question back to exact source</h2></header><div class="prose"><p>Enter the Project’s knowledge view with a question. Search for the concept or use an exact reference when one is known. Inspect the result’s provider, source revision and relationships before expanding the surrounding neighbourhood.</p><p>A useful path may begin at the product overview, follow a capability into a design unit, then retrieve a ticket correction or a code location. The Wiki supplies navigational relationships. Exact source supplies the passage on which a claim depends. Bounded expansion keeps a local investigation manageable.</p><p>When a result is absent, ambiguous or unavailable, retain that condition in the answer. It tells the next actor what remains to be recovered. A loose note can participate as source without being promoted into a product contract, and a formal HTML account retains the standing of the material it actually contains.</p><p>This journey combines [[cap.aikit.projectcentral|ProjectCentral discovery]], [[cap.aikit.source-horizon|explicit retrieval]], [[cap.aikit.knowledge-navigation|navigation]] and [[cap.aikit.reflection|semantic-to-code reflection]]. The return should name the source and revision that justify the conclusion.</p></div><footer class="unit-sources"><a data-source href="../../registry/capsules/skill/aikit/knowledge-navigation/payload/SKILL.md">registry/capsules/skill/aikit/knowledge-navigation/payload/SKILL.md</a></footer></section>
+<section class="ql-node" id="q2-maintain" data-node=".2" data-route="maintain" data-nav="Turn useful understanding into navigable knowledge" data-context="Agent-recovered candidate · review draft" data-vessel="protocol-method" data-standing="agent-inference" data-tags="aikit maintain protocol-method" data-resource="aikit:doc:maintain"><header class="node-head"><div class="node-eyebrow">protocol method</div><h2>Turn useful understanding into navigable knowledge</h2></header><div class="prose"><p>An Agent may discover that several documents describe one capability in different terms. Recover the relevant passages, identify the shared subject and record the relationship with source provenance. Keep unresolved differences available for review.</p><p>Wiki writes name the destination file and the intended object change. The native pipeline parses the existing document, mutates in memory, validates the resulting whole and renders the accepted result for atomic persistence. A refusal leaves the file unchanged. This makes small, inspectable maintenance possible.</p><p>For supported Markdown, source links and OKF properties can contribute relation evidence. Wiki staging additionally requires the source’s explicit authored alignment. A missing alignment is a visible request for determination. It should never be guessed from a filename or inferred merely because the source is useful.</p><p>[[cap.aikit.wiki-write|Explicit Wiki mutation]], [[cap.aikit.authored-relations|relation compilation]] and [[cap.aikit.living-knowledge|change impact]] let the navigation develop alongside real source. When a human-owned statement needs revision, return a proposal to its owner and preserve the original basis until that revision is accepted.</p></div><footer class="unit-sources"><a data-source href="../../registry/capsules/skill/aikit/wiki-inhabitation/payload/SKILL.md">registry/capsules/skill/aikit/wiki-inhabitation/payload/SKILL.md</a></footer></section>
+<section class="ql-node" id="q2-compose" data-node=".3" data-route="compose" data-nav="Change the working setup with a visible result" data-context="Agent-recovered candidate · review draft" data-vessel="implementation-guide" data-standing="agent-inference" data-tags="aikit compose implementation-guide" data-resource="aikit:doc:compose"><header class="node-head"><div class="node-eyebrow">implementation guide</div><h2>Change the working setup with a visible result</h2></header><div class="prose"><p>A person composing a runtime begins with the work’s requirements: the necessary capabilities, supported model, useful surfaces and execution conditions. Inspect candidate Components and provider bindings, then review whether the requirements are satisfied.</p><p>A preview should explain what the proposed composition contributes and what remains unavailable. A successful configuration write establishes the intended material view. Provider observations and activation receipts establish what the target actually made effective.</p><p>For portable terminal work, declare the session topology, compare it with the present backend and reconcile the intended change within owned resources. Existing unrelated panes remain outside the declared ownership boundary. A later inspection should make the resulting topology and any difference clear.</p><p>The journey connects [[cap.aikit.composition|composition]], [[cap.aikit.models|model fit]], [[cap.aikit.sessions|sessions]] and [[cap.aikit.procedures|reviewable Procedures]]. Its outcome is a working arrangement whose changes and limitations the user can inspect.</p></div><footer class="unit-sources"><a data-source href="../../docs/v2/09-COMPOSABLE-RUNTIME-ENVIRONMENTS.md">docs/v2/09-COMPOSABLE-RUNTIME-ENVIRONMENTS.md</a></footer></section>
+</div></article>
+<article class="surface" data-surface="q3" data-title="Who/Whereby? One environment, several ways to encounter it" data-gloss="Who / Whereby?" data-seed-ref="aikit:seed:q3" data-seed-sha256="c02422f1ce8607ef8d2967ec065ebd8538a25bf36f61466538dc99a3f5794361"><div class="surface-inner"><header class="hero"><div class="hero-line"><span class="ql-badge">#3</span><span class="hero-label">Who / Whereby?</span></div><h1>One environment, several ways to encounter it</h1><div class="hero-meta"><a href="#whole/whereby">0/1 · Return to the seed</a><span>Expanded account · review draft</span></div></header><section class="ql-node" id="q3-identity" data-node=".0" data-route="identity" data-nav="References connect resources to their owners" data-context="Agent-recovered candidate · review draft" data-vessel="architecture-contract" data-standing="agent-inference" data-tags="aikit identity architecture-contract" data-resource="aikit:doc:identity"><header class="node-head"><div class="node-eyebrow">architecture contract</div><h2>References connect resources to their owners</h2></header><div class="prose"><p>A resource needs a stable reference, an owner, a revision and a locator. The reference supports continuity while the locator tells the current provider where to retrieve or operate it. Provenance connects the current reading to its source.</p><p>An application Action keeps its native operation and identity when AIKit exposes it as a capability. A Project keeps its source ownership when it enters a knowledge horizon. A model or harness keeps its provider-specific implementation while contributing to a common resolution.</p><p>These relationships let several surfaces show the same operation without inventing separate handlers or competing truth. The CLI, TUI and Agent-facing reading should agree about the selected resource and its basis, even when they display it differently.</p><p>The shared [[source:covenant|O:I primitive relations]] ground these names. AIKit develops the operational selection and disclosure relations; Central keeps durable authored ground, Actuation supplies authority and agency, Factory owns development and Workcell supplies material execution.</p></div><footer class="unit-sources"><a data-source href="../../docs/v2/01-PRODUCT-AND-OWNERSHIP.md">docs/v2/01-PRODUCT-AND-OWNERSHIP.md</a></footer></section>
+<section class="ql-node" id="q3-resolution" data-node=".1" data-route="resolution" data-nav="Make every effective choice explainable" data-context="Agent-recovered candidate · review draft" data-vessel="architecture-contract" data-standing="agent-inference" data-tags="aikit resolution architecture-contract" data-resource="aikit:doc:resolution"><header class="node-head"><div class="node-eyebrow">architecture contract</div><h2>Make every effective choice explainable</h2></header><div class="prose"><p>Resolution combines declarations with present conditions. Scope determines which choice applies. Trust, policy, compatibility and requirements determine whether the candidate is eligible. Preferences choose among eligible possibilities.</p><p>An explanation should show the origin of a selection, the source revision, any inherited constraints and the reason an alternative was excluded. This is practical debugging information when a Skill appears in one Project and disappears in another.</p><p>Generated state should be replaceable from the underlying declarations and sources. A generation provides a complete view whose publication can be checked against the expected prior basis. External mutation needs an explicit Procedure with an inspectable effect and reversal path.</p><p>[[cap.aikit.explain|Explain and History]] make that causal account available. [[cap.aikit.familiarity|Familiarity]] may improve access among eligible results while exact addressing and authored preference retain their own meanings. Usage frequency is useful navigation evidence; it cannot establish authority.</p></div><footer class="unit-sources"><a data-source href="../../docs/v2/02-RESOLUTION-AND-CONTEXT-COGNITION.md">docs/v2/02-RESOLUTION-AND-CONTEXT-COGNITION.md</a></footer></section>
+<section class="ql-node" id="q3-source-contract" data-node=".2" data-route="source-contract" data-nav="Read source faithfully across different forms" data-context="Agent-recovered candidate · review draft" data-vessel="architecture-contract" data-standing="agent-inference" data-tags="aikit source-contract architecture-contract" data-resource="aikit:doc:source-contract"><header class="node-head"><div class="node-eyebrow">architecture contract</div><h2>Read source faithfully across different forms</h2></header><div class="prose"><p>The source contract begins with identity and permission. ProjectCentral discovery uses small manifests and filesystem metadata to establish what can be encountered. Explicit reads obtain payloads. A recursive .no-agent-retrieval boundary excludes the covered subtree before disclosure.</p><p>Central’s recognised source relations carry provenance, truth standing, roles and treatment. A file in the human-owned aperture can remain unresolved until authorship or adoption is recognised. AIKit preserves that distinction through the resulting knowledge view.</p><p>A formal account and an ad hoc note both need a stable source reference and honest retrieval. Their richer interpretation differs. Markdown wikilinks and supported OKF metadata have a native relation compiler. This account’s HTML data attributes, seed hashes and resource registry require a deliberate integration contract before they can become equivalent structured Wiki staging input.</p><p>The sixfold is useful structure when the source supplies it. A plain file can enter as an ordinary source, and a meaningful partial whole can remain partial. The [[cap.aikit.wiki-shapes|QL shape service]] supplies valid structural readings while semantic edges continue to require actual evidence.</p></div><footer class="unit-sources"><a data-source href="../../crates/aikit-adapters/src/projectcentral_authored_wiki.rs">crates/aikit-adapters/src/projectcentral_authored_wiki.rs</a></footer></section>
+</div></article>
+<article class="surface" data-surface="q4" data-title="Where/When? At the boundary of each act" data-gloss="Where / When?" data-seed-ref="aikit:seed:q4" data-seed-sha256="a4305ec3f1ff58c8860e900da1a41662c6350678df62ad60abd3c2dc6b0d2312"><div class="surface-inner"><header class="hero"><div class="hero-line"><span class="ql-badge">#4</span><span class="hero-label">Where / When?</span></div><h1>At the boundary of each act</h1><div class="hero-meta"><a href="#whole/context">0/1 · Return to the seed</a><span>Expanded account · review draft</span></div></header><section class="ql-node" id="q4-contexts" data-node=".0" data-route="contexts" data-nav="Carry common practice into particular work" data-context="Agent-recovered candidate · review draft" data-vessel="design-commitment" data-standing="agent-inference" data-tags="aikit contexts design-commitment" data-resource="aikit:doc:contexts"><header class="node-head"><div class="node-eyebrow">design commitment</div><h2>Carry common practice into particular work</h2></header><div class="prose"><p>A person’s baseline may include general research and editing practice. A Project can refine it with product terminology, relevant sources and selected capabilities. A session can further situate those choices around a current question.</p><p>The user should be able to inspect what came from each scope and change the appropriate source. Temporary requirements belong near the task that needs them. Shared improvements belong in the source that legitimately applies to future work.</p><p>[[cap.aikit.profiles|Profile composition]] and [[cap.aikit.methods|situated Methods]] support this development. The result is a practice that becomes more useful through experience while remaining understandable to someone entering the Project later.</p></div><footer class="unit-sources"><a data-source href="../../docs/v2/20-PRAXIS-METHODS-AND-SKILL-COMPOSITION.md">docs/v2/20-PRAXIS-METHODS-AND-SKILL-COMPOSITION.md</a></footer></section>
+<section class="ql-node" id="q4-providers" data-node=".1" data-route="providers" data-nav="Operate through the resources actually present" data-context="Agent-recovered candidate · review draft" data-vessel="architecture-contract" data-standing="agent-inference" data-tags="aikit providers architecture-contract" data-resource="aikit:doc:providers"><header class="node-head"><div class="node-eyebrow">architecture contract</div><h2>Operate through the resources actually present</h2></header><div class="prose"><p>A working environment can include local or remote models, several harnesses, terminal multiplexers and specialised knowledge providers. Each provider exposes the operations it supports and the conditions under which they work.</p><p>The useful interface explains the present case. If a provider is missing, a known source may remain addressable with an unavailable retrieval route. If a harness supports only part of a composition, the reader needs to see the resulting limitation before relying on it.</p><p>Physical acceptance belongs to the actual arrangement exercised: provider version, host, target process and selected operation. The [[cap.aikit.models|model roster]] and [[cap.aikit.activation|activation receipt]] can preserve such observations. A successful core test establishes its own bounded behaviour, while a live provider claim needs its own observation.</p></div><footer class="unit-sources"><a data-source href="../../docs/v2/15-MODEL-ROSTER-CAPABILITY-FIT.md">docs/v2/15-MODEL-ROSTER-CAPABILITY-FIT.md</a></footer></section>
+<section class="ql-node" id="q4-frontier" data-node=".2" data-route="frontier" data-nav="The next documentation-to-Wiki integration" data-context="Agent-recovered candidate · review draft" data-vessel="temporal-working-state" data-standing="agent-inference" data-tags="aikit frontier temporal-working-state" data-resource="aikit:doc:frontier"><header class="node-head"><div class="node-eyebrow">temporal working state</div><h2>The next documentation-to-Wiki integration</h2></header><div class="prose"><p>The immediate next step is to prove that this account and an ordinary source file can be encountered together. Use an isolated Project fixture with a recognised source relation, an HTML account, its matrix and a plain note. Establish their identities before asking for any semantic projection.</p><p>Then exercise exact retrieval and links back to passages. For the HTML collection, preserve the overview, section identity, vessel, standing and source revision in any proposed Wiki reading. For the note, retain its ordinary form and admit only relationships present in its text or explicitly supplied by an authorised actor.</p><p>The missing proof is automatic faithful consumption of this exact HTML convention by the current Wiki write pipeline. Current code supplies source discovery, reading, Markdown relation compilation and explicit Wiki mutation. The user-selected HTML structure needs an adapter or an explicit Agent-maintained projection with tests for identity, provenance and parity.</p><p>This pass creates the source account and matrix only. The future integration should be reviewed against [[cap.aikit.authored-relations|source relations]], [[cap.aikit.wiki-write|write validation]] and [[cap.aikit.wiki-shapes|shape preservation]] before maintaining a live Wiki.</p></div><footer class="unit-sources"><a data-source href="../../crates/aikit-cli/src/wiki.rs">crates/aikit-cli/src/wiki.rs</a></footer></section>
+</div></article>
+<article class="surface" data-surface="q5" data-title="Why-For? A world that grows without overwhelming its actors" data-gloss="Why-For?" data-seed-ref="aikit:seed:q5" data-seed-sha256="f7d37ffa2b57ffeb31c8f4e9e87c858546fcfbd5deefa882cfeb5a3d0decb0b1"><div class="surface-inner"><header class="hero"><div class="hero-line"><span class="ql-badge">#5</span><span class="hero-label">Why-For?</span></div><h1>A world that grows without overwhelming its actors</h1><div class="hero-meta"><a href="#whole/purpose">0/1 · Return to the seed</a><span>Expanded account · review draft</span></div></header><section class="ql-node" id="q5-whole" data-node=".0" data-route="whole" data-nav="The practical return: a usable context" data-context="Agent-recovered candidate · review draft" data-vessel="vision" data-standing="agent-inference" data-tags="aikit whole vision" data-resource="aikit:doc:whole"><header class="node-head"><div class="node-eyebrow">vision</div><h2>The practical return: a usable context</h2></header><div class="prose"><p>AIKit succeeds when a person or Agent can enter work, find the right resources, understand why they apply and use them through an appropriate environment. A wider collection should increase what can be done without making every new task harder to orient.</p><p>The result has several visible parts: discoverable powers, askable knowledge, understandable configuration, working provider bindings and a trace of what happened. Together they make the agentic environment something the person can deliberately develop.</p><p>Within O:I this is the connective operational role. Central gives intention a durable home. AIKit resolves the resources and information available for the current act. Actuation carries authorised agency, Factory develops the Project and Workcell supplies material conditions. The return can then improve the next source or method at its actual owner.</p></div><footer class="unit-sources"><a data-source href="../../docs/v2/01-PRODUCT-AND-OWNERSHIP.md">docs/v2/01-PRODUCT-AND-OWNERSHIP.md</a></footer></section>
+<section class="ql-node" id="q5-acceptance" data-node=".1" data-route="acceptance" data-nav="What this account establishes" data-context="Agent-recovered candidate · review draft" data-vessel="evidence" data-standing="agent-inference" data-tags="aikit acceptance evidence" data-resource="aikit:doc:acceptance"><header class="node-head"><div class="node-eyebrow">evidence</div><h2>What this account establishes</h2></header><div class="prose"><p>This is an Agent-inference consolidation for review, recovered from native product sources, issue bodies and later corrections. The minimal six-answer seed is a candidate formulation. It has not acquired human-authored standing through placement in ProjectCentral/user.</p><p>The matrix records 24 concrete capability families, with placements in the seed × field contribution view and source-defined suite relations under the same contract. Each capability has a need, operation, outcome, implementation scope and source/code/test references. The references establish a path for checking the account; they do not claim every referenced test ran during this documentation pass.</p><p>The current source basis is the repository revision recorded in the provenance envelope. On 2026-09-06, the coordinating pass ran 13 native Wiki command tests and 21 authored-Wiki adapter tests successfully. The command tests operate on isolated files through the real binary; the adapter selection checks source relation behaviour. This artifact passed the shared structural checker, 35 browser layout checks and six overview-to-expansion navigation checks. Broader provider and installed-world acceptance remains outside that selection.</p><p>When reviewing, begin with the [[aikit:doc:overview|six-answer overview]]. Refine the meaning there, reconcile the affected expanded layer, then inspect the capabilities and contracts it touches. Preserve a discrepancy as a useful next question until its source or implementation has actually changed.</p><p>The <a href="capability-matrix.md#seed--field-contribution">seed × field grid</a> opens the <a href="capability-matrix.json">declared matrix views</a>. Edit its <a href="capability-matrix.csv">CSV records</a> under the <a href="../../../Central/docs/CAPABILITY-MATRIX-PROTOCOL.md">shared capability protocol</a>, then reconcile affected passages in this account. Central owns retirement’s filesystem structure; AIKit owns its operations and the wiki population procedure.</p></div><footer class="unit-sources"><a data-source href="../../docs/v2/08-VERIFICATION-RUNS-AND-CLOSURE.md">docs/v2/08-VERIFICATION-RUNS-AND-CLOSURE.md</a></footer></section>
+</div></article>
+</main>
+  <aside class="right-rail" id="rightRail" aria-label="Section context"><div class="context-head"><div class="context-kicker" id="contextCoord">#0 · .0</div><h3 id="contextTitle">Source context</h3><p id="contextSummary">Select a section to inspect its source and standing.</p></div><div class="note-field" id="noteField"><label for="sectionNote">Section notes</label><textarea id="sectionNote" placeholder="Write a note for this section…"></textarea><div class="save-state" id="saveState">Saved locally when available.</div></div><div class="context-slot" id="contextSlot"></div><details class="right-details" open><summary>Sources in this section</summary><div class="source-list" id="sectionSources"></div><div class="source-empty" id="sourceEmpty">No section sources listed.</div></details><details class="right-details"><summary>Provenance</summary><dl class="meta-list" id="metaList"></dl></details></aside>
+</div>
+
+<script>
+(() => {
+  const resources=JSON.parse(document.getElementById('ground-resources').textContent);
+  const walker=document.createTreeWalker(document.getElementById('mainContent'),NodeFilter.SHOW_TEXT,{acceptNode(node){return node.parentElement.closest('script,style,code,pre,a')?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT;}});
+  const nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);
+  for(const node of nodes){const raw=node.textContent;const pattern=/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;let match,last=0,changed=false;const fragment=document.createDocumentFragment();
+    while((match=pattern.exec(raw))){changed=true;fragment.append(document.createTextNode(raw.slice(last,match.index)));const ref=match[1].trim(),entry=resources[ref];const el=document.createElement(entry?'a':'span');el.textContent=match[2]||entry?.title||ref;if(entry){el.href=entry.href;el.dataset.resource=ref;}else{el.className='source-unresolved';el.title='Unresolved authored source: '+ref;}fragment.append(el);last=pattern.lastIndex;}
+    if(changed){fragment.append(document.createTextNode(raw.slice(last)));node.replaceWith(fragment);}
+  }
+})();
+</script>
+<script>
+(() => {
+  'use strict';
+  const body = document.body;
+  const root = document.documentElement;
+  const surfaces = [...document.querySelectorAll('.surface')];
+  const surfaceNav = document.getElementById('surfaceNav');
+  const leftToggle = document.getElementById('leftToggle');
+  const rightToggle = document.getElementById('rightToggle');
+  const themeToggle = document.getElementById('themeToggle');
+  const routeChip = document.getElementById('routeChip');
+  const contextCoord = document.getElementById('contextCoord');
+  const contextTitle = document.getElementById('contextTitle');
+  const contextSummary = document.getElementById('contextSummary');
+  const contextSlot = document.getElementById('contextSlot');
+  const sectionSources = document.getElementById('sectionSources');
+  const sourceEmpty = document.getElementById('sourceEmpty');
+  const sectionNote = document.getElementById('sectionNote');
+  const saveState = document.getElementById('saveState');
+  const metaList = document.getElementById('metaList');
+  const provenance = readProvenance();
+  let activeSurface = surfaces[0];
+  let activeNode = activeSurface.querySelector('.ql-node');
+  let scrollFrame = 0;
+  function safeGet(key){try{return localStorage.getItem(key)}catch(_){return null}}
+  function safeSet(key,value){try{localStorage.setItem(key,value);return true}catch(_){return false}}
+  function readProvenance(){try{return JSON.parse(document.getElementById('account-provenance').textContent)}catch(_){return {}}}
+  function buildMetadata(){const fields=[['UID',provenance.uid],['Project',provenance.project],['Session',provenance.session],['Status',provenance.status],['Created',provenance.created],['Updated',provenance.updated],['Generator',provenance.generator]];metaList.innerHTML='';for(const [label,value] of fields){if(!value)continue;const row=document.createElement('div');row.className='meta-row';row.innerHTML=`<dt>${escapeHTML(label)}</dt><dd>${escapeHTML(String(value))}</dd>`;metaList.appendChild(row)}}
+  function escapeHTML(value){return value.replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]))}
+  function buildNav(){surfaceNav.innerHTML='';surfaces.forEach(surface=>{const q=surface.dataset.surface;const qNumber=q==='whole'?'0/1':q.replace(/^q/,'');const title=surface.dataset.title||q;const gloss=surface.dataset.gloss||'';const group=document.createElement('div');group.className='nav-group';group.dataset.surface=q;const head=document.createElement('div');head.className='nav-head';const select=document.createElement('button');select.type='button';select.className='nav-select';select.innerHTML=`<span class="nav-q">${q==='whole'?'':'#'}${qNumber}</span><span class="nav-name">${escapeHTML(title)}<span class="nav-gloss">${escapeHTML(gloss)}</span></span>`;select.addEventListener('click',()=>navigate(q,null,true));const toggle=document.createElement('button');toggle.type='button';toggle.className='nav-toggle';toggle.setAttribute('aria-label',`Toggle sections for ${title}`);toggle.setAttribute('aria-expanded','false');toggle.innerHTML='<span>›</span>';toggle.addEventListener('click',()=>{const open=group.classList.toggle('expanded');toggle.setAttribute('aria-expanded',String(open))});head.append(select,toggle);group.appendChild(head);const subnav=document.createElement('div');subnav.className='subnav';[...surface.querySelectorAll('.ql-node')].forEach(node=>{const a=document.createElement('a');const route=node.dataset.route||node.id;a.href=`#${q}/${encodeURIComponent(route)}`;a.dataset.nodeId=node.id;a.innerHTML=`<code>${escapeHTML(node.dataset.node||'')}</code><span>${escapeHTML(node.dataset.nav||node.querySelector('h2')?.textContent||route)}</span>`;a.addEventListener('click',event=>{event.preventDefault();navigate(q,route,true)});subnav.appendChild(a)});group.appendChild(subnav);surfaceNav.appendChild(group)})}
+  function parseHash(){let raw=location.hash.slice(1).trim();try{raw=decodeURIComponent(raw)}catch{}if(!raw)return{surface:surfaces[0]?.dataset.surface||'q0',route:null};const[surface,route]=raw.split('/');return{surface:surfaces.some(s=>s.dataset.surface===surface)?surface:(surfaces[0]?.dataset.surface||'q0'),route:route||null}}
+  function findNode(surface,route){const nodes=[...surface.querySelectorAll('.ql-node')];if(!route)return nodes[0]||null;return nodes.find(node=>node.dataset.route===route||node.id===route)||nodes[0]||null}
+  function navigate(surfaceId,route,push){const surface=surfaces.find(item=>item.dataset.surface===surfaceId)||surfaces[0];const node=findNode(surface,route);activateSurface(surface);activeNode=node;updateActiveUI();if(push){const hash=`#${surface.dataset.surface}${route?'/'+encodeURIComponent(route):''}`;history.pushState(null,'',hash)}requestAnimationFrame(()=>{if(route&&node)node.scrollIntoView({behavior:prefersReducedMotion()?'auto':'smooth',block:'start'});else window.scrollTo({top:0,behavior:'auto'})})}
+  function activateSurface(surface){if(activeSurface!==surface){activeSurface.classList.remove('active');surface.classList.add('active');activeSurface=surface;window.scrollTo({top:0,behavior:'auto'})}document.querySelectorAll('.nav-group').forEach(group=>{const isActive=group.dataset.surface===surface.dataset.surface;group.classList.toggle('active',isActive);if(isActive){group.classList.add('expanded');const toggle=group.querySelector('.nav-toggle');if(toggle)toggle.setAttribute('aria-expanded','true')}})}
+  function updateActiveUI(){if(!activeNode)return;document.querySelectorAll('.subnav a').forEach(a=>a.classList.toggle('active',a.dataset.nodeId===activeNode.id));const qNumber=activeSurface.dataset.surface==='whole'?'0/1':activeSurface.dataset.surface.replace(/^q/,'');routeChip.innerHTML=`<code>${qNumber==='0/1'?'':'#'}${qNumber} · ${escapeHTML(activeNode.dataset.node||'')}</code><span>${escapeHTML(activeNode.dataset.nav||'')}</span>`;updateContext(qNumber,activeNode)}
+  function updateContext(qNumber,node){contextCoord.textContent=`${qNumber==='0/1'?'':'#'}${qNumber} · ${node.dataset.node||''}`;contextTitle.textContent=node.dataset.nav||node.querySelector('h2')?.textContent||'Section';contextSummary.textContent=node.dataset.context||'Section-relative context.';const panel=node.querySelector('template[data-context-panel]');contextSlot.innerHTML='';if(panel)contextSlot.appendChild(panel.content.cloneNode(true));const sources=[...node.querySelectorAll('a[data-source]')];sectionSources.innerHTML='';sourceEmpty.hidden=sources.length>0;sources.forEach(source=>{const clone=document.createElement('a');clone.href=source.href;clone.target='_blank';clone.rel='noopener noreferrer';clone.textContent=source.textContent.trim()||source.href;sectionSources.appendChild(clone)});const noteKey=noteStorageKey(activeSurface.dataset.surface,node.dataset.route||node.id);sectionNote.value=safeGet(noteKey)||'';sectionNote.dataset.storageKey=noteKey}
+  function noteStorageKey(surface,route){return`ql-html-account:${provenance.uid||'anonymous'}:${surface}:${route}:note`}
+  function updateFromScroll(){scrollFrame=0;if(!activeSurface)return;const nodes=[...activeSurface.querySelectorAll('.ql-node')];if(!nodes.length)return;let current=nodes[0];const offset=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--top-h'))+34;const atBottom=window.innerHeight+window.scrollY>=document.documentElement.scrollHeight-4;if(atBottom){current=nodes[nodes.length-1]}else{for(const node of nodes){if(node.getBoundingClientRect().top<=offset)current=node;else break}}if(current!==activeNode){activeNode=current;updateActiveUI();const route=current.dataset.route||current.id;const nextHash=`#${activeSurface.dataset.surface}/${encodeURIComponent(route)}`;history.replaceState(null,'',nextHash)}}
+  function scheduleScrollUpdate(){if(scrollFrame)return;scrollFrame=requestAnimationFrame(updateFromScroll)}
+  function routeFromLocation(){const{surface,route}=parseHash();const targetSurface=surfaces.find(s=>s.dataset.surface===surface)||surfaces[0];const node=findNode(targetSurface,route);activateSurface(targetSurface);activeNode=node;updateActiveUI();requestAnimationFrame(()=>{if(route&&node)node.scrollIntoView({behavior:'auto',block:'start'});else window.scrollTo({top:0,behavior:'auto'})})}
+  function prefersReducedMotion(){return window.matchMedia('(prefers-reduced-motion: reduce)').matches}
+  function setTheme(theme){root.dataset.theme=theme;safeSet('ql-html-account:theme',theme)}
+  function applyResponsiveRailDefaults(){const width=window.innerWidth;if(width<980){body.classList.add('left-closed','right-closed')}else if(width<1320){if(!body.dataset.userLeft)body.classList.remove('left-closed');if(!body.dataset.userRight)body.classList.add('right-closed')}syncRailAria()}
+  function syncRailAria(){leftToggle.setAttribute('aria-expanded',String(!body.classList.contains('left-closed')));rightToggle.setAttribute('aria-expanded',String(!body.classList.contains('right-closed')))}
+  leftToggle.addEventListener('click',()=>{body.dataset.userLeft='1';body.classList.toggle('left-closed');syncRailAria()});rightToggle.addEventListener('click',()=>{body.dataset.userRight='1';body.classList.toggle('right-closed');syncRailAria()});themeToggle.addEventListener('click',()=>{setTheme(root.dataset.theme==='dark'?'light':'dark')});sectionNote.addEventListener('input',()=>{const ok=safeSet(sectionNote.dataset.storageKey||'',sectionNote.value);saveState.textContent=ok?'Saved locally.':'Local persistence is unavailable. The note remains in this page until it closes.'});window.addEventListener('scroll',scheduleScrollUpdate,{passive:true});window.addEventListener('popstate',routeFromLocation);window.addEventListener('hashchange',routeFromLocation);window.addEventListener('resize',applyResponsiveRailDefaults,{passive:true});buildMetadata();buildNav();setTheme(safeGet('ql-html-account:theme')||'light');applyResponsiveRailDefaults();routeFromLocation();
+})();
+</script>
+</body>
+</html>

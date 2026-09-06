@@ -5,3 +5,6 @@
 .DS_Store
 *.pending-snap
 /.aikit/profile.local.toml
+
+# Local recovery receipts for reviewed documentation changes.
+/.central/documentation-transactions/
