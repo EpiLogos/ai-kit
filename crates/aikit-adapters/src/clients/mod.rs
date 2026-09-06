@@ -31,6 +31,7 @@ pub mod bootstrap;
 pub mod broker;
 pub mod claude;
 pub mod codex;
+pub mod dsh;
 
 use std::path::Path;
 

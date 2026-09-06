@@ -5,7 +5,7 @@ name = "Living project collaboration"
 description = "Lean project-facing collaboration temperament for provenance-aware living research and engineering work; procedure remains in the product-understanding Skill."
 maturity = "stable"
 tags = ["aikit", "guidance", "collaboration", "provenance"]
-targets = ["claude-code", "codex"]
+targets = ["claude-code", "codex", "deepseek-harness"]
 
 [effects]
 filesystem = []

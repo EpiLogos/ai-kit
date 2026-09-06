@@ -54,6 +54,7 @@ impl TargetId {
     pub const SHELL: &'static str = "shell";
     pub const CLAUDE_CODE: &'static str = "claude-code";
     pub const CODEX: &'static str = "codex";
+    pub const DEEPSEEK_HARNESS: &'static str = "deepseek-harness";
     pub const AGENT_SKILLS: &'static str = "agent-skills";
     pub const HOOKS: &'static str = "hooks";
     pub const GUIDANCE: &'static str = "guidance";
@@ -70,6 +71,9 @@ impl TargetId {
     }
     pub fn codex() -> Self {
         Self::new(Self::CODEX)
+    }
+    pub fn deepseek_harness() -> Self {
+        Self::new(Self::DEEPSEEK_HARNESS)
     }
 
     pub fn as_str(&self) -> &str {
