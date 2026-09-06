@@ -16,10 +16,10 @@ Do not make a Skill absorb a Project merely because the Project needs it, and do
 1. State the procedure's owner and the user/Agent situation that should trigger it. A Skill should route work through the owner's public application/domain contracts rather than UI coordinates or private runtime mutation.
 2. Recover the target Project vocabulary and applicable source/contract chain before naming durable procedural distinctions. When stable SemanticWiki/ProjectMap/source/code refs already exist, point to them instead of restating architecture in prompt prose.
 3. Create the ordinary Agent Skill body (`SKILL.md`) and package it with the existing AIKit capsule manifest (`kind = "skill"`, `[skill] root = "payload"`). Keep capsule id/path aligned.
-4. Include purpose/triggers, inputs, semantic operations, required Capabilities/Actions where relevant, risk/permission boundaries, outputs and verification/conformance paths.
+4. Include purpose/triggers, inputs, semantic operations, required Capabilities/Actions where relevant, risk/permission boundaries, outputs and verification/conformance paths. If the Skill can end in a consequential completion Claim, identify the operative Whole and materially relevant proof obligations that make that completion statement meaningful; do not let `verify` mean “find something plausible that looks like success.”
 5. Make source/projection status explicit: repository/managed source + exact revision is authoritative; harness projections are derived.
-6. Prefer stable semantic steps such as `inspect -> stage -> preview -> apply -> verify` over key presses or panel positions.
-7. Add examples/fixtures where they prove behaviour. For an authoring Skill, prove that it can guide creation of a small valid Skill that passes the same structural rules.
+6. Prefer stable semantic steps such as `inspect -> stage -> preview -> apply -> verify` over key presses or panel positions. Where `verify` closes a Claim, bind the proving operation to the exact obligation and subject state it establishes.
+7. Add examples/fixtures where they prove behaviour. For an authoring Skill, prove that it can guide creation of a small valid Skill that passes the same structural rules. For a long-horizon or completion-bearing Skill, include a nearby anti-case where a plausible/partial result must remain non-complete.
 8. Submit source/revision to the managed source review/trust lifecycle. Repeated success or fitness evidence may inform review but never promotes source automatically.
 
 ## Instruction architecture
@@ -83,6 +83,36 @@ Sessions, Runs, PRs and repeated failures may justify a governance or Skill prop
 ### Communication is part of capability
 
 Where successful operation requires the Agent to expose evidence, uncertainty, returned difference or a human authorial fork, that communication is part of the Skill's capability contract rather than ornamental verbosity.
+
+### Proof obligations are part of procedure
+
+For a Skill whose procedure can culminate in `done`, `complete`, `adequate`, `satisfied`, `fixed`, `verified`, `conformant` or an equivalent consequential Claim, the Skill must make that Claim answerable to the Whole it names.
+
+Do not author the common failure pattern:
+
+```text
+perform work
+-> inspect one convincing artifact / test / output
+-> decide the requested outcome is plausibly complete
+-> report completion
+```
+
+Author the stronger relation through the native verification owner:
+
+```text
+Claim / requested outcome
+-> operative Whole + exact subject state
+-> materially relevant obligations
+-> proving operation / Evidence standing for each required obligation
+-> unresolved / contradicted / blocked / inapplicable positions remain explicit
+-> completion wording only at the scope actually warranted
+```
+
+The Whole may come from the Project's own acceptance structure, capability matrix, authored Intent, QL-shaped disclosure, RunMap region or another attributable source. The Skill should consume that structure rather than duplicate it as a new checklist ontology. If the relevant Whole evolves during real work, make the change attributable; do not silently shrink it until completed work fits the definition of success.
+
+A Skill may legitimately use sampling or representative evidence, but whole-result language is warranted only when the applicable verification contract defines that evidence mode as sufficient and the coverage condition is itself established. Where deterministic proof can be rerun or inspected directly, instruct the verifier to do so rather than trust a producer Agent's prose report.
+
+This law is especially important for long-horizon Skills because model plausibility is useful for proposing Claims and candidate paths, but is not itself an epistemic standing. Preserve that generative freedom while preventing plausible local success from being narrated upward into unproved whole completion.
 
 The practical premise here is language-conditioned behaviour: instruction language changes distinctions, salience and action. This is not evidence of phenomenal consciousness.
 
