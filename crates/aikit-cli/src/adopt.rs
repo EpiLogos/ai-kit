@@ -924,6 +924,7 @@ pub fn plan_projection_cutover(
     }
     let namespace = namespace.unwrap_or("projection").to_owned();
     valid_slug(&namespace, "namespace")?;
+    let resolved = aikit_store::generation::read_lock(&generation)?;
     let mut generated = std::collections::BTreeMap::new();
     for entry in std::fs::read_dir(&projection).map_err(|e| refusal(e.to_string()))? {
         let path = entry.map_err(|e| refusal(e.to_string()))?.path();
@@ -1010,10 +1011,13 @@ pub fn plan_projection_cutover(
             target,
             inverse: Inverse::Remove,
         });
-        capsules.push(CapsuleId::parse(&format!(
-            "skill/{namespace}/{}",
-            name.to_string_lossy()
-        ))?);
+        let identities: Vec<_> = resolved.active.iter()
+            .filter(|(_, capability)| capability.name == name.to_string_lossy())
+            .map(|(id, _)| id.clone()).collect();
+        if identities.len() != 1 {
+            return Err(refusal(format!("generation does not name one source identity for {}", name.to_string_lossy())));
+        }
+        capsules.push(identities[0].clone());
     }
     plan = plan.with_note("Publish native generation skill entries; preserve harness-owned material and reversible originals.");
     plan = aikit_store::procedure::bind_current_preconditions(plan)?;

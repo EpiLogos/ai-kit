@@ -973,6 +973,9 @@ fn mixed_harness_cutover_recovers_links_preserves_host_files_and_undoes() {
     let args = ["adopt", root.to_str().unwrap(), "--projection", projection.to_str().unwrap()];
     let preview = successful(home.path(), project.path(), &args);
     assert!(!root.join("recovered").exists());
+    let ids = preview["data"]["capsules"].as_array().unwrap();
+    assert!(ids.contains(&serde_json::json!("skill/local/deep-review")));
+    assert!(ids.contains(&serde_json::json!("skill/local/recovered")));
     let mut confirm = args.to_vec();
     confirm.extend(["--yes", "--expect-digest", preview["data"]["review_digest"].as_str().unwrap()]);
     // Actual edits to a symlink's authored target invalidate the old review.
