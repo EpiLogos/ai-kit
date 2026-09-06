@@ -21,6 +21,7 @@ pub const ACP_STABLE_PROTOCOL_VERSION: u32 = 1;
 pub enum ConnectionProtocolFamily {
     Acp,
     ClassicProcess,
+    PiRpc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +179,7 @@ pub enum ConnectionSignalKind {
     PermissionRequested { request: NativePermissionRequest },
     Completed { stop_reason: String },
     Cancelled,
+    Failed { reason: String },
     Status { message: String },
     Degraded { degradation: ConnectionDegradation },
 }

@@ -173,3 +173,6 @@ pub use working_environment_control::{
     AgentSessionSurfaceBinding, AgentSessionWorkingEnvironmentProvider,
     WorkingEnvironmentControlClient, WORKING_ENVIRONMENT_CONTROL_VERSION,
 };
+
+/// Pi native RPC connection; no ACP or permission parity is implied.
+pub mod pi_rpc_connection;
