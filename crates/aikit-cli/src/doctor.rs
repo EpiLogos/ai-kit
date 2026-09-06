@@ -306,6 +306,61 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
         );
     }
 
+    // The Agency Gateway at its well-known endpoint. Three honest states:
+    // answering, present-but-degraded, or simply not running. Absence is not
+    // an error — the gateway is optional — but bootstrap truth means the
+    // default endpoint is always accounted for, never silently absent.
+    #[cfg(unix)]
+    {
+        let socket = home.gateway_socket();
+        if socket.exists() {
+            let target = aikit_adapters::GatewayCarrierTarget::UnixSocket(socket.clone());
+            match aikit_adapters::gateway_command(
+                &target,
+                aikit_adapters::GatewayCommand::Protocol,
+                None,
+            ) {
+                Ok(response) => {
+                    if let aikit_adapters::GatewayResponse::Protocol { gateway_version, .. } =
+                        response
+                    {
+                        findings.push(
+                            Finding::new(
+                                "gateway.service",
+                                Severity::Note,
+                                format!(
+                                    "agency gateway answers at the default endpoint ({gateway_version})"
+                                ),
+                            )
+                            .with_detail(socket.display().to_string()),
+                        );
+                    }
+                }
+                Err(error) => {
+                    findings.push(
+                        Finding::new(
+                            "gateway.service",
+                            Severity::Warning,
+                            "the default agency gateway socket is present but not answering",
+                        )
+                        .with_detail(format!(
+                            "{error}; restart it with `aikit gateway serve`"
+                        )),
+                    );
+                }
+            }
+        } else {
+            findings.push(
+                Finding::new(
+                    "gateway.service",
+                    Severity::Note,
+                    "no agency gateway is running at the default endpoint",
+                )
+                .with_detail("optional; start one with `aikit gateway serve`".to_string()),
+            );
+        }
+    }
+
     findings.sort_by(|a, b| a.severity.cmp(&b.severity).then(a.check.cmp(b.check)));
     Ok(findings)
 }
