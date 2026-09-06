@@ -26,12 +26,18 @@
 //! would silently destroy the user's configuration on the next write, so the
 //! failure is propagated instead of swallowed.
 
+pub mod aider;
 pub mod agent_skills;
 pub mod bootstrap;
 pub mod broker;
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod dsh;
+pub mod gemini;
+pub mod goose;
+pub mod opencode;
+pub mod qwen;
 pub mod zcode;
 
 use std::path::Path;
