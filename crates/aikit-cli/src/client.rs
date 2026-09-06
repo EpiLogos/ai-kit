@@ -17,7 +17,8 @@ use aikit_adapters::actuation_harness_capability::{
     intake_actuation_capability, CapabilityOutcome, HarnessCapability,
 };
 use aikit_adapters::clients::{
-    broker::BrokerAdapter, claude::ClaudeAdapter, codex::CodexAdapter, ClientAdapter,
+    broker::BrokerAdapter, claude::ClaudeAdapter, codex::CodexAdapter, zcode::ZcodeAdapter,
+    ClientAdapter,
 };
 use aikit_adapters::runner::SystemRunner;
 
@@ -110,10 +111,27 @@ fn adapter_for(
                 home.join(".codex"),
             )),
         },
+        "zcode" => match capability_for(client, "zcode") {
+            Ok(capability) => {
+                let config_dir = client_home(&capability.install_seam.config_path)?;
+                Ok((
+                    Box::new(ZcodeAdapter::new().with_capability(capability.clone())),
+                    Some(capability),
+                    config_dir,
+                ))
+            }
+            Err(_) => Ok((
+                Box::new(ZcodeAdapter::new()) as Box<dyn ClientAdapter>,
+                None,
+                home.join(".zcode/cli"),
+            )),
+        },
         "broker" => Ok((Box::new(BrokerAdapter::new()), None, home.join(".aikit"))),
         other => Err(AikitError::new(
             "client.unknown",
-            format!("`{other}` is not a client AIKit knows; try claude, codex or broker"),
+            format!(
+                "`{other}` is not a client AIKit knows; try claude, codex, zcode or broker"
+            ),
         )
         .with("client", other.to_string())),
     }
@@ -212,7 +230,7 @@ pub fn launch_command(service: &Service, client: &str) -> Result<Vec<String>> {
 pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::Value>> {
     let rc = service.projection_context()?;
     let mut rows = Vec::new();
-    for client in ["claude", "codex", "broker"] {
+    for client in ["claude", "codex", "zcode", "broker"] {
         if only.is_some_and(|o| o != client && !(o == "claude-code" && client == "claude")) {
             continue;
         }
@@ -220,6 +238,9 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
         let planned = adapter.plan(&rc);
         let semantic_items = match client {
             "claude" | "codex" => rc.view.active_of_kind(Kind::Skill).len(),
+            // No native skill projection for zcode yet: the count is honestly
+            // zero, not the broker's whole active set.
+            "zcode" => 0,
             "broker" => rc.view.active.len(),
             _ => unreachable!("client list and semantic count must evolve together"),
         };

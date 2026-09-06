@@ -271,6 +271,7 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
                 let candidates: Vec<std::path::PathBuf> = match slug {
                     "claude-code" => vec![home.join(".claude/settings.json")],
                     "codex" => vec![home.join(".codex/hooks/aikit.toml")],
+                    "zcode" => vec![home.join(".zcode/cli/config.json")],
                     _ => vec![],
                 };
                 candidates
