@@ -940,3 +940,45 @@ fn control_cutover_uses_a_real_generation_and_undo_restores_the_original_tree() 
         fs::read(ground.join("deep-review/SKILL.md")).unwrap()
     );
 }
+
+#[test]
+fn mixed_harness_cutover_recovers_links_preserves_host_files_and_undoes() {
+    let (home, project, authored) = fixture();
+    write(&authored.path().join("recovered/SKILL.md"), "---\nname: recovered\ndescription: Recovered local skill.\n---\nLocal content.\n");
+    let root = home.path().join("harness/skills");
+    fs::create_dir_all(&root).unwrap();
+    std::os::unix::fs::symlink(authored.path().join("deep-review"), root.join("deep-review")).unwrap();
+    std::os::unix::fs::symlink("/old/moved/recovered", root.join("recovered")).unwrap();
+    write(&root.join(".system/owner.txt"), "Harness-owned content");
+    write(&root.join("notes.md"), "Human note");
+    write(&root.join("unselected/SKILL.md"), "---\nname: unselected\ndescription: Harness-local skill.\n---\nKeep me.\n");
+    successful(home.path(), project.path(), &["source", "add-directory", "local", authored.path().to_str().unwrap()]);
+    successful(home.path(), project.path(), &["source", "sync", "local"]);
+    successful(home.path(), project.path(), &["source", "promote", "local"]);
+    for id in ["skill/local/deep-review", "skill/local/recovered"] {
+        successful(home.path(), project.path(), &["enable", id, "--scope", "user"]);
+    }
+    let applied = successful(home.path(), project.path(), &["apply"]);
+    let projection = home.path().join("state/contexts").join(applied["context"]["context_id"].as_str().unwrap()).join("current/projections/codex/.agents/skills");
+    let args = ["adopt", root.to_str().unwrap(), "--projection", projection.to_str().unwrap()];
+    let preview = successful(home.path(), project.path(), &args);
+    assert!(!root.join("recovered").exists());
+    let mut confirm = args.to_vec();
+    confirm.extend(["--yes", "--expect-digest", preview["data"]["review_digest"].as_str().unwrap()]);
+    // Actual edits to a symlink's authored target invalidate the old review.
+    let original = fs::read(authored.path().join("deep-review/SKILL.md")).unwrap();
+    fs::write(authored.path().join("deep-review/SKILL.md"), "Changed human content").unwrap();
+    assert!(!run(home.path(), project.path(), &confirm).status.success());
+    fs::write(authored.path().join("deep-review/SKILL.md"), &original).unwrap();
+    let accepted = successful(home.path(), project.path(), &confirm);
+    assert_eq!(accepted["data"]["ownership"], "generation-projected");
+    assert_eq!(fs::read(root.join("deep-review/SKILL.md")).unwrap(), original);
+    assert!(root.join("recovered/SKILL.md").is_file());
+    assert_eq!(fs::read_to_string(root.join(".system/owner.txt")).unwrap(), "Harness-owned content");
+    assert_eq!(fs::read_to_string(root.join("notes.md")).unwrap(), "Human note");
+    assert!(root.join("unselected/SKILL.md").is_file());
+    assert_eq!(successful(home.path(), project.path(), &args)["data"]["skills"], 0);
+    successful(home.path(), project.path(), &["procedure", "undo", accepted["data"]["procedure"].as_str().unwrap()]);
+    assert_eq!(fs::read_link(root.join("recovered")).unwrap(), Path::new("/old/moved/recovered"));
+    assert_eq!(fs::read_link(root.join("deep-review")).unwrap(), authored.path().join("deep-review"));
+}

@@ -266,7 +266,7 @@ pub enum SourceSub {
     Sync(SourceNameArgs),
     /// Inspect source, candidate, active and rollback state.
     Show(SourceNameArgs),
-    /// Promote the candidate snapshot; trust requires an explicit flag.
+    /// Promote the candidate snapshot; local directories need no extra trust flag.
     Promote(SourcePromoteArgs),
     /// Return to the previous promoted snapshot.
     Rollback(SourceNameArgs),
@@ -338,9 +338,10 @@ pub struct AdoptArgs {
     /// Stage into a published Central skill scope (normally Control/user/skills).
     #[arg(long, value_name = "PATH")]
     pub control_ground: Option<std::path::PathBuf>,
-    /// Finish an already staged Control adoption by linking ROOT to this AIKit
-    /// current-generation skill tree. Keeps the original tree in the undo archive.
-    #[arg(long, value_name = "PATH", requires = "control_ground")]
+    /// Publish this native current-generation skill tree into ROOT. With
+    /// --control-ground, replace the whole staged root; otherwise reconcile
+    /// skill entries while preserving harness-owned files and undo material.
+    #[arg(long, value_name = "PATH")]
     pub projection: Option<std::path::PathBuf>,
     /// Apply the reviewed plan. Without this flag adoption only prints its diff.
     #[arg(long)]

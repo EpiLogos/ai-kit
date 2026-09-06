@@ -164,7 +164,7 @@ fn directory_source_sync_is_candidate_only_then_promotes_an_immutable_complete_s
     let promoted = aikit(
         &home,
         &cwd,
-        &["source", "promote", "writing-guidance-tools", "--trust"],
+        &["source", "promote", "writing-guidance-tools"],
     );
     assert_eq!(data(&promoted)["active_snapshot"], candidate);
     assert_eq!(data(&promoted)["trusted_skills"], 1);
@@ -201,7 +201,7 @@ fn directory_source_sync_is_candidate_only_then_promotes_an_immutable_complete_s
     aikit(
         &home,
         &cwd,
-        &["source", "promote", "writing-guidance-tools", "--trust"],
+        &["source", "promote", "writing-guidance-tools"],
     );
     let version_two = aikit(&home, &cwd, &["source", "show", "writing-guidance-tools"]);
     let version_two_digest = data(&version_two)["active_snapshot"]
@@ -224,7 +224,7 @@ fn directory_source_sync_is_candidate_only_then_promotes_an_immutable_complete_s
     aikit(
         &home,
         &cwd,
-        &["source", "promote", "writing-guidance-tools", "--trust"],
+        &["source", "promote", "writing-guidance-tools"],
     );
     let rolled_to_two = aikit(
         &home,
@@ -358,6 +358,8 @@ fn git_source_resolves_an_exact_commit_and_ignores_later_worktree_changes() {
     let synced = aikit(&home, &cwd, &["source", "sync", "mattpocock"]);
     assert_eq!(data(&synced)["skills"], 2);
     assert_eq!(data(&synced)["git_commit"], commit);
+    let untrusted = aikit(&home, &cwd, &["source", "promote", "mattpocock"]);
+    assert_eq!(data(&untrusted)["trusted_skills"], 0);
     let promoted = aikit(
         &home,
         &cwd,

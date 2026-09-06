@@ -741,49 +741,7 @@ pub fn plan_control_cutover(
         ));
     }
     let source = &staged.source;
-    let contexts = std::fs::canonicalize(home.contexts()).map_err(|e| refusal(e.to_string()))?;
-    // Canonicalise the context owner, retaining the stable current component.
-    // Accept only native skill projections, never an arbitrary directory link.
-    let parts: Vec<_> = projection.components().collect();
-    if parts.iter().any(|p| matches!(p, Component::ParentDir)) {
-        return Err(refusal(
-            "projection must name a native current-generation skill tree".into(),
-        ));
-    }
-    let current_index = parts
-        .iter()
-        .rposition(|p| p.as_os_str() == "current")
-        .ok_or_else(|| refusal("projection must follow an AIKit current generation".into()))?;
-    let context_path: PathBuf = parts[..current_index].iter().collect();
-    let context = std::fs::canonicalize(context_path).map_err(|e| refusal(e.to_string()))?;
-    if context.parent() != Some(contexts.as_path()) {
-        return Err(refusal(
-            "projection belongs to a different AIKit home".into(),
-        ));
-    }
-    let suffix: PathBuf = parts[current_index + 1..].iter().collect();
-    if ![
-        Path::new("projections/codex/.agents/skills"),
-        Path::new("projections/claude/.claude/skills"),
-    ]
-    .contains(&suffix.as_path())
-    {
-        return Err(refusal(
-            "projection must name a native Claude or Codex skill tree".into(),
-        ));
-    }
-    let current = context.join("current");
-    let generation = std::fs::canonicalize(&current).map_err(|e| refusal(e.to_string()))?;
-    let generations =
-        std::fs::canonicalize(context.join("generations")).map_err(|e| refusal(e.to_string()))?;
-    if generation.parent() != Some(generations.as_path())
-        || !aikit_store::generation::is_generation(&generation)
-    {
-        return Err(refusal(
-            "current does not identify a committed AIKit generation".into(),
-        ));
-    }
-    let projection = current.join(suffix);
+    let (projection, current, generation) = native_projection(home, projection)?;
     if !projection.is_dir() || projection.starts_with(source) || source.starts_with(&projection) {
         return Err(refusal(
             "projection and former authored root must be disjoint".into(),
@@ -897,6 +855,195 @@ pub fn plan_control_cutover(
         source: source.clone(),
         namespace: staged.namespace,
         capsules: staged.capsules,
+    })
+}
+
+fn native_projection(home: &AikitHome, projection: &Path) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    let refusal = |message: String| AikitError::new("adopt.cutover_refused", message);
+    let contexts = std::fs::canonicalize(home.contexts()).map_err(|e| refusal(e.to_string()))?;
+    // Canonicalise the context owner, retaining the stable current component.
+    // Accept only native skill projections, never an arbitrary directory link.
+    let parts: Vec<_> = projection.components().collect();
+    if parts.iter().any(|p| matches!(p, Component::ParentDir)) {
+        return Err(refusal(
+            "projection must name a native current-generation skill tree".into(),
+        ));
+    }
+    let current_index = parts
+        .iter()
+        .rposition(|p| p.as_os_str() == "current")
+        .ok_or_else(|| refusal("projection must follow an AIKit current generation".into()))?;
+    let context_path: PathBuf = parts[..current_index].iter().collect();
+    let context = std::fs::canonicalize(context_path).map_err(|e| refusal(e.to_string()))?;
+    if context.parent() != Some(contexts.as_path()) {
+        return Err(refusal(
+            "projection belongs to a different AIKit home".into(),
+        ));
+    }
+    let suffix: PathBuf = parts[current_index + 1..].iter().collect();
+    if ![
+        Path::new("projections/codex/.agents/skills"),
+        Path::new("projections/claude/.claude/skills"),
+    ]
+    .contains(&suffix.as_path())
+    {
+        return Err(refusal(
+            "projection must name a native Claude or Codex skill tree".into(),
+        ));
+    }
+    let current = context.join("current");
+    let generation = std::fs::canonicalize(&current).map_err(|e| refusal(e.to_string()))?;
+    let generations =
+        std::fs::canonicalize(context.join("generations")).map_err(|e| refusal(e.to_string()))?;
+    if generation.parent() != Some(generations.as_path())
+        || !aikit_store::generation::is_generation(&generation)
+    {
+        return Err(refusal(
+            "current does not identify a committed AIKit generation".into(),
+        ));
+    }
+    let projection = current.join(suffix);
+    Ok((projection, current, generation))
+}
+
+/// Reconcile a mixed harness directory with a native generation. Authored
+/// payloads must already survive in the generation; unrelated harness material
+/// stays in place. Broken historical links are preserved in the undo archive
+/// and replaced only when their named skill is actually generated.
+pub fn plan_projection_cutover(
+    home: &AikitHome,
+    source: &Path,
+    projection: &Path,
+    namespace: Option<&str>,
+) -> Result<Adoption> {
+    let refusal = |message: String| AikitError::new("adopt.cutover_refused", message);
+    let source = std::fs::canonicalize(source).map_err(|e| refusal(e.to_string()))?;
+    let (projection, current, generation) = native_projection(home, projection)?;
+    if source.starts_with(&projection) || projection.starts_with(&source) {
+        return Err(refusal("source and projection must be disjoint".into()));
+    }
+    let namespace = namespace.unwrap_or("projection").to_owned();
+    valid_slug(&namespace, "namespace")?;
+    let mut generated = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(&projection).map_err(|e| refusal(e.to_string()))? {
+        let path = entry.map_err(|e| refusal(e.to_string()))?.path();
+        if path.join("SKILL.md").is_file() {
+            agent_skills::validate(&path)?;
+            generated.insert(path.file_name().unwrap().to_os_string(), path);
+        }
+    }
+    if generated.is_empty() {
+        return Err(refusal("generation contains no skill payloads".into()));
+    }
+    // Unselected entries remain untouched, including harness-owned skills.
+    // Only entries actually supplied by this generation participate in cutover.
+    let mut plan = Plan::new();
+    let mut capsules = Vec::new();
+    // Stable archive identity is content-bound below through preconditions;
+    // include the source path to prevent two harness roots sharing an archive.
+    let archive_key = blake3::hash(source.to_string_lossy().as_bytes())
+        .to_hex()
+        .to_string();
+    let archive = home.state().join("adoption-undo").join(archive_key);
+    for (name, target) in generated {
+        let path = source.join(&name);
+        if path.is_symlink() && std::fs::read_link(&path).ok().as_ref() == Some(&target) {
+            continue;
+        }
+        if path.exists() && !path.join("SKILL.md").is_file() {
+            return Err(refusal(format!(
+                "{} is harness material, not a skill",
+                path.display()
+            )));
+        }
+        if path.join("SKILL.md").is_file() {
+            let original = agent_skills::validate(&path)?;
+            let replacement = agent_skills::validate(&target)?;
+            let payload = |files: Vec<String>| {
+                files
+                    .into_iter()
+                    .filter(|p| p != "skill.json")
+                    .collect::<BTreeSet<_>>()
+            };
+            let files = payload(original.files);
+            if files != payload(replacement.files) {
+                return Err(refusal(format!(
+                    "payload file set differs for {}",
+                    path.display()
+                )));
+            }
+            for relative in files {
+                let old = path.join(&relative);
+                let new = target.join(&relative);
+                if std::fs::read(&old).map_err(|e| refusal(e.to_string()))?
+                    != std::fs::read(&new).map_err(|e| refusal(e.to_string()))?
+                    || source_mode(&old)? != source_mode(&new)?
+                {
+                    return Err(refusal(format!(
+                        "payload bytes or mode differ for {}",
+                        old.display()
+                    )));
+                }
+            }
+            if path.is_symlink() {
+                plan = aikit_store::procedure::bind_read_precondition(
+                    plan,
+                    &std::fs::canonicalize(&path).map_err(|e| refusal(e.to_string()))?,
+                )?;
+            }
+        }
+        if path.exists() || path.is_symlink() {
+            let backup = archive.join(&name);
+            if backup.exists() || backup.is_symlink() {
+                return Err(refusal(format!(
+                    "undo archive already exists: {}",
+                    backup.display()
+                )));
+            }
+            plan = plan.with_edit(WorldEdit::MovePath {
+                from: path.clone(),
+                to: backup,
+            });
+        }
+        plan = plan.with_edit(WorldEdit::CreateLink {
+            path,
+            target,
+            inverse: Inverse::Remove,
+        });
+        capsules.push(CapsuleId::parse(&format!(
+            "skill/{namespace}/{}",
+            name.to_string_lossy()
+        ))?);
+    }
+    plan = plan.with_note("Publish native generation skill entries; preserve harness-owned material and reversible originals.");
+    plan = aikit_store::procedure::bind_current_preconditions(plan)?;
+    for dependency in [&source, &current, &generation] {
+        plan = aikit_store::procedure::bind_read_precondition(plan, dependency)?;
+    }
+    let review_digest = plan.review_digest(&[format!(
+        "native generation projection: {}",
+        projection.display()
+    )]);
+    let isolation = select_isolation(
+        &plan,
+        &home.state().join("procedures/.shadow"),
+        aikit_store::procedure::git_repo_of,
+    );
+    let procedure = Procedure::new(
+        ProcedureKind::Adopt {
+            source: source.clone(),
+            namespace: namespace.clone(),
+            capsules: capsules.clone(),
+        },
+        plan,
+        isolation,
+    )?;
+    Ok(Adoption {
+        procedure,
+        review_digest,
+        source,
+        namespace,
+        capsules,
     })
 }
 

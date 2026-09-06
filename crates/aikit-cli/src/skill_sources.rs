@@ -497,6 +497,10 @@ pub fn promote(
     trust_all: bool,
     trust_skills: &[String],
 ) -> Result<(SnapshotRecord, usize)> {
+    // Registering and promoting an existing local directory is the user's
+    // acceptance of that source. Downloaded Git snapshots retain explicit trust.
+    let local = matches!(load_spec(home, id)?.kind, SourceKind::Directory { .. });
+    let trust_all = trust_all || (local && trust_skills.is_empty());
     let mut state = load_state(home, id)?;
     let digest = state.candidate_snapshot.clone().ok_or_else(|| {
         AikitError::new(
@@ -532,7 +536,11 @@ pub fn promote(
             store.record(
                 &TrustKey::new(source.clone(), capsule.id.clone(), revision.clone()),
                 TrustState::Trusted,
-                Some("explicit source promotion"),
+                Some(if local {
+                    "user-promoted local directory"
+                } else {
+                    "explicit source promotion"
+                }),
             )?;
             trusted += 1;
         }

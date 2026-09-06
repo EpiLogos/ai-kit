@@ -105,6 +105,11 @@ For personal bootstrap, `aikit adopt ROOT --control-ground CENTRAL/Control/user/
 
 After staging, source promotion and `apply`, finish the handoff with `aikit adopt ROOT --control-ground CENTRAL/Control/user/skills --projection CURRENT/projections/codex/.agents/skills`. Here `CURRENT` is the context's stable `current` generation pointer from the applied AIKit state. Preview and confirm the returned digest. AIKit verifies every original payload against Control and the generated tree, refuses unaccounted files or stale standing, moves the original tree into its Procedure undo archive, then publishes a directory link to the generation. Claude uses `CURRENT/projections/claude/.claude/skills`. Future `apply` calls update the projection; `procedure undo` restores the original tree. This cutover does not author Control or accept an unresolved external source.
 
+For an existing mixed harness directory, use `aikit adopt ROOT --projection CURRENT/projections/codex/.agents/skills` without `--control-ground`. It reconciles generated skill entries, preserves unrelated harness files and unselected skills, checks existing payload bytes and modes, and retains replaced entries in the reversible Procedure archive. Broken links are replaced when the corresponding skill is generated from a registered source. Repeat reconciliation to expose newly selected skill names; existing links follow later generations automatically.
+
+Registering and promoting a local directory accepts its local skill revisions without a separate `--trust` step. Git downloads retain per-revision trust choices. This does not change the active/retired standing authored in Control.
+
+
 This is a non-displacement principle as much as a safety feature. Existing agentic arrangements are part of the user's real world. AIKit should make them intelligible and composable before asking them to become something else.
 
 ## Relation to the wider {O:I} field
