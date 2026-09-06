@@ -47,6 +47,7 @@ use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::Kind;
 use aikit_core::context::Isolation;
+use aikit_core::hooks::HookEventKind;
 use aikit_core::id::CapsuleId;
 use aikit_core::platform::TargetId;
 use aikit_core::projection::{
@@ -67,9 +68,6 @@ pub const CLIENT: &str = "codex";
 
 /// Codex's discovery path, relative to the tree root.
 const SKILLS_PREFIX: &str = ".agents/skills";
-
-/// AIKit's own dispatcher file, kept out of the user's `config.toml`.
-const INSTALL_FILE: &str = "hooks/aikit.toml";
 
 /// The markers that make a directory a project/repository root — the places
 /// Codex's own upward `.agents/skills` discovery walk stops. `.git` is the
@@ -156,25 +154,36 @@ impl CodexAdapter {
         self
     }
 
-    fn descriptor_events(&self) -> Result<Vec<(String, String)>> {
+    fn descriptor_events(&self) -> Result<Vec<(HookEventKind, String)>> {
         match &self.capability {
             Some(capability) => {
-                let (mapped, _unrouted) =
-                    CapabilityOutcome::Descriptor(Box::new(capability.clone())).dispatch_events();
+                // Only the events whose transport is the hooks.json file ride
+                // this seam; the rest (codex's toml-notify Notification) are
+                // disclosed, never silently absorbed.
+                let (mut mapped, unrouted) =
+                    CapabilityOutcome::Descriptor(Box::new(capability.clone()))
+                        .dispatch_events_on_transports(&["hooks-json-file"]);
                 if mapped.is_empty() {
                     return Err(AikitError::new(
                         "client.capability_without_dispatch_events",
-                        "the codex capability descriptor maps none of its native events onto                          AIKit's dispatch boundaries",
+                        format!(
+                            "the codex capability descriptor maps none of its native events onto \
+                             this seam (unrouted: {unrouted:?})"
+                        ),
                     ));
                 }
+                // The file grammar spells events the Claude way (SessionStart,
+                // ...); the descriptor's native_name is codex's internal id.
+                mapped.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
                 Ok(mapped
                     .into_iter()
-                    .map(|(kind, native)| (native, kind.as_str().to_string()))
+                    .map(|(kind, _native)| (kind.clone(), kind.as_str().to_string()))
                     .collect())
             }
             None => Err(AikitError::new(
                 "client.capability_unavailable",
-                "no capability descriptor was supplied: AIKit installs only what Actuation                  declares the harness to be, and guessing is not installation",
+                "no capability descriptor was supplied: AIKit installs only what Actuation \
+                 declares the harness to be, and guessing is not installation",
             )),
         }
     }
@@ -509,23 +518,44 @@ impl ClientAdapter for CodexAdapter {
         vec![self.binary.clone()]
     }
 
-    fn install(&self, _config_dir: &Path) -> Result<Vec<ProjectionItem>> {
-        // (native event name, AIKit boundary name) pairs from the descriptor.
+    fn install(&self, config_dir: &Path) -> Result<Vec<ProjectionItem>> {
+        // The descriptor decides both the seam and the events that ride it:
+        // codex's hooks.json carries session_start / pre_tool_use /
+        // post_tool_use (transport hooks-json-file); its Notification rides
+        // config.toml notify (transport toml-notify), which is configured
+        // separately and never invented here. The file's event keys are the
+        // boundary spellings the grammar uses (SessionStart, ...), as observed
+        // on real trusted installs.
         let events = self.descriptor_events()?;
-        let mut contents = String::from(
-            "# >>> aikit >>>\n\
-             # Managed by AIKit. One durable dispatcher entry per Codex event; the chain each\
-             # one runs is rebuilt from the current generation on every dispatch, so this file\
-             # never has to change when capabilities do. Events are whatever Actuation's\
-             # capability descriptor declares codex to carry.\n",
-        );
-        for (native, boundary) in &events {
-            contents.push_str(&format!(
-                "\n[[hooks]]\nevent = \"{native}\"\ncommand = \"aikit hook dispatch {CLIENT} {boundary}\"\n"
-            ));
-        }
-        contents.push_str("\n# <<< aikit <<<\n");
+        let file_name = self
+            .capability
+            .as_ref()
+            .map(|capability| {
+                Path::new(&capability.install_seam.config_path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "hooks.json".to_string())
+            })
+            .unwrap_or_else(|| "hooks.json".to_string());
+        let path = config_dir.join(&file_name);
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(contents) => Some(contents),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(AikitError::new(
+                    "client.settings_unreadable",
+                    format!("could not read {}: {e}", path.display()),
+                )
+                .with("path", path.display().to_string()))
+            }
+        };
 
-        Ok(vec![ProjectionItem::write(INSTALL_FILE, contents)?])
+        let merged = super::hook_map::merge_hook_map_entries(
+            existing.as_deref(),
+            &events,
+            CLIENT,
+            super::hook_map::MatcherPolicy::Omitted,
+        )?;
+        Ok(vec![ProjectionItem::write(&file_name, merged)?])
     }
 }

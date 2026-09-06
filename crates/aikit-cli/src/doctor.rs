@@ -268,12 +268,20 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
             .and_then(|home| {
                 // Marker check over the installed seam: the honest low-tech
                 // question is whether AIKit's dispatcher entries are present.
-                let candidates: Vec<std::path::PathBuf> = match slug {
-                    "claude-code" => vec![home.join(".claude/settings.json")],
-                    "codex" => vec![home.join(".codex/hooks/aikit.toml")],
-                    "zcode" => vec![home.join(".zcode/cli/config.json")],
-                    _ => vec![],
-                };
+                // Codex's seam is per-project (the descriptor declares
+                // .codex/hooks.json), so it reads the working tree's project
+                // root, not the home directory.
+                let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+                match slug {
+                    "claude-code" => candidates.push(home.join(".claude/settings.json")),
+                    "zcode" => candidates.push(home.join(".zcode/cli/config.json")),
+                    "codex" => {
+                        if let Some(root) = service.descriptor().project_root.as_deref() {
+                            candidates.push(root.join(".codex/hooks.json"));
+                        }
+                    }
+                    _ => {}
+                }
                 candidates
                     .iter()
                     .find_map(|path| {

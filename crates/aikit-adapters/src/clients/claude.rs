@@ -287,120 +287,15 @@ impl ClientAdapter for ClaudeAdapter {
 // Settings merging
 // ---------------------------------------------------------------------------
 
-/// The command AIKit installs for one event.
-pub fn dispatch_command(event: &HookEventKind) -> String {
-    format!("aikit hook dispatch {CLIENT} {event}")
-}
-
-/// Is this an AIKit dispatcher entry — including a stale one from an older
-/// install that spelled the event differently?
-fn is_aikit_entry(command: &str) -> bool {
-    command
-        .trim()
-        .starts_with(&format!("aikit hook dispatch {CLIENT}"))
-}
-
 /// Merge AIKit's dispatcher entries into a settings document.
 ///
-/// Everything that is not AIKit's is preserved: unrelated top-level keys,
-/// unrelated events, and the user's own hooks inside events AIKit also uses.
-/// What is *not* preserved is a previous AIKit entry, because leaving one behind
-/// next to a new one would fire the whole chain twice.
+/// Delegates to the shared Claude-grammar merge with claude-code's matcher
+/// policy: tool names match against a glob, and `*` is its match-all.
 pub fn merge_dispatcher_entries(existing: Option<&str>, events: &DescriptorEvents) -> Result<String> {
-    let mut document: serde_json::Value = match existing {
-        None => serde_json::json!({}),
-        Some(raw) if raw.trim().is_empty() => serde_json::json!({}),
-        Some(raw) => serde_json::from_str(raw).map_err(|e| {
-            AikitError::new(
-                "client.settings_unreadable",
-                format!(
-                    "the existing Claude settings are not valid JSON ({e}); AIKit will not \
-                     overwrite a file it cannot read"
-                ),
-            )
-        })?,
-    };
-
-    if !document.is_object() {
-        return Err(AikitError::new(
-            "client.settings_unreadable",
-            "the existing Claude settings are not a JSON object",
-        ));
-    }
-
-    let hooks = document
-        .as_object_mut()
-        .and_then(|o| {
-            o.entry("hooks")
-                .or_insert_with(|| serde_json::json!({}))
-                .as_object_mut()
-        })
-        .ok_or_else(|| {
-            AikitError::new(
-                "client.settings_unreadable",
-                "the existing `hooks` value is not an object",
-            )
-        })?;
-
-    // A previous install may have written an entry under an event AIKit no longer
-    // dispatches, or under a misspelling. Sweep those first, everywhere.
-    for entries in hooks.values_mut() {
-        if let Some(matchers) = entries.as_array_mut() {
-            for matcher in matchers.iter_mut() {
-                if let Some(list) = matcher.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                    list.retain(|hook| {
-                        !hook
-                            .get("command")
-                            .and_then(|c| c.as_str())
-                            .is_some_and(is_aikit_entry)
-                    });
-                }
-            }
-            matchers.retain(|matcher| {
-                matcher
-                    .get("hooks")
-                    .and_then(|h| h.as_array())
-                    .is_none_or(|list| !list.is_empty())
-            });
-        }
-    }
-
-    for (event, native_name) in events {
-        let mut entry = serde_json::Map::new();
-        // A matcher is only meaningful where the event carries a tool name;
-        // elsewhere it is noise that invites people to edit it.
-        if event.carries_tool_name() {
-            entry.insert("matcher".to_string(), serde_json::json!("*"));
-        }
-        entry.insert(
-            "hooks".to_string(),
-            serde_json::json!([{ "type": "command", "command": dispatch_command(event) }]),
-        );
-
-        let list = hooks
-            .entry(native_name.clone())
-            .or_insert_with(|| serde_json::json!([]));
-        match list.as_array_mut() {
-            Some(array) => array.push(serde_json::Value::Object(entry)),
-            None => {
-                return Err(AikitError::new(
-                    "client.settings_unreadable",
-                    format!("the existing `hooks.{event}` value is not an array"),
-                ))
-            }
-        }
-    }
-
-    // Remove any event key that ended up empty after the sweep, so an old install
-    // does not leave `\"PreCompact\": []` behind forever.
-    hooks.retain(|_, entries| entries.as_array().is_none_or(|a| !a.is_empty()));
-
-    let mut rendered = serde_json::to_string_pretty(&document).map_err(|e| {
-        AikitError::new(
-            "client.settings_unreadable",
-            format!("could not render the merged settings: {e}"),
-        )
-    })?;
-    rendered.push('\n');
-    Ok(rendered)
+    super::hook_map::merge_hook_map_entries(
+        existing,
+        events,
+        CLIENT,
+        super::hook_map::MatcherPolicy::StarForTools,
+    )
 }

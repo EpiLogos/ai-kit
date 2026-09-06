@@ -123,6 +123,41 @@ impl CapabilityOutcome {
             CapabilityOutcome::Unavailable { .. } => (Vec::new(), Vec::new()),
         }
     }
+
+    /// The mapped events that ride one of the given transports, plus the
+    /// disclosure for everything else. A descriptor may declare several seams
+    /// (codex: a per-project hooks.json and a config.toml notify listener); a
+    /// projection installs only the events whose transport its seam carries
+    /// and must disclose, never silently absorb, the rest.
+    pub fn dispatch_events_on_transports(
+        &self,
+        transports: &[&str],
+    ) -> (Vec<(HookEventKind, String)>, Vec<String>) {
+        match self {
+            CapabilityOutcome::Descriptor(capability) => {
+                let mut mapped = Vec::new();
+                let mut unrouted = Vec::new();
+                for event in &capability.native_events {
+                    if !transports.contains(&event.transport.as_str()) {
+                        unrouted.push(format!(
+                            "{} rides transport {} — not wired by this seam",
+                            event.native_name, event.transport
+                        ));
+                        continue;
+                    }
+                    match hook_event_kind(&event.event) {
+                        Some(kind) => mapped.push((kind, event.native_name.clone())),
+                        None => unrouted.push(format!(
+                            "{} ({}) is outside AIKit's boundary vocabulary",
+                            event.native_name, event.event
+                        )),
+                    }
+                }
+                (mapped, unrouted)
+            }
+            CapabilityOutcome::Unavailable { .. } => (Vec::new(), Vec::new()),
+        }
+    }
 }
 
 fn hook_event_kind(event: &str) -> Option<HookEventKind> {
