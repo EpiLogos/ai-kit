@@ -2,8 +2,8 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-KNOWLEDGE = ROOT / "skills/registry/capsules/skill/aikit/knowledge-navigation/payload/SKILL.md"
-VERIFY = ROOT / "skills/registry/capsules/skill/aikit/verification/payload/SKILL.md"
+KNOWLEDGE = ROOT / "registry/capsules/skill/aikit/knowledge-navigation/payload/SKILL.md"
+VERIFY = ROOT / "registry/capsules/skill/aikit/verification/payload/SKILL.md"
 
 knowledge = KNOWLEDGE.read_text(encoding="utf-8")
 verification = VERIFY.read_text(encoding="utf-8")
