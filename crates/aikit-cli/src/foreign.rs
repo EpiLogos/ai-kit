@@ -77,6 +77,30 @@ pub fn projected_generation(
     home: &aikit_store::home::AikitHome,
     path: &Path,
 ) -> Option<aikit_store::generation::GenerationMetadata> {
+    if let Some(metadata) = direct_projected_generation(home, path) {
+        return Some(metadata);
+    }
+    // A reconciled harness root can consist of per-skill generation links.
+    // Claim a wholly generated tree only when every visible skill uses the
+    // same native projection and there are no unrelated subdirectories.
+    let mut parent: Option<PathBuf> = None;
+    for entry in std::fs::read_dir(path).ok()? {
+        let entry = entry.ok()?.path();
+        if !entry.is_dir() && !entry.is_symlink() { continue; }
+        if !entry.is_symlink() || !entry.join("SKILL.md").is_file() { return None; }
+        let link = std::fs::read_link(&entry).ok()?;
+        let target = if link.is_absolute() { link } else { path.join(link) };
+        let candidate = target.parent()?.to_path_buf();
+        if parent.as_ref().is_some_and(|previous| previous != &candidate) { return None; }
+        parent = Some(candidate);
+    }
+    direct_projected_generation(home, &parent?)
+}
+
+fn direct_projected_generation(
+    home: &aikit_store::home::AikitHome,
+    path: &Path,
+) -> Option<aikit_store::generation::GenerationMetadata> {
     let path = std::fs::canonicalize(path).ok()?;
     let generation = path.ancestors().nth(4)?;
     let suffix = path.strip_prefix(generation).ok()?;

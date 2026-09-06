@@ -960,6 +960,16 @@ fn mixed_harness_cutover_recovers_links_preserves_host_files_and_undoes() {
     }
     let applied = successful(home.path(), project.path(), &["apply"]);
     let projection = home.path().join("state/contexts").join(applied["context"]["context_id"].as_str().unwrap()).join("current/projections/codex/.agents/skills");
+    let pure = home.path().join(".agents/skills");
+    fs::create_dir_all(&pure).unwrap();
+    let pure_args = ["adopt", pure.to_str().unwrap(), "--projection", projection.to_str().unwrap()];
+    let preview_pure = successful(home.path(), project.path(), &pure_args);
+    let mut confirm_pure = pure_args.to_vec();
+    confirm_pure.extend(["--yes", "--expect-digest", preview_pure["data"]["review_digest"].as_str().unwrap()]);
+    successful(home.path(), project.path(), &confirm_pure);
+    let tree = successful(home.path(), project.path(), &["tree", "--expand", "registries"]);
+    let pure_row = tree["data"]["rows"].as_array().unwrap().iter().find(|r| r["path"] == "registries/@agents").unwrap();
+    assert!(pure_row["summary"].as_str().unwrap().starts_with("generated ·"));
     let args = ["adopt", root.to_str().unwrap(), "--projection", projection.to_str().unwrap()];
     let preview = successful(home.path(), project.path(), &args);
     assert!(!root.join("recovered").exists());
