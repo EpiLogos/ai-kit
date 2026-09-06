@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use aikit_core::catalog::Catalog;
 use aikit_core::error::err;
@@ -385,7 +385,18 @@ impl Index {
         if let Some(parent) = path.parent() {
             crate::home::create_dir_all(parent)?;
         }
+        // journal_mode changes themselves can return BUSY without invoking
+        // SQLite's busy handler. Reuse the native bounded file-lock authority
+        // only for opening/migration; normal reads and writes retain WAL concurrency.
+        let _opening = crate::ContextLock::acquire_at(
+            &path.with_extension("sqlite-open.lock"),
+            "index-open",
+            crate::LockOptions::default().with_purpose("initialize SQLite index"),
+        )?;
         let conn = Connection::open(path).map_err(|e| sql_error("index.open_failed", &e))?;
+
+        conn.busy_timeout(Duration::from_millis(5_000))
+            .map_err(|e| sql_error("index.open_failed", &e))?;
 
         // WAL is a persistent property of the file, but setting it on every open
         // costs nothing and means a database restored from a non-WAL backup is
@@ -394,11 +405,6 @@ impl Index {
             .map_err(|e| sql_error("index.open_failed", &e))?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| sql_error("index.open_failed", &e))?;
-        // Every command is a separate process; a few hundred milliseconds of
-        // patience beats surfacing `database is locked` to a user.
-        conn.busy_timeout(Duration::from_millis(5_000))
-            .map_err(|e| sql_error("index.open_failed", &e))?;
-
         let index = Self {
             conn,
             path: path.to_path_buf(),
@@ -416,7 +422,11 @@ impl Index {
     }
 
     fn migrate(&self) -> Result<()> {
-        self.conn
+        // Decide and apply under one writer reservation. Other first-open
+        // callers must observe the completed schema, never the same old basis.
+        let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .map_err(|e| sql_error("index.migrate_failed", &e))?;
+        transaction
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS schema_version (
                      version    INTEGER PRIMARY KEY,
@@ -426,8 +436,7 @@ impl Index {
             )
             .map_err(|e| sql_error("index.migrate_failed", &e))?;
 
-        let applied: u32 = self
-            .conn
+        let applied: u32 = transaction
             .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| {
                 r.get(0)
             })
@@ -449,17 +458,17 @@ impl Index {
             if version <= applied {
                 continue;
             }
-            self.conn
+            transaction
                 .execute_batch(sql)
                 .map_err(|e| sql_error("index.migrate_failed", &e))?;
-            self.conn
+            transaction
                 .execute(
                     "INSERT INTO schema_version (version, name, applied_ns) VALUES (?1, ?2, ?3)",
                     params![version, name, Timestamp::now().as_nanos()],
                 )
                 .map_err(|e| sql_error("index.migrate_failed", &e))?;
         }
-        Ok(())
+        transaction.commit().map_err(|e| sql_error("index.migrate_failed", &e))
     }
 
     pub fn schema_version(&self) -> Result<u32> {
