@@ -807,15 +807,18 @@ fn successful(home: &Path, project: &Path, args: &[&str]) -> Value {
 
 #[test]
 fn control_cutover_uses_a_real_generation_and_undo_restores_the_original_tree() {
-    let (home, project, foreign) = fixture();
-    write(&foreign.path().join("retired/SKILL.md"), "---\nname: retired\ndescription: Retired human skill.\n---\nPreserve the authored content.\n");
+    let (home, project, original) = fixture();
+    let foreign = home.path().join(".agents/skills");
+    fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    fs::rename(original.path(), &foreign).unwrap();
+    write(&foreign.as_path().join("retired/SKILL.md"), "---\nname: retired\ndescription: Retired human skill.\n---\nPreserve the authored content.\n");
     let central = TempDir::new().unwrap();
     let ground = central.path().join("Control/user/skills");
     fs::create_dir_all(ground.parent().unwrap()).unwrap();
     fs::create_dir(central.path().join(".central")).unwrap();
     let stage = [
         "adopt",
-        foreign.path().to_str().unwrap(),
+        foreign.as_path().to_str().unwrap(),
         "--control-ground",
         ground.to_str().unwrap(),
     ];
@@ -867,11 +870,11 @@ fn control_cutover_uses_a_real_generation_and_undo_restores_the_original_tree() 
     let mut cutover = stage.to_vec();
     cutover.extend(["--projection", projection.to_str().unwrap()]);
     let preview = successful(home.path(), project.path(), &cutover);
-    assert!(!foreign.path().is_symlink());
+    assert!(!foreign.as_path().is_symlink());
     let old_digest = preview["data"]["review_digest"].as_str().unwrap();
     // A changed source between preview and confirmation must remain untouched.
     write(
-        &foreign.path().join("unaccounted.txt"),
+        &foreign.as_path().join("unaccounted.txt"),
         "Human content outside every skill.\n",
     );
     let mut confirm = cutover.clone();
@@ -882,8 +885,8 @@ fn control_cutover_uses_a_real_generation_and_undo_restores_the_original_tree() 
         .as_str()
         .unwrap()
         .contains("unaccounted"));
-    assert!(!foreign.path().is_symlink());
-    fs::remove_file(foreign.path().join("unaccounted.txt")).unwrap();
+    assert!(!foreign.as_path().is_symlink());
+    fs::remove_file(foreign.as_path().join("unaccounted.txt")).unwrap();
     // A newly restored skill requires a fresh source snapshot and generation.
     let retirement = fs::read(ground.join("retired/skill.json")).unwrap();
     write(
@@ -891,12 +894,12 @@ fn control_cutover_uses_a_real_generation_and_undo_restores_the_original_tree() 
         r#"{"schema":"central.skill/v1","name":"retired","scope":"control-user","standing":"active","provenance":"adopted"}"#,
     );
     assert!(!run(home.path(), project.path(), &confirm).status.success());
-    assert!(!foreign.path().is_symlink());
+    assert!(!foreign.as_path().is_symlink());
     fs::write(ground.join("retired/skill.json"), retirement).unwrap();
     let confirmed = successful(home.path(), project.path(), &confirm);
     assert_eq!(confirmed["data"]["ownership"], "control-ground-projected");
     assert_eq!(
-        fs::read_link(foreign.path()).unwrap(),
+        fs::read_link(foreign.as_path()).unwrap(),
         home.path()
             .join("state/contexts")
             .canonicalize()
@@ -907,11 +910,14 @@ fn control_cutover_uses_a_real_generation_and_undo_restores_the_original_tree() 
                     .unwrap()
             )
     );
-    assert!(!foreign.path().join("retired/SKILL.md").exists());
+    let tree = successful(home.path(), project.path(), &["tree", "--expand", "registries"]);
+    let agents = tree["data"]["rows"].as_array().unwrap().iter().find(|row| row["path"] == "registries/@agents").unwrap();
+    assert!(agents["summary"].as_str().unwrap().starts_with("generated ·"));
+    assert!(!foreign.as_path().join("retired/SKILL.md").exists());
     assert!(ground.join("retired/SKILL.md").is_file());
     let procedure = confirmed["data"]["procedure"].as_str().unwrap();
     assert_eq!(
-        fs::read(foreign.path().join("deep-review/SKILL.md")).unwrap(),
+        fs::read(foreign.as_path().join("deep-review/SKILL.md")).unwrap(),
         fs::read(ground.join("deep-review/SKILL.md")).unwrap()
     );
     // Native selection/application swaps the generation behind the stable link.
@@ -921,16 +927,16 @@ fn control_cutover_uses_a_real_generation_and_undo_restores_the_original_tree() 
         &["disable", "skill/personal/deep-review", "--scope", "user"],
     );
     successful(home.path(), project.path(), &["apply"]);
-    assert!(!foreign.path().join("deep-review/SKILL.md").exists());
+    assert!(!foreign.as_path().join("deep-review/SKILL.md").exists());
     successful(
         home.path(),
         project.path(),
         &["procedure", "undo", procedure],
     );
-    assert!(!foreign.path().is_symlink());
-    assert!(foreign.path().join("retired/SKILL.md").is_file());
+    assert!(!foreign.as_path().is_symlink());
+    assert!(foreign.as_path().join("retired/SKILL.md").is_file());
     assert_eq!(
-        fs::read(foreign.path().join("deep-review/SKILL.md")).unwrap(),
+        fs::read(foreign.as_path().join("deep-review/SKILL.md")).unwrap(),
         fs::read(ground.join("deep-review/SKILL.md")).unwrap()
     );
 }

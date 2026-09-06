@@ -71,6 +71,36 @@ pub fn roots_for(home: &Path, cwd: &Path) -> Vec<(String, PathBuf)> {
     roots
 }
 
+/// Recognise a native skill projection by its owning generation metadata.
+/// A directory or link outside this AIKit home never gains generated standing.
+pub fn projected_generation(
+    home: &aikit_store::home::AikitHome,
+    path: &Path,
+) -> Option<aikit_store::generation::GenerationMetadata> {
+    let path = std::fs::canonicalize(path).ok()?;
+    let generation = path.ancestors().nth(4)?;
+    let suffix = path.strip_prefix(generation).ok()?;
+    if ![
+        Path::new("projections/codex/.agents/skills"),
+        Path::new("projections/claude/.claude/skills"),
+    ].contains(&suffix) {
+        return None;
+    }
+    let generations = generation.parent()?;
+    let context = generations.parent()?;
+    if generations.file_name()? != "generations"
+        || context.parent()? != std::fs::canonicalize(home.contexts()).ok()? {
+        return None;
+    }
+    let metadata = aikit_store::generation::read_metadata(generation).ok()?;
+    if metadata.generation_format < 1
+        || generation.file_name()?.to_str()? != metadata.generation_id.to_string()
+        || context.file_name()?.to_str()? != metadata.context_id {
+        return None;
+    }
+    Some(metadata)
+}
+
 fn closest_ancestor_with(start: &Path, file: &str) -> Option<PathBuf> {
     start
         .ancestors()

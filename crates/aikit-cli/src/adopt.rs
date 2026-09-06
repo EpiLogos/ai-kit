@@ -777,7 +777,7 @@ pub fn plan_control_cutover(
     let generations =
         std::fs::canonicalize(context.join("generations")).map_err(|e| refusal(e.to_string()))?;
     if generation.parent() != Some(generations.as_path())
-        || !generation.join("resolution.lock.toml").is_file()
+        || !aikit_store::generation::is_generation(&generation)
     {
         return Err(refusal(
             "current does not identify a committed AIKit generation".into(),

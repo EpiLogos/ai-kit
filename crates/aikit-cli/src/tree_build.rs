@@ -311,12 +311,16 @@ fn registries_root(service: &Service) -> Result<Node> {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     for root in foreign::discover(&foreign::roots_for(&home, service.invocation_cwd())) {
         let canonical_root = std::fs::canonicalize(&root.path).unwrap_or_else(|_| root.path.clone());
-        let mut summary = match adopted.get(&canonical_root) {
-            Some(record) => format!(
+        let mut summary = match (foreign::projected_generation(service.home(), &root.path), adopted.get(&canonical_root)) {
+            (Some(generation), _) => format!(
+                "generated · {} skills · generation {}",
+                root.skills, generation.generation_id
+            ),
+            (None, Some(record)) => format!(
                 "adopted · {} skills · procedure {}",
                 root.skills, record.procedure
             ),
-            None => format!("foreign · {} skills", root.skills),
+            (None, None) => format!("foreign · {} skills", root.skills),
         };
         if root.problems() > 0 {
             summary.push_str(&format!(

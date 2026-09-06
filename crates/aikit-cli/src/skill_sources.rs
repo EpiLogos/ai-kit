@@ -38,7 +38,7 @@ pub enum SourceKind {
         /// The directory publishes the Control ground skill manifest contract
         /// (`central.skill/v1`): each member skill may carry a `skill.json`
         /// whose standing and provenance become capability metadata. Skills
-        /// without one stay ordinary skills.
+        /// without one have unresolved standing and cannot project.
         #[serde(default)]
         control_ground: bool,
     },
