@@ -335,6 +335,9 @@ pub struct AdoptArgs {
     /// Capsule namespace under `skill/` (for example `claude`).
     #[arg(long, value_name = "NAME")]
     pub namespace: Option<String>,
+    /// Adopt into an existing Control/machines/NAME/skills ground instead of the personal registry.
+    #[arg(long, value_name = "PATH")]
+    pub control_ground: Option<std::path::PathBuf>,
     /// Apply the reviewed plan. Without this flag adoption only prints its diff.
     #[arg(long)]
     pub yes: bool,

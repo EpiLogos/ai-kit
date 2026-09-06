@@ -563,3 +563,151 @@ fn authority_record_cannot_claim_a_source_root_the_procedure_did_not_move() {
     assert!(!tree.status.success());
     assert_eq!(envelope(&tree)["error"]["code"], "adopt.record_unreadable");
 }
+
+#[test]
+fn control_adoption_stages_exact_ground_and_preserves_originals_until_cutover() {
+    let (home, project, foreign) = fixture();
+    let central = TempDir::new().unwrap();
+    let ground = central.path().join("Control/machines/current/skills");
+    fs::create_dir_all(&ground).unwrap();
+    fs::create_dir(central.path().join(".central")).unwrap();
+    let args = [
+        "adopt",
+        foreign.path().to_str().unwrap(),
+        "--control-ground",
+        ground.to_str().unwrap(),
+    ];
+    let preview = run(home.path(), project.path(), &args);
+    assert!(preview.status.success(), "{:?}", envelope(&preview));
+    assert!(!ground.join("deep-review").exists());
+    let review = envelope(&preview);
+    let digest = review["data"]["review_digest"].as_str().unwrap();
+    let mut confirmed = args.to_vec();
+    confirmed.extend(["--yes", "--expect-digest", digest]);
+    let applied = run(home.path(), project.path(), &confirmed);
+    assert!(applied.status.success(), "{:?}", envelope(&applied));
+    let body = envelope(&applied);
+    assert_eq!(body["data"]["ownership"], "control-ground-staged");
+    for relative in [
+        "deep-review/SKILL.md",
+        "deep-review/references/checklist.md",
+    ] {
+        assert_eq!(
+            fs::read(foreign.path().join(relative)).unwrap(),
+            fs::read(ground.join(relative)).unwrap()
+        );
+        assert!(!fs::symlink_metadata(foreign.path().join(relative))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(ground.join("deep-review/skill.json")).unwrap()).unwrap();
+    assert_eq!(manifest["schema"], "central.skill/v1");
+    assert_eq!(manifest["standing"], "active");
+    assert_eq!(manifest["provenance"], "adopted");
+    assert_eq!(
+        manifest["adopted_from"],
+        foreign
+            .path()
+            .join("deep-review")
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    let staged = run(home.path(), project.path(), &args);
+    assert!(staged.status.success(), "{:?}", envelope(&staged));
+    let procedure = body["data"]["procedure"].as_str().unwrap();
+    let undone = run(
+        home.path(),
+        project.path(),
+        &["procedure", "undo", procedure],
+    );
+    assert!(undone.status.success(), "{:?}", envelope(&undone));
+    assert!(!ground.join("deep-review/SKILL.md").exists());
+    assert!(foreign.path().join("deep-review/SKILL.md").is_file());
+}
+
+#[test]
+fn control_adoption_refuses_changed_review_and_conflicting_staged_bytes() {
+    let (home, project, foreign) = fixture();
+    let central = TempDir::new().unwrap();
+    let ground = central.path().join("Control/machines/current/skills");
+    fs::create_dir_all(&ground).unwrap();
+    fs::create_dir(central.path().join(".central")).unwrap();
+    let args = [
+        "adopt",
+        foreign.path().to_str().unwrap(),
+        "--control-ground",
+        ground.to_str().unwrap(),
+    ];
+    let preview = envelope(&run(home.path(), project.path(), &args));
+    let digest = preview["data"]["review_digest"].as_str().unwrap();
+    write(
+        &foreign.path().join("deep-review/references/checklist.md"),
+        "Changed after review\n",
+    );
+    let mut confirmed = args.to_vec();
+    confirmed.extend(["--yes", "--expect-digest", digest]);
+    let refused = run(home.path(), project.path(), &confirmed);
+    assert!(!refused.status.success());
+    assert!(!ground.join("deep-review").exists());
+    write(
+        &ground.join("deep-review/SKILL.md"),
+        "---\nname: deep-review\ndescription: Existing owned skill.\n---\nKeep authored bytes.\n",
+    );
+    write(
+        &ground.join("deep-review/skill.json"),
+        r#"{"schema":"central.skill/v1","name":"deep-review","standing":"active","provenance":"human-authored"}"#,
+    );
+    let before = fs::read(ground.join("deep-review/SKILL.md")).unwrap();
+    assert!(!run(home.path(), project.path(), &args).status.success());
+    assert_eq!(
+        before,
+        fs::read(ground.join("deep-review/SKILL.md")).unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn control_adoption_preserves_retirement_and_refuses_external_links() {
+    let (home, project, foreign) = fixture();
+    let central = TempDir::new().unwrap();
+    let ground = central.path().join("Control/machines/current/skills");
+    fs::create_dir_all(&ground).unwrap();
+    fs::create_dir(central.path().join(".central")).unwrap();
+    for relative in [
+        "deep-review/SKILL.md",
+        "deep-review/references/checklist.md",
+    ] {
+        write(
+            &ground.join(relative),
+            &fs::read_to_string(foreign.path().join(relative)).unwrap(),
+        );
+    }
+    let manifest = r#"{"schema":"central.skill/v1","name":"deep-review","standing":"retired","provenance":"adopted","retirement":{"retired_by":"human","retired_at_unix_seconds":1788653215,"retirement_reason":"Already retired"}}"#;
+    write(&ground.join("deep-review/skill.json"), manifest);
+    let args = [
+        "adopt",
+        foreign.path().to_str().unwrap(),
+        "--control-ground",
+        ground.to_str().unwrap(),
+    ];
+    let preview = run(home.path(), project.path(), &args);
+    assert!(preview.status.success(), "{:?}", envelope(&preview));
+    assert_eq!(
+        fs::read_to_string(ground.join("deep-review/skill.json")).unwrap(),
+        manifest
+    );
+    let external = TempDir::new().unwrap();
+    write(
+        &external.path().join("SKILL.md"),
+        "---\nname: external\ndescription: External authored skill.\n---\nStay here.\n",
+    );
+    std::os::unix::fs::symlink(external.path(), foreign.path().join("external")).unwrap();
+    let refusal = run(home.path(), project.path(), &args);
+    assert!(!refusal.status.success());
+    assert!(!ground.join("external").exists());
+    assert!(external.path().join("SKILL.md").is_file());
+}

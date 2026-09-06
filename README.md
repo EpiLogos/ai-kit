@@ -101,6 +101,8 @@ Discovery is not adoption.
 
 AIKit can inspect existing skill roots and supported lockfiles without rewriting them or claiming ownership. When adoption or external mutation is requested, AIKit uses explicit, reviewable Procedures with enough information to undo what it changed.
 
+For a machine migration, `aikit adopt ROOT --control-ground CENTRAL/Control/machines/NAME/skills` previews staging on existing Control ground. Confirm the reviewed digest only after human acceptance of that authored adoption. This mode preserves originals until projection cutover, retains identical staged skills and their standing, and refuses conflicting payloads or external skill links. Register the accepted ground with `aikit source add-directory machine-ground PATH --control-ground`, then sync, select and apply through AIKit. External skills belong to their original registered sources.
+
 This is a non-displacement principle as much as a safety feature. Existing agentic arrangements are part of the user's real world. AIKit should make them intelligible and composable before asking them to become something else.
 
 ## Relation to the wider {O:I} field

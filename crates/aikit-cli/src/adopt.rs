@@ -500,6 +500,188 @@ pub fn plan(
     })
 }
 
+/// Stage machine skills on authored Control ground through a reviewed Procedure.
+/// Originals remain intact until the separately reviewed projection cutover.
+/// Existing staged skills are accepted only when their full payload is identical;
+/// their authored standing and provenance are never overwritten.
+pub fn plan_control(
+    home: &AikitHome,
+    source: &Path,
+    ground: &Path,
+    requested_namespace: Option<&str>,
+) -> Result<Adoption> {
+    let refusal = |message: String| AikitError::new("adopt.control_ground", message);
+    if std::fs::symlink_metadata(source)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(refusal(
+            "use the real source directory, not a symlinked root".into(),
+        ));
+    }
+    let source = std::fs::canonicalize(source).map_err(|e| refusal(e.to_string()))?;
+    let ground = std::fs::canonicalize(ground).map_err(|e| refusal(e.to_string()))?;
+    let machine = ground
+        .parent()
+        .ok_or_else(|| refusal("missing machine ground".into()))?;
+    let machines = machine
+        .parent()
+        .ok_or_else(|| refusal("missing machines root".into()))?;
+    let control = machines
+        .parent()
+        .ok_or_else(|| refusal("missing Control root".into()))?;
+    if !source.is_dir()
+        || !ground.is_dir()
+        || ground.file_name().and_then(|s| s.to_str()) != Some("skills")
+        || machines.file_name().and_then(|s| s.to_str()) != Some("machines")
+        || control.file_name().and_then(|s| s.to_str()) != Some("Control")
+        || !control
+            .parent()
+            .map(|p| p.join(".central").is_dir())
+            .unwrap_or(false)
+        || source.starts_with(&ground)
+        || ground.starts_with(&source)
+    {
+        return Err(refusal(
+            "expected disjoint source and existing Central Control/machines/NAME/skills ground"
+                .into(),
+        ));
+    }
+    let namespace = valid_slug(requested_namespace.unwrap_or("machine-ground"), "namespace")?;
+    let mut roots = find_skills(&source)?;
+    roots.sort_by(|a, b| a.projection.cmp(&b.projection));
+    reject_overlaps(&roots)?;
+    if roots.is_empty() {
+        return Err(refusal("source contains no valid skills".into()));
+    }
+    let mut plan = Plan::new().with_note(format!(
+        "stage skills on Control ground {}; preserve originals until projection cutover",
+        ground.display()
+    ));
+    let mut capsules = Vec::new();
+    let mut names = BTreeSet::new();
+    for root in roots {
+        if root.original_link.is_some() {
+            return Err(refusal(format!(
+                "external source {} must be registered as a source, not copied into Control",
+                root.projection.display()
+            )));
+        }
+        reject_symlinks(&root.content)?;
+        let skill = agent_skills::validate(&root.content)?;
+        let name = root
+            .projection
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| refusal("skill name must be UTF-8".into()))?;
+        valid_slug(name, "skill")?;
+        if !names.insert(name.to_string()) {
+            return Err(refusal(format!("duplicate machine skill name {name}")));
+        }
+        let target = ground.join(name);
+        if std::fs::symlink_metadata(&target)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(refusal(format!(
+                "refusing symlinked Control destination {}",
+                target.display()
+            )));
+        }
+        if skill.files.iter().any(|p| p.as_str() == "skill.json") {
+            return Err(refusal(format!(
+                "{name} already carries a Control manifest; register its authored source directly"
+            )));
+        }
+        let existing = target.exists();
+        if existing {
+            reject_symlinks(&target)?;
+            crate::control_ground::read(&target, name)?
+                .ok_or_else(|| refusal(format!("{} has no Control manifest", target.display())))?;
+            let staged = agent_skills::validate(&target)?;
+            let expected: BTreeSet<_> = skill
+                .files
+                .iter()
+                .filter(|p| p.as_str() != "skill.json")
+                .collect();
+            let actual: BTreeSet<_> = staged
+                .files
+                .iter()
+                .filter(|p| p.as_str() != "skill.json")
+                .collect();
+            if actual != expected {
+                return Err(refusal(format!(
+                    "staged payload file set differs for {name}"
+                )));
+            }
+        }
+        for relative in &skill.files {
+            if relative == Path::new("skill.json") {
+                continue;
+            }
+            let from = root.content.join(relative);
+            let to = target.join(relative);
+            let bytes = std::fs::read(&from).map_err(|e| refusal(e.to_string()))?;
+            let mode = source_mode(&from)?;
+            if existing {
+                if std::fs::read(&to).map_err(|e| refusal(e.to_string()))? != bytes
+                    || source_mode(&to)? != mode
+                {
+                    return Err(refusal(format!(
+                        "staged bytes or mode differ at {}",
+                        to.display()
+                    )));
+                }
+            } else {
+                plan = plan.with_edit(WorldEdit::WriteFileMode {
+                    path: to,
+                    contents: bytes,
+                    mode,
+                    inverse: Inverse::Remove,
+                });
+            }
+        }
+        if !existing {
+            let manifest = serde_json::json!({
+                "schema": "central.skill/v1", "name": name,
+                "scope": "control-machine", "machine": machine.file_name().and_then(|s| s.to_str()),
+                "standing": "active", "provenance": "adopted",
+                "adopted_from": root.content,
+            });
+            plan = plan.with_edit(WorldEdit::WriteFile {
+                path: target.join("skill.json"),
+                contents: serde_json::to_vec_pretty(&manifest)
+                    .map_err(|e| refusal(e.to_string()))?,
+                inverse: Inverse::Remove,
+            });
+        }
+        capsules.push(CapsuleId::parse(&format!("skill/{namespace}/{name}"))?);
+    }
+    plan = aikit_store::procedure::bind_current_preconditions(plan)?;
+    plan = aikit_store::procedure::bind_read_precondition(plan, &source)?;
+    plan = aikit_store::procedure::bind_read_precondition(plan, &ground)?;
+    let review_digest = plan.review_digest(&[format!("Control ground: {}", ground.display())]);
+    let shadow = home.state().join("procedures/.shadow");
+    let isolation = select_isolation(&plan, &shadow, aikit_store::procedure::git_repo_of);
+    let procedure = Procedure::with_id(
+        ProcedureId::generate(),
+        ProcedureKind::Adopt {
+            source: source.clone(),
+            namespace: namespace.clone(),
+            capsules: capsules.clone(),
+        },
+        plan,
+        isolation,
+    )?;
+    Ok(Adoption {
+        procedure,
+        review_digest,
+        source,
+        namespace,
+        capsules,
+    })
+}
+
 fn source_mode(path: &Path) -> Result<u32> {
     #[cfg(unix)]
     {

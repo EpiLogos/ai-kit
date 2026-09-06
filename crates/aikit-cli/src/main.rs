@@ -606,7 +606,12 @@ fn cmd_profile(cwd: &std::path::Path, c: ProfileCmd) -> Result<Reply> {
 /// `aikit adopt` — move a foreign Agent Skills tree into AIKit ownership.
 fn cmd_adopt(cwd: &std::path::Path, a: AdoptArgs) -> Result<Reply> {
     let service = Service::discover(cwd)?;
-    let adoption = aikit_cli::adopt::plan(service.home(), &a.root, a.namespace.as_deref())?;
+    let adoption = match &a.control_ground {
+        Some(ground) => aikit_cli::adopt::plan_control(
+            service.home(), &a.root, ground, a.namespace.as_deref(),
+        )?,
+        None => aikit_cli::adopt::plan(service.home(), &a.root, a.namespace.as_deref())?,
+    };
     let runner = aikit_store::procedure::ProcedureRunner::new(service.home());
     let diff = runner.diff(&adoption.procedure)?;
 
@@ -616,6 +621,8 @@ fn cmd_adopt(cwd: &std::path::Path, a: AdoptArgs) -> Result<Reply> {
             &service,
             jval!({
                 "source": adoption.source.display().to_string(),
+                "control_ground": a.control_ground,
+                "source_preserved": a.control_ground.is_some(),
                 "namespace": adoption.namespace,
                 "skills": adoption.capsules.len(),
                 "capsules": adoption.capsules.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -654,11 +661,13 @@ fn cmd_adopt(cwd: &std::path::Path, a: AdoptArgs) -> Result<Reply> {
         &service,
         jval!({
             "source": adoption.source.display().to_string(),
+                "control_ground": a.control_ground,
+                "source_preserved": a.control_ground.is_some(),
             "namespace": adoption.namespace,
             "skills": adoption.capsules.len(),
             "capsules": adoption.capsules.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "procedure": adoption.procedure.id.to_string(),
-            "ownership": "adopted",
+            "ownership": if a.control_ground.is_some() { "control-ground-staged" } else { "adopted" },
             "applied": true,
             "edits": outcome.applied,
             "undo": format!("aikit procedure undo {}", adoption.procedure.id),
