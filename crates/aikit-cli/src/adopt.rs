@@ -724,6 +724,182 @@ pub fn plan_control(
     })
 }
 
+/// Finish a staged Control adoption without creating another authored master.
+/// The old tree is retained solely as the Procedure's reversible undo material.
+pub fn plan_control_cutover(
+    home: &AikitHome,
+    source: &Path,
+    ground: &Path,
+    projection: &Path,
+    namespace: Option<&str>,
+) -> Result<Adoption> {
+    let refusal = |message: String| AikitError::new("adopt.cutover_refused", message);
+    let staged = plan_control(home, source, ground, namespace)?;
+    if !staged.procedure.plan.edits.is_empty() {
+        return Err(refusal(
+            "adopt and accept all Control payloads before projection cutover".into(),
+        ));
+    }
+    let source = &staged.source;
+    let contexts = std::fs::canonicalize(home.contexts()).map_err(|e| refusal(e.to_string()))?;
+    // Canonicalise the context owner, retaining the stable current component.
+    // Accept only native skill projections, never an arbitrary directory link.
+    let parts: Vec<_> = projection.components().collect();
+    if parts.iter().any(|p| matches!(p, Component::ParentDir)) {
+        return Err(refusal(
+            "projection must name a native current-generation skill tree".into(),
+        ));
+    }
+    let current_index = parts
+        .iter()
+        .rposition(|p| p.as_os_str() == "current")
+        .ok_or_else(|| refusal("projection must follow an AIKit current generation".into()))?;
+    let context_path: PathBuf = parts[..current_index].iter().collect();
+    let context = std::fs::canonicalize(context_path).map_err(|e| refusal(e.to_string()))?;
+    if context.parent() != Some(contexts.as_path()) {
+        return Err(refusal(
+            "projection belongs to a different AIKit home".into(),
+        ));
+    }
+    let suffix: PathBuf = parts[current_index + 1..].iter().collect();
+    if ![
+        Path::new("projections/codex/.agents/skills"),
+        Path::new("projections/claude/.claude/skills"),
+    ]
+    .contains(&suffix.as_path())
+    {
+        return Err(refusal(
+            "projection must name a native Claude or Codex skill tree".into(),
+        ));
+    }
+    let current = context.join("current");
+    let generation = std::fs::canonicalize(&current).map_err(|e| refusal(e.to_string()))?;
+    let generations =
+        std::fs::canonicalize(context.join("generations")).map_err(|e| refusal(e.to_string()))?;
+    if generation.parent() != Some(generations.as_path())
+        || !generation.join("resolution.lock.toml").is_file()
+    {
+        return Err(refusal(
+            "current does not identify a committed AIKit generation".into(),
+        ));
+    }
+    let projection = current.join(suffix);
+    if !projection.is_dir() || projection.starts_with(source) || source.starts_with(&projection) {
+        return Err(refusal(
+            "projection and former authored root must be disjoint".into(),
+        ));
+    }
+    let roots = find_skills(source)?;
+    for entry in walkdir::WalkDir::new(source).follow_links(false) {
+        let entry = entry.map_err(|e| refusal(e.to_string()))?;
+        if !entry.file_type().is_dir()
+            && !roots.iter().any(|r| entry.path().starts_with(&r.content))
+        {
+            return Err(refusal(format!(
+                "unaccounted source entry {}",
+                entry.path().display()
+            )));
+        }
+    }
+    for root in roots {
+        let name = root.content.file_name().unwrap();
+        let authored = ground.join(name);
+        let contract = crate::control_ground::read(&authored, &name.to_string_lossy())?
+            .ok_or_else(|| refusal("Control standing must be authored before cutover".into()))?;
+        let projected = projection.join(name);
+        if contract.is_retired() {
+            if projected.exists() || projected.is_symlink() {
+                return Err(refusal(format!(
+                    "retired skill {} is present in the generation",
+                    name.to_string_lossy()
+                )));
+            }
+            continue;
+        }
+        let original = agent_skills::validate(&root.content)?;
+        let generated = agent_skills::validate(&projected)?;
+        let payload = |files: &[String]| {
+            files
+                .iter()
+                .filter(|p| p.as_str() != "skill.json")
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        if payload(&original.files) != payload(&generated.files) {
+            return Err(refusal(format!(
+                "generated payload set differs for {}",
+                name.to_string_lossy()
+            )));
+        }
+        for relative in original.files {
+            if std::fs::read(root.content.join(&relative)).map_err(|e| refusal(e.to_string()))?
+                != std::fs::read(projected.join(&relative)).map_err(|e| refusal(e.to_string()))?
+                || source_mode(&root.content.join(&relative))?
+                    != source_mode(&projected.join(&relative))?
+            {
+                return Err(refusal(format!(
+                    "generated bytes or mode differ at {}",
+                    projected.join(relative).display()
+                )));
+            }
+        }
+    }
+    let backup = home
+        .state()
+        .join("adoption-undo")
+        .join(staged.review_digest.as_str());
+    if backup.exists() || backup.is_symlink() {
+        return Err(refusal(
+            "this cutover's undo archive already exists; inspect its Procedure".into(),
+        ));
+    }
+    let mut plan = Plan::new()
+        .with_note(format!(
+            "cut over {} to AIKit projection {}; Control remains authored ground; undo archive {}",
+            source.display(),
+            projection.display(),
+            backup.display()
+        ))
+        .with_edit(WorldEdit::MovePath {
+            from: source.clone(),
+            to: backup,
+        })
+        .with_edit(WorldEdit::CreateLink {
+            path: source.clone(),
+            target: projection.clone(),
+            inverse: Inverse::Remove,
+        });
+    plan = aikit_store::procedure::bind_current_preconditions(plan)?;
+    for dependency in [ground, current.as_path(), generation.as_path()] {
+        plan = aikit_store::procedure::bind_read_precondition(plan, dependency)?;
+    }
+    let review_digest = plan.review_digest(&[format!(
+        "accepted Control adoption {}",
+        staged.review_digest
+    )]);
+    let isolation = select_isolation(
+        &plan,
+        &home.state().join("procedures/.shadow"),
+        aikit_store::procedure::git_repo_of,
+    );
+    let procedure = Procedure::new(
+        ProcedureKind::Adopt {
+            source: source.clone(),
+            namespace: staged.namespace.clone(),
+            capsules: staged.capsules.clone(),
+        },
+        plan,
+        isolation,
+    )?;
+    Ok(Adoption {
+        procedure,
+        review_digest,
+        source: source.clone(),
+        namespace: staged.namespace,
+        capsules: staged.capsules,
+    })
+}
+
 fn source_mode(path: &Path) -> Result<u32> {
     #[cfg(unix)]
     {

@@ -790,3 +790,147 @@ fn adoption_refuses_a_fourth_control_layout() {
     assert!(!result.status.success());
     assert!(!ground.exists());
 }
+
+fn successful(home: &Path, project: &Path, args: &[&str]) -> Value {
+    let output = Command::new(assert_cmd::cargo::cargo_bin("aikit"))
+        .args(args)
+        .arg("--json")
+        .env("AIKIT_HOME", home)
+        .env("HOME", home)
+        .env("AIKIT_CONTEXT_ID", "ctx_CONTROLCUTOVER000000000")
+        .current_dir(project)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{args:?}: {:?}", envelope(&output));
+    envelope(&output)
+}
+
+#[test]
+fn control_cutover_uses_a_real_generation_and_undo_restores_the_original_tree() {
+    let (home, project, foreign) = fixture();
+    write(&foreign.path().join("retired/SKILL.md"), "---\nname: retired\ndescription: Retired human skill.\n---\nPreserve the authored content.\n");
+    let central = TempDir::new().unwrap();
+    let ground = central.path().join("Control/user/skills");
+    fs::create_dir_all(ground.parent().unwrap()).unwrap();
+    fs::create_dir(central.path().join(".central")).unwrap();
+    let stage = [
+        "adopt",
+        foreign.path().to_str().unwrap(),
+        "--control-ground",
+        ground.to_str().unwrap(),
+    ];
+    let preview = successful(home.path(), project.path(), &stage);
+    let mut accept = stage.to_vec();
+    accept.extend([
+        "--yes",
+        "--expect-digest",
+        preview["data"]["review_digest"].as_str().unwrap(),
+    ]);
+    successful(home.path(), project.path(), &accept);
+    write(
+        &ground.join("retired/skill.json"),
+        r#"{"schema":"central.skill/v1","name":"retired","scope":"control-user","standing":"retired","provenance":"adopted","retirement":{"retired_by":"human","retired_at_unix_seconds":1788653215,"retirement_reason":"No longer selected for use"}}"#,
+    );
+    successful(
+        home.path(),
+        project.path(),
+        &[
+            "source",
+            "add-directory",
+            "personal",
+            ground.to_str().unwrap(),
+            "--control-ground",
+        ],
+    );
+    successful(home.path(), project.path(), &["source", "sync", "personal"]);
+    successful(
+        home.path(),
+        project.path(),
+        &["source", "promote", "personal", "--trust"],
+    );
+    successful(
+        home.path(),
+        project.path(),
+        &["enable", "skill/personal/deep-review", "--scope", "user"],
+    );
+    successful(
+        home.path(),
+        project.path(),
+        &["enable", "skill/personal/retired", "--scope", "user"],
+    );
+    let applied = successful(home.path(), project.path(), &["apply"]);
+    let projection = home
+        .path()
+        .join("state/contexts")
+        .join(applied["context"]["context_id"].as_str().unwrap())
+        .join("current/projections/codex/.agents/skills");
+    let mut cutover = stage.to_vec();
+    cutover.extend(["--projection", projection.to_str().unwrap()]);
+    let preview = successful(home.path(), project.path(), &cutover);
+    assert!(!foreign.path().is_symlink());
+    let old_digest = preview["data"]["review_digest"].as_str().unwrap();
+    // A changed source between preview and confirmation must remain untouched.
+    write(
+        &foreign.path().join("unaccounted.txt"),
+        "Human content outside every skill.\n",
+    );
+    let mut confirm = cutover.clone();
+    confirm.extend(["--yes", "--expect-digest", old_digest]);
+    let refused = run(home.path(), project.path(), &confirm);
+    assert!(!refused.status.success());
+    assert!(envelope(&refused)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("unaccounted"));
+    assert!(!foreign.path().is_symlink());
+    fs::remove_file(foreign.path().join("unaccounted.txt")).unwrap();
+    // A newly restored skill requires a fresh source snapshot and generation.
+    let retirement = fs::read(ground.join("retired/skill.json")).unwrap();
+    write(
+        &ground.join("retired/skill.json"),
+        r#"{"schema":"central.skill/v1","name":"retired","scope":"control-user","standing":"active","provenance":"adopted"}"#,
+    );
+    assert!(!run(home.path(), project.path(), &confirm).status.success());
+    assert!(!foreign.path().is_symlink());
+    fs::write(ground.join("retired/skill.json"), retirement).unwrap();
+    let confirmed = successful(home.path(), project.path(), &confirm);
+    assert_eq!(confirmed["data"]["ownership"], "control-ground-projected");
+    assert_eq!(
+        fs::read_link(foreign.path()).unwrap(),
+        home.path()
+            .join("state/contexts")
+            .canonicalize()
+            .unwrap()
+            .join(
+                projection
+                    .strip_prefix(home.path().join("state/contexts"))
+                    .unwrap()
+            )
+    );
+    assert!(!foreign.path().join("retired/SKILL.md").exists());
+    assert!(ground.join("retired/SKILL.md").is_file());
+    let procedure = confirmed["data"]["procedure"].as_str().unwrap();
+    assert_eq!(
+        fs::read(foreign.path().join("deep-review/SKILL.md")).unwrap(),
+        fs::read(ground.join("deep-review/SKILL.md")).unwrap()
+    );
+    // Native selection/application swaps the generation behind the stable link.
+    successful(
+        home.path(),
+        project.path(),
+        &["disable", "skill/personal/deep-review", "--scope", "user"],
+    );
+    successful(home.path(), project.path(), &["apply"]);
+    assert!(!foreign.path().join("deep-review/SKILL.md").exists());
+    successful(
+        home.path(),
+        project.path(),
+        &["procedure", "undo", procedure],
+    );
+    assert!(!foreign.path().is_symlink());
+    assert!(foreign.path().join("retired/SKILL.md").is_file());
+    assert_eq!(
+        fs::read(foreign.path().join("deep-review/SKILL.md")).unwrap(),
+        fs::read(ground.join("deep-review/SKILL.md")).unwrap()
+    );
+}

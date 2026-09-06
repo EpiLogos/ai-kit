@@ -338,6 +338,10 @@ pub struct AdoptArgs {
     /// Stage into a published Central skill scope (normally Control/user/skills).
     #[arg(long, value_name = "PATH")]
     pub control_ground: Option<std::path::PathBuf>,
+    /// Finish an already staged Control adoption by linking ROOT to this AIKit
+    /// current-generation skill tree. Keeps the original tree in the undo archive.
+    #[arg(long, value_name = "PATH", requires = "control_ground")]
+    pub projection: Option<std::path::PathBuf>,
     /// Apply the reviewed plan. Without this flag adoption only prints its diff.
     #[arg(long)]
     pub yes: bool,
