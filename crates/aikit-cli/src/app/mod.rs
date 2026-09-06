@@ -42,10 +42,16 @@ use aikit_store::SessionSpaceApplicationStore;
 
 use aikit_adapters::actor_composition::compose_live_actor_inputs;
 use aikit_adapters::clients::agent_skills;
+use aikit_adapters::clients::aider::AiderAdapter;
 use aikit_adapters::clients::broker::BrokerAdapter;
 use aikit_adapters::clients::claude::ClaudeAdapter;
 use aikit_adapters::clients::codex::CodexAdapter;
+use aikit_adapters::clients::cursor::CursorAdapter;
 use aikit_adapters::clients::dsh::DshAdapter;
+use aikit_adapters::clients::gemini::GeminiAdapter;
+use aikit_adapters::clients::goose::GooseAdapter;
+use aikit_adapters::clients::opencode::OpencodeAdapter;
+use aikit_adapters::clients::qwen::QwenAdapter;
 use aikit_adapters::runner::SystemRunner;
 
 use aikit_tui::backend::{
@@ -1357,6 +1363,28 @@ impl Service {
                 TargetId::CODEX => plan_effect(&CodexAdapter::new(tree.clone()), &rc),
                 TargetId::DEEPSEEK_HARNESS => {
                     plan_effect(&DshAdapter::new(ctx_dir.join("projections/dsh")), &rc)
+                }
+                // Harness-admission sweep round 1: each admitted adapter answers
+                // for its own target id with its evidence-backed plan. Binding
+                // one of these targets in a context descriptor opts the context
+                // into that harness's honest effect; unbound harnesses stay inert.
+                TargetId::AIDER => {
+                    plan_effect(&AiderAdapter::new(ctx_dir.join("projections/aider")), &rc)
+                }
+                TargetId::CURSOR_CLI => {
+                    plan_effect(&CursorAdapter::new(ctx_dir.join("projections/cursor")), &rc)
+                }
+                TargetId::GEMINI_CLI => {
+                    plan_effect(&GeminiAdapter::new(ctx_dir.join("projections/gemini")), &rc)
+                }
+                TargetId::GOOSE => {
+                    plan_effect(&GooseAdapter::new(ctx_dir.join("projections/goose")), &rc)
+                }
+                TargetId::OPENCODE => {
+                    plan_effect(&OpencodeAdapter::new(ctx_dir.join("projections/opencode")), &rc)
+                }
+                TargetId::QWEN_CODE => {
+                    plan_effect(&QwenAdapter::new(ctx_dir.join("projections/qwen")), &rc)
                 }
                 _ => plan_effect(&BrokerAdapter::new(), &rc),
             };
