@@ -121,19 +121,55 @@ impl<'a> SemanticWikiProvider<'a> {
                 view.truncated = true;
                 break;
             }
+            // WikiSpace membership is already a canonical source assertion.
+            // Expose it through the same bounded relation faculty as WikiEdges;
+            // consumers must not reconstruct a private graph from node_refs.
+            if let Some(space) = self.index.space(&current) {
+                for (other, relation) in space
+                    .node_refs
+                    .iter()
+                    .map(|r| (r, "member"))
+                    .chain(space.child_space_refs.iter().map(|r| (r, "child-space")))
+                {
+                    let key = format!("membership\0{}\0{}\0{}", current, other, relation);
+                    if seen_edges.contains(&key) {
+                        continue;
+                    }
+                    if view.edges.len() >= query.max_edges {
+                        view.truncated = true;
+                        break;
+                    }
+                    if !view.nodes.iter().any(|n| &n.resource == other)
+                        && !view.push_node(self.relation_node(other)?)
+                    {
+                        continue;
+                    }
+                    seen_edges.insert(key);
+                    view.push_edge(RelationEdge::new(
+                        current.clone(),
+                        other.clone(),
+                        relation,
+                        RelationDirection::Outgoing,
+                        RelationOrigin::new(SourceAuthority::Authored)
+                            .from_provider(self.provider.clone())
+                            .in_lens("semantic-wiki")
+                            .at_revision(space.revision.to_string()),
+                    ))?;
+                    if seen.insert(other.clone()) {
+                        queue.push_back((other.clone(), depth + 1));
+                    }
+                }
+            }
+            let remaining = query.max_edges.saturating_sub(view.edges.len());
             for neighbour in self.index.neighbours(&current, remaining) {
                 let other = neighbour.resource.clone();
                 let (from, to, direction) = match neighbour.direction {
-                    WikiRelationDirection::Outgoing => (
-                        current.clone(),
-                        other.clone(),
-                        RelationDirection::Outgoing,
-                    ),
-                    WikiRelationDirection::Incoming => (
-                        other.clone(),
-                        current.clone(),
-                        RelationDirection::Incoming,
-                    ),
+                    WikiRelationDirection::Outgoing => {
+                        (current.clone(), other.clone(), RelationDirection::Outgoing)
+                    }
+                    WikiRelationDirection::Incoming => {
+                        (other.clone(), current.clone(), RelationDirection::Incoming)
+                    }
                 };
                 let edge_key = format!("{}\0{}\0{}", from, to, neighbour.edge_ref);
                 if !seen_edges.insert(edge_key) {
@@ -368,7 +404,10 @@ mod tests {
         assert_eq!(provider.discover().len(), 4);
         assert_eq!(provider.search("Alpha", 10).len(), 1);
         let alpha = ResourceRef::parse("wiki:node:a").unwrap();
-        assert_eq!(provider.read(&alpha).unwrap().revision.as_deref(), Some("2"));
+        assert_eq!(
+            provider.read(&alpha).unwrap().revision.as_deref(),
+            Some("2")
+        );
         assert_eq!(provider.sources(&alpha)[0].as_str(), "source:canon");
         assert_eq!(provider.provenance(&alpha).len(), 1);
         assert_eq!(provider.explain(&alpha).unwrap().relations.len(), 1);
@@ -379,7 +418,9 @@ mod tests {
         let index = fixture();
         let provider = SemanticWikiProvider::new(&index);
         let view = provider
-            .relations(RelationQuery::local(ResourceRef::parse("wiki:node:a").unwrap()))
+            .relations(RelationQuery::local(
+                ResourceRef::parse("wiki:node:a").unwrap(),
+            ))
             .unwrap();
         assert_eq!(view.nodes.len(), 2);
         assert_eq!(view.edges.len(), 1);
@@ -440,20 +481,58 @@ mod tests {
             extensions: BTreeMap::new(),
         });
         let index = SemanticWikiIndex::rebuild([target, source_edge, flow_edge]).unwrap();
-        assert!(index.resolve(&ResourceRef::parse(source_id).unwrap()).is_none());
-        assert!(index.resolve(&ResourceRef::parse("flow:thread:1").unwrap()).is_none());
+        assert!(index
+            .resolve(&ResourceRef::parse(source_id).unwrap())
+            .is_none());
+        assert!(index
+            .resolve(&ResourceRef::parse("flow:thread:1").unwrap())
+            .is_none());
 
         let provider = SemanticWikiProvider::new(&index);
         let source_view = provider
             .relations(RelationQuery::local(ResourceRef::parse(source_id).unwrap()))
             .unwrap();
         assert_eq!(source_view.nodes[0].kind, ResourceKind::KnowledgeSource);
-        assert_eq!(source_view.edges[0].origin.authority, SourceAuthority::Learned);
+        assert_eq!(
+            source_view.edges[0].origin.authority,
+            SourceAuthority::Learned
+        );
 
         let flow_view = provider
-            .relations(RelationQuery::local(ResourceRef::parse("flow:thread:1").unwrap()))
+            .relations(RelationQuery::local(
+                ResourceRef::parse("flow:thread:1").unwrap(),
+            ))
             .unwrap();
         assert_eq!(flow_view.nodes[0].kind, ResourceKind::ContextSource);
         assert_eq!(flow_view.edges[0].relation, "references");
+    }
+    #[test]
+    fn space_membership_is_native_bounded_revision_bearing_relation() {
+        let index = fixture();
+        let before = index.status();
+        let provider = SemanticWikiProvider::new(&index);
+        let mut query = RelationQuery::local(ResourceRef::parse("wiki:space:root").unwrap());
+        let view = provider.relations(query.clone()).unwrap();
+        assert_eq!(view.nodes.len(), 3);
+        assert_eq!(view.edges.len(), 2);
+        assert!(view
+            .edges
+            .iter()
+            .all(|e| e.relation == "member" && e.from == query.focus));
+        assert!(view
+            .edges
+            .iter()
+            .all(|e| e.origin.authority == SourceAuthority::Authored
+                && e.origin.revision.as_deref() == Some("1")));
+        query.max_nodes = 2;
+        let bounded = provider.relations(query).unwrap();
+        assert_eq!(bounded.nodes.len(), 2);
+        assert_eq!(bounded.edges.len(), 1);
+        assert!(bounded.truncated);
+        assert_eq!(
+            index.status(),
+            before,
+            "reading never mutates canonical/index membership"
+        );
     }
 }
