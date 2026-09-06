@@ -153,6 +153,8 @@ pub struct ConnectionDegradation {
 pub struct NativePermissionChoice {
     pub option_id: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// A transport-native permission request. This is deliberately *not* a Factory
@@ -164,6 +166,10 @@ pub struct NativePermissionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default)]
+    pub tool_call: Value,
+    #[serde(default)]
+    pub raw: Value,
+    #[serde(default)]
     pub choices: Vec<NativePermissionChoice>,
     #[serde(default)]
     pub provenance: Vec<String>,
@@ -174,6 +180,8 @@ pub struct NativePermissionRequest {
 pub enum ConnectionSignalKind {
     SessionOpened { binding: NativeSessionBinding },
     AgentMessageChunk { text: String },
+    /// Provider-exposed thinking, never reconstructed hidden reasoning.
+    AgentThoughtChunk { text: String, content: Value },
     ToolCall { payload: Value },
     ToolResult { payload: Value },
     PermissionRequested { request: NativePermissionRequest },
@@ -420,6 +428,7 @@ impl AcpV1ConnectionAdapter {
                     "agent_message_chunk" => ConnectionSignalKind::AgentMessageChunk {
                         text: extract_text(&update),
                     },
+                    "agent_thought_chunk" => ConnectionSignalKind::AgentThoughtChunk { text: extract_text(&update), content: update },
                     "tool_call" | "tool_call_update" => {
                         ConnectionSignalKind::ToolCall { payload: update }
                     }
@@ -461,6 +470,7 @@ impl AcpV1ConnectionAdapter {
             .filter_map(|option| {
                 Some(NativePermissionChoice {
                     option_id: option.get("optionId")?.as_str()?.to_string(),
+                    kind: option.get("kind").and_then(Value::as_str).map(ToOwned::to_owned),
                     label: option
                         .get("name")
                         .or_else(|| option.get("label"))?
@@ -473,6 +483,8 @@ impl AcpV1ConnectionAdapter {
             native_request_id: id.to_string(),
             native_session_id: native_session_id.clone(),
             tool_call_id,
+            tool_call: params.get("toolCall").cloned().unwrap_or(Value::Null),
+            raw: params.clone(),
             choices,
             provenance: self.provenance.clone(),
         };

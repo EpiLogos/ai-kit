@@ -121,3 +121,5 @@ pub use session_space_evidence::{
 pub use state::{ContextRecord, SessionRecord, SessionState, StateStore};
 pub use template::{plan_instantiation, ParamValues};
 pub use trust::{TrustSnapshot, TrustStore};
+
+pub mod encounter;
