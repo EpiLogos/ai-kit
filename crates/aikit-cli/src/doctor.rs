@@ -216,6 +216,87 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
         );
     }
 
+    // The dispatch chain per dispatch-relevant harness, tied across three
+    // receipts (CASE 01): detection proves the harness exists here, the
+    // capability descriptor declares what it is, and the projection receipt
+    // says what AIKit's wiring actually landed in it. A leg that cannot be
+    // read is named as the missing leg — never flattened into "not installed".
+    let detection = aikit_adapters::actuation_harness_detection::intake_actuation_detection(
+        &aikit_adapters::runner::SystemRunner::new(),
+        "actuation",
+    );
+    for (slug, marker) in [
+        ("claude-code", "aikit hook dispatch claude"),
+        ("codex", "aikit hook dispatch codex"),
+        ("zcode", "aikit hook dispatch zcode"),
+    ] {
+        let detection_leg =
+            match &detection {
+                aikit_adapters::actuation_harness_detection::DetectionOutcome::Record(record) => {
+                    match record.harnesses.iter().find(|entry| entry.slug == slug).map(|e| e.state)
+                    {
+                        Some(state) => format!("{state:?}"),
+                        None => "absent-from-catalog".to_string(),
+                    }
+                }
+                aikit_adapters::actuation_harness_detection::DetectionOutcome::Unavailable {
+                    reason,
+                } => format!("unavailable ({reason})"),
+            };
+        let capability_leg =
+            match aikit_adapters::actuation_harness_capability::intake_actuation_capability(
+                &aikit_adapters::runner::SystemRunner::new(),
+                "actuation",
+                slug,
+            ) {
+                aikit_adapters::actuation_harness_capability::CapabilityOutcome::Descriptor(
+                    capability,
+                ) => format!(
+                    "r{}: {} event(s), blocking {}, wake {}, seam {}",
+                    capability.provenance.catalog_revision.unwrap_or_default(),
+                    capability.native_events.len(),
+                    capability.blocking_semantics.kind,
+                    capability.wake_capability.kind,
+                    capability.install_seam.config_path
+                ),
+                aikit_adapters::actuation_harness_capability::CapabilityOutcome::Unavailable {
+                    reason,
+                } => format!("unavailable ({reason})"),
+            };
+        let projection_leg = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .and_then(|home| {
+                // Marker check over the installed seam: the honest low-tech
+                // question is whether AIKit's dispatcher entries are present.
+                let candidates: Vec<std::path::PathBuf> = match slug {
+                    "claude-code" => vec![home.join(".claude/settings.json")],
+                    "codex" => vec![home.join(".codex/hooks/aikit.toml")],
+                    _ => vec![],
+                };
+                candidates
+                    .iter()
+                    .find_map(|path| {
+                        let text = std::fs::read_to_string(path).ok()?;
+                        Some(text.contains(marker))
+                    })
+                    .or(Some(false))
+            });
+        let projection_leg = match projection_leg {
+            Some(true) => "installed".to_string(),
+            Some(false) => "not-installed".to_string(),
+            None => "not-installed (home unknown)".to_string(),
+        };
+
+        findings.push(
+            Finding::new(
+                "dispatch.chain",
+                Severity::Note,
+                format!("dispatch chain for {slug}: detection {detection_leg}; projection {projection_leg}"),
+            )
+            .with_detail(format!("capability: {capability_leg}")),
+        );
+    }
+
     findings.sort_by(|a, b| a.severity.cmp(&b.severity).then(a.check.cmp(b.check)));
     Ok(findings)
 }

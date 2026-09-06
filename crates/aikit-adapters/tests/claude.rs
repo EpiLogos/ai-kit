@@ -15,6 +15,7 @@ use common::*;
 
 use std::path::{Path, PathBuf};
 
+use aikit_adapters::actuation_harness_capability::HarnessCapability;
 use aikit_adapters::clients::claude::ClaudeAdapter;
 use aikit_adapters::clients::ClientAdapter;
 use aikit_core::context::Isolation;
@@ -24,7 +25,46 @@ use aikit_core::projection::{
 };
 
 fn adapter(generation: &Path) -> ClaudeAdapter {
-    ClaudeAdapter::new(generation)
+    ClaudeAdapter::new(generation).with_capability(claude_capability())
+}
+
+/// Actuation's declared claude-code capability, as a test fixture: the eight
+/// native events, in the descriptor's own voice.
+fn claude_capability() -> HarnessCapability {
+    serde_json::from_value(serde_json::json!({
+        "schema": "actuation.harness-capability/v1",
+        "document": "capability",
+        "harness_slug": "claude-code",
+        "native_events": [
+            { "event": "session-start", "native_name": "SessionStart", "transport": "settings-json-hooks-map", "can_block": false, "context_channel": "stdout-additional-context" },
+            { "event": "user-prompt-submit", "native_name": "UserPromptSubmit", "transport": "settings-json-hooks-map", "can_block": true, "context_channel": "stdout-additional-context" },
+            { "event": "pre-tool-use", "native_name": "PreToolUse", "transport": "settings-json-hooks-map", "can_block": true, "context_channel": "stdout-additional-context" },
+            { "event": "post-tool-use", "native_name": "PostToolUse", "transport": "settings-json-hooks-map", "can_block": false, "context_channel": "stdout-additional-context" },
+            { "event": "stop", "native_name": "Stop", "transport": "settings-json-hooks-map", "can_block": true, "context_channel": "none" },
+            { "event": "session-end", "native_name": "SessionEnd", "transport": "settings-json-hooks-map", "can_block": false, "context_channel": "none" },
+            { "event": "pre-compact", "native_name": "PreCompact", "transport": "settings-json-hooks-map", "can_block": false, "context_channel": "stdout-additional-context" },
+            { "event": "notification", "native_name": "Notification", "transport": "settings-json-hooks-map", "can_block": false, "context_channel": "none" }
+        ],
+        "injection_channel": { "kind": "stdout-additional-context", "mechanism": "hookSpecificOutcome.additionalContext" },
+        "blocking_semantics": { "kind": "deny-and-block" },
+        "wake_capability": { "kind": "none" },
+        "install_seam": {
+            "config_path": "~/.claude/settings.json",
+            "format": "json",
+            "entry_shape": "hooks.<EventName>[] entries",
+            "ownership_marker": "command resolves to the AIKit dispatch executable",
+            "preserves_foreign_entries": true
+        },
+        "uninstall_seam": {
+            "config_path": "~/.claude/settings.json",
+            "format": "json",
+            "entry_shape": "marker-matched entries removed",
+            "ownership_marker": "command resolves to the AIKit dispatch executable",
+            "preserves_foreign_entries": true
+        },
+        "provenance": { "authored_by": "test", "source_refs": ["survey:test"] }
+    }))
+    .unwrap()
 }
 
 /// A context with two skills whose payloads are real directories on disk.
@@ -303,13 +343,16 @@ fn installing_writes_one_dispatcher_entry_per_event() {
     assert_eq!(
         events,
         vec![
+            "Notification",
             "PostToolUse",
+            "PreCompact",
             "PreToolUse",
             "SessionEnd",
             "SessionStart",
             "Stop",
             "UserPromptSubmit",
-        ]
+        ],
+        "the installed set is the descriptor's, not a hard-coded subset"
     );
 
     for (event, entries) in hooks {
@@ -391,10 +434,18 @@ fn installing_merges_into_an_existing_settings_file_without_destroying_anything(
 
     assert_eq!(settings["model"], "opus");
     assert_eq!(settings["permissions"]["allow"][0], "Bash(cargo test:*)");
+    let pre_compact: Vec<&str> = settings["hooks"]["PreCompact"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|m| m["hooks"].as_array().unwrap())
+        .map(|h| h["command"].as_str().unwrap())
+        .collect();
     assert!(
-        settings["hooks"]["PreCompact"][0]["hooks"][0]["command"] == "my-own-compactor",
-        "an event AIKit does not dispatch is none of its business"
+        pre_compact.contains(&"my-own-compactor"),
+        "the user's own hook on a dispatched event must survive: {pre_compact:?}"
     );
+    assert!(pre_compact.contains(&"aikit hook dispatch claude PreCompact"));
 
     let pre_tool: Vec<&str> = settings["hooks"]["PreToolUse"]
         .as_array()
@@ -455,4 +506,28 @@ fn a_settings_file_that_is_not_json_is_refused_rather_than_overwritten() {
         "{ this is not json",
         "a file AIKit could not understand is left exactly as it was"
     );
+}
+
+#[test]
+fn install_without_a_capability_descriptor_refuses_instead_of_guessing() {
+    let generation = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let bare = ClaudeAdapter::new(generation.path());
+
+    let error = bare.install(config.path()).unwrap_err();
+    assert_eq!(error.code(), "client.capability_unavailable");
+}
+
+#[test]
+fn the_settings_file_name_comes_from_the_descriptor_seam() {
+    // A seam that points somewhere else is honoured: the adapter does not
+    // assume settings.json.
+    let generation = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let mut capability = claude_capability();
+    capability.install_seam.config_path = "~/.claude/other-name.json".to_string();
+    let adapter = ClaudeAdapter::new(generation.path()).with_capability(capability);
+
+    materialize(&adapter.install(config.path()).unwrap(), config.path());
+    assert!(config.path().join("other-name.json").is_file());
 }
