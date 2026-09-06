@@ -1,6 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The repository-owned operation, in two grades.
+#
+#   scripts/verify           full gate — what CI runs. Required before landing.
+#   scripts/verify quick     targeted gate — the packages you touched, plus
+#                            whatever depends on them, in debug only.
+#
+# `quick` is for the inner development loop; it never replaces the full gate,
+# and CI still runs the full gate on every PR. `--locked` and `-D warnings`
+# apply in both grades so a quick run cannot drift from what CI will demand.
+if [ "${1:-}" = "quick" ]; then
+  shift
+  if [ "$#" -eq 0 ]; then
+    echo "usage: scripts/verify quick [-p <package>]... [more cargo --package args]" >&2
+    echo "  e.g. scripts/verify quick -p aikit-adapters -p aikit-cli" >&2
+    exit 2
+  fi
+  pkgs=()
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-p" ] || [ "$1" = "--package" ]; then
+      pkgs+=("$1" "$2"); shift 2
+    else
+      pkgs+=("$1"); shift
+    fi
+  done
+  cargo test --locked "${pkgs[@]}" --all-targets --no-fail-fast
+  cargo clippy --locked "${pkgs[@]}" --all-targets -- -D warnings
+  exit 0
+fi
+
 # These macOS PTY journeys target the retired legacy palette/tree interaction.
 # `aikit ui --tree` now intentionally opens the V2 Workspace Explore/Tree
 # presentation; current reducer, TUI, CLI and resident-tree acceptance cover those
