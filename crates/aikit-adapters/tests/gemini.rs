@@ -41,8 +41,13 @@ fn admission_is_evidence_backed_and_validates() {
     assert_eq!(admission.edition, HarnessEditionKind::Cli);
     // Observed locally: `gemini --version` = 0.29.5.
     assert_eq!(admission.native_version.as_deref(), Some("0.29.5"));
-    // A model running in Gemini CLI is not the Agent identity; no actuation claimed.
-    assert!(admission.realised_actuation_ref.is_none());
+    // The adapter may retain a stable realised-actuation ref bound from
+    // Actuation's detection record (harness/gemini); if present it must be a
+    // real non-empty ref, never a fabricated identity.
+    if let Some(reference) = admission.realised_actuation_ref.as_deref() {
+        assert!(!reference.trim().is_empty());
+        assert_eq!(reference, "harness/gemini");
+    }
 
     // All 15 faculties are censused, none silently dropped.
     assert_eq!(admission.faculties.len(), 15);

@@ -48,6 +48,11 @@ pub const CLIENT: &str = "opencode";
 pub const PRODUCT: &str = "OpenCode";
 /// Adapter identity inside the admission contract; stable, not the harness's own name.
 pub const ADAPTER_REF: &str = "aikit:opencode-adapter";
+/// Detection disclosure: OpenCode is absent from the Actuation harness catalog
+/// (r4, observed 2026-09-06), so no `actuation.harness-detection/v1` record
+/// exists for it. Under the detection contract's three-state law this is
+/// disclosed unavailability, not absence-by-silence; the census evidence
+/// below rests on primary docs and local artifacts.
 
 /// Stable evidence refs pointing at primary sources, not prose.
 const EV_RULES: &str = "doc:opencode.ai/docs/rules";

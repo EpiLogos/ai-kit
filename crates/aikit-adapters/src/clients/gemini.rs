@@ -67,6 +67,9 @@ const EV_SUBAGENTS: &str = "doc:github.com/google-gemini/gemini-cli/main/docs/co
 const EV_EXTENSIONS: &str = "doc:github.com/google-gemini/gemini-cli/main/docs/extensions/index.md";
 const EV_NATIVE_VERSION: &str = "native:gemini --version = 0.29.5";
 const EV_NPM: &str = "npm:@google/gemini-cli@0.58.0";
+/// Actuation owns detection; AIKit consumes the record. Cited per the
+/// `actuation.harness-detection/v1` schema (catalog r4, observed 2026-09-06).
+const EV_DETECTION: &str = "actuation.harness-detection/v1 detection:2026-09-06T23:42:37.615Z gemini:detected exe:/opt/homebrew/bin/gemini sha256:b9d5748e3b98c4a6742a93aefb0617a9d8c9a7810af383df1a02f4b6f62f6381 version:0.29.5 facets:extensions(2),settings,agents(13)";
 
 pub struct GeminiAdapter {
     /// Where a future native GEMINI.md/skills projection would be written.
@@ -210,7 +213,7 @@ fn gemini_faculties() -> Vec<HarnessFacultyObservation> {
         faculty(
             HarnessFaculty::Surfaces,
             FacultySupport::Supported,
-            &[EV_NATIVE_VERSION, EV_SETTINGS_NATIVE],
+            &[EV_NATIVE_VERSION, EV_SETTINGS_NATIVE, EV_DETECTION],
             Some(
                 "interactive TUI, headless mode (-p/--prompt, --output-format json), \
                  IDE integration (ide.enabled in settings), experimental ACP mode",
@@ -297,7 +300,10 @@ impl HarnessAdmissionAdapter for GeminiAdapter {
             // Observed locally: `gemini --version` = 0.29.5 (npm latest 0.58.0).
             native_version: Some("0.29.5".to_string()),
             source_revision: None,
-            realised_actuation_ref: None,
+            // Bound to Actuation's detection identity for this harness
+            // (`actuation harness detect`, catalog r4); AIKit consumes the
+            // ref, it does not mint it.
+            realised_actuation_ref: Some("harness/gemini".to_string()),
             project_binding_ref: None,
             faculties: gemini_faculties(),
         }
