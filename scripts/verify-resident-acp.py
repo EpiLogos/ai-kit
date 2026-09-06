@@ -26,6 +26,35 @@ def request(action,**fields):
  r=cli('encounter','--socket',str(sock),'--request-json',json.dumps({'action':action,**fields}))
  if not r.get('ok'):raise RuntimeError(r)
  return r['data']
+shutdown_receipts={}
+def stop_owner(process):
+ if id(process) in shutdown_receipts:
+  previous=shutdown_receipts[id(process)]
+  if previous['result']!='passed':raise RuntimeError('Prior native owner cleanup failed; inspect retained shutdown receipt')
+  return previous
+ cleanup={'schema':'aikit.owner-shutdown-acceptance/v1','owner_pid':process.pid}
+ failure=None
+ try:
+  if process.poll() is not None:raise RuntimeError('Owner exited without a native provider-cleanup acknowledgement')
+  health=request('health')
+  assert health['pid']==process.pid,'Socket belongs to another owner; refusing shutdown'
+  ack=request('shutdown',expected_pid=health['pid'])
+  assert ack.get('shutdown') is True and ack['pid']==process.pid,ack
+  process.wait(timeout=15)
+  assert process.returncode==0,'Owner failed after native shutdown acknowledgement'
+  cleanup.update(result='passed',acknowledgement=ack,owner_exit_code=process.returncode)
+ except Exception as error:
+  failure=error
+  cleanup.update(result='failed',reason=str(error),scope='Native cleanup unconfirmed; independent provider groups may remain')
+  if process.poll() is None:
+   process.terminate()
+   try:process.wait(timeout=10)
+   except subprocess.TimeoutExpired:process.kill();process.wait(timeout=10)
+   cleanup['fallback']='terminated-only-owned-server-pid'
+ shutdown_receipts[id(process)]=cleanup
+ (base/f'owner-shutdown-{len(shutdown_receipts)}.json').write_text(json.dumps(cleanup,indent=2)+'\n')
+ if failure is not None:raise RuntimeError('Native owner cleanup failed; retained shutdown receipt names unconfirmed provider cleanup') from failure
+ return cleanup
 try:
  deadline=time.monotonic()+20
  while not sock.exists():
@@ -121,8 +150,7 @@ try:
  assert displayed==raw_thinking and displayed
  # Native process restart preserves authored history/composer, without
  # falsely claiming that the old provider connection has been recovered.
- import signal
- os.killpg(server.pid,signal.SIGTERM);server.wait(timeout=10)
+ stop_owner(server)
  server=subprocess.Popen([str(binary),'-C',str(cwd),'encounter-serve','--socket',str(sock)],env=env,stdout=log,stderr=log,start_new_session=True)
  deadline=time.monotonic()+20
  while True:
@@ -138,7 +166,15 @@ try:
  result={'result':'passed','root':str(root),'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'native_session_id':native,'events':events,'long_events':long_events,'long_thinking_updates':long_thoughts,'same_session_continuation':continuation.strip(),'thinking_updates':thinking,'first_event':first,'canonical_draft_revision':draft['revision']}
  print(json.dumps(result));(base/'resident-acceptance.json').write_text(json.dumps(result,indent=2))
 finally:
- import signal
- os.killpg(server.pid,signal.SIGTERM)
- try:server.wait(timeout=10)
- except subprocess.TimeoutExpired:server.kill();server.wait()
+ try:
+  stop_owner(server)
+ except Exception:
+  retained=base/'resident-acceptance.json'
+  if retained.exists():
+   result=json.loads(retained.read_text());result['result']='failed-owner-cleanup';result['owner_shutdown']=list(shutdown_receipts.values());retained.write_text(json.dumps(result,indent=2))
+  raise
+ else:
+  retained=base/'resident-acceptance.json'
+  if retained.exists():
+   result=json.loads(retained.read_text());result['owner_shutdown']=list(shutdown_receipts.values());retained.write_text(json.dumps(result,indent=2))
+ finally:log.close()

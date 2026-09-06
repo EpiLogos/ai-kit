@@ -44,6 +44,7 @@ dependencies = [
  "getrandom 0.4.3",
  "jiff",
  "keyring",
+ "rustix",
  "serde",
  "serde_json",
  "serde_yaml",

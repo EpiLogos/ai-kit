@@ -163,6 +163,10 @@ pub struct ContextResolution {
     /// activation and precedence remain independently explainable here.
     #[serde(default)]
     pub context_activations: Vec<ContextActivationReceipt>,
+    /// Exact observed source descriptors used by this resource resolution.
+    /// These are source evidence, not provider availability or activation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_source_resources: Vec<crate::resource::ResourceDescriptor>,
     pub warnings: Vec<String>,
 }
 
@@ -249,6 +253,13 @@ pub fn compose_context_resolution(
         projection,
         retrieval,
         context_activations: Vec::new(),
+        observed_source_resources: {
+            let mut observed: Vec<_> = resources.resources().into_iter()
+                .filter(|record|record.descriptor.sources.iter().any(|source|source.authority == Some(crate::resource::SourceAuthority::Observed)))
+                .map(|record|record.descriptor.clone()).collect();
+            observed.sort_by(|a,b|a.id.cmp(&b.id));
+            observed
+        },
         warnings,
     }
 }

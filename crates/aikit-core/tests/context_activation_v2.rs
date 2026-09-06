@@ -309,6 +309,7 @@ fn empty_activation_basis_preserves_the_pre_activation_content_address() {
         context_sources,
         host,
         context_activations: _,
+        observed_source_resources: _,
     } = &evidence.basis;
     let legacy = LegacyContextResolutionBasis {
         project_binding,

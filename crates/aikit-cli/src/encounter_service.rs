@@ -9,15 +9,18 @@ use aikit_adapters::{
     },
     interactive_connection::{AcpStableConnectionAdapter, PermissionDecision},
 };
+use aikit_core::context_activation::ContextActivationReceipt;
+use aikit_core::harness_admission::HarnessActivationObservation;
+use aikit_core::projection::ProjectionPlan;
 use aikit_core::session_space::SessionSpaceRef;
-use aikit_core::{AikitError, ResourceRef, Result};
+use aikit_core::{AikitError, ResourceRef, Result, SourceRevision};
 use aikit_store::{encounter::EncounterStore, AikitHome, SessionSpaceApplicationStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,11 +28,141 @@ pub struct EncounterProvider {
     pub id: String,
     pub label: String,
     pub argv: Vec<String>,
+    /// Explicit owner-configured admission basis. Absence preserves optional context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_context: Option<EncounterContextAdmission>,
+}
+
+/// Pins existing source, not a copy of its content or a grant of semantic authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncounterRequiredSource {
+    pub source: ResourceRef,
+    pub revision: SourceRevision,
+    pub path: PathBuf,
+    /// Material byte binding, separate from the source owner's opaque revision.
+    pub content_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncounterContextAdmission {
+    pub sources: Vec<EncounterRequiredSource>,
+    #[serde(default)]
+    pub source_activations: Vec<ContextActivationReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<ProjectionPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation: Option<HarnessActivationObservation>,
+}
+
+impl EncounterContextAdmission {
+    /// Verify required material before a provider effect. Historical activation
+    /// evidence remains distinct: this check never asserts fresh runtime loading.
+    pub fn verify(&self) -> Result<()> {
+        if self.sources.is_empty() || self.sources.len() > 128 {
+            return Err(AikitError::new(
+                "encounter.context_invalid",
+                "Required context must name 1 to 128 sources",
+            ));
+        }
+        let mut identities = std::collections::BTreeSet::new();
+        for source in &self.sources {
+            ResourceRef::parse(source.source.as_str())?;
+            SourceRevision::parse(source.revision.as_str())?;
+            if !source.path.is_absolute() || !identities.insert(source.source.clone()) {
+                return Err(AikitError::new(
+                    "encounter.context_invalid",
+                    "Required source needs an absolute material locator and unique source identity",
+                ));
+            }
+            let expected = source.content_digest.strip_prefix("blake3:").filter(|value| {
+                value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }).ok_or_else(|| AikitError::new("encounter.context_invalid", "Required source digest must be blake3 followed by 64 lowercase hexadecimal digits"))?;
+            let path_metadata = std::fs::metadata(&source.path).map_err(|e| {
+                AikitError::new(
+                    "encounter.context_unavailable",
+                    format!(
+                        "Required source {} at revision {} is unavailable: {e}",
+                        source.source, source.revision
+                    ),
+                )
+            })?;
+            if !path_metadata.is_file() {
+                return Err(AikitError::new(
+                    "encounter.context_invalid",
+                    "Required source must be a regular file",
+                ));
+            }
+            let mut file = std::fs::File::open(&source.path).map_err(|e| {
+                AikitError::new(
+                    "encounter.context_unavailable",
+                    format!(
+                        "Required source {} at revision {} is unreadable: {e}",
+                        source.source, source.revision
+                    ),
+                )
+            })?;
+            let metadata = file.metadata().map_err(error)?;
+            const MAX_BYTES: u64 = 4 * 1024 * 1024;
+            if !metadata.is_file() || metadata.len() > MAX_BYTES {
+                return Err(AikitError::new(
+                    "encounter.context_invalid",
+                    "Required source must be a regular file no larger than 4 MiB",
+                ));
+            }
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            (&mut file)
+                .take(MAX_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(error)?;
+            if bytes.len() as u64 > MAX_BYTES || blake3::hash(&bytes).to_hex().as_str() != expected
+            {
+                return Err(AikitError::new("encounter.context_stale", format!("Required source {} no longer matches the admitted material for revision {}", source.source, source.revision)));
+            }
+        }
+        for activation in &self.source_activations {
+            activation.validate()?;
+            if !identities.contains(&activation.source) {
+                return Err(AikitError::new(
+                    "encounter.context_invalid",
+                    "Source activation evidence names a source outside the admitted basis",
+                ));
+            }
+        }
+        match (&self.projection, &self.activation) {
+            (Some(plan), Some(activation)) => {
+                activation.validate_against(plan)?;
+                if self
+                    .source_activations
+                    .iter()
+                    .any(|source| source.target != plan.target)
+                {
+                    return Err(AikitError::new(
+                        "encounter.context_invalid",
+                        "Source activation target differs from the admitted projection",
+                    ));
+                }
+            }
+            (None, None) => {}
+            _ => {
+                return Err(AikitError::new(
+                    "encounter.context_invalid",
+                    "Projection and activation evidence must be supplied together",
+                ))
+            }
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum EncounterRequest {
     Health,
+    /// Stop only this explicitly identified owner after its provider processes
+    /// have been shut down. This is never an ordinary view-detach operation.
+    Shutdown {
+        expected_pid: u32,
+    },
     Permission {
         agent_session: ResourceRef,
         request_id: String,
@@ -103,9 +236,17 @@ struct Resident {
     provider: String,
     provider_label: String,
     operations: Mutex<()>,
+    required_context: Option<EncounterContextAdmission>,
+}
+enum Lifecycle {
+    Running,
+    Closed(Value),
+    Failed(String),
 }
 pub struct EncounterService {
     home: AikitHome,
+    lifecycle: RwLock<Lifecycle>,
+    shutdown_requested: std::sync::atomic::AtomicBool,
     store: Arc<EncounterStore>,
     residents: Mutex<BTreeMap<ResourceRef, Arc<Resident>>>,
     permissions: PendingPermissions,
@@ -116,6 +257,8 @@ fn error(message: impl std::fmt::Display) -> AikitError {
 impl EncounterService {
     pub fn new(home: AikitHome) -> Result<Self> {
         Ok(Self {
+            lifecycle: RwLock::new(Lifecycle::Running),
+            shutdown_requested: std::sync::atomic::AtomicBool::new(false),
             store: Arc::new(EncounterStore::open(&home)?),
             home,
             residents: Mutex::new(BTreeMap::new()),
@@ -193,8 +336,152 @@ impl EncounterService {
             ))
         }
     }
+    fn check_context(
+        &self,
+        session: &ResourceRef,
+        provider: &str,
+        phase: &str,
+        context: Option<&EncounterContextAdmission>,
+    ) -> Result<()> {
+        let Some(context) = context else {
+            return Ok(());
+        };
+        match context.verify() {
+            Ok(()) => {
+                self.store.append(session, &json!({"kind":"context-admission-checked", "provider":provider, "phase":phase, "sources":context.sources, "source_activations":context.source_activations, "activation":context.activation, "verification":"required-source-material", "fresh_runtime_loading_observed":false}))?;
+                Ok(())
+            }
+            Err(failure) => {
+                self.store.append(session, &json!({"kind":"context-admission-refused", "provider":provider, "phase":phase, "code":failure.code(), "reason":failure.to_string()}))?;
+                Err(failure)
+            }
+        }
+    }
+
+    fn check_resident_context(
+        &self,
+        session: &ResourceRef,
+        resident: &Resident,
+        phase: &str,
+    ) -> Result<()> {
+        let current = self.providers()?.into_iter().find(|p| p.id == resident.provider)
+            .ok_or_else(|| AikitError::new("encounter.provider_removed", "The resident provider configuration was removed; reopen explicitly before further effects"))?;
+        if current.required_context != resident.required_context {
+            let failure = AikitError::new("encounter.context_changed", "Required context configuration changed; recompose and reopen instead of silently updating a resident encounter");
+            self.store.append(session, &json!({"kind":"context-admission-refused", "provider":resident.provider, "phase":phase, "code":failure.code(), "reason":failure.to_string()}))?;
+            return Err(failure);
+        }
+        self.check_context(
+            session,
+            &resident.provider,
+            phase,
+            resident.required_context.as_ref(),
+        )
+    }
+
+    /// Exclusive shutdown waits for already admitted owner operations, then
+    /// stops all residents before acknowledging. A failed cleanup is retained
+    /// as failure, never converted into a later empty successful shutdown.
+    fn shutdown(&self, expected_pid: u32) -> Result<Value> {
+        if expected_pid != std::process::id() {
+            return Err(AikitError::new(
+                "encounter.owner_changed",
+                "Shutdown PID does not identify this encounter owner",
+            ));
+        }
+        // Refuse new read leases immediately so a busy stream of callers cannot
+        // starve the exclusive shutdown lease.
+        self.shutdown_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut lifecycle = self.lifecycle.write().map_err(error)?;
+        match &*lifecycle {
+            Lifecycle::Closed(receipt) => return Ok(receipt.clone()),
+            Lifecycle::Failed(reason) => {
+                return Err(AikitError::new("encounter.shutdown_failed", reason.clone()))
+            }
+            Lifecycle::Running => {}
+        }
+        let residents = std::mem::take(&mut *self.residents.lock().map_err(error)?);
+        let mut stopped = Vec::new();
+        let mut failures = Vec::new();
+        for (session, resident) in residents {
+            // apply() holds a read lease throughout each operation. With the
+            // exclusive lease here, only the map owns these Resident values.
+            match Arc::try_unwrap(resident) {
+                Ok(resident) => {
+                    let native = resident.lane.binding().native_session_id.clone();
+                    // Journal failure must not prevent material cleanup.
+                    if let Err(error) = self.store.append(&session, &json!({"kind":"owner-shutdown-requested","native_session_id":native,"reason":"explicit owner lifecycle operation"})) {
+                        failures.push(format!("{session}: shutdown request journal: {error}"));
+                    }
+                    match resident.host.shutdown() {
+                        Ok(status) => {
+                            let receipt = json!({"agent_session":session,"native_session_id":native,"process_status":status.map(|s|s.to_string()),"process_stopped":true});
+                            if let Err(error) = self.store.append(
+                                &session,
+                                &json!({"kind":"owner-shutdown-completed","receipt":receipt}),
+                            ) {
+                                failures
+                                    .push(format!("{session}: shutdown receipt journal: {error}"));
+                            }
+                            stopped.push(receipt);
+                        }
+                        Err(error) => failures.push(format!("{session}: {error}")),
+                    }
+                }
+                Err(resident) => {
+                    // Preserve the still-owned resident for diagnostics. No
+                    // successful ACK may claim this process has stopped.
+                    self.residents
+                        .lock()
+                        .map_err(error)?
+                        .insert(session.clone(), resident);
+                    failures.push(format!(
+                        "{session}: resident still borrowed during exclusive shutdown"
+                    ));
+                }
+            }
+        }
+        self.permissions.lock().map_err(error)?.clear();
+        if !failures.is_empty() {
+            let reason = failures.join("; ");
+            *lifecycle = Lifecycle::Failed(reason.clone());
+            return Err(AikitError::new("encounter.shutdown_failed", reason));
+        }
+        let receipt = json!({"protocol":"aikit-encounter-v1","pid":std::process::id(),"shutdown":true,"stopped":stopped,"canonical_sessions_retained":true});
+        *lifecycle = Lifecycle::Closed(receipt.clone());
+        Ok(receipt)
+    }
+
     pub fn apply(&self, request: EncounterRequest) -> Result<Value> {
+        if let EncounterRequest::Shutdown { expected_pid } = &request {
+            return self.shutdown(*expected_pid);
+        }
+        // This lease prevents a new launch or effect from racing with shutdown.
+        if self
+            .shutdown_requested
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AikitError::new(
+                "encounter.owner_stopped",
+                "The encounter owner is shutting down or stopped",
+            ));
+        }
+        let lifecycle = self.lifecycle.read().map_err(error)?;
+        if self
+            .shutdown_requested
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || !matches!(*lifecycle, Lifecycle::Running)
+        {
+            return Err(AikitError::new(
+                "encounter.owner_stopped",
+                "The encounter owner is shutting down or stopped",
+            ));
+        }
         match request {
+            EncounterRequest::Shutdown { .. } => {
+                unreachable!("handled before acquiring read lease")
+            }
             EncounterRequest::Permission {
                 agent_session,
                 request_id,
@@ -216,6 +503,21 @@ impl EncounterService {
                             "Provider permission is no longer pending",
                         )
                     })?;
+                if let PermissionDecision::Selected { option_id } = &decision {
+                    let rejecting = request
+                        .choices
+                        .iter()
+                        .find(|choice| &choice.option_id == option_id)
+                        .and_then(|choice| choice.kind.as_deref())
+                        .is_some_and(|kind| matches!(kind, "reject_once" | "reject_always"));
+                    if !rejecting {
+                        self.check_resident_context(
+                            &agent_session,
+                            &resident,
+                            "provider-permission",
+                        )?;
+                    }
+                }
                 // The actual adapter validates native request identity and the offered
                 // option. This is provider transport consent, never an Actuation grant.
                 self.store.append(&agent_session,&json!({"kind":"provider-permission-response-requested","request":request,"decision":decision,"authority":"native-provider-consent"}))?;
@@ -329,7 +631,7 @@ impl EncounterService {
                         ));
                     }
                     return Ok(
-                        json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"resident":true}),
+                        json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"resident":true}),
                     );
                 }
                 let configured = self
@@ -337,6 +639,12 @@ impl EncounterService {
                     .into_iter()
                     .find(|p| p.id == provider)
                     .ok_or_else(|| error("ACP provider is not configured in AIKit"))?;
+                self.check_context(
+                    &agent_session,
+                    &provider,
+                    "before-provider-start",
+                    configured.required_context.as_ref(),
+                )?;
                 let connection = ResourceRef::parse(format!(
                     "connection/encounter-{}",
                     blake3::hash(agent_session.as_str().as_bytes()).to_hex()
@@ -365,7 +673,8 @@ impl EncounterService {
                     agent_session: Some(agent_session.clone()),
                 })?;
                 let native = lane.binding().native_session_id.clone();
-                self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"native_session_id":native}))?;
+                let model_observation = lane.binding().model_observation.clone();
+                self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"native_session_id":native,"model_observation":model_observation}))?;
                 // The owner drains transport delivery; durable cursor readers are
                 // independent views of the same canonical journal.
                 let drain = lane.clone();
@@ -379,10 +688,11 @@ impl EncounterService {
                         provider,
                         provider_label: configured.label,
                         operations: Mutex::new(()),
+                        required_context: configured.required_context,
                     }),
                 );
                 Ok(
-                    json!({"agent_session":agent_session,"native_session_id":native,"resident":true}),
+                    json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"resident":true}),
                 )
             }
             EncounterRequest::Read {
@@ -407,6 +717,7 @@ impl EncounterService {
             } => {
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                self.check_resident_context(&agent_session, &resident, "before-prompt")?;
                 let cleared = self.store.submit(&agent_session, draft_revision, |text| {
                     let handle = resident.lane.prompt(json!([{"type":"text","text":text}]))?;
                     drop(handle);
@@ -447,7 +758,7 @@ pub fn socket_path(home: &AikitHome) -> PathBuf {
 pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     if let Some(parent) = socket.parent() {
         use std::os::unix::fs::DirBuilderExt;
         if !parent.exists() {
@@ -489,16 +800,42 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).map_err(error)?;
     let service = Arc::new(EncounterService::new(home)?);
     let clients = Arc::new(AtomicUsize::new(0));
-    for stream in listener.incoming() {
-        let mut stream = stream.map_err(error)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    listener.set_nonblocking(true).map_err(error)?;
+    let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    while !stop.load(Ordering::Acquire) {
+        // Retire completed threads rather than accumulating one handle per IPC.
+        let mut index = 0;
+        while index < workers.len() {
+            if workers[index].is_finished() {
+                let _ = workers.swap_remove(index).join();
+            } else {
+                index += 1;
+            }
+        }
+        let mut stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            }
+            Err(failure) => return Err(error(failure)),
+        };
+        // Accepted sockets inherit O_NONBLOCK on macOS. Workers use bounded
+        // blocking reads/writes, so restore that mode before receiving a frame
+        // or writing a response larger than the socket's immediate capacity.
+        stream.set_nonblocking(false).map_err(error)?;
         if clients.fetch_add(1, Ordering::AcqRel) >= 32 {
             clients.fetch_sub(1, Ordering::AcqRel);
+            let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
             let _ = stream.write_all(b"{\"error\":\"encounter client capacity reached\"}\n");
             continue;
         }
         let service = service.clone();
         let clients = clients.clone();
-        std::thread::spawn(move || {
+        let stop = stop.clone();
+        workers.push(std::thread::spawn(move || {
+            let mut shutdown = false;
             let result = (|| -> Result<Value> {
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(10)))
@@ -512,8 +849,11 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
                 if bytes.len() > 1024 * 1024 {
                     return Err(error("encounter request exceeds byte limit"));
                 }
-                service.apply(serde_json::from_slice(&bytes).map_err(error)?)
+                let request = serde_json::from_slice(&bytes).map_err(error)?;
+                shutdown = matches!(request, EncounterRequest::Shutdown { .. });
+                service.apply(request)
             })();
+            let shutdown_succeeded = shutdown && result.is_ok();
             let response = match result {
                 Ok(data) => json!({"ok":true,"data":data}),
                 Err(error) => {
@@ -525,9 +865,19 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
                 let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
                 let _ = stream.write_all(&bytes);
             }
+            // The process must not exit before the successful response has been
+            // sent (or the requesting client has disconnected).
+            if shutdown_succeeded {
+                stop.store(true, Ordering::Release);
+            }
             clients.fetch_sub(1, Ordering::AcqRel);
-        });
+        }));
     }
+    drop(listener);
+    for worker in workers {
+        let _ = worker.join();
+    }
+    std::fs::remove_file(socket).map_err(error)?;
     Ok(())
 }
 #[cfg(unix)]

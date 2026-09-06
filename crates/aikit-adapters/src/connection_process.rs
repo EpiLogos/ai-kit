@@ -20,7 +20,7 @@ use crate::agent_connection::ConnectionCommand;
 /// what prevents a second connection stack from growing beside
 /// `aikit.connection-adapter/v1`.
 pub struct ConnectionProcess {
-    child: Child,
+    child: OwnedChild,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     argv: Vec<String>,
@@ -113,7 +113,7 @@ impl ConnectionProcess {
 
     pub fn is_running(&mut self) -> Result<bool> {
         self.child
-            .try_wait()
+            .poll_exit()
             .map(|status| status.is_none())
             .map_err(|error| {
                 AikitError::new(
@@ -157,27 +157,12 @@ impl ConnectionProcess {
     /// AgentSession continuity; callers must use the connection capabilities and
     /// target evidence for that determination.
     pub fn terminate(&mut self) -> Result<Option<ExitStatus>> {
-        if let Some(status) = self.child.try_wait().map_err(|error| {
-            AikitError::new(
-                "connection.process.status_failed",
-                format!("could not inspect `{}`: {error}", self.argv.join(" ")),
-            )
-        })? {
-            return Ok(Some(status));
-        }
-        self.child.kill().map_err(|error| {
+        self.child.terminate().map(Some).map_err(|error| {
             AikitError::new(
                 "connection.process.terminate_failed",
                 format!("could not terminate `{}`: {error}", self.argv.join(" ")),
             )
-        })?;
-        let status = self.child.wait().map_err(|error| {
-            AikitError::new(
-                "connection.process.wait_failed",
-                format!("could not wait for `{}`: {error}", self.argv.join(" ")),
-            )
-        })?;
-        Ok(Some(status))
+        })
     }
 
     pub fn argv(&self) -> &[String] {
@@ -187,7 +172,10 @@ impl ConnectionProcess {
 
 /// Spawn a connection target and return its raw parts, so [`ConnectionProcess`]
 /// and [`ConnectionProcess::spawn_split`] share one spawn path.
-fn spawn_parts(argv: &[String], cwd: Option<&Path>) -> Result<(Child, ChildStdin, ChildStdout)> {
+fn spawn_parts(
+    argv: &[String],
+    cwd: Option<&Path>,
+) -> Result<(OwnedChild, ChildStdin, ChildStdout)> {
     let Some((program, args)) = argv.split_first() else {
         return Err(AikitError::new(
             "connection.process.empty_argv",
@@ -201,6 +189,14 @@ fn spawn_parts(argv: &[String], cwd: Option<&Path>) -> Result<(Child, ChildStdin
         .stdout(Stdio::piped());
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
+    }
+    // A private group contains the adapter and ordinary inherited descendants.
+    // It is a lifetime boundary, not a sandbox: deliberate setsid/setpgid escape
+    // requires a stronger execution provider.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
     let mut child = command.spawn().map_err(|error| {
         AikitError::new(
@@ -221,7 +217,14 @@ fn spawn_parts(argv: &[String], cwd: Option<&Path>) -> Result<(Child, ChildStdin
             format!("`{}` did not expose stdout", argv.join(" ")),
         )
     })?;
-    Ok((child, stdin, stdout))
+    Ok((
+        OwnedChild {
+            child,
+            terminated: None,
+        },
+        stdin,
+        stdout,
+    ))
 }
 
 /// The write half of a split [`ConnectionProcess`]. Every session thread writes
@@ -301,7 +304,7 @@ impl ConnectionReader {
 /// stay host mechanisms; they say nothing about canonical AgentSession
 /// continuity.
 pub struct ConnectionControl {
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<OwnedChild>>,
     argv: Arc<Vec<String>>,
 }
 
@@ -309,7 +312,7 @@ impl ConnectionControl {
     pub fn is_running(&self) -> Result<bool> {
         let mut child = self.child.lock().map_err(|_| poisoned("status"))?;
         child
-            .try_wait()
+            .poll_exit()
             .map(|status| status.is_none())
             .map_err(|error| {
                 AikitError::new(
@@ -324,25 +327,25 @@ impl ConnectionControl {
     /// this transport maps that command to the host's ordinary SIGINT mechanism.
     #[cfg(unix)]
     pub fn interrupt(&self) -> Result<()> {
-        let id = {
-            let mut child = self.child.lock().map_err(|_| poisoned("interrupt"))?;
-            if child
-                .try_wait()
-                .map_err(|error| {
-                    AikitError::new(
-                        "connection.process.status_failed",
-                        format!("could not inspect `{}`: {error}", self.argv.join(" ")),
-                    )
-                })?
-                .is_some()
-            {
-                return Err(AikitError::new(
-                    "connection.process.disconnected",
-                    format!("target `{}` is not running", self.argv.join(" ")),
-                ));
-            }
-            child.id()
-        };
+        // Keep ownership locked through signalling: termination must not reap
+        // and release this PID between the status check and SIGINT.
+        let mut child = self.child.lock().map_err(|_| poisoned("interrupt"))?;
+        if child
+            .poll_exit()
+            .map_err(|error| {
+                AikitError::new(
+                    "connection.process.status_failed",
+                    format!("could not inspect `{}`: {error}", self.argv.join(" ")),
+                )
+            })?
+            .is_some()
+        {
+            return Err(AikitError::new(
+                "connection.process.disconnected",
+                format!("target `{}` is not running", self.argv.join(" ")),
+            ));
+        }
+        let id = child.id();
         let status = Command::new("kill")
             .arg("-INT")
             .arg(id.to_string())
@@ -364,42 +367,16 @@ impl ConnectionControl {
 
     pub fn terminate(&self) -> Result<Option<ExitStatus>> {
         let mut child = self.child.lock().map_err(|_| poisoned("terminate"))?;
-        if let Some(status) = child.try_wait().map_err(|error| {
-            AikitError::new(
-                "connection.process.status_failed",
-                format!("could not inspect `{}`: {error}", self.argv.join(" ")),
-            )
-        })? {
-            return Ok(Some(status));
-        }
-        child.kill().map_err(|error| {
+        child.terminate().map(Some).map_err(|error| {
             AikitError::new(
                 "connection.process.terminate_failed",
                 format!("could not terminate `{}`: {error}", self.argv.join(" ")),
             )
-        })?;
-        let status = child.wait().map_err(|error| {
-            AikitError::new(
-                "connection.process.wait_failed",
-                format!("could not wait for `{}`: {error}", self.argv.join(" ")),
-            )
-        })?;
-        Ok(Some(status))
+        })
     }
 
     pub fn argv(&self) -> &[String] {
         &self.argv
-    }
-}
-
-impl Drop for ConnectionControl {
-    fn drop(&mut self) {
-        if let Ok(mut child) = self.child.lock() {
-            if child.try_wait().ok().flatten().is_none() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
     }
 }
 
@@ -431,11 +408,79 @@ fn write_line_to(stdin: &mut ChildStdin, line: &str, argv: &[String]) -> Result<
     })
 }
 
-impl Drop for ConnectionProcess {
-    fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+/// Retains an exited group leader until the group has been terminated. Keeping
+/// it unreaped reserves its PID/PGID, so a later Drop cannot signal a reused ID.
+struct OwnedChild {
+    child: Child,
+    terminated: Option<ExitStatus>,
+}
+
+impl OwnedChild {
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn poll_exit(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        if let Some(status) = self.terminated {
+            return Ok(Some(status));
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use rustix::process::{waitid, WaitId, WaitIdOptions};
+            use std::os::unix::process::ExitStatusExt;
+            let observed = waitid(
+                WaitId::Pid(self.pid()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+            )?;
+            Ok(observed.map(|status| {
+                if let Some(code) = status.exit_status() {
+                    ExitStatus::from_raw(code << 8)
+                } else {
+                    ExitStatus::from_raw(status.terminating_signal().unwrap_or(0))
+                }
+            }))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            self.child.try_wait()
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn pid(&self) -> rustix::process::Pid {
+        rustix::process::Pid::from_raw(self.child.id() as i32).expect("OS child PID is positive")
+    }
+
+    fn terminate(&mut self) -> std::io::Result<ExitStatus> {
+        if let Some(status) = self.terminated {
+            return Ok(status);
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            // Confirm the leader is still our unreaped child before using its
+            // group identity. ECHILD refuses signalling if ownership was lost.
+            self.poll_exit()?;
+            match rustix::process::kill_process_group(self.pid(), rustix::process::Signal::KILL) {
+                Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            if self.child.try_wait()?.is_none() {
+                self.child.kill()?;
+            }
+        }
+        let status = self.child.wait()?;
+        // Clear group ownership only after signalling and reaping; repeated
+        // terminate/Drop then cannot accidentally signal a recycled PGID.
+        self.terminated = Some(status);
+        Ok(status)
+    }
+}
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let _ = self.terminate();
     }
 }

@@ -122,6 +122,10 @@ impl PaletteBackend for V2SurfaceService<'_> {
         <Service as PaletteBackend>::documents(self.service)
     }
 
+    fn context_resource_records(&self) -> Result<Vec<ResourceRecord>> {
+        self.service.context_resource_records()
+    }
+
     fn navigation_index(&self) -> ResourceSearchIndex {
         self.composition_navigation_index()
     }

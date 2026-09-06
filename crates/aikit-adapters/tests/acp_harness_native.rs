@@ -156,20 +156,65 @@ fn native_acp_stream_interrupt_and_resident_identity_survive_view_handle_drop() 
 #[test]
 #[ignore = "requires explicit actual ACP argv; tests deliberately configured operational policy"]
 fn actual_acp_operational_limit_is_distinct_and_session_can_continue() {
-    let argv:Vec<String>=serde_json::from_str(&std::env::var("AIKIT_ACP_NATIVE_ARGV").expect("Explicit real ACP argv required")).unwrap();
-    let root=tempfile::tempdir().unwrap();
-    let adapter=AcpStableConnectionAdapter::new(ResourceRef::parse("connection/native-operational-policy").unwrap(),vec!["Explicit actual ACP operational policy acceptance".into()]);
-    let mut limits=AgentSessionHostLimits::default();limits.max_signals_per_turn=64;
-    let host=AgentSessionHost::launch(adapter,&argv,Some(root.path()),limits).unwrap();host.initialize().unwrap();
-    let lane=host.open_session(SessionOpenRequest{mode:SessionOpenMode::Create,native_session_id:None,cwd:root.path().to_string_lossy().into_owned(),additional_directories:vec![],mcp_servers:vec![],agent_session:Some(ResourceRef::parse("agent-session/native-operational-policy").unwrap())}).unwrap();
-    while lane.recv_timeout(Duration::from_millis(500)).is_ok(){}
-    let native=lane.binding().native_session_id.clone();
+    let argv: Vec<String> = serde_json::from_str(
+        &std::env::var("AIKIT_ACP_NATIVE_ARGV").expect("Explicit real ACP argv required"),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let adapter = AcpStableConnectionAdapter::new(
+        ResourceRef::parse("connection/native-operational-policy").unwrap(),
+        vec!["Explicit actual ACP operational policy acceptance".into()],
+    );
+    let limits = AgentSessionHostLimits {
+        max_signals_per_turn: 64,
+    };
+    let host = AgentSessionHost::launch(adapter, &argv, Some(root.path()), limits).unwrap();
+    host.initialize().unwrap();
+    let lane = host
+        .open_session(SessionOpenRequest {
+            mode: SessionOpenMode::Create,
+            native_session_id: None,
+            cwd: root.path().to_string_lossy().into_owned(),
+            additional_directories: vec![],
+            mcp_servers: vec![],
+            agent_session: Some(
+                ResourceRef::parse("agent-session/native-operational-policy").unwrap(),
+            ),
+        })
+        .unwrap();
+    while lane.recv_timeout(Duration::from_millis(500)).is_ok() {}
+    let native = lane.binding().native_session_id.clone();
     let turn=lane.prompt(json!([{"type":"text","text":"Write the integers from 1 to 20000, separated by spaces. Begin immediately. Do not use tools."}])).unwrap();
-    let deadline=Instant::now()+Duration::from_secs(120);
-    loop {if let HostEvent::TurnEnded(record)=receive(&lane,deadline){assert_eq!(record.stop,TurnStop::OperationalLimit{max_signals:64});assert!(record.signals>64);break;}}
-    drop(turn);assert!(host.transport_error().is_none());
-    let continuation=lane.prompt(json!([{"type":"text","text":"Reply exactly OK. Do not use tools."}])).unwrap();
-    loop {if let HostEvent::TurnEnded(record)=receive(&lane,Instant::now()+Duration::from_secs(120)){assert!(matches!(record.stop,TurnStop::Completed{..}|TurnStop::OperationalLimit{max_signals:64}),"Configured policy remains active on continuation: {:?}",record.stop);assert!(record.signals>0);break;}}
-    drop(continuation);assert!(host.transport_error().is_none());
-    assert_eq!(lane.binding().native_session_id,native);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if let HostEvent::TurnEnded(record) = receive(&lane, deadline) {
+            assert_eq!(record.stop, TurnStop::OperationalLimit { max_signals: 64 });
+            assert!(record.signals > 64);
+            break;
+        }
+    }
+    drop(turn);
+    assert!(host.transport_error().is_none());
+    let continuation = lane
+        .prompt(json!([{"type":"text","text":"Reply exactly OK. Do not use tools."}]))
+        .unwrap();
+    loop {
+        if let HostEvent::TurnEnded(record) =
+            receive(&lane, Instant::now() + Duration::from_secs(120))
+        {
+            assert!(
+                matches!(
+                    record.stop,
+                    TurnStop::Completed { .. } | TurnStop::OperationalLimit { max_signals: 64 }
+                ),
+                "Configured policy remains active on continuation: {:?}",
+                record.stop
+            );
+            assert!(record.signals > 0);
+            break;
+        }
+    }
+    drop(continuation);
+    assert!(host.transport_error().is_none());
+    assert_eq!(lane.binding().native_session_id, native);
 }

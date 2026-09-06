@@ -57,6 +57,10 @@ pub struct ContextResolutionBasis {
     /// Empty evidence is omitted so pre-activation references do not churn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_activations: Vec<ContextActivationReceipt>,
+    /// Source descriptors from the same once-observed resource snapshot.
+    /// Byte digests and declared revisions remain separate source facts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_source_resources: Vec<crate::resource::ResourceDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +83,7 @@ impl ContextResolutionEvidence {
             context_sources: resolution.retrieval.context_sources.clone(),
             host: resolution.host.as_ref().map(reference_identity),
             context_activations,
+            observed_source_resources: resolution.observed_source_resources.clone(),
         };
         let encoded = serde_json::to_vec(&basis).map_err(|error| {
             AikitError::new(
@@ -801,6 +806,7 @@ mod tests {
             ],
             host: None,
             context_activations: Vec::new(),
+            observed_source_resources: Vec::new(),
         };
         let bytes = serde_json::to_vec(&basis).unwrap();
         let digest = blake3::hash(&bytes).to_hex().to_string();

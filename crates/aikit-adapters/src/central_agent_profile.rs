@@ -25,7 +25,7 @@ pub enum CentralAgentProfileScope {
 }
 
 /// The full Central-authored AgentProfile, consumed as refs + intents.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CentralAgentProfileProjection {
     pub schema: String,
     #[serde(rename = "ref")]
@@ -125,6 +125,7 @@ impl CentralAgentProfileProjection {
             agent_ref: Some(self.agent_ref.clone()),
             host_ref: None,
             profile_refs,
+            profile_source: Some(self.clone()),
         }
     }
 }

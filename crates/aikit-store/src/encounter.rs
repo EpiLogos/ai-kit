@@ -233,6 +233,77 @@ fn draft_in(connection: &Connection, session: &ResourceRef) -> Result<EncounterD
         }))
 }
 
+fn project_block(connection: &Connection, session: &ResourceRef, event: &Value) -> Result<()> {
+    let (kind, text) = if event["kind"] == "user-message" {
+        ("user", event["text"].as_str().unwrap_or("").to_owned())
+    } else if let Some(signal) = event.pointer("/event/Signal/kind") {
+        match signal["kind"].as_str() {
+            Some("agent-message-chunk") => (
+                "assistant",
+                signal["text"].as_str().unwrap_or("").to_owned(),
+            ),
+            Some("agent-thought-chunk") => {
+                ("thinking", signal["text"].as_str().unwrap_or("").to_owned())
+            }
+            Some("tool-call") => (
+                "tool",
+                serde_json::to_string(&signal["payload"]).map_err(failure)?,
+            ),
+            Some("permission-requested") => (
+                "permission",
+                serde_json::to_string(&signal["request"]).map_err(failure)?,
+            ),
+            _ => return Ok(()),
+        }
+    } else if let Some(stop) = event.pointer("/event/TurnEnded/stop") {
+        if stop.get("Completed").is_some() {
+            ("completed", String::new())
+        } else if stop.get("Cancelled").is_some() {
+            ("cancelled", "Stopped by request".into())
+        } else {
+            ("error", serde_json::to_string(stop).map_err(failure)?)
+        }
+    } else {
+        return Ok(());
+    };
+    // Chunks are bounded by bytes, without splitting UTF-8 code points. Adjacent
+    // exposed thinking/message updates coalesce only within this storage block.
+    let mut remaining = text.as_str();
+    loop {
+        let mut end = remaining.len().min(16 * 1024);
+        while !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        let part = &remaining[..end];
+        let last:Option<(u64,String,String)>=connection.query_row("SELECT id,kind,text FROM encounter_blocks WHERE session=?1 ORDER BY id DESC LIMIT 1",params![session.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(failure)?;
+        if let Some((id, held_kind, held_text)) = last.filter(|(_, held_kind, held_text)| {
+            matches!(kind, "assistant" | "thinking")
+                && held_kind == kind
+                && held_text.len() + part.len() <= 16 * 1024
+        }) {
+            let _ = held_kind;
+            connection
+                .execute(
+                    "UPDATE encounter_blocks SET text=?2 WHERE id=?1",
+                    params![id, held_text + part],
+                )
+                .map_err(failure)?;
+        } else {
+            connection
+                .execute(
+                    "INSERT INTO encounter_blocks(session,kind,text) VALUES(?1,?2,?3)",
+                    params![session.as_str(), kind, part],
+                )
+                .map_err(failure)?;
+        }
+        remaining = &remaining[end..];
+        if remaining.is_empty() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,75 +417,4 @@ mod tests {
         assert_eq!(count, 2048);
         assert!(reopened.draft(&other).unwrap().text.is_empty());
     }
-}
-
-fn project_block(connection: &Connection, session: &ResourceRef, event: &Value) -> Result<()> {
-    let (kind, text) = if event["kind"] == "user-message" {
-        ("user", event["text"].as_str().unwrap_or("").to_owned())
-    } else if let Some(signal) = event.pointer("/event/Signal/kind") {
-        match signal["kind"].as_str() {
-            Some("agent-message-chunk") => (
-                "assistant",
-                signal["text"].as_str().unwrap_or("").to_owned(),
-            ),
-            Some("agent-thought-chunk") => {
-                ("thinking", signal["text"].as_str().unwrap_or("").to_owned())
-            }
-            Some("tool-call") => (
-                "tool",
-                serde_json::to_string(&signal["payload"]).map_err(failure)?,
-            ),
-            Some("permission-requested") => (
-                "permission",
-                serde_json::to_string(&signal["request"]).map_err(failure)?,
-            ),
-            _ => return Ok(()),
-        }
-    } else if let Some(stop) = event.pointer("/event/TurnEnded/stop") {
-        if stop.get("Completed").is_some() {
-            ("completed", String::new())
-        } else if stop.get("Cancelled").is_some() {
-            ("cancelled", "Stopped by request".into())
-        } else {
-            ("error", serde_json::to_string(stop).map_err(failure)?)
-        }
-    } else {
-        return Ok(());
-    };
-    // Chunks are bounded by bytes, without splitting UTF-8 code points. Adjacent
-    // exposed thinking/message updates coalesce only within this storage block.
-    let mut remaining = text.as_str();
-    loop {
-        let mut end = remaining.len().min(16 * 1024);
-        while !remaining.is_char_boundary(end) {
-            end -= 1;
-        }
-        let part = &remaining[..end];
-        let last:Option<(u64,String,String)>=connection.query_row("SELECT id,kind,text FROM encounter_blocks WHERE session=?1 ORDER BY id DESC LIMIT 1",params![session.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(failure)?;
-        if let Some((id, held_kind, held_text)) = last.filter(|(_, held_kind, held_text)| {
-            matches!(kind, "assistant" | "thinking")
-                && held_kind == kind
-                && held_text.len() + part.len() <= 16 * 1024
-        }) {
-            let _ = held_kind;
-            connection
-                .execute(
-                    "UPDATE encounter_blocks SET text=?2 WHERE id=?1",
-                    params![id, held_text + part],
-                )
-                .map_err(failure)?;
-        } else {
-            connection
-                .execute(
-                    "INSERT INTO encounter_blocks(session,kind,text) VALUES(?1,?2,?3)",
-                    params![session.as_str(), kind, part],
-                )
-                .map_err(failure)?;
-        }
-        remaining = &remaining[end..];
-        if remaining.is_empty() {
-            break;
-        }
-    }
-    Ok(())
 }
