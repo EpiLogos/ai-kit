@@ -1,0 +1,10 @@
+schema = 1
+id = "hook/continuity/entity-disclosure"
+kind = "hook"
+name = "Continuity entity disclosure"
+description = "First-party continuity reaction (W10 V6): when composed, the engine names the pasu participants present in this context — the bound wiki entities from the authored identity, AgentProfile and AgentSet carriers, partitioned by the world binding. Durable facts only: volatile state stays in NOW/Flow and Frames, never in this disclosure. Not composed by default; composing it is the named CASE 02 delta."
+tags = ["aikit", "continuity", "engine", "entities", "pasu", "orientation"]
+
+[hook]
+entry = "payload/entity-disclosure"
+events = ["SessionStart"]

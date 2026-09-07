@@ -1247,6 +1247,17 @@ impl Service {
                 event.kind, event.client,
             ));
         }
+        if event.kind == aikit_core::hooks::HookEventKind::SessionStart
+            && tuning.allows(aikit_core::continuity::ENTITY_DISCLOSURE)
+        {
+            match crate::continuity_disclosure::entity_disclosure(event) {
+                Ok(Some(block)) => decision.injected.push(block),
+                Ok(None) => {}
+                Err(error) => decision.warnings.push(format!(
+                    "continuity/entity-disclosure unavailable: {error}"
+                )),
+            }
+        }
 
         Ok(decision)
     }

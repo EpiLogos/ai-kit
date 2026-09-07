@@ -1,0 +1,9 @@
+#!/bin/sh
+# The composition handle for the entity-disclosure engine reaction (W10 V6).
+#
+# The engine (aikit-cli dispatch) resolves the continuity tuning at event
+# time; when this capability is composed it names the participants present
+# in the context through the injection channel. This payload only proves the
+# chain reached it: exit 0, no output, because hook-chain stdout is a gate
+# channel, not an injection channel.
+exit 0
