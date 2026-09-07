@@ -49,8 +49,11 @@ pub mod id;
 pub mod knowledge;
 pub mod knowledge_code;
 pub mod knowledge_entity_address;
+<<<<<<< HEAD
 pub mod knowledge_ingest;
 pub mod knowledge_wiki_shape_v2;
+=======
+>>>>>>> origin/main
 pub mod knowledge_living;
 pub mod knowledge_living_context;
 pub mod knowledge_living_relations;
