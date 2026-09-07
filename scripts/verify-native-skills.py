@@ -32,6 +32,7 @@ EXPECTED_GUIDANCE = {
 
 seen_skills: set[str] = set()
 seen_guidance: set[str] = set()
+seen_hooks: set[str] = set()
 for manifest in REGISTRY.glob("**/manifest.toml"):
     data = tomllib.loads(manifest.read_text(encoding="utf-8"))
     capsule_id = data["id"]
@@ -57,6 +58,19 @@ for manifest in REGISTRY.glob("**/manifest.toml"):
         if not body.is_file() or not body.read_text(encoding="utf-8").strip():
             raise SystemExit(f"{manifest}: guidance entry is missing or empty")
         seen_guidance.add(capsule_id)
+    elif kind == "hook":
+        import os
+        hook = data.get("hook", {})
+        entry = hook.get("entry")
+        events = hook.get("events")
+        if not entry or not events:
+            raise SystemExit(f"{manifest}: first-party hook capsule must declare entry and events")
+        body = manifest.parent / entry
+        if not body.is_file() or not body.read_text(encoding="utf-8").strip():
+            raise SystemExit(f"{manifest}: hook entry is missing or empty")
+        if not os.access(body, os.X_OK):
+            raise SystemExit(f"{manifest}: hook entry is not executable")
+        seen_hooks.add(capsule_id)
     else:
         raise SystemExit(f"{manifest}: unexpected first-party capsule kind {kind!r}")
 
@@ -64,6 +78,9 @@ if seen_skills != EXPECTED_SKILLS:
     raise SystemExit(f"first-party Skill corpus mismatch: {seen_skills ^ EXPECTED_SKILLS}")
 if seen_guidance != EXPECTED_GUIDANCE:
     raise SystemExit(f"first-party guidance corpus mismatch: {seen_guidance ^ EXPECTED_GUIDANCE}")
+EXPECTED_HOOKS = {"hook/continuity/turn-ledger"}
+if seen_hooks != EXPECTED_HOOKS:
+    raise SystemExit(f"first-party hook corpus mismatch: {seen_hooks ^ EXPECTED_HOOKS}")
 
 index = tomllib.loads((SETS / "index.toml").read_text(encoding="utf-8"))
 refs = {entry["semantic_ref"]: entry["directory"] for entry in index["skillset"]}
