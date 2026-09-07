@@ -31,6 +31,9 @@ on:
       - "rust-toolchain.toml"
       - ".github/workflows/native-skills.yml"
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   conformance:
     runs-on: ubuntu-latest
@@ -43,6 +46,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Public harness-admission SDK conformance
         run: cargo test -p aikit-core --test harness_admission
       - run: cargo test -p aikit-cli --test set_command

@@ -13,6 +13,9 @@ concurrency:
   group: persistent-surface-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   collapsed-local-workcell:
     name: AIKit Surface ↔ Workcell managed-service proof
@@ -27,6 +30,9 @@ jobs:
           rustup toolchain install 1.98.0 --profile minimal
           rustup default 1.98.0
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Prove AIKit persistent Surface identity and rebinding
         run: cargo test --locked -p aikit-core --test surface_material_v2 -- --nocapture --test-threads=1
 
