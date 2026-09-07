@@ -160,6 +160,50 @@ impl<'a> SemanticWikiProvider<'a> {
                     }
                 }
             }
+            // A bounded local whole (W10 V4): a node carrying
+            // `local_space_ref` contributes its whole's membership through
+            // the same relation faculty, so navigation traverses the set
+            // without any consumer reconstructing a private graph.
+            if let Some(node) = self.index.node(&current) {
+                if let Some(local_ref) = &node.local_space_ref {
+                    if let Some(local_space) = self.index.space(local_ref) {
+                        for (other, relation) in local_space
+                            .node_refs
+                            .iter()
+                            .map(|r| (r, "local-member"))
+                        {
+                            let key =
+                                format!("local-whole\0{}\0{}\0{}", current, other, relation);
+                            if seen_edges.contains(&key) {
+                                continue;
+                            }
+                            if view.edges.len() >= query.max_edges {
+                                view.truncated = true;
+                                break;
+                            }
+                            if !view.nodes.iter().any(|n| &n.resource == other)
+                                && !view.push_node(self.relation_node(other)?)
+                            {
+                                continue;
+                            }
+                            seen_edges.insert(key);
+                            view.push_edge(RelationEdge::new(
+                                current.clone(),
+                                other.clone(),
+                                relation,
+                                RelationDirection::Outgoing,
+                                RelationOrigin::new(SourceAuthority::Derived)
+                                    .from_provider(self.provider.clone())
+                                    .in_lens("semantic-wiki")
+                                    .at_revision(local_space.revision.to_string()),
+                            ))?;
+                            if seen.insert(other.clone()) {
+                                queue.push_back((other.clone(), depth + 1));
+                            }
+                        }
+                    }
+                }
+            }
             let remaining = query.max_edges.saturating_sub(view.edges.len());
             for neighbour in self.index.neighbours(&current, remaining) {
                 let other = neighbour.resource.clone();
