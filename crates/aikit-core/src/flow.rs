@@ -1364,6 +1364,7 @@ mod tests {
                 returns: vec![WikiConstellationReturn {
                     through_anchor_ref: anchor_ref,
                     ground_ref: flow_ref.clone(),
+                    ground_kind: None,
                     extensions: BTreeMap::new(),
                 }],
                 conjugate_ref: None,

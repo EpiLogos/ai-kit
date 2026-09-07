@@ -120,6 +120,11 @@ pub struct WikiConstellationMember {
 pub struct WikiConstellationReturn {
     pub through_anchor_ref: ResourceRef,
     pub ground_ref: ResourceRef,
+    /// Declared return canon (W10 rev 3): how the returned determination
+    /// grounds — `own`, `parent`, `child`, `other` or `conjugate`. Declared
+    /// data riding the return, never an engine kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ground_kind: Option<String>,
     #[serde(flatten, default)]
     pub extensions: BTreeMap<String, Value>,
 }
@@ -163,6 +168,17 @@ impl WikiConstellation {
                     "knowledge.wiki_invalid_constellation",
                     "constellation return must route through its own anchor",
                 ));
+            }
+            if let Some(ground_kind) = &return_path.ground_kind {
+                if !matches!(
+                    ground_kind.as_str(),
+                    "own" | "parent" | "child" | "other" | "conjugate"
+                ) {
+                    return Err(AikitError::new(
+                        "knowledge.wiki_invalid_constellation",
+                        "constellation return ground_kind must be own, parent, child, other or conjugate",
+                    ));
+                }
             }
         }
         Ok(())

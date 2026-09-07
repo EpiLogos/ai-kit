@@ -142,6 +142,12 @@ fn pasu_extension(form: &str, subject_ref: &str, extra: Value) -> BTreeMap<Strin
         PASU_EXTENSION.to_owned(),
         json!({"form": form, "subject_ref": subject_ref, "extra": extra}),
     );
+    // W10 rev 3: the paśu identity grammar is the first typed family of
+    // 0/1 anchors — stance is declared data, never an engine kind.
+    extensions.insert(
+        "aikit.ql-stance/v1".to_owned(),
+        json!({"stance": "0/1"}),
+    );
     extensions
 }
 
