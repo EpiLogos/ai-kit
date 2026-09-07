@@ -149,6 +149,12 @@ praxis source                            reusable Skills / Methods owned by thei
 
 Do not move compatible native material into ProjectCentral merely to make it legible to AIKit. Retain it in place and relate it through stable source/resource refs when the owning relation permits that. Generated harness projection files and derived indexes remain derivative even when their shape resembles authored source.
 
+### Recovering a seed-led product account
+
+When the human selects this documentation mode, recover the 0/1 whole before expanding its six questions. A supplied human seed governs its intended meaning. Otherwise recover a candidate from native founding sources, wayfinders and ticket refinements, including later comments that revise scope. Keep the candidate's Agent attribution visible.
+
+For each meaningful capability, connect need → operation → useful result → actual implementation/evidence → governing account unit. This functional reading checks whether the prose corresponds to the product; it does not let current code retroactively author the purpose. Use the minimal concrete What to prevent an account from becoming a list of peripheral facilities. Keep capability status separate from historical QL relation coverage.
+
 ## Native filesystem / document-governance praxis
 
 Before changing a region, recover the smallest applicable source chain from broad orientation toward local specificity. The practical laws are:
@@ -171,7 +177,7 @@ When code changes falsify a local description or an architectural assertion, rep
 
 ## Claim classes — keep them distinct
 
-Classify consequential claims using at least these source/authority classes:
+Classify consequential claims using these content/provenance distinctions. Map actual authority to Central’s six documentation standings; product intent and current development state below describe content/scope and temporal context rather than extra standings:
 
 ```text
 AUTHORED HUMAN POSITION

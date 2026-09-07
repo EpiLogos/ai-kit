@@ -242,7 +242,10 @@ for required in (
 
 structured_account = (REGISTRY / "skill/aikit/structured-account-authoring/payload/SKILL.md").read_text()
 for required in (
-    "not a universal `Account` entity",
+    "Generation alone gives it no new authority.",
+    "The human may choose an editable account as product source",
+    "with provenance and recognition recorded at the appropriate scope",
+    "Do not invent a new profile, Project, Claim, Evidence, Wiki, Agent, Run, or source ontology when one already exists.",
     "The Skill can read selected material from them, but must not imply that an entire root is public",
     "QL may be used internally as a completeness check",
     "Do not invoke deep account craft merely because the Skill is available",

@@ -1,0 +1,40 @@
+name: Product documentation maintenance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  product-ground:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the actual product CLI
+        run: cargo build --package aikit-cli --bin aikit
+      - name: Check source, matrix, seed and native CLI maintenance
+        shell: bash
+        env:
+          PRODUCT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          base_args=()
+          if [[ -n "$PRODUCT_BASE" && "$PRODUCT_BASE" != 0000000000000000000000000000000000000000 ]]; then
+            base_args=(--base "$PRODUCT_BASE")
+          fi
+          python3 .github/product-ground.pyz --root . --account aikit.html --namespace aikit --product-index 2 --reference-scope repository "${base_args[@]}" | tee product-ground-result.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: product-ground-result
+          path: product-ground-result.json

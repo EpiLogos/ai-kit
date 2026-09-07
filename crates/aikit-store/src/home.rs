@@ -139,6 +139,18 @@ impl AikitHome {
         self.state().join("locks")
     }
 
+    /// The Agency Gateway's well-known same-host carrier. Bootstrap, doctor,
+    /// the terminal surface and the O:I desktop all address a default gateway
+    /// here unless a carrier is named explicitly.
+    pub fn gateway_socket(&self) -> PathBuf {
+        self.state().join("gateway.sock")
+    }
+
+    /// The default semantic state file the gateway persists across restarts.
+    pub fn gateway_state(&self) -> PathBuf {
+        self.state().join("gateway.json")
+    }
+
     /// `state/trust/` holds exported trust review material (signatures, notes).
     /// The authoritative trust records live in the database.
     pub fn trust_dir(&self) -> PathBuf {
