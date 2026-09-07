@@ -74,6 +74,16 @@ A scientific or ordinary non-QL Project can use a completely different natural f
 
 Keep QL coordinates in machine metadata or navigation only when they are useful. Do not expose them merely to prove that QL informed composition.
 
+### Seed-led product documentation mode
+
+When the human selects the suite's seed-led documentation convention, include a **0/1 whole-account overview** before the six expanded #0–#5 views. The overview contains the minimal answers to Why, What, How, Who/Whereby, Where/When and Why-For. These visible labels are the chosen application of the L0 lens. The whole anchor is a distinct navigation destination, not a seventh numbered position.
+
+Preserve the human's supplied seed with explicit editorial attribution. A seed recovered by an Agent from sources remains a candidate. Start What with the concrete product definition; develop capabilities and workflows from that centre. Each answer links to its expansion; each expansion returns to its seed and records the revision reconciled. Preserve stable unit identities, tags, source standing and resource links.
+
+Keep the capability matrix alongside the account. Use Central’s `capability-matrices` Skill, `docs/CAPABILITY-MATRIX-PROTOCOL.md` (`ql-capability-matrix/1`) and its `skills/capability-matrices/assets/matrix.csv` and `matrix.schema.json` templates for the manifest and uniform CSV. The product default has six seed rows and S plus the other five products as columns; additional declared views use the same form and stable capability IDs. Link capabilities to the relevant journeys/contracts and exact implementation or evidence. Relational coverage and current functional status stay distinct. Code describes implemented behaviour; the account develops intended meaning and encounter. Keep necessary caveats and unresolved differences in bounded contract/review sections.
+
+If the human chooses this HTML as the editable product document, preserve its source identity and actual standing. Generated renderings reference that source. This opt-in convention does not require ordinary notes, research or every HTML deliverable to become a sixfold account. For the native convention and schema, consult Central's `docs-methodology` Skill and Project Context Protocol.
+
 ## 3. Nested completeness
 
 For a substantial surface, the author may recursively test:

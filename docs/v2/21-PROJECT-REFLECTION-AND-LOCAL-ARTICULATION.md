@@ -380,3 +380,83 @@ recognised human Ground
 The contrasting minimal subject must still prove ordinary Knowledge Navigation and native Skill operation without special Project substrate.
 
 The deeper result is a Project whose meaning and executable reality can answer one another precisely **because their representations remain differentiated**, not because they have been collapsed into one graph or one source of truth.
+
+## 15. Documentation population contract
+
+**Protocol addition, 2026-09-06.** The procedures below specify documentation integration and its acceptance. The implementation boundary in section 18 distinguishes available operations from work still required.
+
+The shared artifact contract is Central’s `docs/CAPABILITY-MATRIX-PROTOCOL.md`, `ql-capability-matrix/1`, with templates owned by `skills/capability-matrices/assets`. Its manifest declares ordered axes, views, anchor and default view; uniform CSV distinguishes stable capability records from relation placements referencing zero or more capabilities. The Wiki consumes that contract rather than defining another matrix format.
+
+The human account states the product's purpose, intended experience and commitments. Its capability matrix makes the capabilities and their relations addressable. The Wiki discloses both alongside ordinary notes, code evidence and eligible execution material. All participate in the existing source pool and SemanticWiki index with their own provenance; population adds attributable knowledge and traversable relations around those sources.
+
+A source item can remain an ordinary `1`. A `0/1` discloses a whole with an explicit anchor, actual members and Return. The material and question determine the grain. Preserve partial, twofold, threefold, fourfold, sixfold and conjugated forms when present. General matrix axes retain their declared ordered member identities. They do not extend the native QL position range or acquire direct/conjugate semantics from their dimensions. The product default relates six account seed questions to S and the other five products; the native QL direct/conjugate 6×6 is a distinct declared view within the same matrix protocol.
+
+Population proceeds over a selected, bounded source set:
+
+1. Establish Project and canonical Wiki identity, accepted source relations, provider availability and retrieval exclusions. Record source refs and exact revisions before interpreting content.
+2. Inventory account whole/seed/expanded-unit locators, stable capability IDs and matrix axis/record locators. Include ordinary ad hoc notes and eligible NOW/Run passages pertinent to the question. Retain their owners, standing, producer refs and lifecycle. Path alone establishes neither human authorship nor QL meaning.
+3. Resolve explicit `[[links]]`, resource maps, memberships and declared tags against that inventory. Preserve pending and ambiguous targets. Tags aid discovery; they do not establish semantic edges or authority by themselves.
+4. Read the selected source units and recover the materially relevant whole. Generate only the knowledge required for this population task. Attribute inferred relations separately from source-explicit relations. An empty matrix address remains empty unless there is an attributable determination to record.
+5. Validate the proposed Wiki as a whole and persist through its current atomic write path. Record exact basis revisions and affected dependencies. Rerunning population at the same basis must not duplicate subjects, capabilities or edges; changed revisions invalidate dependent readings rather than silently refreshing their claims.
+6. Exercise the read faculty against the populated sources: search, exact read, relations, route, frame, sources, explain, history and status. Inspect returned provenance and exact source passages, not only matching titles or node counts.
+
+NOW is optional. A local session is available only through an eligible source/provider disclosure. Factory retains Run and RunThought lifecycle; AIKit consumes their owner-issued identities, revisions and passage anchors. This procedure does not clone execution transcripts into a second canonical session store or imply that every running session is already projected.
+
+## 16. Capability-specific contemplation and source return
+
+Start with a stable capability identity and a concrete question. Recover its account seed, expanded units, matrix records, and relevant code, note or Run evidence at exact revisions. A view address answers where the question is being considered; a capability identity names the capability through changes of view. Multiple determinations at an address remain separately attributable.
+
+Explicit contemplation returns either an attributable reading, a tension/absence, or a bounded change proposal. A source-change proposal identifies:
+
+- exact source refs/revisions and affected account units, capability IDs and matrix records;
+- the intended functional or experiential change and its evidence;
+- coordinated proposed edits to the HTML account and matrix CSV/Markdown, including changed links and seed dependencies;
+- unresolved or conflicting material, affected dependent Wiki objects and the source owner's reconciliation basis.
+
+Apply edits under the existing user task authorisation and owner/standing rules. Agent inference does not become ratified intention through generation or placement. Preserve meaningful differences between intended behaviour, implementation observation and accepted commitment. Validate all companion artifacts and references together before declaring the change complete. If any basis revision changes, re-read and reconcile it. The required operation must either complete the coherent source set or retain an inspectable incomplete state with recoverable originals; individual atomic Wiki writes do not supply multi-source atomicity.
+
+Refresh affected Wiki dependencies after the source result is known. Retain the original reading and exact basis for explanation rather than retargeting its old evidence to the new text. Documentation consolidation maps the content of an ad hoc file to specific successor units or capability records; meaningful unresolved content remains outstanding until accounted for.
+
+## 17. Retirement operations and ownership
+
+Central owns the durable filesystem structure and contract for source identity, lifecycle, successor relations and any archive locations. AIKit owns the actual assessment, consolidation, reconciliation, retirement, archive and restore operations over that structure, including dependency and retrieval updates. Factory supplies relevant development decisions and Run evidence through its own interfaces. Central's existing migration of compatible Wiki collections does not constitute this document-retirement operation.
+
+Lifecycle is independent of provenance and standing: retiring an agent-derived source does not make its successor human-adopted, and archiving a recognised source does not erase its attribution.
+
+The operation sequence is:
+
+1. **Assess:** read exact selected revisions, owners, inbound references and source contributions. Produce an inspectable preview with the intended successor mapping and filesystem effect.
+2. **Consolidate:** account for each materially distinct source unit as retained, transferred, superseded, conflicting or unresolved. A successor filename alone is insufficient. Partial consolidation leaves the unaccounted material active and visible.
+3. **Reconcile:** use existing user authorisation and source-owner rules. Check the exact basis immediately before mutation. No blanket second approval is required merely because an agent-maintained draft is being consolidated within the authorised task.
+4. **Retire in place:** preserve source bytes, identity and exact revision access while recording lifecycle, successor, actor, time and rationale in Central's structure. Invalidate affected Wiki dependencies. Current-state retrieval should disclose and prefer the recognised successor; exact historical retrieval continues to resolve the original.
+5. **Archive or restore when requested:** apply the same identity and revision guards to moves and inverse changes. Preserve inbound refs through stable identity/redirect resolution. An implementation using path-derived refs must establish continuity before moving a file. Restore must recover content, lifecycle and traversability without duplicating identities.
+
+Deletion is a separate explicitly scoped action. Retirement previews and consolidation proposals are useful before mutation support lands; they must be labelled proposals and must not change source lifecycle or claim retirement occurred.
+
+## 18. Current operation boundary and real acceptance
+
+At this protocol revision the following native surfaces are available:
+
+| Surface | Available behaviour | Remaining acceptance work |
+| --- | --- | --- |
+| ProjectCentral authored adapter | Eligible Markdown, explicit links, source revisions, dependencies and existing SemanticWiki index | HTML whole/unit/resource-map and capability CSV record interpretation through the same identity/policy/standing contract |
+| `wiki stage` | Explicit Markdown `ql:` alignment with stable source/node refs; positions 0–5 relative to a unit | General documentation population and coherent HTML/CSV/source change operation |
+| QL shape and contemplation | Actual constellation grains, deterministic shaped preflight and attributable generated readings/source proposals | Matrix view declaration integration without coercing axes into native direct/conjugate coordinates |
+| Factory RunThought adapter | Exact disclosed owner refs, revisions, passages and producer provenance | End-to-end selected local NOW/Run source availability in the documentation population scenario |
+| Wiki writes and knowledge reads | Whole validation, atomic individual persistence and existing navigation faculty | Multi-source recovery, identity-preserving document lifecycle operations and successor-aware retrieval |
+
+Relevant implementation seams are `projectcentral_authored_wiki.rs`, `authored_wiki_source.rs`, `factory_run_thought_authored_wiki.rs`, `knowledge_wiki_shape.rs`, `knowledge_living.rs` and the native `wiki`/`knowledge` CLI modules. Check these and the installed command help before executing a workflow; this specification does not introduce new command spellings.
+
+Acceptance must use actual filesystem sources and native parsers, storage, operations and query results. Start with the Central account and matrix, an ordinary linked note, a genuinely partial QL whole and an eligible owner-issued Run passage. Use the same protocol for the other five products after this specimen passes. O:I desktop feature documentation is the subsequent scope.
+
+Required assertions:
+
+- Every source, HTML unit and matrix capability/record is addressable at its exact revision; cross-format links work in both directions without duplicate source copies. CSV quoted commas/newlines, reordered records and unknown extension fields survive the supported edit round trip.
+- Ordinary notes work without QL frontmatter. A `1` remains ordinary unless a disclosed whole is actually authored or generated with attribution. Partial wholes retain their grain. General axes and native QL shapes preserve different declared semantics while sharing source and relation handling.
+- Search finds both structured and ad hoc evidence. Exact reads recover the expected passage/record. Frames distinguish purpose, commitment, implementation evidence and agent inference. Duplicate titles, ambiguous links and absent providers stay inspectable.
+- A seed or capability edit changes the relevant dependency revisions; old readings remain explainable at their original basis. Repeated population is idempotent. Restart and rebuild preserve identities and query results.
+- Recursive privacy exclusions apply before disclosure, including through backlinks, frames and Run/source attachments. An unavailable Run remains explicitly unavailable rather than receiving fabricated content.
+- A coordinated capability change with a concurrent source edit rejects the stale proposal and leaves recoverable source state. Failure between companion writes is observable and recoverable; completion is not reported for a partial update.
+- Retirement preserves bytes and exact retrieval, prefers the recognised successor for current-state questions, and retains unresolved contributions. Archive preserves inbound links and history; restore recovers the original identity. Stale previews, offline edits and restart/rebuild exercise real lifecycle persistence.
+
+Report each lane as executed/pass, executed/fail or unavailable with its concrete missing operation. Source inspection and tests of the existing Markdown path cannot establish HTML/CSV or retirement acceptance. Protocol conformance of authored files can be verified before these runtime lanes land; full Wiki population remains gated by the missing operations above.

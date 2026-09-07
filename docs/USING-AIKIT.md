@@ -110,6 +110,51 @@ The operational store at `~/.aikit` is never treated as a project marker. A
 project is scoped by its own `.aikit/` directory (or its exported
 `AIKIT_PROJECT_ID`), even when `AIKIT_HOME` points somewhere custom.
 
+## Agency Gateway
+
+The Agency Gateway is the persistent contact plane through which the same
+Agency and attributable ActuationStream stay continuable across Surfaces —
+harness UI, terminal, and connector platforms such as Telegram. It runs as an
+ordinary service and speaks one request/response envelope over two carriers:
+an owner-only Unix-domain socket for same-host queries, and an authenticated
+WebSocket carrier for network control and events.
+
+The gateway has one well-known endpoint, so it needs no flags in the ordinary
+posture: `~/.aikit/state/gateway.sock`, with semantic state persisted to
+`~/.aikit/state/gateway.json`. Run it, then query it:
+
+```sh
+aikit gateway serve
+aikit gateway protocol
+aikit gateway discover
+aikit gateway status
+aikit gateway ecology
+aikit gateway snapshot
+```
+
+`serve` with no flags binds the default socket and restores state from the
+default file; a `shutdown` command stops it cleanly and persists state.
+Naming `--ws HOST:PORT` (with `--ws-token` or `AIKIT_GATEWAY_TOKEN`) is the
+network posture; `--ws` alone is deliberately network-only and binds no local
+socket. Explicit `--unix PATH` / `--state-file PATH` override the defaults for
+remote-Workcell placements. A query with no running gateway fails with
+`cli.gateway_unreachable` and says how to start one — it never pretends an
+absent gateway answered.
+
+`aikit doctor` accounts for the default endpoint in every state: answering
+(a note with the negotiated version), present-but-degraded (a warning naming
+the restart), or not running (a note naming the start command). Bootstrap and
+the O:I desktop can read exactly this probe as their gateway presence check.
+
+`ecology` answers the gateway ecology read model: which Agencies, Agent
+sessions, Streams and Surfaces this gateway currently constitutes, with fork
+lineage and context revisions, and the invocation vocabulary
+(`communique`, `session-contribution`, `delegation`, `session-fork`,
+`co-actuation`). Presence never implies authority — invocation is a separate
+AIKit capability grant. The `aikit-gateway` binary remains the minimal
+stdio/serve body for Workcell materialisation; the CLI group is the same
+protocol with the product's JSON envelope.
+
 ## What “working” means
 
 At minimum, all of these should succeed:

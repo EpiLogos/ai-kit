@@ -216,6 +216,76 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Client(c)) => cmd_client(cwd, c),
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
+        Some(Command::Gateway(c)) => cmd_gateway(c),
+    }
+}
+
+/// The Agency Gateway front door: run the service, or query a running one.
+/// Gateway commands address an external service, so they carry no resolved
+/// context — the envelope context stays empty rather than pretending a scope.
+/// Carriers default to the well-known home endpoint (`gateway_ops`).
+fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
+    let home = AikitHome::discover()?;
+    match command.command {
+        GatewaySub::Serve(a) => {
+            let config = aikit_cli::gateway_ops::serve_config(&home, &a)?;
+            let gateway_ref = a
+                .gateway_ref
+                .or_else(|| std::env::var("AIKIT_GATEWAY_REF").ok())
+                .unwrap_or_else(|| "agency-gateway/local".into());
+            let gateway_ref = aikit_core::resource::ResourceRef::parse(&gateway_ref).map_err(
+                |error| {
+                    AikitError::new(
+                        "cli.gateway_ref_invalid",
+                        format!("parse gateway ref {gateway_ref}: {error}"),
+                    )
+                },
+            )?;
+            aikit_adapters::run_gateway_service(
+                aikit_adapters::AgencyGateway::new(gateway_ref),
+                config,
+            )?;
+            Ok(Reply::Text("gateway service stopped cleanly".into()))
+        }
+        query => {
+            let command = match query {
+                GatewaySub::Protocol(_) => aikit_adapters::GatewayCommand::Protocol,
+                GatewaySub::Discover(_) => aikit_adapters::GatewayCommand::Discover,
+                GatewaySub::Status(_) => aikit_adapters::GatewayCommand::Status,
+                GatewaySub::Ecology(_) => aikit_adapters::GatewayCommand::Ecology,
+                GatewaySub::Snapshot(_) => aikit_adapters::GatewayCommand::Snapshot,
+                GatewaySub::Serve(_) => unreachable!("serve handled above"),
+            };
+            let args = match query {
+                GatewaySub::Protocol(a)
+                | GatewaySub::Discover(a)
+                | GatewaySub::Status(a)
+                | GatewaySub::Ecology(a)
+                | GatewaySub::Snapshot(a) => a,
+                GatewaySub::Serve(_) => unreachable!("serve handled above"),
+            };
+            let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
+            let response =
+                aikit_adapters::gateway_command(&target, command, None).map_err(|error| {
+                    aikit_cli::gateway_ops::unreachable_hint(&error).unwrap_or(error)
+                })?;
+            let data = serde_json::to_value(&response).map_err(|error| {
+                AikitError::new(
+                    "cli.gateway_response_encode",
+                    format!("encode gateway response: {error}"),
+                )
+            })?;
+            Ok(Reply::Data {
+                context: EnvelopeContext {
+                    context_id: None,
+                    session_id: None,
+                    project_root: None,
+                },
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
     }
 }
 

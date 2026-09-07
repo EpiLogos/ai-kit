@@ -60,6 +60,19 @@ impl GatewayIngressPolicy {
     }
 }
 
+/// Smallest continuation lineage the gateway represents: the Stream/sequence
+/// point a new binding continued from. Refs and a cursor only — Actuation owns
+/// the semantics of forking; the gateway keeps the relation legible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayForkOrigin {
+    pub stream_ref: ResourceRef,
+    pub at_sequence: u64,
+}
+
+fn default_context_revision() -> u64 {
+    1
+}
+
 /// Stable semantic route between one provider-native conversation and one
 /// situated AgentSession/ActuationStream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +90,13 @@ pub struct GatewayBinding {
     pub harness_ref: Option<ResourceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub surface_ref: Option<ResourceRef>,
+    /// Where this binding's Stream continued from, when it is a fork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<GatewayForkOrigin>,
+    /// Recorded revision of the session's operative Context condition. The
+    /// gateway represents the revision; revising the Context is Actuation's.
+    #[serde(default = "default_context_revision")]
+    pub context_revision: u64,
     pub ingress: GatewayIngressPolicy,
     #[serde(default)]
     pub provenance: Vec<String>,
@@ -311,6 +331,85 @@ pub struct GatewayStatus {
     pub connector_health: Vec<ConnectorHealth>,
 }
 
+/// Qualitatively distinct co-internal relations the gateway ecology can name.
+/// Listing a mode discloses that the relation is representable; it never
+/// authorises it. Authority is a separate AIKit capability grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GatewayInvocationMode {
+    Communique,
+    SessionContribution,
+    Delegation,
+    SessionFork,
+    CoActuation,
+}
+
+/// Every mode is always representable; none is ever implied by presence.
+pub const GATEWAY_INVOCATION_MODES: [GatewayInvocationMode; 5] = [
+    GatewayInvocationMode::Communique,
+    GatewayInvocationMode::SessionContribution,
+    GatewayInvocationMode::Delegation,
+    GatewayInvocationMode::SessionFork,
+    GatewayInvocationMode::CoActuation,
+];
+
+pub const GATEWAY_ECOLOGY_AUTHORITY_LAW: &str = "presence-does-not-imply-authority";
+
+/// One live Surface projection of a session, as the ecology read model sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GatewayEcologySurface {
+    pub binding_ref: ResourceRef,
+    pub connector_ref: ResourceRef,
+    pub platform: String,
+    pub address: ConversationAddress,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_ref: Option<ResourceRef>,
+    pub ingress_default: GatewayIngressDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<GatewayForkOrigin>,
+    pub context_revision: u64,
+}
+
+/// Journal-backed stream summary inside the ecology.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GatewayEcologyStream {
+    pub stream_ref: ResourceRef,
+    pub last_sequence: u64,
+    pub event_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GatewayEcologySession {
+    pub agent_session_ref: ResourceRef,
+    pub agency_ref: ResourceRef,
+    pub actuation_refs: Vec<ResourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ref: Option<ResourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_ref: Option<ResourceRef>,
+    pub streams: Vec<GatewayEcologyStream>,
+    pub surfaces: Vec<GatewayEcologySurface>,
+    pub invocation_modes: Vec<GatewayInvocationMode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GatewayEcologyAgency {
+    pub agency_ref: ResourceRef,
+    pub sessions: Vec<GatewayEcologySession>,
+}
+
+/// Derived live-agency read model: which Agencies, AgentSessions, Streams and
+/// Surfaces this gateway currently constitutes, with the invocation vocabulary
+/// and the authority law disclosed. Derived from bindings and journals — not a
+/// second registry; the SessionSpace/capability layers remain the authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GatewayEcology {
+    pub version: String,
+    pub gateway_ref: ResourceRef,
+    pub authority: String,
+    pub agencies: Vec<GatewayEcologyAgency>,
+}
+
 /// Serialisable semantic state sufficient to reconstruct the gateway after a
 /// process/material-service restart. It deliberately carries no PID/socket/
 /// Workcell allocation identity.
@@ -423,6 +522,45 @@ impl AgencyGateway {
                     binding.binding_ref
                 ),
             ));
+        }
+        if binding.context_revision == 0 {
+            return Err(AikitError::new(
+                "agency_gateway.invalid_context_revision",
+                format!(
+                    "binding {} records context revision 0; revisions start at 1",
+                    binding.binding_ref
+                ),
+            ));
+        }
+        if let Some(origin) = &binding.forked_from {
+            if origin.stream_ref == binding.actuation_stream_ref {
+                return Err(AikitError::new(
+                    "agency_gateway.fork_origin_self",
+                    format!(
+                        "binding {} forks Stream {} from itself",
+                        binding.binding_ref, origin.stream_ref
+                    ),
+                ));
+            }
+            let origin_stream = self.streams.get(&origin.stream_ref).ok_or_else(|| {
+                AikitError::new(
+                    "agency_gateway.unknown_fork_origin",
+                    format!(
+                        "binding {} forks from unknown Stream {}",
+                        binding.binding_ref, origin.stream_ref
+                    ),
+                )
+            })?;
+            let origin_last = origin_stream.next_sequence.saturating_sub(1);
+            if origin.at_sequence == 0 || origin.at_sequence > origin_last {
+                return Err(AikitError::new(
+                    "agency_gateway.fork_origin_sequence",
+                    format!(
+                        "binding {} forks Stream {} at sequence {} outside journal 1..={origin_last}",
+                        binding.binding_ref, origin.stream_ref, origin.at_sequence
+                    ),
+                ));
+            }
         }
         let route = GatewayRouteKey::new(binding.connector_ref.clone(), binding.address.clone());
         if let Some(existing_binding) = self.routes.get(&route) {
@@ -672,6 +810,126 @@ impl AgencyGateway {
         }
     }
 
+    /// Derive the live ecology from bindings and journals. A session appears
+    /// once per (Agency, AgentSession); journals with no live binding still
+    /// appear, with no surfaces — a stream survives Surface loss.
+    pub fn ecology(&self) -> GatewayEcology {
+        struct SessionAccumulator {
+            agency_ref: ResourceRef,
+            agent_session_ref: ResourceRef,
+            actuation_refs: BTreeSet<ResourceRef>,
+            agent_ref: Option<ResourceRef>,
+            harness_ref: Option<ResourceRef>,
+            stream_refs: BTreeSet<ResourceRef>,
+            surfaces: Vec<GatewayEcologySurface>,
+        }
+        fn session_entry(
+            sessions: &mut BTreeMap<(ResourceRef, ResourceRef), SessionAccumulator>,
+            agency_ref: ResourceRef,
+            agent_session_ref: ResourceRef,
+        ) -> &mut SessionAccumulator {
+            sessions
+                .entry((agency_ref.clone(), agent_session_ref.clone()))
+                .or_insert_with(|| SessionAccumulator {
+                    agency_ref,
+                    agent_session_ref,
+                    actuation_refs: BTreeSet::new(),
+                    agent_ref: None,
+                    harness_ref: None,
+                    stream_refs: BTreeSet::new(),
+                    surfaces: Vec::new(),
+                })
+        }
+        let mut sessions: BTreeMap<(ResourceRef, ResourceRef), SessionAccumulator> =
+            BTreeMap::new();
+        for binding in self.bindings.values() {
+            let session = session_entry(
+                &mut sessions,
+                binding.agency_ref.clone(),
+                binding.agent_session_ref.clone(),
+            );
+            session.actuation_refs.insert(binding.actuation_ref.clone());
+            session.stream_refs.insert(binding.actuation_stream_ref.clone());
+            if session.agent_ref.is_none() {
+                session.agent_ref = binding.agent_ref.clone();
+            }
+            if session.harness_ref.is_none() {
+                session.harness_ref = binding.harness_ref.clone();
+            }
+            session.surfaces.push(GatewayEcologySurface {
+                binding_ref: binding.binding_ref.clone(),
+                connector_ref: binding.connector_ref.clone(),
+                platform: binding.address.platform.clone(),
+                address: binding.address.clone(),
+                surface_ref: binding.surface_ref.clone(),
+                ingress_default: binding.ingress.default,
+                forked_from: binding.forked_from.clone(),
+                context_revision: binding.context_revision,
+            });
+        }
+        for stream in self.streams.values() {
+            let session = session_entry(
+                &mut sessions,
+                stream.agency_ref.clone(),
+                stream.agent_session_ref.clone(),
+            );
+            session.actuation_refs.insert(stream.actuation_ref.clone());
+            session.stream_refs.insert(stream.stream_ref.clone());
+        }
+        let mut agencies: BTreeMap<ResourceRef, Vec<GatewayEcologySession>> = BTreeMap::new();
+        for (
+            _,
+            SessionAccumulator {
+                agency_ref,
+                agent_session_ref,
+                actuation_refs,
+                agent_ref,
+                harness_ref,
+                stream_refs,
+                surfaces,
+            },
+        ) in sessions
+        {
+            let streams = stream_refs
+                .into_iter()
+                .map(|stream_ref| {
+                    let journal = self.streams.get(&stream_ref);
+                    GatewayEcologyStream {
+                        stream_ref,
+                        last_sequence: journal
+                            .map(|journal| journal.next_sequence.saturating_sub(1))
+                            .unwrap_or(0),
+                        event_count: journal.map(|journal| journal.events.len()).unwrap_or(0),
+                    }
+                })
+                .collect();
+            agencies.entry(agency_ref.clone()).or_default().push(
+                GatewayEcologySession {
+                    agent_session_ref,
+                    agency_ref,
+                    actuation_refs: actuation_refs.into_iter().collect(),
+                    agent_ref,
+                    harness_ref,
+                    streams,
+                    surfaces,
+                    invocation_modes: GATEWAY_INVOCATION_MODES.to_vec(),
+                },
+            );
+        }
+        GatewayEcology {
+            version: AGENCY_GATEWAY_VERSION.into(),
+            gateway_ref: self.gateway_ref.clone(),
+            authority: GATEWAY_ECOLOGY_AUTHORITY_LAW.into(),
+            agencies: agencies
+                .into_iter()
+                .map(|(agency_ref, sessions)| GatewayEcologyAgency {
+                    agency_ref,
+                    sessions,
+                })
+                .collect(),
+        }
+    }
+
     pub fn snapshot(&self) -> GatewaySnapshot {
         GatewaySnapshot {
             version: AGENCY_GATEWAY_VERSION.into(),
@@ -703,9 +961,8 @@ impl AgencyGateway {
         for descriptor in snapshot.connectors {
             gateway.register_connector(descriptor)?;
         }
-        for binding in snapshot.bindings {
-            gateway.bind(binding)?;
-        }
+        // Streams restore before bindings so fork lineage and stream/binding
+        // compatibility validate against the full journal set.
         for stream in snapshot.streams {
             stream.validate()?;
             let stream_ref = stream.stream_ref.clone();
@@ -716,10 +973,8 @@ impl AgencyGateway {
                 ));
             }
         }
-        for binding in gateway.bindings.values() {
-            if let Some(stream) = gateway.streams.get(&binding.actuation_stream_ref) {
-                stream.ensure_binding(binding)?;
-            }
+        for binding in snapshot.bindings {
+            gateway.bind(binding)?;
         }
         for health in snapshot.connector_health {
             gateway.set_connector_health(health)?;
@@ -843,6 +1098,7 @@ pub enum GatewayCommand {
     Protocol,
     Discover,
     Status,
+    Ecology,
     RegisterConnector { descriptor: ConnectorDescriptor },
     Bind { binding: GatewayBinding },
     Unbind { binding_ref: ResourceRef },
@@ -885,6 +1141,7 @@ pub enum GatewayResponse {
     },
     Discovery { discovery: GatewayDiscovery },
     Status { status: GatewayStatus },
+    Ecology { ecology: GatewayEcology },
     Registered { connector_ref: ResourceRef },
     Bound { binding_ref: ResourceRef },
     Unbound { binding_ref: ResourceRef },
@@ -915,6 +1172,9 @@ pub fn execute_gateway_command(
         }),
         GatewayCommand::Status => Ok(GatewayResponse::Status {
             status: gateway.status(),
+        }),
+        GatewayCommand::Ecology => Ok(GatewayResponse::Ecology {
+            ecology: gateway.ecology(),
         }),
         GatewayCommand::RegisterConnector { descriptor } => {
             let connector_ref = descriptor.connector_ref.clone();
@@ -1095,6 +1355,8 @@ mod tests {
             agent_ref: Some(r("agent/root")),
             harness_ref: Some(r("harness/codex")),
             surface_ref: Some(r(&format!("surface/{platform}"))),
+            forked_from: None,
+            context_revision: 1,
             ingress: GatewayIngressPolicy {
                 default: GatewayIngressDecision::Allow,
                 sender_overrides: BTreeMap::new(),
@@ -1345,5 +1607,220 @@ mod tests {
         assert_eq!(decoded, request);
         assert!(!encoded.contains("websocket"));
         assert!(!encoded.contains("unix"));
+    }
+
+    fn forked_binding(
+        platform: &str,
+        conversation: &str,
+        suffix: &str,
+        origin: GatewayForkOrigin,
+        context_revision: u64,
+    ) -> GatewayBinding {
+        let mut fork = binding(platform, conversation, suffix);
+        fork.agent_session_ref = r("agent-session/fork");
+        fork.actuation_ref = r("actuation/fork");
+        fork.actuation_stream_ref = r("actuation-stream/fork");
+        fork.forked_from = Some(origin);
+        fork.context_revision = context_revision;
+        fork
+    }
+
+    fn journal_with_events(gateway: &mut AgencyGateway, count: usize) {
+        for index in 0..count {
+            gateway
+                .ingest(inbound(
+                    "telegram",
+                    "chat-42",
+                    &format!("fork-{index}"),
+                    "user-7",
+                ))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn fork_lineage_binds_only_against_a_real_journal_point() {
+        let mut gateway = gateway();
+        gateway.register_connector(connector("telegram")).unwrap();
+        gateway.bind(binding("telegram", "chat-42", "telegram")).unwrap();
+        journal_with_events(&mut gateway, 3);
+
+        let valid = forked_binding(
+            "slack",
+            "channel-9",
+            "fork-good",
+            GatewayForkOrigin {
+                stream_ref: r("actuation-stream/root"),
+                at_sequence: 2,
+            },
+            2,
+        );
+        gateway.register_connector(connector("slack")).unwrap();
+        gateway.bind(valid).unwrap();
+
+        let unknown_origin = forked_binding(
+            "slack",
+            "channel-10",
+            "fork-unknown",
+            GatewayForkOrigin {
+                stream_ref: r("actuation-stream/absent"),
+                at_sequence: 1,
+            },
+            1,
+        );
+        assert_eq!(
+            gateway.bind(unknown_origin).unwrap_err().code(),
+            "agency_gateway.unknown_fork_origin"
+        );
+
+        let beyond_journal = forked_binding(
+            "slack",
+            "channel-11",
+            "fork-beyond",
+            GatewayForkOrigin {
+                stream_ref: r("actuation-stream/root"),
+                at_sequence: 4,
+            },
+            1,
+        );
+        assert_eq!(
+            gateway.bind(beyond_journal).unwrap_err().code(),
+            "agency_gateway.fork_origin_sequence"
+        );
+
+        let self_fork = forked_binding(
+            "slack",
+            "channel-12",
+            "fork-self",
+            GatewayForkOrigin {
+                stream_ref: r("actuation-stream/fork"),
+                at_sequence: 1,
+            },
+            1,
+        );
+        assert_eq!(
+            gateway.bind(self_fork).unwrap_err().code(),
+            "agency_gateway.fork_origin_self"
+        );
+
+        let zero_revision = forked_binding(
+            "slack",
+            "channel-13",
+            "fork-zero",
+            GatewayForkOrigin {
+                stream_ref: r("actuation-stream/root"),
+                at_sequence: 1,
+            },
+            0,
+        );
+        assert_eq!(
+            gateway.bind(zero_revision).unwrap_err().code(),
+            "agency_gateway.invalid_context_revision"
+        );
+
+        // The bound fork round-trips through a snapshot with its lineage.
+        let snapshot = gateway.snapshot();
+        let restored = AgencyGateway::from_snapshot(snapshot).unwrap();
+        let ecology = restored.ecology();
+        let fork_binding = ecology
+            .agencies
+            .iter()
+            .flat_map(|agency| agency.sessions.iter())
+            .flat_map(|session| session.surfaces.iter())
+            .find(|surface| surface.binding_ref == r("gateway-binding/fork-good"))
+            .unwrap();
+        assert_eq!(fork_binding.forked_from.as_ref().unwrap().at_sequence, 2);
+        assert_eq!(fork_binding.context_revision, 2);
+    }
+
+    #[test]
+    fn ecology_groups_agencies_sessions_and_discloses_authority_law() {
+        let mut gateway = gateway();
+        gateway.register_connector(connector("telegram")).unwrap();
+        gateway.register_connector(connector("slack")).unwrap();
+        gateway.bind(binding("telegram", "chat-42", "telegram")).unwrap();
+        gateway.bind(binding("slack", "channel-7", "slack")).unwrap();
+        journal_with_events(&mut gateway, 2);
+        let mut other_session = binding("telegram", "chat-99", "other");
+        other_session.agent_session_ref = r("agent-session/second");
+        other_session.actuation_ref = r("actuation/second");
+        other_session.actuation_stream_ref = r("actuation-stream/second");
+        gateway.bind(other_session).unwrap();
+
+        let ecology = gateway.ecology();
+        assert_eq!(ecology.version, AGENCY_GATEWAY_VERSION);
+        assert_eq!(ecology.authority, "presence-does-not-imply-authority");
+        assert_eq!(ecology.agencies.len(), 1);
+        let agency = &ecology.agencies[0];
+        assert_eq!(agency.agency_ref, r("agency/root"));
+        assert_eq!(agency.sessions.len(), 2);
+
+        let root = agency
+            .sessions
+            .iter()
+            .find(|session| session.agent_session_ref == r("agent-session/root"))
+            .unwrap();
+        assert_eq!(root.surfaces.len(), 2);
+        assert_eq!(
+            root.streams,
+            vec![GatewayEcologyStream {
+                stream_ref: r("actuation-stream/root"),
+                last_sequence: 2,
+                event_count: 2,
+            }]
+        );
+        assert_eq!(root.agent_ref.as_ref(), Some(&r("agent/root")));
+        assert_eq!(
+            root.invocation_modes,
+            vec![
+                GatewayInvocationMode::Communique,
+                GatewayInvocationMode::SessionContribution,
+                GatewayInvocationMode::Delegation,
+                GatewayInvocationMode::SessionFork,
+                GatewayInvocationMode::CoActuation,
+            ]
+        );
+
+        let second = agency
+            .sessions
+            .iter()
+            .find(|session| session.agent_session_ref == r("agent-session/second"))
+            .unwrap();
+        assert_eq!(second.surfaces.len(), 1);
+        assert_eq!(second.streams[0].last_sequence, 0);
+        assert_eq!(second.streams[0].event_count, 0);
+
+        // Surface loss keeps the stream legible: unbind leaves the journal.
+        gateway.unbind(&r("gateway-binding/slack")).unwrap();
+        let ecology = gateway.ecology();
+        let root = ecology.agencies[0]
+            .sessions
+            .iter()
+            .find(|session| session.agent_session_ref == r("agent-session/root"))
+            .unwrap();
+        assert_eq!(root.surfaces.len(), 1);
+        assert_eq!(root.streams[0].last_sequence, 2);
+    }
+
+    #[test]
+    fn ecology_command_round_trips_through_the_portable_protocol() {
+        let mut gateway = gateway();
+        gateway.register_connector(connector("telegram")).unwrap();
+        gateway.bind(binding("telegram", "chat-42", "telegram")).unwrap();
+        let response = execute_gateway_command(
+            &mut gateway,
+            GatewayCommand::Ecology,
+        )
+        .unwrap();
+        let GatewayResponse::Ecology { ecology } = response else {
+            panic!("ecology command should answer with the ecology read model");
+        };
+        assert_eq!(ecology.agencies.len(), 1);
+        let encoded = serde_json::to_value(GatewayRequestEnvelope {
+            request_id: None,
+            command: GatewayCommand::Ecology,
+        })
+        .unwrap();
+        assert_eq!(encoded["command"]["type"], "ecology");
     }
 }

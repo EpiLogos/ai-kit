@@ -8,7 +8,7 @@ argument-hint: Name the authored world, audience, purpose, source horizon, desir
 
 Create a coherent reading of an authored world from the material that already owns its meaning.
 
-An **account** is an authored or generated reading. It is not a universal `Account` entity and it does not become a new canonical source.
+An **account** is an authored or generated reading. Generation alone gives it no new authority. The human may choose an editable account as product source, with provenance and recognition recorded at the appropriate scope; derived readings retain their source links.
 
 Use this Skill for Central, Projects, Wiki spaces, research corpora, or other coherent authored worlds when the human asks for deep understanding, documentation, design account, review, or Projection preparation.
 
@@ -42,16 +42,16 @@ For a Project, preserve the Project's own authority and ordinary filesystem/repo
 
 When product or system meaning matters, compose with `skill/aikit/product-understanding` if available.
 
-Keep these standings distinguishable:
+Keep the six documentation standings distinguishable:
 
 - AUTHORED HUMAN POSITION
-- PRODUCT / CONSTITUTIONAL INTENT
 - DESIGN COMMITMENT
 - ARCHITECTURE CONTRACT
 - IMPLEMENTATION FACT
-- EXPERIMENTAL OR RUN EVIDENCE
-- CURRENT DEVELOPMENT STATE
-- INFERENCE / INTERPRETATION
+- OBSERVED EVIDENCE
+- AGENT INFERENCE
+
+Product/constitutional intent describes content and scope; current development state describes time and context. Neither adds a standing. Use Central’s source relation and canonical standing protocol when mapping claims.
 
 Provenance determines authority for the question being asked.
 
@@ -111,6 +111,10 @@ Current frontier
 A scientific, artistic, historical, or ordinary filesystem Project can use a completely different form.
 
 Do not manufacture visible symmetry merely to satisfy a hidden grammar.
+
+### Human-selected seed-led accounts
+
+For the suite documentation convention, compose the 0/1 six-question seed first, then its six expanded layers. Use the human's seed where supplied; otherwise return a source-grounded candidate with Agent attribution. Keep the concrete What and experiential Why visible before technical detail. Follow the native `html-account` seed-led mode for the renderer and Central's `docs-methodology` for capability links, seed revision reconciliation and source standing. Preserve ordinary files as valid source around this selected account. Route capability-matrix authoring to Central’s `capability-matrices` Skill and `docs/CAPABILITY-MATRIX-PROTOCOL.md` (`ql-capability-matrix/1`), with templates in `skills/capability-matrices/assets` (`matrix.csv` and `matrix.schema.json`). Bind account units to stable capability IDs; the manifest owns ordered axes and views, while uniform CSV records retain capabilities and their placements. Other views change the declared organisation, not the artifact protocol.
 
 ## 5. Source ledger
 
