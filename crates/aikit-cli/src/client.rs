@@ -6,7 +6,7 @@
 //! each client's config shape); this module turns that into world edits with
 //! inverses and hands them to the one engine.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::Kind;
 use aikit_core::procedure::{Inverse, Plan, Procedure, ProcedureKind, WorldEdit};
@@ -28,23 +28,31 @@ use crate::app::Service;
 /// Actuation's capability descriptor declares the seam when it is reachable;
 /// otherwise the row carries the disclosure and the legacy default path is
 /// used for read models only. The broker is AIKit's own config home.
-fn client_home(seam_path: &str) -> Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let expanded = seam_path
-        .strip_prefix("~/")
-        .map(|rest| home.join(rest))
-        .unwrap_or_else(|| PathBuf::from(seam_path));
-    expanded
-        .parent()
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            AikitError::new(
-                "client.seam_has_no_directory",
-                format!("the capability seam `{seam_path}` has no parent directory"),
-            )
-        })
+///
+/// A `~/` seam is user-level; an absolute seam is taken as-is; a **relative**
+/// seam (codex's per-project `.codex/hooks.json`) is a property of the working
+/// tree and resolves against the project root, never against whatever
+/// directory the command happened to run from.
+fn client_home(seam_path: &str, tree: &Path) -> Result<PathBuf> {
+    let expanded = if let Some(rest) = seam_path.strip_prefix("~/") {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        home.join(rest)
+    } else {
+        PathBuf::from(seam_path)
+    };
+    let resolved = if expanded.is_absolute() {
+        expanded
+    } else {
+        tree.join(expanded)
+    };
+    resolved.parent().map(PathBuf::from).ok_or_else(|| {
+        AikitError::new(
+            "client.seam_has_no_directory",
+            format!("the capability seam `{seam_path}` has no parent directory"),
+        )
+    })
 }
 
 /// Intake of one harness's capability descriptor: a descriptor, or a
@@ -83,7 +91,7 @@ fn adapter_for(
     match client {
         "claude" | "claude-code" => match capability_for(client, "claude-code") {
             Ok(capability) => {
-                let config_dir = client_home(&capability.install_seam.config_path)?;
+                let config_dir = client_home(&capability.install_seam.config_path, &tree)?;
                 Ok((
                     Box::new(ClaudeAdapter::new(ctx_dir).with_capability(capability.clone())),
                     Some(capability),
@@ -98,7 +106,7 @@ fn adapter_for(
         },
         "codex" => match capability_for(client, "codex") {
             Ok(capability) => {
-                let config_dir = client_home(&capability.install_seam.config_path)?;
+                let config_dir = client_home(&capability.install_seam.config_path, &tree)?;
                 Ok((
                     Box::new(CodexAdapter::new(tree).with_capability(capability.clone())),
                     Some(capability),
@@ -113,7 +121,7 @@ fn adapter_for(
         },
         "zcode" => match capability_for(client, "zcode") {
             Ok(capability) => {
-                let config_dir = client_home(&capability.install_seam.config_path)?;
+                let config_dir = client_home(&capability.install_seam.config_path, &tree)?;
                 Ok((
                     Box::new(ZcodeAdapter::new().with_capability(capability.clone())),
                     Some(capability),

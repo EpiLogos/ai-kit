@@ -36,6 +36,7 @@ pub mod cursor;
 pub mod dsh;
 pub mod gemini;
 pub mod goose;
+pub mod hook_map;
 pub mod opencode;
 pub mod qwen;
 pub mod zcode;

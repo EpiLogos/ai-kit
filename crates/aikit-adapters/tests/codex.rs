@@ -21,7 +21,7 @@ use common::*;
 
 use std::path::Path;
 
-use aikit_adapters::actuation_harness_capability::HarnessCapability;
+use aikit_adapters::actuation_harness_capability::{CapabilityOutcome, HarnessCapability};
 use aikit_adapters::clients::codex::{CodexAdapter, SharedTreeStrategy};
 use aikit_adapters::clients::ClientAdapter;
 use aikit_core::context::Isolation;
@@ -448,36 +448,204 @@ fn codex_capability() -> HarnessCapability {
 }
 
 #[test]
-fn installing_writes_an_aikit_owned_dispatcher_file_and_is_idempotent() {
+fn installing_writes_the_descriptor_seam_hooks_json_and_is_idempotent() {
     let tree = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     let adapter = CodexAdapter::new(tree.path()).with_capability(codex_capability());
 
     let items = adapter.install(config.path()).unwrap();
     materialize(&items, config.path());
-    let first = std::fs::read_to_string(config.path().join("hooks/aikit.toml")).unwrap();
+    let first = std::fs::read_to_string(config.path().join("hooks.json")).unwrap();
 
     materialize(&adapter.install(config.path()).unwrap(), config.path());
-    let second = std::fs::read_to_string(config.path().join("hooks/aikit.toml")).unwrap();
+    let second = std::fs::read_to_string(config.path().join("hooks.json")).unwrap();
 
     assert_eq!(first, second);
-    for event in ["session_start", "pre_tool_use", "post_tool_use"] {
-        assert!(
-            first.contains(&format!("event = \"{event}\"")),
-            "missing native event {event} in {first}"
-        );
-        assert!(
-            first.contains("aikit hook dispatch codex"),
-            "the dispatcher command rides the AIKit boundary name: {first}"
+    let document: serde_json::Value = serde_json::from_str(&first).unwrap();
+    let events = document["hooks"].as_object().unwrap();
+    let mut names: Vec<&String> = events.keys().collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["PostToolUse", "PreToolUse", "SessionStart"],
+        "the file carries exactly the descriptor's hooks-json events, spelled the way the \
+         grammar spells them"
+    );
+    for (event, entries) in events {
+        let commands: Vec<&str> = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["hooks"].as_array().unwrap())
+            .map(|h| h["command"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            commands,
+            vec![format!("aikit hook dispatch codex {event}")],
+            "exactly one durable dispatcher entry per event"
         );
     }
-    // The dispatcher command is keyed by AIKit's boundary name, not the native
-    // spelling, so the same chain works on both sides of the seam.
-    assert!(first.contains("aikit hook dispatch codex SessionStart"), "{first}");
 }
 
 #[test]
-fn installing_does_not_touch_the_users_own_codex_configuration() {
+fn the_toml_notify_event_is_disclosed_but_never_written_into_hooks_json() {
+    let tree = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let adapter = CodexAdapter::new(tree.path()).with_capability(codex_capability());
+
+    materialize(&adapter.install(config.path()).unwrap(), config.path());
+    let document: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config.path().join("hooks.json")).unwrap())
+            .unwrap();
+    assert!(
+        document["hooks"].get("Notification").is_none(),
+        "codex's Notification rides config.toml notify, not the hooks file: {document}"
+    );
+
+    let outcome = CapabilityOutcome::Descriptor(Box::new(codex_capability()));
+    let (mapped, unrouted) = outcome.dispatch_events();
+    assert_eq!(mapped.len(), 4, "all four events map onto AIKit boundaries");
+    assert!(
+        unrouted.is_empty(),
+        "the plain mapping routes everything; the transport split is the seam's concern"
+    );
+    let (file_events, disclosed) = outcome.dispatch_events_on_transports(&["hooks-json-file"]);
+    assert_eq!(file_events.len(), 3);
+    assert!(
+        disclosed.iter().any(|note| note.contains("toml-notify")),
+        "the notify event stays disclosed beside the seam's events: {disclosed:?}"
+    );
+}
+
+#[test]
+fn installing_merges_into_an_existing_hooks_json_preserving_foreign_entries() {
+    let tree = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join("hooks.json"),
+        r#"{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [{ "type": "command", "command": "my-own-orienter", "timeout": 15 }]
+      }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "my-own-stopper" }] }
+    ]
+  }
+}"#,
+    )
+    .unwrap();
+
+    materialize(
+        &CodexAdapter::new(tree.path())
+            .with_capability(codex_capability())
+            .install(config.path())
+            .unwrap(),
+        config.path(),
+    );
+    let document: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config.path().join("hooks.json")).unwrap())
+            .unwrap();
+
+    let session_start: Vec<&str> = document["hooks"]["SessionStart"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|m| m["hooks"].as_array().unwrap())
+        .map(|h| h["command"].as_str().unwrap())
+        .collect();
+    assert!(
+        session_start.contains(&"my-own-orienter"),
+        "the user's own hook must survive: {session_start:?}"
+    );
+    assert!(session_start.contains(&"aikit hook dispatch codex SessionStart"));
+    assert!(
+        document["hooks"].get("Stop").is_some(),
+        "a foreign event AIKit does not dispatch must survive untouched"
+    );
+    // codex's matcher is a regex and an omitted matcher matches everything;
+    // AIKit's entries invent none.
+    let aikit_entry = document["hooks"]["SessionStart"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| {
+            m["hooks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|h| h["command"] == "aikit hook dispatch codex SessionStart")
+        })
+        .unwrap();
+    assert!(aikit_entry.get("matcher").is_none());
+}
+
+#[test]
+fn a_stale_aikit_entry_is_replaced_rather_than_joined_by_a_second_one() {
+    let tree = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join("hooks.json"),
+        r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"aikit hook dispatch codex Stopp"}]}]}}"#,
+    )
+    .unwrap();
+
+    materialize(
+        &CodexAdapter::new(tree.path())
+            .with_capability(codex_capability())
+            .install(config.path())
+            .unwrap(),
+        config.path(),
+    );
+    let document: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config.path().join("hooks.json")).unwrap())
+            .unwrap();
+    let session_start: Vec<&str> = document["hooks"]["SessionStart"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|m| m["hooks"].as_array().unwrap())
+        .map(|h| h["command"].as_str().unwrap())
+        .collect();
+    assert_eq!(session_start, vec!["aikit hook dispatch codex SessionStart"]);
+    // The typo'd stale entry was on Stop; the sweep removed it, and Stop is not
+    // an event this descriptor dispatches, so its key is pruned.
+    assert!(document["hooks"].get("Stop").is_none());
+}
+
+#[test]
+fn a_hooks_json_that_is_not_json_is_refused_rather_than_overwritten() {
+    let tree = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(config.path().join("hooks.json"), "{ this is not json").unwrap();
+
+    let error = CodexAdapter::new(tree.path())
+        .with_capability(codex_capability())
+        .install(config.path())
+        .unwrap_err();
+    assert_eq!(error.code(), "client.settings_unreadable");
+    assert_eq!(
+        std::fs::read_to_string(config.path().join("hooks.json")).unwrap(),
+        "{ this is not json",
+        "a file AIKit could not understand is left exactly as it was"
+    );
+}
+
+#[test]
+fn install_without_a_capability_descriptor_refuses_instead_of_guessing() {
+    let tree = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let bare = CodexAdapter::new(tree.path());
+
+    let error = bare.install(config.path()).unwrap_err();
+    assert_eq!(error.code(), "client.capability_unavailable");
+}
+
+#[test]
+fn installing_leaves_the_users_own_codex_config_toml_untouched() {
     let tree = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     let own = "# my notes\nmodel = \"o3\"\n";
@@ -494,8 +662,8 @@ fn installing_does_not_touch_the_users_own_codex_configuration() {
     assert_eq!(
         std::fs::read_to_string(config.path().join("config.toml")).unwrap(),
         own,
-        "AIKit's entries live in their own file precisely so a hand-written config with \
-         comments in it is never rewritten"
+        "the notify listener is the user's to configure; AIKit writes only the descriptor's \
+         hooks.json seam"
     );
 }
 
