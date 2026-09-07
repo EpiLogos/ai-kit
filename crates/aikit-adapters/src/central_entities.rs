@@ -14,7 +14,7 @@
 
 use aikit_core::{
     ResourceRef, SemanticRevision, SourceRef, WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject,
-    WikiProvenanceRef,
+    WikiProvenanceRef, WikiSpace,
 };
 
 fn resource_ref(value: &str) -> ResourceRef {
@@ -57,7 +57,7 @@ pub fn materialise_central_entities(root: &Path) -> CentralEntityReading {
 
     let agent_nodes = read_agent_entities(root, &mut absences).unwrap_or_default();
 
-    let (set_nodes, set_edges) = read_agent_set_entities(root, &mut absences);
+    let (mut set_nodes, set_edges) = read_agent_set_entities(root, &mut absences);
 
     // Member edges only target entities that exist in this same pass, so the
     // compiled graph never dangles; unresolved members are disclosed.
@@ -67,6 +67,7 @@ pub fn materialise_central_entities(root: &Path) -> CentralEntityReading {
         known_refs.insert(nara.ref_id.as_str().to_owned());
     }
     let mut edges = Vec::new();
+    let mut spaces = Vec::new();
     for edge in set_edges {
         if known_refs.contains(edge.to_ref.as_str()) {
             edges.push(edge);
@@ -77,8 +78,46 @@ pub fn materialise_central_entities(root: &Path) -> CentralEntityReading {
             ));
         }
     }
+
+    // W10 V4: each agent-set entity is a bounded local whole — its local
+    // space anchors on the entity and carries exactly the materialised
+    // membership, so `local_space_ref` resolves at rebuild and navigation
+    // traverses the whole through the bounded relation faculty.
+    for node in &mut set_nodes {
+        let set_ref = node
+            .extensions
+            .get(PASU_EXTENSION)
+            .and_then(|form| form.get("subject_ref"))
+            .and_then(|value| value.as_str())
+            .and_then(|subject| subject.rsplit(':').next())
+            .unwrap_or_default()
+            .to_owned();
+        if set_ref.is_empty() {
+            continue;
+        }
+        let local_space_ref = format!("wiki:space:pasu-local:{set_ref}");
+        let members: Vec<ResourceRef> = edges
+            .iter()
+            .filter(|edge| edge.from_ref.as_str() == node.ref_id.as_str())
+            .map(|edge| edge.to_ref.clone())
+            .collect();
+        node.local_space_ref = Some(resource_ref(&local_space_ref));
+        spaces.push(WikiObject::Space(WikiSpace {
+            profile: "okf-wiki/v1".into(),
+            ref_id: resource_ref(&local_space_ref),
+            revision: 1,
+            provenance: Vec::new(),
+            title: Some(format!("Local whole: {set_ref}")),
+            parent_space_refs: Vec::new(),
+            child_space_refs: Vec::new(),
+            node_refs: members,
+            anchor_ref: Some(node.ref_id.clone()),
+            extensions: BTreeMap::new(),
+        }));
+    }
     objects.extend(agent_nodes.into_iter().map(WikiObject::Node));
     objects.extend(set_nodes.into_iter().map(WikiObject::Node));
+    objects.extend(spaces);
     objects.extend(edges.into_iter().map(WikiObject::Edge));
 
     CentralEntityReading { objects, absences }

@@ -225,6 +225,17 @@ impl ParticipantTarget {
         address: impl Into<String>,
     ) -> Result<Self> {
         let address = address.into();
+        Self::validate_address_shape(&address)?;
+        Ok(Self {
+            kind,
+            participant,
+            address,
+        })
+    }
+
+    /// The participant-address shape law, shared with the Vāk resolver path
+    /// (W10 V4, D9 fold): a non-empty @token without whitespace.
+    pub fn validate_address_shape(address: &str) -> crate::Result<()> {
         if !address.starts_with('@')
             || address.len() < 2
             || address.chars().any(char::is_whitespace)
@@ -234,11 +245,7 @@ impl ParticipantTarget {
                 format!("participant address `{address}` must be a non-empty @token"),
             ));
         }
-        Ok(Self {
-            kind,
-            participant,
-            address,
-        })
+        Ok(())
     }
 }
 

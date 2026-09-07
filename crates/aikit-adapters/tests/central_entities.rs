@@ -189,8 +189,34 @@ fn case17_half_agent_set_materialises_with_compiled_member_edges() {
         .any(|absence| absence.contains("agent:unprofiled")));
     // The profiled member edge compiles and the whole set rebuilds into the index.
     let index = SemanticWikiIndex::rebuild(reading.objects).expect("entity materialisation rebuilds");
-    // Navigation traversal arrives with V4; here the compiled graph is the
-    // deliverable: the set entity participates in search like any node.
     let members = index.search("central-operators", 5);
     assert!(!members.is_empty(), "agent-set entity participates in search");
+}
+
+/// W10 V4: the agent-set entity is a bounded local whole — `local_space_ref`
+/// resolves against a materialised space anchored on the entity, and
+/// navigation traverses the membership through the relation faculty.
+#[test]
+fn case17_local_whole_resolves_and_navigation_traverses_membership() {
+    use aikit_core::RelationQuery;
+    let central = fixture_central();
+    let reading = materialise_central_entities(&central);
+    let index = SemanticWikiIndex::rebuild(reading.objects).expect("rebuild");
+
+    let set_ref = aikit_core::ResourceRef::parse("wiki:node:pasu:agent-set:central-operators").unwrap();
+    let whole = index.local_whole(&set_ref).expect("local whole resolves");
+    assert!(whole.local_space.is_some(), "the local space is materialised");
+    assert_eq!(whole.members.len(), 1, "only materialised members ride the whole");
+
+    let provider = aikit_core::SemanticWikiProvider::new(&index);
+    let query = RelationQuery {
+        focus: set_ref.clone(),
+        depth: 2,
+        max_nodes: 32,
+        max_edges: 32,
+        filters: Vec::new(),
+    };
+    let view = provider.relations(query).expect("relations view");
+    assert!(view.edges.iter().any(|edge| edge.relation == "local-member"),
+        "navigation traverses the local whole: {:?}", view.edges.iter().map(|e| e.relation.clone()).collect::<Vec<_>>());
 }

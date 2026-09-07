@@ -351,6 +351,11 @@ impl Service {
             let entities=aikit_adapters::central_entities::materialise_central_entities(central_root);
             absences.extend(entities.absences);
             aikit_adapters::central_entities::adopt_into(&mut discovered.wiki, entities.objects);
+            // W10 V4 extension: capability matrices compile in both placements
+            // (project spaces + the Central root composition), origin Compiled.
+            let matrices=aikit_adapters::capability_matrix::compile_world_matrices(central_root);
+            absences.extend(matrices.absences);
+            aikit_adapters::central_entities::adopt_into(&mut discovered.wiki, matrices.objects);
         }
 
         let wiki = if discovered.wiki.is_empty() {

@@ -48,6 +48,7 @@ pub mod hooks;
 pub mod id;
 pub mod knowledge;
 pub mod knowledge_code;
+pub mod knowledge_entity_address;
 pub mod knowledge_living;
 pub mod knowledge_living_context;
 pub mod knowledge_living_relations;
