@@ -22,7 +22,7 @@ pub fn serve_config(home: &AikitHome, args: &GatewayServeArgs) -> Result<Gateway
     let websocket_bearer_token = args
         .websocket_token
         .clone()
-        .or_else(|| gateway_token_from_env());
+        .or_else(gateway_token_from_env);
     #[cfg(unix)]
     let unix_socket = args.unix_socket.clone().or(match &args.websocket_bind {
         Some(_) => None,
@@ -57,7 +57,7 @@ pub fn carrier_target(home: &AikitHome, args: &GatewayQueryArgs) -> Result<Gatew
         let bearer_token = args
             .websocket_token
             .clone()
-            .or_else(|| gateway_token_from_env())
+            .or_else(gateway_token_from_env)
             .ok_or_else(|| {
                 AikitError::new(
                     "cli.gateway_token_required",

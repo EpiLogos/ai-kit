@@ -112,7 +112,7 @@ fn flagless_serve_binds_the_well_known_endpoint_and_queries_find_it() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|finding| finding["check"] == Value::from("gateway.service"))
+        .find(|finding| finding["check"] == "gateway.service")
         .expect("doctor must account for the gateway");
     assert_eq!(finding["severity"], Value::from("note"));
     assert!(
@@ -137,7 +137,7 @@ fn flagless_serve_binds_the_well_known_endpoint_and_queries_find_it() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|finding| finding["check"] == Value::from("gateway.service"))
+        .find(|finding| finding["check"] == "gateway.service")
         .unwrap();
     assert_eq!(finding["severity"], Value::from("note"));
     assert!(
