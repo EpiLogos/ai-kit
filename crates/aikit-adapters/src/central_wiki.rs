@@ -65,6 +65,7 @@ pub fn read_central_wiki<R: CommandRunner>(
     let mut objects = Vec::new();
     let mut absences = Vec::new();
     let mut paths = BTreeSet::new();
+    let mut seen_refs = BTreeSet::new();
     for declaration in declarations {
         if let Some(error) = declaration["error"].as_str() {
             absences.push(format!("Central wiki declaration unavailable: {error}"));
@@ -113,7 +114,26 @@ pub fn read_central_wiki<R: CommandRunner>(
             parse_wiki_objects(&text)
         })();
         match reading {
-            Ok(read) => objects.extend(read),
+            Ok(read) => {
+                // Two checkouts of one project disclose the same wiki space;
+                // same-ref objects are one logical source. First declaration
+                // wins (canonical_root order), later duplicates are
+                // disclosed. Distinct refs across projects still collide at
+                // rebuild, so the duplicate-ref guarantee is preserved where
+                // it matters.
+                for object in read {
+                    let object_ref = object.ref_id().as_str().to_owned();
+                    if seen_refs.insert(object_ref.clone()) {
+                        objects.push(object);
+                    } else {
+                        absences.push(format!(
+                            "Canonical wiki {} re-declares {} from an earlier declaration; kept the first",
+                            relative.display(),
+                            object_ref
+                        ));
+                    }
+                }
+            }
             Err(error) => absences.push(format!(
                 "Canonical wiki {} unavailable: {}",
                 relative.display(),
