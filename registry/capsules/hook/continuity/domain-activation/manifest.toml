@@ -1,0 +1,10 @@
+schema = 1
+id = "hook/continuity/domain-activation"
+kind = "hook"
+name = "Continuity domain activation"
+description = "First-party continuity reaction (W1/CASE 03): when composed, a prompt matching a declared KnowledgeDomain's triggers makes its guidance operative within the domain's declared horizon span. Ordinary guidance dedups on rendered content; standing rules are dedup-exempt by explicit classification. Domains are declared data in the project layer (.aikit/domains/*.toml); the explanation names trigger, horizon and source. Not composed by default."
+tags = ["aikit", "continuity", "engine", "domains", "activation"]
+
+[hook]
+entry = "payload/domain-activation"
+events = ["UserPromptSubmit"]

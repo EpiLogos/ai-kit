@@ -40,11 +40,18 @@ pub const TURN_LEDGER: &str = "turn-ledger";
 /// and NOW, never in this disclosure and never in persistent nodes.
 pub const ENTITY_DISCLOSURE: &str = "entity-disclosure";
 
+/// Domain activation (W1/CASE 03): when composed, a prompt matching a
+/// declared KnowledgeDomain's triggers makes its guidance operative within
+/// the domain's declared horizon span. Dedup keys on rendered content;
+/// standing rules are exempt by explicit classification. Domains are
+/// declared data in the project layer (`.aikit/domains`), never ambient.
+pub const DOMAIN_ACTIVATION: &str = "domain-activation";
+
 /// The reactions the engine itself implements, as opposed to hook capsules
 /// that merely ride the chain. A reaction listed here is answerable when
 /// asked even while it is not composed: the engine says "not composed"
 /// instead of staying silent about what it could do.
-pub const ENGINE_REACTIONS: &[&str] = &[TURN_LEDGER, ENTITY_DISCLOSURE];
+pub const ENGINE_REACTIONS: &[&str] = &[TURN_LEDGER, ENTITY_DISCLOSURE, DOMAIN_ACTIVATION];
 
 /// True when the capsule id names a first-party continuity reaction.
 pub fn is_continuity_capability(id: &CapsuleId) -> bool {

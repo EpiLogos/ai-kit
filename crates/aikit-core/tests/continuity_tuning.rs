@@ -30,6 +30,14 @@ fn entity_disclosure_capsule() -> Capsule {
     )
 }
 
+fn domain_activation_capsule() -> Capsule {
+    hook_table(
+        "hook/continuity/domain-activation",
+        "",
+        "entry = \"payload/domain-activation\"\nevents = [\"UserPromptSubmit\"]",
+    )
+}
+
 fn cid(s: &str) -> CapsuleId {
     CapsuleId::parse(s).unwrap()
 }
@@ -136,4 +144,33 @@ fn composing_entity_disclosure_is_exactly_that_delta() {
     assert!(tuning.allows("entity-disclosure"));
     // Composing entity-disclosure composes nothing else.
     assert!(!tuning.allows("turn-ledger"));
+}
+
+#[test]
+fn domain_activation_is_known_but_not_composed_by_default() {
+    // W1/CASE 03: the reaction exists and is answerable, but the descope
+    // floor never arms domains.
+    let fixture = Fixture::new(vec![domain_activation_capsule()]);
+    let view = fixture.resolve().unwrap();
+    let tuning = ContinuityTuning::resolve(&view);
+    assert!(
+        tuning.not_composed.iter().any(|name| name == "domain-activation"),
+        "domain-activation must be answerable as not composed: {tuning}"
+    );
+    assert!(!tuning.allows("domain-activation"));
+}
+
+#[test]
+fn composing_domain_activation_is_exactly_that_delta() {
+    let fixture = Fixture::new(vec![domain_activation_capsule()]).with_layers(vec![layer(
+        ScopeKind::Session,
+        &["hook/continuity/domain-activation"],
+        &[],
+    )]);
+    let view = fixture.resolve().unwrap();
+    let tuning = ContinuityTuning::resolve(&view);
+    assert_eq!(tuning.composed, vec!["domain-activation".to_string()]);
+    assert!(tuning.allows("domain-activation"));
+    assert!(!tuning.allows("turn-ledger"));
+    assert!(!tuning.allows("entity-disclosure"));
 }
