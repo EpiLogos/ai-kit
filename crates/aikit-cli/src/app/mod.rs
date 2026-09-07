@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::{Capsule, Kind};
 use aikit_core::catalog::Catalog;
+use aikit_core::continuity::ContinuityTuning;
 use aikit_core::context::ContextDescriptor;
 use aikit_core::id::{CapsuleId, GenerationId, SessionId};
 use aikit_core::platform::TargetId;
@@ -1224,13 +1225,38 @@ impl Service {
             )?,
         };
         let roots = self.catalog.capsule_roots();
-        crate::hook::dispatch(
+        let mut decision = crate::hook::dispatch(
             &self.index,
             &self.descriptor.context_id,
             &chain,
             event,
             &roots,
-        )
+        )?;
+
+        // W1 reaction engine. The floor (Central's temporal reground) already
+        // ran inside dispatch and is law, never gated. Everything beyond it is
+        // operative only because the active composition selected it: the
+        // tuning is resolved from the view at event time, never from global
+        // config.
+        let tuning = ContinuityTuning::resolve(&self.view);
+        if event.kind == aikit_core::hooks::HookEventKind::UserPromptSubmit
+            && tuning.allows(aikit_core::continuity::TURN_LEDGER)
+        {
+            decision.injected.push(format!(
+                "[continuity/turn-ledger] composed by this context's composition; event {}                  dispatched for {}",
+                event.kind, event.client,
+            ));
+        }
+
+        Ok(decision)
+    }
+
+    /// The continuity composition in force for this context, resolved from
+    /// the active view (the descope law): the floor is temporal reground,
+    /// and everything beyond it is operative only because the composition
+    /// selected it. Never global mutable config; read fresh on every ask.
+    pub fn continuity_tuning(&self) -> ContinuityTuning {
+        ContinuityTuning::resolve(&self.view)
     }
 
     /// Issue a bypass token for this context.
