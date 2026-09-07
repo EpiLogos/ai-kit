@@ -65,6 +65,15 @@ impl WikiQlRelationFamily {
             Self::C => [(0, 5), (1, 4), (2, 3)],
         }
     }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "A" => Some(Self::A),
+            "B" => Some(Self::B),
+            "C" => Some(Self::C),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -787,6 +796,47 @@ pub fn explicit_ql_shaped_resolve_contemplate(
     })
 }
 
+/// Public read access for the shape-v2 layer: the positioned member map.
+pub fn positioned_members_public(
+    constellation: &WikiConstellation,
+) -> Result<std::collections::BTreeMap<(u8, bool), &WikiConstellationMember>> {
+    positioned_members(constellation)
+}
+
+/// Public read access for the shape-v2 layer: the computed grain.
+pub fn wiki_constellation_grain_public(
+    constellation: &WikiConstellation,
+) -> Result<WikiQlConstellationGrain> {
+    wiki_constellation_grain(constellation)
+}
+
+/// Parse a structural shape ref the v2 contract can name:
+/// `ql:structural:<version>:field:<FAMILY>:<pair>:<D1|D2|D3>`. Any other ref
+/// (contract v1 shapes, unversioned or unknown) parses to None — preserved,
+/// not vouched for.
+pub fn structural_ref_parts(
+    shape_ref: &str,
+) -> Option<(WikiQlRelationFamily, u8, crate::knowledge_wiki_shape_v2::WikiQlCompletionDegree)> {
+    use crate::knowledge_wiki_shape_v2::WikiQlCompletionDegree;
+    let rest = shape_ref.strip_prefix("ql:structural:")?;
+    let mut parts = rest.split(':');
+    let version = parts.next()?;
+    if version != QL_STRUCTURAL_CONTRACT_VERSION {
+        return None;
+    }
+    let kind = parts.next()?;
+    if kind != "field" {
+        return None;
+    }
+    let family = WikiQlRelationFamily::parse(parts.next()?)?;
+    let pair_index = parts.next()?.parse::<u8>().ok()?;
+    let degree = WikiQlCompletionDegree::parse(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((family, pair_index, degree))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,6 +871,7 @@ mod tests {
             returns: vec![WikiConstellationReturn {
                 through_anchor_ref: anchor.clone(),
                 ground_ref: resource("wiki:ground"),
+                ground_kind: None,
                 extensions: BTreeMap::new(),
             }],
             conjugate_ref: None,
