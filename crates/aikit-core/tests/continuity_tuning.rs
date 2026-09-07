@@ -22,6 +22,14 @@ fn turn_ledger_capsule() -> Capsule {
     )
 }
 
+fn entity_disclosure_capsule() -> Capsule {
+    hook_table(
+        "hook/continuity/entity-disclosure",
+        "",
+        "entry = \"payload/entity-disclosure\"\nevents = [\"SessionStart\"]",
+    )
+}
+
 fn cid(s: &str) -> CapsuleId {
     CapsuleId::parse(s).unwrap()
 }
@@ -99,4 +107,33 @@ fn the_floor_is_law_and_never_gated() {
     let tuning = ContinuityTuning::resolve(&view);
     assert!(tuning.allows(FLOOR_CAPABILITY));
     assert_eq!(CONTINUITY_NAMESPACE, "continuity");
+}
+
+#[test]
+fn entity_disclosure_is_known_but_not_composed_by_default() {
+    // W10 V6: the reaction exists and is answerable, but the descope floor
+    // does not compose it.
+    let fixture = Fixture::new(vec![entity_disclosure_capsule()]);
+    let view = fixture.resolve().unwrap();
+    let tuning = ContinuityTuning::resolve(&view);
+    assert!(
+        tuning.not_composed.iter().any(|name| name == "entity-disclosure"),
+        "entity-disclosure must be answerable as not composed: {tuning}"
+    );
+    assert!(!tuning.allows("entity-disclosure"));
+}
+
+#[test]
+fn composing_entity_disclosure_is_exactly_that_delta() {
+    let fixture = Fixture::new(vec![entity_disclosure_capsule()]).with_layers(vec![layer(
+        ScopeKind::Session,
+        &["hook/continuity/entity-disclosure"],
+        &[],
+    )]);
+    let view = fixture.resolve().unwrap();
+    let tuning = ContinuityTuning::resolve(&view);
+    assert_eq!(tuning.composed, vec!["entity-disclosure".to_string()]);
+    assert!(tuning.allows("entity-disclosure"));
+    // Composing entity-disclosure composes nothing else.
+    assert!(!tuning.allows("turn-ledger"));
 }

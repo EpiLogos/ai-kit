@@ -78,7 +78,7 @@ if seen_skills != EXPECTED_SKILLS:
     raise SystemExit(f"first-party Skill corpus mismatch: {seen_skills ^ EXPECTED_SKILLS}")
 if seen_guidance != EXPECTED_GUIDANCE:
     raise SystemExit(f"first-party guidance corpus mismatch: {seen_guidance ^ EXPECTED_GUIDANCE}")
-EXPECTED_HOOKS = {"hook/continuity/turn-ledger"}
+EXPECTED_HOOKS = {"hook/continuity/turn-ledger", "hook/continuity/entity-disclosure"}
 if seen_hooks != EXPECTED_HOOKS:
     raise SystemExit(f"first-party hook corpus mismatch: {seen_hooks ^ EXPECTED_HOOKS}")
 

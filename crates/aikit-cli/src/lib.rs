@@ -23,6 +23,7 @@ pub mod discover;
 pub mod doctor;
 pub mod env;
 pub mod foreign;
+pub mod continuity_disclosure;
 pub mod hook;
 pub mod json;
 pub mod jump;

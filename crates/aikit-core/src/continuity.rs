@@ -33,11 +33,18 @@ pub const FLOOR_CAPABILITY: &str = "temporal-reground";
 /// the continuity that produced it.
 pub const TURN_LEDGER: &str = "turn-ledger";
 
+/// Entity-aware disclosure (W10 V6): when composed, the engine names the
+/// pasu participants present in this context (the bound wiki entities) at
+/// SessionStart. Durable facts only, from authored carriers and the world
+/// binding — volatile state ("who is the current actor") stays in Frames
+/// and NOW, never in this disclosure and never in persistent nodes.
+pub const ENTITY_DISCLOSURE: &str = "entity-disclosure";
+
 /// The reactions the engine itself implements, as opposed to hook capsules
 /// that merely ride the chain. A reaction listed here is answerable when
 /// asked even while it is not composed: the engine says "not composed"
 /// instead of staying silent about what it could do.
-pub const ENGINE_REACTIONS: &[&str] = &[TURN_LEDGER];
+pub const ENGINE_REACTIONS: &[&str] = &[TURN_LEDGER, ENTITY_DISCLOSURE];
 
 /// True when the capsule id names a first-party continuity reaction.
 pub fn is_continuity_capability(id: &CapsuleId) -> bool {
