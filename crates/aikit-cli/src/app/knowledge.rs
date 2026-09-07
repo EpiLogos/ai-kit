@@ -345,6 +345,12 @@ impl Service {
                 Ok(reading)=>{discovered.wiki=reading.objects;absences.extend(reading.absences);}
                 Err(error)=>absences.push(format!("Central wiki discovery unavailable: {}",error.message())),
             }
+            // W10 V3: compiled entity materialisation joins the discovered
+            // wiki before the index rebuild; colliding stand-in nodes adopt
+            // the entity convention (wiki:node:identity keeps its ref).
+            let entities=aikit_adapters::central_entities::materialise_central_entities(central_root);
+            absences.extend(entities.absences);
+            aikit_adapters::central_entities::adopt_into(&mut discovered.wiki, entities.objects);
         }
 
         let wiki = if discovered.wiki.is_empty() {
