@@ -356,6 +356,21 @@ impl Service {
             let matrices=aikit_adapters::capability_matrix::compile_world_matrices(central_root);
             absences.extend(matrices.absences);
             aikit_adapters::central_entities::adopt_into(&mut discovered.wiki, matrices.objects);
+            // W10 V5: a project context binds the same entity refs through
+            // Central's effective world sources — never a second subject;
+            // declared exclusions withhold, per-hop provenance is recorded.
+            if let Some(project)=root.strip_prefix(central_root).ok().and_then(|relative| {
+                let mut parts=relative.components();
+                if parts.next()?.as_os_str() != "Work" { return None; }
+                parts.next()?.as_os_str().to_str().map(str::to_owned)
+            }) {
+                let world_binding=aikit_adapters::central_world_sources::read_project_binding(
+                    &SystemRunner::new(), &executable, central_root, &project, &mut absences);
+                if let Some(binding)=world_binding {
+                    aikit_adapters::central_world_sources::bind_project_context(
+                        &mut discovered.wiki, &binding, &mut absences);
+                }
+            }
         }
 
         let wiki = if discovered.wiki.is_empty() {
