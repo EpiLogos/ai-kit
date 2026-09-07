@@ -1973,6 +1973,7 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
     match c.command {
         ContextSub::Current(_) => {
             let d = service.descriptor();
+            let tuning = service.continuity_tuning();
             let data = jval!({
                 "context_id": d.context_id.to_string(),
                 "session_id": d.session_id.as_ref().map(|s| s.to_string()),
@@ -1982,6 +1983,11 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
                 "host": d.host,
                 "mux": d.mux.map(|m| m.as_str()),
                 "targets": d.targets.iter().map(|t| t.as_str().to_string()).collect::<Vec<_>>(),
+                "continuity": {
+                    "floor": tuning.floor,
+                    "composed": tuning.composed,
+                    "not_composed": tuning.not_composed,
+                },
             });
             Ok(reply(&service, data, vec![]))
         }
@@ -2179,6 +2185,7 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
     let event: HookEvent = hook::normalize(&a.client, &a.event, payload);
     let decision = service.dispatch_hook(&event)?;
 
+    let tuning = service.continuity_tuning();
     let data = jval!({
         "event": a.event,
         "client": a.client,
@@ -2187,6 +2194,11 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
         "injected": decision.injected_text(),
         "bypassed": decision.was_bypassed(),
         "warnings": decision.warnings,
+        "continuity": {
+            "floor": tuning.floor,
+            "composed": tuning.composed,
+            "not_composed": tuning.not_composed,
+        },
     });
     Ok(reply(&service, data, vec![]))
 }

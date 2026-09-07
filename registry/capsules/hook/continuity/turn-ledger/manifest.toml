@@ -1,0 +1,10 @@
+schema = 1
+id = "hook/continuity/turn-ledger"
+kind = "hook"
+name = "Continuity turn ledger"
+description = "First-party continuity reaction: when composed, the W1 engine injects a one-line dispatch ledger at UserPromptSubmit so every turn names the continuity that produced it. The descope floor (temporal reground) never depends on this; composing it is the visible CASE 14 delta."
+tags = ["aikit", "continuity", "engine", "ledger", "descope"]
+
+[hook]
+entry = "payload/ledger"
+events = ["UserPromptSubmit"]
