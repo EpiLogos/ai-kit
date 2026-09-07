@@ -24,6 +24,7 @@ pub mod doctor;
 pub mod env;
 pub mod foreign;
 pub mod continuity_disclosure;
+pub mod domain_activation;
 pub mod gateway_ops;
 pub mod hook;
 pub mod json;

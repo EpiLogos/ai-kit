@@ -1258,6 +1258,24 @@ impl Service {
                 )),
             }
         }
+        if event.kind == aikit_core::hooks::HookEventKind::UserPromptSubmit
+            && tuning.allows(aikit_core::continuity::DOMAIN_ACTIVATION)
+        {
+            // Domains are declared data in the project layer; they load only
+            // under this composition, never ambient.
+            if let Some(project_root)=self.descriptor.project_root.as_deref() {
+                let (domains, mut load_warnings)=
+                    crate::domain_activation::load_domains(project_root);
+                decision.warnings.append(&mut load_warnings);
+                let prompt=crate::domain_activation::prompt_of(event);
+                let scope=crate::domain_activation::dedup_scope(event, Some(project_root));
+                let Some(scope)=scope else { return Ok(decision) };
+                let (blocks, mut reaction_warnings)=crate::domain_activation::run(
+                    &self.index, &scope, &domains, prompt.as_deref());
+                decision.injected.extend(blocks);
+                decision.warnings.append(&mut reaction_warnings);
+            }
+        }
 
         Ok(decision)
     }

@@ -23,6 +23,7 @@ pub mod application_context;
 pub mod arg;
 pub mod capsule;
 pub mod continuity;
+pub mod domain;
 pub mod catalog;
 pub mod composition;
 pub mod composition_explain_history;
