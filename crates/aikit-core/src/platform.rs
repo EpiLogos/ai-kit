@@ -62,6 +62,13 @@ impl TargetId {
     pub const GOOSE: &'static str = "goose";
     pub const OPENCODE: &'static str = "opencode";
     pub const QWEN_CODE: &'static str = "qwen-code";
+    // Round 3: ids align to Actuation catalog slugs.
+    pub const ANTIGRAVITY: &'static str = "gemini-antigravity";
+    pub const GROK_BOT: &'static str = "grok-bot";
+    pub const KIMI: &'static str = "kimi";
+    pub const OLLAMA: &'static str = "ollama";
+    pub const OPENCLAW: &'static str = "openclaw";
+    pub const PI: &'static str = "pi";
     pub const AGENT_SKILLS: &'static str = "agent-skills";
     pub const HOOKS: &'static str = "hooks";
     pub const GUIDANCE: &'static str = "guidance";
@@ -102,6 +109,24 @@ impl TargetId {
     }
     pub fn qwen_code() -> Self {
         Self::new(Self::QWEN_CODE)
+    }
+    pub fn antigravity() -> Self {
+        Self::new(Self::ANTIGRAVITY)
+    }
+    pub fn grok_bot() -> Self {
+        Self::new(Self::GROK_BOT)
+    }
+    pub fn kimi() -> Self {
+        Self::new(Self::KIMI)
+    }
+    pub fn ollama() -> Self {
+        Self::new(Self::OLLAMA)
+    }
+    pub fn openclaw() -> Self {
+        Self::new(Self::OPENCLAW)
+    }
+    pub fn pi() -> Self {
+        Self::new(Self::PI)
     }
 
     pub fn as_str(&self) -> &str {

@@ -38,7 +38,6 @@ pub const ADAPTER_REF: &str = "aikit:aider-adapter";
 /// exists for it. Under the detection contract's three-state law this is
 /// disclosed unavailability, not absence-by-silence; the census evidence
 /// below rests on primary docs and local artifacts.
-
 /// Primary sources, fetched 2026-09-06. Aider is not installed on this machine
 /// (`which aider`, `pip show aider-chat` both empty; `actuation harness detect`
 /// catalog r4 does not cover it), so the census cites aider's own docs/repo.

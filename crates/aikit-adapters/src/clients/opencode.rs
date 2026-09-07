@@ -53,7 +53,6 @@ pub const ADAPTER_REF: &str = "aikit:opencode-adapter";
 /// exists for it. Under the detection contract's three-state law this is
 /// disclosed unavailability, not absence-by-silence; the census evidence
 /// below rests on primary docs and local artifacts.
-
 /// Stable evidence refs pointing at primary sources, not prose.
 const EV_RULES: &str = "doc:opencode.ai/docs/rules";
 const EV_CONFIG: &str = "doc:opencode.ai/docs/config";

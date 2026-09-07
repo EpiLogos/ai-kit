@@ -44,7 +44,6 @@ pub const ADAPTER_REF: &str = "aikit:cursor-adapter";
 /// record exists for it. Under the detection contract's three-state law this
 /// is disclosed unavailability, not absence-by-silence; the census evidence
 /// below rests on primary docs and local artifacts.
-
 /// Primary sources, fetched 2026-09-06. The CLI is not installed on this
 /// machine (`which cursor-agent`, `which agent` empty; `actuation harness
 /// detect` catalog r4 does not cover it), so the census cites cursor.com/docs.

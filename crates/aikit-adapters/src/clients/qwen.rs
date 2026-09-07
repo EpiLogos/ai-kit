@@ -43,7 +43,6 @@ pub const ADAPTER_REF: &str = "aikit:qwen-adapter";
 /// record exists for it. Under the detection contract's three-state law this
 /// is disclosed unavailability, not absence-by-silence; the census evidence
 /// below rests on primary docs and local artifacts.
-
 /// Stable evidence refs so conformance can cite exact sources rather than prose.
 const EV_MEMORY_DOC: &str =
     "https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/memory.md";
