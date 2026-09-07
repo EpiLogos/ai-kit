@@ -21,6 +21,10 @@
 
 use std::path::Path;
 
+use aikit_core::harness_admission::{
+    FacultySupport, HarnessAdmissionAdapter, HarnessAdmissionDescriptor, HarnessEditionKind,
+    HarnessFaculty, HarnessFacultyObservation, HARNESS_ADAPTER_SDK_VERSION,
+};
 use aikit_core::hooks::HookEventKind;
 use aikit_core::platform::TargetId;
 use aikit_core::projection::{
@@ -31,10 +35,17 @@ use aikit_core::{AikitError, Result};
 
 use crate::actuation_harness_capability::{CapabilityOutcome, HarnessCapability};
 
+use super::admission::descriptor_session_start_hook;
 use super::ClientAdapter;
 
 /// The client's own name for itself in a hook command.
 pub const CLIENT: &str = "zcode";
+
+/// The product's own name, as the admission census reports it.
+pub const PRODUCT: &str = "ZCode";
+
+/// Adapter identity inside the admission contract; stable, not the harness's own name.
+pub const ADAPTER_REF: &str = "aikit:zcode-adapter";
 
 /// The events AIKit installs are read from Actuation's capability descriptor,
 /// never hard-coded here: the AIKit boundary and the native name the harness
@@ -103,7 +114,7 @@ impl Default for ZcodeAdapter {
 
 impl TargetAdapter for ZcodeAdapter {
     fn target(&self) -> TargetId {
-        TargetId::new(CLIENT)
+        TargetId::zcode()
     }
 
     fn capabilities(&self) -> TargetCapabilities {
@@ -144,6 +155,123 @@ impl TargetAdapter for ZcodeAdapter {
             ActivationEffect::immediate("already projected")
         } else {
             new.effect.clone()
+        }
+    }
+}
+
+impl HarnessAdmissionAdapter for ZcodeAdapter {
+    fn admission(&self) -> HarnessAdmissionDescriptor {
+        // Dispatch facts are owned by Actuation's r4 descriptor (five mappable
+        // boundaries, two disclosed customs, the config-json seam); the census
+        // cites the intake. ZCode reads configuration once at session start:
+        // reload truth is next-session.
+        let hook = descriptor_session_start_hook(&self.capability);
+        let projection_lifecycle = "aikit:clients/zcode (projection lifecycle, test-covered)";
+        let live_config = "native:/Users/admin/.zcode/cli/config.json";
+
+        let faculties = vec![
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::StandingInstructions,
+                support: FacultySupport::Supported,
+                evidence_refs: vec!["native:/Users/admin/Central/AGENTS.md".to_string()],
+                note: Some("workspace AGENTS.md loaded in live sessions on the survey machine".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::ProjectInstructions,
+                support: FacultySupport::Supported,
+                evidence_refs: vec!["native:/Users/admin/Central/AGENTS.md".to_string()],
+                note: Some("the workspace root's AGENTS.md (and its CLAUDE.md twin) is the project-instructions surface".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::NativeSkills,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![
+                    "native:/Users/admin/.agents/skills".to_string(),
+                    "native:/Users/admin/.zcode/cli/plugins".to_string(),
+                ],
+                note: Some("user skill directory and plugin-shipped skills observed live".into()),
+            },
+            hook,
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::LiveReload,
+                support: FacultySupport::Unsupported,
+                evidence_refs: vec![],
+                note: Some("configuration-file hooks and plugins are read once at session start".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::NextSessionReload,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![projection_lifecycle.to_string()],
+                note: Some("dispatch entries land in the config-json seam and are read at the next session start".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::RestartReload,
+                support: FacultySupport::Unsupported,
+                evidence_refs: vec![],
+                note: Some("no restart lifecycle; the session boundary is the reload mechanism".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::ToolProtocol,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![live_config.to_string()],
+                note: Some("MCP servers configured in the configuration JSON (bimba observed live)".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::NativeToolContribution,
+                support: FacultySupport::Supported,
+                evidence_refs: vec!["native:/Users/admin/.zcode/cli/plugins".to_string()],
+                note: Some("plugins ship runnable tools (browser-use, computer-use, document-skills observed)".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::SessionResume,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused from primary sources by this admission".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::DelegatedAgents,
+                support: FacultySupport::Supported,
+                evidence_refs: vec!["survey:local-machine-2026-09-07".to_string()],
+                note: Some("live agent delegation observed in ordinary programme work on this machine".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::ProjectRoots,
+                support: FacultySupport::Supported,
+                evidence_refs: vec!["upstream:zcode-guide-diagnosing-hooks".to_string()],
+                note: Some("workspace configuration sources (<repo>/.zcode/config.json, zcode.json) documented by the harness's own shipped documentation".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::Components,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![live_config.to_string()],
+                note: Some("plugins enabled per-identity through the configuration's enabledPlugins".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::Surfaces,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused by this admission".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::LiveRetraction,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![projection_lifecycle.to_string()],
+                note: Some("install is a Procedure whose undo restored the configuration bytes exactly (CASE 01 live proof); plugins toggle per-identity".into()),
+            },
+        ];
+
+        HarnessAdmissionDescriptor {
+            schema: HARNESS_ADAPTER_SDK_VERSION.to_string(),
+            adapter_ref: ADAPTER_REF.to_string(),
+            adapter_version: env!("CARGO_PKG_VERSION").to_string(),
+            target: self.target(),
+            product: PRODUCT.to_string(),
+            edition: HarnessEditionKind::Cli,
+            native_version: None,
+            source_revision: None,
+            realised_actuation_ref: None,
+            project_binding_ref: None,
+            faculties,
         }
     }
 }

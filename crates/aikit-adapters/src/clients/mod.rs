@@ -26,6 +26,7 @@
 //! would silently destroy the user's configuration on the next write, so the
 //! failure is propagated instead of swallowed.
 
+pub mod admission;
 pub mod aider;
 pub mod agent_skills;
 pub mod bootstrap;

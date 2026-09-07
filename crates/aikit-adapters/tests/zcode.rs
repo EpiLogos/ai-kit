@@ -321,3 +321,84 @@ fn the_config_file_name_comes_from_the_descriptor_seam() {
     materialize(&adapter.install(config.path()).unwrap(), config.path());
     assert!(config.path().join("other-name.json").is_file());
 }
+
+// ---------------------------------------------------------------------------
+// Harness admission (the integrated harness-adapter contract)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn zcode_admits_through_the_harness_adapter_contract_with_a_full_census() {
+    use aikit_core::harness_admission::HarnessAdmissionAdapter;
+    use aikit_adapters::clients::zcode::{ADAPTER_REF, PRODUCT};
+    use aikit_core::harness_admission::{FacultySupport, HarnessFaculty, HARNESS_ADAPTER_SDK_VERSION};
+    use aikit_core::platform::TargetId;
+
+    let admission = adapter().admission();
+
+    assert_eq!(admission.schema, HARNESS_ADAPTER_SDK_VERSION);
+    assert_eq!(admission.adapter_ref, ADAPTER_REF);
+    assert_eq!(admission.product, PRODUCT);
+    assert_eq!(admission.target, TargetId::zcode());
+    assert_ne!(admission.target, TargetId::claude_code());
+    assert_ne!(admission.target, TargetId::codex());
+
+    assert_eq!(admission.faculties.len(), 15);
+    admission.validate().expect("admission must validate");
+    for faculty in &admission.faculties {
+        if faculty.support == FacultySupport::Supported {
+            assert!(
+                !faculty.evidence_refs.is_empty(),
+                "{:?} must carry evidence",
+                faculty.faculty
+            );
+        }
+    }
+
+    // Reload truth: config read at session start; no live reload, no restart.
+    assert_eq!(
+        admission.faculty(HarnessFaculty::LiveReload).unwrap().support,
+        FacultySupport::Unsupported
+    );
+    assert_eq!(
+        admission.faculty(HarnessFaculty::NextSessionReload).unwrap().support,
+        FacultySupport::Supported
+    );
+
+    // The hook faculty cites the Actuation descriptor, not a restated list.
+    let hook = admission.faculty(HarnessFaculty::SessionStartHook).unwrap();
+    assert_eq!(hook.support, FacultySupport::Supported);
+    assert!(
+        hook.evidence_refs
+            .iter()
+            .any(|r| r.starts_with("actuation:harness-capability/zcode@r")),
+        "the dispatch faculty cites Actuation's descriptor intake: {hook:?}"
+    );
+}
+
+#[test]
+fn zcode_activation_truth_rejects_an_overclaiming_observation() {
+    use aikit_core::harness_admission::{
+        HarnessActivationObservation, HarnessActivationState, verify_activation_truth,
+        HARNESS_ADAPTER_SDK_VERSION,
+    };
+    use aikit_core::projection::{ActivationEffect, ProjectionPlan, TargetAdapter};
+
+    let zcode = adapter();
+    let plan = ProjectionPlan::new(
+        zcode.target(),
+        ActivationEffect::brokered("no native skill projection; dispatch via install"),
+    );
+    let observation = HarnessActivationObservation {
+        schema: HARNESS_ADAPTER_SDK_VERSION.to_string(),
+        target: zcode.target(),
+        projection_digest: plan.digest(),
+        state: HarnessActivationState::Loaded,
+        evidence_refs: vec![],
+        native_revision: None,
+        note: None,
+    };
+    assert!(
+        verify_activation_truth(&plan, &observation).is_err(),
+        "a brokered plan must never be observed as Loaded"
+    );
+}
