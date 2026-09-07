@@ -52,6 +52,7 @@ use aikit_adapters::clients::gemini::GeminiAdapter;
 use aikit_adapters::clients::goose::GooseAdapter;
 use aikit_adapters::clients::opencode::OpencodeAdapter;
 use aikit_adapters::clients::qwen::QwenAdapter;
+use aikit_adapters::clients::zcode::ZcodeAdapter;
 use aikit_adapters::runner::SystemRunner;
 
 use aikit_tui::backend::{
@@ -1361,6 +1362,7 @@ impl Service {
                     plan_effect(&ClaudeAdapter::new(ctx_dir.join("projections/claude")), &rc)
                 }
                 TargetId::CODEX => plan_effect(&CodexAdapter::new(tree.clone()), &rc),
+                TargetId::ZCODE => plan_effect(&ZcodeAdapter::new(), &rc),
                 TargetId::DEEPSEEK_HARNESS => {
                     plan_effect(&DshAdapter::new(ctx_dir.join("projections/dsh")), &rc)
                 }

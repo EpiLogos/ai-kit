@@ -55,6 +55,7 @@ impl TargetId {
     pub const CLAUDE_CODE: &'static str = "claude-code";
     pub const CODEX: &'static str = "codex";
     pub const DEEPSEEK_HARNESS: &'static str = "deepseek-harness";
+    pub const ZCODE: &'static str = "zcode";
     pub const AIDER: &'static str = "aider";
     pub const CURSOR_CLI: &'static str = "cursor-cli";
     pub const GEMINI_CLI: &'static str = "gemini-cli";
@@ -80,6 +81,9 @@ impl TargetId {
     }
     pub fn deepseek_harness() -> Self {
         Self::new(Self::DEEPSEEK_HARNESS)
+    }
+    pub fn zcode() -> Self {
+        Self::new(Self::ZCODE)
     }
     pub fn aider() -> Self {
         Self::new(Self::AIDER)

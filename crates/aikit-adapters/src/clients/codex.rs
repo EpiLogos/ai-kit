@@ -47,6 +47,10 @@ use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::Kind;
 use aikit_core::context::Isolation;
+use aikit_core::harness_admission::{
+    FacultySupport, HarnessAdmissionAdapter, HarnessAdmissionDescriptor, HarnessEditionKind,
+    HarnessFaculty, HarnessFacultyObservation, HARNESS_ADAPTER_SDK_VERSION,
+};
 use aikit_core::hooks::HookEventKind;
 use aikit_core::id::CapsuleId;
 use aikit_core::platform::TargetId;
@@ -60,11 +64,18 @@ use aikit_core::{AikitError, Result};
 
 use crate::actuation_harness_capability::{CapabilityOutcome, HarnessCapability};
 
+use super::admission::descriptor_session_start_hook;
 use super::agent_skills;
 use super::bootstrap;
 use super::ClientAdapter;
 
 pub const CLIENT: &str = "codex";
+
+/// The product's own name, as the admission census reports it.
+pub const PRODUCT: &str = "Codex CLI";
+
+/// Adapter identity inside the admission contract; stable, not the harness's own name.
+pub const ADAPTER_REF: &str = "aikit:codex-adapter";
 
 /// Codex's discovery path, relative to the tree root.
 const SKILLS_PREFIX: &str = ".agents/skills";
@@ -509,6 +520,123 @@ impl TargetAdapter for CodexAdapter {
             ActivationEffect::immediate("already projected")
         } else {
             new.effect.clone()
+        }
+    }
+}
+
+impl HarnessAdmissionAdapter for CodexAdapter {
+    fn admission(&self) -> HarnessAdmissionDescriptor {
+        // Dispatch facts are owned by Actuation's descriptor (hooks.json events
+        // plus the separately-configured toml notify); the census cites the
+        // intake. Codex is process-per-invocation: reload truth is
+        // next-session, and a restart lifecycle does not exist.
+        let hook = descriptor_session_start_hook(&self.capability);
+        let projection_lifecycle = "aikit:clients/codex (projection lifecycle, test-covered)";
+        let module_census = "aikit:clients/codex module census (authored from primary sources, 2026-09-06)";
+
+        let faculties = vec![
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::StandingInstructions,
+                support: FacultySupport::Supported,
+                evidence_refs: vec!["native:/Users/admin/.codex/AGENTS.md".to_string()],
+                note: Some("user-level AGENTS.md observed on the survey machine".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::ProjectInstructions,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![module_census.to_string()],
+                note: Some("AGENTS.md discovered by the same upward project walk the skills surface uses".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::NativeSkills,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![
+                    module_census.to_string(),
+                    projection_lifecycle.to_string(),
+                ],
+                note: Some(".agents/skills discovered by walking from the working directory up to the project root".into()),
+            },
+            hook,
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::LiveReload,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![projection_lifecycle.to_string()],
+                note: Some("the target watches its projection directory for changes".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::NextSessionReload,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![projection_lifecycle.to_string()],
+                note: Some("plain Codex discovers project skills at task start".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::RestartReload,
+                support: FacultySupport::Unsupported,
+                evidence_refs: vec![],
+                note: Some("process-per-invocation: there is no restart lifecycle; next-session is the reload mechanism".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::ToolProtocol,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused by this admission; dispatch facts live in the Actuation descriptor".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::NativeToolContribution,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused by this admission".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::SessionResume,
+                support: FacultySupport::Supported,
+                evidence_refs: vec!["native:/Users/admin/.codex/sessions".to_string()],
+                note: Some("persisted session store observed on the survey machine".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::DelegatedAgents,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused from primary sources by this admission".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::ProjectRoots,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![projection_lifecycle.to_string()],
+                note: Some("discovery walks up to the nearest project root (.git / .agents markers), which is why shared-tree projection is restricted".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::Components,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused by this admission".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::Surfaces,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused by this admission".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::LiveRetraction,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![projection_lifecycle.to_string()],
+                note: Some("the descriptor's uninstall seam removes marker-matched entries and leaves foreign entries untouched".into()),
+            },
+        ];
+
+        HarnessAdmissionDescriptor {
+            schema: HARNESS_ADAPTER_SDK_VERSION.to_string(),
+            adapter_ref: ADAPTER_REF.to_string(),
+            adapter_version: env!("CARGO_PKG_VERSION").to_string(),
+            target: self.target(),
+            product: PRODUCT.to_string(),
+            edition: HarnessEditionKind::Cli,
+            native_version: None,
+            source_revision: None,
+            realised_actuation_ref: None,
+            project_binding_ref: None,
+            faculties,
         }
     }
 }

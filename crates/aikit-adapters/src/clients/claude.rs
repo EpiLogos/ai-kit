@@ -30,6 +30,10 @@
 use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::Kind;
+use aikit_core::harness_admission::{
+    FacultySupport, HarnessAdmissionAdapter, HarnessAdmissionDescriptor, HarnessEditionKind,
+    HarnessFaculty, HarnessFacultyObservation, HARNESS_ADAPTER_SDK_VERSION,
+};
 use aikit_core::hooks::HookEventKind;
 use aikit_core::platform::TargetId;
 use aikit_core::projection::{
@@ -40,12 +44,19 @@ use aikit_core::{AikitError, Result};
 
 use crate::actuation_harness_capability::{CapabilityOutcome, HarnessCapability};
 
+use super::admission::descriptor_session_start_hook;
 use super::agent_skills;
 use super::bootstrap;
 use super::ClientAdapter;
 
 /// The client's own name for itself in a hook command.
 pub const CLIENT: &str = "claude";
+
+/// The product's own name, as the admission census reports it.
+pub const PRODUCT: &str = "Claude Code";
+
+/// Adapter identity inside the admission contract; stable, not the harness's own name.
+pub const ADAPTER_REF: &str = "aikit:claude-adapter";
 
 /// The events AIKit installs are read from Actuation's capability descriptor,
 /// never hard-coded here. A descriptor event maps to a dispatch boundary by
@@ -240,6 +251,123 @@ impl TargetAdapter for ClaudeAdapter {
             ActivationEffect::immediate("already projected")
         } else {
             ActivationEffect::restart_client("Claude")
+        }
+    }
+}
+
+impl HarnessAdmissionAdapter for ClaudeAdapter {
+    fn admission(&self) -> HarnessAdmissionDescriptor {
+        // Dispatch facts (the hook surface among them) are owned by Actuation's
+        // capability descriptor and consumed at install time; the census cites
+        // that intake as evidence instead of restating the facts. Faculties
+        // this admission has no primary-source evidence for are Unknown, never
+        // invented.
+        let hook = descriptor_session_start_hook(&self.capability);
+        let projection_lifecycle = "aikit:clients/claude (projection lifecycle, test-covered)";
+
+        let faculties = vec![
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::StandingInstructions,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("user-memory hierarchy not censused from primary sources by this admission".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::ProjectInstructions,
+                support: FacultySupport::Supported,
+                evidence_refs: vec!["native:/Users/admin/Central/CLAUDE.md".to_string()],
+                note: Some("project CLAUDE.md observed and loaded in live sessions on the survey machine".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::NativeSkills,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![
+                    "native:/Users/admin/.claude/skills".to_string(),
+                    projection_lifecycle.to_string(),
+                ],
+                note: Some("skills discovered from the user directory and the generation's --add-dir tree".into()),
+            },
+            hook,
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::LiveReload,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![projection_lifecycle.to_string()],
+                note: Some("the target watches its projection directory for changes".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::NextSessionReload,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![projection_lifecycle.to_string()],
+                note: Some("content placed in the projection is picked up no later than the next session".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::RestartReload,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![projection_lifecycle.to_string()],
+                note: Some("a changed generation restarts the client against the new --add-dir target".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::ToolProtocol,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused by this admission; dispatch facts live in the Actuation descriptor".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::NativeToolContribution,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused by this admission".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::SessionResume,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused from primary sources by this admission".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::DelegatedAgents,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused from primary sources by this admission".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::ProjectRoots,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![projection_lifecycle.to_string()],
+                note: Some("--add-dir binds an arbitrary extra directory, which is how two sessions in one checkout differ".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::Components,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused by this admission".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::Surfaces,
+                support: FacultySupport::Unknown,
+                evidence_refs: vec![],
+                note: Some("not censused by this admission".into()),
+            },
+            HarnessFacultyObservation {
+                faculty: HarnessFaculty::LiveRetraction,
+                support: FacultySupport::Supported,
+                evidence_refs: vec![projection_lifecycle.to_string()],
+                note: Some("uninstall is a Procedure whose undo restores the settings bytes exactly (CASE 01 live proof)".into()),
+            },
+        ];
+
+        HarnessAdmissionDescriptor {
+            schema: HARNESS_ADAPTER_SDK_VERSION.to_string(),
+            adapter_ref: ADAPTER_REF.to_string(),
+            adapter_version: env!("CARGO_PKG_VERSION").to_string(),
+            target: self.target(),
+            product: PRODUCT.to_string(),
+            edition: HarnessEditionKind::Cli,
+            native_version: None,
+            source_revision: None,
+            realised_actuation_ref: None,
+            project_binding_ref: None,
+            faculties,
         }
     }
 }

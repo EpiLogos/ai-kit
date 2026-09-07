@@ -531,3 +531,111 @@ fn the_settings_file_name_comes_from_the_descriptor_seam() {
     materialize(&adapter.install(config.path()).unwrap(), config.path());
     assert!(config.path().join("other-name.json").is_file());
 }
+
+// ---------------------------------------------------------------------------
+// Harness admission (the integrated harness-adapter contract)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn claude_admits_through_the_harness_adapter_contract_with_a_full_census() {
+    use aikit_core::harness_admission::{FacultySupport, HarnessFaculty, HARNESS_ADAPTER_SDK_VERSION};
+    use aikit_adapters::clients::claude::{ADAPTER_REF, PRODUCT};
+    use aikit_adapters::clients::codex::CodexAdapter;
+    use aikit_adapters::clients::zcode::ZcodeAdapter;
+    use aikit_core::harness_admission::HarnessAdmissionAdapter;
+
+    let generation = tempfile::tempdir().unwrap();
+    let claude = adapter(generation.path());
+    let admission = claude.admission();
+
+    assert_eq!(admission.schema, HARNESS_ADAPTER_SDK_VERSION);
+    assert_eq!(admission.adapter_ref, ADAPTER_REF);
+    assert_eq!(admission.product, PRODUCT);
+    assert_eq!(admission.target, TargetId::claude_code());
+    // Identity non-collapse across the dispatch adapters.
+    assert_ne!(admission.target, TargetId::codex());
+    assert_ne!(admission.target, TargetId::zcode());
+    assert_ne!(
+        admission.target,
+        CodexAdapter::new(generation.path()).target()
+    );
+    assert_ne!(admission.target, ZcodeAdapter::new().target());
+
+    // All 15 faculties censused, none silently dropped; every Supported claim
+    // carries evidence.
+    assert_eq!(admission.faculties.len(), 15);
+    for variant in [
+        HarnessFaculty::StandingInstructions,
+        HarnessFaculty::ProjectInstructions,
+        HarnessFaculty::NativeSkills,
+        HarnessFaculty::SessionStartHook,
+        HarnessFaculty::LiveReload,
+        HarnessFaculty::NextSessionReload,
+        HarnessFaculty::RestartReload,
+        HarnessFaculty::ToolProtocol,
+        HarnessFaculty::NativeToolContribution,
+        HarnessFaculty::SessionResume,
+        HarnessFaculty::DelegatedAgents,
+        HarnessFaculty::ProjectRoots,
+        HarnessFaculty::Components,
+        HarnessFaculty::Surfaces,
+        HarnessFaculty::LiveRetraction,
+    ] {
+        assert!(admission.faculty(variant).is_some(), "{variant:?} must be censused");
+    }
+    admission.validate().expect("admission must validate");
+    for faculty in &admission.faculties {
+        if faculty.support == FacultySupport::Supported {
+            assert!(
+                !faculty.evidence_refs.is_empty(),
+                "{:?} must carry evidence",
+                faculty.faculty
+            );
+        }
+    }
+
+    // The hook faculty cites the Actuation descriptor, not a restated list.
+    let hook = admission.faculty(HarnessFaculty::SessionStartHook).unwrap();
+    assert!(
+        hook.evidence_refs
+            .iter()
+            .any(|r| r.starts_with("actuation:harness-capability/claude-code@r")),
+        "the dispatch faculty cites Actuation's descriptor intake: {hook:?}"
+    );
+}
+
+#[test]
+fn claude_hook_faculty_stays_unknown_without_a_descriptor_intake() {
+    use aikit_core::harness_admission::HarnessAdmissionAdapter;
+    use aikit_core::harness_admission::{FacultySupport, HarnessFaculty};
+
+    let bare = ClaudeAdapter::new(tempfile::tempdir().unwrap().path());
+    let admission = bare.admission();
+    let hook = admission.faculty(HarnessFaculty::SessionStartHook).unwrap();
+    assert_eq!(hook.support, FacultySupport::Unknown);
+    assert!(hook.evidence_refs.is_empty());
+}
+
+#[test]
+fn claude_activation_truth_rejects_an_overclaiming_observation() {
+    use aikit_core::harness_admission::{
+        HarnessActivationObservation, HarnessActivationState, verify_activation_truth,
+        HARNESS_ADAPTER_SDK_VERSION,
+    };
+    use aikit_core::projection::{ProjectionPlan, TargetAdapter};
+
+    let generation = tempfile::tempdir().unwrap();
+    let claude = adapter(generation.path());
+    let plan = ProjectionPlan::new(claude.target(), ActivationEffect::restart_client("Claude"));
+    let observation = HarnessActivationObservation {
+        schema: HARNESS_ADAPTER_SDK_VERSION.to_string(),
+        target: claude.target(),
+        projection_digest: plan.digest(),
+        state: HarnessActivationState::Loaded,
+        evidence_refs: vec![],
+        native_revision: None,
+        note: None,
+    };
+    // A projection write is never proof that the running harness loaded it.
+    assert!(verify_activation_truth(&plan, &observation).is_err());
+}

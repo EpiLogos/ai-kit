@@ -735,3 +735,81 @@ fn a_shared_task_with_no_project_root_above_it_falls_back_to_the_cwd_honestly() 
         plan.notes
     );
 }
+
+// ---------------------------------------------------------------------------
+// Harness admission (the integrated harness-adapter contract)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn codex_admits_through_the_harness_adapter_contract_with_a_full_census() {
+    use aikit_adapters::clients::codex::{ADAPTER_REF, PRODUCT};
+    use aikit_core::harness_admission::HarnessAdmissionAdapter;
+    use aikit_core::harness_admission::{FacultySupport, HarnessFaculty, HARNESS_ADAPTER_SDK_VERSION};
+
+    let tree = tempfile::tempdir().unwrap();
+    let admission = CodexAdapter::new(tree.path())
+        .with_capability(codex_capability())
+        .admission();
+
+    assert_eq!(admission.schema, HARNESS_ADAPTER_SDK_VERSION);
+    assert_eq!(admission.adapter_ref, ADAPTER_REF);
+    assert_eq!(admission.product, PRODUCT);
+    assert_eq!(admission.target, TargetId::codex());
+    assert_ne!(admission.target, TargetId::claude_code());
+    assert_ne!(admission.target, TargetId::zcode());
+
+    assert_eq!(admission.faculties.len(), 15);
+    admission.validate().expect("admission must validate");
+    for faculty in &admission.faculties {
+        if faculty.support == FacultySupport::Supported {
+            assert!(
+                !faculty.evidence_refs.is_empty(),
+                "{:?} must carry evidence",
+                faculty.faculty
+            );
+        }
+    }
+
+    // Reload truth: process-per-invocation means next-session, never restart.
+    let restart = admission.faculty(HarnessFaculty::RestartReload).unwrap();
+    assert_eq!(restart.support, FacultySupport::Unsupported);
+
+    // The hook faculty cites the Actuation descriptor, not a restated list.
+    let hook = admission.faculty(HarnessFaculty::SessionStartHook).unwrap();
+    assert_eq!(hook.support, FacultySupport::Supported);
+    assert!(
+        hook.evidence_refs
+            .iter()
+            .any(|r| r.starts_with("actuation:harness-capability/codex@r")),
+        "the dispatch faculty cites Actuation's descriptor intake: {hook:?}"
+    );
+}
+
+#[test]
+fn codex_activation_truth_rejects_an_overclaiming_observation() {
+    use aikit_core::harness_admission::{
+        HarnessActivationObservation, HarnessActivationState, verify_activation_truth,
+        HARNESS_ADAPTER_SDK_VERSION,
+    };
+    use aikit_core::projection::{ProjectionPlan, TargetAdapter};
+
+    let tree = tempfile::tempdir().unwrap();
+    let codex = CodexAdapter::new(tree.path()).with_capability(codex_capability());
+    let plan = ProjectionPlan::new(
+        codex.target(),
+        ActivationEffect::next_session_only("plain Codex discovers at task start"),
+    );
+    let observation = HarnessActivationObservation {
+        schema: HARNESS_ADAPTER_SDK_VERSION.to_string(),
+        target: codex.target(),
+        projection_digest: plan.digest(),
+        state: HarnessActivationState::Loaded,
+        evidence_refs: vec![],
+        native_revision: None,
+        note: None,
+    };
+    assert!(
+        verify_activation_truth(&plan, &observation).is_err(),
+        "a next-session plan must never be observed as Loaded"
+    );
+}
