@@ -59,6 +59,20 @@ pub fn prompt_of(event: &HookEvent) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The dedup scope for an event: the session id when the client declared
+/// one, else the project root path — stable across dispatch processes,
+/// because the engine's context id is minted per invocation.
+pub fn dedup_scope(event: &HookEvent, project_root: Option<&Path>) -> Option<String> {
+    event
+        .payload
+        .get("session_id")
+        .or_else(|| event.payload.get("sessionId"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| project_root.map(|root| root.to_string_lossy().into_owned()))
+}
+
 /// Run the reaction: activate domains on the prompt, render blocks, dedup
 /// through the ledger. Returns the blocks to inject plus warnings.
 ///
@@ -69,7 +83,7 @@ pub fn prompt_of(event: &HookEvent) -> Option<String> {
 ///   inspection answers "what was deduped" through `aikit context`).
 pub fn run(
     index: &Index,
-    context: &aikit_core::ContextId,
+    scope: &str,
     domains: &[KnowledgeDomain],
     prompt: Option<&str>,
 ) -> (Vec<String>, Vec<String>) {
@@ -82,7 +96,7 @@ pub fn run(
         let (ordinary, standing) = render_rules(&activation);
         let hash = dedup_hash(&activation.domain.id, &ordinary);
         let deduped = !ordinary.is_empty()
-            && match index.injection_seen(context, &hash) {
+            && match index.injection_seen(scope, &hash) {
                 Ok(seen) => seen,
                 Err(error) => {
                     warnings.push(format!(
@@ -95,7 +109,7 @@ pub fn run(
             continue;
         }
         if !deduped && !ordinary.is_empty() {
-            if let Err(error) = index.record_injection(context, &hash) {
+            if let Err(error) = index.record_injection(scope, &hash) {
                 warnings.push(format!(
                     "continuity/domain-activation ledger unavailable: {error}"
                 ));

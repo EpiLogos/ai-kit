@@ -6,7 +6,6 @@
 use std::{fs, path::PathBuf};
 
 use aikit_cli::domain_activation::{load_domains, prompt_of, run};
-use aikit_core::ContextId;
 use aikit_core::hooks::{HookEvent, HookEventKind};
 use aikit_store::index::Index;
 
@@ -50,8 +49,8 @@ fn index(path: &std::path::Path) -> Index {
     Index::open(path).unwrap()
 }
 
-fn context() -> ContextId {
-    ContextId::parse("ctx_domain_test").unwrap()
+fn scope() -> String {
+    "session-domain-test".to_owned()
 }
 
 #[test]
@@ -77,7 +76,7 @@ fn a_matching_prompt_activates_and_the_explanation_names_trigger_horizon_source(
     let index = index(&db);
     let (domains, warnings) = load_domains(&tmp);
     assert!(warnings.is_empty());
-    let (blocks, warnings) = run(&index, &context(), &domains, Some("please prepare this RELEASE"));
+    let (blocks, warnings) = run(&index, &scope(), &domains, Some("please prepare this RELEASE"));
     assert!(warnings.is_empty());
     assert_eq!(blocks.len(), 1);
     let block = &blocks[0];
@@ -93,7 +92,7 @@ fn a_matching_prompt_activates_and_the_explanation_names_trigger_horizon_source(
 fn unchanged_ordinary_payload_dedups_but_standing_rules_reassert() {
     let (tmp, db) = fixture();
     let index = index(&db);
-    let ctx = context();
+    let ctx = scope();
     let (domains, _) = load_domains(&tmp);
 
     let (first, _) = run(&index, &ctx, &domains, Some("prepare this release"));
@@ -118,7 +117,7 @@ fn unchanged_ordinary_payload_dedups_but_standing_rules_reassert() {
 fn changed_guidance_content_re_arms_injection() {
     let (tmp, db) = fixture();
     let index = index(&db);
-    let ctx = context();
+    let ctx = scope();
     let (domains, _) = load_domains(&tmp);
     let (first, _) = run(&index, &ctx, &domains, Some("prepare this release"));
     assert_eq!(first.len(), 1);
@@ -141,7 +140,7 @@ fn a_non_matching_prompt_activates_nothing() {
     let (tmp, db) = fixture();
     let index = index(&db);
     let (domains, _) = load_domains(&tmp);
-    let (blocks, warnings) = run(&index, &context(), &domains, Some("water the garden"));
+    let (blocks, warnings) = run(&index, &scope(), &domains, Some("water the garden"));
     assert!(blocks.is_empty());
     assert!(warnings.is_empty());
 }

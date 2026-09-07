@@ -249,17 +249,17 @@ CREATE TABLE foreign_index_state (
 "#,
     ),
     (
-        "0002-injection-ledger",
-        // W1 dedup law: per-context record of rendered-content hashes already
+        "0006-injection-ledger",
+        // W1 dedup law: per-scope record of rendered-content hashes already
         // injected, so unchanged ordinary payloads are not re-injected.
         // Standing rules exempt by classification are recorded too (for
         // inspection) but never consulted to suppress.
         r#"
 CREATE TABLE IF NOT EXISTS injection_ledger (
-    context     TEXT NOT NULL,
+    scope       TEXT NOT NULL,
     hash        TEXT NOT NULL,
     injected_ns INTEGER NOT NULL,
-    PRIMARY KEY (context, hash)
+    PRIMARY KEY (scope, hash)
 );
 CREATE INDEX IF NOT EXISTS injection_ledger_by_time ON injection_ledger(injected_ns);
 "#,
@@ -1018,27 +1018,29 @@ impl Index {
         Ok(())
     }
 
-    /// Record a rendered-content hash as injected for a context (W1 dedup
-    /// law). Idempotent: a re-record refreshes the timestamp.
-    pub fn record_injection(&self, context: &ContextId, hash: &str) -> Result<()> {
+    /// Record a rendered-content hash as injected under a dedup scope (W1
+    /// dedup law). The scope is the session id when the event carries one,
+    /// else the project root — a stable identity across dispatch processes.
+    /// Idempotent: a re-record refreshes the timestamp.
+    pub fn record_injection(&self, scope: &str, hash: &str) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO injection_ledger (context, hash, injected_ns) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (context, hash) DO UPDATE SET injected_ns = ?3",
-                params![context.as_str(), hash, Timestamp::now().as_nanos()],
+                "INSERT INTO injection_ledger (scope, hash, injected_ns) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (scope, hash) DO UPDATE SET injected_ns = ?3",
+                params![scope, hash, Timestamp::now().as_nanos()],
             )
             .map_err(|e| sql_error("index.write_failed", &e))?;
         Ok(())
     }
 
-    /// True when this rendered-content hash was already injected for the
-    /// context — the dedup check for unchanged ordinary payloads.
-    pub fn injection_seen(&self, context: &ContextId, hash: &str) -> Result<bool> {
+    /// True when this rendered-content hash was already injected under the
+    /// dedup scope — the dedup check for unchanged ordinary payloads.
+    pub fn injection_seen(&self, scope: &str, hash: &str) -> Result<bool> {
         let seen: i64 = self
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM injection_ledger WHERE context = ?1 AND hash = ?2",
-                params![context.as_str(), hash],
+                "SELECT COUNT(*) FROM injection_ledger WHERE scope = ?1 AND hash = ?2",
+                params![scope, hash],
                 |row| row.get(0),
             )
             .map_err(|e| sql_error("index.read_failed", &e))?;
