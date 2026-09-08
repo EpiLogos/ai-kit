@@ -14,6 +14,8 @@ pub mod backend;
 pub mod credential_surface;
 pub mod event;
 pub mod explain_history_service;
+pub mod graph_layout;
+pub mod graph_presentation;
 pub mod host;
 pub mod knowledge_service;
 pub mod layout;

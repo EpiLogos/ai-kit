@@ -1,0 +1,28 @@
+---
+source: crates/aikit-tui/tests/knowledge_graph_v2.rs
+expression: text
+---
+┌ AIKit · Workspace · payments · test-host ────────────────────────────────────┐
+│/ alpha   Search · Context · Compose · Knowledge · Explain · History          │
+│┌ Relations · Graph · depth 1 ───────────────────────────────────────────────┐│
+││                                                                            ││
+││                                                                            ││
+││                                                                            ││
+││                                                                            ││
+││                                          Outgoing -> related-skill         ││
+││                                      *   skill/beta (capability)           ││
+││                                          skill/gamma (capability)          ││
+││                                                                            ││
+││                                                                            ││
+││                                                                            ││
+││                                                                            ││
+││                                                                            ││
+││Inspector                                                                   ││
+││subject: skill/alpha                                                        ││
+││kind: capability                                                            ││
+││state: (not supplied)                                                       ││
+││role: focus of this neighbourhood                                           ││
+││relations:                                                                  ││
+│└────────────────────────────────────────────────────────────────────────────┘│
+│Knowledge · 1 result · 0 staged · scope session · Alt+←/→ fields · : actions ·│
+└──────────────────────────────────────────────────────────────────────────────┘

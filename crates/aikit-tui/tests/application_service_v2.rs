@@ -2,7 +2,7 @@ use aikit_core::resource::{
     ActionStageability, ContextualActionDescriptor, ResourceKind, ResourceRef,
 };
 use aikit_core::scope::ScopeKind;
-use aikit_core::Result;
+use aikit_core::{KnowledgeRelationView, RelationNode, RelationQuery, Result};
 use aikit_tui::{
     ActivationIntent, ApplyReceipt, CompositionPreview, HistoryEntry, RelationReadModel,
     ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService, TuiRuntime,
@@ -75,9 +75,15 @@ impl TuiApplicationService for FakeService {
     }
 
     fn relations(&self, subject: &ResourceRef) -> Result<RelationReadModel> {
+        let view = KnowledgeRelationView::focus_only(
+            RelationQuery::local(subject.clone()),
+            RelationNode::new(subject.clone(), ResourceKind::Capability, "alpha"),
+        )?;
+        let value = json!({"edges": []});
         Ok(RelationReadModel {
             subject: subject.clone(),
-            value: json!({"edges": []}),
+            view,
+            value,
         })
     }
 

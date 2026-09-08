@@ -1,0 +1,34 @@
+---
+source: crates/aikit-tui/tests/knowledge_graph_v2.rs
+expression: text
+---
+┌ AIKit · Workspace · Project: payments · Host: test-host · Target: shell ─────────────────────────────────────────────┐
+│/ alpha   Search · Context · Compose · Knowledge · Explain · History                                                  │
+│┌ Relations · Graph · depth 1 ────────────────────────────────────────┐alpha                                          │
+││                                                                     │capability                                     │
+││                                                                     │                                               │
+││                                                                     │Test skill alpha.                              │
+││                                                                     │                                               │
+││                                                                     │skill/alpha                                    │
+││                                                                     │                                               │
+││                                      Outgoing -> related-skill      │Actions · press :                              │
+││                                  *   skill/beta (capability)        │ › Explain · Explain provenance, availability, │
+││                                      skill/gamma (capability)       │staged/projected state and learned             │
+││                                                                     │accessibility                                  │
+││                                                                     │ › History · Inspect recent, familiar, changed │
+││                                                                     │and recoverable evidence for this Resource     │
+││                                                                     │ › Explain · show resolution, eligibility and  │
+││                                                                     │provenance for this Capability                 │
+││                                                                     │ * Toggle activation · stage an explicit       │
+││                                                                     │enable/disable change for this Capability      │
+││Inspector                                                            │                                               │
+││subject: skill/alpha                                                 │                                               │
+││kind: capability                                                     │                                               │
+││state: (not supplied)                                                │                                               │
+││role: focus of this neighbourhood                                    │                                               │
+││relations:                                                           │                                               │
+││  related-skill · bidirectional (skill/alpha -> skill/beta)          │                                               │
+││    authority: Derived  route: learned/derived                       │                                               │
+│└─────────────────────────────────────────────────────────────────────┘                                               │
+│Knowledge · 1 result · 0 staged · scope session · Alt+←/→ fields · : actions · Ctrl+W Quick                           │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
