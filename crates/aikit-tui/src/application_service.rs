@@ -20,9 +20,10 @@ use aikit_core::resource::{
 use aikit_core::{
     explain_history_actions_for, install_explain_history_actions, AikitError, FamiliarityContext,
     FamiliarityObservation, FamiliarityUse, ForgetScope, KnowledgeAddress, KnowledgeContextPack,
-    KnowledgeProviderStatus, KnowledgeReading, KnowledgeRoute, KnowledgeSources,
-    OperativePathEvidence, Result, RouteStepEvidence, DEFAULT_FAMILIARITY_HALF_LIFE_MS,
-    EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
+    KnowledgeProviderStatus, KnowledgeReading, KnowledgeRelationView, KnowledgeRoute,
+    KnowledgeSources, OperativePathEvidence, RelationDirection, RelationEdge, RelationNode,
+    RelationOrigin, RelationQuery, Result, RouteStepEvidence, SourceAuthority,
+    DEFAULT_FAMILIARITY_HALF_LIFE_MS, EXPLAIN_ACTION_REF, HISTORY_ACTION_REF,
 };
 use aikit_store::KnowledgeHistoryOperation;
 use serde_json::{json, to_string_pretty, to_value, Value};
@@ -409,6 +410,116 @@ impl<'a> ApplicationService<'a> {
         .from_surface(surface);
         self.backend.record_familiarity(observation)
     }
+
+    /// Shared body for [`TuiApplicationService::relations`] and
+    /// [`TuiApplicationService::relations_at_depth`]. `relations` calls this
+    /// with the historical fixed depth of `2`; `relations_at_depth` (the
+    /// Graph presentation's `+`/`-` control) passes through the requested,
+    /// already-bounded depth. Only the Knowledge-address path actually reads
+    /// `depth` — the resolver fallback's "often used with" edges are an
+    /// intrinsic one-hop set with no deeper resolver traversal to request,
+    /// so its `RelationQuery` still records the requested depth (for Inspector
+    /// honesty about what was asked) without pretending to have walked it.
+    fn relations_at_depth_impl(&self, resource: &ResourceRef, depth: u8) -> Result<RelationReadModel> {
+        if let Some(address) = self.backend.knowledge_address(resource)? {
+            if let Some(view) = self
+                .backend
+                .knowledge_relations(&address, depth, 256, 512)?
+            {
+                // The typed view is authoritative; `value` is retained only for
+                // Inspector/JSON parity with what the provider actually returned.
+                let value = to_value(&view).map_err(json_error)?;
+                return Ok(RelationReadModel {
+                    subject: resource.clone(),
+                    view,
+                    value,
+                });
+            }
+        }
+        let index = self.navigation_index()?;
+        let record = ResourceIndex::resource(&index, resource).ok_or_else(|| {
+            AikitError::new(
+                "application.resource_not_in_navigation_index",
+                format!("{resource} is not in the V2 navigation index"),
+            )
+        })?;
+        let explanation = record.explanation();
+        let contextual_actions = index
+            .actions_for(resource)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        // No Knowledge address: build a genuine, honestly-attributed
+        // KnowledgeRelationView from the package resolver's "often used with"
+        // catalog edges, rather than emitting untyped "related" strings. The
+        // resolver *derived* this pairing from a manifest declaration, so it is
+        // never Authored, and its lens is named for what it is.
+        let mut view = KnowledgeRelationView::focus_only(
+            RelationQuery {
+                focus: resource.clone(),
+                depth,
+                max_nodes: aikit_core::DEFAULT_RELATION_NODE_BUDGET,
+                max_edges: aikit_core::DEFAULT_RELATION_EDGE_BUDGET,
+                filters: Vec::new(),
+            },
+            RelationNode::new(
+                resource.clone(),
+                record.descriptor.kind,
+                record.descriptor.name.clone(),
+            ),
+        )?;
+        if let Some(capsule) = self.package_capability_id(resource)? {
+            for related in self.backend.view().related_to(&capsule) {
+                let related_ref = match ResourceRef::parse(related.to_string()) {
+                    Ok(related_ref) => related_ref,
+                    Err(_) => {
+                        view.warnings.push(format!(
+                            "resolver related id {related} could not be represented as a Resource"
+                        ));
+                        continue;
+                    }
+                };
+                if !view.push_node(RelationNode::new(
+                    related_ref.clone(),
+                    ResourceKind::Capability,
+                    related_ref.to_string(),
+                )) {
+                    // Node budget exhausted; view.truncated is already set, and the
+                    // edge cannot be pushed without its endpoint present.
+                    continue;
+                }
+                let origin = RelationOrigin::new(SourceAuthority::Derived).in_lens("resolver");
+                view.push_edge(RelationEdge::new(
+                    resource.clone(),
+                    related_ref,
+                    "related-skill",
+                    RelationDirection::Bidirectional,
+                    origin,
+                ))?;
+            }
+        }
+
+        let resolver_related = view
+            .edges
+            .iter()
+            .map(|edge| edge.to.to_string())
+            .collect::<Vec<_>>();
+        let value = json!({
+            "owner": explanation.owner,
+            "sources": explanation.sources,
+            "providers": explanation.providers,
+            "contextualActions": contextual_actions,
+            "related": resolver_related.clone(),
+            "resolverRelated": resolver_related,
+        });
+
+        Ok(RelationReadModel {
+            subject: resource.clone(),
+            view,
+            value,
+        })
+    }
 }
 
 impl TuiApplicationService for ApplicationService<'_> {
@@ -736,50 +847,11 @@ impl TuiApplicationService for ApplicationService<'_> {
     }
 
     fn relations(&self, resource: &ResourceRef) -> Result<RelationReadModel> {
-        if let Some(address) = self.backend.knowledge_address(resource)? {
-            if let Some(view) = self.backend.knowledge_relations(&address, 2, 256, 512)? {
-                return Ok(RelationReadModel {
-                    subject: resource.clone(),
-                    value: to_value(view).map_err(json_error)?,
-                });
-            }
-        }
-        let index = self.navigation_index()?;
-        let record = ResourceIndex::resource(&index, resource).ok_or_else(|| {
-            AikitError::new(
-                "application.resource_not_in_navigation_index",
-                format!("{resource} is not in the V2 navigation index"),
-            )
-        })?;
-        let explanation = record.explanation();
-        let contextual_actions = index
-            .actions_for(resource)
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        let resolver_related = self
-            .package_capability_id(resource)?
-            .map(|capsule| {
-                self.backend
-                    .view()
-                    .related_to(&capsule)
-                    .into_iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        self.relations_at_depth_impl(resource, 2)
+    }
 
-        Ok(RelationReadModel {
-            subject: resource.clone(),
-            value: json!({
-                "owner": explanation.owner,
-                "sources": explanation.sources,
-                "providers": explanation.providers,
-                "contextualActions": contextual_actions,
-                "related": resolver_related.clone(),
-                "resolverRelated": resolver_related,
-            }),
-        })
+    fn relations_at_depth(&self, resource: &ResourceRef, depth: u8) -> Result<RelationReadModel> {
+        self.relations_at_depth_impl(resource, depth)
     }
 
     fn knowledge_read(&self, address: &KnowledgeAddress) -> Result<Option<KnowledgeReading>> {
@@ -1008,5 +1080,305 @@ fn plural(count: usize) -> &'static str {
         ""
     } else {
         "s"
+    }
+}
+
+/// Regression coverage for the typed-relation-presentation boundary: `relations()`
+/// must surface a real [`KnowledgeRelationView`] on both the Knowledge-address path
+/// and the resolver fallback path, never only an untyped `"related"` string list.
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use aikit_core::capsule::Capsule;
+    use aikit_core::catalog::MemoryCatalog;
+    use aikit_core::context::{ContextDescriptor, Isolation};
+    use aikit_core::id::{CapsuleId, ContextId, GenerationId, RegistrySource, Revision, SessionId};
+    use aikit_core::platform::{Platform, TargetId};
+    use aikit_core::policy::ManagedPolicy;
+    use aikit_core::resolve::{resolve, ResolveRequest, ResolvedView};
+    use aikit_core::resource::{SourceRef, SourceRevision};
+    use aikit_core::scope::ScopeKind;
+    use aikit_core::search::SearchDoc;
+    use aikit_core::trust::{MemoryTrust, TrustState};
+    use aikit_core::{
+        FamiliarityContext, KnowledgeOperations, NativeSourcePoolProvider, SemanticWikiIndex,
+        SemanticWikiProvider, SourceBinding, SourceMaterial, SourcePoolProvider, SourceVisibility,
+    };
+
+    use crate::backend::{JobOutput, Projected, PromotionDraft, RunIntent, Toggle};
+
+    use super::*;
+
+    /// A minimal, honest [`PaletteBackend`]: the Knowledge and package/resolver
+    /// surfaces `relations()` actually reads are backed by real fixtures (a real
+    /// resolved catalogue, a real Knowledge fixture); every operation this test
+    /// never exercises is left `unimplemented!()` rather than faked.
+    struct FakeBackend {
+        context: ContextDescriptor,
+        view: ResolvedView,
+        capsules: BTreeMap<CapsuleId, Capsule>,
+        knowledge: Option<(ResourceRef, KnowledgeAddress, KnowledgeRelationView)>,
+    }
+
+    impl PaletteBackend for FakeBackend {
+        fn context(&self) -> &ContextDescriptor {
+            &self.context
+        }
+
+        fn view(&self) -> &ResolvedView {
+            &self.view
+        }
+
+        fn documents(&self) -> Vec<SearchDoc> {
+            Vec::new()
+        }
+
+        fn knowledge_address(&self, resource: &ResourceRef) -> Result<Option<KnowledgeAddress>> {
+            Ok(self
+                .knowledge
+                .as_ref()
+                .filter(|(subject, _, _)| subject == resource)
+                .map(|(_, address, _)| address.clone()))
+        }
+
+        fn knowledge_relations(
+            &self,
+            _address: &KnowledgeAddress,
+            _depth: u8,
+            _max_nodes: usize,
+            _max_edges: usize,
+        ) -> Result<Option<KnowledgeRelationView>> {
+            Ok(self.knowledge.as_ref().map(|(_, _, view)| view.clone()))
+        }
+
+        fn capsule(&self, id: &CapsuleId) -> Option<&Capsule> {
+            self.capsules.get(id)
+        }
+
+        fn preview(&self, _scope: ScopeKind, _toggles: &[Toggle]) -> Result<Projected> {
+            unimplemented!("relation tests never preview a composition")
+        }
+
+        fn apply(&mut self, _scope: ScopeKind, _toggles: &[Toggle]) -> Result<GenerationId> {
+            unimplemented!("relation tests never apply a composition")
+        }
+
+        fn start(&mut self, _intent: &RunIntent) -> Result<JobOutput> {
+            unimplemented!("relation tests never start a run")
+        }
+
+        fn recent(&self) -> Vec<RunIntent> {
+            Vec::new()
+        }
+
+        fn promotion_drafts(&self) -> Vec<PromotionDraft> {
+            Vec::new()
+        }
+
+        fn promote(&mut self, _draft: &PromotionDraft) -> Result<CapsuleId> {
+            unimplemented!("relation tests never promote a draft")
+        }
+    }
+
+    fn test_context() -> ContextDescriptor {
+        ContextDescriptor {
+            context_id: ContextId::parse("ctx_TESTCONTEXT000000000000").unwrap(),
+            session_id: Some(SessionId::parse("ses_TESTSESSION000000000000").unwrap()),
+            project_id: None,
+            project_root: None,
+            task: None,
+            isolation: Isolation::Shared,
+            platform: Platform::Linux,
+            targets: vec![TargetId::shell()],
+            mux: None,
+            host: "test-host".into(),
+        }
+    }
+
+    /// A real skill capsule, resolved through the real catalogue/trust/resolve
+    /// pipeline, declaring `related_skills` the way an author actually would.
+    fn skill_capsule(id: &str, related_skills: &[&str]) -> Capsule {
+        let related_toml = related_skills
+            .iter()
+            .map(|related| format!("\"{related}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let leaf = id.rsplit('/').next().unwrap();
+        let src = format!(
+            r#"schema = 1
+id = "{id}"
+kind = "skill"
+name = "{leaf}"
+description = "Test skill {leaf}."
+related_skills = [{related_toml}]
+
+[skill]
+root = "payload"
+"#
+        );
+        let mut capsule = Capsule::from_toml_str(&src)
+            .unwrap_or_else(|e| panic!("fixture manifest for {id} should parse: {e}"));
+        capsule.revision = Some(Revision::from_raw(format!("rev-{id}")));
+        capsule.source = Some(RegistrySource::personal());
+        capsule.root = Some(PathBuf::from(format!("/registry/{}", id.replace('/', "-"))));
+        capsule
+    }
+
+    fn resolve_fixture(capsules: Vec<Capsule>) -> (BTreeMap<CapsuleId, Capsule>, ResolvedView) {
+        let mut catalog = MemoryCatalog::default();
+        for capsule in &capsules {
+            catalog.insert(capsule.clone());
+        }
+        let mut trust = MemoryTrust::default();
+        for capsule in &capsules {
+            trust.set(
+                capsule.source.clone().unwrap(),
+                capsule.id.clone(),
+                capsule.revision.clone().unwrap(),
+                TrustState::Reviewed,
+            );
+        }
+        let view = resolve(
+            &catalog,
+            &trust,
+            &ResolveRequest {
+                context: test_context(),
+                layers: vec![],
+                policy: ManagedPolicy::default(),
+            },
+        )
+        .expect("an empty layer stack always resolves");
+        let by_id = capsules.into_iter().map(|c| (c.id.clone(), c)).collect();
+        (by_id, view)
+    }
+
+    /// Regression test for the exact defect this workstream fixes: a real Wiki
+    /// neighbourhood must reach the `RelationReadModel` with its typed nodes,
+    /// edges and origins intact, not flattened into an untyped `"related"` list
+    /// (which, for this fixture, would previously have been empty).
+    #[test]
+    fn knowledge_address_relations_survive_typed_into_the_read_model() {
+        let objects = aikit_core::parse_wiki_objects(
+            r#"{"objects":[
+              {"profile":"okf-wiki/v1","object":"space","ref":"wiki:space:root","revision":1,
+               "provenance":[],"title":"Root","parent_space_refs":[],"child_space_refs":[],
+               "node_refs":["wiki:node:auth"]},
+              {"profile":"okf-wiki/v1","object":"node","ref":"wiki:node:auth","revision":1,
+               "provenance":[{"source_ref":"source:spec"}],"type":"Concept","title":"Authentication",
+               "space_refs":["wiki:space:root"],"source_refs":["source:spec"]}
+            ]}"#,
+        )
+        .unwrap();
+        let index = SemanticWikiIndex::rebuild(objects).unwrap();
+        let material = vec![SourceMaterial {
+            binding: SourceBinding {
+                source: SourceRef::parse("source:spec").unwrap(),
+                revision: SourceRevision::parse("sha256:spec").unwrap(),
+                title: "Auth spec".into(),
+                tags: vec!["auth".into()],
+                visibility: SourceVisibility::Team,
+                owners: Vec::new(),
+                media_type: "text/markdown".into(),
+                locator: None,
+                metadata: BTreeMap::new(),
+            },
+            body: "Authentication rotates session tokens.".into(),
+        }];
+        let mut sources = NativeSourcePoolProvider::new();
+        sources.rebuild(&material).unwrap();
+        let subject = ResourceRef::parse("wiki:node:auth").unwrap();
+        let address = KnowledgeAddress::Wiki(subject.clone());
+        let app = aikit_core::KnowledgeApplication::new(FamiliarityContext {
+            project: Some(ResourceRef::parse("project:demo").unwrap()),
+            actor: None,
+            agency: None,
+            focus: None,
+        })
+        .with_wiki(SemanticWikiProvider::new(&index))
+        .with_source_pool(&sources, &material);
+        let view = KnowledgeOperations::relations(&app, &address, 2, 256, 512).unwrap();
+        assert!(
+            view.nodes
+                .iter()
+                .any(|node| node.resource.as_str() == "source:spec"),
+            "the fixture's own Knowledge application must produce a real neighbourhood"
+        );
+
+        let mut backend = FakeBackend {
+            context: test_context(),
+            view: resolve_fixture(Vec::new()).1,
+            capsules: BTreeMap::new(),
+            knowledge: Some((subject.clone(), address, view.clone())),
+        };
+        let service = ApplicationService::new(&mut backend);
+        let relation = service.relations(&subject).unwrap();
+
+        assert_eq!(relation.subject, subject);
+        assert_eq!(relation.view, view, "the typed view must pass through unchanged");
+        assert!(
+            relation
+                .view
+                .nodes
+                .iter()
+                .any(|node| node.resource.as_str() == "source:spec"),
+            "before this fix, list/tree/graph could see none of this: only an \
+             untyped `related` key (absent from KnowledgeRelationView's own \
+             serialisation) was ever scraped"
+        );
+        assert!(!relation.view.edges.is_empty());
+        assert_eq!(
+            relation.value["nodes"].as_array().map(Vec::len),
+            Some(view.nodes.len()),
+            "the untyped value must stay in parity with the typed view for Inspector detail"
+        );
+    }
+
+    /// The resolver fallback (no Knowledge address) must build a genuine,
+    /// honestly-attributed [`KnowledgeRelationView`] from the package resolver's
+    /// "often used with" edges — never a parallel untyped relation ontology.
+    #[test]
+    fn resolver_fallback_builds_a_valid_derived_relation_view() {
+        let subject_id = "skill/alpha";
+        let related_id = "skill/beta";
+        let alpha = skill_capsule(subject_id, &[related_id]);
+        let beta = skill_capsule(related_id, &[]);
+        let (capsules, view) = resolve_fixture(vec![alpha, beta]);
+
+        let mut backend = FakeBackend {
+            context: test_context(),
+            view,
+            capsules,
+            knowledge: None,
+        };
+        let service = ApplicationService::new(&mut backend);
+        let subject = ResourceRef::parse(subject_id).unwrap();
+        let relation = service.relations(&subject).unwrap();
+
+        assert_eq!(relation.view.query.focus, subject);
+        assert!(relation
+            .view
+            .nodes
+            .iter()
+            .any(|node| node.resource.as_str() == related_id));
+        let edge = relation
+            .view
+            .edges
+            .iter()
+            .find(|edge| edge.to.as_str() == related_id)
+            .expect("resolver fallback must expose the related capsule as a typed edge");
+        assert_eq!(edge.origin.authority, SourceAuthority::Derived);
+        assert_eq!(
+            edge.origin.lens.as_deref(),
+            Some("resolver"),
+            "the fallback must be honest about where the edge came from"
+        );
+        assert!(
+            relation.view.nodes.iter().any(|node| node.resource == edge.from),
+            "push_edge already enforces this, but the view must never carry a \
+             dangling endpoint"
+        );
+        assert!(relation.view.nodes.iter().any(|node| node.resource == edge.to));
     }
 }
