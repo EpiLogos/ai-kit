@@ -129,13 +129,13 @@ fn the_ascii_workspace_panes_carry_the_same_resolved_world() {
     .unwrap();
     surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
 
-    let context = rendered(&draw_width(&surface, 140, 30));
+    let context = rendered(&draw_width(&surface, 220, 30));
     assert!(context.contains("Context - resolved Project world"));
     assert!(context.contains("Project  project:payments"));
     assert!(context.contains("Scopes   not exposed by application boundary"));
 
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
-    let compose = rendered(&draw_width(&surface, 140, 30));
+    let compose = rendered(&draw_width(&surface, 220, 30));
     assert!(compose.contains("Compose - resolved Project world"));
     assert!(compose.contains("Intent        eligibility unresolved"));
     assert!(compose.contains("Effective     available - 0 providers"));
@@ -146,6 +146,14 @@ fn the_ascii_workspace_panes_carry_the_same_resolved_world() {
 }
 
 #[test]
+// 220 columns rather than 140: the wide-shell Inspector column (spec §2.1)
+// now carves a persistent share out of the preview pane's own budget
+// (`Layout::split`, `crates/aikit-tui/src/layout.rs`), never out of the list
+// pane. At 140 columns several of the single-line assertions below (e.g.
+// "Scopes   not exposed by application boundary") would wrap once the
+// preview pane gives up part of its width to Inspector; 220 keeps the
+// preview pane exactly as roomy as it needs to be for every string this test
+// asserts as one contiguous line, so the assertions below are unchanged.
 fn wide_workspace_renders_context_compose_and_explain_from_one_world() {
     let (_dir, mut backend) = fixture();
     let mut surface = ApplicationSurfaceController::new(
@@ -160,14 +168,14 @@ fn wide_workspace_renders_context_compose_and_explain_from_one_world() {
     .unwrap();
     surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
 
-    let context = rendered(&draw_width(&surface, 140, 30));
+    let context = rendered(&draw_width(&surface, 220, 30));
     assert!(context.contains("Context · resolved Project world"));
     assert!(context.contains("Project  project:payments"));
     assert!(context.contains("Scopes   not exposed by application boundary"));
 
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
     assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Compose");
-    let compose = rendered(&draw_width(&surface, 140, 30));
+    let compose = rendered(&draw_width(&surface, 220, 30));
     assert!(compose.contains("Compose · resolved Project world"));
     assert!(compose.contains("Capabilities"));
     assert!(compose.contains("Information"));
@@ -194,13 +202,17 @@ fn wide_workspace_renders_context_compose_and_explain_from_one_world() {
     // project_workspace_render::explain_lines block this overlay now also
     // carries, so the frame needs more rows than the tab views above to keep
     // "Catalog"/"Resolution" on screen.
-    let explain = rendered(&draw_width(&surface, 140, 80));
+    let explain = rendered(&draw_width(&surface, 220, 80));
     assert!(explain.contains("Explain · authored intent and effective state"));
     assert!(explain.contains("Catalog"));
     assert!(explain.contains("Resolution"));
 }
 
 #[test]
+// See the comment on `wide_workspace_renders_context_compose_and_explain_
+// from_one_world` above: 220 columns, not 140, keeps the preview pane's
+// single-line assertions below intact once the wide-shell Inspector column
+// (spec §2.1) takes its own carved share of that pane's width.
 fn work_and_system_sections_disclose_real_facts_without_fabricating_factory_or_credential_state() {
     let (_dir, mut backend) = fixture();
     let mut surface = ApplicationSurfaceController::new(
@@ -215,7 +227,7 @@ fn work_and_system_sections_disclose_real_facts_without_fabricating_factory_or_c
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Compose
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Work
     assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Work");
-    let work = rendered(&draw_width(&surface, 140, 30));
+    let work = rendered(&draw_width(&surface, 220, 30));
     assert!(work.contains("Work · what is actually running"));
     assert!(work.contains("Factory work    not exposed by application boundary"));
     assert!(
@@ -227,7 +239,7 @@ fn work_and_system_sections_disclose_real_facts_without_fabricating_factory_or_c
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // History
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // System
     assert_eq!(workspace_section_label(surface.semantic().workspace_section), "System");
-    let system = rendered(&draw_width(&surface, 140, 30));
+    let system = rendered(&draw_width(&surface, 220, 30));
     assert!(system.contains("System · installation and provider disclosure"));
     assert!(system.contains("Credentials   not exposed by application boundary"));
 }

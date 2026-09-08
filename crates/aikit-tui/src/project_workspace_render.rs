@@ -450,7 +450,10 @@ fn availability_label(availability: &Availability) -> &'static str {
     }
 }
 
-fn authority_label(authority: SourceAuthority) -> &'static str {
+/// `pub(crate)`: `crate::inspector_render` reuses this exact vocabulary for
+/// the Inspector column's Evidence facts rather than inventing a second
+/// authority-label mapping.
+pub(crate) fn authority_label(authority: SourceAuthority) -> &'static str {
     match authority {
         SourceAuthority::Authored => "authored",
         SourceAuthority::Observed => "observed",

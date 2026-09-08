@@ -17,6 +17,7 @@ pub mod explain_history_service;
 pub mod graph_layout;
 pub mod graph_presentation;
 pub mod host;
+pub mod inspector_render;
 pub mod knowledge_service;
 pub mod layout;
 pub mod model_roster_surface;

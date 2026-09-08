@@ -1,34 +1,35 @@
 ---
 source: crates/aikit-tui/tests/knowledge_graph_v2.rs
+assertion_line: 1075
 expression: text
 ---
 ┌ AIKit · Workspace · Project: payments · Host: test-host · Target: shell ─────────────────────────────────────────────┐
 │/ alpha   Search · Worlds · Compose · Work · Knowledge · History · System                                             │
-│┌ Relations · Graph · depth 1 ────────────────────────────────────────┐alpha                                          │
+│┌ Relations · Graph · depth 1 ────────────────────────────────────────┐alpha              INSPECTOR                   │
 ││                                                                     │capability                                     │
+││                                                                     │                   subject   skill/alpha       │
+││                                                                     │Test skill alpha.  kind      capability        │
+││                                                                     │                   label     alpha             │
+││                                                                     │skill/alpha        summary   Test skill alpha. │
 ││                                                                     │                                               │
-││                                                                     │Test skill alpha.                              │
-││                                                                     │                                               │
-││                                                                     │skill/alpha                                    │
-││                                                                     │                                               │
-││                                      Outgoing → related-skill       │Actions · press :                              │
-││                                  ◆   skill/beta (capability)        │ › Explain · Explain provenance, availability, │
-││                                      skill/gamma (capability)       │staged/projected state and learned             │
-││                                                                     │accessibility                                  │
-││                                                                     │ › History · Inspect recent, familiar, changed │
-││                                                                     │and recoverable evidence for this Resource     │
-││                                                                     │ › Explain · show resolution, eligibility and  │
-││                                                                     │provenance for this Capability                 │
-││                                                                     │ * Toggle activation · stage an explicit       │
-││                                                                     │enable/disable change for this Capability      │
-││Inspector                                                            │                                               │
-││subject: skill/alpha                                                 │                                               │
-││kind: capability                                                     │                                               │
-││state: (not supplied)                                                │                                               │
-││role: focus of this neighbourhood                                    │                                               │
-││relations:                                                           │                                               │
-││  related-skill · bidirectional (skill/alpha -> skill/beta)          │                                               │
-││    authority: Derived  route: learned/derived                       │                                               │
-│└─────────────────────────────────────────────────────────────────────┘                                               │
+││                                      Outgoing → related-skill       │Actions · press :  Explain · authored intent   │
+││                                  ◆   skill/beta (capability)        │ › Explain ·       and effective state         │
+││                                      skill/gamma (capability)       │Explain provenance,                            │
+││                                                                     │availability,      Resource       skill/alpha  │
+││                                                                     │staged/projected   alpha · capability          │
+││                                                                     │state and learned  skill/alpha                 │
+││                                                                     │accessibility      Intent        eligibility   │
+││                                                                     │ › History ·       unresolved · no authored    │
+││                                                                     │Inspect recent,    preference · provenance     │
+││                                                                     │familiar, changed  authored                    │
+││Inspector                                                            │and recoverable    Effective     available · 0 │
+││subject: skill/alpha                                                 │evidence for this  providers                   │
+││kind: capability                                                     │Resource                                       │
+││state: (not supplied)                                                │ › Explain · show  Catalog                     │
+││role: focus of this neighbourhood                                    │resolution,        fec6f17159da596f07e1e05317f0│
+││relations:                                                           │eligibility and    a58f96f1b77eb28401ecd58aa413│
+││  related-skill · bidirectional (skill/alpha -> skill/beta)          │provenance for this6163a61e                    │
+││    authority: Derived  route: learned/derived                       │Capability         Resolution                  │
+│└─────────────────────────────────────────────────────────────────────┘ * Toggle          bd5c9f88cc6b723d41c306dff6b1│
 │Knowledge · 1 result · 0 staged · scope session · Alt+←/→ fields · : actions · Ctrl+W Quick                           │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
