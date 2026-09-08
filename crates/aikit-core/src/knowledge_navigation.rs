@@ -552,9 +552,17 @@ impl<'a> KnowledgeApplication<'a> {
                             citing.len()
                         ),
                         sources: vec![source.clone()],
-                        detail: serde_json::to_value(
-                            citing.iter().map(ToString::to_string).collect::<Vec<_>>(),
-                        )
+                        // Named, not a bare list: this rides under the
+                        // explain payload's `provider` key alongside other
+                        // providers' native detail, where an unlabelled
+                        // array of refs would not say what it is.
+                        detail: serde_json::to_value(serde_json::json!({
+                            "citing_nodes": citing
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>(),
+                            "readable": false,
+                        }))
                         .ok(),
                     });
                 };
