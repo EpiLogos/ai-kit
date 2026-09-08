@@ -789,6 +789,75 @@ pub enum WikiSub {
     Root(WikiRootCmd),
     /// Stage a source file into the Wiki by its authored QL frontmatter.
     Stage(WikiStageArgs),
+    /// Ingest an authored corpus directory (rooms, records, links, tags,
+    /// register frontmatter) into a Wiki file.
+    Ingest(WikiIngestArgs),
+    /// Read a Wiki file's semantic index: search, neighbours, backlinks.
+    Query(WikiQueryCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct WikiIngestArgs {
+    /// The corpus directory to walk (e.g. an essay's canonical publication
+    /// body, `submission-package/essay/`). Walked recursively; only files
+    /// named by `--extension` are read as candidate records.
+    #[arg(value_name = "CORPUS_DIR")]
+    pub corpus: std::path::PathBuf,
+    /// The wiki.json file to write the ingested objects into.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
+    /// Write the ingestion. Without it, ingest only reports what it would
+    /// do — the same dry-run-by-default convention as `wiki root prune`.
+    #[arg(long)]
+    pub apply: bool,
+    /// Replace an object the file already holds (advancing its revision)
+    /// instead of refusing on collision. Off by default: ingest never
+    /// silently overwrites an authored or previously-ingested object.
+    #[arg(long)]
+    pub update: bool,
+    /// Only files with this extension are read as candidate records.
+    #[arg(long, value_name = "EXT", default_value = "md")]
+    pub extension: String,
+}
+
+#[derive(Debug, Args)]
+pub struct WikiQueryCmd {
+    #[command(subcommand)]
+    pub command: WikiQuerySub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WikiQuerySub {
+    /// Full-text search over a Wiki file's nodes, edges, spaces and readings.
+    Search(WikiQuerySearchArgs),
+    /// Every object one ref links to (outgoing and incoming), by relation.
+    Neighbours(WikiQueryRefArgs),
+    /// Every object that links *to* one ref — the backlinks view.
+    Backlinks(WikiQueryRefArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WikiQuerySearchArgs {
+    /// The search text.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+    /// The wiki.json file to read.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct WikiQueryRefArgs {
+    /// The canonical ref to query from.
+    #[arg(value_name = "REF")]
+    pub resource_ref: String,
+    /// The wiki.json file to read.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
+    #[arg(long, default_value_t = 50)]
+    pub limit: usize,
 }
 
 #[derive(Debug, Args)]

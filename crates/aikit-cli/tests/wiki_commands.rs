@@ -911,3 +911,300 @@ fn anchor_project_names_the_root_node_from_the_project() {
         .iter()
         .any(|entry| entry == &Value::from("wiki:node:project-root/my-project")));
 }
+
+// ---------------------------------------------------------------------------
+// wiki ingest / wiki query
+//
+// The fixture below mirrors the real Return of Zero corpus in miniature:
+// a non-record README, an etymology whole-field that cites its argument
+// consumer by markdown link (the corpus's dominant citation form) with a
+// relative path that only resolves from the citing file's own directory,
+// a tagged argument record, and a stale working-tree snapshot that
+// re-declares the etymology's own `record_id` — the exact collision the
+// live corpus carries in `working/…/snapshots/…/before/`.
+// ---------------------------------------------------------------------------
+
+fn ingest_corpus_fixture(root: &Path) {
+    write(&root.join("README.md"), "# Not a record\n\nNo frontmatter, no record_id.\n");
+    write(
+        &root.join("symbolon/episteme/etymologies/arbitration/WHOLE-FIELD.md"),
+        "---\nrecord_id: etymology-arbitration\nrecord_type: etymology-whole\nregister: episteme\n---\n\n# Whole Field\n\nSee [A24](../../arguments/A24-Arbitration.md) for the consequential development.\n",
+    );
+    write(
+        &root.join("symbolon/episteme/arguments/A24-Arbitration.md"),
+        "---\nrecord_id: A24\nrecord_type: argument\nregister: episteme\nclaim_status: \"Argued\"\nsource_ids:\n  - ostrom-1990-governing-commons\ntags:\n  - arbitration\n  - measure\n---\n\n# A24 — Arbitration and the Usurpation of Measure\n",
+    );
+    // The stale checkpoint: same record_id as the canonical whole-field,
+    // sorting after it lexicographically (`submission` < `working`, mirrored
+    // here by `symbolon` < `working`), so it is the one set aside.
+    write(
+        &root.join("working/snapshots/before/expanded-E2.md"),
+        "---\nrecord_id: etymology-arbitration\nrecord_type: etymology-whole\n---\n\n# Snapshot copy, not canonical\n",
+    );
+}
+
+/// A record's declared bibliography is findable as an authored source, and
+/// asking that source for relations says what it is rather than answering an
+/// empty list — which a caller cannot tell from "exists, unrelated".
+#[test]
+fn cited_bibliography_is_findable_and_an_empty_traversal_says_why() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\n  \"objects\": []\n}\n");
+    let (code, _) = wiki(
+        scratch.path(),
+        &["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply"],
+    );
+    assert_eq!(code, 0);
+
+    // The work A24 stands on is findable, as a source and not as a node.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "search", "ostrom", "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let hits = envelope["data"]["hits"].as_array().unwrap();
+    let hit = hits
+        .iter()
+        .find(|h| h["address"]["kind"] == "authored-source")
+        .expect("the declared bibliography is findable");
+    assert_eq!(
+        hit["address"]["source"],
+        "central:source:corpus:ostrom-1990-governing-commons"
+    );
+
+    // Asking it for neighbours discloses that it is a cited source, not a
+    // curated object with nothing attached.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "neighbours", "central:source:corpus:ostrom-1990-governing-commons",
+          "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert!(envelope["data"]["neighbours"].as_array().unwrap().is_empty());
+    let warnings = envelope["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w.as_str().unwrap_or_default().contains("authored source cited by")),
+        "an empty traversal over a cited source explains itself: {warnings:?}"
+    );
+
+    // A ref the field does not hold at all is a different answer again.
+    let (_, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "neighbours", "wiki:node:record/absent", "--file", wiki_json.to_str().unwrap()],
+    );
+    let warnings = envelope["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w.as_str().unwrap_or_default().contains("not in this Wiki file")),
+        "an unknown ref says it is absent, not unrelated: {warnings:?}"
+    );
+
+    // A real curated node stays quiet.
+    let (_, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "neighbours", "wiki:node:record/A24", "--file", wiki_json.to_str().unwrap()],
+    );
+    assert!(envelope["warnings"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn ingest_dry_run_reports_the_real_mixed_tree_and_writes_nothing() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\n  \"objects\": []\n}\n");
+    let before = read(&wiki_json);
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let data = &envelope["data"];
+    assert_eq!(data["applied"], Value::from(false));
+    // README.md is the one non-record file; the snapshot re-declares
+    // etymology-arbitration's id and is set aside, not ingested.
+    assert_eq!(data["skipped_no_record_id"], Value::from(1));
+    assert_eq!(data["duplicate_record_id"], Value::from(1));
+    assert_eq!(data["records_selected"], Value::from(2));
+    // Two record nodes, two tag nodes (arbitration, measure), one room space
+    // (`symbolon`), and the one resolved markdown-link edge (A24 -> whole
+    // field is not asserted; the whole field cites A24, so the edge is
+    // whole-field -> A24) plus two tagged edges.
+    assert_eq!(data["nodes"], Value::from(4));
+    assert_eq!(data["edges"], Value::from(3));
+    assert_eq!(data["spaces"], Value::from(1));
+    assert_eq!(data["absences"], Value::from(0));
+
+    assert!(envelope["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("etymology-arbitration")
+            && w.as_str().unwrap().contains("expanded-E2.md")));
+    assert_eq!(read(&wiki_json), before, "a dry run writes nothing");
+}
+
+#[test]
+fn ingest_apply_writes_objects_then_refuses_a_rerun_without_update() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\n  \"objects\": []\n}\n");
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "ingest",
+            corpus.to_str().unwrap(),
+            "--file",
+            wiki_json.to_str().unwrap(),
+            "--apply",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["applied"], Value::from(true));
+
+    let held: Value = serde_json::from_str(&read(&wiki_json)).unwrap();
+    let objects = held["objects"].as_array().unwrap();
+    assert!(objects
+        .iter()
+        .any(|o| o["ref"] == "wiki:node:record/A24" && o["type"] == "argument"));
+    assert!(objects
+        .iter()
+        .any(|o| o["ref"] == "wiki:node:record/etymology-arbitration"));
+    assert!(objects.iter().any(|o| o["ref"] == "wiki:node:tag/arbitration"));
+
+    // A second apply without --update refuses and leaves the file untouched.
+    let before = read(&wiki_json);
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "ingest",
+            corpus.to_str().unwrap(),
+            "--file",
+            wiki_json.to_str().unwrap(),
+            "--apply",
+        ],
+    );
+    assert_ne!(code, 0);
+    assert!(envelope["error"]["message"].as_str().unwrap().contains("--update"));
+    assert_eq!(read(&wiki_json), before);
+
+    // With --update the rerun succeeds and advances every touched revision.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "ingest",
+            corpus.to_str().unwrap(),
+            "--file",
+            wiki_json.to_str().unwrap(),
+            "--apply",
+            "--update",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let held: Value = serde_json::from_str(&read(&wiki_json)).unwrap();
+    let a24 = held["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["ref"] == "wiki:node:record/A24")
+        .unwrap();
+    assert_eq!(a24["revision"], Value::from(2));
+}
+
+/// The capability proof: after ingesting, `wiki query backlinks` and
+/// `wiki query search` answer real questions over the ingested field
+/// through the ordinary semantic-index surface — backlinks and tags are
+/// first-class results, not merely present on the objects.
+#[test]
+fn query_backlinks_and_search_see_the_ingested_field_as_first_class_results() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\n  \"objects\": []\n}\n");
+    let (code, _) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "ingest",
+            corpus.to_str().unwrap(),
+            "--file",
+            wiki_json.to_str().unwrap(),
+            "--apply",
+        ],
+    );
+    assert_eq!(code, 0);
+
+    // A24's backlinks include the whole-field's markdown-link citation.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "backlinks", "wiki:node:record/A24", "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let backlinks = envelope["data"]["backlinks"].as_array().unwrap();
+    assert!(backlinks
+        .iter()
+        .any(|n| n["resource"] == "wiki:node:record/etymology-arbitration" && n["relation"] == "references"));
+
+    // The `arbitration` tag's backlinks are the tagged records — first-class,
+    // not a side channel.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "backlinks", "wiki:node:tag/arbitration", "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let backlinks = envelope["data"]["backlinks"].as_array().unwrap();
+    assert!(backlinks
+        .iter()
+        .any(|n| n["resource"] == "wiki:node:record/A24" && n["relation"] == "tagged"));
+
+    // Search finds the ingested record by its title.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "search", "Usurpation of Measure", "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let hits = envelope["data"]["hits"].as_array().unwrap();
+    assert!(hits.iter().any(|h| h["address"]["kind"] == "curated"
+        && h["address"]["resource"] == "wiki:node:record/A24"));
+
+    // Neighbours from the whole-field show its outgoing reference to A24.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "query",
+            "neighbours",
+            "wiki:node:record/etymology-arbitration",
+            "--file",
+            wiki_json.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let neighbours = envelope["data"]["neighbours"].as_array().unwrap();
+    assert!(neighbours
+        .iter()
+        .any(|n| n["resource"] == "wiki:node:record/A24" && n["direction"] == "outgoing"));
+}
+
+#[test]
+fn ingest_refuses_a_corpus_path_that_is_not_a_directory() {
+    let (work, scratch) = fixture();
+    let not_a_dir = work.path().join("wiki.json");
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "ingest", not_a_dir.to_str().unwrap(), "--file", not_a_dir.to_str().unwrap()],
+    );
+    assert_ne!(code, 0);
+    assert!(envelope["error"]["message"].as_str().unwrap().contains("not a directory"));
+}
