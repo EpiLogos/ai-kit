@@ -26,6 +26,7 @@ pub mod foreign;
 pub mod continuity_disclosure;
 pub mod domain_activation;
 pub mod file_context;
+pub mod orientation_packet;
 pub mod gateway_ops;
 pub mod hook;
 pub mod json;

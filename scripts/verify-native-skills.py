@@ -83,6 +83,7 @@ EXPECTED_HOOKS = {
     "hook/continuity/entity-disclosure",
     "hook/continuity/domain-activation",
     "hook/continuity/file-context",
+    "hook/continuity/orientation-packet",
 }
 if seen_hooks != EXPECTED_HOOKS:
     raise SystemExit(f"first-party hook corpus mismatch: {seen_hooks ^ EXPECTED_HOOKS}")
