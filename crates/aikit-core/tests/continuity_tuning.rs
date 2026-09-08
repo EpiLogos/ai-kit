@@ -6,12 +6,14 @@
 
 mod common;
 
+use aikit_core::capsule::Capsule;
 use aikit_core::continuity::{
     is_continuity_capability, ContinuityTuning, CONTINUITY_NAMESPACE, FLOOR_CAPABILITY,
 };
-use aikit_core::capsule::Capsule;
 use aikit_core::id::CapsuleId;
+use aikit_core::profile::{ConfigTable, PoolPatch};
 use aikit_core::scope::ScopeKind;
+use aikit_core::scope::{LayerOrigin, ScopeLayer};
 use common::*;
 
 fn turn_ledger_capsule() -> Capsule {
@@ -44,10 +46,16 @@ fn cid(s: &str) -> CapsuleId {
 
 #[test]
 fn only_hook_capsules_in_the_continuity_namespace_are_continuity_capabilities() {
-    assert!(is_continuity_capability(&cid("hook/continuity/turn-ledger")));
+    assert!(is_continuity_capability(&cid(
+        "hook/continuity/turn-ledger"
+    )));
     assert!(!is_continuity_capability(&cid("hook/other/turn-ledger")));
-    assert!(!is_continuity_capability(&cid("skill/continuity/turn-ledger")));
-    assert!(!is_continuity_capability(&cid("script/continuity/turn-ledger")));
+    assert!(!is_continuity_capability(&cid(
+        "skill/continuity/turn-ledger"
+    )));
+    assert!(!is_continuity_capability(&cid(
+        "script/continuity/turn-ledger"
+    )));
 }
 
 #[test]
@@ -66,8 +74,13 @@ fn the_default_composition_reports_only_the_floor() {
     assert!(!tuning.allows("turn-ledger"));
 
     let report = tuning.describe();
-    assert_eq!(report.get("floor").unwrap(), &[FLOOR_CAPABILITY.to_string()]);
-    assert!(report.get("composed").unwrap().is_empty());
+    assert_eq!(report["floor"], serde_json::json!(FLOOR_CAPABILITY));
+    assert_eq!(report["composed"], serde_json::json!([]));
+    assert_eq!(
+        report["tunings"],
+        serde_json::json!({}),
+        "an uncomposed field tunes nothing"
+    );
 }
 
 #[test]
@@ -79,10 +92,7 @@ fn a_known_but_uncomposed_reaction_is_answered_not_composed() {
 
     let tuning = ContinuityTuning::resolve(&view);
     assert!(
-        tuning
-            .not_composed
-            .iter()
-            .any(|name| name == "turn-ledger"),
+        tuning.not_composed.iter().any(|name| name == "turn-ledger"),
         "turn-ledger is known but not composed and must be answered as such: {tuning}"
     );
 }
@@ -103,7 +113,7 @@ fn composing_the_delta_makes_exactly_that_reaction_operative() {
     assert!(!tuning.allows("orientation-packet"));
 
     let report = tuning.describe();
-    assert_eq!(report.get("composed").unwrap(), &["turn-ledger".to_string()]);
+    assert_eq!(report["composed"], serde_json::json!(["turn-ledger"]));
 }
 
 #[test]
@@ -125,7 +135,10 @@ fn entity_disclosure_is_known_but_not_composed_by_default() {
     let view = fixture.resolve().unwrap();
     let tuning = ContinuityTuning::resolve(&view);
     assert!(
-        tuning.not_composed.iter().any(|name| name == "entity-disclosure"),
+        tuning
+            .not_composed
+            .iter()
+            .any(|name| name == "entity-disclosure"),
         "entity-disclosure must be answerable as not composed: {tuning}"
     );
     assert!(!tuning.allows("entity-disclosure"));
@@ -154,7 +167,10 @@ fn domain_activation_is_known_but_not_composed_by_default() {
     let view = fixture.resolve().unwrap();
     let tuning = ContinuityTuning::resolve(&view);
     assert!(
-        tuning.not_composed.iter().any(|name| name == "domain-activation"),
+        tuning
+            .not_composed
+            .iter()
+            .any(|name| name == "domain-activation"),
         "domain-activation must be answerable as not composed: {tuning}"
     );
     assert!(!tuning.allows("domain-activation"));
@@ -173,4 +189,169 @@ fn composing_domain_activation_is_exactly_that_delta() {
     assert!(tuning.allows("domain-activation"));
     assert!(!tuning.allows("turn-ledger"));
     assert!(!tuning.allows("entity-disclosure"));
+}
+
+// ---------------------------------------------------------------------------
+// CASE 14 clause 3 — adjusted tuning values are attributable to the active
+// composition, never to ambient global state.
+// ---------------------------------------------------------------------------
+
+fn orientation_packet_capsule() -> Capsule {
+    hook_table(
+        "hook/continuity/orientation-packet",
+        "",
+        "entry = \"payload/orientation-packet\"\nevents = [\"SessionStart\"]",
+    )
+}
+
+/// A layer that both composes a capability and tunes it, the way a real
+/// delta does: `[config.<capsule-id>]` rides the same patch as the enable.
+fn layer_tuning(kind: ScopeKind, enable: &str, config: ConfigTable) -> ScopeLayer {
+    let id = cid(enable);
+    let mut table = std::collections::BTreeMap::new();
+    table.insert(id.clone(), config);
+    ScopeLayer {
+        kind,
+        depth: 0,
+        origin: LayerOrigin::new(format!("test:{}", kind.as_str())),
+        patch: PoolPatch {
+            profiles: vec![],
+            uses: vec![],
+            enable: vec![id],
+            disable: vec![],
+            config: table,
+            skill_overlays: Default::default(),
+        },
+    }
+}
+
+fn budget(max_items: i64) -> ConfigTable {
+    let mut t = ConfigTable::new();
+    t.insert("max_items".to_string(), toml::Value::Integer(max_items));
+    t
+}
+
+/// The clause: a tuning adjusted within a delta is reported *as the value in
+/// effect*, not merely as the name of the capability carrying it. Before this,
+/// `aikit context` printed capability names only — an operator could see that
+/// orientation-packet was composed but not what budget it was running.
+#[test]
+fn an_adjusted_tuning_value_is_reported_as_the_value_in_effect() {
+    let fixture = Fixture::new(vec![orientation_packet_capsule()]).with_layers(vec![layer_tuning(
+        ScopeKind::Session,
+        "hook/continuity/orientation-packet",
+        budget(3),
+    )]);
+    let view = fixture.resolve().unwrap();
+    let tuning = ContinuityTuning::resolve(&view);
+
+    assert_eq!(tuning.composed, vec!["orientation-packet".to_string()]);
+    let effect = tuning
+        .tunings
+        .get("orientation-packet")
+        .expect("a composed capability reports the values it runs under");
+    assert_eq!(
+        effect.values.get("max_items"),
+        Some(&toml::Value::Integer(3)),
+        "the adjusted value itself must be readable: {:?}",
+        effect.values
+    );
+}
+
+/// The other half of the clause: the value is *attributable* — the report
+/// names the active composition that owns it, so it can never be mistaken for
+/// ambient global state.
+#[test]
+fn the_value_in_effect_names_the_active_composition_that_owns_it() {
+    let fixture = Fixture::new(vec![orientation_packet_capsule()]).with_layers(vec![layer_tuning(
+        ScopeKind::Session,
+        "hook/continuity/orientation-packet",
+        budget(7),
+    )]);
+    let view = fixture.resolve().unwrap();
+    let tuning = ContinuityTuning::resolve(&view);
+
+    let effect = &tuning.tunings["orientation-packet"];
+    assert!(
+        !effect.composition.is_empty(),
+        "an attributable value always names its active composition"
+    );
+    assert!(
+        effect.composition.contains("session"),
+        "the report names the layer that selected the active composition, got: {}",
+        effect.composition
+    );
+}
+
+/// A composed capability that nobody tuned reports an *empty* value set, not
+/// an absent one. "Running on its declared defaults, adjusted by nobody" is a
+/// real answer; silence would be indistinguishable from "not composed".
+#[test]
+fn a_composed_but_untuned_capability_reports_an_empty_value_set_not_absence() {
+    let fixture = Fixture::new(vec![orientation_packet_capsule()]).with_layers(vec![layer(
+        ScopeKind::Session,
+        &["hook/continuity/orientation-packet"],
+        &[],
+    )]);
+    let view = fixture.resolve().unwrap();
+    let tuning = ContinuityTuning::resolve(&view);
+
+    let effect = tuning
+        .tunings
+        .get("orientation-packet")
+        .expect("composed means present in the report, tuned or not");
+    assert!(
+        effect.values.is_empty(),
+        "nobody adjusted it: {:?}",
+        effect.values
+    );
+}
+
+/// An uncomposed capability contributes no tuning at all. The report cannot
+/// suggest that a value is in effect for something that never runs.
+#[test]
+fn an_uncomposed_capability_contributes_no_tuning_to_the_report() {
+    let fixture = Fixture::new(vec![orientation_packet_capsule()]);
+    let view = fixture.resolve().unwrap();
+    let tuning = ContinuityTuning::resolve(&view);
+
+    assert!(tuning
+        .not_composed
+        .iter()
+        .any(|name| name == "orientation-packet"));
+    assert!(
+        !tuning.tunings.contains_key("orientation-packet"),
+        "a capability that does not run has no values in effect: {:?}",
+        tuning.tunings
+    );
+}
+
+/// The report `aikit context` renders carries the values, so the inspection
+/// surface and the behaviour are read from one resolve of one view — they
+/// cannot drift apart.
+#[test]
+fn the_inspection_report_carries_the_values_not_just_the_names() {
+    let fixture = Fixture::new(vec![orientation_packet_capsule()]).with_layers(vec![layer_tuning(
+        ScopeKind::Session,
+        "hook/continuity/orientation-packet",
+        budget(5),
+    )]);
+    let view = fixture.resolve().unwrap();
+    let report = ContinuityTuning::resolve(&view).describe();
+
+    assert_eq!(
+        report["composed"],
+        serde_json::json!(["orientation-packet"])
+    );
+    assert_eq!(
+        report["tunings"]["orientation-packet"]["values"]["max_items"],
+        serde_json::json!(5),
+        "the rendered report is the attribution surface: {report}"
+    );
+    assert!(
+        report["tunings"]["orientation-packet"]["composition"]
+            .as_str()
+            .is_some_and(|o| !o.is_empty()),
+        "every reported value is attributed: {report}"
+    );
 }
