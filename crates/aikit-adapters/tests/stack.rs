@@ -26,7 +26,7 @@ use aikit_adapters::mux::cmux::Cmux;
 use aikit_adapters::mux::plain::Plain;
 use aikit_adapters::mux::stack::{combine_registries, EffectiveRegistry, MuxStack, RemoteBoundary};
 use aikit_adapters::mux::tmux::Tmux;
-use aikit_adapters::mux::{MuxTarget, SpawnRequest, StatusUpdate, UiHost};
+use aikit_adapters::mux::{MuxAdapter, MuxTarget, SpawnRequest, StatusUpdate, UiHost};
 use aikit_adapters::runner::ScriptedRunner;
 use aikit_core::platform::MuxKind;
 use aikit_core::session::{Direction, Placement};
@@ -57,7 +57,7 @@ fn tmux_runner() -> Arc<ScriptedRunner> {
             .on("list-sessions", "payments: 2 windows")
             .on(
                 "display-message -p #{session_name}",
-                "payments\t@1\t%4\tstaging-box",
+                "payments|@1|%4|staging-box",
             )
             .on("split-window", "%12")
             .on("display-popup", "")
@@ -306,6 +306,30 @@ fn the_plain_fallback_is_not_reported_as_a_fake_status_layer_inside_tmux() {
             .all(|delivery| delivery.kind != MuxKind::Plain),
         "plain is a fallback host, not a real outer layer once tmux is active"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The location's raw fields
+// ---------------------------------------------------------------------------
+
+/// `current_location` joins its four fields with `|` rather than a literal
+/// tab, because tmux 3.6a rewrites an embedded tab in `-p`/`-F` output to `_`
+/// while leaving `|` untouched (tmux 3.7c leaves both alone). This does not
+/// exercise tmux itself — it pins the parse against the scripted fixture, so
+/// a regression back to `\t` (or to any separator tmux mangles) fails here
+/// instead of surfacing as silently empty `window_id`/`pane_id`/`host` on a
+/// real 3.6a machine.
+#[test]
+fn current_location_parses_every_pipe_joined_field() {
+    let tmux =
+        Tmux::new(Arc::clone(&tmux_runner())).with_env_var("TMUX", "/tmp/tmux-501/default,1,0");
+
+    let location = tmux.current_location().unwrap();
+
+    assert_eq!(location.session.as_deref(), Some("payments"));
+    assert_eq!(location.view.as_deref(), Some("@1"));
+    assert_eq!(location.surface.as_deref(), Some("%4"));
+    assert_eq!(location.host, "staging-box");
 }
 
 // ---------------------------------------------------------------------------
