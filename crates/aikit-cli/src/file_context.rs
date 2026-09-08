@@ -72,7 +72,7 @@ pub fn load_project_wiki(project_root: &Path) -> (Vec<WikiObject>, Vec<String>) 
 }
 
 /// The project-relative form of the path, for pattern matching and keys.
-fn relative<'a>(project_root: &Path, path: &'a str) -> String {
+fn relative(project_root: &Path, path: &str) -> String {
     Path::new(path)
         .strip_prefix(project_root)
         .unwrap_or_else(|_| Path::new(path))
