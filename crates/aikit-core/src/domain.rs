@@ -97,6 +97,15 @@ pub struct KnowledgeDomain {
     pub triggers: Vec<String>,
     #[serde(default)]
     pub guidance: Vec<DomainRule>,
+    /// Declared file-addressing patterns (W1/CASE 05): when the composition
+    /// also arms `hook/continuity/file-context`, this domain's guidance
+    /// becomes operative before an operation on a file matching any pattern.
+    /// Same grammar as skill overlays (`glob_matches`: `*` within a segment,
+    /// `**` across segments); patterns are project-root-relative data, like
+    /// everything else here. A domain without patterns stays
+    /// prompt-addressed only.
+    #[serde(default)]
+    pub path_patterns: Vec<String>,
     /// The typed retrieval expression this domain resolves when operative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retrieval: Option<ResolveExpression>,
@@ -129,12 +138,22 @@ impl KnowledgeDomain {
                 ));
             }
         }
-        if self.triggers.is_empty() {
-            return Err("a domain declares at least one trigger".into());
+        if self.triggers.is_empty() && self.path_patterns.is_empty() {
+            return Err(
+                "a domain declares at least one trigger or path pattern".into(),
+            );
         }
         for trigger in &self.triggers {
             if trigger.trim().is_empty() {
                 return Err("triggers must be non-empty".into());
+            }
+        }
+        for pattern in &self.path_patterns {
+            if pattern.trim().is_empty() {
+                return Err(format!(
+                    "domain {} declares an empty path pattern",
+                    self.id
+                ));
             }
         }
         for rule in &self.guidance {
@@ -185,9 +204,15 @@ pub fn activate<'a>(domains: &'a [KnowledgeDomain], prompt: &str) -> Vec<DomainA
 /// Standing rules render with their exemption visible; ordinary lines are
 /// the dedup-tracked payload.
 pub fn render_rules(activation: &DomainActivation<'_>) -> (Vec<String>, Vec<String>) {
+    render_guidance_lines(activation.domain)
+}
+
+/// The rendered guidance lines for a domain's rules, independent of why the
+/// domain became operative (prompt trigger or file addressing).
+pub fn render_guidance_lines(domain: &KnowledgeDomain) -> (Vec<String>, Vec<String>) {
     let mut ordinary = Vec::new();
     let mut standing = Vec::new();
-    for rule in &activation.domain.guidance {
+    for rule in &domain.guidance {
         let line = match rule.pressure_class {
             PressureClass::Ordinary => format!("- {} [ordinary]", rule.rule),
             PressureClass::Standing => format!(
@@ -275,6 +300,7 @@ mod tests {
             source: "central:source:project:demo:.aikit/domains/release.toml".into(),
             horizon_range: Some(HorizonRange { min: 3, max: 5 }),
             triggers: vec!["release".into()],
+            path_patterns: vec![],
             guidance: vec![
                 DomainRule {
                     rule: "Run the verification suite before tagging".into(),

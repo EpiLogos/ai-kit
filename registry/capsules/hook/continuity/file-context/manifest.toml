@@ -1,0 +1,10 @@
+schema = 1
+id = "hook/continuity/file-context"
+kind = "hook"
+name = "Continuity file context"
+description = "First-party continuity reaction (W1/W3, CASE 05): when composed, an operation about to Read/Edit/Write a file arrives with the semantic context the project already holds for it — wiki relations that cite the file, and any declared KnowledgeDomain whose path_patterns address it — through the pre-tool additional-context channel. Dedup keys on rendered content per file (unchanged file, no re-injection); standing rules are dedup-exempt by explicit classification. Fail-open. Not composed by default."
+tags = ["aikit", "continuity", "engine", "files", "pretooluse"]
+
+[hook]
+entry = "payload/file-context"
+events = ["PreToolUse"]

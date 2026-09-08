@@ -1275,6 +1275,29 @@ impl Service {
                 decision.warnings.append(&mut reaction_warnings);
             }
         }
+        if event.kind == aikit_core::hooks::HookEventKind::PreToolUse
+            && tuning.allows(aikit_core::continuity::FILE_CONTEXT)
+        {
+            // File context is project-layer knowledge too: the project's wiki
+            // relations and path-addressed domains, loaded only under this
+            // composition, in front of the operation — never after it.
+            if let Some(project_root)=self.descriptor.project_root.as_deref() {
+                if let Some(path)=crate::file_context::file_path_of(event) {
+                    let (domains, mut load_warnings)=
+                        crate::domain_activation::load_domains(project_root);
+                    decision.warnings.append(&mut load_warnings);
+                    let (objects, mut wiki_warnings)=
+                        crate::file_context::load_project_wiki(project_root);
+                    decision.warnings.append(&mut wiki_warnings);
+                    let scope=crate::domain_activation::dedup_scope(event, Some(project_root));
+                    let Some(scope)=scope else { return Ok(decision) };
+                    let (blocks, mut reaction_warnings)=crate::file_context::run(
+                        &self.index, &scope, project_root, &path, &domains, objects);
+                    decision.injected.extend(blocks);
+                    decision.warnings.append(&mut reaction_warnings);
+                }
+            }
+        }
 
         Ok(decision)
     }
