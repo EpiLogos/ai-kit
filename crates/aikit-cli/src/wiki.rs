@@ -2,10 +2,14 @@
 //!
 //! Every command here names the file it touches, runs the same core pipeline
 //! (parse → mutate in memory → validate the whole → render), and persists the
-//! result through a temp-file rename. Nothing discovers a file to mutate: a
-//! caller passes `--file`, or, for the Central root only, a `--root` that is
-//! resolved read-only from the working directory. Wiki tooling is AVAILABLE,
-//! NOT ENFORCED.
+//! result through a temp-file rename gated by an optimistic concurrency check.
+//! The wiki is agent-maintained, so concurrent writers — two agents, or an
+//! agent and a human — are the normal case: each write captures the SHA-256 of
+//! the exact bytes it read, and refuses at the rename if a peer's write already
+//! landed, rather than silently discarding it. Nothing discovers a file to
+//! mutate: a caller passes `--file`, or, for the Central root only, a `--root`
+//! that is resolved read-only from the working directory. Wiki tooling is
+//! AVAILABLE, NOT ENFORCED.
 //!
 //! The root commands (`wiki root …`) are the only ones that *guess* a path, and
 //! they guess from the Central layout — `<central>/Control/agents/wiki/wiki.json`
@@ -16,6 +20,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json as jval, Value};
+use sha2::Digest;
 
 use aikit_core::knowledge_wiki::{
     WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject, WikiProvenanceRef, WikiSpace, OKF_WIKI_PROFILE,
@@ -546,6 +551,7 @@ fn root_prune(cwd: &Path, args: &WikiRootPruneArgs) -> Result<WikiOutcome> {
     let root = resolve_root_wiki(cwd, args.root.as_deref())?;
     let child = ResourceRef::parse(&args.child_ref)?;
     let input = read(&root)?;
+    let base_hash = content_hash(input.as_bytes());
     let federated = WikiDocument::parse(&input)?
         .objects()
         .iter()
@@ -579,7 +585,7 @@ fn root_prune(cwd: &Path, args: &WikiRootPruneArgs) -> Result<WikiOutcome> {
             json::EXIT_OK,
         ));
     }
-    persist(&root, &rendered)?;
+    persist(&root, &rendered, &base_hash)?;
     Ok(WikiOutcome::wrote(
         jval!({
             "command": "root.prune",
@@ -629,6 +635,7 @@ fn root_adopt(cwd: &Path, args: &WikiRootAdoptArgs) -> Result<WikiOutcome> {
     }
 
     let input = read(&root)?;
+    let base_hash = content_hash(input.as_bytes());
     let already = WikiDocument::parse(&input)?
         .objects()
         .iter()
@@ -656,7 +663,7 @@ fn root_adopt(cwd: &Path, args: &WikiRootAdoptArgs) -> Result<WikiOutcome> {
         ledger.record(linked);
         Ok(())
     })?;
-    persist(&root, &rendered)?;
+    persist(&root, &rendered, &base_hash)?;
     Ok(WikiOutcome::wrote(
         jval!({
             "command": "root.adopt",
@@ -1234,14 +1241,18 @@ fn root_space(document: &WikiDocument) -> Result<&WikiSpace> {
 
 /// Run one mutation against one file and persist it: read, mutate in memory,
 /// validate the whole, render, atomic rename. A refusal anywhere leaves the
-/// file byte-identical — the rendered text exists only after the gate.
+/// file byte-identical — the rendered text exists only after the gate. The
+/// hash of what was read travels to `persist` as the compare-and-swap base, so
+/// a peer's write landing between this read and the rename is refused rather
+/// than silently overwritten.
 fn mutate_file<F>(path: &Path, mutate: F) -> Result<WikiMutationOutcome>
 where
     F: FnOnce(&mut WikiDocument, &mut WikiMutationLedger) -> Result<()>,
 {
     let input = read(path)?;
+    let base_hash = content_hash(input.as_bytes());
     let (rendered, outcome) = apply_wiki_mutation(&input, mutate)?;
-    persist(path, &rendered)?;
+    persist(path, &rendered, &base_hash)?;
     Ok(outcome)
 }
 
@@ -1255,9 +1266,44 @@ fn read(path: &Path) -> Result<String> {
     })
 }
 
-/// The atomic write: a temp file next to the target, then a rename. A crash
-/// mid-write leaves the previous revision on disk, never a half document.
-fn persist(path: &Path, rendered: &str) -> Result<()> {
+/// SHA-256 of exactly these bytes, hex-encoded. This is the compare-and-swap
+/// base: a rewrite that happens to land byte-identical content is never a
+/// conflict, only a peer write that actually changed the file is.
+fn content_hash(bytes: &[u8]) -> String {
+    let mut digest = sha2::Sha256::new();
+    digest.update(bytes);
+    format!("{:x}", digest.finalize())
+}
+
+/// The current on-disk hash of `path`, or `None` when the file no longer
+/// exists — itself a change from whatever a caller read, so a base hash can
+/// never match it.
+fn current_hash(path: &Path) -> Result<Option<String>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(content_hash(&bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AikitError::new(
+            "knowledge.wiki_file_unreadable",
+            format!(
+                "could not re-read {} to verify it is unchanged before writing: {error}",
+                path.display()
+            ),
+        )
+        .with("path", path.display().to_string())),
+    }
+}
+
+/// The atomic write: a temp file next to the target, then a rename — gated by
+/// an optimistic concurrency check run immediately before the rename.
+/// `base_hash` is the SHA-256 of the exact bytes the caller read before it
+/// mutated in memory; every write path in this file captures it at the same
+/// `read` call the mutation was built from. If the file on disk no longer
+/// hashes to that value, a peer's write landed first: this write refuses
+/// rather than silently discard it, and the target is left exactly as the
+/// peer left it — nothing of the peer's write is touched, and nothing of this
+/// mutation is applied. A crash mid-write still leaves the previous revision
+/// on disk, never a half document.
+fn persist(path: &Path, rendered: &str, base_hash: &str) -> Result<()> {
     let file_name = path
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -1270,6 +1316,19 @@ fn persist(path: &Path, rendered: &str) -> Result<()> {
         )
         .with("path", temp.display().to_string())
     })?;
+
+    if current_hash(path)?.as_deref() != Some(base_hash) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(AikitError::new(
+            "knowledge.wiki_concurrent_write",
+            format!(
+                "{} changed since it was read; a peer write landed first. Re-read the file and re-apply this mutation.",
+                path.display()
+            ),
+        )
+        .with("path", path.display().to_string()));
+    }
+
     std::fs::rename(&temp, path).map_err(|error| {
         let _ = std::fs::remove_file(&temp);
         AikitError::new(
@@ -1367,4 +1426,171 @@ fn read_stdin() -> Result<String> {
         ));
     }
     Ok(buffer)
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency: the write gate against a peer that lands between read and rename
+// ---------------------------------------------------------------------------
+//
+// These are unit tests, not `tests/wiki_commands.rs` integration tests, on
+// purpose: the race this guards against is a *sequence* — read (capture base),
+// a peer's independent read-mutate-persist, then this writer's persist — and
+// the CLI's `aikit wiki …` commands each run that whole sequence inside one
+// process invocation with no I/O in between the read and the rename. There is
+// no pause point to land a second subprocess's write into from outside, short
+// of adding a test-only delay hook to production code. Driving `read`,
+// `apply_wiki_mutation` and `persist` directly gives the exact interleaving
+// the race depends on, deterministically, using the very functions
+// `mutate_file` composes them from — not a stand-in for the race, the race
+// itself, minus OS scheduling.
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn write(path: &Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn document(objects_json: &str) -> String {
+        format!("{{\n  \"objects\": [\n    {objects_json}\n  ]\n}}\n")
+    }
+
+    fn node_json(ref_id: &str) -> String {
+        format!(
+            r#"{{
+  "object": "node",
+  "profile": "okf-wiki/v1",
+  "provenance": [],
+  "ref": "{ref_id}",
+  "revision": 1,
+  "space_refs": [],
+  "title": "{ref_id}",
+  "type": "Note"
+}}"#
+        )
+    }
+
+    fn new_node(ref_id: &str) -> WikiObject {
+        WikiObject::Node(WikiNode {
+            profile: OKF_WIKI_PROFILE.to_string(),
+            ref_id: ResourceRef::parse(ref_id).unwrap(),
+            revision: 1,
+            provenance: Vec::new(),
+            node_type: "Note".to_string(),
+            title: Some(ref_id.to_string()),
+            space_refs: Vec::new(),
+            source_refs: Vec::new(),
+            local_space_ref: None,
+            extensions: BTreeMap::new(),
+        })
+    }
+
+    #[test]
+    fn an_uncontended_write_still_succeeds() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("wiki.json");
+        write(&path, &document(&node_json("wiki:node:a")));
+
+        let outcome = mutate_file(&path, |doc, ledger| {
+            ledger.record(doc.create_object(new_node("wiki:node:b"))?);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(outcome.changed);
+        let after = WikiDocument::parse(&read(&path).unwrap()).unwrap();
+        assert!(after.holds(&ResourceRef::parse("wiki:node:b").unwrap()));
+    }
+
+    /// The race this whole change exists for: writer A reads the file and
+    /// builds its mutation from that snapshot; before A commits, writer B
+    /// independently reads, mutates and persists the *same* file; A then
+    /// attempts to commit its now-stale mutation. Without the fix, A's
+    /// `rename` simply wins and B's write vanishes with no trace. With it, A's
+    /// `persist` must refuse: B's content is the only thing on disk
+    /// afterwards, byte for byte, and no temp file is left behind.
+    #[test]
+    fn a_peer_write_between_read_and_rename_is_refused_and_survives_byte_identical() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("wiki.json");
+        write(&path, &document(&node_json("wiki:node:a")));
+
+        // Writer A: read (captures the base), then mutate in memory. No write
+        // has happened yet — exactly where `mutate_file` stands right before
+        // its own `persist` call.
+        let input_a = read(&path).unwrap();
+        let base_hash_a = content_hash(input_a.as_bytes());
+        let (rendered_a, _) = apply_wiki_mutation(&input_a, |doc, ledger| {
+            ledger.record(doc.create_object(new_node("wiki:node:from-a"))?);
+            Ok(())
+        })
+        .unwrap();
+
+        // Writer B: an independent, complete read-mutate-persist that lands
+        // first, through the exact same production path.
+        mutate_file(&path, |doc, ledger| {
+            ledger.record(doc.create_object(new_node("wiki:node:from-b"))?);
+            Ok(())
+        })
+        .unwrap();
+        let after_b = fs::read(&path).unwrap();
+
+        // Writer A now tries to commit its stale mutation.
+        let error = persist(&path, &rendered_a, &base_hash_a).unwrap_err();
+        assert_eq!(error.code(), "knowledge.wiki_concurrent_write");
+        assert!(
+            error.message().to_lowercase().contains("re-read"),
+            "the refusal must say what to do next: {}",
+            error.message()
+        );
+
+        // B's write is untouched: byte for byte, not just semantically.
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            after_b,
+            "a refused write leaves the file exactly as the peer left it"
+        );
+        let surviving = WikiDocument::parse(&String::from_utf8(after_b).unwrap()).unwrap();
+        assert!(surviving.holds(&ResourceRef::parse("wiki:node:from-b").unwrap()));
+        assert!(!surviving.holds(&ResourceRef::parse("wiki:node:from-a").unwrap()));
+        assert!(
+            surviving.holds(&ResourceRef::parse("wiki:node:a").unwrap()),
+            "the document is still whole and valid, not half-written"
+        );
+
+        // The refused write's temp file does not linger next to the target.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name() != "wiki.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a refused write must not leave a temp file behind: {leftovers:?}"
+        );
+    }
+
+    /// A rewrite that lands byte-identical content is not a peer's change —
+    /// only a peer write that actually altered the file trips the gate.
+    #[test]
+    fn a_rewrite_that_lands_the_same_bytes_is_not_a_conflict() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("wiki.json");
+        let original = document(&node_json("wiki:node:a"));
+        write(&path, &original);
+
+        let input = read(&path).unwrap();
+        let base_hash = content_hash(input.as_bytes());
+
+        // "Someone" rewrites the file to the exact bytes it already held —
+        // e.g. a filesystem sync or an editor save with no real change.
+        write(&path, &original);
+
+        // Re-committing the same content over that base is not a conflict.
+        persist(&path, &original, &base_hash).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
 }
