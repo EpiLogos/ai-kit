@@ -55,12 +55,25 @@ pub const DOMAIN_ACTIVATION: &str = "domain-activation";
 /// re-injects nothing; standing rules stay exempt by classification.
 pub const FILE_CONTEXT: &str = "file-context";
 
+/// Orientation packet (W2/W1, CASE 02 + CASE 09): when composed, a fresh
+/// session in a project is met by that project's own NOW field — assembled
+/// through `ctrl projectcentral.now.inspect`, bounded, with the newest open
+/// handoff return as the continuation. Horizon apertures are closed by
+/// default (the field's human side arrives only by explicit composition
+/// authorization), and other projects are structurally absent.
+pub const ORIENTATION_PACKET: &str = "orientation-packet";
+
 /// The reactions the engine itself implements, as opposed to hook capsules
 /// that merely ride the chain. A reaction listed here is answerable when
 /// asked even while it is not composed: the engine says "not composed"
 /// instead of staying silent about what it could do.
-pub const ENGINE_REACTIONS: &[&str] =
-    &[TURN_LEDGER, ENTITY_DISCLOSURE, DOMAIN_ACTIVATION, FILE_CONTEXT];
+pub const ENGINE_REACTIONS: &[&str] = &[
+    TURN_LEDGER,
+    ENTITY_DISCLOSURE,
+    DOMAIN_ACTIVATION,
+    FILE_CONTEXT,
+    ORIENTATION_PACKET,
+];
 
 /// True when the capsule id names a first-party continuity reaction.
 pub fn is_continuity_capability(id: &CapsuleId) -> bool {

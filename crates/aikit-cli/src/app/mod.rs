@@ -1257,6 +1257,34 @@ impl Service {
                 )),
             }
         }
+        if event.kind == aikit_core::hooks::HookEventKind::SessionStart
+            && tuning.allows(aikit_core::continuity::ORIENTATION_PACKET)
+        {
+            // The aperture tunings ride the composition's config for this
+            // capsule, resolved from the view at event time — never ambient.
+            // Closed by default: a missing config keeps the default bounds
+            // and keeps the @1 human horizon shut.
+            let capsule_id = aikit_core::id::CapsuleId::parse(
+                "hook/continuity/orientation-packet",
+            )
+            .map_err(|error| {
+                AikitError::new(
+                    "capabilities.invalid_id",
+                    format!("engine reaction id is malformed: {error}"),
+                )
+            })?;
+            let tuned = match self.view.active.get(&capsule_id) {
+                Some(active) => {
+                    crate::orientation_packet::OrientationConfig::from_config(Some(&active.config))
+                }
+                None => crate::orientation_packet::OrientationConfig::default(),
+            };
+            match crate::orientation_packet::orientation_packet(event, &tuned) {
+                Ok(Some(block)) => decision.injected.push(block),
+                Ok(None) => {}
+                Err(error) => decision.warnings.push(error),
+            }
+        }
         if event.kind == aikit_core::hooks::HookEventKind::UserPromptSubmit
             && tuning.allows(aikit_core::continuity::DOMAIN_ACTIVATION)
         {
