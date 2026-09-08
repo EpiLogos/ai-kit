@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "handoff-1788829542953033000",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode-session-ci-audit",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1788829542,
+  "subject": "CI time diagnosis: wall time set by uncached macOS verify (11m) + release build in PR gate; propose cache + tiering + nextest",
+  "result": "Investigated why CI feels slow. Latest run 2026-09-07T23:35Z: wall ~11.5min, all 9 jobs parallel. Long poles: Real integration suite (macos-15, scripts/verify full gate) 11m10s; V2 static gate 6m35s of which cargo build --release is the bulk. Every job recompiles the dep graph from zero (no rust-cache or equivalent). Threefold duplication: verify runs whole-workspace tests+clippy+release on macOS while v2-crate-tests matrix reruns tests on Linux and v2-static reruns clippy+release on Linux. Tests pinned to --test-threads=1 since 0fc81f1 (v2 foundation) with no documented hermeticity rationale; only 2 test files bind ports, no env mutation found in tests, so full serialization may be releasable via cargo-nextest process-per-test. Real-conformance jobs (bkmr/gitnexus/deepseek) are only 1.5-2.5min each, not the problem. scripts/verify quick -p already exists for the inner loop. Proposal sketch (propose-not-write, not applied): 1) Swatinem/rust-cache on all jobs 2) drop release build from PR gate 3) shrink macOS job to macOS-only journeys (PTY/keychain) 4) adopt cargo-nextest to replace --test-threads=1. Open: which parts of the suite actually force serialization, owner adoption of the CI diff.",
+  "status": "active"
+}

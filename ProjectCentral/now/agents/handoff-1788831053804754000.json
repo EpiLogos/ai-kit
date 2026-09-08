@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "handoff-1788831053804754000",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode-session-ci-audit",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1788831053,
+  "subject": "CI speed fix landed on main (commit fa002bb, not pushed): caching + parallel nextest + release build out of PR gate",
+  "result": "All four commissioned items landed and verified locally. Evidence: full suite under nextest in parallel 1759 passed / 8 skipped in 69s (the --test-threads=1 pin since 0fc81f1 was precautionary — nothing broke); new scripts/verify full gate end-to-end exit 0 (tests + clippy -D warnings + git diff --check, ~2min warm). Changes in fa002bb (7 files +55/-16): rust-cache@v2.9.2 in all 9 ci.yml jobs plus native-skills/product-ground/persistent-surface/oi97 workflows; v2-crate-tests matrix via taiki-e/install-action@v2.87.8 cargo-nextest; release build removed from v2-static and scripts/verify (prelocal-release.yml already owns that proof); scripts/verify prefers nextest with cargo test fallback, legacy PTY skip list preserved as filter expression; CONTRIBUTING.md gate description updated. Design note: macOS verify job kept running the FULL suite (not sliced to mac-only) because parallel+cache meets the speed goal with zero coverage loss and keeps the one-gate-script invariant — expect wall ~11.5min -> ~4-5min. Open: (1) owner decides push; first cached CI run will be slower while caches populate. (2) Not mine, flagged not moved: untracked scripts/build-hygiene.sh, scripts/build_hygiene.rs, registry/capsules/hook/continuity/file-context/, .central/ at repo root — placement fault per session-work-placement, propose owner review. (3) cargo-nextest now needed locally for the fast path: curl -LsSf https://get.nexte.st/latest/mac | tar xz -C ~/.cargo/bin. Supersedes the proposal note from this actor.",
+  "status": "active"
+}

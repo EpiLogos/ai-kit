@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "handoff-1788723102249657000",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode-session-2026-09-06-gateway-154",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1788723102,
+  "subject": "#154 Agency Gateway vertical completed on the AIKit side (commit f80d6fe, main, not pushed)",
+  "result": "Owner-commissioned completion of the #154 gateway line on AIKit. Audit first: B (protocol/carriers) and C (Telegram + fixtures) were already landed from V2-J; the real gaps were the product front door and D (ecology). Landed in f80d6fe (8 files, +1287/-16): aikit gateway serve|protocol|discover|status|ecology|snapshot over both carriers (UDS + authenticated WebSocket) in the house JSON envelope; gateway_client.rs connection-per-request client with agency_gateway_client.* error codes; Ecology command/read model derived from bindings+journals (no parallel registry) with the five invocation modes under presence-does-not-imply-authority; forked_from lineage + context_revision as the smallest continuation representation, validated at bind against a real journal point; snapshot restore replays streams before bindings. USING-AIKIT.md documents the group. Evidence: adapters/cli/tui suites 87 binaries 0 failures; live end-to-end register->bind->ingest->ecology->replay->shutdown->persist verified over UDS. Open remainder, per #154 pre-local acceptance: physical slice only (real Telegram credentials/message delivery, Workcell materialisation run, #158 tailnet proof). O-I M-prime collation rows for the new commands belong to the desktop session (O-I register, flagged there). Not pushed; no issue comment posted — owner decides.",
+  "status": "active"
+}
