@@ -18,7 +18,7 @@ use crate::application::{
 };
 use crate::layout::{Glyphs, Layout};
 use crate::navigation::AmbientContext;
-use crate::project_workspace_render::{project_world_lines, workspace_section_label};
+use crate::project_workspace_render::{explain_lines, project_world_lines, workspace_section_label};
 use crate::theme::Theme;
 
 /// Render the resting shell with an already-resolved host glyph capability.
@@ -283,17 +283,33 @@ fn preview_pane<'a>(
     }
     if state.overlay == Some(Overlay::Explain) {
         if let Some(ActionOutcome::Explained { subject, summary }) = state.action_result.as_ref() {
-            return Paragraph::new(vec![
+            let mut lines = vec![
                 Line::from(Span::styled(
                     format!("Explain {sep} {subject}"),
                     theme.heading(),
                 )),
                 Line::from(""),
                 Line::from(Span::raw(summary.clone())),
-                Line::from(""),
-                Line::from(Span::styled("Esc returns", theme.dim())),
-            ])
-            .wrap(Wrap { trim: false });
+            ];
+            // Retiring the Projection Workspace tab (spec §17: "Explain is not
+            // a top-level destination in the final IA") must not silently drop
+            // its authored-intent/effective-state content — it is folded in
+            // here, alongside the provider's own Explain evidence above,
+            // whenever a Project world is available to render it from.
+            if let Some(world) = world {
+                let world_lines = explain_lines(state, world, glyphs);
+                if !world_lines.is_empty() {
+                    lines.push(Line::from(""));
+                    lines.extend(
+                        world_lines
+                            .into_iter()
+                            .map(|line| Line::from(Span::raw(line))),
+                    );
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("Esc returns", theme.dim())));
+            return Paragraph::new(lines).wrap(Wrap { trim: false });
         }
     }
 

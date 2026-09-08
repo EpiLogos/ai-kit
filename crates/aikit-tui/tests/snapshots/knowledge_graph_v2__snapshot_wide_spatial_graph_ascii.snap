@@ -3,7 +3,7 @@ source: crates/aikit-tui/tests/knowledge_graph_v2.rs
 expression: text
 ---
 + AIKit - Workspace - Project: payments - Host: test-host - Target: shell ---------------------------------------------+
-|/ alpha   Search - Context - Compose - Knowledge - Explain - History                                                  |
+|/ alpha   Search - Worlds - Compose - Work - Knowledge - History - System                                             |
 |+ Relations - Graph - depth 1 ----------------------------------------+alpha                                          |
 ||                                                                     |capability                                     |
 ||                                                                     |                                               |

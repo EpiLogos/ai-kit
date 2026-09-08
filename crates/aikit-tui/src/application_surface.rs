@@ -79,7 +79,7 @@ impl ApplicationSurfaceRequest {
             host,
             initial_query: None,
             initial_relation_view: RelationView::List,
-            initial_workspace_section: WorkspaceSection::Projects,
+            initial_workspace_section: WorkspaceSection::Worlds,
             glyphs: None,
         }
     }
@@ -106,7 +106,7 @@ impl ApplicationSurfaceRequest {
     #[must_use]
     pub fn opening_relations(mut self, view: RelationView) -> Self {
         self.initial_relation_view = view;
-        self.initial_workspace_section = WorkspaceSection::Explore;
+        self.initial_workspace_section = WorkspaceSection::Knowledge;
         self
     }
 }
@@ -275,7 +275,7 @@ impl ApplicationSurfaceController {
             );
         }
         if self.semantic.presentation == PresentationMode::Workspace
-            && self.semantic.workspace_section == WorkspaceSection::Explore
+            && self.semantic.workspace_section == WorkspaceSection::Knowledge
         {
             self.draw_relations(frame);
         }
@@ -325,6 +325,16 @@ impl ApplicationSurfaceController {
         if ctrl && code == KeyCode::Char('w') {
             return self.toggle_presentation(backend);
         }
+        // Ctrl+K is the Universal Navigator: an explicit "go to Quick" alias,
+        // consistent with Ctrl+T already being an explicit view-rotation alias
+        // rather than a toggle. Quick is already the Navigator presentation
+        // (search over the one shared ResourceSearchIndex, "things" and
+        // "places" alike — see `crate::workspace_navigation`); this binding
+        // adds no new state, it only jumps to it from wherever the operator
+        // currently is, preserving query/selection/staged/mutation_scope.
+        if ctrl && matches!(code, KeyCode::Char('k') | KeyCode::Char('K')) {
+            return self.dispatch(backend, UiAction::SetPresentation(PresentationMode::Quick));
+        }
         if alt && code == KeyCode::Left {
             return self.dispatch(backend, UiAction::PreviousWorkspaceSection);
         }
@@ -341,7 +351,7 @@ impl ApplicationSurfaceController {
             self.dispatch(backend, UiAction::SetPresentation(PresentationMode::Workspace))?;
             return self.dispatch(
                 backend,
-                UiAction::SetWorkspaceSection(WorkspaceSection::Explore),
+                UiAction::SetWorkspaceSection(WorkspaceSection::Knowledge),
             );
         }
         if ctrl && code == KeyCode::Char('s') {
@@ -750,7 +760,7 @@ impl ApplicationSurfaceController {
     /// the precondition for every Graph-specific key/mouse binding.
     fn graph_projection_active(&self) -> bool {
         self.semantic.presentation == PresentationMode::Workspace
-            && self.semantic.workspace_section == WorkspaceSection::Explore
+            && self.semantic.workspace_section == WorkspaceSection::Knowledge
             && self.semantic.relation_view == RelationView::Graph
     }
 

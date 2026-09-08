@@ -6,10 +6,14 @@
 //! explicit provider operation, and durable composition remains the existing
 //! staging -> preview -> confirm -> apply path.
 //!
-//! The public Workspace field is Search / Context / Compose / Explain / History /
-//! Knowledge. The older enum variant names are intentionally treated only as
-//! presentation slots while #59 removes the remaining V1 controllers; they no
-//! longer define product meaning.
+//! The public Workspace field is Search / Worlds / Compose / Work / Knowledge /
+//! History / System — spec `docs/v2/23-TUI-HUMAN-EXPERIENCE-SPEC.md` §3-§8
+//! (carried unmerged on PR #212 as of this writing). Explain is deliberately
+//! not a section here: spec §17 retires it as a top-level destination in
+//! favour of an Inspector overlay reached through the `:` Explain contextual
+//! Action (see `Overlay::Explain` in `crate::v2_render`, which now renders
+//! `explain_lines`' content alongside the provider Explain evidence rather
+//! than losing it).
 
 use aikit_core::context_resolution::Availability;
 use aikit_core::project::ProjectBindingLocator;
@@ -22,15 +26,16 @@ use crate::layout::Glyphs;
 /// Canonical product label for each Workspace slot.
 ///
 /// Search is the universal query field and therefore does not need its own
-/// `WorkspaceSection`; the five section slots complete the canonical six-field
-/// shell as Context / Compose / Explain / History / Knowledge.
+/// `WorkspaceSection`; the six section slots complete the canonical field as
+/// Worlds / Compose / Work / Knowledge / History / System.
 pub fn workspace_section_label(section: WorkspaceSection) -> &'static str {
     match section {
-        WorkspaceSection::Projects => "Context",
+        WorkspaceSection::Worlds => "Worlds",
         WorkspaceSection::Compose => "Compose",
-        WorkspaceSection::Explore => "Knowledge",
-        WorkspaceSection::Projection => "Explain",
+        WorkspaceSection::Work => "Work",
+        WorkspaceSection::Knowledge => "Knowledge",
         WorkspaceSection::History => "History",
+        WorkspaceSection::System => "System",
     }
 }
 
@@ -42,11 +47,12 @@ pub fn project_world_lines(
     glyphs: Glyphs,
 ) -> Vec<String> {
     match state.workspace_section {
-        WorkspaceSection::Projects => context_lines(world, glyphs),
+        WorkspaceSection::Worlds => context_lines(world, glyphs),
         WorkspaceSection::Compose => compose_lines(state, world, glyphs),
-        WorkspaceSection::Projection => explain_lines(state, world, glyphs),
+        WorkspaceSection::Work => work_lines(state, world, glyphs),
         WorkspaceSection::History => history_lines(world, glyphs),
-        WorkspaceSection::Explore => Vec::new(),
+        WorkspaceSection::System => system_lines(world, glyphs),
+        WorkspaceSection::Knowledge => Vec::new(),
     }
 }
 
@@ -186,7 +192,93 @@ fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs
     lines
 }
 
-fn explain_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
+/// Work's human question (spec §6) is "what is actually running", distinct
+/// from Compose's "what could I build". Grounded in real, already-resolved
+/// `actor_runtime` facts (the same facts `compose_lines` already folds in) —
+/// this section is honest-minimal rather than fabricated: the fuller §6.3
+/// Active-Work (DIRECT/FACTORY/ATTENTION) dashboard needs Factory Journey/Run
+/// read-model plumbing this application boundary does not expose yet, so this
+/// says so plainly instead of inventing rows, reusing this codebase's own
+/// established "not exposed by application boundary" disclosure idiom
+/// (`context_lines`'s `Scopes` row).
+fn work_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
+    let mut lines = vec![format!("Work {sep} what is actually running"), String::new()];
+    let mut any_runtime = false;
+    if let Some(agent) = world.actor_runtime.agent.effective.as_ref() {
+        lines.push(format!("Agent         {}", agent.resource));
+        any_runtime = true;
+    }
+    if let Some(agency) = world.actor_runtime.agency.effective.as_ref() {
+        lines.push(format!("Agency        {}", agency.resource));
+        any_runtime = true;
+    }
+    if let Some(host) = world.actor_runtime.host.effective.as_ref() {
+        lines.push(format!("Host          {}", host.resource));
+        any_runtime = true;
+    }
+    for harness in &world.actor_runtime.harnesses {
+        lines.push(format!("Harness       {}", harness.resource));
+        any_runtime = true;
+    }
+    for model in &world.actor_runtime.models {
+        lines.push(format!("Model         {}", model.resource));
+        any_runtime = true;
+    }
+    for offer in &world.actor_runtime.execution_offers {
+        lines.push(format!("Execution     {}", offer.resource));
+        any_runtime = true;
+    }
+    if !any_runtime {
+        lines.push("Runtime       no effective Actor/Runtime resource in this world".into());
+    }
+
+    if let Some(selected) = state.selected.as_ref() {
+        if let Some(resource) = selected_world_resource(world, selected) {
+            lines.push(String::new());
+            lines.extend(resource_lines(resource, glyphs));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(
+        "Direct Session  reachable through Search (kind session-space)".into(),
+    );
+    lines.push("Factory work    not exposed by application boundary".into());
+    lines
+}
+
+/// System's human question (spec §11) is "what does this installation depend
+/// on". `crate::credential_surface::CredentialSetupView` is real, tested
+/// product code, but `ProjectWorldReadModel`/`ContextResolution` carry no
+/// credential field today, so a live System tab cannot honestly show real
+/// credential rows without new provider plumbing (see the PR body's owner-gap
+/// note). This is therefore honest-minimal, matching `work_lines`' idiom
+/// exactly rather than fabricating a dashboard: it names System as a real,
+/// Ctrl+K-navigable destination and says plainly what is not yet disclosed.
+fn system_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
+    vec![
+        format!("System {sep} installation and provider disclosure"),
+        String::new(),
+        "Credentials   not exposed by application boundary".into(),
+        "Providers     not exposed by application boundary".into(),
+        "Adapters      not exposed by application boundary".into(),
+        "Workcell      not exposed by application boundary".into(),
+        String::new(),
+        format!(
+            "Revision      catalog {} {sep} resolution {}",
+            world.effective_revision.catalog_revision, world.effective_revision.resolution_hash,
+        ),
+    ]
+}
+
+/// Selected-resource resolved intent/effective-state lines. No longer reached
+/// as a Workspace tab (`WorkspaceSection::Projection` is retired, see this
+/// module's own doc comment) — `crate::v2_render`'s `Overlay::Explain` branch
+/// calls this directly, alongside the provider Explain evidence, when a
+/// Project world is available.
+pub fn explain_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
     let sep = glyphs.separator();
     let mut lines = vec![
         format!("Explain {sep} authored intent and effective state"),
