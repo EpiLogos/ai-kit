@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "naming-law-canonical-register-smoke-test-2026-09-08",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "hermes-nara-naming-smoke",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1788889392,
+  "subject": "Naming law canonical register smoke test",
+  "result": "verifying slug default in ctrl action",
+  "status": "resolved"
+}

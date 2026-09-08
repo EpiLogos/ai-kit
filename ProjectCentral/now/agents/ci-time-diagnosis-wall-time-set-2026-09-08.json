@@ -1,6 +1,6 @@
 {
   "schema": "central.project-now.handoff/v1",
-  "id": "handoff-1788829542953033000",
+  "id": "ci-time-diagnosis-wall-time-set-2026-09-08",
   "provenance": "agent-authored-bounded-return",
   "actor": "zcode-session-ci-audit",
   "kind": "note",

@@ -1,6 +1,6 @@
 {
   "schema": "central.project-now.handoff/v1",
-  "id": "handoff-1788831053804754000",
+  "id": "ci-speed-fix-landed-on-main-2026-09-08",
   "provenance": "agent-authored-bounded-return",
   "actor": "zcode-session-ci-audit",
   "kind": "handoff",
