@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "handoff-1788723971739840000",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode-session-2026-09-06-gateway-154",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1788723971,
+  "subject": "Gateway bootstrap fold: well-known endpoint + doctor probe (commit a2f90c9)",
+  "result": "Follow-up to f80d6fe, folding the gateway into the bootstrap/config posture. One well-known endpoint now exists: ~/.aikit/state/gateway.sock + gateway.json (AikitHome::gateway_socket/gateway_state). Flagless `aikit gateway serve` binds and restores it; flagless queries find it; a bare query with no gateway fails as cli.gateway_unreachable naming the start command. doctor carries gateway.service in three honest states (answering note+version / dead-socket warning+restart / not-running note+start) — the single presence probe for O:I bootstrap and install UX. --ws alone remains a deliberate network-only posture. gateway_ops.rs keeps default resolution in the lib so the CLI contract stays testable; tests/gateway_command.rs drives the real binary through honest-failure, flagless lifecycle with shutdown+persist, and restart-restore. 49/49 aikit-cli suites green. Terminal and agent UX lanes closed on this side; desktop lane documented for the O-I programme in the updated awareness brief. Not pushed.",
+  "status": "active"
+}

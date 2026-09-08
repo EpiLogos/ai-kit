@@ -1,0 +1,157 @@
+{
+  "schema": "central.source-change-horizon/v1",
+  "world_ref": "project:project:ai-kit",
+  "cursor": 3,
+  "sources": {
+    "central:source:project:project:ai-kit:ProjectCentral/agents/wiki/wiki.json": {
+      "binding": {
+        "ref": "central:source:project:project:ai-kit:ProjectCentral/agents/wiki/wiki.json",
+        "path": "ProjectCentral/agents/wiki/wiki.json",
+        "roles": [
+          "agent-wiki-source"
+        ],
+        "provenance": "agent-maintained",
+        "standing": "unspecified",
+        "treatment": "projectcentral-agent-wiki",
+        "agent_retrieval_allowed": true
+      },
+      "revision": {
+        "revision": "central.content-fnv1a64/v1:882:534472bed1682d91",
+        "byte_len": 882
+      }
+    },
+    "central:source:project:project:ai-kit:ProjectCentral/user/aikit.html": {
+      "binding": {
+        "ref": "central:source:project:project:ai-kit:ProjectCentral/user/aikit.html",
+        "path": "ProjectCentral/user/aikit.html",
+        "roles": [
+          "project-human-source-aperture"
+        ],
+        "provenance": "unresolved",
+        "standing": "unspecified",
+        "treatment": "projectcentral-user",
+        "agent_retrieval_allowed": true
+      },
+      "revision": {
+        "revision": "central.content-fnv1a64/v1:96981:8fdaf46dc00f4762",
+        "byte_len": 96981
+      }
+    },
+    "central:source:project:project:ai-kit:ProjectCentral/user/capability-matrix.csv": {
+      "binding": {
+        "ref": "central:source:project:project:ai-kit:ProjectCentral/user/capability-matrix.csv",
+        "path": "ProjectCentral/user/capability-matrix.csv",
+        "roles": [
+          "project-human-source-aperture"
+        ],
+        "provenance": "unresolved",
+        "standing": "unspecified",
+        "treatment": "projectcentral-user",
+        "agent_retrieval_allowed": true
+      },
+      "revision": {
+        "revision": "central.content-fnv1a64/v1:75684:0bf7a746ccedc5cb",
+        "byte_len": 75684
+      }
+    },
+    "central:source:project:project:ai-kit:ProjectCentral/user/capability-matrix.json": {
+      "binding": {
+        "ref": "central:source:project:project:ai-kit:ProjectCentral/user/capability-matrix.json",
+        "path": "ProjectCentral/user/capability-matrix.json",
+        "roles": [
+          "project-human-source-aperture"
+        ],
+        "provenance": "unresolved",
+        "standing": "unspecified",
+        "treatment": "projectcentral-user",
+        "agent_retrieval_allowed": true
+      },
+      "revision": {
+        "revision": "central.content-fnv1a64/v1:5310:15ccf9875c356a7d",
+        "byte_len": 5310
+      }
+    },
+    "central:source:project:project:ai-kit:ProjectCentral/user/capability-matrix.md": {
+      "binding": {
+        "ref": "central:source:project:project:ai-kit:ProjectCentral/user/capability-matrix.md",
+        "path": "ProjectCentral/user/capability-matrix.md",
+        "roles": [
+          "project-human-source-aperture"
+        ],
+        "provenance": "unresolved",
+        "standing": "unspecified",
+        "treatment": "projectcentral-user",
+        "agent_retrieval_allowed": true
+      },
+      "revision": {
+        "revision": "central.content-fnv1a64/v1:116829:1114c898d105eacc",
+        "byte_len": 116829
+      }
+    }
+  },
+  "changes": [
+    {
+      "schema": "central.source-change/v1",
+      "change_ref": "central:change:project:project:ai-kit:1",
+      "cursor": 1,
+      "world_ref": "project:project:ai-kit",
+      "source_ref": "central:source:project:project:ai-kit:ProjectCentral/user/aikit.html",
+      "source_path": "ProjectCentral/user/aikit.html",
+      "source_roles": [
+        "project-human-source-aperture"
+      ],
+      "provenance": "unresolved",
+      "standing": "unspecified",
+      "treatment": "projectcentral-user",
+      "agent_retrieval_allowed": true,
+      "before_revision": "central.content-fnv1a64/v1:96530:091b1a927e81ccd2",
+      "after_revision": "central.content-fnv1a64/v1:96981:8fdaf46dc00f4762",
+      "kind": "modified",
+      "observed_at_unix_seconds": 1788830009,
+      "provider": "central.filesystem-reconcile/v1"
+    },
+    {
+      "schema": "central.source-change/v1",
+      "change_ref": "central:change:project:project:ai-kit:2",
+      "cursor": 2,
+      "world_ref": "project:project:ai-kit",
+      "source_ref": "central:source:project:project:ai-kit:ProjectCentral/user/capability-matrix.csv",
+      "source_path": "ProjectCentral/user/capability-matrix.csv",
+      "source_roles": [
+        "project-human-source-aperture"
+      ],
+      "provenance": "unresolved",
+      "standing": "unspecified",
+      "treatment": "projectcentral-user",
+      "agent_retrieval_allowed": true,
+      "before_revision": "central.content-fnv1a64/v1:70070:9d0fd95328f6660d",
+      "after_revision": "central.content-fnv1a64/v1:75684:0bf7a746ccedc5cb",
+      "kind": "modified",
+      "observed_at_unix_seconds": 1788830009,
+      "provider": "central.filesystem-reconcile/v1"
+    },
+    {
+      "schema": "central.source-change/v1",
+      "change_ref": "central:change:project:project:ai-kit:3",
+      "cursor": 3,
+      "world_ref": "project:project:ai-kit",
+      "source_ref": "central:source:project:project:ai-kit:ProjectCentral/user/capability-matrix.md",
+      "source_path": "ProjectCentral/user/capability-matrix.md",
+      "source_roles": [
+        "project-human-source-aperture"
+      ],
+      "provenance": "unresolved",
+      "standing": "unspecified",
+      "treatment": "projectcentral-user",
+      "agent_retrieval_allowed": true,
+      "before_revision": "central.content-fnv1a64/v1:107993:026095d4fcd6aa33",
+      "after_revision": "central.content-fnv1a64/v1:116829:1114c898d105eacc",
+      "kind": "modified",
+      "observed_at_unix_seconds": 1788830009,
+      "provider": "central.filesystem-reconcile/v1"
+    }
+  ],
+  "consumer_cursors": {},
+  "provider": "central.filesystem-reconcile/v1",
+  "reconciled_at_unix_seconds": 1788839371
+}
