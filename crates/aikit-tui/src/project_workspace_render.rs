@@ -17,6 +17,7 @@ use aikit_core::resource::{Eligibility, SourceAuthority};
 use aikit_core::{ContextSourceHit, ProjectWorldReadModel, ProjectWorldResource};
 
 use crate::application::{TuiState, WorkspaceSection};
+use crate::layout::Glyphs;
 
 /// Canonical product label for each Workspace slot.
 ///
@@ -35,19 +36,24 @@ pub fn workspace_section_label(section: WorkspaceSection) -> &'static str {
 
 /// Section-specific Project-world lines. Empty means another canonical read model
 /// (currently Knowledge relations) owns the presentation for this section.
-pub fn project_world_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String> {
+pub fn project_world_lines(
+    state: &TuiState,
+    world: &ProjectWorldReadModel,
+    glyphs: Glyphs,
+) -> Vec<String> {
     match state.workspace_section {
-        WorkspaceSection::Projects => context_lines(world),
-        WorkspaceSection::Compose => compose_lines(state, world),
-        WorkspaceSection::Projection => explain_lines(state, world),
-        WorkspaceSection::History => history_lines(world),
+        WorkspaceSection::Projects => context_lines(world, glyphs),
+        WorkspaceSection::Compose => compose_lines(state, world, glyphs),
+        WorkspaceSection::Projection => explain_lines(state, world, glyphs),
+        WorkspaceSection::History => history_lines(world, glyphs),
         WorkspaceSection::Explore => Vec::new(),
     }
 }
 
-fn context_lines(world: &ProjectWorldReadModel) -> Vec<String> {
+fn context_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
     let mut lines = vec![
-        "Context · resolved Project world".into(),
+        format!("Context {sep} resolved Project world"),
         String::new(),
         format!("Project  {}", world.project.project.as_str()),
         format!("Binding  {}", locator_label(&world.project.locator)),
@@ -93,14 +99,14 @@ fn context_lines(world: &ProjectWorldReadModel) -> Vec<String> {
 
     lines.push(String::new());
     lines.push(format!(
-        "Revision catalog {} · resolution {}{}",
+        "Revision catalog {} {sep} resolution {}{}",
         world.effective_revision.catalog_revision,
         world.effective_revision.resolution_hash,
         world
             .effective_revision
             .generation
             .as_ref()
-            .map(|generation| format!(" · generation {generation}"))
+            .map(|generation| format!(" {sep} generation {generation}"))
             .unwrap_or_default(),
     ));
     for warning in &world.warnings {
@@ -109,7 +115,8 @@ fn context_lines(world: &ProjectWorldReadModel) -> Vec<String> {
     lines
 }
 
-fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String> {
+fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
     let actor_runtime_count = usize::from(world.actor_runtime.agent.effective.is_some())
         + usize::from(world.actor_runtime.agency.effective.is_some())
         + usize::from(world.actor_runtime.host.effective.is_some())
@@ -117,21 +124,21 @@ fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String>
         + world.actor_runtime.harnesses.len()
         + world.actor_runtime.execution_offers.len();
     let mut lines = vec![
-        "Compose · resolved Project world".into(),
+        format!("Compose {sep} resolved Project world"),
         String::new(),
         format!(
-            "Capabilities  {} capabilities · {} actions",
+            "Capabilities  {} capabilities {sep} {} actions",
             world.capability_horizon.capabilities.len(),
             world.capability_horizon.actions.len(),
         ),
         format!(
-            "Information   {} visible sources · {} planned retrievals",
+            "Information   {} visible sources {sep} {} planned retrievals",
             world.information_horizon.sources.len(),
             world.information_horizon.planned_retrieval.len(),
         ),
         format!("Actor/Runtime {actor_runtime_count} effective or candidate resources"),
         format!(
-            "Projection    {} targets · {} effective capabilities",
+            "Projection    {} targets {sep} {} effective capabilities",
             world.projection.targets.len(),
             world.projection.active_capabilities.len(),
         ),
@@ -156,7 +163,7 @@ fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String>
     if let Some(selected) = state.selected.as_ref() {
         if let Some(resource) = selected_world_resource(world, selected) {
             lines.push(String::new());
-            lines.extend(resource_lines(resource));
+            lines.extend(resource_lines(resource, glyphs));
         } else if let Some(source) = world
             .information_horizon
             .sources
@@ -164,14 +171,14 @@ fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String>
             .find(|source| &source.resource == selected)
         {
             lines.push(String::new());
-            lines.extend(context_source_lines(source));
+            lines.extend(context_source_lines(source, glyphs));
         }
     }
 
     if !state.staged.is_empty() {
         lines.push(String::new());
         lines.push(format!(
-            "{} staged change{} · preview -> explain -> confirm -> apply",
+            "{} staged change{} {sep} preview -> explain -> confirm -> apply",
             state.staged.len(),
             if state.staged.len() == 1 { "" } else { "s" },
         ));
@@ -179,8 +186,12 @@ fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String>
     lines
 }
 
-fn explain_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String> {
-    let mut lines = vec!["Explain · authored intent and effective state".into(), String::new()];
+fn explain_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
+    let mut lines = vec![
+        format!("Explain {sep} authored intent and effective state"),
+        String::new(),
+    ];
     let Some(selected) = state.selected.as_ref() else {
         lines.push("Select a Resource to inspect its resolved intent/effective state.".into());
         lines.push(format!("Resolution {}", world.effective_revision.resolution_hash));
@@ -189,14 +200,14 @@ fn explain_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String>
 
     lines.push(format!("Resource       {selected}"));
     if let Some(resource) = selected_world_resource(world, selected) {
-        lines.extend(resource_lines(resource));
+        lines.extend(resource_lines(resource, glyphs));
     } else if let Some(source) = world
         .information_horizon
         .sources
         .iter()
         .find(|source| &source.resource == selected)
     {
-        lines.extend(context_source_lines(source));
+        lines.extend(context_source_lines(source, glyphs));
     } else {
         lines.push("No Project-world resolution record for this shallow navigation Resource.".into());
         lines.push("Use the contextual Explain Action for provider-specific detail.".into());
@@ -220,9 +231,9 @@ fn explain_lines(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<String>
     lines
 }
 
-fn history_lines(world: &ProjectWorldReadModel) -> Vec<String> {
+fn history_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
     let mut lines = vec![
-        "History · effective world lineage".into(),
+        format!("History {} effective world lineage", glyphs.separator()),
         String::new(),
         format!("Catalog revision  {}", world.effective_revision.catalog_revision),
         format!("Resolution hash   {}", world.effective_revision.resolution_hash),
@@ -268,7 +279,8 @@ fn selected_world_resource<'a>(
         .find(|resource| &resource.resource == selected)
 }
 
-fn resource_lines(resource: &ProjectWorldResource) -> Vec<String> {
+fn resource_lines(resource: &ProjectWorldResource, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
     let preference = resource
         .intent
         .preference
@@ -283,20 +295,20 @@ fn resource_lines(resource: &ProjectWorldResource) -> Vec<String> {
         .map(authority_label)
         .collect::<Vec<_>>();
     vec![
-        format!("{} · {}", resource.name, resource.kind.as_str()),
+        format!("{} {sep} {}", resource.name, resource.kind.as_str()),
         resource.resource.as_str().to_string(),
         format!(
-            "Intent        {} · {}{}",
+            "Intent        {} {sep} {}{}",
             eligibility_label(&resource.intent.eligibility),
             preference,
             if authorities.is_empty() {
                 String::new()
             } else {
-                format!(" · provenance {}", authorities.join(", "))
+                format!(" {sep} provenance {}", authorities.join(", "))
             },
         ),
         format!(
-            "Effective     {} · {} provider{}",
+            "Effective     {} {sep} {} provider{}",
             availability_label(&resource.effective.availability),
             resource.effective.providers.len(),
             if resource.effective.providers.len() == 1 { "" } else { "s" },
@@ -304,12 +316,13 @@ fn resource_lines(resource: &ProjectWorldResource) -> Vec<String> {
     ]
 }
 
-fn context_source_lines(source: &ContextSourceHit) -> Vec<String> {
+fn context_source_lines(source: &ContextSourceHit, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
     vec![
-        format!("{} · context-source", source.name),
+        format!("{} {sep} context-source", source.name),
         source.resource.as_str().to_string(),
         format!(
-            "Disclosure    exists={} · known={} · askable={} · retrieved={} · focused={}",
+            "Disclosure    exists={} {sep} known={} {sep} askable={} {sep} retrieved={} {sep} focused={}",
             source.disclosure.exists,
             source.disclosure.known_to_exist,
             source.disclosure.askable,

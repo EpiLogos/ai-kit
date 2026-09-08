@@ -203,9 +203,19 @@ pub struct HistoryEntry {
     pub summary: String,
 }
 
+/// The typed relation neighbourhood for one subject, as List/Tree/Graph project it.
+///
+/// `view` is the canonical [`aikit_core::KnowledgeRelationView`] the owning
+/// provider actually returned (or, for the resolver-backed fallback, a genuine
+/// view this crate builds honestly from resolver "often used with" edges — never
+/// a parallel relation ontology). List, Tree and Graph presentations are pure
+/// projections of `view.nodes` / `view.edges`; no presentation re-derives
+/// relations from strings. `value` is retained only for Inspector/JSON detail the
+/// typed view does not carry — it must never be the sole source of relation truth.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelationReadModel {
     pub subject: ResourceRef,
+    pub view: aikit_core::KnowledgeRelationView,
     pub value: Value,
 }
 
@@ -264,6 +274,19 @@ pub trait TuiApplicationService {
     fn explain(&self, resource: &ResourceRef) -> Result<Value>;
     fn history(&self, resource: Option<&ResourceRef>) -> Result<Vec<HistoryEntry>>;
     fn relations(&self, resource: &ResourceRef) -> Result<RelationReadModel>;
+
+    /// Depth-carrying sibling of [`relations`](Self::relations). Graph's
+    /// bounded `+`/`-` depth control needs to reach the owning provider, but
+    /// `relations` itself is called directly by call sites (the CLI, other
+    /// TUI tests) with no depth concept of their own; widening its signature
+    /// would ripple through every one of them for a control only Graph
+    /// drives. A sibling method is the smaller honest change: every existing
+    /// `TuiApplicationService` implementation stays source-compatible
+    /// through this default, which simply ignores the requested depth and
+    /// falls back to whatever `relations` already does.
+    fn relations_at_depth(&self, resource: &ResourceRef, _depth: u8) -> Result<RelationReadModel> {
+        self.relations(resource)
+    }
 
     /// Rich Knowledge operations are part of the application faculty, not renderer
     /// semantics. Minimal services may return None; the production service exposes
@@ -354,6 +377,64 @@ pub struct UiStatus {
     pub message: String,
 }
 
+/// Presentation-only state for the Graph relation view.
+///
+/// Graph does not get a second semantic selection: which node is highlighted
+/// is still exactly `TuiState.selected`. What Graph needs beyond that is where
+/// it is centred, how it got there, how deep it looks, how it is filtered and
+/// panned, and which relation-family groups a viewer has folded away — none of
+/// which is a competing identity for `selected`, all of which is meaningless
+/// for List/Tree.
+///
+/// `focus` is deliberately distinct from `selected`. `selected` is "what is
+/// highlighted right now" (moves on every arrow/hjkl press); `focus` is "whose
+/// neighbourhood the graph is currently showing" (moves only on an explicit
+/// recenter). Leaving `focus` at `None` means "follow `selected`", which is
+/// the ordinary state before the first recenter and after selection changes
+/// through any non-Graph path (see `reduce_tui`'s `Select`/`SelectNext`/
+/// `SelectPrevious` arms, which reset `focus` and `history` deliberately —
+/// picking a different subject elsewhere abandons the pinned neighbourhood).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphPresentation {
+    pub focus: Option<ResourceRef>,
+    /// Previous explicit foci, most recent last. `GraphBack` pops one; when
+    /// this is empty, Esc/Back falls through to ordinary navigation history
+    /// (`ApplicationSurfaceController::handle_key` makes that choice, since
+    /// the pure reducer's `GraphBack` arm only pops — it never re-dispatches
+    /// `Back` itself).
+    pub history: Vec<ResourceRef>,
+    /// Bounded relation-expansion depth requested from the owning provider.
+    /// See [`GraphPresentation::MIN_DEPTH`]/[`GraphPresentation::MAX_DEPTH`].
+    pub depth: u8,
+    /// Graph-local text filter (`/`). Narrows which nodes/edges of the
+    /// already-fetched relation view are laid out; it never re-queries.
+    pub filter: String,
+    pub pan: (i32, i32),
+    /// Relation-family group keys (`RelationBand::label()` combined with a
+    /// lane name) a viewer has folded away. A `String` rather than a typed
+    /// key so this module never has to know `graph_layout`'s band/lane
+    /// vocabulary.
+    pub collapsed_groups: BTreeSet<String>,
+}
+
+impl GraphPresentation {
+    pub const MIN_DEPTH: u8 = 1;
+    pub const MAX_DEPTH: u8 = 4;
+}
+
+impl Default for GraphPresentation {
+    fn default() -> Self {
+        Self {
+            focus: None,
+            history: Vec::new(),
+            depth: aikit_core::DEFAULT_RELATION_DEPTH,
+            filter: String::new(),
+            pan: (0, 0),
+            collapsed_groups: BTreeSet::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TuiState {
     pub query: String,
@@ -381,6 +462,8 @@ pub struct TuiState {
     pub presentation: PresentationMode,
     pub workspace_section: WorkspaceSection,
     pub relation_view: RelationView,
+    #[serde(default)]
+    pub graph: GraphPresentation,
     pub overlay: Option<Overlay>,
     pub navigation: Vec<NavigationPoint>,
     pub selection_invalidation: Option<SelectionInvalidation>,
@@ -406,6 +489,7 @@ impl Default for TuiState {
             presentation: PresentationMode::Quick,
             workspace_section: WorkspaceSection::Projects,
             relation_view: RelationView::List,
+            graph: GraphPresentation::default(),
             overlay: None,
             navigation: Vec::new(),
             selection_invalidation: None,
@@ -444,6 +528,27 @@ pub enum UiAction {
     NextWorkspaceSection,
     PreviousWorkspaceSection,
     SetRelationView(RelationView),
+    /// Highlight a node the Graph projection actually laid out. Distinct from
+    /// `Select` because a relation neighbour (a Wiki node, a source, anything
+    /// reached only through Knowledge relations) need not appear in the flat
+    /// resource-search read model `Select` validates membership against —
+    /// its validity is already established by the controller against the
+    /// fetched `RelationReadModel` before this is dispatched. It still lands
+    /// on the one canonical `TuiState.selected`; this is a differently
+    /// guarded entry to the same field, never a second store.
+    GraphSelectNode(ResourceRef),
+    /// Recentre the Graph on a new focus, remembering where it was.
+    GraphRecenter(ResourceRef),
+    /// Return to the previous Graph focus. A no-op when history is empty —
+    /// the controller is responsible for falling through to ordinary `Back`
+    /// in that case so Esc is never swallowed.
+    GraphBack,
+    GraphSetDepth(u8),
+    GraphIncreaseDepth,
+    GraphDecreaseDepth,
+    GraphSetFilter(String),
+    GraphPan(i32, i32),
+    GraphToggleGroup(String),
     ShowOverlay(Overlay),
     Dismiss,
     Stage {
@@ -577,6 +682,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         }
         UiAction::Select(resource) => {
             if state.read_model.contains(&resource) {
+                reset_graph_follow(&mut state);
                 state.selected = Some(resource.clone());
                 state.selection_invalidation = None;
                 state.action_query = None;
@@ -592,6 +698,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         }
         UiAction::SelectNext => {
             if let Some(subject) = select_relative(&mut state, 1) {
+                reset_graph_follow(&mut state);
                 state.action_query = None;
                 state.action_cursor = 0;
                 clear_contextual_actions(&mut state);
@@ -600,6 +707,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         }
         UiAction::SelectPrevious => {
             if let Some(subject) = select_relative(&mut state, -1) {
+                reset_graph_follow(&mut state);
                 state.action_query = None;
                 state.action_cursor = 0;
                 clear_contextual_actions(&mut state);
@@ -729,7 +837,85 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         UiAction::PreviousWorkspaceSection => {
             state.workspace_section = state.workspace_section.relative(-1)
         }
-        UiAction::SetRelationView(view) => state.relation_view = view,
+        UiAction::SetRelationView(view) => {
+            state.relation_view = view;
+            // Entering Graph latches its focus onto whatever is canonically
+            // selected right now (when nothing has recentred it already).
+            // Without this latch, `graph.focus` would stay `None` and the
+            // controller's "follow selection when focus is unset" fallback
+            // (see `ApplicationSurfaceController::relation_subject`) would
+            // keep tracking `selected` even after Graph opens — meaning
+            // ordinary arrow/hjkl movement inside the Graph (which moves
+            // `selected` via `GraphSelectNode`) would silently recentre the
+            // neighbourhood on every keypress, exactly the behaviour Graph's
+            // own Enter/GraphRecenter is supposed to be the only way to
+            // trigger.
+            if view == RelationView::Graph && state.graph.focus.is_none() {
+                state.graph.focus = state.selected.clone();
+            }
+        }
+        UiAction::GraphSelectNode(resource) => {
+            state.selected = Some(resource.clone());
+            state.selection_invalidation = None;
+            state.action_query = None;
+            state.action_cursor = 0;
+            clear_contextual_actions(&mut state);
+            effects.push(UiEffect::LoadContextualActions { subject: resource });
+        }
+        UiAction::GraphRecenter(resource) => {
+            let previous = state.graph.focus.clone().or_else(|| state.selected.clone());
+            if let Some(previous) = previous {
+                if previous != resource {
+                    state.graph.history.push(previous);
+                }
+            }
+            state.graph.focus = Some(resource.clone());
+            state.graph.pan = (0, 0);
+            state.selected = Some(resource.clone());
+            state.selection_invalidation = None;
+            state.action_query = None;
+            state.action_cursor = 0;
+            clear_contextual_actions(&mut state);
+            effects.push(UiEffect::LoadContextualActions { subject: resource });
+        }
+        UiAction::GraphBack => {
+            if let Some(previous) = state.graph.history.pop() {
+                state.graph.focus = Some(previous.clone());
+                state.graph.pan = (0, 0);
+                state.selected = Some(previous.clone());
+                state.selection_invalidation = None;
+                state.action_query = None;
+                state.action_cursor = 0;
+                clear_contextual_actions(&mut state);
+                effects.push(UiEffect::LoadContextualActions { subject: previous });
+            }
+        }
+        UiAction::GraphSetDepth(depth) => {
+            state.graph.depth = depth.clamp(GraphPresentation::MIN_DEPTH, GraphPresentation::MAX_DEPTH);
+        }
+        UiAction::GraphIncreaseDepth => {
+            state.graph.depth = state
+                .graph
+                .depth
+                .saturating_add(1)
+                .min(GraphPresentation::MAX_DEPTH);
+        }
+        UiAction::GraphDecreaseDepth => {
+            state.graph.depth = state
+                .graph
+                .depth
+                .saturating_sub(1)
+                .max(GraphPresentation::MIN_DEPTH);
+        }
+        UiAction::GraphSetFilter(filter) => state.graph.filter = filter,
+        UiAction::GraphPan(dx, dy) => {
+            state.graph.pan = (state.graph.pan.0 + dx, state.graph.pan.1 + dy);
+        }
+        UiAction::GraphToggleGroup(key) => {
+            if !state.graph.collapsed_groups.remove(&key) {
+                state.graph.collapsed_groups.insert(key);
+            }
+        }
         UiAction::ShowOverlay(overlay) => state.overlay = Some(overlay),
         UiAction::Dismiss => {
             // Esc/dismiss is intentionally incapable of clearing query, staged
@@ -868,6 +1054,16 @@ fn reconcile_read_model(state: &mut TuiState, model: ResourceListReadModel) {
 fn clear_contextual_actions(state: &mut TuiState) {
     state.contextual_actions_for = None;
     state.contextual_actions.clear();
+}
+
+/// A selection change that did not come from the Graph itself abandons any
+/// pinned Graph focus: the neighbourhood now showing should be the newly
+/// selected subject's, not one the viewer explicitly recentred onto earlier
+/// while looking at something else entirely.
+fn reset_graph_follow(state: &mut TuiState) {
+    state.graph.focus = None;
+    state.graph.history.clear();
+    state.graph.pan = (0, 0);
 }
 
 fn select_relative(state: &mut TuiState, delta: isize) -> Option<ResourceRef> {

@@ -2,9 +2,14 @@
 //! No eligibility or ranking logic lives here.
 
 use aikit_core::resource::ModelRoster;
+use aikit_tui::layout::Glyphs;
 
+/// One reading of host glyph capability, here at the CLI boundary, handed
+/// to the projection as data — the same shape the terminal surface uses
+/// (`ApplicationSurfaceController::new`). Nothing downstream sniffs the
+/// environment again.
 pub fn model_roster_text(roster: &ModelRoster) -> String {
-    aikit_tui::model_roster_matrix(roster).join("\n")
+    aikit_tui::model_roster_matrix(roster, Glyphs::from_env()).join("\n")
 }
 
 pub fn model_roster_json(roster: &ModelRoster) -> serde_json::Result<String> {

@@ -29,6 +29,28 @@ pub enum RelationDirection {
     Bidirectional,
 }
 
+/// A provider's own assertion that a [`RelationEdge`] is a containment
+/// relation, and which endpoint contains the other.
+///
+/// This is orthogonal to `direction`, which is traversal orientation only
+/// and cannot distinguish "contains" from any other relation shape. It is
+/// also orthogonal to `relation`, which stays provider vocabulary — a
+/// provider that names its containment relation `"member"`, `"part-of"` or
+/// anything else still asserts `Encloses`/`EnclosedBy` here so a consumer
+/// never has to know or guess that name to place the edge correctly.
+///
+/// `None` on a [`RelationEdge`] means the provider is not asserting
+/// containment for that edge; a consumer must fall back to `direction`-only
+/// placement, never to reconstructing containment from `relation` text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContainmentRole {
+    /// `from` contains/encloses `to`.
+    Encloses,
+    /// `from` is contained/enclosed by `to`.
+    EnclosedBy,
+}
+
 /// Where one relation assertion came from.
 ///
 /// `relation` itself remains provider vocabulary. AIKit does not normalize a
@@ -110,6 +132,11 @@ pub struct RelationEdge {
     pub relation: String,
     pub direction: RelationDirection,
     pub origin: RelationOrigin,
+    /// The provider's own containment assertion for this edge, if any. See
+    /// [`ContainmentRole`]. Absent by default; a provider that asserts
+    /// containment opts in with [`RelationEdge::with_containment`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment: Option<ContainmentRole>,
 }
 
 impl RelationEdge {
@@ -126,7 +153,14 @@ impl RelationEdge {
             relation: relation.into(),
             direction,
             origin,
+            containment: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_containment(mut self, containment: ContainmentRole) -> Self {
+        self.containment = Some(containment);
+        self
     }
 }
 
@@ -540,5 +574,62 @@ mod tests {
             }
             crate::FamiliarityUse::Destination => panic!("route evidence must remain a route"),
         }
+    }
+
+    #[test]
+    fn relation_edge_containment_round_trips_and_stays_absent_on_legacy_payloads() {
+        let with_containment = RelationEdge::new(
+            r("knowledge-node/focus"),
+            r("knowledge-node/member"),
+            "member",
+            RelationDirection::Outgoing,
+            RelationOrigin::new(SourceAuthority::Authored).in_lens("semantic-wiki"),
+        )
+        .with_containment(ContainmentRole::Encloses);
+
+        let json = serde_json::to_value(&with_containment).unwrap();
+        assert_eq!(json["containment"], serde_json::json!("encloses"));
+        let round_tripped: RelationEdge = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, with_containment);
+
+        let enclosed_by = with_containment
+            .clone()
+            .with_containment(ContainmentRole::EnclosedBy);
+        let json = serde_json::to_value(&enclosed_by).unwrap();
+        assert_eq!(json["containment"], serde_json::json!("enclosed-by"));
+        assert_eq!(
+            serde_json::from_value::<RelationEdge>(json).unwrap(),
+            enclosed_by
+        );
+
+        // A provider that asserts no containment must not even write the
+        // key: `skip_serializing_if` keeps the wire payload identical to
+        // what a pre-containment provider emitted.
+        let without_containment = RelationEdge::new(
+            r("knowledge-node/focus"),
+            r("knowledge-source/spec"),
+            "cites",
+            RelationDirection::Outgoing,
+            RelationOrigin::new(SourceAuthority::Authored),
+        );
+        let json = serde_json::to_value(&without_containment).unwrap();
+        assert!(
+            json.get("containment").is_none(),
+            "containment must be omitted, not written as null, when the provider asserts none"
+        );
+
+        // The actual backward-compatibility contract: a `RelationEdge`
+        // serialized before this field existed — no `containment` key at
+        // all — must still deserialize, defaulting to `None`.
+        let legacy_json = serde_json::json!({
+            "from": "knowledge-node/focus",
+            "to": "knowledge-source/spec",
+            "relation": "cites",
+            "direction": "outgoing",
+            "origin": { "authority": "authored" },
+        });
+        let legacy: RelationEdge = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(legacy.containment, None);
+        assert_eq!(legacy, without_containment);
     }
 }

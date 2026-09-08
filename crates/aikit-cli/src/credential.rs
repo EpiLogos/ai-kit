@@ -134,7 +134,10 @@ pub fn setup(home: &AikitHome, request: &CredentialRequest) -> Result<Credential
             && !inspection.native_provider.available,
         headless: false,
     };
-    eprintln!("{}", render_credential_setup_panel(&view));
+    eprintln!(
+        "{}",
+        render_credential_setup_panel(&view, aikit_tui::layout::Glyphs::from_env())
+    );
     eprint!("> ");
     io::stderr().flush().map_err(io_error)?;
     let choice = read_line()?.trim().to_ascii_lowercase();
