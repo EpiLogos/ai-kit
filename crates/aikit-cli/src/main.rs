@@ -2058,6 +2058,10 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
         ContextSub::Current(_) => {
             let d = service.descriptor();
             let tuning = service.continuity_tuning();
+            let last_active=d.project_root.as_deref()
+                .map(|root| service.index().project_last_activity(root))
+                .transpose()?.flatten().as_ref()
+                .map(aikit_cli::activity_evidence::describe);
             let data = jval!({
                 "context_id": d.context_id.to_string(),
                 "session_id": d.session_id.as_ref().map(|s| s.to_string()),
@@ -2071,6 +2075,7 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
                 // report, values included, rather than three fields copied
                 // out of it here and drifting from it later.
                 "continuity": tuning.describe(),
+                "last_active": last_active,
             });
             Ok(reply(&service, data, vec![]))
         }

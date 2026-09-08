@@ -10,7 +10,8 @@
 //!   them wholesale. That is what makes "delete the database and carry on" a true
 //!   statement rather than an aspiration.
 //! * **Operational** — `usage_events`, `contexts`, `context_bindings`,
-//!   `generations`, `candidates`, `trust`, `bypasses`. These exist nowhere else.
+//!   `generations`, `candidates`, `trust`, `bypasses`,
+//!   `project_activity_events`. These exist nowhere else.
 //!   A `reindex` that dropped them would turn routine maintenance into data loss:
 //!   the ranking history, the live tmux bindings and the record of who reviewed
 //!   what would all be gone, and nothing on disk could bring them back.
@@ -38,8 +39,8 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use aikit_core::catalog::Catalog;
 use aikit_core::error::err;
 use aikit_core::{
-    AikitError, BypassScope, BypassToken, CapsuleId, ContextBinding, ContextId, Isolation, Kind,
-    Maturity, MuxKind, ProfileId, RegistrySource, Result, Revision, SessionId, UsageStats,
+    AikitError, BypassScope, BypassToken, CapsuleId, ContextBinding, ContextId, EventId, Isolation,
+    Kind, Maturity, MuxKind, ProfileId, RegistrySource, Result, Revision, SessionId, UsageStats,
 };
 
 use crate::events::{Event, EventAction, Outcome, Timestamp};
@@ -264,6 +265,24 @@ CREATE TABLE IF NOT EXISTS injection_ledger (
 CREATE INDEX IF NOT EXISTS injection_ledger_by_time ON injection_ledger(injected_ns);
 "#,
     ),
+    (
+        "0007-project-activity-evidence",
+        // W4/CASE 06: append-only operational evidence of completed tool use.
+        // This is the durable source for a project's `lastActive`; ranking
+        // history is deliberately not substituted because ranking is not activation.
+        r#"
+CREATE TABLE project_activity_events (
+    evidence_id  TEXT PRIMARY KEY,
+    project_root TEXT NOT NULL,
+    occurred_ns  INTEGER NOT NULL,
+    context_id   TEXT NOT NULL,
+    tool         TEXT,
+    touched_path TEXT
+);
+CREATE INDEX project_activity_by_project
+    ON project_activity_events(project_root, occurred_ns DESC, evidence_id DESC);
+"#,
+    ),
 ];
 
 /// Tables `reindex` is allowed to empty.
@@ -384,6 +403,34 @@ pub struct BypassRecord {
     pub token: BypassToken,
     pub issued_at: Timestamp,
     pub spent: bool,
+}
+
+/// One durable receipt that work completed in a project context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectActivityEvidence {
+    pub evidence_id: EventId,
+    pub project_root: PathBuf,
+    pub occurred_at: Timestamp,
+    pub context_id: ContextId,
+    pub tool: Option<String>,
+    /// Project-relative when the event named a path within the project.
+    pub touched_path: Option<PathBuf>,
+}
+
+impl ProjectActivityEvidence {
+    #[must_use]
+    pub fn new(
+        project_root: impl Into<PathBuf>,
+        occurred_at: Timestamp,
+        context_id: ContextId,
+        tool: Option<String>,
+        touched_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            evidence_id: EventId::generate(), project_root: project_root.into(),
+            occurred_at, context_id, tool, touched_path,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,6 +1092,39 @@ impl Index {
             )
             .map_err(|e| sql_error("index.read_failed", &e))?;
         Ok(seen > 0)
+    }
+
+    /// Append a completed project activity receipt. Evidence is never overwritten.
+    pub fn record_project_activity(&self, evidence: &ProjectActivityEvidence) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO project_activity_events
+             (evidence_id, project_root, occurred_ns, context_id, tool, touched_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                evidence.evidence_id.to_string(), evidence.project_root.to_string_lossy(),
+                evidence.occurred_at.as_nanos(), evidence.context_id.to_string(), evidence.tool,
+                evidence.touched_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            ],
+        ).map_err(|e| sql_error("activity.write_failed", &e))?;
+        Ok(())
+    }
+
+    /// Latest completed activity for exactly this project identity.
+    pub fn project_last_activity(&self, project_root: &Path) -> Result<Option<ProjectActivityEvidence>> {
+        self.conn.query_row(
+            "SELECT evidence_id, project_root, occurred_ns, context_id, tool, touched_path
+             FROM project_activity_events WHERE project_root = ?1
+             ORDER BY occurred_ns DESC, evidence_id DESC LIMIT 1",
+            params![project_root.to_string_lossy()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?,
+                      row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?,
+                      row.get::<_, Option<String>>(5)?)),
+        ).optional().map_err(|e| sql_error("activity.read_failed", &e))?
+            .map(|(eid, root, ns, cid, tool, path)| Ok(ProjectActivityEvidence {
+                evidence_id: EventId::parse(&eid)?, project_root: PathBuf::from(root),
+                occurred_at: Timestamp::from_nanos(ns), context_id: ContextId::parse(&cid)?,
+                tool, touched_path: path.map(PathBuf::from),
+            })).transpose()
     }
 }
 
