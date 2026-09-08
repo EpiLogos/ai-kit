@@ -241,7 +241,21 @@ fn work_and_system_sections_disclose_real_facts_without_fabricating_factory_or_c
     assert_eq!(workspace_section_label(surface.semantic().workspace_section), "System");
     let system = rendered(&draw_width(&surface, 220, 30));
     assert!(system.contains("System · installation and provider disclosure"));
-    assert!(system.contains("Credentials   not exposed by application boundary"));
+    // The fixture composes no credential input, so the read model carries a
+    // `not_attempted` disclosure. System must render that as the open question
+    // it is — never as "no credentials" and never as an observed-empty roster.
+    assert!(
+        system.contains("Credentials   not attempted for this world"),
+        "System must disclose an unattempted credential reading as unattempted"
+    );
+    assert!(
+        system.contains("Providers     not observed"),
+        "an Unknown provider roster must read as not observed, not as an empty roster"
+    );
+    assert!(
+        !system.contains("none on this machine") && !system.contains("none required"),
+        "System must not turn an unread credential world into a confirmed negative"
+    );
 }
 
 #[test]

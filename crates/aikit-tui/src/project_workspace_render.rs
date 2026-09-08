@@ -7,8 +7,8 @@
 //! staging -> preview -> confirm -> apply path.
 //!
 //! The public Workspace field is Search / Worlds / Compose / Work / Knowledge /
-//! History / System — spec `docs/v2/23-TUI-HUMAN-EXPERIENCE-SPEC.md` §3-§8
-//! (carried unmerged on PR #212 as of this writing). Explain is deliberately
+//! History / System — spec `docs/v2/23-TUI-HUMAN-EXPERIENCE-SPEC.md` §3-§8.
+//! Explain is deliberately
 //! not a section here: spec §17 retires it as a top-level destination in
 //! favour of an Inspector overlay reached through the `:` Explain contextual
 //! Action (see `Overlay::Explain` in `crate::v2_render`, which now renders
@@ -17,6 +17,7 @@
 
 use aikit_core::context_resolution::Availability;
 use aikit_core::project::ProjectBindingLocator;
+use aikit_core::credential_world::{CredentialStatusKnowledge, ProviderRosterKnowledge};
 use aikit_core::resource::{Eligibility, SourceAuthority};
 use aikit_core::{ContextSourceHit, ProjectWorldReadModel, ProjectWorldResource};
 
@@ -258,19 +259,83 @@ fn work_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -
 /// Ctrl+K-navigable destination and says plainly what is not yet disclosed.
 fn system_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
     let sep = glyphs.separator();
-    vec![
+    let mut lines = vec![
         format!("System {sep} installation and provider disclosure"),
         String::new(),
-        "Credentials   not exposed by application boundary".into(),
-        "Providers     not exposed by application boundary".into(),
-        "Adapters      not exposed by application boundary".into(),
-        "Workcell      not exposed by application boundary".into(),
-        String::new(),
-        format!(
-            "Revision      catalog {} {sep} resolution {}",
-            world.effective_revision.catalog_revision, world.effective_revision.resolution_hash,
-        ),
-    ]
+    ];
+    lines.extend(credential_lines(world, glyphs));
+    lines.push("Adapters      not exposed by application boundary".into());
+    lines.push("Workcell      not exposed by application boundary".into());
+    lines.push(String::new());
+    lines.push(format!(
+        "Revision      catalog {} {sep} resolution {}",
+        world.effective_revision.catalog_revision, world.effective_revision.resolution_hash,
+    ));
+    lines
+}
+
+/// The Credentials and Providers rows of §8 System, read from
+/// `ProjectWorldReadModel::credential_world`.
+///
+/// The disclosure's whole point is that "none" and "we could not tell" are
+/// different facts, so this renderer never collapses them into one row. An
+/// `Unknown` roster says so and carries its reason; an `Observed` empty roster
+/// is a confirmed negative and says *that*. Per-credential, only a `Resolved`
+/// status with nothing selected is a real "no" — an `Unresolved` status is an
+/// open question and is counted separately rather than being added to the
+/// failures.
+fn credential_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
+    let disclosure = &world.credential_world;
+
+    let providers = match &disclosure.providers {
+        ProviderRosterKnowledge::Observed { providers } if providers.is_empty() => {
+            "Providers     none on this machine (roster observed)".to_string()
+        }
+        ProviderRosterKnowledge::Observed { providers } => {
+            let names = providers
+                .iter()
+                .map(|provider| provider.provider_ref.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Providers     {} observed {sep} {names}", providers.len())
+        }
+        ProviderRosterKnowledge::Unknown { reason } => {
+            format!("Providers     not observed {sep} {reason}")
+        }
+    };
+
+    let credentials = if disclosure.credentials.is_empty() {
+        match &disclosure.providers {
+            // No requirements against a roster we could not read is not a
+            // statement about credentials at all.
+            ProviderRosterKnowledge::Unknown { .. } => {
+                "Credentials   not attempted for this world".to_string()
+            }
+            ProviderRosterKnowledge::Observed { .. } => {
+                "Credentials   none required by this world".to_string()
+            }
+        }
+    } else {
+        let total = disclosure.credentials.len();
+        let selected = disclosure
+            .credentials
+            .values()
+            .filter(|status| status.is_selected())
+            .count();
+        let unresolved = disclosure
+            .credentials
+            .values()
+            .filter(|status| matches!(status, CredentialStatusKnowledge::Unresolved { .. }))
+            .count();
+        let mut row = format!("Credentials   {selected}/{total} resolved to a provider");
+        if unresolved > 0 {
+            row.push_str(&format!(" {sep} {unresolved} not attempted"));
+        }
+        row
+    };
+
+    vec![credentials, providers]
 }
 
 /// Selected-resource resolved intent/effective-state lines. No longer reached
@@ -460,5 +525,115 @@ pub(crate) fn authority_label(authority: SourceAuthority) -> &'static str {
         SourceAuthority::Derived => "derived",
         SourceAuthority::Learned => "learned",
         SourceAuthority::Generated => "generated",
+    }
+}
+
+#[cfg(test)]
+mod credential_disclosure_tests {
+    use aikit_core::context::ContextDescriptor;
+    use aikit_core::credential::{
+        CredentialRef, SecretMaterialisationClass, SecretProviderDescriptor, SecretProviderRef,
+        SecretProviderTier,
+    };
+    use aikit_core::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
+    use aikit_core::credential_world::CredentialWorldDisclosure;
+
+    use super::*;
+
+    fn world_with(credential_world: CredentialWorldDisclosure) -> ProjectWorldReadModel {
+        let context = ContextDescriptor::for_project("/work/aikit");
+        ProjectWorldReadModel::empty(
+            ProjectBinding::from_legacy_context(
+                ProjectRef::parse("project:aikit").unwrap(),
+                ProjectConstituentRef::parse("source:working-tree").unwrap(),
+                &context,
+            )
+            .unwrap(),
+            context,
+        )
+        .with_credential_world(credential_world)
+    }
+
+    fn provider(id: &str) -> SecretProviderDescriptor {
+        SecretProviderDescriptor {
+            provider_ref: SecretProviderRef::new(id).unwrap(),
+            provider_kind: id.into(),
+            tier: SecretProviderTier::OsSecureStore,
+            available: true,
+            headless_capable: true,
+            assurance: "os-keychain".into(),
+            degradation: None,
+            supported_credentials: [CredentialRef::new("credential:openai").unwrap()]
+                .into_iter()
+                .collect(),
+            supported_materialisation: [SecretMaterialisationClass::ProviderNativeLease]
+                .into_iter()
+                .collect(),
+            binding_provenance: format!("binding:{id}"),
+            revision_or_lease_class: None,
+        }
+    }
+
+    /// The whole reason `credential_world.rs` exists: "there are none" and "we
+    /// could not tell" are different facts. If System renders them the same
+    /// way, the disclosure has been wasted at the last step.
+    #[test]
+    fn an_unread_roster_and_a_confirmed_empty_roster_do_not_render_alike() {
+        let unknown = credential_lines(
+            &world_with(CredentialWorldDisclosure::not_attempted("no roster gathered")),
+            Glyphs::unicode(),
+        );
+        let observed_empty = credential_lines(
+            &world_with(CredentialWorldDisclosure {
+                version: "aikit.credential-world/v1".into(),
+                providers: ProviderRosterKnowledge::Observed { providers: vec![] },
+                credentials: Default::default(),
+            }),
+            Glyphs::unicode(),
+        );
+
+        assert_ne!(unknown, observed_empty);
+        assert!(unknown.iter().any(|line| line.contains("not observed")));
+        assert!(unknown.iter().any(|line| line.contains("not attempted for this world")));
+        assert!(observed_empty
+            .iter()
+            .any(|line| line.contains("none on this machine (roster observed)")));
+        assert!(observed_empty
+            .iter()
+            .any(|line| line.contains("none required by this world")));
+    }
+
+    #[test]
+    fn an_observed_roster_names_the_providers_it_actually_saw() {
+        let lines = credential_lines(
+            &world_with(CredentialWorldDisclosure {
+                version: "aikit.credential-world/v1".into(),
+                providers: ProviderRosterKnowledge::Observed {
+                    providers: vec![provider("keychain"), provider("varlock")],
+                },
+                credentials: Default::default(),
+            }),
+            Glyphs::unicode(),
+        );
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("2 observed") && line.contains("keychain, varlock")));
+    }
+
+    /// A `not_attempted` disclosure must never reach the pane as a claim about
+    /// credentials. This is the regression that would re-fabricate exactly the
+    /// state the old placeholder row honestly refused to fabricate.
+    #[test]
+    fn a_not_attempted_disclosure_never_renders_as_a_negative() {
+        let lines = credential_lines(
+            &world_with(CredentialWorldDisclosure::default()),
+            Glyphs::unicode(),
+        );
+        let rendered = lines.join("\n");
+
+        assert!(!rendered.contains("none required"));
+        assert!(!rendered.contains("none on this machine"));
+        assert!(!rendered.contains("0/0"));
     }
 }
