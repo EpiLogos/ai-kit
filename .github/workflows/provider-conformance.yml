@@ -14,11 +14,15 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   tmux-3-7c-real:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2.9.2
       - name: Install tmux 3.7c build dependencies
         run: |
           sudo apt-get update
@@ -40,6 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2.9.2
       - name: Run real classic non-ACP process proof
         run: cargo test -p aikit-adapters --test connection_process_real real_classic_process -- --nocapture
 
@@ -47,6 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2.9.2
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -68,6 +74,7 @@ jobs:
         working-directory: provider-fixtures/vscode-session-space
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2.9.2
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -86,6 +93,7 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2.9.2
       - name: Install exact cmux v0.64.22 release
         run: |
           set -euo pipefail

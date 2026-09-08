@@ -13,6 +13,9 @@ concurrency:
   group: persistent-surface-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   collapsed-local-workcell:
     name: AIKit Surface ↔ Workcell managed-service proof

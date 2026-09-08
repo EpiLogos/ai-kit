@@ -22,6 +22,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -30,6 +33,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo test --workspace --all-targets --locked
 
   artifact:
@@ -54,6 +58,7 @@ jobs:
         with:
           toolchain: 1.98.0
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2.9.2
       - name: Build locked native artifact
         run: cargo build --locked --release --target '${{ matrix.target }}' --package aikit-cli --bin aikit
       - name: Package unratified pre-local artifact
