@@ -1,7 +1,8 @@
 //! Native Central wiki discovery. Only the canonical paths disclosed by
 //! central.world participate; repository fixtures and copied JSON are not roots.
 use crate::runner::CommandRunner;
-use aikit_core::{parse_wiki_objects, AikitError, Result, WikiObject};
+use aikit_core::knowledge_wiki_provider::WikiRegisterRevision;
+use aikit_core::{parse_wiki_objects, AikitError, ResourceRef, Result, WikiObject};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -11,6 +12,7 @@ use std::{
 
 pub struct CentralWikiReading {
     pub objects: Vec<WikiObject>,
+    pub registers: Vec<WikiRegisterRevision>,
     pub absences: Vec<String>,
 }
 
@@ -63,8 +65,10 @@ pub fn read_central_wiki<R: CommandRunner>(
         }
     }
     let mut objects = Vec::new();
+    let mut registers = Vec::new();
     let mut absences = Vec::new();
     let mut paths = BTreeSet::new();
+    let mut seen_registers = BTreeSet::new();
     let mut seen_refs = BTreeSet::new();
     for declaration in declarations {
         if let Some(error) = declaration["error"].as_str() {
@@ -89,7 +93,26 @@ pub fn read_central_wiki<R: CommandRunner>(
         if !paths.insert(path.clone()) {
             continue;
         }
-        let reading = (|| -> Result<Vec<WikiObject>> {
+        let Some(register) = declaration["space_ref"].as_str() else {
+            absences.push("Central wiki declaration has no owner-authored space_ref".into());
+            continue;
+        };
+        let register = match ResourceRef::parse(register) {
+            Ok(register) => register,
+            Err(error) => {
+                absences.push(format!("Central wiki declaration has invalid space_ref: {error}"));
+                continue;
+            }
+        };
+        if !seen_registers.insert(register.clone()) {
+            absences.push(format!(
+                "Canonical wiki {} repeats register {}; kept the first declaration",
+                relative.display(),
+                register
+            ));
+            continue;
+        }
+        let reading = (|| -> Result<(Vec<WikiObject>, WikiRegisterRevision)> {
             let actual = path
                 .canonicalize()
                 .map_err(|e| AikitError::new("central.wiki_source_unavailable", e.to_string()))?;
@@ -109,12 +132,32 @@ pub fn read_central_wiki<R: CommandRunner>(
                     "Canonical wiki exceeds the bounded read size",
                 ));
             }
-            let text = fs::read_to_string(&path)
+            let bytes = fs::read(&path)
                 .map_err(|e| AikitError::new("central.wiki_source_unavailable", e.to_string()))?;
-            parse_wiki_objects(&text)
+            let text = std::str::from_utf8(&bytes).map_err(|e| {
+                AikitError::new("central.wiki_source_unavailable", e.to_string())
+            })?;
+            let objects = parse_wiki_objects(text)?;
+            if !objects.iter().any(|object| {
+                matches!(object, WikiObject::Space(space) if space.ref_id == register)
+            }) {
+                return Err(AikitError::new(
+                    "central.wiki_register_identity_mismatch",
+                    "Central's declared register is not the canonical Wiki space in that source",
+                )
+                .with("register", register.to_string()));
+            }
+            Ok((
+                objects,
+                WikiRegisterRevision {
+                    register: register.clone(),
+                    revision: format!("blake3:{}", blake3::hash(&bytes).to_hex()),
+                },
+            ))
         })();
         match reading {
-            Ok(read) => {
+            Ok((read, register_revision)) => {
+                registers.push(register_revision);
                 // Two checkouts of one project disclose the same wiki space;
                 // same-ref objects are one logical source. First declaration
                 // wins (canonical_root order), later duplicates are
@@ -141,5 +184,118 @@ pub fn read_central_wiki<R: CommandRunner>(
             )),
         }
     }
-    Ok(CentralWikiReading { objects, absences })
+    registers.sort_by(|left, right| left.register.cmp(&right.register));
+    Ok(CentralWikiReading {
+        objects,
+        registers,
+        absences,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runner::{CommandRunner, Output};
+    use serde_json::json;
+
+    struct WorldRunner {
+        root: std::path::PathBuf,
+    }
+
+    impl CommandRunner for WorldRunner {
+        fn run(&self, _argv: &[String]) -> Result<Output> {
+            Ok(Output::success(
+                json!({
+                    "ok": true,
+                    "data": {
+                        "schema": "central.world-map/v1",
+                        "root": self.root,
+                        "control": {"agent_wiki": {"wiki": {
+                            "present": true,
+                            "path": "Control/agents/wiki/wiki.json",
+                            "space_ref": "central:wiki:root"
+                        }}},
+                        "work": {"projects": [{"projectcentral": {"agent_wiki": {"wiki": {
+                            "present": true,
+                            "path": "Work/Alpha/ProjectCentral/agents/wiki/wiki.json",
+                            "space_ref": "central:wiki:project:alpha"
+                        }}}}]}
+                    }
+                })
+                .to_string(),
+            ))
+        }
+    }
+
+    fn wiki(space_ref: &str, revision: u64, title: &str) -> String {
+        json!({"objects": [{
+            "profile": "okf-wiki/v1",
+            "object": "space",
+            "ref": space_ref,
+            "revision": revision,
+            "provenance": [],
+            "title": title,
+            "parent_space_refs": [],
+            "child_space_refs": [],
+            "node_refs": []
+        }]})
+        .to_string()
+    }
+
+    #[test]
+    fn canonical_register_revisions_are_independent_content_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let root_path = root.join("Control/agents/wiki/wiki.json");
+        let project_path = root.join("Work/Alpha/ProjectCentral/agents/wiki/wiki.json");
+        fs::create_dir_all(root_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(project_path.parent().unwrap()).unwrap();
+        fs::write(&root_path, wiki("central:wiki:root", 1, "Root")).unwrap();
+        fs::write(
+            &project_path,
+            wiki("central:wiki:project:alpha", 1, "Alpha"),
+        )
+        .unwrap();
+        let runner = WorldRunner {
+            root: root.to_path_buf(),
+        };
+
+        let first = read_central_wiki(&runner, Path::new("ctrl"), root).unwrap();
+        assert_eq!(first.registers.len(), 2);
+        let root_before = first
+            .registers
+            .iter()
+            .find(|item| item.register.as_str() == "central:wiki:root")
+            .unwrap()
+            .revision
+            .clone();
+        let project_before = first
+            .registers
+            .iter()
+            .find(|item| item.register.as_str() == "central:wiki:project:alpha")
+            .unwrap()
+            .revision
+            .clone();
+
+        fs::write(
+            &project_path,
+            wiki("central:wiki:project:alpha", 2, "Alpha moved"),
+        )
+        .unwrap();
+        let second = read_central_wiki(&runner, Path::new("ctrl"), root).unwrap();
+        let root_after = second
+            .registers
+            .iter()
+            .find(|item| item.register.as_str() == "central:wiki:root")
+            .unwrap();
+        let project_after = second
+            .registers
+            .iter()
+            .find(|item| item.register.as_str() == "central:wiki:project:alpha")
+            .unwrap();
+
+        assert_eq!(root_after.revision, root_before);
+        assert_ne!(project_after.revision, project_before);
+        assert!(project_after.revision.starts_with("blake3:"));
+    }
 }
