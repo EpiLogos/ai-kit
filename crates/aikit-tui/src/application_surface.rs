@@ -59,6 +59,14 @@ pub struct ApplicationSurfaceRequest {
     pub initial_query: Option<String>,
     pub initial_relation_view: RelationView,
     pub initial_workspace_section: WorkspaceSection,
+    /// Explicit Graph glyph-set override. `None` (every real run) resolves
+    /// host capability once at construction, from
+    /// [`crate::layout::Glyphs::from_env`] — see [`ApplicationSurfaceController::graph_glyphs`].
+    /// `Some` is the injection point a test uses to pin ASCII or Unicode
+    /// deterministically instead of depending on the process locale, without
+    /// mutating process-global environment variables (which `nextest`'s
+    /// parallel test execution makes racy).
+    graph_glyphs: Option<graph_layout::GraphGlyphs>,
 }
 
 impl ApplicationSurfaceRequest {
@@ -68,12 +76,22 @@ impl ApplicationSurfaceRequest {
             initial_query: None,
             initial_relation_view: RelationView::List,
             initial_workspace_section: WorkspaceSection::Projects,
+            graph_glyphs: None,
         }
     }
 
     #[must_use]
     pub fn with_query(mut self, query: impl Into<String>) -> Self {
         self.initial_query = Some(query.into());
+        self
+    }
+
+    /// Pin the Graph glyph set this surface renders with, overriding host
+    /// locale detection. For tests only — real callers leave this unset so
+    /// `Glyphs::from_env()` governs, exactly as before.
+    #[must_use]
+    pub fn with_graph_glyphs(mut self, glyphs: graph_layout::GraphGlyphs) -> Self {
+        self.graph_glyphs = Some(glyphs);
         self
     }
 
@@ -99,6 +117,16 @@ pub struct ApplicationSurfaceController {
     project_world: Option<ProjectWorldReadModel>,
     ambient: AmbientContext,
     graph_layout: Option<(GraphLayoutCacheKey, GraphLayout)>,
+    /// Host glyph capability for the Graph presentation, resolved exactly
+    /// once — here, at construction, alongside `ambient` — rather than
+    /// sniffed live inside the render path. A rendered frame is then a pure
+    /// function of `semantic`/`graph_layout` and this already-resolved
+    /// capability, never of the live process environment. Real callers get
+    /// [`crate::layout::Glyphs::from_env`]'s answer (`ApplicationSurfaceRequest`
+    /// leaves `graph_glyphs` unset); [`ApplicationSurfaceRequest::with_graph_glyphs`]
+    /// is the injection point a test uses to pin ASCII or Unicode
+    /// deterministically instead.
+    graph_glyphs: graph_layout::GraphGlyphs,
     /// Whether the Graph-local filter text lane (`/`) is currently open.
     /// Controller-only input-routing state, not `TuiState`: it decides which
     /// method the next keystroke reaches, exactly like `graph_layout`'s
@@ -123,6 +151,7 @@ impl ApplicationSurfaceController {
         request: ApplicationSurfaceRequest,
     ) -> Result<Self> {
         let ambient = ambient_context(backend.context());
+        let graph_glyphs = request.graph_glyphs.unwrap_or_else(default_graph_glyphs);
         let mut semantic = TuiState {
             presentation: if matches!(request.host, UiHost::Inline(_)) {
                 PresentationMode::Quick
@@ -152,6 +181,7 @@ impl ApplicationSurfaceController {
             project_world,
             ambient,
             graph_layout: None,
+            graph_glyphs,
             graph_filter_editing: false,
             graph_layout_recomputes: 0,
         };
@@ -766,7 +796,7 @@ impl ApplicationSurfaceController {
         let block = Block::default().borders(Borders::ALL).title(title);
 
         let lines = if self.semantic.relation_view == RelationView::Graph {
-            let glyphs = graph_glyphs();
+            let glyphs = self.graph_glyphs;
             match self.graph_layout.as_ref() {
                 Some((_, layout)) if self.graph_is_spatial() => graph_presentation::spatial_lines(
                     layout,
@@ -788,11 +818,15 @@ impl ApplicationSurfaceController {
     }
 }
 
-/// Glyph set choice for the Graph presentation. Mirrors `Glyphs::from_env`
-/// (`layout.rs`) exactly rather than re-deriving its own environment
-/// heuristic, so a single `AIKIT_ASCII`/locale check governs every glyph set
-/// this crate renders.
-fn graph_glyphs() -> graph_layout::GraphGlyphs {
+/// Default Graph glyph-set resolution for real runs: mirrors
+/// `Glyphs::from_env` (`layout.rs`) exactly rather than re-deriving its own
+/// environment heuristic, so a single `AIKIT_ASCII`/locale check governs
+/// every glyph set this crate renders. Called exactly once, at
+/// [`ApplicationSurfaceController::new`], when the request leaves
+/// `graph_glyphs` unset — never at draw time. See
+/// [`ApplicationSurfaceController::graph_glyphs`] and
+/// [`ApplicationSurfaceRequest::with_graph_glyphs`].
+fn default_graph_glyphs() -> graph_layout::GraphGlyphs {
     if crate::layout::Glyphs::from_env().is_ascii() {
         graph_layout::GraphGlyphs::ascii()
     } else {

@@ -1031,44 +1031,71 @@ fn resize_preserves_graph_focus_filter_depth_and_staged_state() {
 
 // ===========================================================================
 // Snapshots — wide / medium / narrow, plus one degraded state
+//
+// Host glyph capability (ASCII vs. Unicode) is resolved once at
+// `ApplicationSurfaceController::new` (`application_surface.rs`), from
+// `Glyphs::from_env()` by default. Rendering it through the live process
+// locale would make a snapshot recorded on one machine fail on another with
+// a different `LANG`/`LC_ALL` — the exact defect this module's own
+// `snapshot_wide_spatial_graph` etc. hit (goldens recorded with no locale
+// set, i.e. ASCII, failing under CI's UTF-8 locale, i.e. Unicode). Setting
+// the environment from the test is not an option either: `nextest` runs
+// tests in parallel and the environment is process-global, so that would be
+// racy. Instead every snapshot below pins its glyph set explicitly via
+// `ApplicationSurfaceRequest::with_graph_glyphs`, and each width gets one
+// ASCII and one Unicode golden — named accordingly — so the pair also
+// stands as the proof (constraint 4) that the two glyph sets carry
+// identical distinctions: a reviewer reading both goldens for the same
+// width side by side sees the same information laid out identically, only
+// the glyphs swapped.
 // ===========================================================================
 
-#[test]
-fn snapshot_wide_spatial_graph() {
+fn snapshot_spatial_graph(glyphs: aikit_tui::graph_layout::GraphGlyphs, width: u16, height: u16) -> String {
     let (_dir, mut backend) = resolver_fixture();
     let mut surface = ApplicationSurfaceController::new(
         &mut backend,
-        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("alpha"),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup)
+            .with_query("alpha")
+            .with_graph_glyphs(glyphs),
     )
     .unwrap();
-    enter_graph(&mut surface, &mut backend, 120, 30);
-    let text = rendered_rows(&draw(&surface, 120, 30));
+    enter_graph(&mut surface, &mut backend, width, height);
+    rendered_rows(&draw(&surface, width, height))
+}
+
+#[test]
+fn snapshot_wide_spatial_graph_ascii() {
+    let text = snapshot_spatial_graph(aikit_tui::graph_layout::GraphGlyphs::ascii(), 120, 30);
     insta::assert_snapshot!(text);
 }
 
 #[test]
-fn snapshot_medium_spatial_graph() {
-    let (_dir, mut backend) = resolver_fixture();
-    let mut surface = ApplicationSurfaceController::new(
-        &mut backend,
-        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("alpha"),
-    )
-    .unwrap();
-    enter_graph(&mut surface, &mut backend, 80, 24);
-    let text = rendered_rows(&draw(&surface, 80, 24));
+fn snapshot_wide_spatial_graph_unicode() {
+    let text = snapshot_spatial_graph(aikit_tui::graph_layout::GraphGlyphs::unicode(), 120, 30);
     insta::assert_snapshot!(text);
 }
 
 #[test]
-fn snapshot_narrow_grouped_graph() {
-    let (_dir, mut backend) = resolver_fixture();
-    let mut surface = ApplicationSurfaceController::new(
-        &mut backend,
-        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("alpha"),
-    )
-    .unwrap();
-    enter_graph(&mut surface, &mut backend, 40, 20);
-    let text = rendered_rows(&draw(&surface, 40, 20));
+fn snapshot_medium_spatial_graph_ascii() {
+    let text = snapshot_spatial_graph(aikit_tui::graph_layout::GraphGlyphs::ascii(), 80, 24);
+    insta::assert_snapshot!(text);
+}
+
+#[test]
+fn snapshot_medium_spatial_graph_unicode() {
+    let text = snapshot_spatial_graph(aikit_tui::graph_layout::GraphGlyphs::unicode(), 80, 24);
+    insta::assert_snapshot!(text);
+}
+
+#[test]
+fn snapshot_narrow_grouped_graph_ascii() {
+    let text = snapshot_spatial_graph(aikit_tui::graph_layout::GraphGlyphs::ascii(), 40, 20);
+    insta::assert_snapshot!(text);
+}
+
+#[test]
+fn snapshot_narrow_grouped_graph_unicode() {
+    let text = snapshot_spatial_graph(aikit_tui::graph_layout::GraphGlyphs::unicode(), 40, 20);
     insta::assert_snapshot!(text);
 }
 
