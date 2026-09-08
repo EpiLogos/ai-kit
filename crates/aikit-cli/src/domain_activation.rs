@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use aikit_core::domain::{
-    activate, dedup_hash, render_header, render_rules, KnowledgeDomain,
+    activate, decide_injection, dedup_hash, render_header, render_rules, KnowledgeDomain,
 };
 use aikit_core::hooks::HookEvent;
 use aikit_store::index::Index;
@@ -95,35 +95,30 @@ pub fn run(
     for activation in activate(domains, prompt) {
         let (ordinary, standing) = render_rules(&activation);
         let hash = dedup_hash(&activation.domain.id, &ordinary);
-        let deduped = !ordinary.is_empty()
-            && match index.injection_seen(scope, &hash) {
-                Ok(seen) => seen,
-                Err(error) => {
-                    warnings.push(format!(
-                        "continuity/domain-activation dedup check unavailable: {error}"
-                    ));
-                    false
-                }
-            };
-        if deduped && standing.is_empty() {
+        let seen = match index.injection_seen(scope, &hash) {
+            Ok(seen) => seen,
+            Err(error) => {
+                warnings.push(format!(
+                    "continuity/domain-activation dedup check unavailable: {error}"
+                ));
+                false
+            }
+        };
+        // What the ledger's answer *means* is the shared law's to say, not
+        // this reaction's.
+        let decision = decide_injection(ordinary, standing, seen);
+        if decision.suppressed {
             continue;
         }
-        if !deduped && !ordinary.is_empty() {
+        if decision.record {
             if let Err(error) = index.record_injection(scope, &hash) {
                 warnings.push(format!(
                     "continuity/domain-activation ledger unavailable: {error}"
                 ));
             }
         }
-        // Deduped ordinary lines stay out of the block entirely; only
-        // standing rules reassert.
-        let lines: Vec<&String> = if deduped {
-            standing.iter().collect()
-        } else {
-            standing.iter().chain(ordinary.iter()).collect()
-        };
-        let mut block = render_header(&activation, deduped, !standing.is_empty());
-        for line in lines {
+        let mut block = render_header(&activation, decision.deduped, decision.has_standing);
+        for line in &decision.lines {
             block.push('\n');
             block.push_str(line);
         }
