@@ -830,3 +830,120 @@ fn logical_tree(root: &Path) -> Vec<(String, Vec<u8>)> {
         .filter(|(path, _)| path != "metadata.json")
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// Secret env vars (central.security/v1)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct ScriptedResolver {
+    value: &'static str,
+}
+
+impl aikit_core::SecretResolver for ScriptedResolver {
+    fn resolve(
+        &self,
+        _secret_ref: &aikit_core::SecretRef,
+    ) -> aikit_core::Result<aikit_core::SecretValue> {
+        aikit_core::SecretValue::new(self.value)
+    }
+}
+
+fn secret_plan() -> ProjectionPlan {
+    ProjectionPlan::new(TargetId::shell(), ActivationEffect::live()).with_item(
+        ProjectionItem::secret_env(
+            "TEST_SECRET",
+            aikit_core::SecretRef::parse("keychain://test/service").unwrap(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn a_secret_env_resolves_at_materialisation_into_the_env_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = registry(tmp.path());
+    let resolved = resolve_fixture(
+        &fixture,
+        &["script/test/nt", "skill/rust/review", "hook/gate/secrets"],
+    );
+    let ctx = context_dir(tmp.path());
+
+    let staged = GenerationBuilder::new()
+        .with_secret_resolver(std::sync::Arc::new(ScriptedResolver {
+            value: "fixture-material",
+        }))
+        .build(&ctx, &resolved.view, &[secret_plan()])
+        .unwrap();
+
+    let env = fs::read_to_string(staged.path().join("env")).unwrap();
+    assert!(
+        env.contains("TEST_SECRET=fixture-material"),
+        "the resolved value must land in the env manifest: {env}"
+    );
+    // The value must appear NOWHERE else: not in the lock, not in metadata.
+    let lock = fs::read_to_string(staged.path().join("resolution.lock.toml")).unwrap();
+    let metadata = fs::read_to_string(staged.path().join("metadata.json")).unwrap();
+    for artifact in [&lock, &metadata] {
+        assert!(
+            !artifact.contains("fixture-material"),
+            "secret material leaked into an artifact"
+        );
+    }
+    // The plan identity is a hash over item lines; the ref participates, the
+    // value never can (it is not a field of SecretEnv at any point). A plan
+    // pointing at a different location is a different projection:
+    let other = ProjectionPlan::new(TargetId::shell(), ActivationEffect::live()).with_item(
+        ProjectionItem::secret_env(
+            "TEST_SECRET",
+            aikit_core::SecretRef::parse("keychain://test/other-service").unwrap(),
+        )
+        .unwrap(),
+    );
+    assert_ne!(secret_plan().digest(), other.digest());
+}
+
+#[test]
+fn a_plan_declaring_a_secret_without_a_resolver_is_refused_not_silently_built() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = registry(tmp.path());
+    let resolved = resolve_fixture(
+        &fixture,
+        &["script/test/nt", "skill/rust/review", "hook/gate/secrets"],
+    );
+    let ctx = context_dir(tmp.path());
+
+    let err = GenerationBuilder::new()
+        .build(&ctx, &resolved.view, &[secret_plan()])
+        .unwrap_err();
+    assert_eq!(err.code(), "generation.secret_resolver_missing");
+}
+
+#[test]
+fn rotation_that_preserves_the_ref_keeps_the_generation_identity() {
+    // The env manifest is excluded from hash_tree: two builds whose only
+    // difference is the resolved secret value must mint the same id. Any other
+    // outcome would (a) churn every context on rotation and (b) make the id a
+    // brute-force oracle over secret material.
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = registry(tmp.path());
+    let resolved = resolve_fixture(
+        &fixture,
+        &["script/test/nt", "skill/rust/review", "hook/gate/secrets"],
+    );
+    let ctx = context_dir(tmp.path());
+
+    let first = GenerationBuilder::new()
+        .with_secret_resolver(std::sync::Arc::new(ScriptedResolver {
+            value: "material-before-rotation",
+        }))
+        .build(&ctx, &resolved.view, &[secret_plan()])
+        .unwrap();
+    let second = GenerationBuilder::new()
+        .with_secret_resolver(std::sync::Arc::new(ScriptedResolver {
+            value: "material-after-rotation",
+        }))
+        .build(&ctx, &resolved.view, &[secret_plan()])
+        .unwrap();
+    assert_eq!(first.id(), second.id());
+}

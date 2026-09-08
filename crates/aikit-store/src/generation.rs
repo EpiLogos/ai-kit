@@ -52,6 +52,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -59,7 +60,8 @@ use serde::{Deserialize, Serialize};
 use aikit_core::error::err;
 use aikit_core::projection::{MaterializationMode, ProjectionItem, ProjectionPlan};
 use aikit_core::{
-    ActivationEffect, AikitError, GenerationId, Isolation, Result, ResolvedView, TargetId,
+    ActivationEffect, AikitError, GenerationId, Isolation, Result, ResolvedView, SecretResolver,
+    TargetId,
 };
 
 use crate::events::Timestamp;
@@ -239,6 +241,10 @@ pub struct GenerationBuilder {
     /// on the PATH for the shim to be truthful.
     aikit_command: String,
     lock_timeout: Duration,
+    /// Resolves `[secrets]` refs at materialisation time. `None` is a valid
+    /// configuration only for plans that declare no secret env vars; a plan
+    /// carrying one is refused rather than silently materialised without it.
+    secret_resolver: Option<Arc<dyn SecretResolver>>,
 }
 
 impl Default for GenerationBuilder {
@@ -248,6 +254,7 @@ impl Default for GenerationBuilder {
             symlinks: cfg!(unix),
             aikit_command: "aikit".to_string(),
             lock_timeout: Duration::from_secs(30),
+            secret_resolver: None,
         }
     }
 }
@@ -279,6 +286,15 @@ impl GenerationBuilder {
     #[must_use]
     pub fn with_lock_timeout(mut self, timeout: Duration) -> Self {
         self.lock_timeout = timeout;
+        self
+    }
+
+    /// Register the resolver used for `ProjectionItem::SecretEnv` items.
+    /// The resolver is consulted at materialisation time; nothing it returns
+    /// is recorded in the plan, the digest, the metadata or the logs.
+    #[must_use]
+    pub fn with_secret_resolver(mut self, resolver: Arc<dyn SecretResolver>) -> Self {
+        self.secret_resolver = Some(resolver);
         self
     }
 
@@ -456,6 +472,32 @@ impl GenerationBuilder {
                 existing.push_str(&format!("{name}={value}\n"));
                 write_file(&path, existing.as_bytes())
             }
+            // Secret env vars resolve HERE, at materialisation time, and the
+            // value lives only in the env manifest the shell integration
+            // sources. The plan, the digest, the metadata and every log line
+            // carry the ref alone. A plan that declares a secret with no
+            // resolver registered is refused — "could not resolve" never
+            // collapses into "materialised without it".
+            ProjectionItem::SecretEnv { name, secret_ref } => {
+                let resolver = self.secret_resolver.as_ref().ok_or_else(|| {
+                    AikitError::new(
+                        "generation.secret_resolver_missing",
+                        format!(
+                            "the plan declares `{name}` from {secret_ref}, but no secret resolver is registered"
+                        ),
+                    )
+                    .with("env", name.clone())
+                    .with("secret_ref", secret_ref.to_string())
+                })?;
+                let value = resolver.resolve(secret_ref).map_err(|e| {
+                    e.with("env", name.clone())
+                        .with("secret_ref", secret_ref.to_string())
+                })?;
+                let path = staging.join(ENV_FILE);
+                let mut existing = fs::read_to_string(&path).unwrap_or_default();
+                existing.push_str(&format!("{name}={}\n", value.expose()));
+                write_file(&path, existing.as_bytes())
+            }
             ProjectionItem::Shim {
                 name,
                 capsule,
@@ -522,7 +564,9 @@ fn validate(staging: &Path, plans: &[ProjectionPlan]) -> Result<()> {
             let path = match item {
                 // An env var lands in the generation's `env` manifest, not at a
                 // destination of its own.
-                ProjectionItem::Env { .. } => staging.join(ENV_FILE),
+                ProjectionItem::Env { .. } | ProjectionItem::SecretEnv { .. } => {
+                    staging.join(ENV_FILE)
+                }
                 ProjectionItem::Shim { name, .. } => staging.join("bin").join(name),
                 _ => match item.destination() {
                     Some(destination) => root.join(destination),
@@ -1029,7 +1073,13 @@ fn hash_tree(staging: &Path, view: &ResolvedView) -> Result<GenerationId> {
             .to_string_lossy()
             .replace('\\', "/");
         // metadata.json records the id; the lock is folded semantically above.
-        if relative == METADATA_FILE || relative == LOCK_FILE {
+        // The env manifest holds resolved secret values and literal env
+        // entries: hashing it would (a) make the generation id an oracle over
+        // secret material — a guessed value could be confirmed offline — and
+        // (b) churn the generation's identity on every secret rotation. Its
+        // non-secret contents are already covered by the plan digests folded
+        // into each target record.
+        if relative == METADATA_FILE || relative == LOCK_FILE || relative == ENV_FILE {
             continue;
         }
         files.insert(relative, entry.path().to_path_buf());

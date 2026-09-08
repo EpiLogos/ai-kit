@@ -705,6 +705,38 @@ impl Service {
         &self.index
     }
 
+    /// `[secrets]` projection items for every active capsule that declares
+    /// them, read from the same `capsule_roots` the adapters project payloads
+    /// from. A capsule with no root contributes nothing — a `[secrets]` table
+    /// lives only in a manifest, and a capsule without a root has no manifest
+    /// surface. A manifest that exists but cannot be read or parsed is a loud
+    /// error: a declared secret that silently never exports is the exact
+    /// failure this feature exists to prevent.
+    pub fn secret_env_items(&self, context: &ResolvedContext) -> Result<Vec<ProjectionItem>> {
+        let mut items = Vec::new();
+        for id in self.view.active.keys() {
+            let Some(root) = context.capsule_roots.get(id) else {
+                continue;
+            };
+            let manifest = root.join(aikit_store::registry::MANIFEST_FILE);
+            if !manifest.exists() {
+                continue;
+            }
+            let text = std::fs::read_to_string(&manifest).map_err(|e| {
+                AikitError::new(
+                    "context.secret_capsule_unloadable",
+                    format!("could not re-read the manifest of {id}: {e}"),
+                )
+            })?;
+            let capsule = Capsule::from_toml_str(&text)?;
+            for (name, secret_ref) in &capsule.secrets {
+                items.push(ProjectionItem::secret_env(name.clone(), secret_ref.clone())?);
+            }
+        }
+        items.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        Ok(items)
+    }
+
     pub fn descriptor(&self) -> &ContextDescriptor {
         &self.descriptor
     }
@@ -831,7 +863,12 @@ impl Service {
         })
     }
 
-    pub(crate) fn projection_context(&self) -> Result<ResolvedContext> {
+    /// The resolved projection context: the view plus the capsule roots the
+    /// adapters project payloads from. The CLI's commands (`context env`,
+    /// apply) and the adapters share this one source so a capsule's
+    /// projection and its secret declarations can never disagree about where
+    /// it lives.
+    pub fn projection_context(&self) -> Result<ResolvedContext> {
         self.projection_context_for(&self.view)
     }
 
@@ -1559,7 +1596,7 @@ impl Service {
     /// The shell projection: one `bin/` shim per exported command. This is the
     /// projection that makes the contextual PATH — and therefore `run` and the
     /// multicall shims — real.
-    fn shell_plan(view: &ResolvedView) -> Result<ProjectionPlan> {
+    fn shell_plan(view: &ResolvedView, secret_items: Vec<ProjectionItem>) -> Result<ProjectionPlan> {
         let mut plan =
             ProjectionPlan::new(TargetId::shell(), ActivationEffect::immediate("shell bin/"));
         for (name, capsule) in view.exported_commands() {
@@ -1571,6 +1608,11 @@ impl Service {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         for item in crate::env::project(view, &home)? {
+            plan = plan.with_item(item);
+        }
+        // Secret env vars ride the same surface, declared by ref: values
+        // resolve at materialisation time, never at plan time.
+        for item in secret_items {
             plan = plan.with_item(item);
         }
         Ok(plan)
@@ -1768,7 +1810,7 @@ impl AikitApplication for Service {
             .clone()
             .unwrap_or_else(|| self.invocation_cwd.clone());
         let plans = vec![
-            Self::shell_plan(&self.view)?,
+            Self::shell_plan(&self.view, self.secret_env_items(&projection_context)?)?,
             ClaudeAdapter::new(context_dir.join("projections/claude")).plan(&projection_context)?,
             CodexAdapter::new(tree).plan(&projection_context)?,
             DshAdapter::new(context_dir.join("projections/dsh")).plan(&projection_context)?,
@@ -1782,7 +1824,11 @@ impl AikitApplication for Service {
             view.properties
                 .insert("label".to_string(), label.to_string());
         }
-        let staged = GenerationBuilder::new().build(&context_dir, &view, &plans)?;
+        let staged = GenerationBuilder::new()
+            .with_secret_resolver(std::sync::Arc::new(
+                aikit_adapters::secret_resolver::SuiteSecretResolver::default(),
+            ))
+            .build(&context_dir, &view, &plans)?;
         self.prepare_codex_project_link(&context_dir)?;
         let committed = staged.commit(base.as_ref())?;
         let effects = self.client_effects(&self.view);
