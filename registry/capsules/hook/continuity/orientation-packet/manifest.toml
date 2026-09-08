@@ -1,0 +1,10 @@
+schema = 1
+id = "hook/continuity/orientation-packet"
+kind = "hook"
+name = "Continuity orientation packet"
+description = "First-party continuity reaction (W2/W1, CASE 02 + CASE 09): when composed, a fresh session in a project is met by that project's own NOW field — assembled through ctrl projectcentral.now.inspect, bounded, with the newest open handoff return as the continuation. Horizon apertures are closed by default: the field's human side (@1 personal material) arrives only when the composition explicitly authorizes it (include_human_scratch in the capsule config); other projects are structurally absent — only the project the session stands in is ever inspected. Fail-open. Not composed by default."
+tags = ["aikit", "continuity", "engine", "now", "sessionstart"]
+
+[hook]
+entry = "payload/orientation-packet"
+events = ["SessionStart"]
