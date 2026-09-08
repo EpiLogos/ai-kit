@@ -1109,7 +1109,8 @@ fn query_backlinks_and_search_see_the_ingested_field_as_first_class_results() {
     );
     assert_eq!(code, 0, "{envelope}");
     let hits = envelope["data"]["hits"].as_array().unwrap();
-    assert!(hits.iter().any(|h| h["resource"] == "wiki:node:record/A24"));
+    assert!(hits.iter().any(|h| h["address"]["kind"] == "curated"
+        && h["address"]["resource"] == "wiki:node:record/A24"));
 
     // Neighbours from the whole-field show its outgoing reference to A24.
     let (code, envelope) = wiki(
