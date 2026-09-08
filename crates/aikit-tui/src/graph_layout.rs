@@ -27,12 +27,13 @@
 //! A node's band is read off the *edge*, never off the relation label's
 //! English meaning. Two structural facts decide it:
 //!
-//! - **Containment vocabulary.** A small, explicit, provisional table
-//!   (below) of the exact provider relation names known to encode "the
-//!   `from` node contains the `to` node". Anything not in the table is not
-//!   containment — we do not guess from a word that merely sounds
-//!   container-shaped (`"binds"`, `"owns"`, `"scopes"`, or even an authored
-//!   edge a human named `"member-of"`, all stay plain Incoming/Outgoing).
+//! - **`RelationEdge.containment`**, the provider's own structural
+//!   assertion (see `aikit_core::knowledge::ContainmentRole`) that `from`
+//!   encloses `to` or vice versa. Absent means the provider is not
+//!   asserting containment — we do not guess from a word that merely
+//!   sounds container-shaped (`"binds"`, `"owns"`, `"scopes"`, or even an
+//!   authored edge a human named `"member-of"`, all stay plain
+//!   Incoming/Outgoing).
 //! - **`RelationDirection`**, for everything else. Outgoing/Incoming are
 //!   used exactly as authored; `Bidirectional` has no directional default
 //!   of its own, so it is placed on the Outgoing side by a documented,
@@ -88,72 +89,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use aikit_core::{
-    KnowledgeRelationView, RelationDirection, RelationEdge, RelationOrigin, ResourceKind,
-    ResourceRef,
+    ContainmentRole, KnowledgeRelationView, RelationDirection, RelationEdge, RelationOrigin,
+    ResourceKind, ResourceRef,
 };
-
-// ---------------------------------------------------------------------------
-// Containment vocabulary
-// ---------------------------------------------------------------------------
-
-/// Relation names where the edge's `from` is the container and `to` is the
-/// contained/member resource.
-///
-/// This is a PROVISIONAL PLACEMENT HEURISTIC, not a relation ontology. It
-/// decides only where a node/edge is drawn on screen; it never asserts or
-/// changes what a relation *means*. The three names below are exactly the
-/// relation strings `SemanticWikiProvider::relations` emits today for
-/// authored membership (see
-/// `crates/aikit-core/src/knowledge_wiki_provider.rs`):
-///
-/// - `"member"` — a `WikiSpace`'s members, in both directions: the Space's
-///   own focus emits it `from` the Space (case 1), and a member node's own
-///   focus emits it `from` the Space back to itself, `Incoming` (case 4).
-/// - `"child-space"` — a `WikiSpace`'s subspaces, symmetrically (cases 2, 5).
-/// - `"local-member"` — the bounded local-whole projection from a node
-///   focus to its local-whole siblings (case 3).
-///
-/// All three are "container is at `from`" shaped — `classify_band` below
-/// reads the actual structural role (which endpoint the anchor sits at)
-/// off `anchor_is_from`, not off a second forward/reverse vocabulary, so
-/// there is nothing here for a "from the member's side" table to add. Any
-/// other relation string — including ones that merely *look*
-/// container-shaped, such as an authored WikiEdge a human happened to name
-/// `"member-of"` or `"part-of"` — is not containment: the provider asserts
-/// no containment meaning for it, so this module must not guess one. Such
-/// an edge falls through to plain `RelationDirection`-based
-/// Incoming/Outgoing, same as `"cites"` or `"grounded-in"`.
-///
-/// `RelationEdge.relation` is never rewritten by this classification — the
-/// provider's original string survives unchanged on the laid-out edge.
-///
-/// This string-match against provider internals exists only because
-/// `RelationEdge` carries no first-class containment signal of its own
-/// (no `is_containment` flag, no separate containment relation kind) — a
-/// known gap in the `RelationEdge`/provider contract, not a design choice
-/// made here. It should be filed as an issue against that contract; until
-/// then, a provider that wants correct placement must emit one of these
-/// exact three strings for authored containment, and any other provider's
-/// containment-shaped relations will render as plain Incoming/Outgoing.
-const FORWARD_CONTAINMENT_RELATIONS: &[&str] = &["member", "child-space", "local-member"];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Containment {
-    /// `from` contains `to`.
-    Forward,
-}
-
-fn containment_of(relation: &str) -> Option<Containment> {
-    let relation = relation.trim();
-    if FORWARD_CONTAINMENT_RELATIONS
-        .iter()
-        .any(|candidate| candidate.eq_ignore_ascii_case(relation))
-    {
-        Some(Containment::Forward)
-    } else {
-        None
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Bands
@@ -187,24 +125,43 @@ impl RelationBand {
     }
 }
 
-/// Classify the band of the node reached by `relation`/`direction`, relative
-/// to a `from`-or-`to` anchor.
+/// Classify the band of the node reached by `containment`/`direction`,
+/// relative to a `from`-or-`to` anchor.
 ///
 /// `anchor_is_from` says whether the node we are placing *from* sits at
 /// `edge.from` (`true`) or `edge.to` (`false`); the placed node is always
-/// the other endpoint. Containment is read structurally off that role.
+/// the other endpoint. Containment is read directly off the provider's own
+/// `RelationEdge.containment` assertion — never reconstructed from
+/// `relation` text, which stays opaque provider vocabulary this module must
+/// not interpret. `None` means the provider is not asserting containment
+/// for this edge (including a relation that merely *looks*
+/// container-shaped, such as `"member-of"` or `"part-of"`); such an edge
+/// falls back to plain `RelationDirection`-based Incoming/Outgoing, same as
+/// `"cites"` or `"grounded-in"`.
+///
 /// Non-containment relations fall back to `direction` taken at face value —
 /// `Bidirectional` has no inherent Incoming/Outgoing default, so mutual
 /// relations are surfaced once, on the Outgoing side, by convention; this
 /// mirrors how `application_service.rs` already emits resolver "often used
 /// with" pairings as `Bidirectional`.
-fn classify_band(relation: &str, direction: RelationDirection, anchor_is_from: bool) -> RelationBand {
-    match containment_of(relation) {
-        Some(Containment::Forward) => {
+fn classify_band(
+    containment: Option<ContainmentRole>,
+    direction: RelationDirection,
+    anchor_is_from: bool,
+) -> RelationBand {
+    match containment {
+        Some(ContainmentRole::Encloses) => {
             if anchor_is_from {
                 RelationBand::Contained
             } else {
                 RelationBand::Context
+            }
+        }
+        Some(ContainmentRole::EnclosedBy) => {
+            if anchor_is_from {
+                RelationBand::Context
+            } else {
+                RelationBand::Contained
             }
         }
         None => match direction {
@@ -238,10 +195,10 @@ fn edge_band(edge: &RelationEdge, focus: &ResourceRef, node_band: &BTreeMap<Reso
         };
     }
     if &edge.from == focus {
-        return classify_band(&edge.relation, edge.direction, true);
+        return classify_band(edge.containment, edge.direction, true);
     }
     if &edge.to == focus {
-        return classify_band(&edge.relation, edge.direction, false);
+        return classify_band(edge.containment, edge.direction, false);
     }
     // Neither endpoint is the focus: a depth>1 edge between two already
     // placed nodes, or an edge disconnected from the focus within this
@@ -585,7 +542,7 @@ pub fn layout(view: &KnowledgeRelationView, request: &GraphLayoutRequest) -> Gra
                 // but a hand-built or degraded view is not trusted here.
                 continue;
             }
-            let band = classify_band(&edge.relation, edge.direction, anchor_is_from);
+            let band = classify_band(edge.containment, edge.direction, anchor_is_from);
             node_band.insert(other.clone(), band);
             node_lane.insert(other.clone(), edge.relation.clone());
             visited.insert(other.clone());
@@ -1363,13 +1320,16 @@ mod tests {
             ResourceKind::KnowledgeNode,
             "Member",
         ));
-        view.push_edge(RelationEdge::new(
-            r("knowledge-node/focus"),
-            r("knowledge-node/member"),
-            "member",
-            RelationDirection::Outgoing,
-            origin(SourceAuthority::Authored),
-        ))
+        view.push_edge(
+            RelationEdge::new(
+                r("knowledge-node/focus"),
+                r("knowledge-node/member"),
+                "member",
+                RelationDirection::Outgoing,
+                origin(SourceAuthority::Authored),
+            )
+            .with_containment(ContainmentRole::Encloses),
+        )
         .unwrap();
 
         let result = layout(&view, &viewport(80, 24));
@@ -1390,13 +1350,16 @@ mod tests {
             ResourceKind::KnowledgeSpace,
             "Whole",
         ));
-        view.push_edge(RelationEdge::new(
-            r("knowledge-space/whole"),
-            r("knowledge-node/focus"),
-            "member",
-            RelationDirection::Outgoing,
-            origin(SourceAuthority::Authored),
-        ))
+        view.push_edge(
+            RelationEdge::new(
+                r("knowledge-space/whole"),
+                r("knowledge-node/focus"),
+                "member",
+                RelationDirection::Outgoing,
+                origin(SourceAuthority::Authored),
+            )
+            .with_containment(ContainmentRole::Encloses),
+        )
         .unwrap();
 
         let result = layout(&view, &viewport(80, 24));
@@ -1411,17 +1374,12 @@ mod tests {
 
     #[test]
     fn relation_named_like_containment_without_provider_backing_falls_through_to_plain_direction() {
-        // "member-of" *looks* container-shaped, but it is not one of the
-        // three exact strings `SemanticWikiProvider::relations` actually
-        // emits for containment — it is just an authored WikiEdge whose
-        // human-chosen relation name happens to resemble one. This module
-        // must not guess containment from the word; it must place the node
-        // by `RelationDirection` alone, exactly like `"cites"` or any other
-        // ordinary relation. (Previously this module carried a speculative
-        // `REVERSE_CONTAINMENT_RELATIONS` table that treated `"member-of"`
-        // as reverse containment and placed it in Context — that table has
-        // been removed because no provider in this codebase ever emits it;
-        // see the module doc comment and `FORWARD_CONTAINMENT_RELATIONS`.)
+        // "member-of" *looks* container-shaped, but no provider asserts
+        // `RelationEdge.containment` for it here — it is just an authored
+        // WikiEdge whose human-chosen relation name happens to resemble
+        // containment. This module must not guess containment from the
+        // word; it must place the node by `RelationDirection` alone,
+        // exactly like `"cites"` or any other ordinary relation.
         let mut view = focus_view(ResourceKind::KnowledgeNode);
         view.push_node(node(
             "knowledge-space/container",
@@ -1450,6 +1408,159 @@ mod tests {
              can assert that, and for an arbitrary relation string it asserts none"
         );
         assert_eq!(result.edges[0].band, RelationBand::Outgoing);
+    }
+
+    #[test]
+    fn provider_asserted_containment_places_the_band_regardless_of_relation_name() {
+        // "belongs-to-collection" is not, and never was, one of the old
+        // hardcoded strings (`member`, `child-space`, `local-member`) —
+        // proving placement now comes from `RelationEdge.containment`
+        // alone, not from recognising a relation name. A string-table
+        // classifier could never place this edge correctly.
+        let mut view = focus_view(ResourceKind::KnowledgeSpace);
+        view.push_node(node(
+            "knowledge-node/item",
+            ResourceKind::KnowledgeNode,
+            "Item",
+        ));
+        view.push_edge(
+            RelationEdge::new(
+                r("knowledge-node/focus"),
+                r("knowledge-node/item"),
+                "belongs-to-collection",
+                RelationDirection::Outgoing,
+                origin(SourceAuthority::Authored),
+            )
+            .with_containment(ContainmentRole::Encloses),
+        )
+        .unwrap();
+
+        let result = layout(&view, &viewport(80, 24));
+        let item = result
+            .nodes
+            .iter()
+            .find(|n| n.resource == r("knowledge-node/item"))
+            .unwrap();
+        assert_eq!(
+            item.band,
+            Some(RelationBand::Contained),
+            "a provider's own containment assertion must place the node, no matter what the \
+             relation string is spelled"
+        );
+        assert_eq!(result.edges[0].band, RelationBand::Contained);
+    }
+
+    #[test]
+    fn relation_named_exactly_member_without_containment_assertion_is_not_containment() {
+        // The inverse of the previous test, and the proof the old
+        // `FORWARD_CONTAINMENT_RELATIONS` string table is truly gone: an
+        // edge named exactly `"member"` — one of the three strings that
+        // table used to hardcode as containment — must NOT land in the
+        // Contained band when the provider does not assert
+        // `RelationEdge.containment` for it. Under the old string-match
+        // classifier this edge was indistinguishable from real wiki
+        // membership; it must now fall through to plain direction, exactly
+        // like any other relation.
+        let mut view = focus_view(ResourceKind::KnowledgeSpace);
+        view.push_node(node(
+            "knowledge-node/member",
+            ResourceKind::KnowledgeNode,
+            "Member",
+        ));
+        view.push_edge(RelationEdge::new(
+            r("knowledge-node/focus"),
+            r("knowledge-node/member"),
+            "member",
+            RelationDirection::Outgoing,
+            origin(SourceAuthority::Authored),
+        ))
+        .unwrap();
+
+        let result = layout(&view, &viewport(80, 24));
+        let member = result
+            .nodes
+            .iter()
+            .find(|n| n.resource == r("knowledge-node/member"))
+            .unwrap();
+        assert_eq!(
+            member.band,
+            Some(RelationBand::Outgoing),
+            "the relation string \"member\" alone must never imply containment; only \
+             RelationEdge.containment may"
+        );
+        assert_eq!(result.edges[0].band, RelationBand::Outgoing);
+    }
+
+    #[test]
+    fn enclosed_by_role_places_the_container_in_context_and_the_member_in_contained() {
+        // No provider in this codebase emits `EnclosedBy` today (every
+        // authored wiki containment edge asserts `Encloses` from the
+        // container's side), but the classifier must still handle it
+        // correctly wherever a future provider asserts a `from`-is-contained
+        // edge: the *other* endpoint is the container.
+        let mut enclosed_by_focus = focus_view(ResourceKind::KnowledgeNode);
+        enclosed_by_focus.push_node(node(
+            "knowledge-space/whole",
+            ResourceKind::KnowledgeSpace,
+            "Whole",
+        ));
+        enclosed_by_focus
+            .push_edge(
+                RelationEdge::new(
+                    r("knowledge-node/focus"),
+                    r("knowledge-space/whole"),
+                    "belongs-to-collection",
+                    RelationDirection::Outgoing,
+                    origin(SourceAuthority::Authored),
+                )
+                .with_containment(ContainmentRole::EnclosedBy),
+            )
+            .unwrap();
+
+        let result = layout(&enclosed_by_focus, &viewport(80, 24));
+        let whole = result
+            .nodes
+            .iter()
+            .find(|n| n.resource == r("knowledge-space/whole"))
+            .unwrap();
+        assert_eq!(
+            whole.band,
+            Some(RelationBand::Context),
+            "focus is EnclosedBy `to`, so `to` is the enclosing container and belongs in Context"
+        );
+        assert_eq!(result.edges[0].band, RelationBand::Context);
+
+        let mut enclosed_by_other = focus_view(ResourceKind::KnowledgeSpace);
+        enclosed_by_other.push_node(node(
+            "knowledge-node/member",
+            ResourceKind::KnowledgeNode,
+            "Member",
+        ));
+        enclosed_by_other
+            .push_edge(
+                RelationEdge::new(
+                    r("knowledge-node/member"),
+                    r("knowledge-node/focus"),
+                    "belongs-to-collection",
+                    RelationDirection::Incoming,
+                    origin(SourceAuthority::Authored),
+                )
+                .with_containment(ContainmentRole::EnclosedBy),
+            )
+            .unwrap();
+
+        let result = layout(&enclosed_by_other, &viewport(80, 24));
+        let member = result
+            .nodes
+            .iter()
+            .find(|n| n.resource == r("knowledge-node/member"))
+            .unwrap();
+        assert_eq!(
+            member.band,
+            Some(RelationBand::Contained),
+            "`from` is EnclosedBy focus (`to`), so `from` is the contained member"
+        );
+        assert_eq!(result.edges[0].band, RelationBand::Contained);
     }
 
     #[test]
@@ -1681,13 +1792,16 @@ mod tests {
             origin(SourceAuthority::Authored),
         ))
         .unwrap();
-        view.push_edge(RelationEdge::new(
-            r("knowledge-space/whole"),
-            r("knowledge-node/focus"),
-            "member",
-            RelationDirection::Outgoing,
-            origin(SourceAuthority::Authored),
-        ))
+        view.push_edge(
+            RelationEdge::new(
+                r("knowledge-space/whole"),
+                r("knowledge-node/focus"),
+                "member",
+                RelationDirection::Outgoing,
+                origin(SourceAuthority::Authored),
+            )
+            .with_containment(ContainmentRole::Encloses),
+        )
         .unwrap();
 
         let result = layout(&view, &viewport(80, 24));
