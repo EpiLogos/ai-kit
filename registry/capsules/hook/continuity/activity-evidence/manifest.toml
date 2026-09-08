@@ -1,0 +1,10 @@
+schema = 1
+id = "hook/continuity/activity-evidence"
+kind = "hook"
+name = "Continuity activity evidence"
+description = "First-party continuity reaction (W4/CASE 06): when composed, every completed project PostToolUse appends attributed operational evidence for that project's lastActive value, including the explicit touched path when supplied. Evidence survives reindex and is inspectable through context current. Fail-open. Not composed by default."
+tags = ["aikit", "continuity", "engine", "activity", "posttooluse"]
+
+[hook]
+entry = "payload/activity-evidence"
+events = ["PostToolUse"]

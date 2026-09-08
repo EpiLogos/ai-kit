@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod adopt;
+pub mod activity_evidence;
 pub mod app;
 pub mod cli;
 pub mod client;

@@ -89,6 +89,7 @@ fn every_documented_table_exists_after_opening() {
         "trust",
         "bypasses",
         "inbox_items",
+        "project_activity_events",
     ] {
         assert!(
             tables.iter().any(|t| t == expected),

@@ -109,7 +109,8 @@ pub use capsule::{
     Kind, LanguageFacet, Maturity, Payload, Requirement, Surface,
 };
 pub use continuity::{
-    CapabilityTuning, ContinuityTuning, CONTINUITY_NAMESPACE, FLOOR_CAPABILITY, TURN_LEDGER,
+    CapabilityTuning, ContinuityTuning, ACTIVITY_EVIDENCE, CONTINUITY_NAMESPACE,
+    FLOOR_CAPABILITY, TURN_LEDGER,
 };
 pub use catalog::{Catalog, MemoryCatalog};
 pub use composition::{

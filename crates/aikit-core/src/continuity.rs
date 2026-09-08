@@ -64,6 +64,9 @@ pub const FILE_CONTEXT: &str = "file-context";
 /// authorization), and other projects are structurally absent.
 pub const ORIENTATION_PACKET: &str = "orientation-packet";
 
+/// W4/CASE 06: completed tool use appends attributed project `lastActive` evidence.
+pub const ACTIVITY_EVIDENCE: &str = "activity-evidence";
+
 /// The reactions the engine itself implements, as opposed to hook capsules
 /// that merely ride the chain. A reaction listed here is answerable when
 /// asked even while it is not composed: the engine says "not composed"
@@ -74,6 +77,7 @@ pub const ENGINE_REACTIONS: &[&str] = &[
     DOMAIN_ACTIVATION,
     FILE_CONTEXT,
     ORIENTATION_PACKET,
+    ACTIVITY_EVIDENCE,
 ];
 
 /// True when the capsule id names a first-party continuity reaction.

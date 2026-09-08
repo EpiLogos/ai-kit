@@ -101,7 +101,7 @@ pub use history_evidence::{
 };
 pub use home::AikitHome;
 pub use inbox::{Candidate, CandidateState, Capture, Inbox, PromotionEdits, Similarity};
-pub use index::{CapsuleFilter, CapsuleRow, Facets, Index, ReindexReport};
+pub use index::{CapsuleFilter, CapsuleRow, Facets, Index, ProjectActivityEvidence, ReindexReport};
 pub use knowledge_application::{
     KnowledgeApplicationReceipt, KnowledgeApplicationStore, KnowledgeHistoryOperation,
     KNOWLEDGE_APPLICATION_STORE_VERSION,

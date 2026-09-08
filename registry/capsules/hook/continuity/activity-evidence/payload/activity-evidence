@@ -1,0 +1,4 @@
+#!/bin/sh
+# Composition handle for the W4 activity-evidence engine reaction. The engine
+# writes the attributed operational receipt; hook stdout remains a gate channel.
+exit 0

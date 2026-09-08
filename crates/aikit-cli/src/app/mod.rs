@@ -1326,6 +1326,18 @@ impl Service {
                 }
             }
         }
+        if event.kind == aikit_core::hooks::HookEventKind::PostToolUse
+            && tuning.allows(aikit_core::continuity::ACTIVITY_EVIDENCE)
+        {
+            if let Some(project_root)=self.descriptor.project_root.as_deref() {
+                if let Err(error)=crate::activity_evidence::record(
+                    &self.index, &self.descriptor.context_id, project_root, event)
+                {
+                    decision.warnings.push(format!(
+                        "continuity/activity-evidence unavailable: {error}"));
+                }
+            }
+        }
 
         Ok(decision)
     }
