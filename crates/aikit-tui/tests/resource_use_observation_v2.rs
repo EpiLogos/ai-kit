@@ -1,5 +1,5 @@
 use aikit_core::resource::{ResourceKind, ResourceRef};
-use aikit_core::Result;
+use aikit_core::{KnowledgeRelationView, RelationNode, RelationQuery, Result};
 use aikit_tui::application::{
     ApplyReceipt, CompositionPreview, HistoryEntry, RelationReadModel, ResourceListItem,
     ResourceListReadModel, StagedChanges, TuiApplicationService, TuiRuntime, TuiState, UiAction,
@@ -41,8 +41,13 @@ impl TuiApplicationService for Service {
     }
 
     fn relations(&self, resource: &ResourceRef) -> Result<RelationReadModel> {
+        let view = KnowledgeRelationView::focus_only(
+            RelationQuery::local(resource.clone()),
+            RelationNode::new(resource.clone(), ResourceKind::Project, "AIKit"),
+        )?;
         Ok(RelationReadModel {
             subject: resource.clone(),
+            view,
             value: json!({}),
         })
     }

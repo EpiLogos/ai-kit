@@ -5,7 +5,7 @@ use common::*;
 use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
 use aikit_tui::event::PaletteEvent;
 use aikit_tui::host::UiHost;
-use aikit_tui::layout::Layout;
+use aikit_tui::layout::{Glyphs, Layout};
 use aikit_tui::{ActionOutcome, PresentationMode, WorkspaceSection};
 use crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -184,7 +184,7 @@ fn live_shell_title_exposes_truthful_ambient_context_without_invented_identity()
     let (_dir, mut backend) = fixture();
     let surface = ApplicationSurfaceController::new(
         &mut backend,
-        ApplicationSurfaceRequest::new(UiHost::TmuxPopup),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_glyphs(Glyphs::unicode()),
     )
     .unwrap();
     let terminal = draw(&surface);
@@ -197,18 +197,60 @@ fn live_shell_title_exposes_truthful_ambient_context_without_invented_identity()
     assert!(!output.contains("Agency:"));
 }
 
+/// The same title, on a terminal that cannot draw `·`. Asserted here rather
+/// than left to the reader, because a title that silently dropped a
+/// dimension under the ASCII set would still satisfy every other assertion
+/// in this file.
+///
+/// The glyph set is pinned on the request, never by setting `LANG` from the
+/// test: `nextest` runs these in parallel in one process, so a test that
+/// writes the environment corrupts whichever sibling reads it next.
+#[test]
+fn the_ascii_shell_title_carries_the_same_ambient_context() {
+    let (_dir, mut backend) = fixture();
+    let surface = ApplicationSurfaceController::new(
+        &mut backend,
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_glyphs(Glyphs::ascii()),
+    )
+    .unwrap();
+    let output = rendered(&draw(&surface));
+
+    assert!(output.contains("AIKit - Workspace - Project: payments"));
+    assert!(output.contains("Host: test-host"));
+    assert!(output.contains("Target: shell"));
+    assert!(!output.contains("Profile:"));
+    assert!(!output.contains("Agency:"));
+}
+
 #[test]
 fn narrow_shell_keeps_compact_project_and_host_context_legible() {
     let (_dir, mut backend) = fixture();
     let surface = ApplicationSurfaceController::new(
         &mut backend,
-        ApplicationSurfaceRequest::new(UiHost::TmuxPopup),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_glyphs(Glyphs::unicode()),
     )
     .unwrap();
     let terminal = draw_width(&surface, 60, 20);
     let output = rendered(&terminal);
 
     assert!(output.contains("AIKit · Workspace · payments · test-host"));
+    assert!(!output.contains("Profile:"));
+    assert!(!output.contains("Agency:"));
+}
+
+/// Narrow drops the labels, not the values, in either glyph set: the
+/// compact form is the one with least room to lose a dimension unnoticed.
+#[test]
+fn the_narrow_ascii_shell_keeps_the_same_compact_context() {
+    let (_dir, mut backend) = fixture();
+    let surface = ApplicationSurfaceController::new(
+        &mut backend,
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_glyphs(Glyphs::ascii()),
+    )
+    .unwrap();
+    let output = rendered(&draw_width(&surface, 60, 20));
+
+    assert!(output.contains("AIKit - Workspace - payments - test-host"));
     assert!(!output.contains("Profile:"));
     assert!(!output.contains("Agency:"));
 }

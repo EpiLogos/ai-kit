@@ -16,17 +16,30 @@ use crate::application::{
     visible_contextual_actions, ActionOutcome, Overlay, PresentationMode, ResourceListItem,
     TuiState, WorkspaceSection,
 };
-use crate::layout::Layout;
+use crate::layout::{Glyphs, Layout};
 use crate::navigation::AmbientContext;
 use crate::project_workspace_render::{project_world_lines, workspace_section_label};
 use crate::theme::Theme;
 
-pub fn draw(frame: &mut Frame, state: &TuiState) {
-    draw_with_context(frame, state, &AmbientContext::default());
+/// Render the resting shell with an already-resolved host glyph capability.
+///
+/// `glyphs` is passed in rather than read from the environment here: the
+/// capability is host state, resolved once at
+/// [`crate::application_surface::ApplicationSurfaceController::new`] and
+/// carried as data, so a drawn frame is a pure function of the semantic
+/// state and that capability. `layout.rs`'s module header says why every
+/// mark this renderer draws has to come out of one chosen set.
+pub fn draw(frame: &mut Frame, state: &TuiState, glyphs: Glyphs) {
+    draw_with_context(frame, state, &AmbientContext::default(), glyphs);
 }
 
-pub fn draw_with_context(frame: &mut Frame, state: &TuiState, ambient: &AmbientContext) {
-    draw_shell(frame, state, ambient, None);
+pub fn draw_with_context(
+    frame: &mut Frame,
+    state: &TuiState,
+    ambient: &AmbientContext,
+    glyphs: Glyphs,
+) {
+    draw_shell(frame, state, ambient, None, glyphs);
 }
 
 /// Render the live Workspace against the shared Project-world read model.
@@ -38,8 +51,9 @@ pub fn draw_with_project_world(
     state: &TuiState,
     ambient: &AmbientContext,
     world: &ProjectWorldReadModel,
+    glyphs: Glyphs,
 ) {
-    draw_shell(frame, state, ambient, Some(world));
+    draw_shell(frame, state, ambient, Some(world), glyphs);
 }
 
 fn draw_shell(
@@ -47,22 +61,25 @@ fn draw_shell(
     state: &TuiState,
     ambient: &AmbientContext,
     world: Option<&ProjectWorldReadModel>,
+    glyphs: Glyphs,
 ) {
     let theme = Theme::new();
     let area = frame.area();
-    let base_title = match state.presentation {
-        PresentationMode::Quick => "AIKit · Quick",
-        PresentationMode::Workspace => "AIKit · Workspace",
+    let sep = glyphs.separator();
+    let mode = match state.presentation {
+        PresentationMode::Quick => "Quick",
+        PresentationMode::Workspace => "Workspace",
     };
-    let ambient_line = ambient.line(area.width.saturating_sub(20));
+    let base_title = format!("AIKit {sep} {mode}");
+    let ambient_line = ambient.line(area.width.saturating_sub(20), glyphs);
     let title = if ambient_line.is_empty() {
         format!(" {base_title} ")
     } else {
-        format!(" {base_title} · {ambient_line} ")
+        format!(" {base_title} {sep} {ambient_line} ")
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(theme.border_type())
+        .border_set(glyphs.border_set())
         .border_style(theme.border())
         .title(title)
         .title_alignment(Alignment::Left);
@@ -74,13 +91,13 @@ fn draw_shell(
 
     let layout = Layout::for_width(inner.width);
     let panes = layout.split(inner);
-    frame.render_widget(query_line(state, &theme), panes.query);
+    frame.render_widget(query_line(state, &theme, glyphs), panes.query);
 
     let compact_world_lines = if panes.preview.is_none()
         && state.presentation == PresentationMode::Workspace
     {
         world
-            .map(|world| project_world_lines(state, world))
+            .map(|world| project_world_lines(state, world, glyphs))
             .filter(|lines| !lines.is_empty())
     } else {
         None
@@ -88,16 +105,16 @@ fn draw_shell(
     if let Some(lines) = compact_world_lines {
         frame.render_widget(project_world_pane(lines, &theme), panes.list);
     } else {
-        draw_resources(frame, state, &theme, panes.list);
+        draw_resources(frame, state, &theme, panes.list, glyphs);
     }
 
     if let Some(preview) = panes.preview {
-        frame.render_widget(preview_pane(state, &theme, world), preview);
+        frame.render_widget(preview_pane(state, &theme, world, glyphs), preview);
     }
-    frame.render_widget(footer(state, &theme), panes.footer);
+    frame.render_widget(footer(state, &theme, glyphs), panes.footer);
 }
 
-fn query_line<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
+fn query_line<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragraph<'a> {
     let mut spans = if let Some(action_query) = state.action_query.as_ref() {
         vec![
             Span::styled(": ", theme.accent()),
@@ -121,7 +138,7 @@ fn query_line<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
         spans.push(Span::raw("   "));
         spans.push(Span::styled("Search", theme.accent()));
         for section in WorkspaceSection::ALL.iter() {
-            spans.push(Span::styled(" · ", theme.dim()));
+            spans.push(Span::styled(format!(" {} ", glyphs.separator()), theme.dim()));
             spans.push(Span::styled(
                 workspace_section_label(*section),
                 if *section == state.workspace_section {
@@ -135,7 +152,13 @@ fn query_line<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
     Paragraph::new(Line::from(spans))
 }
 
-fn draw_resources(frame: &mut Frame, state: &TuiState, theme: &Theme, area: ratatui::layout::Rect) {
+fn draw_resources(
+    frame: &mut Frame,
+    state: &TuiState,
+    theme: &Theme,
+    area: ratatui::layout::Rect,
+    glyphs: Glyphs,
+) {
     if state.read_model.resources.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -165,7 +188,9 @@ fn draw_resources(frame: &mut Frame, state: &TuiState, theme: &Theme, area: rata
         .enumerate()
         .skip(first)
         .take(height)
-        .map(|(index, item)| resource_line(state, theme, item, index == selected_index, area.width))
+        .map(|(index, item)| {
+            resource_line(state, theme, item, index == selected_index, area.width, glyphs)
+        })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -176,9 +201,10 @@ fn resource_line<'a>(
     item: &'a ResourceListItem,
     selected: bool,
     width: u16,
+    glyphs: Glyphs,
 ) -> Line<'a> {
     let staged = state.staged.get(&item.resource).is_some();
-    let cursor = if selected { '›' } else { ' ' };
+    let cursor = if selected { glyphs.list_cursor() } else { " " };
     let staged_mark = if staged { '*' } else { ' ' };
     let kind = format!("[{}]", item.kind.as_str());
     let fixed = 5 + kind.chars().count();
@@ -192,17 +218,20 @@ fn resource_line<'a>(
             if staged { theme.staged() } else { theme.accent() },
         ),
         Span::styled(
-            format!("{} ", pad(&kind, 20.min(kind.chars().count().max(8)))),
+            format!("{} ", pad(&kind, 20.min(kind.chars().count().max(8)), glyphs)),
             theme.dim(),
         ),
         Span::styled(
-            pad(&item.label, label_width),
+            pad(&item.label, label_width, glyphs),
             if selected { theme.selected() } else { theme.base() },
         ),
     ];
     if summary_width > 3 {
         spans.push(Span::styled(
-            format!(" {}", truncate(&item.summary, summary_width.saturating_sub(1))),
+            format!(
+                " {}",
+                truncate(&item.summary, summary_width.saturating_sub(1), glyphs)
+            ),
             theme.dim(),
         ));
     }
@@ -213,7 +242,9 @@ fn preview_pane<'a>(
     state: &'a TuiState,
     theme: &Theme,
     world: Option<&ProjectWorldReadModel>,
+    glyphs: Glyphs,
 ) -> Paragraph<'a> {
+    let sep = glyphs.separator();
     if state.overlay == Some(Overlay::ConfirmApply) {
         let summary = state
             .preview
@@ -225,7 +256,10 @@ fn preview_pane<'a>(
             Line::from(""),
             Line::from(Span::raw(summary.to_string())),
             Line::from(""),
-            Line::from(Span::styled("Ctrl+S applies · Esc returns", theme.staged())),
+            Line::from(Span::styled(
+                format!("Ctrl+S applies {sep} Esc returns"),
+                theme.staged(),
+            )),
         ])
         .wrap(Wrap { trim: false });
     }
@@ -241,7 +275,7 @@ fn preview_pane<'a>(
             Line::from(Span::raw(summary.to_string())),
             Line::from(""),
             Line::from(Span::styled(
-                "Ctrl+S proceeds to confirmation · Esc returns",
+                format!("Ctrl+S proceeds to confirmation {sep} Esc returns"),
                 theme.dim(),
             )),
         ])
@@ -250,7 +284,10 @@ fn preview_pane<'a>(
     if state.overlay == Some(Overlay::Explain) {
         if let Some(ActionOutcome::Explained { subject, summary }) = state.action_result.as_ref() {
             return Paragraph::new(vec![
-                Line::from(Span::styled(format!("Explain · {subject}"), theme.heading())),
+                Line::from(Span::styled(
+                    format!("Explain {sep} {subject}"),
+                    theme.heading(),
+                )),
                 Line::from(""),
                 Line::from(Span::raw(summary.clone())),
                 Line::from(""),
@@ -262,7 +299,7 @@ fn preview_pane<'a>(
 
     if state.presentation == PresentationMode::Workspace {
         if let Some(world) = world {
-            let lines = project_world_lines(state, world);
+            let lines = project_world_lines(state, world, glyphs);
             if !lines.is_empty() {
                 return project_world_pane(lines, theme);
             }
@@ -286,9 +323,9 @@ fn preview_pane<'a>(
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             if state.action_query.is_some() {
-                "Actions · text mode"
+                format!("Actions {sep} text mode")
             } else {
-                "Actions · press :"
+                format!("Actions {sep} press :")
             },
             theme.heading(),
         )));
@@ -300,10 +337,10 @@ fn preview_pane<'a>(
         for (index, action) in actions.iter().enumerate() {
             let stage_marker = match action.stageability {
                 ActionStageability::Stageable => "*",
-                ActionStageability::NotStageable => "›",
+                ActionStageability::NotStageable => glyphs.list_cursor(),
             };
             let cursor = if state.action_query.is_some() && index == state.action_cursor {
-                "→"
+                glyphs.action_cursor()
             } else {
                 " "
             };
@@ -317,7 +354,7 @@ fn preview_pane<'a>(
                         theme.base()
                     },
                 ),
-                Span::styled(format!(" · {}", action.description), theme.dim()),
+                Span::styled(format!(" {sep} {}", action.description), theme.dim()),
             ]));
         }
         if actions.is_empty() && state.action_query.is_some() {
@@ -351,7 +388,7 @@ fn project_world_pane(lines: Vec<String>, theme: &Theme) -> Paragraph<'static> {
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
-fn footer<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
+fn footer<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragraph<'a> {
     if let Some(status) = &state.status {
         return Paragraph::new(Line::from(Span::styled(status.message.clone(), theme.dim())));
     }
@@ -359,21 +396,25 @@ fn footer<'a>(state: &'a TuiState, theme: &Theme) -> Paragraph<'a> {
         .mutation_scope
         .map(|scope| scope.as_str())
         .unwrap_or("unresolved");
+    let sep = glyphs.separator();
+    let updown = glyphs.vertical_keys();
     let text = if state.action_query.is_some() {
-        "Action mode · type to filter · ↑↓ choose · Enter invoke · Space invoke if stageable · Esc return"
-            .to_string()
+        format!(
+            "Action mode {sep} type to filter {sep} {updown} choose {sep} Enter invoke {sep} Space invoke if stageable {sep} Esc return"
+        )
     } else if state.presentation == PresentationMode::Workspace {
         format!(
-            "{} · {} result{} · {} staged · scope {} · Alt+←/→ fields · : actions · Ctrl+W Quick",
+            "{} {sep} {} result{} {sep} {} staged {sep} scope {} {sep} Alt+{} fields {sep} : actions {sep} Ctrl+W Quick",
             workspace_section_label(state.workspace_section),
             state.read_model.resources.len(),
             if state.read_model.resources.len() == 1 { "" } else { "s" },
             state.staged.len(),
             scope,
+            glyphs.horizontal_keys(),
         )
     } else {
         format!(
-            "{} result{} · {} staged · scope {} · ↑↓ navigate · : actions · Space stage · Ctrl+S preview/apply · Ctrl+W Workspace",
+            "{} result{} {sep} {} staged {sep} scope {} {sep} {updown} navigate {sep} : actions {sep} Space stage {sep} Ctrl+S preview/apply {sep} Ctrl+W Workspace",
             state.read_model.resources.len(),
             if state.read_model.resources.len() == 1 { "" } else { "s" },
             state.staged.len(),
@@ -392,28 +433,39 @@ fn selected_item(state: &TuiState) -> Option<&ResourceListItem> {
         .find(|item| &item.resource == selected)
 }
 
-fn pad(text: &str, width: usize) -> String {
+fn pad(text: &str, width: usize, glyphs: Glyphs) -> String {
     if width == 0 {
         return String::new();
     }
-    let mut out = truncate(text, width);
+    let mut out = truncate(text, width, glyphs);
     while out.chars().count() < width {
         out.push(' ');
     }
     out
 }
 
-fn truncate(text: &str, width: usize) -> String {
+/// Clip `text` to `width` cells, marking that something was dropped.
+///
+/// The elision mark's own width is taken from the glyph set rather than
+/// assumed to be one cell: `Glyphs::ascii`'s mark is `...`, three cells
+/// against Unicode's one, and reserving a single cell for it would draw
+/// two cells past the column every ASCII row.
+fn truncate(text: &str, width: usize, glyphs: Glyphs) -> String {
     if width == 0 {
         return String::new();
     }
     if text.chars().count() <= width {
         return text.to_string();
     }
-    if width == 1 {
-        return "…".to_string();
+    let mark = glyphs.ellipsis();
+    let mark_width = mark.chars().count();
+    // Too narrow for the mark and any real character both. The mark alone,
+    // itself clipped, still says "there is more here"; content with no mark
+    // would silently claim to be whole.
+    if width <= mark_width {
+        return mark.chars().take(width).collect();
     }
-    let mut out: String = text.chars().take(width - 1).collect();
-    out.push('…');
+    let mut out: String = text.chars().take(width - mark_width).collect();
+    out.push_str(mark);
     out
 }

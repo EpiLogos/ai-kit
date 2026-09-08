@@ -26,8 +26,10 @@
 
 use aikit_core::resolve::UnavailableReason;
 use aikit_core::scope::ScopeKind;
+use aikit_core::RelationDirection;
 use aikit_core::search::DocStatus;
 use ratatui::layout::Rect;
+use ratatui::symbols::border;
 
 /// Below this the list and a preview cannot both be useful.
 const WIDE_COLUMNS: u16 = 100;
@@ -274,6 +276,178 @@ impl Glyphs {
             None => ' ',
         }
     }
+
+    // -- shell chrome -------------------------------------------------------
+    //
+    // The marks below are the ones the resting shell draws around its own
+    // content: separators, cursors, elision, the keycap hints in a footer,
+    // the branch marks of a tree row. They live here, beside the state marks,
+    // for the reason the module header gives: one set, chosen once, so a
+    // rendering cannot come out three-quarters Unicode because one call site
+    // was written with a literal. Each ASCII form below is either the same
+    // width as its Unicode form or wider by a documented amount, and the
+    // wider ones (`ellipsis`, the keycap hints) are never drawn inside a
+    // column whose width was computed from the Unicode form.
+
+    /// The separator between chrome fields on one line.
+    pub fn separator(&self) -> &'static str {
+        if self.ascii {
+            "-"
+        } else {
+            "\u{b7}"
+        }
+    }
+
+    /// The mark that stands for text elided to fit.
+    ///
+    /// Three cells in ASCII against one in Unicode, matching
+    /// `graph_layout::GraphGlyphs::ellipsis`. A caller eliding to a fixed
+    /// width must therefore reserve this mark's own width rather than assume
+    /// a single cell — see `v2_render::truncate`.
+    pub fn ellipsis(&self) -> &'static str {
+        if self.ascii {
+            "..."
+        } else {
+            "\u{2026}"
+        }
+    }
+
+    /// The cursor on the selected row of a list.
+    ///
+    /// Distinct from [`Self::selected`], which marks the palette's own
+    /// selection: this one sits in a one-cell gutter drawn on every row,
+    /// blank where there is no cursor, so it is exactly one cell in both
+    /// sets and a row cannot shift sideways when the cursor arrives.
+    pub fn list_cursor(&self) -> &'static str {
+        if self.ascii {
+            ">"
+        } else {
+            "\u{203a}"
+        }
+    }
+
+    /// The cursor in the contextual-Action lane. One cell, for the same
+    /// reason [`Self::list_cursor`] is.
+    pub fn action_cursor(&self) -> &'static str {
+        if self.ascii {
+            ">"
+        } else {
+            "\u{2192}"
+        }
+    }
+
+    /// The keycap hint for the vertical navigation keys.
+    pub fn vertical_keys(&self) -> &'static str {
+        if self.ascii {
+            "^v"
+        } else {
+            "\u{2191}\u{2193}"
+        }
+    }
+
+    /// The keycap hint for the horizontal navigation keys.
+    pub fn horizontal_keys(&self) -> &'static str {
+        if self.ascii {
+            "<-/->"
+        } else {
+            "\u{2190}/\u{2192}"
+        }
+    }
+
+    /// The dash that separates a statement from the reason for it.
+    pub fn dash(&self) -> &'static str {
+        if self.ascii {
+            "--"
+        } else {
+            "\u{2014}"
+        }
+    }
+
+    /// The sign that prefixes a removed count.
+    pub fn minus(&self) -> &'static str {
+        if self.ascii {
+            "-"
+        } else {
+            "\u{2212}"
+        }
+    }
+
+    /// A typed relation's direction, drawn between the two ends of a list
+    /// row. Three cells in both sets, so a column of rows stays aligned
+    /// either way.
+    ///
+    /// `graph_layout::GraphGlyphs::direction_glyph` answers the same question
+    /// for the spatial Graph, where a connector shares a cell budget with
+    /// lane geometry and is drawn as a bare arrowhead. A list row has the
+    /// room for the shaft and reads better with it, so the two stay separate
+    /// marks — behind, as of `ApplicationSurfaceController`, a single
+    /// resolved capability.
+    pub fn relation_arrow(&self, direction: RelationDirection) -> &'static str {
+        match (direction, self.ascii) {
+            (RelationDirection::Outgoing, false) => "\u{2500}\u{2500}\u{25b6}",
+            (RelationDirection::Outgoing, true) => "-->",
+            (RelationDirection::Incoming, false) => "\u{25c0}\u{2500}\u{2500}",
+            (RelationDirection::Incoming, true) => "<--",
+            (RelationDirection::Bidirectional, false) => "\u{25c0}\u{2500}\u{25b6}",
+            (RelationDirection::Bidirectional, true) => "<->",
+        }
+    }
+
+    /// The branch mark for a tree row with siblings after it.
+    pub fn branch_tee(&self) -> &'static str {
+        if self.ascii {
+            "|"
+        } else {
+            "\u{251c}"
+        }
+    }
+
+    /// The branch mark for the last row of a group.
+    pub fn branch_last(&self) -> &'static str {
+        if self.ascii {
+            "`"
+        } else {
+            "\u{2514}"
+        }
+    }
+
+    /// The horizontal run a branch mark hangs its label from.
+    pub fn branch_stem(&self) -> &'static str {
+        if self.ascii {
+            "-"
+        } else {
+            "\u{2500}"
+        }
+    }
+
+    /// The frame itself.
+    ///
+    /// `ratatui`'s own sets are all box-drawing, so a terminal that cannot
+    /// render `\u{250c}` draws the palette's single border as a rectangle of
+    /// replacement boxes — the loudest possible version of the defect this
+    /// type exists to prevent, since the border is on screen at every width
+    /// and in every state. The ASCII set is the conventional `+`/`-`/`|`
+    /// frame, one cell per side exactly like `PLAIN`, so the geometry
+    /// `Layout::split` computed is unaffected.
+    ///
+    /// `Theme` still owns *which* border (one, plain, never nested); this
+    /// owns what it is drawn with.
+    pub fn border_set(&self) -> border::Set<'static> {
+        if self.ascii {
+            border::Set {
+                top_left: "+",
+                top_right: "+",
+                bottom_left: "+",
+                bottom_right: "+",
+                vertical_left: "|",
+                vertical_right: "|",
+                horizontal_top: "-",
+                horizontal_bottom: "-",
+            }
+        } else {
+            border::PLAIN
+        }
+    }
 }
 
 /// The one-line state sentence for a row or a preview header.
@@ -281,13 +455,20 @@ impl Glyphs {
 /// The unavailable case borrows core's own wording rather than paraphrasing it,
 /// so the palette and `aikit explain` cannot drift into describing the same
 /// refusal two different ways.
-pub fn state_note(status: DocStatus, reason: Option<&UnavailableReason>) -> String {
+pub fn state_note(
+    status: DocStatus,
+    reason: Option<&UnavailableReason>,
+    glyphs: Glyphs,
+) -> String {
+    let dash = glyphs.dash();
     match (status, reason) {
         (DocStatus::Active, _) => "active".to_string(),
         (DocStatus::Inactive, _) => "inactive".to_string(),
-        (DocStatus::Unavailable, Some(reason)) => format!("unavailable — {}", reason.describe()),
+        (DocStatus::Unavailable, Some(reason)) => {
+            format!("unavailable {dash} {}", reason.describe())
+        }
         // The resolver records a reason for everything it withholds; a row that
         // reaches here is a bug, and saying so beats inventing a cause.
-        (DocStatus::Unavailable, None) => "unavailable — no reason recorded".to_string(),
+        (DocStatus::Unavailable, None) => format!("unavailable {dash} no reason recorded"),
     }
 }

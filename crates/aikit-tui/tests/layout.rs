@@ -10,6 +10,7 @@
 use aikit_core::resolve::UnavailableReason;
 use aikit_core::scope::ScopeKind;
 use aikit_core::search::DocStatus;
+use aikit_core::RelationDirection;
 use aikit_tui::layout::{Declared, Glyphs, Layout, Width};
 use ratatui::layout::Rect;
 
@@ -169,6 +170,105 @@ fn the_ascii_fallback_carries_the_same_information_without_a_single_non_ascii_by
     }
 }
 
+/// The state marks above were never the whole set: the shell also draws
+/// separators, cursors, elision marks, keycap hints and branch marks, and
+/// for a long time it drew them as literals — so `Glyphs::ascii()` was
+/// honoured for six characters and ignored for the footer, which emitted
+/// `↑↓` and `←/→` on a terminal that could render neither.
+///
+/// This enumerates the chrome vocabulary rather than sampling it. A mark
+/// added to `Glyphs` and forgotten here is a mark nobody proved renders on a
+/// non-UTF-8 terminal, so the list is meant to be extended in the same
+/// commit that extends the type.
+#[test]
+fn the_ascii_shell_chrome_is_ascii_too() {
+    let ascii = Glyphs::ascii();
+    let mut marks = vec![
+        ascii.separator(),
+        ascii.ellipsis(),
+        ascii.list_cursor(),
+        ascii.action_cursor(),
+        ascii.vertical_keys(),
+        ascii.horizontal_keys(),
+        ascii.dash(),
+        ascii.minus(),
+        ascii.branch_tee(),
+        ascii.branch_last(),
+        ascii.branch_stem(),
+    ];
+    for direction in [
+        RelationDirection::Outgoing,
+        RelationDirection::Incoming,
+        RelationDirection::Bidirectional,
+    ] {
+        marks.push(ascii.relation_arrow(direction));
+    }
+    for mark in marks {
+        assert!(mark.is_ascii(), "`{mark}` is not ASCII");
+    }
+}
+
+/// Every chrome mark differs between the two sets, so none of them is
+/// cosmetics that would go untested if the fallback broke.
+#[test]
+fn every_chrome_mark_actually_changes_between_the_sets() {
+    let (a, u) = (Glyphs::ascii(), Glyphs::unicode());
+    for (name, ascii, unicode) in [
+        ("separator", a.separator(), u.separator()),
+        ("ellipsis", a.ellipsis(), u.ellipsis()),
+        ("list_cursor", a.list_cursor(), u.list_cursor()),
+        ("action_cursor", a.action_cursor(), u.action_cursor()),
+        ("vertical_keys", a.vertical_keys(), u.vertical_keys()),
+        ("horizontal_keys", a.horizontal_keys(), u.horizontal_keys()),
+        ("dash", a.dash(), u.dash()),
+        ("minus", a.minus(), u.minus()),
+        ("branch_tee", a.branch_tee(), u.branch_tee()),
+        ("branch_last", a.branch_last(), u.branch_last()),
+        ("branch_stem", a.branch_stem(), u.branch_stem()),
+    ] {
+        assert_ne!(ascii, unicode, "{name} is the same in both sets");
+    }
+}
+
+/// The marks a row's column arithmetic depends on are the same width in
+/// both sets, so swapping the set cannot shift a column sideways. The two
+/// deliberate exceptions — the elision mark and the keycap hints — are
+/// excluded here and documented on `Glyphs` itself: neither is ever drawn
+/// inside a column whose width was computed from the Unicode form.
+#[test]
+fn the_column_bearing_marks_are_the_same_width_in_both_sets() {
+    let (a, u) = (Glyphs::ascii(), Glyphs::unicode());
+    for (name, ascii, unicode) in [
+        ("separator", a.separator(), u.separator()),
+        ("list_cursor", a.list_cursor(), u.list_cursor()),
+        ("action_cursor", a.action_cursor(), u.action_cursor()),
+        ("branch_tee", a.branch_tee(), u.branch_tee()),
+        ("branch_last", a.branch_last(), u.branch_last()),
+        ("branch_stem", a.branch_stem(), u.branch_stem()),
+        (
+            "relation_arrow/out",
+            a.relation_arrow(RelationDirection::Outgoing),
+            u.relation_arrow(RelationDirection::Outgoing),
+        ),
+        (
+            "relation_arrow/in",
+            a.relation_arrow(RelationDirection::Incoming),
+            u.relation_arrow(RelationDirection::Incoming),
+        ),
+        (
+            "relation_arrow/both",
+            a.relation_arrow(RelationDirection::Bidirectional),
+            u.relation_arrow(RelationDirection::Bidirectional),
+        ),
+    ] {
+        assert_eq!(
+            ascii.chars().count(),
+            unicode.chars().count(),
+            "{name} changes width between the sets"
+        );
+    }
+}
+
 #[test]
 fn a_unicode_set_is_actually_different_from_the_ascii_one() {
     // Otherwise the "fallback" would be untested cosmetics.
@@ -212,12 +312,19 @@ fn an_undeclared_capability_has_a_blank_scope_badge_rather_than_a_guess() {
 fn an_unavailable_row_carries_the_reason_core_gave_and_not_a_paraphrase() {
     let reason = UnavailableReason::TrustRequired;
     assert_eq!(
-        aikit_tui::layout::state_note(DocStatus::Unavailable, Some(&reason)),
+        aikit_tui::layout::state_note(DocStatus::Unavailable, Some(&reason), Glyphs::unicode()),
         "unavailable — this revision has not been reviewed"
     );
-    assert_eq!(aikit_tui::layout::state_note(DocStatus::Active, None), "active");
     assert_eq!(
-        aikit_tui::layout::state_note(DocStatus::Inactive, None),
+        aikit_tui::layout::state_note(DocStatus::Unavailable, Some(&reason), Glyphs::ascii()),
+        "unavailable -- this revision has not been reviewed"
+    );
+    assert_eq!(
+        aikit_tui::layout::state_note(DocStatus::Active, None, Glyphs::unicode()),
+        "active"
+    );
+    assert_eq!(
+        aikit_tui::layout::state_note(DocStatus::Inactive, None, Glyphs::unicode()),
         "inactive"
     );
 }
@@ -225,7 +332,11 @@ fn an_unavailable_row_carries_the_reason_core_gave_and_not_a_paraphrase() {
 #[test]
 fn an_unavailable_row_without_a_recorded_reason_says_so_rather_than_inventing_one() {
     assert_eq!(
-        aikit_tui::layout::state_note(DocStatus::Unavailable, None),
+        aikit_tui::layout::state_note(DocStatus::Unavailable, None, Glyphs::unicode()),
         "unavailable — no reason recorded"
+    );
+    assert_eq!(
+        aikit_tui::layout::state_note(DocStatus::Unavailable, None, Glyphs::ascii()),
+        "unavailable -- no reason recorded"
     );
 }
