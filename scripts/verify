@@ -10,6 +10,12 @@ set -euo pipefail
 # `quick` is for the inner development loop; it never replaces the full gate,
 # and CI still runs the full gate on every PR. `--locked` and `-D warnings`
 # apply in both grades so a quick run cannot drift from what CI will demand.
+#
+# Tests run under cargo-nextest when it is installed (process per test, in
+# parallel — no suite-wide serialization); otherwise `cargo test` runs the
+# same gate directly. The release build is deliberately not part of this
+# gate: that proof lives in .github/workflows/prelocal-release.yml.
+
 if [ "${1:-}" = "quick" ]; then
   shift
   if [ "$#" -eq 0 ]; then
@@ -22,10 +28,14 @@ if [ "${1:-}" = "quick" ]; then
     if [ "$1" = "-p" ] || [ "$1" = "--package" ]; then
       pkgs+=("$1" "$2"); shift 2
     else
-      pkgs+=("$1"); shift
+      pkgs+=("$1" "$2"); shift 2
     fi
   done
-  cargo test --locked "${pkgs[@]}" --all-targets --no-fail-fast
+  if cargo nextest --version >/dev/null 2>&1; then
+    cargo nextest run --locked "${pkgs[@]}" --all-targets
+  else
+    cargo test --locked "${pkgs[@]}" --all-targets --no-fail-fast
+  fi
   cargo clippy --locked "${pkgs[@]}" --all-targets -- -D warnings
   exit 0
 fi
@@ -35,13 +45,26 @@ fi
 # presentation; current reducer, TUI, CLI and resident-tree acceptance cover those
 # contracts. Keep the stale journeys out of the release gate until they are
 # rewritten against the V2 action grammar rather than reviving legacy semantics.
-cargo test --locked --workspace --all-targets --no-fail-fast -- \
-  --test-threads=1 \
-  --skip the_real_binary_completes_palette_tree_stage_palette_apply_in_one_lifecycle \
-  --skip the_real_binary_tree_applies_a_keyboard_staged_capability_through_a_pty \
-  --skip the_real_binary_tree_applies_an_exact_mouse_staged_capability_through_a_pty \
-  --skip a_palette_run_outcome_executes_the_real_script_after_the_terminal_is_restored \
-  --skip the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes
+legacy_pty_journeys=(
+  the_real_binary_completes_palette_tree_stage_palette_apply_in_one_lifecycle
+  the_real_binary_tree_applies_a_keyboard_staged_capability_through_a_pty
+  the_real_binary_tree_applies_an_exact_mouse_staged_capability_through_a_pty
+  a_palette_run_outcome_executes_the_real_script_after_the_terminal_is_restored
+  the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes
+)
+
+if cargo nextest --version >/dev/null 2>&1; then
+  filter=""
+  for name in "${legacy_pty_journeys[@]}"; do
+    filter+="not test(${name}) and "
+  done
+  cargo nextest run --locked --workspace --all-targets -E "${filter% and }"
+else
+  skip_args=()
+  for name in "${legacy_pty_journeys[@]}"; do
+    skip_args+=(--skip "$name")
+  done
+  cargo test --locked --workspace --all-targets --no-fail-fast -- "${skip_args[@]}"
+fi
 cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo build --locked --workspace --release
 git diff --check

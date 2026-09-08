@@ -27,6 +27,8 @@ jobs:
           rustup toolchain install 1.98.0 --profile minimal
           rustup default 1.98.0
 
+      - uses: Swatinem/rust-cache@v2.9.2
+
       - name: Prove AIKit persistent Surface identity and rebinding
         run: cargo test --locked -p aikit-core --test surface_material_v2 -- --nocapture --test-threads=1
 

@@ -1,0 +1,12 @@
+#!/bin/sh
+# The composition handle for the orientation-packet engine reaction
+# (W2/W1, CASE 02 + CASE 09).
+#
+# The engine (aikit-cli dispatch) resolves the tuning at event time; when
+# this capability is composed, a SessionStart event in a project under the
+# world arrives with that project's bounded NOW orientation packet — the
+# open continuation, open work and disclosed warnings — through the
+# additional-context decision. This payload only proves the chain reached
+# it: exit 0, no output, because hook-chain stdout is a gate channel — the
+# packet itself rides the additional-context channel, never stdout.
+exit 0

@@ -25,9 +25,12 @@ Run the same repository-owned operation as CI:
 bash scripts/verify
 ```
 
-It runs the workspace test suite, clippy with warnings denied, the release build,
-and `git diff --check`. Keep this operation and the CI invocation aligned rather
-than duplicating verification semantics in workflow YAML.
+It runs the workspace test suite, clippy with warnings denied, and `git diff --check`.
+Tests run under [cargo-nextest](https://nexte.st) when installed (process per test,
+in parallel) and fall back to `cargo test` otherwise. Keep this operation and the CI
+invocation aligned rather than duplicating verification semantics in workflow YAML.
+The release build is not part of this gate; it is proven separately by
+`.github/workflows/prelocal-release.yml` before a release is cut.
 
 This is *source* verification. Installed-binary verification is a separate path
 (`aikit doctor --json`); see [docs/USING-AIKIT.md](docs/USING-AIKIT.md#source-verification-and-installed-verification).
