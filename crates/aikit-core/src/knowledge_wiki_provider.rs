@@ -67,6 +67,9 @@ pub trait WikiProvider {
     fn relations(&self, query: RelationQuery) -> Result<KnowledgeRelationView>;
     fn frame(&self, resource: &ResourceRef) -> Option<WikiFrame>;
     fn sources(&self, resource: &ResourceRef) -> Vec<SourceRef>;
+    /// The curated nodes citing `source` — what the Wiki knows about material
+    /// it does not itself hold. Empty when nothing cites it.
+    fn citing_nodes(&self, source: &SourceRef) -> Vec<ResourceRef>;
     fn provenance(&self, resource: &ResourceRef) -> Vec<WikiProvenanceRef>;
     fn explain(&self, resource: &ResourceRef) -> Result<WikiExplanation>;
 }
@@ -98,6 +101,9 @@ impl<T: WikiProvider + ?Sized> WikiProvider for &T {
     }
     fn sources(&self, resource: &ResourceRef) -> Vec<SourceRef> {
         (**self).sources(resource)
+    }
+    fn citing_nodes(&self, source: &SourceRef) -> Vec<ResourceRef> {
+        (**self).citing_nodes(source)
     }
     fn provenance(&self, resource: &ResourceRef) -> Vec<WikiProvenanceRef> {
         (**self).provenance(resource)
@@ -403,6 +409,10 @@ impl<'a> SemanticWikiProvider<'a> {
         self.index.sources(resource)
     }
 
+    pub fn citing_nodes(&self, source: &SourceRef) -> Vec<ResourceRef> {
+        self.index.citing_nodes(source)
+    }
+
     pub fn provenance(&self, resource: &ResourceRef) -> Vec<WikiProvenanceRef> {
         self.index.provenance(resource)
     }
@@ -490,6 +500,10 @@ impl WikiProvider for SemanticWikiProvider<'_> {
 
     fn sources(&self, resource: &ResourceRef) -> Vec<SourceRef> {
         SemanticWikiProvider::sources(self, resource)
+    }
+
+    fn citing_nodes(&self, source: &SourceRef) -> Vec<ResourceRef> {
+        SemanticWikiProvider::citing_nodes(self, source)
     }
 
     fn provenance(&self, resource: &ResourceRef) -> Vec<WikiProvenanceRef> {
