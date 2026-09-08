@@ -203,3 +203,50 @@ fn nested_skillsets_expose_direct_containment_and_transitive_projection() {
     );
     assert!(verification.members[0].direct);
 }
+
+#[test]
+fn nested_skillsets_preserve_every_declaring_set_for_a_shared_skill() {
+    let research = SkillSet::new("research", SetProvenance::Project)
+        .with_member(cid("skill/verify"), SetMembership::Explicit);
+    let release = SkillSet::new("release", SetProvenance::Project)
+        .with_member(cid("skill/verify"), SetMembership::Explicit);
+    let methodology = SkillSet::new("methodology", SetProvenance::Project)
+        .with_child(research)
+        .with_child(release);
+    let patch = authored(&["skill/verify"]);
+    let fixture =
+        Fixture::new(vec![skill("skill/verify")]).with_layers(vec![project_layer(patch.clone())]);
+    let view = fixture.resolve().unwrap();
+
+    let read = inspect_profile_composition(
+        ScopeKind::Project,
+        &patch,
+        &view,
+        std::slice::from_ref(&methodology),
+    );
+
+    let root = &read.skill_sets[0];
+    let shared_relations: Vec<_> = root
+        .members
+        .iter()
+        .filter(|member| member.capability == cid("skill/verify"))
+        .collect();
+    assert_eq!(shared_relations.len(), 2);
+    assert_eq!(
+        shared_relations
+            .iter()
+            .map(|member| member.declared_by.as_str())
+            .collect::<Vec<_>>(),
+        vec!["methodology/research", "methodology/release"]
+    );
+    assert!(shared_relations.iter().all(|member| !member.direct));
+    assert!(shared_relations
+        .iter()
+        .all(|member| matches!(member.state, SkillSetMemberRelationState::Effective)));
+
+    for child in &read.skill_sets[1..] {
+        assert_eq!(child.members.len(), 1);
+        assert!(child.members[0].direct);
+        assert_eq!(child.members[0].declared_by, child.identity);
+    }
+}

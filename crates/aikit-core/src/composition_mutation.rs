@@ -530,7 +530,7 @@ fn inspect_skill_set_relations(
         .into_iter()
         .map(|entry| (entry.capsule, entry.reason.describe()))
         .collect();
-    let mut declarations = BTreeMap::new();
+    let mut declarations = Vec::new();
     collect_member_declarations(set, identity, true, &mut declarations);
     let members = declarations
         .into_iter()
@@ -575,15 +575,16 @@ fn collect_member_declarations(
     set: &SkillSet,
     identity: &str,
     direct: bool,
-    out: &mut BTreeMap<CapsuleId, (SetMembership, String, bool)>,
+    out: &mut Vec<(CapsuleId, (SetMembership, String, bool))>,
 ) {
     for (capability, membership) in &set.members {
-        if direct || !out.contains_key(capability) {
-            out.insert(
-                capability.clone(),
-                (membership.clone(), identity.to_string(), direct),
-            );
-        }
+        // Each entry is a containment relation, not a de-duplicated capability
+        // projection. The same Skill may be directly authored into multiple
+        // descendant sets and every such relation must remain inspectable.
+        out.push((
+            capability.clone(),
+            (membership.clone(), identity.to_string(), direct),
+        ));
     }
     for child in &set.children {
         collect_member_declarations(child, &format!("{identity}/{}", child.name), false, out);
