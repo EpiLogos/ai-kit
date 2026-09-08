@@ -160,6 +160,73 @@ impl<'a> SemanticWikiProvider<'a> {
                     }
                 }
             }
+            // The enclosing direction of that same authored membership.
+            // `WikiNode::space_refs` and `WikiSpace::parent_space_refs` are
+            // canonical assertions that were previously readable only from
+            // the containing end: a node focus could never reach its own
+            // Space, so the enclosing band of any node-focused view was
+            // structurally empty and consumers were pushed toward
+            // reconstructing containment from raw refs — the drift this
+            // faculty exists to prevent.
+            //
+            // The same logical edge is emitted (space -> node, space ->
+            // child space), oriented Incoming relative to the focus and
+            // keyed identically to the outgoing projection above, so
+            // reaching both ends of one membership yields one edge, not two.
+            // Only refs that resolve in this index are projected; a ref that
+            // resolves in a peer Wiki is the federated norm and is left to
+            // the federation seam, matching the local-whole rule below.
+            let enclosing: Vec<(ResourceRef, &'static str)> = self
+                .index
+                .node(&current)
+                .map(|node| {
+                    node.space_refs
+                        .iter()
+                        .map(|r| (r.clone(), "member"))
+                        .collect::<Vec<_>>()
+                })
+                .or_else(|| {
+                    self.index.space(&current).map(|space| {
+                        space
+                            .parent_space_refs
+                            .iter()
+                            .map(|r| (r.clone(), "child-space"))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .unwrap_or_default();
+            for (container, relation) in enclosing {
+                let Some(container_space) = self.index.space(&container) else {
+                    continue;
+                };
+                let key = format!("membership\0{}\0{}\0{}", container, current, relation);
+                if seen_edges.contains(&key) {
+                    continue;
+                }
+                if view.edges.len() >= query.max_edges {
+                    view.truncated = true;
+                    break;
+                }
+                if !view.nodes.iter().any(|n| n.resource == container)
+                    && !view.push_node(self.relation_node(&container)?)
+                {
+                    continue;
+                }
+                seen_edges.insert(key);
+                view.push_edge(RelationEdge::new(
+                    container.clone(),
+                    current.clone(),
+                    relation,
+                    RelationDirection::Incoming,
+                    RelationOrigin::new(SourceAuthority::Authored)
+                        .from_provider(self.provider.clone())
+                        .in_lens("semantic-wiki")
+                        .at_revision(container_space.revision.to_string()),
+                ))?;
+                if seen.insert(container.clone()) {
+                    queue.push_back((container, depth + 1));
+                }
+            }
             // A bounded local whole (W10 V4): a node carrying
             // `local_space_ref` contributes its whole's membership through
             // the same relation faculty, so navigation traverses the set
@@ -466,10 +533,18 @@ mod tests {
                 ResourceRef::parse("wiki:node:a").unwrap(),
             ))
             .unwrap();
-        assert_eq!(view.nodes.len(), 2);
-        assert_eq!(view.edges.len(), 1);
-        assert_eq!(view.edges[0].relation, "develops");
-        assert_eq!(view.edges[0].origin.authority, SourceAuthority::Authored);
+        // Three nodes and two edges: Beta through the authored `develops`
+        // edge, and Root through the enclosing half of the membership the
+        // Space asserts. Before the enclosing projection existed this read
+        // 2 and 1 — the node could not reach its own Space at all.
+        assert_eq!(view.nodes.len(), 3);
+        assert_eq!(view.edges.len(), 2);
+        let develops = view
+            .edges
+            .iter()
+            .find(|e| e.relation == "develops")
+            .expect("the authored edge still arrives");
+        assert_eq!(develops.origin.authority, SourceAuthority::Authored);
         assert_eq!(
             provider.neighbours(&ResourceRef::parse("wiki:node:a").unwrap(), 10)[0].origin,
             WikiEdgeOrigin::Authored
@@ -550,6 +625,94 @@ mod tests {
         assert_eq!(flow_view.nodes[0].kind, ResourceKind::ContextSource);
         assert_eq!(flow_view.edges[0].relation, "references");
     }
+    /// The enclosing half of membership. A node focus must reach its own
+    /// Space: `WikiNode::space_refs` is a canonical assertion, and before
+    /// this projection existed it was readable only from the Space end, so
+    /// any node-focused view had a structurally empty enclosing band and
+    /// consumers were pushed toward rebuilding containment from raw refs.
+    #[test]
+    fn a_node_reaches_its_enclosing_space_through_the_relation_faculty() {
+        let index = fixture();
+        let provider = SemanticWikiProvider::new(&index);
+        let focus = ResourceRef::parse("wiki:node:a").unwrap();
+        let view = provider.relations(RelationQuery::local(focus.clone())).unwrap();
+
+        let enclosing: Vec<_> = view
+            .edges
+            .iter()
+            .filter(|e| e.relation == "member")
+            .collect();
+        assert_eq!(enclosing.len(), 1, "exactly one enclosing Space: {view:?}");
+        let edge = enclosing[0];
+
+        // The same logical edge the Space asserts: oriented from the Space,
+        // Incoming relative to this focus, carrying the Space's revision.
+        assert_eq!(edge.from.as_str(), "wiki:space:root");
+        assert_eq!(edge.to, focus);
+        assert_eq!(edge.direction, RelationDirection::Incoming);
+        assert_eq!(edge.origin.authority, SourceAuthority::Authored);
+        assert_eq!(edge.origin.revision.as_deref(), Some("1"));
+        assert!(view.nodes.iter().any(|n| n.resource.as_str() == "wiki:space:root"));
+    }
+
+    /// Reaching both ends of one membership must yield one edge, not two.
+    /// The enclosing projection keys identically to the containing one, so
+    /// a traversal deep enough to arrive from either side still sees a
+    /// single assertion.
+    #[test]
+    fn one_membership_is_one_edge_however_the_traversal_arrives() {
+        let index = fixture();
+        let provider = SemanticWikiProvider::new(&index);
+        let mut query = RelationQuery::local(ResourceRef::parse("wiki:space:root").unwrap());
+        query.depth = 2;
+        let view = provider.relations(query).unwrap();
+
+        for node in ["wiki:node:a", "wiki:node:b"] {
+            let count = view
+                .edges
+                .iter()
+                .filter(|e| {
+                    e.relation == "member"
+                        && e.from.as_str() == "wiki:space:root"
+                        && e.to.as_str() == node
+                })
+                .count();
+            assert_eq!(count, 1, "membership duplicated for {node}: {view:?}");
+        }
+    }
+
+    /// A Space reaches its own parent for the same reason a node reaches its
+    /// Space: `parent_space_refs` is the enclosing half of `child_space_refs`.
+    #[test]
+    fn a_space_reaches_its_parent_space() {
+        let objects = parse_wiki_objects(
+            r#"{"objects":[
+              {"profile":"okf-wiki/v1","object":"space","ref":"wiki:space:root","revision":3,
+               "provenance":[],"title":"Root","parent_space_refs":[],
+               "child_space_refs":["wiki:space:child"],"node_refs":[]},
+              {"profile":"okf-wiki/v1","object":"space","ref":"wiki:space:child","revision":1,
+               "provenance":[],"title":"Child","parent_space_refs":["wiki:space:root"],
+               "child_space_refs":[],"node_refs":[]}
+            ]}"#,
+        )
+        .unwrap();
+        let index = SemanticWikiIndex::rebuild(objects).unwrap();
+        let provider = SemanticWikiProvider::new(&index);
+        let focus = ResourceRef::parse("wiki:space:child").unwrap();
+        let view = provider.relations(RelationQuery::local(focus.clone())).unwrap();
+
+        let parents: Vec<_> = view
+            .edges
+            .iter()
+            .filter(|e| e.relation == "child-space")
+            .collect();
+        assert_eq!(parents.len(), 1, "the child reaches its parent: {view:?}");
+        assert_eq!(parents[0].from.as_str(), "wiki:space:root");
+        assert_eq!(parents[0].to, focus);
+        assert_eq!(parents[0].direction, RelationDirection::Incoming);
+        assert_eq!(parents[0].origin.revision.as_deref(), Some("3"));
+    }
+
     #[test]
     fn space_membership_is_native_bounded_revision_bearing_relation() {
         let index = fixture();
