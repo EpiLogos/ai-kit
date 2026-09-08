@@ -13,6 +13,7 @@ use crate::knowledge_code::{CodeIndexProvider, CodeReference};
 use crate::knowledge_source_pool::{
     SourceMaterial, SourcePoolProvider, SourceProviderStatus, SourceSearchMode,
 };
+use crate::knowledge_wiki_index::WikiSearchAddress;
 use crate::knowledge_wiki_provider::{SemanticWikiProviderStatus, WikiProvider};
 use crate::project_map::{ProjectLens, ProjectMap, ProjectMapEndpoint, ProjectMapStep};
 use crate::resource::{ProviderRef, ResourceKind, ResourceRef, SourceAuthority, SourceRef};
@@ -203,21 +204,50 @@ impl<'a> KnowledgeApplication<'a> {
 
         if let Some(wiki) = &self.wiki {
             hits.extend(wiki.search(query, limit).into_iter().map(|hit| {
-                let kind = match hit.object.as_str() {
-                    "space" => ResourceKind::KnowledgeSpace,
-                    "frame" => ResourceKind::KnowledgeFrame,
-                    _ => ResourceKind::KnowledgeNode,
-                };
-                KnowledgeSearchHit {
-                    address: KnowledgeAddress::Wiki(hit.resource.clone()),
-                    resource: hit.resource,
-                    kind,
-                    label: hit.label,
-                    score: 1.0 / (1.0 + f64::from(hit.score)),
-                    snippet: hit.summary,
-                    provider: wiki.status().provider,
-                    authority: SourceAuthority::Authored,
-                    ranking: None,
+                match &hit.address {
+                    // A curated Wiki object keeps the Wiki address and the
+                    // KnowledgeNode/Space/Frame kind it always had.
+                    WikiSearchAddress::Curated { resource } => {
+                        let kind = match hit.object.as_str() {
+                            "space" => ResourceKind::KnowledgeSpace,
+                            "frame" => ResourceKind::KnowledgeFrame,
+                            _ => ResourceKind::KnowledgeNode,
+                        };
+                        KnowledgeSearchHit {
+                            address: KnowledgeAddress::Wiki(resource.clone()),
+                            resource: resource.clone(),
+                            kind,
+                            label: hit.label,
+                            score: 1.0 / (1.0 + f64::from(hit.score)),
+                            snippet: hit.summary,
+                            provider: wiki.status().provider,
+                            authority: SourceAuthority::Authored,
+                            ranking: None,
+                        }
+                    }
+                    // A source cited by a curated node is findable, but it is
+                    // not itself curated Wiki identity: it reaches the
+                    // product surface as a Source address, addressable by
+                    // the CLI's own `source=REF` form. Unlike a SourcePool
+                    // hit — an eligible, `Observed` project artefact — this
+                    // is the owner's own authored citation, so it keeps
+                    // `Authored` authority; only its provenance house
+                    // differs from a curated Wiki object.
+                    WikiSearchAddress::AuthoredSource { source } => {
+                        let resource = ResourceRef::parse(source.as_str())
+                            .expect("SourceRef validation is compatible with ResourceRef validation");
+                        KnowledgeSearchHit {
+                            address: KnowledgeAddress::Source(source.clone()),
+                            resource,
+                            kind: ResourceKind::KnowledgeSource,
+                            label: hit.label,
+                            score: 1.0 / (1.0 + f64::from(hit.score)),
+                            snippet: hit.summary,
+                            provider: wiki.status().provider,
+                            authority: SourceAuthority::Authored,
+                            ranking: None,
+                        }
+                    }
                 }
             }));
         } else {
@@ -1373,5 +1403,47 @@ mod tests {
             index.resolve(&ResourceRef::parse("wiki:node:auth").unwrap()),
             Some(WikiObject::Node(_))
         ));
+    }
+
+    /// CASE 19: the authored source `wiki:node:auth` cites (`source:spec`)
+    /// must reach the application surface as a distinct `Source` address —
+    /// not folded into the curated `Wiki` hit for the node that cites it —
+    /// carrying `KnowledgeSource`/`Authored`, so the CLI's existing
+    /// `source=REF` dispatch can already resolve it.
+    #[test]
+    fn authored_source_search_hits_map_to_a_distinct_source_address() {
+        let index = wiki();
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(SemanticWikiProvider::new(&index));
+
+        // "auth" matches the curated node by its own title *and* matches the
+        // cited source only through that same title, riding as the source's
+        // citing-node label — exactly the second search pass this case adds.
+        let result = app.search("auth", 10);
+        let curated = result
+            .hits
+            .iter()
+            .find(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .expect("the curated node itself remains findable");
+        assert!(matches!(curated.address, KnowledgeAddress::Wiki(_)));
+        assert_eq!(curated.kind, ResourceKind::KnowledgeNode);
+        assert_eq!(curated.authority, SourceAuthority::Authored);
+
+        let authored_source = result
+            .hits
+            .iter()
+            .find(|hit| hit.resource.as_str() == "source:spec")
+            .expect("the cited source is independently findable");
+        assert_eq!(
+            authored_source.address,
+            KnowledgeAddress::Source(SourceRef::parse("source:spec").unwrap())
+        );
+        assert_eq!(authored_source.kind, ResourceKind::KnowledgeSource);
+        assert_eq!(authored_source.authority, SourceAuthority::Authored);
+
+        // Distinct hits in the same result set: neither collapses into the
+        // other, and the authored source is dispatchable through the same
+        // `source=REF` CLI form as any other Source address.
+        assert_ne!(curated.address, authored_source.address);
     }
 }

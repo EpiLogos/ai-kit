@@ -670,7 +670,20 @@ mod tests {
             "wiki:space:register-a"
         );
         assert_eq!(provider.discover().len(), 4);
-        assert_eq!(provider.search("Alpha", 10).len(), 1);
+        // "Alpha" finds the curated node by its own title, and also finds
+        // `source:canon` — the source that node cites — through the same
+        // citing-node label (CASE 19). The cited source never joins
+        // `discover()`, which stays at 4 curated objects above.
+        let alpha_hits = provider.search("Alpha", 10);
+        assert_eq!(alpha_hits.len(), 2);
+        assert!(alpha_hits
+            .iter()
+            .any(|hit| hit.address.as_curated().map(ResourceRef::as_str) == Some("wiki:node:a")));
+        assert!(alpha_hits.iter().any(|hit| hit
+            .address
+            .as_authored_source()
+            .map(SourceRef::as_str)
+            == Some("source:canon")));
         let alpha = ResourceRef::parse("wiki:node:a").unwrap();
         assert_eq!(
             provider.read(&alpha).unwrap().revision.as_deref(),
