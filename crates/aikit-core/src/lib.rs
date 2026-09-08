@@ -108,7 +108,9 @@ pub use capsule::{
     BypassPolicy, Capsule, ControlGround, ControlStanding, Facets, Facing, FailurePolicy, HookPhase,
     Kind, LanguageFacet, Maturity, Payload, Requirement, Surface,
 };
-pub use continuity::{ContinuityTuning, CONTINUITY_NAMESPACE, FLOOR_CAPABILITY, TURN_LEDGER};
+pub use continuity::{
+    CapabilityTuning, ContinuityTuning, CONTINUITY_NAMESPACE, FLOOR_CAPABILITY, TURN_LEDGER,
+};
 pub use catalog::{Catalog, MemoryCatalog};
 pub use composition::{
     resolve_composition_body, resolve_harness_composition, ActivationScope, ActivationScopeKind,

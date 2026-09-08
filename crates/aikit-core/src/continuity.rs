@@ -18,6 +18,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::id::CapsuleId;
+use crate::profile::ConfigTable;
 use crate::resolve::ResolvedView;
 
 /// The capability namespace that carries first-party continuity reactions.
@@ -84,7 +85,10 @@ pub fn is_continuity_capability(id: &CapsuleId) -> bool {
             .is_some()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// No `Eq`: the tuning carries a TOML config table, and `toml::Value` is only
+// `PartialEq` (it can hold floats). `PartialEq` is all the reports and tests
+// need.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContinuityTuning {
     /// The floor: always law, never composed-by-someone.
     pub floor: &'static str,
@@ -94,6 +98,31 @@ pub struct ContinuityTuning {
     /// Continuity capabilities known to the registry but not selected — the
     /// honest "not composed" answer the engine gives when asked.
     pub not_composed: Vec<String>,
+    /// The tuning values in effect for each composed continuity capability,
+    /// keyed by continuity name, alongside the composition that selected the
+    /// capability. This makes an adjusted value *attributable to the active
+    /// composition*: it is read from that resolved capability, never from
+    /// ambient global state.
+    ///
+    /// Defaulted for serde so a lock written before attribution existed still
+    /// reads back.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tunings: BTreeMap<String, CapabilityTuning>,
+}
+
+/// The tuning values one composed continuity capability is running under, and
+/// the composition layer they were selected through.
+///
+/// An empty `values` is a real answer, not a missing one: the capability is
+/// composed and running on its own declared defaults, adjusted by nobody.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CapabilityTuning {
+    /// Where this capsule's active selection came from, as
+    /// [`crate::resolve::SelectionOrigin::describe`] renders it.
+    pub composition: String,
+    /// The `[config.<capsule-id>]` table in effect after the layer merge —
+    /// the adjusted values themselves, not a summary of them.
+    pub values: ConfigTable,
 }
 
 impl ContinuityTuning {
@@ -122,10 +151,26 @@ impl ContinuityTuning {
             }
         }
         not_composed.sort();
+        // The values each composed reaction is running under, read from the
+        // same view at the same instant as the composition itself — so the
+        // report can never disagree with the behaviour it describes.
+        let mut tunings = BTreeMap::new();
+        for (id, active) in &view.active {
+            if is_continuity_capability(id) {
+                tunings.insert(
+                    continuity_name(id),
+                    CapabilityTuning {
+                        composition: active.origin.describe(),
+                        values: active.config.clone(),
+                    },
+                );
+            }
+        }
         Self {
             floor: FLOOR_CAPABILITY,
             composed,
             not_composed,
+            tunings,
         }
     }
 
@@ -137,15 +182,19 @@ impl ContinuityTuning {
 
     /// The inspection report `aikit context` renders: every value attributed
     /// to the composition that produced it.
-    pub fn describe(&self) -> BTreeMap<String, Vec<String>> {
-        let mut report = BTreeMap::new();
-        report.insert(
-            "floor".to_string(),
-            vec![self.floor.to_string()],
-        );
-        report.insert("composed".to_string(), self.composed.clone());
-        report.insert("not_composed".to_string(), self.not_composed.clone());
-        report
+    ///
+    /// The floor, what the composition selected, what it knowingly did not,
+    /// and — per composed capability — the tuning values in effect with the
+    /// composition that selected it. An operator reading this can answer
+    /// "what is this composition running with" without consulting anything
+    /// ambient.
+    pub fn describe(&self) -> serde_json::Value {
+        serde_json::json!({
+            "floor": self.floor,
+            "composed": self.composed,
+            "not_composed": self.not_composed,
+            "tunings": self.tunings,
+        })
     }
 }
 
@@ -159,7 +208,9 @@ fn continuity_name(id: &CapsuleId) -> String {
 
 impl fmt::Display for ContinuityTuning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "floor: {}; composed: [{}]; not composed: [{}]",
+        write!(
+            f,
+            "floor: {}; composed: [{}]; not composed: [{}]",
             self.floor,
             self.composed.join(", "),
             self.not_composed.join(", "),

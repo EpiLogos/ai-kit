@@ -2067,11 +2067,10 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
                 "host": d.host,
                 "mux": d.mux.map(|m| m.as_str()),
                 "targets": d.targets.iter().map(|t| t.as_str().to_string()).collect::<Vec<_>>(),
-                "continuity": {
-                    "floor": tuning.floor,
-                    "composed": tuning.composed,
-                    "not_composed": tuning.not_composed,
-                },
+                // The attribution surface itself: the composition's own
+                // report, values included, rather than three fields copied
+                // out of it here and drifting from it later.
+                "continuity": tuning.describe(),
             });
             Ok(reply(&service, data, vec![]))
         }
@@ -2278,11 +2277,7 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
         "injected": decision.injected_text(),
         "bypassed": decision.was_bypassed(),
         "warnings": decision.warnings,
-        "continuity": {
-            "floor": tuning.floor,
-            "composed": tuning.composed,
-            "not_composed": tuning.not_composed,
-        },
+        "continuity": tuning.describe(),
     });
     Ok(reply(&service, data, vec![]))
 }
