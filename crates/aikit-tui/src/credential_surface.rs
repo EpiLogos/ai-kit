@@ -9,6 +9,8 @@ use aikit_core::credential::{
 };
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::layout::Glyphs;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CredentialSetupView {
     pub credential_ref: CredentialRef,
@@ -24,16 +26,21 @@ pub struct CredentialSetupView {
     pub headless: bool,
 }
 
-pub fn render_credential_setup_panel(view: &CredentialSetupView) -> String {
+/// Render the disclosure panel with an already-resolved host glyph
+/// capability. The caller resolves it once at its own boundary — the CLI
+/// credential flow does so from [`Glyphs::from_env`] — rather than this
+/// function reading the environment per call.
+pub fn render_credential_setup_panel(view: &CredentialSetupView, glyphs: Glyphs) -> String {
+    let sep = glyphs.separator();
     let native = &view.native_provider;
     let native_status = if native.available {
         if native.supported_credentials.contains(&view.credential_ref) {
-            "available · bound"
+            format!("available {sep} bound")
         } else {
-            "available · unbound"
+            format!("available {sep} unbound")
         }
     } else {
-        "unavailable"
+        "unavailable".to_string()
     };
     let materialisation = native
         .supported_materialisation
@@ -48,7 +55,7 @@ pub fn render_credential_setup_panel(view: &CredentialSetupView) -> String {
         format!("For: {}", view.purpose),
         format!("Consumer: {}", view.consumer_ref),
         format!(
-            "Native store: {} · tier {} · {native_status}",
+            "Native store: {} {sep} tier {} {sep} {native_status}",
             native.provider_kind,
             tier_name(native.tier)
         ),
@@ -75,11 +82,13 @@ pub fn render_credential_setup_panel(view: &CredentialSetupView) -> String {
     lines.push("  [1] Enter secret and bind it to the OS secure store".into());
     if let Some(env_var) = &view.env_var {
         lines.push(format!(
-            "  [2] Import explicitly from {env_var} (--from-env) · {} · lowest tier",
+            "  [2] Import explicitly from {env_var} (--from-env) {sep} {} {sep} lowest tier",
             env_route_status(view.env_available)
         ));
     } else {
-        lines.push("  [2] Import explicitly from a named environment variable (--from-env --env-var NAME) · lowest tier".into());
+        lines.push(format!(
+            "  [2] Import explicitly from a named environment variable (--from-env --env-var NAME) {sep} lowest tier"
+        ));
     }
     if view.encrypted_fallback_available {
         lines.push(
@@ -91,9 +100,14 @@ pub fn render_credential_setup_panel(view: &CredentialSetupView) -> String {
     lines.join("\n")
 }
 
-pub fn credential_setup_widget(view: &CredentialSetupView) -> Paragraph<'static> {
-    Paragraph::new(render_credential_setup_panel(view))
-        .block(Block::default().borders(Borders::ALL).title("Credentials"))
+pub fn credential_setup_widget(view: &CredentialSetupView, glyphs: Glyphs) -> Paragraph<'static> {
+    Paragraph::new(render_credential_setup_panel(view, glyphs))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_set(glyphs.border_set())
+                .title("Credentials"),
+        )
 }
 
 fn env_route_status(declared: bool) -> &'static str {
@@ -169,7 +183,7 @@ mod tests {
 
     #[test]
     fn interactive_panel_keeps_env_import_visible_without_claiming_value_was_read() {
-        insta::assert_snapshot!(render_credential_setup_panel(&view(false)), @r###"
+        insta::assert_snapshot!(render_credential_setup_panel(&view(false), Glyphs::unicode()), @r###"
         Credential setup
         Credential: credential:openai/research
         For: provider inference
@@ -185,9 +199,30 @@ mod tests {
         "###);
     }
 
+    /// The ASCII set carries the same disclosures in the same order, with
+    /// the separator swapped and nothing else — the panel says exactly as
+    /// much on a terminal that cannot draw `·` as on one that can.
+    #[test]
+    fn the_ascii_panel_discloses_the_same_routes() {
+        insta::assert_snapshot!(render_credential_setup_panel(&view(false), Glyphs::ascii()), @r###"
+        Credential setup
+        Credential: credential:openai/research
+        For: provider inference
+        Consumer: harness:pi
+        Native store: macos-keychain - tier os-secure-store - available - unbound
+        Materialisation: provider-native-lease
+        Binding provenance: macos-keychain:service=dev.aikit.credentials;account=credential:openai/research
+
+        Choose a credential source:
+          [1] Enter secret and bind it to the OS secure store
+          [2] Import explicitly from OPENAI_API_KEY (--from-env) - route declared; value unread until explicit selection - lowest tier
+          [q] Cancel
+        "###);
+    }
+
     #[test]
     fn headless_panel_never_offers_secret_prompt() {
-        let rendered = render_credential_setup_panel(&view(true));
+        let rendered = render_credential_setup_panel(&view(true), Glyphs::unicode());
         assert!(!rendered.contains("Enter secret"));
         assert!(rendered.contains("no secret prompt"));
         assert!(rendered.contains("--from-env"));

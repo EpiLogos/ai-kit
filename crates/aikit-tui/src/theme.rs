@@ -19,6 +19,8 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::BorderType;
 
+use crate::layout::Glyphs;
+
 /// The palette's styles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme;
@@ -83,7 +85,15 @@ impl Theme {
         Style::default().add_modifier(Modifier::DIM)
     }
 
-    /// Always plain. See the module header.
+    /// Always plain: one frame, never nested, never doubled. See the module
+    /// header.
+    ///
+    /// This says which border, not what it is drawn with — every `BorderType`
+    /// `ratatui` offers is box-drawing. A block that must survive a
+    /// non-UTF-8 terminal takes its characters from
+    /// [`crate::layout::Glyphs::border_set`] instead, which is why the two
+    /// V2 surface blocks call `.border_set(...)` rather than
+    /// `.border_type(...)`.
     pub fn border_type(self) -> BorderType {
         BorderType::Plain
     }
@@ -93,9 +103,11 @@ impl Theme {
     /// Two frames, driven by the event loop's idle poll. A spinner is the one
     /// place motion carries information — that something is still happening —
     /// and everything else is static on purpose.
-    pub fn tick(self, frame: u64) -> &'static str {
+    /// The tick's visible frame is a mark like any other, so it comes from
+    /// the already-resolved host glyph set rather than a literal.
+    pub fn tick(self, frame: u64, glyphs: Glyphs) -> &'static str {
         if frame.is_multiple_of(2) {
-            "·"
+            glyphs.separator()
         } else {
             " "
         }

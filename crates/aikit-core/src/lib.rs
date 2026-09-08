@@ -212,10 +212,10 @@ pub use id::{
     RegistrySource, Revision, SessionId,
 };
 pub use knowledge::{
-    ContextPackBudget, KnowledgeContextPack, KnowledgeReading, KnowledgeRelationView,
-    KnowledgeRoute, KnowledgeRouteStep, RelationDirection, RelationEdge, RelationNode,
-    RelationOrigin, RelationQuery, DEFAULT_RELATION_DEPTH, DEFAULT_RELATION_EDGE_BUDGET,
-    DEFAULT_RELATION_NODE_BUDGET,
+    ContainmentRole, ContextPackBudget, KnowledgeContextPack, KnowledgeReading,
+    KnowledgeRelationView, KnowledgeRoute, KnowledgeRouteStep, RelationDirection, RelationEdge,
+    RelationNode, RelationOrigin, RelationQuery, DEFAULT_RELATION_DEPTH,
+    DEFAULT_RELATION_EDGE_BUDGET, DEFAULT_RELATION_NODE_BUDGET,
 };
 pub use knowledge_code::{
     CodeContext, CodeImpact, CodeIndexCapabilities, CodeIndexProvider, CodeIndexStatus,

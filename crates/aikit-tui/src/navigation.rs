@@ -8,6 +8,7 @@
 use aikit_core::resource::{ContextualActionDescriptor, ResourceSearchHit, ResourceRef};
 
 use crate::application::PresentationMode;
+use crate::layout::Glyphs;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NavigationIntent {
@@ -40,7 +41,8 @@ impl AmbientContext {
     /// Narrow surfaces carry truthful values without verbose labels so the current
     /// Project/Focus/Host remain legible. Wide surfaces add the explicit labels and
     /// only show Profile/Agency/Target when authoritative values are actually known.
-    pub fn line(&self, width: u16) -> String {
+    pub fn line(&self, width: u16, glyphs: Glyphs) -> String {
+        let separator = format!(" {} ", glyphs.separator());
         if width < 80 {
             return [
                 self.project.as_deref(),
@@ -51,7 +53,7 @@ impl AmbientContext {
             .flatten()
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>()
-            .join(" · ");
+            .join(&separator);
         }
 
         let mut parts = Vec::new();
@@ -61,7 +63,7 @@ impl AmbientContext {
         push(&mut parts, "Profile", self.profile.as_deref());
         push(&mut parts, "Agency", self.agency.as_deref());
         push(&mut parts, "Target", self.target.as_deref());
-        parts.join(" · ")
+        parts.join(&separator)
     }
 }
 
@@ -214,8 +216,8 @@ mod tests {
             target: Some("codex".into()),
         };
 
-        let narrow = context.line(60);
-        let wide = context.line(120);
+        let narrow = context.line(60, Glyphs::unicode());
+        let wide = context.line(120, Glyphs::unicode());
         assert_eq!(narrow, "ai-kit · V2-E1 · worker-laptop");
         assert!(wide.contains("Project: ai-kit"));
         assert!(wide.contains("Focus: V2-E1"));
@@ -223,6 +225,33 @@ mod tests {
         assert!(wide.contains("Profile: code"));
         assert!(wide.contains("Agency: Mahāmāyā"));
         assert!(wide.contains("Target: codex"));
+    }
+
+    /// The ASCII set carries the same dimensions in the same order, with the
+    /// separator swapped and nothing else. An authoritative value that is
+    /// itself non-ASCII (`Mahāmāyā`) is content, not chrome: the glyph set
+    /// governs the marks this module draws, and transliterating somebody's
+    /// Agency name would be a different — and wrong — kind of fallback.
+    #[test]
+    fn the_ascii_context_chrome_carries_the_same_dimensions() {
+        let context = AmbientContext {
+            project: Some("ai-kit".into()),
+            focus: Some("V2-E1".into()),
+            profile: Some("code".into()),
+            agency: Some("Mahāmāyā".into()),
+            host: Some("worker-laptop".into()),
+            target: Some("codex".into()),
+        };
+
+        assert_eq!(
+            context.line(60, Glyphs::ascii()),
+            "ai-kit - V2-E1 - worker-laptop"
+        );
+        let wide = context.line(120, Glyphs::ascii());
+        assert_eq!(
+            wide,
+            "Project: ai-kit - Focus: V2-E1 - Host: worker-laptop - Profile: code - Agency: Mahāmāyā - Target: codex"
+        );
     }
 
     #[test]
@@ -234,7 +263,7 @@ mod tests {
             target: Some("codex".into()),
             ..AmbientContext::default()
         };
-        let wide = context.line(120);
+        let wide = context.line(120, Glyphs::unicode());
         assert!(!wide.contains("Profile:"));
         assert!(!wide.contains("Agency:"));
         assert!(wide.contains("Target: codex"));
