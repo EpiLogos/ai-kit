@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use std::io;
 
 use aikit_core::resource::ActionStageability;
-use aikit_core::{AikitError, KnowledgeRelationView, ProjectWorldReadModel, RelationDirection, ResourceRef, Result};
+use aikit_core::{
+    AikitError, KnowledgeRelationView, ProjectWorldReadModel, ResourceRef, Result,
+};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
     MouseEventKind,
@@ -31,7 +33,7 @@ use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::graph_layout::{self, GraphLayout, GraphLayoutRequest, GraphViewport, RelationBand};
 use crate::graph_presentation;
 use crate::host::UiHost;
-use crate::layout::{Layout, Width};
+use crate::layout::{Glyphs, Layout, Width};
 use crate::navigation::AmbientContext;
 use crate::project_workspace_render::workspace_section_label;
 use crate::project_world_api::ProjectWorldApplicationService;
@@ -59,14 +61,16 @@ pub struct ApplicationSurfaceRequest {
     pub initial_query: Option<String>,
     pub initial_relation_view: RelationView,
     pub initial_workspace_section: WorkspaceSection,
-    /// Explicit Graph glyph-set override. `None` (every real run) resolves
-    /// host capability once at construction, from
-    /// [`crate::layout::Glyphs::from_env`] — see [`ApplicationSurfaceController::graph_glyphs`].
-    /// `Some` is the injection point a test uses to pin ASCII or Unicode
-    /// deterministically instead of depending on the process locale, without
-    /// mutating process-global environment variables (which `nextest`'s
-    /// parallel test execution makes racy).
-    graph_glyphs: Option<graph_layout::GraphGlyphs>,
+    /// Explicit host glyph-capability override, governing every mark this
+    /// surface draws — the resting shell's chrome and the Graph's connectors
+    /// alike. `None` (every real run) resolves the capability once at
+    /// construction from [`crate::layout::Glyphs::from_env`] — see
+    /// [`ApplicationSurfaceController::shell_glyphs`]. `Some` is the
+    /// injection point a test uses to pin ASCII or Unicode deterministically
+    /// instead of depending on the process locale, without mutating
+    /// process-global environment variables (which `nextest`'s parallel test
+    /// execution makes racy).
+    glyphs: Option<Glyphs>,
 }
 
 impl ApplicationSurfaceRequest {
@@ -76,7 +80,7 @@ impl ApplicationSurfaceRequest {
             initial_query: None,
             initial_relation_view: RelationView::List,
             initial_workspace_section: WorkspaceSection::Projects,
-            graph_glyphs: None,
+            glyphs: None,
         }
     }
 
@@ -86,12 +90,15 @@ impl ApplicationSurfaceRequest {
         self
     }
 
-    /// Pin the Graph glyph set this surface renders with, overriding host
-    /// locale detection. For tests only — real callers leave this unset so
-    /// `Glyphs::from_env()` governs, exactly as before.
+    /// Pin the glyph capability this surface renders with — shell chrome and
+    /// Graph connectors together — overriding host locale detection. For
+    /// tests only; real callers leave this unset so `Glyphs::from_env()`
+    /// governs. One knob rather than two: a frame drawn with an ASCII footer
+    /// and Unicode graph connectors is exactly the mixed rendering
+    /// `layout.rs`'s module header rules out.
     #[must_use]
-    pub fn with_graph_glyphs(mut self, glyphs: graph_layout::GraphGlyphs) -> Self {
-        self.graph_glyphs = Some(glyphs);
+    pub fn with_glyphs(mut self, glyphs: Glyphs) -> Self {
+        self.glyphs = Some(glyphs);
         self
     }
 
@@ -117,15 +124,22 @@ pub struct ApplicationSurfaceController {
     project_world: Option<ProjectWorldReadModel>,
     ambient: AmbientContext,
     graph_layout: Option<(GraphLayoutCacheKey, GraphLayout)>,
-    /// Host glyph capability for the Graph presentation, resolved exactly
-    /// once — here, at construction, alongside `ambient` — rather than
-    /// sniffed live inside the render path. A rendered frame is then a pure
-    /// function of `semantic`/`graph_layout` and this already-resolved
-    /// capability, never of the live process environment. Real callers get
+    /// Host glyph capability for the resting shell — the footer's keycap
+    /// hints, field separators, cursors and elision marks — resolved exactly
+    /// once, here at construction alongside `ambient`, rather than sniffed
+    /// live inside the render path. A rendered frame is then a pure function
+    /// of `semantic`/`graph_layout` and this already-resolved capability,
+    /// never of the live process environment. Real callers get
     /// [`crate::layout::Glyphs::from_env`]'s answer (`ApplicationSurfaceRequest`
-    /// leaves `graph_glyphs` unset); [`ApplicationSurfaceRequest::with_graph_glyphs`]
-    /// is the injection point a test uses to pin ASCII or Unicode
+    /// leaves `glyphs` unset); [`ApplicationSurfaceRequest::with_glyphs`] is
+    /// the injection point a test uses to pin ASCII or Unicode
     /// deterministically instead.
+    shell_glyphs: Glyphs,
+    /// The Graph presentation's connector set, derived from `shell_glyphs`
+    /// by [`graph_glyphs_for`] at that same single construction-time
+    /// reading. Two glyph types because the Graph's connectors answer a
+    /// question the shell's marks do not; one capability behind both,
+    /// because a frame must not come out half ASCII.
     graph_glyphs: graph_layout::GraphGlyphs,
     /// Whether the Graph-local filter text lane (`/`) is currently open.
     /// Controller-only input-routing state, not `TuiState`: it decides which
@@ -151,7 +165,10 @@ impl ApplicationSurfaceController {
         request: ApplicationSurfaceRequest,
     ) -> Result<Self> {
         let ambient = ambient_context(backend.context());
-        let graph_glyphs = request.graph_glyphs.unwrap_or_else(default_graph_glyphs);
+        // One reading of host capability, at the one boundary that is
+        // allowed to look: everything drawn below is a function of it.
+        let shell_glyphs = request.glyphs.unwrap_or_else(Glyphs::from_env);
+        let graph_glyphs = graph_glyphs_for(shell_glyphs);
         let mut semantic = TuiState {
             presentation: if matches!(request.host, UiHost::Inline(_)) {
                 PresentationMode::Quick
@@ -181,6 +198,7 @@ impl ApplicationSurfaceController {
             project_world,
             ambient,
             graph_layout: None,
+            shell_glyphs,
             graph_glyphs,
             graph_filter_editing: false,
             graph_layout_recomputes: 0,
@@ -241,9 +259,20 @@ impl ApplicationSurfaceController {
 
     pub fn draw(&self, frame: &mut ratatui::Frame) {
         if let Some(world) = &self.project_world {
-            v2_render::draw_with_project_world(frame, &self.semantic, &self.ambient, world);
+            v2_render::draw_with_project_world(
+                frame,
+                &self.semantic,
+                &self.ambient,
+                world,
+                self.shell_glyphs,
+            );
         } else {
-            v2_render::draw_with_context(frame, &self.semantic, &self.ambient);
+            v2_render::draw_with_context(
+                frame,
+                &self.semantic,
+                &self.ambient,
+                self.shell_glyphs,
+            );
         }
         if self.semantic.presentation == PresentationMode::Workspace
             && self.semantic.workspace_section == WorkspaceSection::Explore
@@ -780,20 +809,24 @@ impl ApplicationSurfaceController {
         );
         let panes = Layout::for_width(inner.width).split(inner);
         let theme = Theme::new();
+        let sep = self.shell_glyphs.separator();
         let title = if self.semantic.relation_view == RelationView::Graph {
             format!(
-                " Relations · Graph · depth {} {}",
+                " Relations {sep} Graph {sep} depth {} {}",
                 self.semantic.graph.depth,
                 if self.semantic.graph.filter.is_empty() {
                     String::new()
                 } else {
-                    format!("· filter \"{}\" ", self.semantic.graph.filter)
+                    format!("{sep} filter \"{}\" ", self.semantic.graph.filter)
                 }
             )
         } else {
-            format!(" Relations · {:?} ", self.semantic.relation_view)
+            format!(" Relations {sep} {:?} ", self.semantic.relation_view)
         };
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(self.shell_glyphs.border_set())
+            .title(title);
 
         let lines = if self.semantic.relation_view == RelationView::Graph {
             let glyphs = self.graph_glyphs;
@@ -809,7 +842,12 @@ impl ApplicationSurfaceController {
                 None => vec![Line::from(Span::styled("no relation state", theme.dim()))],
             }
         } else {
-            relation_lines(self.relation.as_ref(), self.semantic.relation_view, &theme)
+            relation_lines(
+                self.relation.as_ref(),
+                self.semantic.relation_view,
+                &theme,
+                self.shell_glyphs,
+            )
         };
         frame.render_widget(
             Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
@@ -818,16 +856,15 @@ impl ApplicationSurfaceController {
     }
 }
 
-/// Default Graph glyph-set resolution for real runs: mirrors
-/// `Glyphs::from_env` (`layout.rs`) exactly rather than re-deriving its own
-/// environment heuristic, so a single `AIKIT_ASCII`/locale check governs
-/// every glyph set this crate renders. Called exactly once, at
-/// [`ApplicationSurfaceController::new`], when the request leaves
-/// `graph_glyphs` unset — never at draw time. See
-/// [`ApplicationSurfaceController::graph_glyphs`] and
-/// [`ApplicationSurfaceRequest::with_graph_glyphs`].
-fn default_graph_glyphs() -> graph_layout::GraphGlyphs {
-    if crate::layout::Glyphs::from_env().is_ascii() {
+/// The Graph connector set that goes with one already-resolved host glyph
+/// capability. Derived rather than sniffed separately, so a single
+/// `AIKIT_ASCII`/locale reading governs every glyph set this crate renders
+/// and the two can never disagree. Called exactly once, at
+/// [`ApplicationSurfaceController::new`] — never at draw time. See
+/// [`ApplicationSurfaceController::shell_glyphs`] and
+/// [`ApplicationSurfaceRequest::with_glyphs`].
+fn graph_glyphs_for(glyphs: Glyphs) -> graph_layout::GraphGlyphs {
+    if glyphs.is_ascii() {
         graph_layout::GraphGlyphs::ascii()
     } else {
         graph_layout::GraphGlyphs::unicode()
@@ -852,7 +889,7 @@ fn workspace_tab_hit(state: &TuiState, query_x: u16, column: u16) -> Option<Work
         .saturating_add(3)
         .saturating_add(6); // `Search`
     for section in WorkspaceSection::ALL {
-        cursor = cursor.saturating_add(3); // ` · `
+        cursor = cursor.saturating_add(3); // the separator plus its two spaces
         let label = workspace_section_label(section);
         let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
         if column >= cursor && column < cursor.saturating_add(width) {
@@ -874,17 +911,22 @@ fn relation_lines<'a>(
     relation: Option<&'a RelationReadModel>,
     view: RelationView,
     theme: &Theme,
+    glyphs: Glyphs,
 ) -> Vec<Line<'a>> {
     let Some(relation) = relation else {
         return vec![Line::from(Span::styled("no relation state", theme.dim()))];
     };
     match view {
-        RelationView::Tree => tree_relation_lines(relation, theme),
-        RelationView::List | RelationView::Graph => list_relation_lines(relation, theme),
+        RelationView::Tree => tree_relation_lines(relation, theme, glyphs),
+        RelationView::List | RelationView::Graph => list_relation_lines(relation, theme, glyphs),
     }
 }
 
-fn list_relation_lines<'a>(relation: &'a RelationReadModel, theme: &Theme) -> Vec<Line<'a>> {
+fn list_relation_lines<'a>(
+    relation: &'a RelationReadModel,
+    theme: &Theme,
+    glyphs: Glyphs,
+) -> Vec<Line<'a>> {
     let mut lines = vec![Line::from(Span::styled(
         relation.subject.to_string(),
         theme.heading(),
@@ -903,11 +945,7 @@ fn list_relation_lines<'a>(relation: &'a RelationReadModel, theme: &Theme) -> Ve
         } else {
             &edge.from
         };
-        let arrow = match edge.direction {
-            RelationDirection::Outgoing => "──▶",
-            RelationDirection::Incoming => "◀──",
-            RelationDirection::Bidirectional => "◀─▶",
-        };
+        let arrow = glyphs.relation_arrow(edge.direction);
         let detail = format!(
             "{} {arrow} {other}  ({:?})",
             edge.relation, edge.origin.authority
@@ -934,7 +972,11 @@ fn list_relation_lines<'a>(relation: &'a RelationReadModel, theme: &Theme) -> Ve
 /// not the Graph projection's cached layout (see
 /// `ApplicationSurfaceController::graph_layout`), which is the one this
 /// crate's "recompute only when inputs change" contract actually governs.
-fn tree_relation_lines<'a>(relation: &'a RelationReadModel, theme: &Theme) -> Vec<Line<'a>> {
+fn tree_relation_lines<'a>(
+    relation: &'a RelationReadModel,
+    theme: &Theme,
+    glyphs: Glyphs,
+) -> Vec<Line<'a>> {
     let mut lines = vec![Line::from(Span::styled(
         relation.subject.to_string(),
         theme.heading(),
@@ -953,7 +995,10 @@ fn tree_relation_lines<'a>(relation: &'a RelationReadModel, theme: &Theme) -> Ve
         .collect();
     if context.is_empty() && contained.is_empty() {
         lines.push(Line::from(Span::styled(
-            "no genuine containment relation in this neighbourhood — Tree only shows hierarchy; List shows the full typed neighbourhood",
+            format!(
+                "no genuine containment relation in this neighbourhood {} Tree only shows hierarchy; List shows the full typed neighbourhood",
+                glyphs.dash()
+            ),
             theme.dim(),
         )));
         return lines;
@@ -977,8 +1022,13 @@ fn tree_relation_lines<'a>(relation: &'a RelationReadModel, theme: &Theme) -> Ve
             };
             let label = labels.get(other).copied().unwrap_or_else(|| other.as_str());
             lines.push(Line::from(Span::raw(format!(
-                "{}─ {label} ({})",
-                if index + 1 == count { "└" } else { "├" },
+                "{}{} {label} ({})",
+                if index + 1 == count {
+                    glyphs.branch_last()
+                } else {
+                    glyphs.branch_tee()
+                },
+                glyphs.branch_stem(),
                 edge.relation
             ))));
         }

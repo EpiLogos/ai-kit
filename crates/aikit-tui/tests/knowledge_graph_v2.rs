@@ -714,7 +714,12 @@ fn provider_lens_authority_and_revision_are_all_still_readable_at_the_inspector(
 
     let laid = graph_layout(&relation.view, &viewport_request(120, 30));
     let member_node = ResourceRef::parse("wiki:node:member").unwrap();
-    let inspector = graph_presentation::inspector_lines(&laid, Some(&member_node), &aikit_tui::theme::Theme::new());
+    let inspector = graph_presentation::inspector_lines(
+        &laid,
+        Some(&member_node),
+        &aikit_tui::graph_layout::GraphGlyphs::unicode(),
+        &aikit_tui::theme::Theme::new(),
+    );
     let text = lines_to_text(&inspector);
     assert!(text.contains("member"), "the Inspector must name the relation:\n{text}");
     assert!(text.contains("authority: Authored"), "authority must render:\n{text}");
@@ -1042,21 +1047,29 @@ fn resize_preserves_graph_focus_filter_depth_and_staged_state() {
 // the environment from the test is not an option either: `nextest` runs
 // tests in parallel and the environment is process-global, so that would be
 // racy. Instead every snapshot below pins its glyph set explicitly via
-// `ApplicationSurfaceRequest::with_graph_glyphs`, and each width gets one
-// ASCII and one Unicode golden — named accordingly — so the pair also
-// stands as the proof (constraint 4) that the two glyph sets carry
-// identical distinctions: a reviewer reading both goldens for the same
-// width side by side sees the same information laid out identically, only
-// the glyphs swapped.
+// `ApplicationSurfaceRequest::with_glyphs`, and each width gets one ASCII
+// and one Unicode golden — named accordingly — so the pair also stands as
+// the proof (constraint 4) that the two glyph sets carry identical
+// distinctions: a reviewer reading both goldens for the same width side by
+// side sees the same information laid out identically, only the glyphs
+// swapped.
+//
+// `with_glyphs` pins one capability for the *whole* frame, not just the
+// graph canvas: these goldens capture the entire terminal buffer, so the
+// shell's own chrome — the title bar, the Workspace field row, the footer —
+// is in them too, and pinning only the graph's connectors would have left
+// those three lines reading the process locale. That is what they did
+// before this pass: the ASCII goldens carried `AIKit · Workspace` and
+// `Knowledge · 1 result` under a Unicode locale.
 // ===========================================================================
 
-fn snapshot_spatial_graph(glyphs: aikit_tui::graph_layout::GraphGlyphs, width: u16, height: u16) -> String {
+fn snapshot_spatial_graph(glyphs: aikit_tui::layout::Glyphs, width: u16, height: u16) -> String {
     let (_dir, mut backend) = resolver_fixture();
     let mut surface = ApplicationSurfaceController::new(
         &mut backend,
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup)
             .with_query("alpha")
-            .with_graph_glyphs(glyphs),
+            .with_glyphs(glyphs),
     )
     .unwrap();
     enter_graph(&mut surface, &mut backend, width, height);
@@ -1065,38 +1078,61 @@ fn snapshot_spatial_graph(glyphs: aikit_tui::graph_layout::GraphGlyphs, width: u
 
 #[test]
 fn snapshot_wide_spatial_graph_ascii() {
-    let text = snapshot_spatial_graph(aikit_tui::graph_layout::GraphGlyphs::ascii(), 120, 30);
+    let text = snapshot_spatial_graph(aikit_tui::layout::Glyphs::ascii(), 120, 30);
     insta::assert_snapshot!(text);
 }
 
 #[test]
 fn snapshot_wide_spatial_graph_unicode() {
-    let text = snapshot_spatial_graph(aikit_tui::graph_layout::GraphGlyphs::unicode(), 120, 30);
+    let text = snapshot_spatial_graph(aikit_tui::layout::Glyphs::unicode(), 120, 30);
     insta::assert_snapshot!(text);
 }
 
 #[test]
 fn snapshot_medium_spatial_graph_ascii() {
-    let text = snapshot_spatial_graph(aikit_tui::graph_layout::GraphGlyphs::ascii(), 80, 24);
+    let text = snapshot_spatial_graph(aikit_tui::layout::Glyphs::ascii(), 80, 24);
     insta::assert_snapshot!(text);
 }
 
 #[test]
 fn snapshot_medium_spatial_graph_unicode() {
-    let text = snapshot_spatial_graph(aikit_tui::graph_layout::GraphGlyphs::unicode(), 80, 24);
+    let text = snapshot_spatial_graph(aikit_tui::layout::Glyphs::unicode(), 80, 24);
     insta::assert_snapshot!(text);
 }
 
 #[test]
 fn snapshot_narrow_grouped_graph_ascii() {
-    let text = snapshot_spatial_graph(aikit_tui::graph_layout::GraphGlyphs::ascii(), 40, 20);
+    let text = snapshot_spatial_graph(aikit_tui::layout::Glyphs::ascii(), 40, 20);
     insta::assert_snapshot!(text);
 }
 
 #[test]
 fn snapshot_narrow_grouped_graph_unicode() {
-    let text = snapshot_spatial_graph(aikit_tui::graph_layout::GraphGlyphs::unicode(), 40, 20);
+    let text = snapshot_spatial_graph(aikit_tui::layout::Glyphs::unicode(), 40, 20);
     insta::assert_snapshot!(text);
+}
+
+/// The ASCII goldens above are only worth keeping if they are actually
+/// ASCII, and a reviewer can miss one `\u{b7}` in a 120-column frame. This
+/// cannot. It is the assertion nobody had made, which is why the footer went
+/// on emitting `\u{2191}\u{2193}` and `\u{2190}/\u{2192}` under
+/// `Glyphs::ascii()` — those characters were in the recorded ASCII goldens
+/// the whole time, reviewed and accepted, because nothing was checking.
+///
+/// It covers the whole frame, not the graph canvas alone: the title bar,
+/// the Workspace field row, the block borders and the footer are all in the
+/// rendered buffer, and every one of them used to draw box-drawing or
+/// punctuation glyphs regardless of the resolved capability.
+#[test]
+fn nothing_in_an_ascii_rendering_is_non_ascii() {
+    for (width, height) in [(120, 30), (80, 24), (40, 20)] {
+        let text = snapshot_spatial_graph(aikit_tui::layout::Glyphs::ascii(), width, height);
+        let offenders: Vec<char> = text.chars().filter(|c| !c.is_ascii()).collect();
+        assert!(
+            offenders.is_empty(),
+            "{width}x{height} ASCII rendering emitted non-ASCII: {offenders:?}"
+        );
+    }
 }
 
 #[test]

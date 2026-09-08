@@ -5,9 +5,15 @@
 
 use aikit_core::resource::{ModelRoster, ModelRosterEntry};
 
-pub fn model_roster_matrix(roster: &ModelRoster) -> Vec<String> {
+use crate::layout::Glyphs;
+
+/// The matrix, drawn with an already-resolved host glyph capability. The
+/// caller resolves it once at its own boundary (the CLI does so from
+/// [`Glyphs::from_env`]); this module never reads the environment.
+pub fn model_roster_matrix(roster: &ModelRoster, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
     let mut lines = vec![format!(
-        "MODEL ROSTER · {:?} · {}",
+        "MODEL ROSTER {sep} {:?} {sep} {}",
         roster.policy, roster.demand.use_type
     )];
     lines.push("RANK  MODEL  PROVIDER  ELIGIBLE  TASK  PROFILE  COST(USD)  ACCESS  WHY".to_string());
@@ -133,7 +139,7 @@ mod tests {
                 provenance: vec!["test".into()],
             }],
         );
-        let matrix = model_roster_matrix(&roster).join("\n");
+        let matrix = model_roster_matrix(&roster, Glyphs::unicode()).join("\n");
         assert!(matrix.contains(model.as_str()));
         assert!(matrix.contains("UNKNOWN"));
         assert!(matrix.contains("i1c1x1l1"));

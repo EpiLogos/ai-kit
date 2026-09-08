@@ -21,6 +21,7 @@ use aikit_core::resolve::ResolvedView;
 use aikit_core::scope::ScopeKind;
 
 use crate::backend::{ClientEffect, PaletteBackend, Projected, Toggle};
+use crate::layout::Glyphs;
 
 /// Does a proven package-backed Capability read as enabled to compatibility code?
 pub fn is_on(view: &ResolvedView, id: &CapsuleId) -> bool {
@@ -67,7 +68,11 @@ impl StagedDiff {
             .count()
     }
 
-    pub fn footer(&self) -> String {
+    /// The one-line staging summary, drawn with an already-resolved host
+    /// glyph capability (see `layout.rs`'s `Glyphs`) rather than literals:
+    /// the separator and the removal sign are chrome, and a terminal that
+    /// cannot render them must get the ASCII set, not replacement boxes.
+    pub fn footer(&self, glyphs: Glyphs) -> String {
         let mut parts = vec![format!(
             "{} staged {}",
             self.requested.len(),
@@ -82,7 +87,8 @@ impl StagedDiff {
         }
         if !self.dropped_dependencies.is_empty() {
             parts.push(format!(
-                "−{} {}",
+                "{}{} {}",
+                glyphs.minus(),
                 self.dropped_dependencies.len(),
                 plural(
                     self.dropped_dependencies.len(),
@@ -104,7 +110,7 @@ impl StagedDiff {
                 self.still_unavailable.len()
             ));
         }
-        parts.join(" · ")
+        parts.join(&format!(" {} ", glyphs.separator()))
     }
 }
 

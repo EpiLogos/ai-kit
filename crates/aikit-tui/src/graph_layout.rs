@@ -1137,6 +1137,19 @@ impl GraphGlyphs {
             "\u{2026}"
         }
     }
+
+    /// The shell glyph set this connector set belongs to, for the prose the
+    /// Graph draws around its canvas — the Inspector's field separators, say.
+    /// The inverse of `application_surface::graph_glyphs_for`, and the reason
+    /// a mark like the separator is defined once, in `layout.rs`, instead of
+    /// being copied into this type where the two could drift apart.
+    pub fn shell(&self) -> crate::layout::Glyphs {
+        if self.ascii {
+            crate::layout::Glyphs::ascii()
+        } else {
+            crate::layout::Glyphs::unicode()
+        }
+    }
 }
 
 #[cfg(test)]

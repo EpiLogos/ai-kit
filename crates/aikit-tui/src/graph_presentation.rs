@@ -282,7 +282,7 @@ pub fn spatial_lines(
     lines.push(Line::raw(""));
     lines.extend(legend_lines(layout, selected, glyphs, theme));
     lines.push(Line::raw(""));
-    lines.extend(inspector_lines(layout, selected, theme));
+    lines.extend(inspector_lines(layout, selected, glyphs, theme));
     if layout.truncated {
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
@@ -495,6 +495,7 @@ fn legend_lines(
 pub fn inspector_lines(
     layout: &GraphLayout,
     selected: Option<&ResourceRef>,
+    glyphs: &GraphGlyphs,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled("Inspector", theme.heading()))];
@@ -548,8 +549,12 @@ pub fn inspector_lines(
                 RelationDirection::Bidirectional => "bidirectional",
             };
             lines.push(Line::raw(format!(
-                "  {} · {} ({} -> {})",
-                edge.relation, direction, edge.from, edge.to
+                "  {} {} {} ({} -> {})",
+                edge.relation,
+                glyphs.shell().separator(),
+                direction,
+                edge.from,
+                edge.to
             )));
             lines.push(Line::raw(format!(
                 "    authority: {:?}  route: {}",

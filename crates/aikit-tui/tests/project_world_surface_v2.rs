@@ -5,6 +5,7 @@ use common::*;
 use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
 use aikit_tui::event::PaletteEvent;
 use aikit_tui::host::UiHost;
+use aikit_tui::layout::Glyphs;
 use aikit_tui::project_workspace_render::workspace_section_label;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
@@ -56,7 +57,12 @@ fn final_surface_uses_the_shared_project_world_read_model() {
     let (_dir, mut backend) = fixture();
     let surface = ApplicationSurfaceController::new(
         &mut backend,
-        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup)
+            .with_query("review")
+            // Pinned, not read from the process locale: these assertions
+            // name the Unicode separator, and `nextest`'s parallel execution
+            // rules out setting `LANG` from a test.
+            .with_glyphs(Glyphs::unicode()),
     )
     .unwrap();
 
@@ -89,7 +95,12 @@ fn global_surface_remains_first_class_without_inventing_project_world() {
     .with_descriptor(global);
     let surface = ApplicationSurfaceController::new(
         &mut backend,
-        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup)
+            .with_query("review")
+            // Pinned, not read from the process locale: these assertions
+            // name the Unicode separator, and `nextest`'s parallel execution
+            // rules out setting `LANG` from a test.
+            .with_glyphs(Glyphs::unicode()),
     )
     .unwrap();
 
@@ -99,12 +110,51 @@ fn global_surface_remains_first_class_without_inventing_project_world() {
     assert!(!output.contains("resolved Project world"));
 }
 
+/// The Workspace panes under the ASCII set: the same headings, the same
+/// resolved values, the same fields — separator swapped and nothing else.
+/// These lines are built by `project_workspace_render`, which formatted its
+/// own `·` as a literal until the glyph capability was threaded into it, so
+/// a terminal that could not draw one got a pane of replacement boxes with
+/// the resolution facts still in it.
+#[test]
+fn the_ascii_workspace_panes_carry_the_same_resolved_world() {
+    let (_dir, mut backend) = fixture();
+    let mut surface = ApplicationSurfaceController::new(
+        &mut backend,
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup)
+            .with_query("review")
+            .with_glyphs(Glyphs::ascii()),
+    )
+    .unwrap();
+    surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
+
+    let context = rendered(&draw_width(&surface, 140, 30));
+    assert!(context.contains("Context - resolved Project world"));
+    assert!(context.contains("Project  project:payments"));
+    assert!(context.contains("Scopes   not exposed by application boundary"));
+
+    surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
+    let compose = rendered(&draw_width(&surface, 140, 30));
+    assert!(compose.contains("Compose - resolved Project world"));
+    assert!(compose.contains("Intent        eligibility unresolved"));
+    assert!(compose.contains("Effective     available - 0 providers"));
+    assert!(
+        compose.is_ascii(),
+        "an ASCII Workspace pane still emitted non-ASCII"
+    );
+}
+
 #[test]
 fn wide_workspace_renders_context_compose_and_explain_from_one_world() {
     let (_dir, mut backend) = fixture();
     let mut surface = ApplicationSurfaceController::new(
         &mut backend,
-        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup)
+            .with_query("review")
+            // Pinned, not read from the process locale: these assertions
+            // name the Unicode separator, and `nextest`'s parallel execution
+            // rules out setting `LANG` from a test.
+            .with_glyphs(Glyphs::unicode()),
     )
     .unwrap();
     surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
@@ -139,7 +189,12 @@ fn staged_composition_survives_field_navigation() {
     let (_dir, mut backend) = fixture();
     let mut surface = ApplicationSurfaceController::new(
         &mut backend,
-        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup)
+            .with_query("review")
+            // Pinned, not read from the process locale: these assertions
+            // name the Unicode separator, and `nextest`'s parallel execution
+            // rules out setting `LANG` from a test.
+            .with_glyphs(Glyphs::unicode()),
     )
     .unwrap();
     surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
@@ -166,7 +221,12 @@ fn narrow_workspace_progressively_discloses_project_world_without_a_second_contr
     let (_dir, mut backend) = fixture();
     let mut surface = ApplicationSurfaceController::new(
         &mut backend,
-        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("review"),
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup)
+            .with_query("review")
+            // Pinned, not read from the process locale: these assertions
+            // name the Unicode separator, and `nextest`'s parallel execution
+            // rules out setting `LANG` from a test.
+            .with_glyphs(Glyphs::unicode()),
     )
     .unwrap();
     surface.handle(&mut backend, key(KeyCode::Down)).unwrap();

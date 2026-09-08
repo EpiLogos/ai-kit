@@ -2,23 +2,23 @@
 source: crates/aikit-tui/tests/knowledge_graph_v2.rs
 expression: text
 ---
-┌ AIKit · Workspace · payments · test-h┐
-│/ alpha   Search · Context · Compose ·│
-│┌ Relations · Graph · depth 1 ───────┐│
-││alpha                               ││
-││                                    ││
-││Outgoing ->                         ││
-││  related-skill <-> skill/beta      ││
-││  related-skill <-> skill/gamma     ││
-││                                    ││
-││                                    ││
-││                                    ││
-││                                    ││
-││                                    ││
-││                                    ││
-││                                    ││
-││                                    ││
-││                                    ││
-│└────────────────────────────────────┘│
-│Knowledge · 1 result · 0 staged · scop│
-└──────────────────────────────────────┘
++ AIKit - Workspace - payments - test-h+
+|/ alpha   Search - Context - Compose -|
+|+ Relations - Graph - depth 1 -------+|
+||alpha                               ||
+||                                    ||
+||Outgoing ->                         ||
+||  related-skill <-> skill/beta      ||
+||  related-skill <-> skill/gamma     ||
+||                                    ||
+||                                    ||
+||                                    ||
+||                                    ||
+||                                    ||
+||                                    ||
+||                                    ||
+||                                    ||
+||                                    ||
+|+------------------------------------+|
+|Knowledge - 1 result - 0 staged - scop|
++--------------------------------------+
