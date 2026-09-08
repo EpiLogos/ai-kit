@@ -37,8 +37,8 @@ Where materially independent obligations can be checked independently, preserve 
 2. Run the narrow conformance/proving operation for each required obligation first, then the repository baseline appropriate to the change. Record which obligation each result actually establishes; keep uncovered obligations explicit.
 3. For capsules/Skills, validate manifest path/id, payload root/frontmatter, source/revision and registry scan behaviour. If the Claim is broader than those properties, those checks are partial evidence until the remaining obligations are proved.
 4. For UsageOverlays, verify the unchanged Skill source, exact scoped adaptation/review digest and resulting Effective Skill projection; a projected file never becomes source.
-5. For Methods, verify source identity/revision, stable independently owned member refs, exact overlay digests where used, expected verification/return forms and resolution under the existing ContextResolution. Method selection must not activate, trust or authorise a referenced resource.
-6. For SkillSets, verify explicit membership, additive resolution and withholding of members that fail their own gates. SkillSet union must remain independent from Method composition and Profile precedence.
+5. For Methods, verify the unchanged Skill identity/source/revision, `METHOD:` description classification, exact overlay digests where used, situated-use relations and resolution under the existing ContextResolution. Method classification must not activate, trust or authorise a resource.
+6. For SkillSets, verify direct and nested membership, additive transitive projection and withholding of members that fail their own gates. SkillSet union must remain independent from Method classification and Profile precedence.
 7. For Project reflection, verify explicit ProjectMap bindings and both semantic→code and code→semantic traversal at bounded depth. Keep authored Ground, SemanticWiki, local structural description, CodeReference, CodeIndex observation, verification/evidence and history differently authoritative.
 8. If the target declares a strong reflection law, test missing, wrong, duplicate and stale mappings plus constitutive structural relations. Matching names are not parity; structural flattening must fail even when labels survive.
 9. For local structural descriptions, include at least one stale-description/reflection case. The result is discrepancy evidence routed to the source owner, not permission for the verifier to rewrite the description/Wiki/Ground.
@@ -67,7 +67,7 @@ verification / evidence / history
 
 From a semantic anchor, prove the route to exact implementation and evidence. From the exact CodeReference, prove the reverse route to known meaning/description/ownership. Provider-native graph richness is not required to be copied into ProjectMap.
 
-For an ordinary contrasting Project with no Central directories, Bimba/QL coordinates, special local-header convention or Method source tree, verify that completed Knowledge Navigation and ordinary native Skill operation still work. Rich reflection/praxis is developmental capacity, not a new minimum-validity condition.
+For an ordinary contrasting Project with no Central directories, Bimba/QL coordinates or special local-header convention, verify that completed Knowledge Navigation and ordinary native Skill operation still work. Rich reflection/praxis is developmental capacity, not a new minimum-validity condition.
 
 ## Strong target-owned conformance
 

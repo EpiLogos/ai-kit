@@ -1654,14 +1654,7 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
 /// state in the current context.
 fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
     let service = Service::discover(cwd)?;
-    let filter = match a.command {
-        MethodCommand::Resolve { source, focus } => {
-            let focus = focus.iter().map(aikit_core::ResourceRef::parse).collect::<Result<Vec<_>>>()?;
-            let data = aikit_cli::method_source::resolve_source(&service, &source, &focus)?;
-            return Ok(reply(&service, data, diagnostic_warnings(&service)));
-        }
-        MethodCommand::List { filter } => filter,
-    };
+    let MethodCommand::List { filter } = a.command;
     let view = service.resolved();
     let filter = filter.as_deref().map(str::to_lowercase);
     let mut methods: Vec<Value> = view

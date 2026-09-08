@@ -222,7 +222,7 @@ authored ground + inherited social / technical world
         ↓
 current Agency + harness + body + authority
         ↓
-available Skills / Methods / Actions / ContextSources
+available Skills (including METHOD:-classified Skills) / Actions / ContextSources
         ↓
 current Focus and selected context
         ↓
@@ -245,7 +245,7 @@ Actuation
     Agency, agent loop/actuation, authority and model/harness/agent-instance research
 
 AIKit
-    ContextSources, Guidance, Skills, Methods, SkillSets, Profiles,
+    ContextSources, Guidance, Skills, Method classification, SkillSets, Profiles,
     ContextResolution, harness projection and this meta-harness praxis
 
 Software Factory
@@ -305,7 +305,7 @@ Before closing a meta-harness task, ask:
 - Can a fresh authorised agent orient with a small seed and discover the wider context it needs?
 - Are durable artifacts typed by role, provenance, scope and lifecycle clearly enough for human and agent use?
 - Is the context horizon addressable rather than copied wholesale into prompts?
-- Are Guidance, Skills, Methods, UsageOverlays, ContextSources and source artifacts being used for their distinct roles?
+- Are Guidance, Skills, METHOD: classification, UsageOverlays, ContextSources and source artifacts being used for their distinct roles?
 - Is repeated work becoming reusable praxis or better maintained knowledge where that would genuinely help?
 - Can important drift be validated or evidenced?
 - Does action return evidence/history to the world it changed?

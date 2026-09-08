@@ -144,7 +144,7 @@ ordinary source/docs                    source according to its own provenance
 runtime/code implementation             current operative implementation fact
 derived/generated docs or indexes       rebuildable observation/projection
 current working / temporal material     moving work, not automatically stable reference
-praxis source                            reusable Skills / Methods owned by their source
+praxis source                            reusable Skills (including METHOD:-classified Skills) owned by their source
 ```
 
 Do not move compatible native material into ProjectCentral merely to make it legible to AIKit. Retain it in place and relate it through stable source/resource refs when the owning relation permits that. Generated harness projection files and derived indexes remain derivative even when their shape resembles authored source.

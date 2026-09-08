@@ -46,7 +46,15 @@ There is no semantic precedence or reorder operation. Stable presentation order 
 
 The new core `composition_workspace` model represents these states without moving ProjectSpec persistence into the TUI.
 
-### SkillSet -> Capability membership
+### SkillSet containment and Capability membership
+
+Nested SkillSets are the existing domain composition rule. The application
+read model exposes each child with a qualified identity, its direct parent and
+children, and each member's direct declaration or transitive origin. Projection
+and withholding still come from the effective resolver; containment grants no
+activation or trust. Editing parentage is intentionally not represented as
+`Add { skill_set, capability }`: on disk it is directory ownership and needs a
+separately reviewed move/adoption contract.
 
 SkillSet is a projection request, not activation/trust authority. Membership is explicit or pattern-derived and projection is checked against `ResolvedView`.
 

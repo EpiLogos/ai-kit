@@ -1196,14 +1196,6 @@ pub struct MethodArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum MethodCommand {
-    /// Resolve a native Method JSON source under the current Project Context.
-    Resolve {
-        #[arg(long)]
-        source: std::path::PathBuf,
-        /// Situated Focus refs; defaults to the actual current Project.
-        #[arg(long)]
-        focus: Vec<String>,
-    },
     /// List detected methods with their effective state in this context.
     List {
         /// Only show methods whose name or payload contains this substring.

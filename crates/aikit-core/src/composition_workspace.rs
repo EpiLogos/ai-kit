@@ -5,8 +5,9 @@
 //!
 //! - Project -> SkillSet selection is additive, may be authored or inherited, and
 //!   is effective when present in the resolved Project selection union.
-//! - SkillSet -> Capability membership/projection remains represented by
-//!   `ProfileCompositionReadModel` and never acquires activation/trust authority.
+//! - SkillSet -> SkillSet containment and direct/transitive Capability
+//!   membership/projection are represented by `ProfileCompositionReadModel` and
+//!   never acquire activation/trust authority.
 //! - neither relation has semantic precedence/reordering.
 
 use std::collections::{BTreeMap, BTreeSet};

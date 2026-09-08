@@ -304,8 +304,9 @@ pub use knowledge_wiki_write::{
 pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
 pub use live_activation_history::live_activation_history_evidence;
 pub use method::{
-    resolve_method, Method, MethodResolution, MethodResolvedRef, MethodSkillRef, UsageOverlayRef,
-    METHOD_VERSION,
+    resolve_method, resolve_skill_praxis_metadata, Method, MethodResolution,
+    MethodResolvedRef, MethodSkillRef, SituatedSkillRef, SkillPraxisMetadata,
+    SkillPraxisMetadataResolution, SkillPraxisResolvedRef, UsageOverlayRef, METHOD_VERSION,
 };
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;

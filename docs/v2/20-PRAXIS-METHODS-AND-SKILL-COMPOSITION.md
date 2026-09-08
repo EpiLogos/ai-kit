@@ -1,9 +1,17 @@
 # AIKit V2 — Praxis, Methods, and Skill Composition
 
-**Status:** current implementation contract  
+**Status:** historical #108 programme contract; Method identity decision superseded 2026-09-08
 **Date:** 2026-08-19  
 **Implementation owner:** `crates/aikit-core/src/method.rs`, `praxis.rs`, existing Skill/SkillSet/Profile/ContextResolution/Skill Usage Overlay machinery  
 **Coordinates with:** O:I authored praxis position; Central ProjectCentral source contracts; Factory praxis/evidence consumption
+
+> Supersession: the accepted #108 design below deliberately introduced an
+> independent Method resource, but the current canonical ontology restores the
+> older Skill law. A Method is the same Skill identity, source and lifecycle,
+> classified by a `METHOD:` description prefix. `ResourceKind::Method` and the
+> separate JSON Method source surface have been removed. UsageOverlay and praxis
+> relations survive only as Skill/situated-use metadata. Nested SkillSets provide
+> methodology repertoires; there is no MethodSet.
 
 ## 0. Why these distinctions exist
 
