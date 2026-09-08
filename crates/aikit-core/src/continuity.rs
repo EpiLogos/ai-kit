@@ -47,11 +47,20 @@ pub const ENTITY_DISCLOSURE: &str = "entity-disclosure";
 /// declared data in the project layer (`.aikit/domains`), never ambient.
 pub const DOMAIN_ACTIVATION: &str = "domain-activation";
 
+/// File context (W1/W3, CASE 05): when composed, an operation about to touch
+/// a file arrives with the semantic context the project already holds for it
+/// — wiki relations that cite the file, plus any declared KnowledgeDomain
+/// whose `path_patterns` address it — through the pre-tool additional-context
+/// channel. Dedup keys on rendered content per file, so an unchanged file
+/// re-injects nothing; standing rules stay exempt by classification.
+pub const FILE_CONTEXT: &str = "file-context";
+
 /// The reactions the engine itself implements, as opposed to hook capsules
 /// that merely ride the chain. A reaction listed here is answerable when
 /// asked even while it is not composed: the engine says "not composed"
 /// instead of staying silent about what it could do.
-pub const ENGINE_REACTIONS: &[&str] = &[TURN_LEDGER, ENTITY_DISCLOSURE, DOMAIN_ACTIVATION];
+pub const ENGINE_REACTIONS: &[&str] =
+    &[TURN_LEDGER, ENTITY_DISCLOSURE, DOMAIN_ACTIVATION, FILE_CONTEXT];
 
 /// True when the capsule id names a first-party continuity reaction.
 pub fn is_continuity_capability(id: &CapsuleId) -> bool {

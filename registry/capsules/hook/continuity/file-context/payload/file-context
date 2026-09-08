@@ -1,0 +1,10 @@
+#!/bin/sh
+# The composition handle for the file-context engine reaction (W1/W3).
+#
+# The engine (aikit-cli dispatch) resolves the tuning at event time; when
+# this capability is composed, a PreToolUse event carrying an explicit file
+# path arrives with the project's wiki relations and path-addressed domain
+# guidance for that file. This payload only proves the chain reached it:
+# exit 0, no output, because hook-chain stdout is a gate channel — the
+# context itself rides the pre-tool additional-context channel, never stdout.
+exit 0
