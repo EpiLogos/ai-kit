@@ -29,6 +29,7 @@
 pub mod admission;
 pub mod aider;
 pub mod agent_skills;
+pub mod antigravity;
 pub mod bootstrap;
 pub mod broker;
 pub mod claude;
@@ -37,8 +38,13 @@ pub mod cursor;
 pub mod dsh;
 pub mod gemini;
 pub mod goose;
+pub mod grokbot;
 pub mod hook_map;
+pub mod kimi;
+pub mod ollama;
+pub mod openclaw;
 pub mod opencode;
+pub mod pi;
 pub mod qwen;
 pub mod zcode;
 

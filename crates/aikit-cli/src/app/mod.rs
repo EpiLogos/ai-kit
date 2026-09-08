@@ -44,6 +44,7 @@ use aikit_store::SessionSpaceApplicationStore;
 use aikit_adapters::actor_composition::compose_live_actor_inputs;
 use aikit_adapters::clients::agent_skills;
 use aikit_adapters::clients::aider::AiderAdapter;
+use aikit_adapters::clients::antigravity::AntigravityAdapter;
 use aikit_adapters::clients::broker::BrokerAdapter;
 use aikit_adapters::clients::claude::ClaudeAdapter;
 use aikit_adapters::clients::codex::CodexAdapter;
@@ -51,7 +52,12 @@ use aikit_adapters::clients::cursor::CursorAdapter;
 use aikit_adapters::clients::dsh::DshAdapter;
 use aikit_adapters::clients::gemini::GeminiAdapter;
 use aikit_adapters::clients::goose::GooseAdapter;
+use aikit_adapters::clients::grokbot::GrokbotAdapter;
+use aikit_adapters::clients::kimi::KimiAdapter;
+use aikit_adapters::clients::ollama::OllamaAdapter;
+use aikit_adapters::clients::openclaw::OpenclawAdapter;
 use aikit_adapters::clients::opencode::OpencodeAdapter;
+use aikit_adapters::clients::pi::PiAdapter;
 use aikit_adapters::clients::qwen::QwenAdapter;
 use aikit_adapters::clients::zcode::ZcodeAdapter;
 use aikit_adapters::runner::SystemRunner;
@@ -1436,6 +1442,28 @@ impl Service {
                 TargetId::QWEN_CODE => {
                     plan_effect(&QwenAdapter::new(ctx_dir.join("projections/qwen")), &rc)
                 }
+                // Harness-admission sweep round 3: six catalog-r4 harnesses
+                // admitted through Actuation detection records; ids align to
+                // catalog slugs (gemini-antigravity, grok-bot, kimi, ollama,
+                // openclaw, pi). Binding one opts the context into that
+                // harness's honest effect; unbound harnesses stay inert.
+                TargetId::ANTIGRAVITY => plan_effect(
+                    &AntigravityAdapter::new(ctx_dir.join("projections/antigravity")),
+                    &rc,
+                ),
+                TargetId::GROK_BOT => {
+                    plan_effect(&GrokbotAdapter::new(ctx_dir.join("projections/grokbot")), &rc)
+                }
+                TargetId::KIMI => {
+                    plan_effect(&KimiAdapter::new(ctx_dir.join("projections/kimi")), &rc)
+                }
+                TargetId::OLLAMA => {
+                    plan_effect(&OllamaAdapter::new(ctx_dir.join("projections/ollama")), &rc)
+                }
+                TargetId::OPENCLAW => {
+                    plan_effect(&OpenclawAdapter::new(ctx_dir.join("projections/openclaw")), &rc)
+                }
+                TargetId::PI => plan_effect(&PiAdapter::new(ctx_dir.join("projections/pi")), &rc),
                 _ => plan_effect(&BrokerAdapter::new(), &rc),
             };
             if let Some(effect) = effect {
