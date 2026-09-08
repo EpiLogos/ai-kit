@@ -147,8 +147,10 @@ fn the_human_horizon_stays_closed_until_the_composition_opens_it() {
     assert!(!closed.contains("human scratch"), "@1 material leaked: {closed}");
     assert!(!closed.contains("my-own-notes.md"), "@1 material leaked: {closed}");
 
-    let mut config = OrientationConfig::default();
-    config.include_human_scratch = true;
+    let config = OrientationConfig {
+        include_human_scratch: true,
+        ..Default::default()
+    };
     let open = orientation_packet_in(&runner, Some(&root), Some(&a), &config)
         .unwrap()
         .unwrap();
@@ -231,9 +233,11 @@ fn the_budget_bounds_the_packet() {
     let field = json!({"exists": true, "active_items": items, "open_questions": [], "invalid_items": []});
     let runner = NowRunner::with_field("A", field);
 
-    let mut config = OrientationConfig::default();
-    config.max_items = 3;
-    config.max_result_chars = 50;
+    let config = OrientationConfig {
+        max_items: 3,
+        max_result_chars: 50,
+        ..Default::default()
+    };
     let packet = orientation_packet_in(&runner, Some(&root), Some(&a), &config)
         .unwrap()
         .unwrap();
