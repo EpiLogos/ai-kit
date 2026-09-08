@@ -1,0 +1,43 @@
+name: Branch hygiene
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    name: Inventory branches against main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Inventory branches against main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --prune --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          {
+            echo "### Branches merged into main — local refs safe to delete"
+            merged="$(git branch -r --merged origin/main | sed 's/^ *//' | grep -v -E '^(origin/HEAD|origin/main)$' || true)"
+            if [ -n "$merged" ]; then
+              while IFS= read -r b; do
+                if [ -n "$b" ]; then echo "- \`$b\`"; fi
+              done <<< "$merged"
+            else
+              echo "- (none)"
+            fi
+            echo
+            echo "### Branches not merged — last commit per branch"
+            git branch -r --no-merged origin/main | sed 's/^ *//' | while IFS= read -r b; do
+              if [ -n "$b" ]; then
+                when="$(git log -1 --format='%cs' "$b")"
+                echo "- \`$b\` — last commit $when"
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "branch inventory written to step summary"
