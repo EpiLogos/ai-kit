@@ -353,7 +353,9 @@ pub fn materialize(items: &[aikit_core::projection::ProjectionItem], root: &Path
                 std::fs::create_dir_all(target.parent().unwrap()).unwrap();
                 std::fs::write(&target, contents).unwrap();
             }
-            ProjectionItem::Shim { .. } | ProjectionItem::Env { .. } => {}
+            ProjectionItem::Shim { .. }
+            | ProjectionItem::Env { .. }
+            | ProjectionItem::SecretEnv { .. } => {}
         }
     }
 }

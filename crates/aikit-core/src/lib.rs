@@ -36,6 +36,7 @@ pub mod context_resolution;
 pub mod context_source;
 pub mod credential;
 pub mod credential_world;
+pub mod secret_ref;
 pub mod duration;
 pub mod effects;
 pub mod error;
@@ -168,6 +169,7 @@ pub use credential_world::{
     CredentialWorldDisclosure, ProviderResolutionDisclosure, ProviderRosterKnowledge,
     CREDENTIAL_WORLD_VERSION,
 };
+pub use secret_ref::{SecretRef, SecretResolver};
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
 pub use explain_history::{

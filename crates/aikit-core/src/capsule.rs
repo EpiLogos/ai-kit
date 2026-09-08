@@ -763,6 +763,10 @@ struct RawManifest {
     /// (PRIOR-ART-ACTIONS L5, from Hermes' `related_skills[]`).
     #[serde(default)]
     related_skills: Vec<CapsuleId>,
+    /// `[secrets]`: environment variable name → secret ref string. Parsed and
+    /// validated into typed `SecretRef`s; the raw strings never survive parsing.
+    #[serde(default)]
+    secrets: BTreeMap<String, String>,
     /// `[metadata.*]`. AIKit's own facets live under `metadata.aikit`; every other
     /// namespace is carried verbatim, because dropping a neighbour's keys silently
     /// degrades every skill AIKit touches (PRIOR-ART-ACTIONS #30).
@@ -835,6 +839,11 @@ pub struct Capsule {
     /// and the tree. Never a dependency — purely advisory (PRIOR-ART-ACTIONS L5).
     #[serde(default)]
     pub related_skills: Vec<CapsuleId>,
+    /// Secret references this capsule needs: environment variable name → ref
+    /// (`keychain://`, `op://`, `env://`). Values are resolved at projection
+    /// time, never stored here (central.security/v1; PRIOR-ART secret-refs).
+    #[serde(default)]
+    pub secrets: BTreeMap<String, crate::secret_ref::SecretRef>,
     /// The `[metadata.aikit]` facets, parsed. Describes; never selects.
     #[serde(default)]
     pub facets: Facets,
@@ -1008,6 +1017,30 @@ impl Capsule {
                 );
             }
         }
+
+        // `[secrets]`: each name must be a name a shell can export, each value
+        // a parseable secret ref. A bad entry is refused, never silently
+        // dropped — a capsule that asked for a secret it never receives is the
+        // exact failure this schema exists to prevent.
+        let mut secrets = BTreeMap::new();
+        for (name, ref_string) in &raw.secrets {
+            let exportable = !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !exportable {
+                return Err(AikitError::new(
+                    "manifest.invalid",
+                    format!("`{id}` declares a secret under `{name}`, which is not a name a shell can export"),
+                )
+                .with("id", id.to_string()));
+            }
+            let secret_ref = crate::secret_ref::SecretRef::parse(ref_string).map_err(|e| {
+                e.with("id", id.to_string()).with("secret", name.clone())
+            })?;
+            secrets.insert(name.clone(), secret_ref);
+        }
         for req in &raw.requires {
             if req.id == id {
                 return err(
@@ -1038,6 +1071,7 @@ impl Capsule {
             provenance: raw.provenance,
             config_merge: raw.config_merge,
             related_skills: raw.related_skills,
+            secrets,
             facets,
             control,
             metadata: raw.metadata,
@@ -1260,5 +1294,74 @@ type = "string"
     fn blocked_capsules_are_never_selectable() {
         assert!(!Maturity::Blocked.is_selectable());
         assert!(Maturity::Deprecated.is_selectable());
+    }
+
+    #[test]
+    fn secrets_parse_into_typed_refs_and_round_trip() {
+        let src = r#"
+schema = 1
+id = "script/test/secrets"
+kind = "script"
+name = "secrets"
+description = "Declares secret refs."
+
+[secrets]
+OP_TOKEN = "op://Central/central-security/credential"
+MAC_KEY = "keychain://workcell/op-service-account"
+LEGACY = "env://MY_API_KEY"
+
+[script]
+entry = "payload/run.sh"
+"#;
+        let capsule = Capsule::from_toml_str(src).unwrap();
+        assert_eq!(capsule.secrets.len(), 3);
+        assert_eq!(
+            capsule.secrets["OP_TOKEN"].to_string(),
+            "op://Central/central-security/credential"
+        );
+        assert_eq!(
+            capsule.secrets["MAC_KEY"].to_string(),
+            "keychain://workcell/op-service-account"
+        );
+        assert_eq!(capsule.secrets["LEGACY"].scheme(), "env");
+    }
+
+    #[test]
+    fn a_secret_with_an_unexportable_name_is_refused() {
+        let src = r#"
+schema = 1
+id = "script/test/bad-secret-name"
+kind = "script"
+name = "bad-secret-name"
+description = "Declares a secret under an unusable name."
+
+[secrets]
+"9BAD" = "op://v/i/f"
+
+[script]
+entry = "payload/run.sh"
+"#;
+        let err = Capsule::from_toml_str(src).unwrap_err();
+        assert_eq!(err.code(), "manifest.invalid");
+        assert!(err.message().contains("9BAD"));
+    }
+
+    #[test]
+    fn a_secret_with_an_unparseable_ref_is_refused() {
+        let src = r#"
+schema = 1
+id = "script/test/bad-secret-ref"
+kind = "script"
+name = "bad-secret-ref"
+description = "Declares a secret at an unsupported location."
+
+[secrets]
+TOKEN = "vault://nope"
+
+[script]
+entry = "payload/run.sh"
+"#;
+        let err = Capsule::from_toml_str(src).unwrap_err();
+        assert_eq!(err.code(), "secret_ref.invalid");
     }
 }

@@ -101,11 +101,28 @@ fn bkmr_env(
 ///
 /// Values are single-quoted with embedded quotes escaped, so a path containing a
 /// space, a `$` or a quote cannot become shell syntax.
-pub fn render_shell(items: &[ProjectionItem], shell: &str) -> Result<String> {
+///
+/// `SecretEnv` items resolve HERE, at render time, through the given resolver;
+/// the value goes straight into the emitted line and is held by nothing else.
+/// A secret that cannot be resolved is an error, never a silently missing
+/// export.
+pub fn render_shell(
+    items: &[ProjectionItem],
+    shell: &str,
+    resolver: &dyn aikit_core::SecretResolver,
+) -> Result<String> {
     let mut out = String::new();
     for item in items {
-        let ProjectionItem::Env { name, value } = item else {
-            continue;
+        let (name, value) = match item {
+            ProjectionItem::Env { name, value } => (name.clone(), value.clone()),
+            ProjectionItem::SecretEnv { name, secret_ref } => {
+                let material = resolver.resolve(secret_ref).map_err(|e| {
+                    e.with("env", name.clone())
+                        .with("secret_ref", secret_ref.to_string())
+                })?;
+                (name.clone(), material.expose().to_string())
+            }
+            _ => continue,
         };
         let quoted = value.replace('\'', r"'\''");
         match shell {
