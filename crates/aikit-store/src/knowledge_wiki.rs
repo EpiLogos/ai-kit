@@ -257,6 +257,8 @@ fn store_error(action: &str, error: impl std::fmt::Display) -> AikitError {
 #[cfg(test)]
 mod tests {
     use aikit_core::knowledge_wiki::parse_wiki_objects;
+    use aikit_core::knowledge_wiki_index::{SemanticWikiIndex, WikiSearchAddress};
+    use aikit_core::knowledge_wiki_provider::SemanticWikiProvider;
 
     use super::*;
 
@@ -289,7 +291,11 @@ mod tests {
             .expect("matching canonical revisions reuse the projection");
         assert_eq!(reopened.discover(), written.discover());
         assert_eq!(
-            reopened.search("One", 8)[0].resource.as_str(),
+            reopened.search("One", 8)[0]
+                .address
+                .as_curated()
+                .unwrap()
+                .as_str(),
             "wiki:node:one"
         );
         assert!(
@@ -318,5 +324,41 @@ mod tests {
                 .revision(),
             u64::MAX
         );
+    }
+
+    /// The SQLite projection rebuilds `SemanticWikiIndex` from stored objects,
+    /// so the authored-source facet must reconstruct identically to the
+    /// native in-memory index — this is what makes CASE 19 findability parity
+    /// come free rather than needing its own SQLite-side search logic.
+    #[test]
+    fn native_and_sqlite_search_parity_includes_authored_source_hits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wiki.sqlite3");
+        let sqlite = SqliteWikiProvider::rebuild(&path, objects(), revisions("blake3:a")).unwrap();
+
+        let native_index = SemanticWikiIndex::rebuild(objects()).unwrap();
+        let native = SemanticWikiProvider::new(&native_index);
+
+        for query in ["One", "test:one", "wiki:node:one", ""] {
+            assert_eq!(
+                native.search(query, 16),
+                sqlite.search(query, 16),
+                "native/sqlite search parity diverged for query {query:?}"
+            );
+        }
+
+        // The authored source is independently findable through the SQLite
+        // projection too, and it is not the same hit as the curated node
+        // that cites it.
+        let hits = sqlite.search("test:one", 16);
+        assert!(hits.iter().any(|hit| hit.address
+            == WikiSearchAddress::AuthoredSource {
+                source: SourceRef::parse("source:test:one").unwrap()
+            }));
+        assert!(!hits
+            .iter()
+            .any(|hit| hit.address.as_curated().is_some_and(
+                |resource| resource.as_str() == "source:test:one"
+            )));
     }
 }

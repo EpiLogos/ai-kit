@@ -27,13 +27,64 @@ pub enum WikiRelationDirection {
     Incoming,
 }
 
+/// The address one search hit resolves through. `Curated` and `AuthoredSource`
+/// carry different ref types on purpose: a [`SourceRef`] can never be mistaken
+/// for, coerced into, or resolved as a [`ResourceRef`] naming a curated Wiki
+/// object. Citing a source from a WikiNode makes that source findable; it does
+/// not — and structurally cannot — promote the source into curated identity.
+/// Promotion stays a human Recognition act, out of scope for this index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum WikiSearchAddress {
+    Curated { resource: ResourceRef },
+    AuthoredSource { source: SourceRef },
+}
+
+impl WikiSearchAddress {
+    pub fn hit_kind(&self) -> WikiSearchHitKind {
+        match self {
+            Self::Curated { .. } => WikiSearchHitKind::Curated,
+            Self::AuthoredSource { .. } => WikiSearchHitKind::AuthoredSource,
+        }
+    }
+
+    pub fn as_curated(&self) -> Option<&ResourceRef> {
+        match self {
+            Self::Curated { resource } => Some(resource),
+            Self::AuthoredSource { .. } => None,
+        }
+    }
+
+    pub fn as_authored_source(&self) -> Option<&SourceRef> {
+        match self {
+            Self::AuthoredSource { source } => Some(source),
+            Self::Curated { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WikiSearchHitKind {
+    Curated,
+    AuthoredSource,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WikiSearchHit {
-    pub resource: ResourceRef,
+    pub address: WikiSearchAddress,
     pub object: String,
     pub label: String,
     pub summary: String,
     pub score: u32,
+}
+
+impl WikiSearchHit {
+    /// Derived from `address`, never stored redundantly — a stored copy could
+    /// drift out of agreement with the address it is supposed to describe.
+    pub fn hit_kind(&self) -> WikiSearchHitKind {
+        self.address.hit_kind()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -108,6 +159,12 @@ pub struct SemanticWikiIndex {
     readings: BTreeMap<ResourceRef, WikiReading>,
     outgoing: BTreeMap<ResourceRef, Vec<ResourceRef>>,
     incoming: BTreeMap<ResourceRef, Vec<ResourceRef>>,
+    /// Authored sources cited through `WikiNode::source_refs`, keyed by the
+    /// [`SourceRef`] itself and carrying the curated nodes that cite it. This
+    /// facet is search-only: it is never consulted by `resolve`, `contains`,
+    /// `discover` or `neighbours`, so a cited source's findability can never
+    /// make it answerable as a curated Wiki object.
+    authored_sources: BTreeMap<SourceRef, BTreeSet<ResourceRef>>,
     revision: String,
 }
 
@@ -138,6 +195,19 @@ impl SemanticWikiIndex {
                     index.spaces.insert(id, value);
                 }
                 WikiObject::Node(value) => {
+                    // The authored-source facet is derived strictly from
+                    // `source_refs`, the citations a curated node itself
+                    // declares. It never reaches into provenance, and it
+                    // never touches `identities`/`revision_material` — a
+                    // cited source carries no revision of its own here and
+                    // must not perturb the deterministic index revision.
+                    for source in &value.source_refs {
+                        index
+                            .authored_sources
+                            .entry(source.clone())
+                            .or_default()
+                            .insert(id.clone());
+                    }
                     index.nodes.insert(id, value);
                 }
                 WikiObject::Edge(value) => {
@@ -238,20 +308,63 @@ impl SemanticWikiIndex {
                 continue;
             };
             hits.push(WikiSearchHit {
-                resource: resource.clone(),
+                address: WikiSearchAddress::Curated {
+                    resource: resource.clone(),
+                },
                 object: object.into(),
                 label,
                 summary,
                 score,
             });
         }
+        hits.extend(self.search_authored_sources(&tokens));
         hits.sort_by(|left, right| {
             left.score
                 .cmp(&right.score)
-                .then_with(|| left.resource.cmp(&right.resource))
+                .then_with(|| search_address_key(&left.address).cmp(search_address_key(&right.address)))
         });
         hits.truncate(limit);
         hits
+    }
+
+    /// Second search pass over authored sources cited by curated nodes.
+    /// Scored the same way as any other document: the source ref stands in
+    /// for its own id/label, and the citing nodes' labels widen what a query
+    /// can match without ever adding the source to `all_refs()`.
+    fn search_authored_sources(&self, tokens: &[String]) -> Vec<WikiSearchHit> {
+        let mut hits = Vec::new();
+        for (source, citing_nodes) in &self.authored_sources {
+            let labels: Vec<String> = citing_nodes
+                .iter()
+                .map(|node_ref| self.node_label(node_ref))
+                .collect();
+            let searchable = format!("{} {}", source.as_str(), labels.join(" "));
+            let Some(score) = score(tokens, source.as_str(), source.as_str(), &searchable) else {
+                continue;
+            };
+            hits.push(WikiSearchHit {
+                address: WikiSearchAddress::AuthoredSource {
+                    source: source.clone(),
+                },
+                object: "source".into(),
+                label: source.to_string(),
+                summary: format!(
+                    "cited by {} node{}: {}",
+                    citing_nodes.len(),
+                    if citing_nodes.len() == 1 { "" } else { "s" },
+                    labels.join(", ")
+                ),
+                score,
+            });
+        }
+        hits
+    }
+
+    fn node_label(&self, node_ref: &ResourceRef) -> String {
+        self.nodes
+            .get(node_ref)
+            .and_then(|node| node.title.clone())
+            .unwrap_or_else(|| node_ref.to_string())
     }
 
     pub fn neighbours(&self, resource: &ResourceRef, limit: usize) -> Vec<WikiNeighbour> {
@@ -525,6 +638,17 @@ impl SemanticWikiIndex {
     }
 }
 
+/// Deterministic tie-break key shared by both search-hit addresses. A
+/// [`SourceRef`] and a [`ResourceRef`] are distinct types with no shared
+/// ordering, so hits must be compared by their address's own string form
+/// rather than by a field that only one variant carries.
+fn search_address_key(address: &WikiSearchAddress) -> &str {
+    match address {
+        WikiSearchAddress::Curated { resource } => resource.as_str(),
+        WikiSearchAddress::AuthoredSource { source } => source.as_str(),
+    }
+}
+
 fn neighbour(edge: &WikiEdge, direction: WikiRelationDirection) -> WikiNeighbour {
     WikiNeighbour {
         edge_ref: edge.ref_id.clone(),
@@ -636,6 +760,34 @@ mod tests {
         })
     }
 
+    /// Like `node`, but with an explicit, controllable `source_refs` list —
+    /// `node` always cites `source:paper:17`, which is fine for relation
+    /// fixtures but too coarse for exercising the authored-source facet
+    /// directly against distinct, test-chosen sources.
+    fn node_with_sources(
+        id: &str,
+        title: &str,
+        spaces: &[&str],
+        local_space: Option<&str>,
+        sources: &[&str],
+    ) -> WikiObject {
+        WikiObject::Node(WikiNode {
+            profile: crate::OKF_WIKI_PROFILE.into(),
+            ref_id: r(id),
+            revision: 1,
+            provenance: Vec::new(),
+            node_type: "Concept".into(),
+            title: Some(title.into()),
+            space_refs: spaces.iter().map(|value| r(value)).collect(),
+            source_refs: sources
+                .iter()
+                .map(|value| SourceRef::parse(*value).unwrap())
+                .collect(),
+            local_space_ref: local_space.map(r),
+            extensions: BTreeMap::new(),
+        })
+    }
+
     fn edge(id: &str, from: &str, to: &str, relation: &str, origin: WikiEdgeOrigin) -> WikiObject {
         WikiObject::Edge(WikiEdge {
             profile: crate::OKF_WIKI_PROFILE.into(),
@@ -662,7 +814,14 @@ mod tests {
         let first = SemanticWikiIndex::rebuild(objects.clone()).unwrap();
         let second = SemanticWikiIndex::rebuild(objects).unwrap();
         assert_eq!(first.revision(), second.revision());
-        assert_eq!(first.search("source pool", 10)[0].resource.as_str(), "wiki:node:b");
+        assert_eq!(
+            first.search("source pool", 10)[0]
+                .address
+                .as_curated()
+                .unwrap()
+                .as_str(),
+            "wiki:node:b"
+        );
         let backlinks = first.backlinks(&r("wiki:node:b"));
         assert_eq!(backlinks.len(), 1);
         assert_eq!(backlinks[0].origin, WikiEdgeOrigin::Authored);
@@ -707,5 +866,87 @@ mod tests {
             SemanticWikiIndex::rebuild(broken).unwrap_err().code(),
             "knowledge.wiki_local_space_missing"
         );
+    }
+
+    #[test]
+    fn authored_source_is_findable_and_carries_its_citing_node_as_backlink() {
+        let objects = vec![node_with_sources(
+            "wiki:node:erp",
+            "Encapsulation",
+            &[],
+            None,
+            &["source:paper:erp-99"],
+        )];
+        let index = SemanticWikiIndex::rebuild(objects).unwrap();
+
+        let hits = index.search("erp-99", 10);
+        let hit = hits
+            .iter()
+            .find(|hit| hit.hit_kind() == WikiSearchHitKind::AuthoredSource)
+            .expect("the cited source is findable by its own ref");
+        assert_eq!(
+            hit.address.as_authored_source().unwrap().as_str(),
+            "source:paper:erp-99"
+        );
+        assert_eq!(hit.object, "source");
+        assert!(
+            hit.summary.contains("Encapsulation"),
+            "backlink names the citing curated node: {}",
+            hit.summary
+        );
+
+        // The citing node's own title is part of what makes the source
+        // findable, not only the source ref string.
+        let by_citing_label = index.search("Encapsulation", 10);
+        assert!(by_citing_label
+            .iter()
+            .any(|hit| hit.hit_kind() == WikiSearchHitKind::AuthoredSource));
+    }
+
+    #[test]
+    fn authored_source_never_resolves_contains_or_discovers_as_a_curated_object() {
+        let objects = vec![node_with_sources(
+            "wiki:node:erp",
+            "Encapsulation",
+            &[],
+            None,
+            &["source:paper:erp-99"],
+        )];
+        let index = SemanticWikiIndex::rebuild(objects).unwrap();
+        let source_as_resource = ResourceRef::parse("source:paper:erp-99").unwrap();
+
+        assert!(index.resolve(&source_as_resource).is_none());
+        assert!(!index.contains(&source_as_resource));
+        assert!(!index
+            .discover()
+            .iter()
+            .any(|resource| resource.as_str() == "source:paper:erp-99"));
+
+        let status = index.status();
+        assert_eq!(status.nodes, 1, "citing a source adds no curated node");
+        assert_eq!(status.spaces, 0);
+        assert_eq!(status.edges, 0);
+        assert_eq!(status.frames, 0);
+        assert_eq!(status.readings, 0);
+    }
+
+    #[test]
+    fn authored_source_search_is_deterministic_across_rebuilds() {
+        let objects = vec![
+            node_with_sources("wiki:node:a", "Alpha", &[], None, &["source:paper:shared"]),
+            node_with_sources("wiki:node:b", "Beta", &[], None, &["source:paper:shared"]),
+        ];
+        let first = SemanticWikiIndex::rebuild(objects.clone()).unwrap();
+        let second = SemanticWikiIndex::rebuild(objects).unwrap();
+
+        assert_eq!(first.revision(), second.revision());
+        let first_hits = first.search("shared", 10);
+        let second_hits = second.search("shared", 10);
+        assert_eq!(first_hits, second_hits);
+        let hit = first_hits
+            .iter()
+            .find(|hit| hit.hit_kind() == WikiSearchHitKind::AuthoredSource)
+            .expect("the shared source is findable");
+        assert!(hit.summary.contains("Alpha") && hit.summary.contains("Beta"));
     }
 }
