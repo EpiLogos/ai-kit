@@ -321,7 +321,10 @@ impl SemanticWikiIndex {
         hits.sort_by(|left, right| {
             left.score
                 .cmp(&right.score)
-                .then_with(|| search_address_key(&left.address).cmp(search_address_key(&right.address)))
+                .then_with(|| search_rank(&left.address).cmp(&search_rank(&right.address)))
+                .then_with(|| {
+                    search_address_key(&left.address).cmp(search_address_key(&right.address))
+                })
         });
         hits.truncate(limit);
         hits
@@ -638,6 +641,19 @@ impl SemanticWikiIndex {
     }
 }
 
+/// Curated objects outrank authored sources whenever the relevance score
+/// cannot separate them. A scoreless query (the browse case: every document
+/// scores alike) would otherwise be decided by raw ref spelling, and source
+/// refs sort ahead of `wiki:` refs — pushing curated objects out of the
+/// truncation window and quietly making the field look like its citations.
+/// Findability never costs the curated field its precedence.
+fn search_rank(address: &WikiSearchAddress) -> u8 {
+    match address {
+        WikiSearchAddress::Curated { .. } => 0,
+        WikiSearchAddress::AuthoredSource { .. } => 1,
+    }
+}
+
 /// Deterministic tie-break key shared by both search-hit addresses. A
 /// [`SourceRef`] and a [`ResourceRef`] are distinct types with no shared
 /// ordering, so hits must be compared by their address's own string form
@@ -928,6 +944,36 @@ mod tests {
         assert_eq!(status.edges, 0);
         assert_eq!(status.frames, 0);
         assert_eq!(status.readings, 0);
+    }
+
+    #[test]
+    fn browse_keeps_curated_objects_ahead_of_the_sources_they_cite() {
+        // A scoreless query scores every document alike, so the tie-break
+        // decides the truncation window. Source refs sort ahead of `wiki:`
+        // refs by raw spelling; curated objects must still come first, or a
+        // browse of the field returns its citations instead of its content.
+        let objects = vec![node_with_sources(
+            "wiki:node:erp",
+            "Encapsulation",
+            &[],
+            None,
+            &["source:paper:erp-99"],
+        )];
+        let index = SemanticWikiIndex::rebuild(objects).unwrap();
+
+        let hits = index.search("", 10);
+        assert_eq!(hits.len(), 2, "browse returns the node and its source");
+        assert_eq!(hits[0].hit_kind(), WikiSearchHitKind::Curated);
+        assert_eq!(hits[1].hit_kind(), WikiSearchHitKind::AuthoredSource);
+
+        // The precedence has to hold under truncation, not merely in order:
+        // a one-hit window is the curated node, never the cited source.
+        let narrowed = index.search("", 1);
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(
+            narrowed[0].address.as_curated().unwrap().as_str(),
+            "wiki:node:erp"
+        );
     }
 
     #[test]
