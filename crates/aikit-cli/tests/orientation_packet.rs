@@ -100,16 +100,26 @@ fn fixture() -> (PathBuf, PathBuf, PathBuf) {
     (root, project_a, project_b)
 }
 
+/// Matches the real `ctrl projectcentral.now.inspect` contract (source:
+/// `ctrl/src/projectcentral_now.rs`, ~lines 547-592): every active record,
+/// regardless of kind, lands in `active_items`, and a `kind == "question"`
+/// record is *additionally* pushed into `open_questions` — the same record
+/// surfaced through two fields, never a disjoint second record. A fixture
+/// that hand-builds these as disjoint sets (the shape this suite used before
+/// CASE-02-PROOF caught the live discrepancy) lies about the contract the
+/// renderer must actually handle.
 fn field_with() -> Value {
+    let question = handoff("h-q", "is the aperture law testable?", "yes, by composition", 150, "question");
     json!({
         "exists": true,
         "project_root": "/central/Work/A",
         "active_items": [
             handoff("h-old", "older note", "superseded context", 100, "note"),
             handoff("h-new", "the open continuation", "resume here: the engine awaits its packet", 200, "handoff"),
+            question.clone(),
         ],
         "open_questions": [
-            handoff("h-q", "is the aperture law testable?", "yes, by composition", 150, "question"),
+            question,
         ],
         "invalid_items": ["now/agents/broken.json: schema mismatch"],
         "human_scratch": ["now/user/my-own-notes.md"],
@@ -125,15 +135,77 @@ fn a_fresh_session_is_met_by_the_projects_open_continuation_and_work() {
         .expect("the field is open, the packet must arrive");
 
     assert!(packet.starts_with("[continuity/orientation-packet] project A"), "{packet}");
-    assert!(packet.contains("2 open item(s), 1 open question(s)"), "{packet}");
+    // `active_items` carries 3 distinct records (continuation, note,
+    // question) under the real, overlapping ctrl contract — the header
+    // count is the honest total, not a disjoint-sets count.
+    assert!(packet.contains("3 open item(s), 1 open question(s)"), "{packet}");
     // CASE 09: the newest handoff return is the continuation, in the packet.
     assert!(packet.contains("- continuation: the open continuation (actor: agent-session-test)"), "{packet}");
     assert!(packet.contains("resume here: the engine awaits its packet"), "{packet}");
     // Older work arrives as a subject, not a second continuation.
     assert!(packet.contains("- note: older note"), "{packet}");
     assert!(packet.contains("- question: is the aperture law testable?"), "{packet}");
+    // The question record lives in both `active_items` and `open_questions`
+    // (same record, two fields) but must render exactly once, never twice.
+    assert_eq!(
+        packet.matches("- question: is the aperture law testable?").count(),
+        1,
+        "a question surfaced through two ctrl fields must render once: {packet}"
+    );
     // Invalid records are disclosed, never dropped.
     assert!(packet.contains("- warning: invalid NOW record disclosed: now/agents/broken.json"), "{packet}");
+}
+
+#[test]
+fn an_open_question_renders_once_and_the_withheld_count_is_honest() {
+    // Pins the CASE-02-PROOF finding directly: `ctrl`'s real
+    // `projectcentral.now.inspect` pushes a `question`-kind record into BOTH
+    // `active_items` and `open_questions` (one record, two fields). Against
+    // the old renderer (generic active-items loop with no kind skip, and
+    // `total_open = active.len() + questions.len()`), this fixture makes a
+    // question render twice and inflates the withheld count. Both assertions
+    // below fail on the pre-fix renderer and pass on the fixed one.
+    let (root, a, _b) = fixture();
+    let question = handoff("h-q", "is the aperture law demonstrable?", "yes", 150, "question");
+    let field = json!({
+        "exists": true,
+        "active_items": [
+            handoff("h-old", "older note", "superseded context", 100, "note"),
+            handoff("h-new", "the open continuation", "resume here", 200, "handoff"),
+            question.clone(),
+        ],
+        "open_questions": [question],
+        "invalid_items": [],
+    });
+    let runner = NowRunner::with_field("A", field);
+
+    // Default budget (max_items: 5, plenty of room): the question must
+    // appear exactly once, not once per field.
+    let packet = orientation_packet_in(&runner, Some(&root), Some(&a), &OrientationConfig::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        packet.matches("- question: is the aperture law demonstrable?").count(),
+        1,
+        "old renderer double-renders a question surfaced through both ctrl fields: {packet}"
+    );
+
+    // Tight budget (max_items: 2 — continuation + the note fill it, the
+    // question is withheld): 3 distinct records total, 2 shown, so exactly
+    // 1 is withheld. The old formula (active.len() + questions.len(), i.e.
+    // 3 + 1 = 4) would report 2 withheld instead of the true 1, because it
+    // counts the one withheld question record twice.
+    let tight = OrientationConfig {
+        max_items: 2,
+        ..Default::default()
+    };
+    let bounded = orientation_packet_in(&runner, Some(&root), Some(&a), &tight)
+        .unwrap()
+        .unwrap();
+    assert!(
+        bounded.contains("- … 1 further open item(s) withheld by the orientation budget"),
+        "withheld count must not double-count the question record: {bounded}"
+    );
 }
 
 #[test]

@@ -230,23 +230,33 @@ fn render_packet(
         shown += 1;
     }
 
-    // Remaining open returns: subjects only, within the budget.
+    // Remaining open returns: subjects only, within the budget. `ctrl`'s real
+    // `projectcentral.now.inspect` pushes every active record into
+    // `active_items` regardless of kind, and *additionally* pushes
+    // `question`-kind records into `open_questions` — the same record
+    // surfaced through two fields, not two records. Question-kind entries
+    // are skipped here and rendered once, from the `open_questions` loop
+    // below, so a question never charges the budget or the packet twice.
     let continuation_id = newest_handoff.and_then(|item| item["id"].as_str());
     for item in active {
         if shown >= config.max_items {
             break;
         }
-        let subject = item["subject"].as_str().unwrap_or("(untitled)");
         if Some(item["id"].as_str().unwrap_or("")) == continuation_id {
             continue;
         }
         let kind = item["kind"].as_str().unwrap_or("item");
+        if kind == "question" {
+            continue;
+        }
+        let subject = item["subject"].as_str().unwrap_or("(untitled)");
         lines.push(format!("- {kind}: {subject}"));
         shown += 1;
     }
 
     // Open questions fill the remaining budget (they are handoff records of
-    // kind `question`).
+    // kind `question`, already counted once in `active_items` above — this
+    // is their one and only render).
     for question in questions {
         if shown >= config.max_items {
             break;
@@ -256,7 +266,10 @@ fn render_packet(
         shown += 1;
     }
 
-    let total_open = active.len() + questions.len();
+    // `open_questions` is a subset of `active_items` (every question-kind
+    // record lives in both), so the distinct-item total is `active.len()`
+    // alone — summing the two would double-count each open question.
+    let total_open = active.len();
     if total_open > shown {
         lines.push(format!(
             "- … {} further open item(s) withheld by the orientation budget",
@@ -281,6 +294,12 @@ fn render_packet(
         }
     }
 
+    // Header counts: `active.len()` already includes every question-kind
+    // record (they live in both fields), so "N open item(s)" is the honest
+    // total distinct open records, and "M open question(s)" names how many
+    // of those N are questions — a subset call-out, not an addend. The two
+    // numbers are never summed anywhere in this render, matching `total_open`
+    // above.
     Ok(Some(format!(
         "[continuity/orientation-packet] project {project} — {} open item(s), {} open question(s) (composed):\n{}",
         active.len(),
