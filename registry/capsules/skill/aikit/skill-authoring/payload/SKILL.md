@@ -1,13 +1,13 @@
 ---
 name: aikit-skill-authoring
-description: Author executable procedural knowledge as managed Skill or Method praxis with explicit source, triggers, operations, authority assumptions and verification.
+description: Author executable procedural knowledge as managed Skills, including METHOD:-classified situated praxis, with explicit source, triggers, operations, authority assumptions and verification.
 ---
 
 # Skill and Method authoring
 
 Semantic ref: `aikit:skill-authoring`. Native owner: `EpiLogos/ai-kit`.
 
-A **Skill** is reusable organised intelligent praxis. A **Method** is a Focus-bearing situated composition of independently owned Skills, UsageOverlay receipts, Actions/Capabilities, ContextSources, Project/domain refs and verification/expected-return forms. A **SkillSet** is only additive repertoire. Profile/ContextResolution determine why and where resources become operative.
+A **Skill** is reusable organised intelligent praxis. A **Method** is that same Skill identity classified by a `METHOD:` description prefix so situated/interstitial praxis is discoverable. Useful relations to UsageOverlay receipts, Actions/Capabilities, ContextSources, Project/domain refs and verification/expected-return forms remain Skill or situated-use metadata. A **SkillSet** is additive repertoire and may recursively contain child SkillSets. Profile/ContextResolution determine why and where resources become operative.
 
 Do not make a Skill absorb a Project merely because the Project needs it, and do not make a SkillSet become a workflow engine merely because several Skills are commonly used together.
 
@@ -43,8 +43,8 @@ stable fact / vocabulary / care / collaboration boundary
 situational reusable procedure
     -> Skill
 
-Focus-bearing relation among independently owned resources
-    -> Method
+reusable situated/interstitial praxis
+    -> Skill with a METHOD: description
 
 rare provider/template/deep example
     -> conditional reference / context pointer
@@ -131,13 +131,13 @@ reviewed-against / digest            exact adaptation evidence
 Effective Skill projection           derived harness-facing material
 ```
 
-A repeated useful overlay may create evidence for a Project Method or later reusable Skill refinement, but repeated use is not automatic promotion and the overlay does not become Skill source.
+A repeated useful overlay may create evidence for a METHOD:-classified Skill or later reusable Skill refinement, but repeated use is not automatic promotion and the overlay does not become Skill source.
 
-## When to author a Method
+## When to classify a Skill as Method
 
-Author a Method when the useful durable thing is **the contextual relation among independently owned resources around a purpose/Focus**, rather than a new reusable Skill body.
+Use the `METHOD:` description prefix when the reusable Skill is situated or interstitial praxis whose method character should be discoverable. This classification changes no identity, source format, trust, activation, usage overlay or projection rule.
 
-A Method should be able to retain stable refs to:
+A Method-classified Skill or its situated-use evidence may retain stable refs to:
 
 ```text
 Focus / Project / domain
@@ -149,17 +149,17 @@ verification refs
 expected return forms
 ```
 
-Do not copy the referenced bodies into the Method. Do not encode trust, activation authority or Profile precedence in Method membership. Do not convert the Method into a sequence DSL merely to make its composition look procedural; order belongs only where the actual practice requires and owns order.
+Do not create a second Method source or MethodRef. Do not copy referenced bodies into Skill metadata. Do not encode trust, activation authority or Profile precedence in these relations. Do not convert Method classification into a sequence DSL; order belongs only where the actual practice requires and owns order.
 
-Before writing a Project Method:
+Before authoring a Method-classified Skill:
 
 1. Recover the Project's actual language/ontology and the stable refs already expressing it.
-2. Check whether an existing reusable Skill plus UsageOverlay is sufficient. If so, stop there.
+2. Check whether an existing reusable Skill plus UsageOverlay is sufficient. If so, stop there; add `METHOD:` only when classification improves discovery.
 3. Check whether the need is merely additive availability. If so, use SkillSet rather than Method.
-4. Compose only the refs materially germane to the Focus and state the expected verification/return relation.
-5. Resolve the selected Method **under** the existing Profile/ContextResolution. Method selection never activates an unavailable capability or bypasses trust/policy/Action authority.
-6. Preserve source/revision and immutable overlay digests so Explain/History can reconstruct the praxis condition later.
-7. After real use, return fitness evidence as evidence about the Method/overlay/Skill condition; do not silently mutate durable praxis.
+4. Retain only the Skill/situated-use relations materially germane to the Focus and state the expected verification/return relation.
+5. Resolve the Skill **under** the existing Profile/ContextResolution. Method classification never activates an unavailable capability or bypasses trust/policy/Action authority.
+6. Preserve Skill source/revision and immutable overlay digests so Explain/History can reconstruct the praxis condition later.
+7. After real use, return fitness evidence as evidence about the Method-classified Skill/overlay condition; do not silently mutate durable praxis.
 
 ## Project vocabulary and structural fidelity
 
@@ -171,4 +171,4 @@ Use the target's stable semantic/source/code refs where possible. If no such str
 
 `registry/fixtures/minimal-authored-skill/` is the representative small Skill produced by this procedure. `scripts/verify-native-skills.py` validates both its capsule path/id and its Skill frontmatter.
 
-For Method implementation/conformance, use AIKit's native `Method` / `resolve_method` / `resolve_praxis` contracts and their tests rather than inventing a second Method store in this Skill.
+For Method conformance, verify the Skill's `METHOD:` description classification, unchanged capsule identity and ordinary Profile/ContextResolution projection. There is no separate Method store or source contract.

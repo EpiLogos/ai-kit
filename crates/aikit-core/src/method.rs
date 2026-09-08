@@ -1,19 +1,18 @@
-//! Native Method semantics: situated composition without copying the things composed.
+//! Method classification and situated metadata for Skills.
 //!
-//! A Method is deliberately narrower than a Profile and richer than a SkillSet.
-//! It records how independently owned praxis/resources relate around a Focus. It
-//! does not activate capabilities, confer trust, mutate Skill source, or own
-//! Action authority.
+//! A Method is not a second resource. It is a Skill whose description starts
+//! with [`METHOD_DESCRIPTION_PREFIX`]. The optional situated relations below are
+//! metadata about that same Skill identity; they never create a Method identity,
+//! source lifecycle, store, or activation path.
 
 use serde::{Deserialize, Serialize};
 
 use crate::resource::{
-    ResolveExpression, ResourceIndex, ResourceKind, ResourceRecord, ResourceRef, SourceRef,
-    SourceRevision,
+    ResolveExpression, ResourceIndex, ResourceKind, ResourceRef, SourceRef, SourceRevision,
 };
 use crate::{AikitError, Result};
 
-pub const METHOD_VERSION: &str = "aikit.method/v1";
+pub const METHOD_VERSION: &str = "aikit.skill-method-metadata/v1";
 
 /// The detection convention for situated operational patterns: a Method is
 /// just a Skill whose description carries a `METHOD:` prefix. Nothing else
@@ -34,8 +33,8 @@ pub fn method_payload(description: &str) -> Option<&str> {
 /// Immutable receipt identifying the scoped adaptation of an unchanged Skill.
 ///
 /// Runtime authoring remains the existing `SkillUsageOverlayPatch` mechanism in
-/// Profile/scope resolution. A Method only points at the resulting exact digest;
-/// it does not introduce another overlay store.
+/// Profile/scope resolution. Situated-use metadata only points at the resulting
+/// exact digest; it does not introduce another overlay store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageOverlayRef {
     pub skill: ResourceRef,
@@ -70,19 +69,19 @@ impl UsageOverlayRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MethodSkillRef {
+pub struct SituatedSkillRef {
     pub skill: ResourceRef,
     #[serde(default)]
     pub usage_overlay: Option<UsageOverlayRef>,
 }
 
-/// Source-owned situated praxis composition.
+/// Optional situated-use metadata attached to the Skill named by `id`.
 ///
-/// `source`/`revision` identify where the Method itself came from. Every member
-/// remains a stable reference to independently owned source; no member body is
-/// copied into this resource.
+/// `id` is the existing Skill resource identity. `source`/`revision` identify
+/// the evidence that supplied these relations, not a Method source object.
+/// Every related member remains independently owned and no body is copied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Method {
+pub struct SkillPraxisMetadata {
     pub id: ResourceRef,
     pub source: SourceRef,
     #[serde(default)]
@@ -95,7 +94,7 @@ pub struct Method {
     #[serde(default)]
     pub project_domain: Vec<ResourceRef>,
     #[serde(default)]
-    pub skills: Vec<MethodSkillRef>,
+    pub skills: Vec<SituatedSkillRef>,
     #[serde(default)]
     pub actions: Vec<ResourceRef>,
     #[serde(default)]
@@ -113,7 +112,7 @@ pub struct Method {
     pub expected_return_forms: Vec<String>,
 }
 
-impl Method {
+impl SkillPraxisMetadata {
     pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
             return Err(AikitError::new(
@@ -146,38 +145,15 @@ impl Method {
         }
         Ok(())
     }
-
-    /// A V2 resource record for indexing/search/resolution. The Method body stays
-    /// in its source; annotations only expose compact routing/provenance facts.
-    pub fn resource_record(&self) -> ResourceRecord {
-        let mut descriptor = crate::resource::ResourceDescriptor::new(
-            self.id.clone(),
-            ResourceKind::Method,
-            self.name.clone(),
-            self.description.clone(),
-        );
-        descriptor
-            .annotations
-            .insert("method.version".into(), METHOD_VERSION.into());
-        descriptor
-            .annotations
-            .insert("method.source".into(), self.source.to_string());
-        if let Some(revision) = &self.revision {
-            descriptor
-                .annotations
-                .insert("method.revision".into(), revision.to_string());
-        }
-        if let Some(expected) = &self.expected_resolve {
-            descriptor
-                .annotations
-                .insert("method.expected-resolve".into(), expected.render());
-        }
-        ResourceRecord::new(descriptor)
-    }
 }
 
+/// Compatibility names for callers of the superseded #108 API. These are type
+/// aliases only: neither name creates a resource identity or source format.
+pub type Method = SkillPraxisMetadata;
+pub type MethodSkillRef = SituatedSkillRef;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MethodResolvedRef {
+pub struct SkillPraxisResolvedRef {
     pub reference: ResourceRef,
     pub expected_kind: ResourceKind,
     #[serde(default)]
@@ -186,18 +162,18 @@ pub struct MethodResolvedRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MethodResolution {
+pub struct SkillPraxisMetadataResolution {
     pub method: ResourceRef,
     pub source: SourceRef,
     #[serde(default)]
     pub revision: Option<SourceRevision>,
-    pub focus: Vec<MethodResolvedRef>,
-    pub project_domain: Vec<MethodResolvedRef>,
-    pub skills: Vec<MethodResolvedRef>,
-    pub actions: Vec<MethodResolvedRef>,
-    pub capabilities: Vec<MethodResolvedRef>,
-    pub context_sources: Vec<MethodResolvedRef>,
-    pub verification: Vec<MethodResolvedRef>,
+    pub focus: Vec<SkillPraxisResolvedRef>,
+    pub project_domain: Vec<SkillPraxisResolvedRef>,
+    pub skills: Vec<SkillPraxisResolvedRef>,
+    pub actions: Vec<SkillPraxisResolvedRef>,
+    pub capabilities: Vec<SkillPraxisResolvedRef>,
+    pub context_sources: Vec<SkillPraxisResolvedRef>,
+    pub verification: Vec<SkillPraxisResolvedRef>,
     pub overlays: Vec<UsageOverlayRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_resolve: Option<ResolveExpression>,
@@ -206,18 +182,42 @@ pub struct MethodResolution {
     pub warnings: Vec<String>,
 }
 
-impl MethodResolution {
+impl SkillPraxisMetadataResolution {
     pub fn is_complete(&self) -> bool {
         self.warnings.is_empty()
     }
 }
 
-/// Resolve Method references against the same V2 resource field used by
-/// ContextResolution. This is deliberately observational: it never enables,
-/// disables, trusts, orders, or mutates referenced resources.
-pub fn resolve_method(method: &Method, resources: &dyn ResourceIndex) -> Result<MethodResolution> {
+/// Resolve a Method-classified Skill and its situated-use metadata against the
+/// same V2 resource field used by ContextResolution. This is observational: it
+/// never enables, disables, trusts, orders, or mutates referenced resources.
+pub fn resolve_skill_praxis_metadata(
+    method: &SkillPraxisMetadata,
+    resources: &dyn ResourceIndex,
+) -> Result<SkillPraxisMetadataResolution> {
     method.validate()?;
     let mut warnings = Vec::new();
+
+    match resources.resource(&method.id) {
+        None => warnings.push(format!(
+            "Method-classified Skill {} is absent from the resource field",
+            method.id
+        )),
+        Some(record) if record.descriptor.kind != ResourceKind::Capability => {
+            warnings.push(format!(
+                "Method-classified resource {} has kind {}, expected capability",
+                method.id,
+                record.descriptor.kind.as_str()
+            ))
+        }
+        Some(record) if method_payload(&record.descriptor.description).is_none() => {
+            warnings.push(format!(
+            "Skill {} is not Method-classified because its description lacks the METHOD: prefix",
+            method.id
+        ))
+        }
+        Some(_) => {}
+    }
 
     let focus = resolve_many(
         &method.focus,
@@ -272,7 +272,7 @@ pub fn resolve_method(method: &Method, resources: &dyn ResourceIndex) -> Result<
     // preserve the actual kind while requiring existence only.
     let verification = resolve_any(&method.verification, resources, &mut warnings);
 
-    Ok(MethodResolution {
+    Ok(SkillPraxisMetadataResolution {
         method: method.id.clone(),
         source: method.source.clone(),
         revision: method.revision.clone(),
@@ -300,7 +300,7 @@ fn resolve_many(
     resources: &dyn ResourceIndex,
     warnings: &mut Vec<String>,
     strict_kind: bool,
-) -> Vec<MethodResolvedRef> {
+) -> Vec<SkillPraxisResolvedRef> {
     refs.iter()
         .map(|reference| match resources.resource(reference) {
             None => {
@@ -308,7 +308,7 @@ fn resolve_many(
                     "Method reference {reference} is absent (expected {})",
                     expected.as_str()
                 ));
-                MethodResolvedRef {
+                SkillPraxisResolvedRef {
                     reference: reference.clone(),
                     expected_kind: expected,
                     actual_kind: None,
@@ -321,14 +321,14 @@ fn resolve_many(
                     record.descriptor.kind.as_str(),
                     expected.as_str()
                 ));
-                MethodResolvedRef {
+                SkillPraxisResolvedRef {
                     reference: reference.clone(),
                     expected_kind: expected,
                     actual_kind: Some(record.descriptor.kind),
                     resolved: false,
                 }
             }
-            Some(record) => MethodResolvedRef {
+            Some(record) => SkillPraxisResolvedRef {
                 reference: reference.clone(),
                 expected_kind: expected,
                 actual_kind: Some(record.descriptor.kind),
@@ -342,10 +342,10 @@ fn resolve_any(
     refs: &[ResourceRef],
     resources: &dyn ResourceIndex,
     warnings: &mut Vec<String>,
-) -> Vec<MethodResolvedRef> {
+) -> Vec<SkillPraxisResolvedRef> {
     refs.iter()
         .map(|reference| match resources.resource(reference) {
-            Some(record) => MethodResolvedRef {
+            Some(record) => SkillPraxisResolvedRef {
                 reference: reference.clone(),
                 expected_kind: record.descriptor.kind,
                 actual_kind: Some(record.descriptor.kind),
@@ -355,7 +355,7 @@ fn resolve_any(
                 warnings.push(format!(
                     "Method verification reference {reference} is absent"
                 ));
-                MethodResolvedRef {
+                SkillPraxisResolvedRef {
                     reference: reference.clone(),
                     expected_kind: ResourceKind::Capability,
                     actual_kind: None,
@@ -366,10 +366,21 @@ fn resolve_any(
         .collect()
 }
 
+pub type MethodResolvedRef = SkillPraxisResolvedRef;
+pub type MethodResolution = SkillPraxisMetadataResolution;
+
+/// Compatibility entry point for the superseded #108 API.
+pub fn resolve_method(
+    method: &Method,
+    resources: &dyn ResourceIndex,
+) -> Result<MethodResolution> {
+    resolve_skill_praxis_metadata(method, resources)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resource::{MemoryResourceIndex, ResourceDescriptor};
+    use crate::resource::{MemoryResourceIndex, ResourceDescriptor, ResourceRecord};
 
     #[test]
     fn method_detection_is_prefix_only_and_never_asserts_semantics() {
@@ -378,7 +389,10 @@ mod tests {
             Some("inhabit a project wiki from Control state")
         );
         // Leading whitespace before the prefix does not hide a Method.
-        assert_eq!(method_payload("  METHOD: situate the work"), Some("situate the work"));
+        assert_eq!(
+            method_payload("  METHOD: situate the work"),
+            Some("situate the work")
+        );
         // An empty payload is still a declared Method.
         assert_eq!(method_payload("METHOD:"), Some(""));
         // Without the prefix there is no Method, and a mid-description
@@ -399,6 +413,9 @@ mod tests {
     #[test]
     fn method_composes_refs_without_copying_or_conferring_authority() {
         let mut resources = MemoryResourceIndex::default();
+        let mut classified = record("skill:project-change", ResourceKind::Capability);
+        classified.descriptor.description = "METHOD: Project change".into();
+        resources.insert(classified);
         resources.insert(record("cap:wayfinder", ResourceKind::Capability));
         resources.insert(record("action:verify", ResourceKind::Action));
         resources.insert(record(
@@ -408,7 +425,7 @@ mod tests {
         resources.insert(record("project:demo", ResourceKind::Project));
 
         let method = Method {
-            id: ResourceRef::parse("method:project-change").unwrap(),
+            id: ResourceRef::parse("skill:project-change").unwrap(),
             source: SourceRef::parse("source:method:project-change").unwrap(),
             revision: None,
             name: "Project change".into(),
@@ -449,20 +466,18 @@ mod tests {
                 .map(ResolveExpression::render),
             Some("@0 context:project-ground x @5 action:verify".into())
         );
-        let record = method.resource_record();
-        assert_eq!(record.descriptor.kind, ResourceKind::Method);
-        assert_eq!(
-            record.descriptor.annotations.get("method.expected-resolve"),
-            Some(&"@0 context:project-ground x @5 action:verify".into())
-        );
+        assert_eq!(resolved.method, method.id);
     }
 
     #[test]
     fn missing_or_wrong_refs_are_explainable_not_promoted() {
         let mut resources = MemoryResourceIndex::default();
+        let mut classified = record("skill:broken", ResourceKind::Capability);
+        classified.descriptor.description = "METHOD: Broken".into();
+        resources.insert(classified);
         resources.insert(record("action:not-a-skill", ResourceKind::Action));
         let method = Method {
-            id: ResourceRef::parse("method:broken").unwrap(),
+            id: ResourceRef::parse("skill:broken").unwrap(),
             source: SourceRef::parse("source:method:broken").unwrap(),
             revision: None,
             name: "Broken".into(),
@@ -483,5 +498,32 @@ mod tests {
         let resolved = resolve_method(&method, &resources).unwrap();
         assert!(!resolved.is_complete());
         assert_eq!(resolved.warnings.len(), 2);
+    }
+
+    #[test]
+    fn situated_metadata_cannot_mint_a_method_identity_beside_an_ordinary_skill() {
+        let mut resources = MemoryResourceIndex::default();
+        resources.insert(record("skill:orient", ResourceKind::Capability));
+        let method = Method {
+            id: ResourceRef::parse("skill:orient").unwrap(),
+            source: SourceRef::parse("source:metadata:orient").unwrap(),
+            revision: None,
+            name: "Orient".into(),
+            description: String::new(),
+            focus: vec![],
+            project_domain: vec![],
+            skills: vec![],
+            actions: vec![],
+            capabilities: vec![],
+            context_sources: vec![],
+            verification: vec![],
+            expected_resolve: None,
+            expected_return_forms: vec![],
+        };
+
+        let resolved = resolve_method(&method, &resources).unwrap();
+        assert!(!resolved.is_complete());
+        assert_eq!(resolved.method, method.id);
+        assert!(resolved.warnings[0].contains("lacks the METHOD: prefix"));
     }
 }

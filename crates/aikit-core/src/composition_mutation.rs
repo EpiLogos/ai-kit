@@ -53,9 +53,9 @@ impl StagedHarnessComposition {
         // One staged answer per Component identity. Re-staging replaces the prior
         // answer rather than creating ordering-sensitive duplicate intent.
         self.mutations.retain(|mutation| match mutation {
-            HarnessCompositionMutation::Select { selection: existing } => {
-                existing.component != selection.component
-            }
+            HarnessCompositionMutation::Select {
+                selection: existing,
+            } => existing.component != selection.component,
             HarnessCompositionMutation::Retract { component } => component != &selection.component,
         });
         self.mutations
@@ -65,7 +65,9 @@ impl StagedHarnessComposition {
     pub fn retract(&mut self, component: ResourceRef) {
         self.mutations.retain(|mutation| match mutation {
             HarnessCompositionMutation::Select { selection } => selection.component != component,
-            HarnessCompositionMutation::Retract { component: existing } => existing != &component,
+            HarnessCompositionMutation::Retract {
+                component: existing,
+            } => existing != &component,
         });
         self.mutations
             .push(HarnessCompositionMutation::Retract { component });
@@ -212,7 +214,8 @@ impl CompositionBasis {
     }
 
     pub fn matches(&self, view: &ResolvedView) -> bool {
-        self.catalog_revision == view.catalog_revision && self.resolution_hash == view.hash.to_string()
+        self.catalog_revision == view.catalog_revision
+            && self.resolution_hash == view.hash.to_string()
     }
 }
 
@@ -262,7 +265,10 @@ impl StagedProfileComposition {
     pub fn authored_after(&self, authored_before: &PoolPatch) -> PoolPatch {
         let mut after = authored_before.clone();
         for (capability, intent) in &self.changes {
-            after.set(capability, matches!(intent, ProfileActivationIntent::Enable));
+            after.set(
+                capability,
+                matches!(intent, ProfileActivationIntent::Enable),
+            );
         }
         after
     }
@@ -334,12 +340,15 @@ impl StagedSkillSetRelations {
         let mut after = sets.to_vec();
         for mutation in &self.mutations {
             let (name, capability) = relation_key(mutation);
-            let set = after.iter_mut().find(|set| set.name == name).ok_or_else(|| {
-                AikitError::new(
-                    "composition.skillset_not_found",
-                    format!("SkillSet `{name}` is not present in the inspected composition"),
-                )
-            })?;
+            let set = after
+                .iter_mut()
+                .find(|set| set.name == name)
+                .ok_or_else(|| {
+                    AikitError::new(
+                        "composition.skillset_not_found",
+                        format!("SkillSet `{name}` is not present in the inspected composition"),
+                    )
+                })?;
             if !set.provenance.is_writable() {
                 return Err(AikitError::new(
                     "composition.skillset_read_only",
@@ -348,7 +357,8 @@ impl StagedSkillSetRelations {
             }
             match mutation {
                 SkillSetRelationMutation::Add { .. } => {
-                    set.members.insert(capability.clone(), SetMembership::Explicit);
+                    set.members
+                        .insert(capability.clone(), SetMembership::Explicit);
                 }
                 SkillSetRelationMutation::Remove { .. } => {
                     set.members.remove(capability);
@@ -418,14 +428,26 @@ pub enum SkillSetMemberRelationState {
 pub struct SkillSetMemberRelationReadModel {
     pub capability: CapsuleId,
     pub membership: SetMembership,
+    /// The SkillSet that directly declares this member. For a direct member this
+    /// equals the enclosing relation identity; inherited members name the child
+    /// set that owns the declaration.
+    pub declared_by: String,
+    pub direct: bool,
     pub state: SkillSetMemberRelationState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillSetRelationReadModel {
     pub identity: String,
+    /// Direct containing SkillSet, when this is a nested set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     pub provenance: String,
     pub writable: bool,
+    /// Direct child SkillSet identities. Identities are qualified by their
+    /// parent path so equal leaf names in different branches remain distinct.
+    #[serde(default)]
+    pub children: Vec<String>,
     /// Stable presentation order only. SkillSet semantics remain set union with no
     /// precedence, override or reorder authority.
     pub members: Vec<SkillSetMemberRelationReadModel>,
@@ -473,10 +495,10 @@ pub fn inspect_profile_composition(
         .iter()
         .map(|selection| selection.describe())
         .collect();
-    let skill_sets = skill_sets
-        .iter()
-        .map(|set| inspect_skill_set_relation(set, effective))
-        .collect();
+    let mut inspected_skill_sets = Vec::new();
+    for set in skill_sets {
+        inspect_skill_set_relations(set, &set.name, None, effective, &mut inspected_skill_sets);
+    }
 
     ProfileCompositionReadModel {
         basis: CompositionBasis::from_view(effective),
@@ -489,12 +511,18 @@ pub fn inspect_profile_composition(
             unavailable,
             provenance,
         },
-        skill_sets,
+        skill_sets: inspected_skill_sets,
         warnings: effective.warnings.clone(),
     }
 }
 
-fn inspect_skill_set_relation(set: &SkillSet, effective: &ResolvedView) -> SkillSetRelationReadModel {
+fn inspect_skill_set_relations(
+    set: &SkillSet,
+    identity: &str,
+    parent: Option<&str>,
+    effective: &ResolvedView,
+    out: &mut Vec<SkillSetRelationReadModel>,
+) {
     let projection = project_skill_set(set, effective);
     let projected: BTreeSet<CapsuleId> = projection.projected.into_iter().collect();
     let withheld: BTreeMap<CapsuleId, String> = projection
@@ -502,29 +530,64 @@ fn inspect_skill_set_relation(set: &SkillSet, effective: &ResolvedView) -> Skill
         .into_iter()
         .map(|entry| (entry.capsule, entry.reason.describe()))
         .collect();
-    let members = set
-        .members
-        .iter()
-        .map(|(capability, membership)| SkillSetMemberRelationReadModel {
-            capability: capability.clone(),
-            membership: membership.clone(),
-            state: if projected.contains(capability) {
-                SkillSetMemberRelationState::Effective
-            } else {
-                SkillSetMemberRelationState::Withheld {
-                    reason: withheld
-                        .get(capability)
-                        .cloned()
-                        .unwrap_or_else(|| "not projected from this context".to_string()),
-                }
+    let mut declarations = Vec::new();
+    collect_member_declarations(set, identity, true, &mut declarations);
+    let members = declarations
+        .into_iter()
+        .map(
+            |(capability, (membership, declared_by, direct))| SkillSetMemberRelationReadModel {
+                state: if projected.contains(&capability) {
+                    SkillSetMemberRelationState::Effective
+                } else {
+                    SkillSetMemberRelationState::Withheld {
+                        reason: withheld
+                            .get(&capability)
+                            .cloned()
+                            .unwrap_or_else(|| "not projected from this context".to_string()),
+                    }
+                },
+                capability,
+                membership,
+                declared_by,
+                direct,
             },
-        })
+        )
         .collect();
-    SkillSetRelationReadModel {
-        identity: set.name.clone(),
+    let children: Vec<String> = set
+        .children
+        .iter()
+        .map(|child| format!("{identity}/{}", child.name))
+        .collect();
+    out.push(SkillSetRelationReadModel {
+        identity: identity.to_string(),
+        parent: parent.map(str::to_string),
         provenance: set.provenance.as_str().to_string(),
         writable: set.provenance.is_writable(),
+        children: children.clone(),
         members,
+    });
+    for (child, child_identity) in set.children.iter().zip(children) {
+        inspect_skill_set_relations(child, &child_identity, Some(identity), effective, out);
+    }
+}
+
+fn collect_member_declarations(
+    set: &SkillSet,
+    identity: &str,
+    direct: bool,
+    out: &mut Vec<(CapsuleId, (SetMembership, String, bool))>,
+) {
+    for (capability, membership) in &set.members {
+        // Each entry is a containment relation, not a de-duplicated capability
+        // projection. The same Skill may be directly authored into multiple
+        // descendant sets and every such relation must remain inspectable.
+        out.push((
+            capability.clone(),
+            (membership.clone(), identity.to_string(), direct),
+        ));
+    }
+    for child in &set.children {
+        collect_member_declarations(child, &format!("{identity}/{}", child.name), false, out);
     }
 }
 
@@ -579,8 +642,10 @@ pub fn preview_profile_composition_change(
 ) -> Result<ProfileCompositionPreview> {
     let authored_after = staged_profile.authored_after(authored_before);
     let skill_sets_after = staged_skill_sets.authored_after(skill_sets_before)?;
-    let before = inspect_profile_composition(scope, authored_before, effective_before, skill_sets_before);
-    let after = inspect_profile_composition(scope, &authored_after, effective_after, &skill_sets_after);
+    let before =
+        inspect_profile_composition(scope, authored_before, effective_before, skill_sets_before);
+    let after =
+        inspect_profile_composition(scope, &authored_after, effective_after, &skill_sets_after);
     let changed_ground = changed_ground(effective_before, effective_after);
     Ok(ProfileCompositionPreview {
         basis_before: before.basis.clone(),
@@ -606,8 +671,14 @@ pub fn ensure_profile_composition_preview_current(
         "composition.preview_stale",
         "the accepted composition preview was produced against a different resolution basis",
     )
-    .with("expected_catalog_revision", preview.basis_before.catalog_revision.clone())
-    .with("expected_resolution_hash", preview.basis_before.resolution_hash.clone())
+    .with(
+        "expected_catalog_revision",
+        preview.basis_before.catalog_revision.clone(),
+    )
+    .with(
+        "expected_resolution_hash",
+        preview.basis_before.resolution_hash.clone(),
+    )
     .with("current_catalog_revision", current.catalog_revision.clone())
     .with("current_resolution_hash", current.hash.to_string()))
 }
@@ -661,7 +732,13 @@ pub fn changed_ground(before: &ResolvedView, after: &ResolvedView) -> ChangedGro
                 reason: reason.clone(),
             })
             .collect(),
-        warnings_added: after_warnings.difference(&before_warnings).cloned().collect(),
-        warnings_removed: before_warnings.difference(&after_warnings).cloned().collect(),
+        warnings_added: after_warnings
+            .difference(&before_warnings)
+            .cloned()
+            .collect(),
+        warnings_removed: before_warnings
+            .difference(&after_warnings)
+            .cloned()
+            .collect(),
     }
 }

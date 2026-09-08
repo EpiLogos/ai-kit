@@ -39,7 +39,7 @@ pub const FLOW_SKILL_REF: &str = "cap:flow-working";
 pub const FLOW_KNOWLEDGE_NAVIGATION_REF: &str = "cap:knowledge-navigation";
 pub const FLOW_LIVING_KNOWLEDGE_REF: &str = "cap:living-knowledge";
 pub const FLOW_CONTEMPLATE_ACTION_REF: &str = "action:contemplate-flow";
-pub const FLOW_METHOD_REF: &str = "method:contemplate-flow";
+pub const FLOW_METHOD_REF: &str = "skill:aikit/contemplate-flow";
 pub const FLOW_METHOD_SOURCE: &str = "source:aikit:first-party:contemplate-flow";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -668,6 +668,7 @@ pub fn first_party_flow_guidance() -> Result<GuidanceFragment> {
 /// ResourceIndex used by Method/ContextResolution; they are not a private Flow registry.
 pub fn first_party_flow_resource_records() -> Result<Vec<ResourceRecord>> {
     let values = [
+        (FLOW_METHOD_REF, ResourceKind::Capability, "Contemplate Flow", "METHOD: Situate the active Flow inside Knowledge Navigation and Living Knowledge, then return attributable differences through their native owners."),
         (FLOW_SKILL_REF, ResourceKind::Capability, "Flow working", "Read, continue, refine and safely return changes to one current Flow through its owner."),
         (FLOW_KNOWLEDGE_NAVIGATION_REF, ResourceKind::Capability, "Knowledge Navigation", "Use the current Semantic Wiki, sources and relation field around the Flow."),
         (FLOW_LIVING_KNOWLEDGE_REF, ResourceKind::Capability, "Living Knowledge", "Use explicit source/revision dependencies and ChangeHorizon impact/freshness."),
@@ -1654,7 +1655,7 @@ mod tests {
                 "agency":"agency:test",
                 "agent_session":"agent-session/test",
                 "context_resolution_version":"aikit.context-resolution/v2",
-                "method":"method:contemplate-flow",
+                "method":"skill:aikit/contemplate-flow",
                 "invocation_ref":"flow-contemplate/abc"
               }]
             }"#,

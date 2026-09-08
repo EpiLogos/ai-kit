@@ -5,6 +5,11 @@
 **Tracks:** AIKit #108, #113  
 **Implementation PR:** #115 `agent/praxis-project-reflection`
 
+> Historical receipt: its independent Method-resource claims record the accepted
+> #108 programme at the time and were superseded on 2026-09-08. Method now means
+> the same Skill identity classified by a `METHOD:` description prefix; retained
+> overlay and praxis evidence describes that Skill's situated use.
+
 ## 0. What this receipt proves
 
 This receipt does not replace the native owner tests with one synthetic mega-fixture. It composes the real owner seams which together constitute the AIKit-owned median Project vertical:

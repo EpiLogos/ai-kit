@@ -353,10 +353,14 @@ mod tests {
     #[test]
     fn method_selection_is_downstream_of_context_resolution_not_a_precedence_engine() {
         let mut resources = MemoryResourceIndex::default();
+        let mut method_record = record("skill:orient", ResourceKind::Capability);
+        method_record.descriptor.description = "METHOD: Orient".into();
+        resources.insert(method_record);
         resources.insert(record("cap:wayfinder", ResourceKind::Capability));
         let context = context(&resources);
+        let capabilities_before = context.capabilities.clone();
         let method = Method {
-            id: ResourceRef::parse("method:orient").unwrap(),
+            id: ResourceRef::parse("skill:orient").unwrap(),
             source: SourceRef::parse("source:method:orient").unwrap(),
             revision: None,
             name: "Orient".into(),
@@ -378,18 +382,22 @@ mod tests {
             &context,
             &resources,
             &[method],
-            &[ResourceRef::parse("method:orient").unwrap()],
+            &[ResourceRef::parse("skill:orient").unwrap()],
             &[],
         );
         assert_eq!(resolved.context_resolution_version, context.version);
         assert_eq!(resolved.methods.len(), 1);
         assert!(resolved.warnings.is_empty());
-        assert_eq!(context.capabilities.len(), 1);
+        assert_eq!(context.capabilities, capabilities_before);
+        assert_eq!(context.capabilities.len(), 2);
     }
 
     #[test]
     fn explain_and_history_preserve_method_source_overlay_and_resolution_condition() {
         let mut resources = MemoryResourceIndex::default();
+        let mut method_record = record("skill:orient", ResourceKind::Capability);
+        method_record.descriptor.description = "METHOD: Orient".into();
+        resources.insert(method_record);
         resources.insert(record("cap:wayfinder", ResourceKind::Capability));
         resources.insert(record("context:ground", ResourceKind::ContextSource));
         let context = context(&resources);
@@ -400,7 +408,7 @@ mod tests {
             source: Some(SourceRef::parse("source:overlay:project").unwrap()),
         };
         let method = Method {
-            id: ResourceRef::parse("method:orient").unwrap(),
+            id: ResourceRef::parse("skill:orient").unwrap(),
             source: SourceRef::parse("source:method:orient").unwrap(),
             revision: None,
             name: "Orient".into(),
@@ -425,7 +433,7 @@ mod tests {
             &context,
             &resources,
             &[method],
-            &[ResourceRef::parse("method:orient").unwrap()],
+            &[ResourceRef::parse("skill:orient").unwrap()],
             &[ResourceRef::parse("focus:project-orientation").unwrap()],
         );
         let explained = explain_praxis(&praxis);

@@ -618,8 +618,18 @@ pub fn resolve_expression(
                     .unwrap_or_default()
                     .cmp(&left.ranking.authored_preference_rank.unwrap_or_default())
             })
-            .then_with(|| right.ranking.current_project.cmp(&left.ranking.current_project))
-            .then_with(|| right.ranking.active_in_context.cmp(&left.ranking.active_in_context))
+            .then_with(|| {
+                right
+                    .ranking
+                    .current_project
+                    .cmp(&left.ranking.current_project)
+            })
+            .then_with(|| {
+                right
+                    .ranking
+                    .active_in_context
+                    .cmp(&left.ranking.active_in_context)
+            })
             .then_with(|| {
                 right
                     .ranking
@@ -824,7 +834,11 @@ fn text_score(query: &str, record: &ResourceRecord) -> Option<i64> {
     }
     for annotation in ["aikit.search-exports", "aikit.search-tags"] {
         if let Some(handles) = record.descriptor.annotations.get(annotation) {
-            for handle in handles.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+            for handle in handles
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
                 score = score.max(direct_handle_score(query, handle));
             }
         }
@@ -842,7 +856,10 @@ fn text_score(query: &str, record: &ResourceRecord) -> Option<i64> {
     };
     (!terms.is_empty()
         && terms.iter().all(|term| {
-            id.contains(term) || name.contains(term) || description.contains(term) || annotations_match(term)
+            id.contains(term)
+                || name.contains(term)
+                || description.contains(term)
+                || annotations_match(term)
         }))
     .then_some(1_000 - terms.len() as i64)
 }
@@ -861,7 +878,6 @@ pub fn horizons_for_resource(record: &ResourceRecord) -> BTreeSet<AddressHorizon
             BTreeSet::from([AddressHorizon::H1, AddressHorizon::H3])
         }
         ResourceKind::Profile => BTreeSet::from([AddressHorizon::H1, AddressHorizon::H4]),
-        ResourceKind::Method => BTreeSet::from([AddressHorizon::H2, AddressHorizon::H5]),
         ResourceKind::Project => BTreeSet::from([AddressHorizon::H4]),
         ResourceKind::Agent | ResourceKind::Agency => {
             BTreeSet::from([AddressHorizon::H2, AddressHorizon::H4, AddressHorizon::H5])
@@ -881,6 +897,11 @@ pub fn horizons_for_resource(record: &ResourceRecord) -> BTreeSet<AddressHorizon
             BTreeSet::from([AddressHorizon::H1, AddressHorizon::H4])
         }
     };
+    if record.descriptor.kind == ResourceKind::Capability
+        && crate::method::method_payload(&record.descriptor.description).is_some()
+    {
+        horizons.insert(AddressHorizon::H2);
+    }
     if let Some(extra) = record.descriptor.annotations.get("oi.address-horizons") {
         for value in extra.split(|ch: char| ch == ',' || ch.is_whitespace()) {
             let horizon = match value.trim().trim_start_matches('@').trim_start_matches('h') {
@@ -1041,7 +1062,14 @@ pub fn action_semantic_profile(
     let method_relations = path
         .candidates
         .iter()
-        .filter(|resolved| resolved.kind == ResourceKind::Method)
+        .filter(|resolved| {
+            resources
+                .resource(&resolved.resource)
+                .is_some_and(|record| {
+                    record.descriptor.kind == ResourceKind::Capability
+                        && crate::method::method_payload(&record.descriptor.description).is_some()
+                })
+        })
         .map(|resolved| resolved.resource.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -1211,7 +1239,8 @@ mod tests {
 
     #[test]
     fn horizon_is_soft_and_can_be_extended_without_identity_duplication() {
-        let mut record = record("method:orient", ResourceKind::Method);
+        let mut record = record("skill:orient", ResourceKind::Capability);
+        record.descriptor.description = "METHOD: orient".into();
         record
             .descriptor
             .annotations
@@ -1259,7 +1288,9 @@ mod tests {
         let mut resources = MemoryResourceIndex::default();
         resources.insert(record("project:demo", ResourceKind::Project));
         resources.insert(record("knowledge:ground", ResourceKind::KnowledgeSource));
-        resources.insert(record("method:orient", ResourceKind::Method));
+        let mut method = record("skill:orient", ResourceKind::Capability);
+        method.descriptor.description = "METHOD: orient".into();
+        resources.insert(method);
         resources.insert(record("action:verify", ResourceKind::Action));
 
         let expression =
@@ -1274,9 +1305,7 @@ mod tests {
             .iter()
             .any(|candidate| candidate.resource.as_str() == "action:verify"));
         assert!(ActionRef::parse(ResourceRef::parse("action:verify").unwrap(), &resources).is_ok());
-        assert!(
-            ActionRef::parse(ResourceRef::parse("method:orient").unwrap(), &resources).is_err()
-        );
+        assert!(ActionRef::parse(ResourceRef::parse("skill:orient").unwrap(), &resources).is_err());
     }
 
     #[test]
