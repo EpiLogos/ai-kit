@@ -1402,9 +1402,37 @@ fn query_neighbours(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
             "ref": resource.to_string(),
             "neighbours": serde_json::to_value(&neighbours).unwrap_or_default(),
         }),
-        Vec::new(),
+        absent_ref_warnings(&index, &resource),
         json::EXIT_OK,
     ))
+}
+
+/// An empty traversal has two very different causes: a curated object with
+/// nothing attached, and a ref the field does not hold at all. Reported the
+/// same way they are indistinguishable, and a caller reads "no relations"
+/// where the truth is "not here". Say which.
+///
+/// A cited authored source lands in the second case by design — it is
+/// findable through search without ever being a curated object — so the
+/// warning names that rather than implying the ref is unknown.
+fn absent_ref_warnings(index: &SemanticWikiIndex, resource: &ResourceRef) -> Vec<String> {
+    if index.contains(resource) {
+        return Vec::new();
+    }
+    let source = SourceRef::parse(resource.as_str())
+        .ok()
+        .filter(|source| !index.citing_nodes(source).is_empty());
+    match source {
+        Some(source) => vec![format!(
+            "{resource} is an authored source cited by {} curated node(s), not a curated object: \
+             it has no relations of its own. Search finds it; `query backlinks` on the nodes \
+             that cite it shows the citation.",
+            index.citing_nodes(&source).len()
+        )],
+        None => vec![format!(
+            "{resource} is not in this Wiki file: an empty result here means absent, not unrelated"
+        )],
+    }
 }
 
 /// Every object that points *at* `--ref` — what cites it. First-class over
@@ -1415,6 +1443,7 @@ fn query_backlinks(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
     let resource = ResourceRef::parse(&args.resource_ref)?;
     let mut backlinks = index.backlinks(&resource);
     backlinks.truncate(args.limit);
+    let warnings = absent_ref_warnings(&index, &resource);
     Ok(WikiOutcome::reported(
         jval!({
             "command": "query.backlinks",
@@ -1422,7 +1451,7 @@ fn query_backlinks(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
             "ref": resource.to_string(),
             "backlinks": serde_json::to_value(&backlinks).unwrap_or_default(),
         }),
-        Vec::new(),
+        warnings,
         json::EXIT_OK,
     ))
 }

@@ -65,8 +65,9 @@ pub struct IngestedRecord {
     pub tags: Vec<String>,
     pub source_ids: Vec<String>,
     pub wikilinks: Vec<String>,
-    /// `[text](path.md)` targets that address another corpus record. The
-    /// corpus's dominant citation form; resolved the same way wikilinks are.
+    /// `[text](path.md)` targets that address another corpus record.
+    /// Resolved the same way wikilinks are; the corpus uses both forms at
+    /// rough parity (see `parse_markdown_links`).
     pub markdown_links: Vec<String>,
     pub title: Option<String>,
     pub room: Option<String>,
@@ -351,6 +352,34 @@ pub fn parse_ingestable_record(relative: &str, text: &str) -> Result<IngestedRec
     })
 }
 
+/// The authored sources a record node cites: its own text first, then the
+/// bibliography it declares in `source_ids`.
+///
+/// Self-provenance alone was not the whole citation. A record that grounds
+/// itself on Bratton or Ostrom is citing authored ground as surely as it
+/// cites its own body, and leaving that out of `source_refs` left the
+/// bibliography unfindable — invisible to the very search that exists to
+/// surface what a curated node stands on. Both kinds address the same
+/// corpus source namespace; a `record_id` and a `source_id` never collide.
+///
+/// Deduplicated and ordered so the same record always yields the same node.
+/// Citing a source still never makes it a curated node.
+fn record_source_refs(record: &IngestedRecord) -> Vec<SourceRef> {
+    let mut ids: Vec<&str> = vec![record.record_id.as_str()];
+    let mut cited: Vec<&str> = record
+        .source_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| *id != record.record_id)
+        .collect();
+    cited.sort_unstable();
+    cited.dedup();
+    ids.extend(cited);
+    ids.into_iter()
+        .filter_map(|id| SourceRef::parse(format!("central:source:corpus:{id}")).ok())
+        .collect()
+}
+
 fn ingest_provenance(record: &IngestedRecord) -> WikiProvenanceRef {
     WikiProvenanceRef {
         source_ref: SourceRef::parse(format!("central:source:corpus:{}", record.record_id))
@@ -500,10 +529,7 @@ pub fn ingest_corpus(corpus: &[(String, String)]) -> Result<(Vec<WikiObject>, Ve
             node_type: record.record_type.clone(),
             title: record.title.clone().or(Some(record.record_id.clone())),
             space_refs: Vec::new(),
-            source_refs: vec![
-                SourceRef::parse(format!("central:source:corpus:{}", record.record_id))
-                    .expect("record source refs are valid")
-            ],
+            source_refs: record_source_refs(record),
             local_space_ref: None,
             extensions: ingest_extension(record),
         };
@@ -730,6 +756,52 @@ mod tests {
                 .iter()
                 .any(|neighbour| neighbour.resource.as_str() == "wiki:node:record/A24"),
             "A24 backlink is first-class"
+        );
+    }
+
+    /// The bibliography a record declares is authored ground it stands on,
+    /// so it must reach `source_refs` — that is the field authored-source
+    /// findability searches. Self-provenance alone left every cited work
+    /// unfindable.
+    #[test]
+    fn declared_bibliography_becomes_citable_authored_sources() {
+        let text = "---\nrecord_id: A25\nrecord_type: argument\nsource_ids:\n                      - bratton-2026-agentworld-brief\n  - ostrom-1990-governing-commons\n                    ---\n\n# Arbitration\n";
+        let (objects, _) = ingest_corpus(&[("arguments/A25.md".into(), text.into())]).unwrap();
+
+        let node = objects
+            .iter()
+            .find_map(|object| match object {
+                WikiObject::Node(node) if node.ref_id.as_str().contains("A25") => Some(node),
+                _ => None,
+            })
+            .expect("the record ingests as a node");
+
+        let refs: Vec<&str> = node.source_refs.iter().map(SourceRef::as_str).collect();
+        assert_eq!(
+            refs,
+            vec![
+                "central:source:corpus:A25",
+                "central:source:corpus:bratton-2026-agentworld-brief",
+                "central:source:corpus:ostrom-1990-governing-commons",
+            ],
+            "own text first, then the declared bibliography in a stable order"
+        );
+
+        // The cited works are findable through the ordinary index, and none
+        // of them became a curated node of its own.
+        let index = crate::knowledge_wiki_index::SemanticWikiIndex::rebuild(objects).unwrap();
+        let hits = index.search("bratton", 10);
+        assert!(
+            hits.iter().any(|hit| hit.address
+                == crate::knowledge_wiki_index::WikiSearchAddress::AuthoredSource {
+                    source: SourceRef::parse("central:source:corpus:bratton-2026-agentworld-brief")
+                        .unwrap()
+                }),
+            "the cited work is findable as an authored source"
+        );
+        assert!(
+            !index.contains(&ResourceRef::parse("central:source:corpus:bratton-2026-agentworld-brief").unwrap()),
+            "citing a work never makes it a curated node"
         );
     }
 

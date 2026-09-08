@@ -932,7 +932,7 @@ fn ingest_corpus_fixture(root: &Path) {
     );
     write(
         &root.join("symbolon/episteme/arguments/A24-Arbitration.md"),
-        "---\nrecord_id: A24\nrecord_type: argument\nregister: episteme\nclaim_status: \"Argued\"\ntags:\n  - arbitration\n  - measure\n---\n\n# A24 — Arbitration and the Usurpation of Measure\n",
+        "---\nrecord_id: A24\nrecord_type: argument\nregister: episteme\nclaim_status: \"Argued\"\nsource_ids:\n  - ostrom-1990-governing-commons\ntags:\n  - arbitration\n  - measure\n---\n\n# A24 — Arbitration and the Usurpation of Measure\n",
     );
     // The stale checkpoint: same record_id as the canonical whole-field,
     // sorting after it lexicographically (`submission` < `working`, mirrored
@@ -941,6 +941,72 @@ fn ingest_corpus_fixture(root: &Path) {
         &root.join("working/snapshots/before/expanded-E2.md"),
         "---\nrecord_id: etymology-arbitration\nrecord_type: etymology-whole\n---\n\n# Snapshot copy, not canonical\n",
     );
+}
+
+/// A record's declared bibliography is findable as an authored source, and
+/// asking that source for relations says what it is rather than answering an
+/// empty list — which a caller cannot tell from "exists, unrelated".
+#[test]
+fn cited_bibliography_is_findable_and_an_empty_traversal_says_why() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\n  \"objects\": []\n}\n");
+    let (code, _) = wiki(
+        scratch.path(),
+        &["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply"],
+    );
+    assert_eq!(code, 0);
+
+    // The work A24 stands on is findable, as a source and not as a node.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "search", "ostrom", "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let hits = envelope["data"]["hits"].as_array().unwrap();
+    let hit = hits
+        .iter()
+        .find(|h| h["address"]["kind"] == "authored-source")
+        .expect("the declared bibliography is findable");
+    assert_eq!(
+        hit["address"]["source"],
+        "central:source:corpus:ostrom-1990-governing-commons"
+    );
+
+    // Asking it for neighbours discloses that it is a cited source, not a
+    // curated object with nothing attached.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "neighbours", "central:source:corpus:ostrom-1990-governing-commons",
+          "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert!(envelope["data"]["neighbours"].as_array().unwrap().is_empty());
+    let warnings = envelope["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w.as_str().unwrap_or_default().contains("authored source cited by")),
+        "an empty traversal over a cited source explains itself: {warnings:?}"
+    );
+
+    // A ref the field does not hold at all is a different answer again.
+    let (_, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "neighbours", "wiki:node:record/absent", "--file", wiki_json.to_str().unwrap()],
+    );
+    let warnings = envelope["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w.as_str().unwrap_or_default().contains("not in this Wiki file")),
+        "an unknown ref says it is absent, not unrelated: {warnings:?}"
+    );
+
+    // A real curated node stays quiet.
+    let (_, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "neighbours", "wiki:node:record/A24", "--file", wiki_json.to_str().unwrap()],
+    );
+    assert!(envelope["warnings"].as_array().unwrap().is_empty());
 }
 
 #[test]
