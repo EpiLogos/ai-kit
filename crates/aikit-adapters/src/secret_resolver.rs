@@ -1,10 +1,16 @@
 //! Projection-time secret resolution.
 //!
-//! The three implementations each delegate to a genuine store boundary — the
+//! The implementations each delegate to a genuine store boundary — the
 //! OS secure store via `keyring`, the 1Password CLI (`op read`, the same SDK
-//! boundary the Workcell onepassword adapter uses), and the process
-//! environment for the legacy `env://` escape hatch. No vault client is
-//! reimplemented here.
+//! boundary the Workcell onepassword adapter uses), the varlock CLI
+//! (`printenv`, the documents-side boundary), and the process environment
+//! for the legacy `env://` escape hatch. No vault client is reimplemented
+//! here.
+//!
+//! Resolution order per `central.security/v1`: `op://` > `keychain://` >
+//! `varlock://` > flagged `env://`. Dispatch is by the ref's declared
+//! scheme — the order governs which scheme an author should declare, not
+//! runtime fallback between stores.
 //!
 //! The `env://` scheme is gated: admissible only when the operator explicitly
 //! opts in (the `--from-env` law — a matching variable in the environment
@@ -71,7 +77,9 @@ impl OpRead for OpCli {
         let output = std::process::Command::new("op")
             .args(["read", op_ref])
             .output()
-            .map_err(|error| format!("failed to spawn `op` (is the 1Password CLI installed?): {error}"))?;
+            .map_err(|error| {
+                format!("failed to spawn `op` (is the 1Password CLI installed?): {error}")
+            })?;
         if output.status.success() {
             return String::from_utf8(output.stdout)
                 .map(|value| value.trim_end_matches(['\n', '\r']).to_string())
@@ -93,7 +101,10 @@ fn classify_op_error(stderr: &str) -> String {
         "1Password service account lacks access to this vault".to_string()
     } else {
         let first = stderr.trim().lines().next().unwrap_or("(no stderr)");
-        format!("op read failed: {}", first.chars().take(200).collect::<String>())
+        format!(
+            "op read failed: {}",
+            first.chars().take(200).collect::<String>()
+        )
     }
 }
 
@@ -120,13 +131,98 @@ impl<R: OpRead> SecretResolver for OnePasswordSecretResolver<R> {
         let SecretRef::OnePassword { .. } = secret_ref else {
             return Err(unsupported_scheme(secret_ref, "op://"));
         };
-        let value = self.runner.read(&secret_ref.to_string()).map_err(|message| {
-            unavailable("secret_resolver.onepassword_unavailable", message)
-        })?;
+        let value = self
+            .runner
+            .read(&secret_ref.to_string())
+            .map_err(|message| unavailable("secret_resolver.onepassword_unavailable", message))?;
         if value.is_empty() {
             return Err(unavailable(
                 "secret_resolver.empty_material",
                 format!("op read returned empty material for {secret_ref}"),
+            ));
+        }
+        SecretValue::new(value)
+    }
+}
+
+/// The seam a varlock resolver reads through — scripted in tests.
+pub trait VarlockRead: Send + Sync + fmt::Debug {
+    fn printenv(&self, file: &str, name: &str) -> std::result::Result<String, String>;
+}
+
+/// The genuine varlock CLI: `varlock printenv --path <file> <NAME>`. The
+/// daemon holds the device key; this resolver never sees a sealed blob.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct VarlockCli;
+
+impl VarlockRead for VarlockCli {
+    fn printenv(&self, file: &str, name: &str) -> std::result::Result<String, String> {
+        let output = std::process::Command::new("varlock")
+            .args(["printenv", "--path", file, name])
+            .output()
+            .map_err(|error| format!("failed to spawn `varlock` (is it installed?): {error}"))?;
+        if output.status.success() {
+            return String::from_utf8(output.stdout)
+                .map(|value| value.trim_end_matches(['\n', '\r']).to_string())
+                .map_err(|_| "varlock printenv returned non-UTF-8 material".to_string());
+        }
+        Err(classify_varlock_error(&String::from_utf8_lossy(
+            &output.stderr,
+        )))
+    }
+}
+
+/// Map varlock stderr to a capability fact: a locked daemon, a missing
+/// variable and a missing file are different remediations.
+fn classify_varlock_error(stderr: &str) -> String {
+    let lowered = stderr.to_lowercase();
+    if lowered.contains("lock") || lowered.contains("biometric") {
+        "varlock daemon is locked; unlock it (`varlock` interactive) and retry".to_string()
+    } else if lowered.contains("not found") || lowered.contains("no variable") {
+        "variable not found under the given varlock path".to_string()
+    } else if lowered.contains("no such file") || lowered.contains("cannot find") {
+        "varlock env file not found for the given path".to_string()
+    } else {
+        let first = stderr.trim().lines().next().unwrap_or("(no stderr)");
+        format!(
+            "varlock printenv failed: {}",
+            first.chars().take(200).collect::<String>()
+        )
+    }
+}
+
+/// `varlock://<path>/<NAME>` via the genuine varlock CLI — the
+/// documents-side boundary of the `central.security/v1` scheme.
+#[derive(Debug, Clone)]
+pub struct VarlockSecretResolver<R: VarlockRead = VarlockCli> {
+    runner: R,
+}
+
+impl<R: VarlockRead> VarlockSecretResolver<R> {
+    pub fn new(runner: R) -> Self {
+        Self { runner }
+    }
+}
+
+impl Default for VarlockSecretResolver<VarlockCli> {
+    fn default() -> Self {
+        Self { runner: VarlockCli }
+    }
+}
+
+impl<R: VarlockRead> SecretResolver for VarlockSecretResolver<R> {
+    fn resolve(&self, secret_ref: &SecretRef) -> Result<SecretValue> {
+        let SecretRef::Varlock { file, name } = secret_ref else {
+            return Err(unsupported_scheme(secret_ref, "varlock://"));
+        };
+        let value = self
+            .runner
+            .printenv(file, name)
+            .map_err(|message| unavailable("secret_resolver.varlock_unavailable", message))?;
+        if value.is_empty() {
+            return Err(unavailable(
+                "secret_resolver.empty_material",
+                format!("varlock printenv returned empty material for {secret_ref}"),
             ));
         }
         SecretValue::new(value)
@@ -200,12 +296,13 @@ impl SecretResolver for EnvImportSecretResolver {
     }
 }
 
-/// The default composite: keychain + 1Password, with the environment import
-/// gate closed unless the operator opened it.
+/// The default composite: keychain + 1Password + varlock, with the
+/// environment import gate closed unless the operator opened it.
 #[derive(Debug, Default)]
 pub struct SuiteSecretResolver {
     pub keychain: KeychainSecretResolver,
     pub onepassword: OnePasswordSecretResolver<OpCli>,
+    pub varlock: VarlockSecretResolver<VarlockCli>,
     pub env_import: EnvImportSecretResolver,
 }
 
@@ -224,6 +321,7 @@ impl SecretResolver for SuiteSecretResolver {
         match secret_ref {
             SecretRef::Keychain { .. } => self.keychain.resolve(secret_ref),
             SecretRef::OnePassword { .. } => self.onepassword.resolve(secret_ref),
+            SecretRef::Varlock { .. } => self.varlock.resolve(secret_ref),
             SecretRef::Env { .. } => self.env_import.resolve(secret_ref),
         }
     }
@@ -336,5 +434,55 @@ mod tests {
             err.code(),
             err.message()
         );
+    }
+
+    #[derive(Debug, Clone)]
+    struct ScriptedVarlock {
+        result: std::result::Result<String, String>,
+    }
+
+    impl VarlockRead for ScriptedVarlock {
+        fn printenv(&self, _file: &str, _name: &str) -> std::result::Result<String, String> {
+            self.result.clone()
+        }
+    }
+
+    fn varlock_ref() -> SecretRef {
+        SecretRef::parse("varlock://secrets/providers.env/GEMINI_API_KEY").unwrap()
+    }
+
+    #[test]
+    fn varlock_resolves_material_and_refuses_empty() {
+        let resolver = VarlockSecretResolver::new(ScriptedVarlock {
+            result: Ok("fixture-material\n".to_string()),
+        });
+        let material = resolver.resolve(&varlock_ref()).unwrap();
+        assert_eq!(material.expose(), "fixture-material\n");
+
+        let empty = VarlockSecretResolver::new(ScriptedVarlock {
+            result: Ok(String::new()),
+        });
+        let err = empty.resolve(&varlock_ref()).unwrap_err();
+        assert!(err.message().contains("empty"));
+    }
+
+    #[test]
+    fn varlock_rejects_wrong_scheme_without_touching_cli() {
+        let resolver = VarlockSecretResolver::new(ScriptedVarlock {
+            result: Err("must not be called".to_string()),
+        });
+        let err = resolver
+            .resolve(&SecretRef::parse("op://v/i/f").unwrap())
+            .unwrap_err();
+        assert!(err.message().contains("varlock://"));
+    }
+
+    #[test]
+    fn varlock_error_classifier_names_capability_facts() {
+        assert!(classify_varlock_error("vault is locked").contains("locked"));
+        assert!(classify_varlock_error("biometric required").contains("locked"));
+        assert!(classify_varlock_error("variable not found").contains("not found"));
+        assert!(classify_varlock_error("no such file").contains("env file not found"));
+        assert!(classify_varlock_error("boom").contains("varlock printenv failed"));
     }
 }
