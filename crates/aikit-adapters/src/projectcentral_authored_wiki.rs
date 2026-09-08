@@ -6,14 +6,15 @@
 //! their explicit links/OKF Properties into the existing SemanticWiki relation
 //! field. No source migration or second Wiki store is introduced.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
 use aikit_core::knowledge_living::KnowledgeDependency;
-use aikit_core::knowledge_wiki::WikiObject;
+use aikit_core::knowledge_wiki::{WikiEdge, WikiObject};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
 use aikit_core::resource::{ResourceRef, SourceAuthority};
-use aikit_core::{AikitError, Result};
+use aikit_core::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::authored_wiki_source::{
@@ -25,6 +26,13 @@ use crate::ProjectCentralFilesystemBinding;
 
 pub const PROJECTCENTRAL_AUTHORED_WIKI_VERSION: &str =
     "aikit.projectcentral-authored-wiki/v1";
+
+/// Bound matching the per-file read cap already applied to canonical Wiki
+/// sources (`central_wiki.rs`'s 4 MiB bound) and to CLI discovery scanning
+/// (`app/knowledge.rs::MAX_DISCOVERY_FILE_BYTES`): an authored Markdown
+/// source larger than this is disclosed as an absence and skipped rather
+/// than read whole into memory on every command invocation.
+pub const AUTHORED_WIKI_MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Materialized read model for one ProjectCentral world. Every field is
 /// rebuildable from Central-owned source descriptors/files plus the canonical
@@ -39,6 +47,10 @@ pub struct ProjectCentralAuthoredWiki {
     pub index: SemanticWikiIndex,
     /// Source interpretation/rebuild is deterministic and never invokes a model.
     pub automatic_agent_or_model_invocation: bool,
+    /// An oversized, unreadable, or unparseable eligible source is disclosed
+    /// here and skipped — it never aborts the compile for every other
+    /// eligible source in this project.
+    pub absences: Vec<String>,
 }
 
 /// Compile the current ProjectCentral world into the existing SemanticWiki index.
@@ -51,6 +63,7 @@ pub fn projectcentral_authored_wiki(
 ) -> Result<ProjectCentralAuthoredWiki> {
     let wiki_objects = binding.load_project_wiki()?;
     let mut source_projections = Vec::new();
+    let mut absences = Vec::new();
 
     for descriptor in &binding.semantic.sources {
         if !descriptor.exists
@@ -62,25 +75,50 @@ pub fn projectcentral_authored_wiki(
         }
 
         let path = binding.project_root().join(&descriptor.relative_path);
-        let markdown = fs::read_to_string(&path).map_err(|error| {
-            AikitError::new(
-                "projectcentral.authored_wiki_source_read",
-                format!("{}: {error}", path.display()),
-            )
-        })?;
+        let relative_display = descriptor.relative_path.display();
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                absences.push(format!(
+                    "authored wiki source {relative_display} is unreadable: {error}"
+                ));
+                continue;
+            }
+        };
+        if metadata.len() > AUTHORED_WIKI_MAX_SOURCE_BYTES {
+            absences.push(format!(
+                "authored wiki source {relative_display} exceeds the bounded read size ({AUTHORED_WIKI_MAX_SOURCE_BYTES} bytes); skipped"
+            ));
+            continue;
+        }
+        let markdown = match fs::read_to_string(&path) {
+            Ok(markdown) => markdown,
+            Err(error) => {
+                absences.push(format!(
+                    "authored wiki source {relative_display} is unreadable: {error}"
+                ));
+                continue;
+            }
+        };
         let subject_ref = ResourceRef::parse(descriptor.source.as_str())?;
         let authority = descriptor
             .standing
             .source_authority()
             .unwrap_or(SourceAuthority::Observed);
-        source_projections.push(parse_authored_wiki_source_with_authority(
+        match parse_authored_wiki_source_with_authority(
             subject_ref,
             descriptor.source.clone(),
             authority,
             descriptor.revision.clone(),
             vec![descriptor.relative_path.to_string_lossy().into_owned()],
             &markdown,
-        )?);
+        ) {
+            Ok(projection) => source_projections.push(projection),
+            Err(error) => absences.push(format!(
+                "authored wiki source {relative_display} could not be parsed: {}",
+                error.message()
+            )),
+        }
     }
 
     source_projections.sort_by(|left, right| left.source_ref.cmp(&right.source_ref));
@@ -97,7 +135,84 @@ pub fn projectcentral_authored_wiki(
         dependencies,
         index,
         automatic_agent_or_model_invocation: false,
+        absences,
     })
+}
+
+pub struct AuthoredWikiWorldReading {
+    pub edges: Vec<WikiEdge>,
+    pub absences: Vec<String>,
+}
+
+/// Discover and compile every ProjectCentral authored-Markdown wiki
+/// disclosed by the world: each `Work/<project>/ProjectCentral` register.
+/// Mirrors `capability_matrix::compile_world_matrices` and
+/// `central_entities::materialise_central_entities` — infallible, and every
+/// absence (a project whose ProjectCentral binding cannot be inspected, an
+/// unreadable/oversized/unparseable source, a pending `[[link]]`, a
+/// colliding edge identity) is disclosed rather than aborting the world.
+/// Only edges are returned: this never promotes a Markdown source to a
+/// `WikiNode` (see `authored_wiki_source.rs`'s module doc comment).
+pub fn compile_world_authored_wiki(central_root: &Path) -> AuthoredWikiWorldReading {
+    let mut edges = Vec::new();
+    let mut absences = Vec::new();
+    let mut seen_edge_refs = BTreeSet::new();
+
+    let mut projects: Vec<_> = match fs::read_dir(central_root.join("Work")) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    projects.sort();
+
+    for project_root in projects {
+        let home = project_root.display().to_string();
+        let binding =
+            match ProjectCentralFilesystemBinding::inspect(&project_root, Some(central_root)) {
+                Ok(binding) => binding,
+                Err(error) => {
+                    absences.push(format!(
+                        "ProjectCentral authored wiki unavailable at {home}: {}",
+                        error.message()
+                    ));
+                    continue;
+                }
+            };
+        let projected = match projectcentral_authored_wiki(&binding) {
+            Ok(projected) => projected,
+            Err(error) => {
+                absences.push(format!(
+                    "ProjectCentral authored wiki compile failed at {home}: {}",
+                    error.message()
+                ));
+                continue;
+            }
+        };
+        for absence in projected.absences {
+            absences.push(format!("{home}: {absence}"));
+        }
+        for pending in &projected.compilation.pending {
+            absences.push(format!(
+                "Authored relation pending at {home}: [[{}]] from {} ({}) is not yet resolved",
+                pending.evidence.raw_target, pending.subject_ref, pending.evidence.relation
+            ));
+        }
+        for edge in projected.compilation.edges {
+            let key = edge.ref_id.as_str().to_owned();
+            if seen_edge_refs.insert(key.clone()) {
+                edges.push(edge);
+            } else {
+                absences.push(format!(
+                    "Authored wiki at {home} re-declares edge {key} from an earlier project; kept the first"
+                ));
+            }
+        }
+    }
+
+    AuthoredWikiWorldReading { edges, absences }
 }
 
 fn is_markdown_path(path: &Path) -> bool {
@@ -234,6 +349,54 @@ mod tests {
         assert_eq!(
             projected.compilation.pending[0].evidence.raw_target,
             "Future Concept"
+        );
+    }
+
+    #[test]
+    fn world_compile_gathers_edges_across_projects_and_discloses_absences_fail_open() {
+        let (temp, _project) = fixture();
+        // A second Work project with no ProjectCentral at all: an absence,
+        // never an abort of the world compile.
+        fs::create_dir_all(temp.path().join("Work/bare")).unwrap();
+
+        let reading = compile_world_authored_wiki(temp.path());
+
+        assert_eq!(reading.edges.len(), 1, "{:?}", reading.absences);
+        assert_eq!(reading.edges[0].origin, WikiEdgeOrigin::Authored);
+        assert!(
+            reading
+                .absences
+                .iter()
+                .any(|absence| absence.contains("Future Concept")),
+            "{:?}",
+            reading.absences
+        );
+        assert!(
+            reading.absences.iter().any(|absence| absence.contains("bare")),
+            "{:?}",
+            reading.absences
+        );
+    }
+
+    #[test]
+    fn world_compile_discloses_an_oversized_source_without_aborting_the_world() {
+        let (temp, project) = fixture();
+        write(
+            &project.join("ProjectCentral/user/oversized.md"),
+            &"x".repeat(AUTHORED_WIKI_MAX_SOURCE_BYTES as usize + 1),
+        );
+
+        let reading = compile_world_authored_wiki(temp.path());
+
+        assert_eq!(reading.edges.len(), 1, "{:?}", reading.absences);
+        assert!(
+            reading
+                .absences
+                .iter()
+                .any(|absence| absence.contains("oversized.md")
+                    && absence.contains("bounded read size")),
+            "{:?}",
+            reading.absences
         );
     }
 
