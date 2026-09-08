@@ -392,3 +392,60 @@ fn narrow_workspace_progressively_discloses_project_world_without_a_second_contr
         "responsive Project-world disclosure must not create a second selection state"
     );
 }
+
+/// Spec §5.1's Preview answers nine named questions before a person enters
+/// work. It rides the existing staging -> preview -> confirm -> apply route
+/// (Ctrl+Space stages, Ctrl+S previews), so this drives the real surface
+/// rather than the renderer in isolation.
+///
+/// The overlay pane is narrow and `Wrap` reflows prose, so this asserts the
+/// route and the row labels — never wrapped, because they are the first token
+/// on their line. Exact row *content* is pinned by
+/// `compose_preview`'s own unit tests, where no reflow can hide a wrong fact.
+#[test]
+fn compose_preview_answers_every_section_5_question_on_the_existing_preview_route() {
+    let (_dir, mut backend) = fixture();
+    let mut surface = ApplicationSurfaceController::new(
+        &mut backend,
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup)
+            .with_query("deploy")
+            .with_glyphs(Glyphs::unicode()),
+    )
+    .unwrap();
+    surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
+    surface
+        .handle(&mut backend, ctrl(KeyCode::Char(' ')))
+        .unwrap();
+    assert_eq!(surface.semantic().staged.len(), 1);
+
+    surface.handle(&mut backend, ctrl(KeyCode::Char('s'))).unwrap();
+    assert_eq!(surface.semantic().overlay, Some(Overlay::CompositionPreview));
+
+    let preview = rendered(&draw_width(&surface, 220, 40));
+
+    // Every §5.1 Preview question gets a row, in spec order. A missing row is
+    // the failure this test exists to catch: a Preview that silently omits a
+    // question reads as "nothing to report" about it.
+    for row in [
+        "Resolved to",
+        "Authored",
+        "Effective",
+        "Withheld",
+        "Carried by",
+        "Information",
+        "Material",
+        "Environment",
+        "Activates",
+        "Reprojection",
+    ] {
+        assert!(
+            preview.contains(row),
+            "§5.1 Preview must answer `{row}` on the preview route"
+        );
+    }
+
+    // The package-toggle summary is not replaced by the world preview — both
+    // answer different questions and the one route carries both.
+    assert!(preview.contains("Composition preview"));
+    assert!(preview.contains("Ctrl+S proceeds to confirm"));
+}
