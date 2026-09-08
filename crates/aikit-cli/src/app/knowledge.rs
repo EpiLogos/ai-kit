@@ -13,7 +13,6 @@ use aikit_core::knowledge_source_pool::{
 };
 use aikit_core::knowledge_wiki::{parse_wiki_objects, OkfWikiBundle, WikiObject};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
-use aikit_core::knowledge_wiki_provider::SemanticWikiProvider;
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
 use aikit_core::resource::{
     ProviderRef, ResourceIndex, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
@@ -25,7 +24,7 @@ use aikit_core::{
 };
 use aikit_store::{
     append_familiarity_observation, append_familiarity_reset, KnowledgeApplicationReceipt,
-    KnowledgeApplicationStore,
+    KnowledgeApplicationStore, SqliteWikiProvider,
 };
 use aikit_tui::backend::PaletteBackend;
 
@@ -35,8 +34,7 @@ const MAX_DISCOVERY_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DISCOVERY_FILES: usize = 4096;
 
 pub(super) struct KnowledgeRuntime {
-    wiki: Option<SemanticWikiIndex>,
-    wiki_registers: Vec<aikit_core::knowledge_wiki_provider::WikiRegisterRevision>,
+    wiki: Option<SqliteWikiProvider>,
     material: Vec<SourceMaterial>,
     native_source: NativeSourcePoolProvider,
     bkmr: Option<BkmrSourcePoolProvider<SystemRunner>>,
@@ -50,11 +48,8 @@ impl KnowledgeRuntime {
         let mut application = KnowledgeApplication::new(context)
             .with_source_pool(&self.native_source, &self.material)
             .with_project_map(&self.project_map);
-        if let Some(index) = &self.wiki {
-            application = application.with_wiki(
-                SemanticWikiProvider::new(index)
-                    .with_register_revisions(self.wiki_registers.clone()),
-            );
+        if let Some(provider) = &self.wiki {
+            application = application.with_wiki(provider);
         }
         if let Some(provider) = &self.bkmr {
             application = application.with_source_pool(provider, &self.material);
@@ -342,27 +337,45 @@ impl Service {
             .unwrap_or(&self.invocation_cwd);
         let mut absences = Vec::new();
         let mut wiki_registers = Vec::new();
-        let central_root = root.ancestors().find(|candidate| candidate.join("Control").is_dir() && candidate.join("Work").is_dir());
-        let mut discovered = discover_material(root, self.home.root(), &mut absences, central_root.is_none())?;
-        if let Some(central_root)=central_root {
-            let executable=std::env::var_os("CENTRAL_CTRL_BIN").or_else(||std::env::var_os("OI_CENTRAL_CTRL_BIN")).map(PathBuf::from).unwrap_or_else(||PathBuf::from("ctrl"));
-            match aikit_adapters::central_wiki::read_central_wiki(&SystemRunner::new(), &executable, central_root) {
-                Ok(reading)=>{
-                    discovered.wiki=reading.objects;
-                    wiki_registers=reading.registers;
+        let central_root = root.ancestors().find(|candidate| {
+            candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
+        });
+        let mut discovered = discover_material(
+            root,
+            self.home.root(),
+            &mut absences,
+            central_root.is_none(),
+        )?;
+        if let Some(central_root) = central_root {
+            let executable = std::env::var_os("CENTRAL_CTRL_BIN")
+                .or_else(|| std::env::var_os("OI_CENTRAL_CTRL_BIN"))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("ctrl"));
+            match aikit_adapters::central_wiki::read_central_wiki(
+                &SystemRunner::new(),
+                &executable,
+                central_root,
+            ) {
+                Ok(reading) => {
+                    discovered.wiki = reading.objects;
+                    wiki_registers = reading.registers;
                     absences.extend(reading.absences);
                 }
-                Err(error)=>absences.push(format!("Central wiki discovery unavailable: {}",error.message())),
+                Err(error) => absences.push(format!(
+                    "Central wiki discovery unavailable: {}",
+                    error.message()
+                )),
             }
             // W10 V3: compiled entity materialisation joins the discovered
             // wiki before the index rebuild; colliding stand-in nodes adopt
             // the entity convention (wiki:node:identity keeps its ref).
-            let entities=aikit_adapters::central_entities::materialise_central_entities(central_root);
+            let entities =
+                aikit_adapters::central_entities::materialise_central_entities(central_root);
             absences.extend(entities.absences);
             aikit_adapters::central_entities::adopt_into(&mut discovered.wiki, entities.objects);
             // W10 V4 extension: capability matrices compile in both placements
             // (project spaces + the Central root composition), origin Compiled.
-            let matrices=aikit_adapters::capability_matrix::compile_world_matrices(central_root);
+            let matrices = aikit_adapters::capability_matrix::compile_world_matrices(central_root);
             absences.extend(matrices.absences);
             aikit_adapters::central_entities::adopt_into(&mut discovered.wiki, matrices.objects);
             // CASE 19 / W10 V9.4: authored Markdown under each project's
@@ -370,25 +383,42 @@ impl Service {
             // into the same SemanticWiki as ordinary Compiled edges — never
             // as new WikiNodes. Unresolved links stay disclosed as
             // absences, never as synthetic edges.
-            let authored_wiki=aikit_adapters::projectcentral_authored_wiki::compile_world_authored_wiki(central_root);
+            let authored_wiki =
+                aikit_adapters::projectcentral_authored_wiki::compile_world_authored_wiki(
+                    central_root,
+                );
             absences.extend(authored_wiki.absences);
             aikit_adapters::central_entities::adopt_into(
                 &mut discovered.wiki,
-                authored_wiki.edges.into_iter().map(WikiObject::Edge).collect(),
+                authored_wiki
+                    .edges
+                    .into_iter()
+                    .map(WikiObject::Edge)
+                    .collect(),
             );
             // W10 V5: a project context binds the same entity refs through
             // Central's effective world sources — never a second subject;
             // declared exclusions withhold, per-hop provenance is recorded.
-            if let Some(project)=root.strip_prefix(central_root).ok().and_then(|relative| {
-                let mut parts=relative.components();
-                if parts.next()?.as_os_str() != "Work" { return None; }
+            if let Some(project) = root.strip_prefix(central_root).ok().and_then(|relative| {
+                let mut parts = relative.components();
+                if parts.next()?.as_os_str() != "Work" {
+                    return None;
+                }
                 parts.next()?.as_os_str().to_str().map(str::to_owned)
             }) {
-                let world_binding=aikit_adapters::central_world_sources::read_project_binding(
-                    &SystemRunner::new(), &executable, central_root, &project, &mut absences);
-                if let Some(binding)=world_binding {
+                let world_binding = aikit_adapters::central_world_sources::read_project_binding(
+                    &SystemRunner::new(),
+                    &executable,
+                    central_root,
+                    &project,
+                    &mut absences,
+                );
+                if let Some(binding) = world_binding {
                     aikit_adapters::central_world_sources::bind_project_context(
-                        &mut discovered.wiki, &binding, &mut absences);
+                        &mut discovered.wiki,
+                        &binding,
+                        &mut absences,
+                    );
                 }
             }
         }
@@ -397,8 +427,14 @@ impl Service {
             absences.push("SemanticWiki material absent from the project horizon".into());
             None
         } else {
-            match SemanticWikiIndex::rebuild(discovered.wiki) {
-                Ok(index) => Some(index),
+            let horizon = blake3::hash(root.to_string_lossy().as_bytes()).to_hex();
+            let path = self
+                .home
+                .cache()
+                .join("knowledge/wiki")
+                .join(format!("{horizon}.sqlite3"));
+            match SqliteWikiProvider::rebuild(&path, discovered.wiki, wiki_registers.clone()) {
+                Ok(provider) => Some(provider),
                 Err(error) => {
                     absences.push(format!(
                         "SemanticWiki materialisation degraded: {}",
@@ -471,11 +507,11 @@ impl Service {
             absences.push("ProjectMap CodeIndex unavailable: no canonical Project identity".into());
         }
 
-        let project_map = self.build_project_map(wiki.as_ref(), &material)?;
+        let project_map =
+            self.build_project_map(wiki.as_ref().map(SqliteWikiProvider::index), &material)?;
 
         Ok(KnowledgeRuntime {
             wiki,
-            wiki_registers,
             material,
             native_source,
             bkmr,

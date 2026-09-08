@@ -62,6 +62,7 @@ pub mod home;
 pub mod inbox;
 pub mod index;
 pub mod knowledge_application;
+pub mod knowledge_wiki;
 pub mod locks;
 pub mod procedure;
 pub mod procedure_history;
@@ -106,6 +107,7 @@ pub use knowledge_application::{
     KnowledgeApplicationReceipt, KnowledgeApplicationStore, KnowledgeHistoryOperation,
     KNOWLEDGE_APPLICATION_STORE_VERSION,
 };
+pub use knowledge_wiki::SqliteWikiProvider;
 pub use locks::{ContextLock, LockOptions};
 pub use procedure::{plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner};
 pub use procedure_history::procedure_history_evidence;
