@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::context::ContextDescriptor;
+use crate::credential_world::CredentialWorldDisclosure;
 use crate::context_resolution::{
     Availability, ContextResolution, ReferenceResolution, ResolvedResource, ScopeResolution,
 };
@@ -136,6 +137,7 @@ pub struct EffectiveRevisionDisclosure {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ProjectWorldReadModel {
     pub version: String,
     pub project: ProjectBinding,
@@ -154,6 +156,14 @@ pub struct ProjectWorldReadModel {
     /// material/history evidence rather than a second Project resolver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub versioned_world: Option<VersionedProjectWorld>,
+    /// Credential/provider status for this world. Deliberately not an
+    /// `Option`: an absent credential input is a
+    /// `CredentialWorldDisclosure::not_attempted(..)` reading, which is a
+    /// different fact from a positively observed empty provider roster. A
+    /// `None` here would collapse that distinction back into the ambiguity
+    /// `credential_world.rs` exists to remove.
+    #[serde(default)]
+    pub credential_world: CredentialWorldDisclosure,
     pub warnings: Vec<String>,
 }
 
@@ -173,6 +183,54 @@ impl ProjectWorldReadModel {
         }
         self.versioned_world = Some(versioned);
         Ok(self)
+    }
+
+    /// Attach an already-composed credential/provider reading to this resolved
+    /// Project reading, mirroring `with_versioned_world`. `aikit-core` is
+    /// I/O-free: the caller gathers the provider roster and requirements and
+    /// composes the disclosure through `disclose_credential_world`, which is a
+    /// pure function over already-observed facts.
+    pub fn with_credential_world(mut self, credential_world: CredentialWorldDisclosure) -> Self {
+        self.credential_world = credential_world;
+        self
+    }
+
+    /// A minimal well-formed reading bound to an already-resolved Project.
+    ///
+    /// This is the one construction path open to consumers outside this crate,
+    /// and it is what makes `#[non_exhaustive]` bearable: a disclosure added
+    /// here later gets an honest default rather than breaking every caller's
+    /// struct literal — the exact fragility that kept `credential_world` out of
+    /// this struct when it was first written. Every field stays `pub`, so a
+    /// caller assigns whatever it actually knows and leaves the rest honestly
+    /// unresolved.
+    pub fn empty(project: ProjectBinding, context: ContextDescriptor) -> Self {
+        Self {
+            version: PROJECT_WORLD_VERSION.to_string(),
+            project,
+            context,
+            resolution_basis: ResolutionBasisDisclosure {
+                profiles: Vec::new(),
+                scopes: Vec::new(),
+            },
+            capability_horizon: CapabilityHorizonDisclosure::default(),
+            information_horizon: InformationHorizonDisclosure::default(),
+            actor_runtime: ActorRuntimeDisclosure::default(),
+            projection: ProjectionDisclosure {
+                targets: Vec::new(),
+                active_capabilities: Vec::new(),
+            },
+            effective_revision: EffectiveRevisionDisclosure {
+                generation: None,
+                catalog_revision: "unresolved".to_string(),
+                resolution_hash: "unresolved".to_string(),
+            },
+            versioned_world: None,
+            credential_world: CredentialWorldDisclosure::not_attempted(
+                "this reading was built as a shell; no credential input was composed into it",
+            ),
+            warnings: Vec::new(),
+        }
     }
 }
 
@@ -219,6 +277,9 @@ pub fn disclose_project_world(
             resolution_hash: resolution.deterministic.hash.to_string(),
         },
         versioned_world: None,
+        credential_world: CredentialWorldDisclosure::not_attempted(
+            "disclose_project_world was given no credential roster; a caller attaches one with with_credential_world",
+        ),
         warnings: resolution.warnings.clone(),
     }
 }
@@ -333,6 +394,9 @@ mod tests {
                 resolution_hash: "resolution@1".into(),
             },
             versioned_world: None,
+            credential_world: CredentialWorldDisclosure::not_attempted(
+                "test fixture composed no credential input",
+            ),
             warnings: vec![],
         }
     }
@@ -435,6 +499,37 @@ mod tests {
             reading.versioned_world.as_ref().unwrap().repository.branch.as_deref(),
             Some("main")
         );
+    }
+
+    /// A stored reading written before `credential_world` existed must load as
+    /// `not_attempted` — an open question — rather than defaulting into a
+    /// positive claim that the world observed no providers.
+    #[test]
+    fn a_reading_without_a_credential_field_loads_as_not_attempted() {
+        let world = project_world("project:alpha");
+        let mut payload: serde_json::Value = serde_json::to_value(&world).unwrap();
+        payload.as_object_mut().unwrap().remove("credential_world").unwrap();
+
+        let restored: ProjectWorldReadModel = serde_json::from_value(payload).unwrap();
+        assert!(!restored.credential_world.fully_observed());
+        assert_eq!(restored.credential_world.providers.providers(), None);
+    }
+
+    #[test]
+    fn an_attached_credential_world_survives_a_round_trip() {
+        let world = project_world("project:alpha").with_credential_world(
+            crate::credential_world::disclose_credential_world(
+                crate::credential_world::ProviderRosterKnowledge::Observed { providers: vec![] },
+                &[],
+                false,
+                false,
+            ),
+        );
+        assert!(world.credential_world.providers.is_known());
+
+        let restored: ProjectWorldReadModel =
+            serde_json::from_str(&serde_json::to_string(&world).unwrap()).unwrap();
+        assert_eq!(restored.credential_world, world.credential_world);
     }
 
     #[test]

@@ -33,8 +33,8 @@ pub enum PresentationMode {
 }
 
 /// The six top-level Workspace destinations, in spec order (`docs/v2/23-TUI-
-/// HUMAN-EXPERIENCE-SPEC.md` §3-§8, carried unmerged on PR #212 as of this
-/// writing — see `crate::workspace_navigation` for the single source-of-truth
+/// HUMAN-EXPERIENCE-SPEC.md` §3-§8 — see `crate::workspace_navigation` for the
+/// single source-of-truth
 /// destination table this enum is projected through for Ctrl+K navigation).
 ///
 /// `Projection` (the old "Explain" tab) is deliberately retired here: spec §17

@@ -1,8 +1,7 @@
 //! Workspace destinations ("places") as real hits in the shared navigation
 //! field, not a second search/route ontology.
 //!
-//! `docs/v2/23-TUI-HUMAN-EXPERIENCE-SPEC.md` §3.3 (carried unmerged on PR
-//! #212 as of this writing) is explicit: "A navigation destination must not
+//! `docs/v2/23-TUI-HUMAN-EXPERIENCE-SPEC.md` §3.3 is explicit: "A navigation destination must not
 //! become a second resource/search ontology. The host advertises a navigable
 //! Surface/route; Search resolves it through the existing addressable
 //! field." This module is that advertisement. It inserts one

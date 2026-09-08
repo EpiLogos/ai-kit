@@ -130,9 +130,8 @@ mod tests {
     use aikit_core::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
     use aikit_core::resource::{Eligibility, ResourceDescriptor, ResourceKind, ResourceRecord};
     use aikit_core::{
-        ActorRuntimeDisclosure, CapabilityHorizonDisclosure, EffectiveRevisionDisclosure,
-        InformationHorizonDisclosure, ProjectWorldReadModel, ProjectWorldResource,
-        ProjectionDisclosure, ResolutionBasisDisclosure, PROJECT_WORLD_VERSION,
+        EffectiveRevisionDisclosure, InformationHorizonDisclosure, ProjectWorldReadModel,
+        ProjectWorldResource,
     };
 
     fn rref(raw: &str) -> ResourceRef {
@@ -171,38 +170,26 @@ mod tests {
         )));
         let context = ContextDescriptor::for_project("/work/aikit");
 
-        ProjectWorldReadModel {
-            version: PROJECT_WORLD_VERSION.into(),
-            project: ProjectBinding::from_legacy_context(
+        let mut world = ProjectWorldReadModel::empty(
+            ProjectBinding::from_legacy_context(
                 ProjectRef::parse("project:aikit").unwrap(),
                 ProjectConstituentRef::parse("source:working-tree").unwrap(),
                 &context,
             )
             .unwrap(),
             context,
-            resolution_basis: ResolutionBasisDisclosure {
-                profiles: Vec::new(),
-                scopes: Vec::new(),
-            },
-            capability_horizon: CapabilityHorizonDisclosure::default(),
-            information_horizon: InformationHorizonDisclosure {
-                resolved_sources: vec![ProjectWorldResource::from(&resolved_source)],
-                sources,
-                planned_retrieval: vec![rref("project:context-source:canon")],
-            },
-            actor_runtime: ActorRuntimeDisclosure::default(),
-            projection: ProjectionDisclosure {
-                targets: Vec::new(),
-                active_capabilities: Vec::new(),
-            },
-            effective_revision: EffectiveRevisionDisclosure {
-                generation: None,
-                catalog_revision: "r1".into(),
-                resolution_hash: "hash".into(),
-            },
-            versioned_world: None,
-            warnings: Vec::new(),
-        }
+        );
+        world.information_horizon = InformationHorizonDisclosure {
+            resolved_sources: vec![ProjectWorldResource::from(&resolved_source)],
+            sources,
+            planned_retrieval: vec![rref("project:context-source:canon")],
+        };
+        world.effective_revision = EffectiveRevisionDisclosure {
+            generation: None,
+            catalog_revision: "r1".into(),
+            resolution_hash: "hash".into(),
+        };
+        world
     }
 
     #[test]
