@@ -1285,6 +1285,26 @@ impl Service {
                 Err(error) => decision.warnings.push(error),
             }
         }
+        if event.kind == aikit_core::hooks::HookEventKind::SessionStart
+            && self.descriptor.project_root.is_none()
+            && tuning.allows(aikit_core::continuity::PROJECT_RECENCY)
+        {
+            let capsule_id = aikit_core::id::CapsuleId::parse(
+                "hook/continuity/project-recency",
+            )?;
+            let config = self.view.active.get(&capsule_id)
+                .map(|active| crate::project_recency::ProjectRecencyConfig::from_config(Some(&active.config)))
+                .unwrap_or_default();
+            match crate::projects::load_all(&self.home).and_then(|specs| {
+                crate::project_recency::classify_all(
+                    &self.index, &specs, aikit_store::Timestamp::now(), config)
+            }) {
+                Ok(rows) => decision.injected.push(
+                    crate::project_recency::render_session_start(&rows, config.max_projects)),
+                Err(error) => decision.warnings.push(format!(
+                    "continuity/project-recency unavailable: {error}")),
+            }
+        }
         if event.kind == aikit_core::hooks::HookEventKind::UserPromptSubmit
             && tuning.allows(aikit_core::continuity::DOMAIN_ACTIVATION)
         {

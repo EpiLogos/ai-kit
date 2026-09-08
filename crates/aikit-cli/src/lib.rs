@@ -13,6 +13,7 @@
 
 pub mod adopt;
 pub mod activity_evidence;
+pub mod project_recency;
 pub mod app;
 pub mod cli;
 pub mod client;

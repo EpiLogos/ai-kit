@@ -282,6 +282,8 @@ pub enum ProjectSub {
     Bind(ProjectBindArgs),
     /// Show the Project Specification matching the current directory.
     Show(ProjectShowArgs),
+    /// List registered projects exhaustively, optionally filtering by id or root.
+    List(ProjectListArgs),
     /// Configure the Skill Sets inherited by Project Specifications by default.
     Defaults(ProjectDefaultsArgs),
 }
@@ -302,6 +304,12 @@ pub struct ProjectBindArgs {
 
 #[derive(Debug, Args)]
 pub struct ProjectShowArgs {}
+
+#[derive(Debug, Args)]
+pub struct ProjectListArgs {
+    #[arg(long)]
+    pub filter: Option<String>,
+}
 
 #[derive(Debug, Args)]
 pub struct ProjectDefaultsArgs {

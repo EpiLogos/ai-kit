@@ -454,6 +454,23 @@ fn cmd_project(cwd: &std::path::Path, command: ProjectCmd) -> Result<Reply> {
                 vec![],
             ))
         }
+        ProjectSub::List(args) => {
+            let rows = aikit_cli::project_recency::classify_all(
+                service.index(),
+                &aikit_cli::projects::load_all(service.home())?,
+                aikit_store::Timestamp::now(),
+                aikit_cli::project_recency::ProjectRecencyConfig::default(),
+            )?;
+            let needle = args.filter.as_deref().map(str::to_lowercase);
+            let rows = rows.into_iter()
+                .filter(|row| needle.as_ref().is_none_or(|needle| {
+                    row.project.to_lowercase().contains(needle)
+                        || row.root.to_lowercase().contains(needle)
+                }))
+                .map(|row| aikit_cli::project_recency::describe(&row))
+                .collect::<Vec<_>>();
+            Ok(reply(&service, jval!({ "projects": rows }), vec![]))
+        }
         ProjectSub::Defaults(args) => {
             let defaults = aikit_cli::projects::set_defaults(service.home(), &args.skill_sets)?;
             Ok(reply(
