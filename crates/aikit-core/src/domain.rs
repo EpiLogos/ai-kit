@@ -258,6 +258,74 @@ pub fn dedup_hash(domain_id: &str, ordinary_lines: &[String]) -> String {
     format!("{hash:016x}")
 }
 
+/// What a reaction should do with one domain's rendered guidance, once the
+/// ledger has answered whether the ordinary payload was seen before.
+///
+/// This is the dedup law itself, in one place. Before it existed, every
+/// reaction re-derived the same four rules at its own call site and the
+/// standing exemption was inferable only by noticing that two call sites
+/// happened to agree — incidental, not law. A third reaction could get it
+/// wrong silently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectionDecision {
+    /// Nothing arrives at all: the ordinary payload deduped and there is no
+    /// standing guidance to reassert. The caller renders no block.
+    pub suppressed: bool,
+    /// The ordinary payload is unchanged since its last injection.
+    pub deduped: bool,
+    /// Standing guidance is present and is being reasserted.
+    pub has_standing: bool,
+    /// The caller should record this injection in the ledger.
+    pub record: bool,
+    /// The lines the block carries: standing first, then ordinary unless the
+    /// ordinary payload deduped out.
+    pub lines: Vec<String>,
+}
+
+/// Apply the standing-guidance dedup exemption.
+///
+/// The law, stated once:
+///
+/// 1. **The dedup key covers only ordinary lines.** Standing lines never
+///    enter [`dedup_hash`], so standing guidance can never be "unchanged
+///    since last time" and can never dedup away.
+/// 2. **Deduped ordinary with no standing suppresses the block entirely** —
+///    true dedup, nothing arrives.
+/// 3. **Standing guidance always renders** when a block renders at all,
+///    deduped or not.
+/// 4. **The exemption belongs to the classification, not to the reaction.**
+///    A line is exempt because it is [`PressureClass::Standing`], which is
+///    declared on the rule — no reaction may grant or withhold it.
+///
+/// `ordinary_seen` is the ledger's answer for [`dedup_hash`] over
+/// `ordinary`; the caller owns that lookup so it can apply its own fail-open
+/// warning, but it does not own what the answer means.
+pub fn decide_injection(
+    ordinary: Vec<String>,
+    standing: Vec<String>,
+    ordinary_seen: bool,
+) -> InjectionDecision {
+    // An empty ordinary payload was never injected, so it cannot have been
+    // seen: dedup is about unchanged *content*, not about absence.
+    let has_ordinary = !ordinary.is_empty();
+    let has_standing = !standing.is_empty();
+    let deduped = has_ordinary && ordinary_seen;
+    let lines = if deduped {
+        standing
+    } else {
+        standing.into_iter().chain(ordinary).collect()
+    };
+    InjectionDecision {
+        suppressed: deduped && !has_standing,
+        deduped,
+        has_standing,
+        // Only the ordinary payload is ledger-tracked; standing lines are
+        // never recorded, which is what keeps them permanently exempt.
+        record: !deduped && has_ordinary,
+        lines,
+    }
+}
+
 /// The explanation header: why this domain matched — trigger, horizon,
 /// source — and whether the ordinary payload was deduped.
 pub fn render_header(
@@ -404,4 +472,111 @@ classification = "standing"
         let wrong_schema = text.replace(DOMAIN_SCHEMA, "aikit.knowledge-domain/v2");
         assert!(KnowledgeDomain::from_toml_str(&wrong_schema).is_err());
     }
+
+    fn lines(prefix: &str, n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("- {prefix} {i}")).collect()
+    }
+
+    /// Law 1: the dedup key covers only the ordinary payload. Standing lines
+    /// are not hashed, so standing guidance can never be "unchanged since
+    /// last time" and can never dedup away.
+    #[test]
+    fn the_dedup_key_never_sees_standing_lines() {
+        let ordinary = lines("ordinary", 2);
+        let standing = lines("standing", 3);
+        let without = dedup_hash("domain/a", &ordinary);
+        let with_standing_appended: Vec<String> =
+            ordinary.iter().cloned().chain(standing).collect();
+        assert_ne!(
+            without,
+            dedup_hash("domain/a", &with_standing_appended),
+            "hashing standing lines would let them participate in dedup"
+        );
+        // And the key is stable for the same ordinary payload in any order.
+        let mut shuffled = ordinary.clone();
+        shuffled.reverse();
+        assert_eq!(without, dedup_hash("domain/a", &shuffled));
+    }
+
+    /// Law 2: deduped ordinary payload with no standing guidance suppresses
+    /// the block entirely — true dedup, nothing arrives.
+    #[test]
+    fn deduped_ordinary_with_no_standing_suppresses_the_block() {
+        let decision = decide_injection(lines("ordinary", 2), vec![], true);
+        assert!(decision.suppressed);
+        assert!(decision.deduped);
+        assert!(!decision.has_standing);
+        assert!(!decision.record, "a deduped payload is not re-recorded");
+    }
+
+    /// Law 3: standing guidance always renders when a block renders at all —
+    /// deduped or not. This is the exemption, and it is unconditional.
+    #[test]
+    fn standing_guidance_reasserts_whether_or_not_the_ordinary_payload_deduped() {
+        let standing = lines("standing", 2);
+
+        let fresh = decide_injection(lines("ordinary", 2), standing.clone(), false);
+        assert!(!fresh.suppressed);
+        assert!(!fresh.deduped);
+        assert!(fresh.record, "a fresh ordinary payload is recorded");
+        for line in &standing {
+            assert!(fresh.lines.contains(line), "standing line missing: {line}");
+        }
+        assert_eq!(fresh.lines.len(), 4, "standing then ordinary");
+        assert_eq!(&fresh.lines[..2], &standing[..], "standing renders first");
+
+        let repeat = decide_injection(lines("ordinary", 2), standing.clone(), true);
+        assert!(!repeat.suppressed, "standing guidance keeps the block alive");
+        assert!(repeat.deduped);
+        assert!(!repeat.record);
+        assert_eq!(
+            repeat.lines, standing,
+            "deduped ordinary lines leave the block; standing lines never do"
+        );
+    }
+
+    /// Law 4: the exemption belongs to the classification, not to any
+    /// reaction. A rule declared `standing` is rendered into the standing
+    /// half by `render_guidance_lines`, and every reaction that consults the
+    /// law therefore exempts it identically.
+    #[test]
+    fn the_exemption_travels_with_the_classification_not_the_reaction() {
+        let domain = release_domain();
+        let (ordinary, standing) = render_guidance_lines(&domain);
+        assert!(!standing.is_empty(), "fixture must declare a standing rule");
+        assert!(
+            standing.iter().all(|line| line.contains("[standing — dedup-exempt by classification]")),
+            "the exemption is stated in the rendered line itself: {standing:?}"
+        );
+        assert!(
+            ordinary.iter().all(|line| line.contains("[ordinary]")),
+            "ordinary lines carry no exemption: {ordinary:?}"
+        );
+        // Whatever the ledger says, the standing half survives.
+        for seen in [false, true] {
+            let decision = decide_injection(ordinary.clone(), standing.clone(), seen);
+            for line in &standing {
+                assert!(decision.lines.contains(line), "standing dropped when seen={seen}");
+            }
+        }
+    }
+
+    /// An absent ordinary payload was never injected, so it cannot have been
+    /// seen — dedup is about unchanged content, not about absence.
+    #[test]
+    fn an_empty_ordinary_payload_is_not_treated_as_deduped() {
+        let standing = lines("standing", 1);
+        let decision = decide_injection(vec![], standing.clone(), true);
+        assert!(!decision.deduped, "nothing was injected, so nothing deduped");
+        assert!(!decision.suppressed);
+        assert!(!decision.record, "there is no ordinary payload to record");
+        assert_eq!(decision.lines, standing);
+
+        let nothing = decide_injection(vec![], vec![], true);
+        assert!(!nothing.deduped);
+        assert!(!nothing.suppressed, "an empty domain is not a dedup event");
+        assert!(nothing.lines.is_empty());
+    }
+
+
 }

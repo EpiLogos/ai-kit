@@ -22,7 +22,7 @@
 
 use std::path::Path;
 
-use aikit_core::domain::{dedup_hash, render_guidance_lines, KnowledgeDomain};
+use aikit_core::domain::{decide_injection, dedup_hash, render_guidance_lines, KnowledgeDomain};
 use aikit_core::hooks::HookEvent;
 use aikit_core::skillset::glob_matches;
 use aikit_core::{parse_wiki_objects, SemanticWikiIndex, WikiObject};
@@ -182,22 +182,20 @@ pub fn run(
         }
         let (ordinary, standing) = render_guidance_lines(domain);
         let hash = dedup_hash(&format!("{}@{relative_path}", domain.id), &ordinary);
-        let deduped = !ordinary.is_empty() && seen(index, scope, &hash, &mut warnings);
-        if deduped && standing.is_empty() {
+        // Same law as every other reaction; only the key and the header
+        // differ here.
+        let decision = decide_injection(ordinary, standing, seen(index, scope, &hash, &mut warnings));
+        if decision.suppressed {
             continue;
         }
-        if !deduped && !ordinary.is_empty() {
+        if decision.record {
             if let Err(error) = index.record_injection(scope, &hash) {
                 warnings.push(format!(
                     "continuity/file-context ledger unavailable: {error}"
                 ));
             }
         }
-        let lines: Vec<&String> = if deduped {
-            standing.iter().collect()
-        } else {
-            standing.iter().chain(ordinary.iter()).collect()
-        };
+        let (deduped, has_standing) = (decision.deduped, decision.has_standing);
         let mut block = format!(
             "[continuity/file-context] domain {} armed for {relative_path} — horizon: {}; \
              source: {} revision {};{}{}",
@@ -214,13 +212,13 @@ pub fn run(
             } else {
                 ""
             },
-            if !standing.is_empty() {
+            if has_standing {
                 " standing rules reasserted (dedup-exempt by classification)"
             } else {
                 ""
             }
         );
-        for line in lines {
+        for line in &decision.lines {
             block.push('\n');
             block.push_str(line);
         }
