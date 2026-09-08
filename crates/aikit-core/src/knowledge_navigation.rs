@@ -202,6 +202,7 @@ impl<'a> KnowledgeApplication<'a> {
         let mut hits = Vec::new();
         let mut absences = Vec::new();
 
+        let mut unreadable: Vec<SourceRef> = Vec::new();
         if let Some(wiki) = &self.wiki {
             hits.extend(wiki.search(query, limit).into_iter().map(|hit| {
                 match &hit.address {
@@ -234,6 +235,14 @@ impl<'a> KnowledgeApplication<'a> {
                     // `Authored` authority; only its provenance house
                     // differs from a curated Wiki object.
                     WikiSearchAddress::AuthoredSource { source } => {
+                        // Findability must not outrun openability in silence.
+                        // If this horizon cannot materialise the source, the
+                        // result says so here — at the point the address is
+                        // handed over — rather than letting the caller
+                        // discover it only by trying to read.
+                        if self.source_material(source).is_none() {
+                            unreadable.push(source.clone());
+                        }
                         let resource = ResourceRef::parse(source.as_str())
                             .expect("SourceRef validation is compatible with ResourceRef validation");
                         KnowledgeSearchHit {
@@ -252,6 +261,12 @@ impl<'a> KnowledgeApplication<'a> {
             }));
         } else {
             absences.push("SemanticWiki search unavailable: provider absent".into());
+        }
+        for source in &unreadable {
+            absences.push(format!(
+                "Authored source {source} is cited by the Wiki but not materialised in this \
+                 horizon: findable and explainable, not readable"
+            ));
         }
 
         for binding in &self.sources {
@@ -395,10 +410,18 @@ impl<'a> KnowledgeApplication<'a> {
                 .read(resource),
             KnowledgeAddress::Source(source) => {
                 let (binding, material) = self.source_material(source).ok_or_else(|| {
-                    AikitError::new(
-                        "knowledge.source_missing",
-                        format!("Source {source} is not materialised in the project horizon"),
-                    )
+                    // Search can hand back a source a curated node cites. If
+                    // this horizon cannot materialise it, say which citation
+                    // it came from rather than reporting it simply missing.
+                    let citing = self.wiki_citations(source);
+                    if citing.is_empty() {
+                        AikitError::new(
+                            "knowledge.source_missing",
+                            format!("Source {source} is not materialised in the project horizon"),
+                        )
+                    } else {
+                        Self::unmaterialised_cited_source(source, &citing)
+                    }
                 })?;
                 Ok(KnowledgeReading {
                     resource: ResourceRef::parse(source.as_str())?,
@@ -504,12 +527,45 @@ impl<'a> KnowledgeApplication<'a> {
                 })
             }
             KnowledgeAddress::Source(source) => {
-                let (binding, material) = self.source_material(source).ok_or_else(|| {
-                    AikitError::new(
-                        "knowledge.source_missing",
-                        format!("Source {source} is absent"),
-                    )
-                })?;
+                let Some((binding, material)) = self.source_material(source) else {
+                    // Explaining is not reading. When a curated node cites a
+                    // source this horizon cannot materialise, the Wiki still
+                    // holds the one fact worth having — that the citation is
+                    // authored, and whose it is. Answer with that instead of
+                    // refusing, and let `read` be the operation that admits
+                    // the content is out of reach.
+                    let citing = self.wiki_citations(source);
+                    if citing.is_empty() {
+                        return Err(AikitError::new(
+                            "knowledge.source_missing",
+                            format!("Source {source} is absent"),
+                        ));
+                    }
+                    let wiki = self.wiki.as_ref().expect("a citation implies a Wiki provider");
+                    return Ok(KnowledgeExplanation {
+                        address: address.clone(),
+                        provider: Some(wiki.status().provider),
+                        authority: SourceAuthority::Authored,
+                        summary: format!(
+                            "authored source cited by {} curated node(s); not materialised in \
+                             this horizon, so it is findable and explainable but not readable",
+                            citing.len()
+                        ),
+                        sources: vec![source.clone()],
+                        // Named, not a bare list: this rides under the
+                        // explain payload's `provider` key alongside other
+                        // providers' native detail, where an unlabelled
+                        // array of refs would not say what it is.
+                        detail: serde_json::to_value(serde_json::json!({
+                            "citing_nodes": citing
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>(),
+                            "readable": false,
+                        }))
+                        .ok(),
+                    });
+                };
                 Ok(KnowledgeExplanation {
                     address: address.clone(),
                     provider: Some(binding.provider.status().provider),
@@ -671,6 +727,39 @@ impl<'a> KnowledgeApplication<'a> {
             .iter()
             .filter(|route| route.context == self.context)
             .collect()
+    }
+
+    /// The curated nodes citing `source`, or empty when the Wiki is absent or
+    /// nothing cites it.
+    ///
+    /// A cited source is authored ground this horizon may or may not be able
+    /// to open. When the SourcePool cannot materialise it, this is what turns
+    /// the refusal into a fact the caller can act on — the citation is real
+    /// and named, only its content is out of reach.
+    fn wiki_citations(&self, source: &SourceRef) -> Vec<ResourceRef> {
+        self.wiki
+            .as_ref()
+            .map(|wiki| wiki.citing_nodes(source))
+            .unwrap_or_default()
+    }
+
+    /// The refusal a cited-but-unmaterialised source earns: distinct from a
+    /// source nothing knows about, because the difference matters to whoever
+    /// has to decide what to do next.
+    fn unmaterialised_cited_source(source: &SourceRef, citing: &[ResourceRef]) -> AikitError {
+        let names = citing
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        AikitError::new(
+            "knowledge.source_cited_but_unmaterialised",
+            format!(
+                "Source {source} is cited by {names} but is not materialised in the project \
+                 horizon: it can be found and explained, not read"
+            ),
+        )
+        .with("source", source.as_str())
     }
 
     fn source_material(
@@ -1072,12 +1161,22 @@ impl<'a> KnowledgeApplication<'a> {
                 ))
             }
             KnowledgeAddress::Source(source) => {
-                let (binding, material) = self.source_material(source).ok_or_else(|| {
-                    AikitError::new(
-                        "knowledge.source_missing",
-                        format!("Source {source} is absent"),
-                    )
-                })?;
+                let Some((binding, material)) = self.source_material(source) else {
+                    // A cited source routes through the Wiki that cites it.
+                    // It carries no revision here — the Wiki knows the
+                    // citation, not the material's version — and saying so
+                    // is better than failing a route for an address search
+                    // legitimately returned.
+                    let citing = self.wiki_citations(source);
+                    if citing.is_empty() {
+                        return Err(AikitError::new(
+                            "knowledge.source_missing",
+                            format!("Source {source} is absent"),
+                        ));
+                    }
+                    let wiki = self.wiki.as_ref().expect("a citation implies a Wiki provider");
+                    return Ok((Some(wiki.status().provider), SourceAuthority::Authored, None));
+                };
                 Ok((
                     Some(binding.provider.status().provider),
                     SourceAuthority::Observed,
@@ -1184,6 +1283,10 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    fn spec() -> SourceRef {
+        SourceRef::parse("source:spec").unwrap()
     }
 
     fn material() -> SourceMaterial {
@@ -1403,6 +1506,95 @@ mod tests {
             index.resolve(&ResourceRef::parse("wiki:node:auth").unwrap()),
             Some(WikiObject::Node(_))
         ));
+    }
+
+    /// A source a curated node cites, which this horizon cannot materialise,
+    /// is findable — so the result must say, at the point it hands over the
+    /// address, that the address will not open. Silence here is what makes
+    /// findability a trap instead of a capability.
+    #[test]
+    fn search_discloses_a_cited_source_this_horizon_cannot_open() {
+        let index = wiki();
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(SemanticWikiProvider::new(&index));
+
+        let result = app.search("auth", 10);
+        assert!(
+            result
+                .hits
+                .iter()
+                .any(|hit| hit.address == KnowledgeAddress::Source(spec())),
+            "the cited source is still findable"
+        );
+        assert!(
+            result
+                .absences
+                .iter()
+                .any(|absence| absence.contains("source:spec") && absence.contains("not readable")),
+            "the absence names the source and what cannot be done with it: {:?}",
+            result.absences
+        );
+    }
+
+    /// Reading it still fails — the Wiki holds the citation, not the content —
+    /// but the refusal names the citation instead of reporting the source
+    /// simply missing, which is a different fact with a different remedy.
+    #[test]
+    fn reading_a_cited_unmaterialised_source_names_the_citation() {
+        let index = wiki();
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(SemanticWikiProvider::new(&index));
+
+        let error = app
+            .read(&KnowledgeAddress::Source(spec()))
+            .expect_err("the Wiki cites this source but cannot serve its content");
+        assert_eq!(error.code(), "knowledge.source_cited_but_unmaterialised");
+        assert!(
+            error.message().contains("wiki:node:auth"),
+            "the refusal names the citing node: {}",
+            error.message()
+        );
+    }
+
+    /// A source nothing cites keeps the older, plainer absence: it is not a
+    /// citation this horizon failed to open, it is simply unknown.
+    #[test]
+    fn an_uncited_absent_source_is_still_plainly_missing() {
+        let index = wiki();
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(SemanticWikiProvider::new(&index));
+
+        let stranger = SourceRef::parse("source:nobody-cites-me").unwrap();
+        let error = app
+            .read(&KnowledgeAddress::Source(stranger))
+            .expect_err("nothing knows this source");
+        assert_eq!(error.code(), "knowledge.source_missing");
+    }
+
+    /// Explaining is not reading. The Wiki can account for a citation whose
+    /// content it cannot serve, so `explain` answers from that knowledge —
+    /// authored, attributed, and honest that the material is out of reach.
+    #[test]
+    fn explaining_a_cited_unmaterialised_source_answers_from_the_wiki() {
+        let index = wiki();
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(SemanticWikiProvider::new(&index));
+
+        let explanation = app
+            .explain(&KnowledgeAddress::Source(spec()))
+            .expect("the citation itself is explainable");
+        assert_eq!(explanation.authority, SourceAuthority::Authored);
+        assert_eq!(explanation.sources, vec![spec()]);
+        assert!(
+            explanation.summary.contains("not readable"),
+            "the explanation admits what it cannot do: {}",
+            explanation.summary
+        );
+        let detail = explanation.detail.expect("citing nodes ride the detail");
+        assert!(
+            detail.to_string().contains("wiki:node:auth"),
+            "the detail names the citing node: {detail}"
+        );
     }
 
     /// CASE 19: the authored source `wiki:node:auth` cites (`source:spec`)

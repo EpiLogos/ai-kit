@@ -479,6 +479,20 @@ impl SemanticWikiIndex {
             .unwrap_or_default()
     }
 
+    /// The curated nodes that cite `source`, the inverse of [`Self::sources`].
+    ///
+    /// This is the one thing the Wiki genuinely knows about a source it does
+    /// not hold: that it is cited, and by whom. A caller handed a source
+    /// address it cannot open can still learn where the citation came from,
+    /// which is the difference between an absence and a dead end. Reading a
+    /// citation never makes the cited source a curated object.
+    pub fn citing_nodes(&self, source: &SourceRef) -> Vec<ResourceRef> {
+        self.authored_sources
+            .get(source)
+            .map(|nodes| nodes.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub fn proposal_to_upsert(&self, object: &WikiObject) -> WikiMutationProposal {
         WikiMutationProposal::Upsert {
             object: WikiObjectEnvelope::from_object(object),
