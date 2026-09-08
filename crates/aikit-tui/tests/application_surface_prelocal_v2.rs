@@ -29,7 +29,7 @@ fn fixture() -> (tempfile::TempDir, Fixture) {
 fn shipped_workspace_exposes_one_canonical_product_field() {
     assert_eq!(
         WorkspaceSection::ALL.map(workspace_section_label),
-        ["Context", "Compose", "Knowledge", "Explain", "History"]
+        ["Worlds", "Compose", "Work", "Knowledge", "History", "System"]
     );
 
     let (_dir, mut backend) = fixture();
@@ -39,7 +39,7 @@ fn shipped_workspace_exposes_one_canonical_product_field() {
     )
     .unwrap();
     assert_eq!(surface.semantic().presentation, PresentationMode::Workspace);
-    assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Context");
+    assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Worlds");
     assert!(surface.semantic().selected.is_none(), "search must not silently create semantic selection");
     surface
         .handle(&mut backend, key(KeyCode::Down, KeyModifiers::NONE))
@@ -63,7 +63,7 @@ fn final_surface_preserves_identity_across_field_navigation_and_relation_views()
         .unwrap();
     let selected = surface.semantic().selected.clone();
 
-    for expected in ["Compose", "Knowledge", "Explain", "History"] {
+    for expected in ["Compose", "Work", "Knowledge", "History", "System"] {
         surface
             .handle(&mut backend, key(KeyCode::Right, KeyModifiers::ALT))
             .unwrap();

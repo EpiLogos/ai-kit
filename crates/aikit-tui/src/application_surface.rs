@@ -30,11 +30,14 @@ use crate::application::{
 use crate::application_service::ApplicationService;
 use crate::backend::PaletteBackend;
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
+use crate::explain_history_service::ExplainHistoryApplicationService;
 use crate::graph_layout::{self, GraphLayout, GraphLayoutRequest, GraphViewport, RelationBand};
 use crate::graph_presentation;
 use crate::host::UiHost;
+use crate::inspector_render::{self, InspectorSnapshot};
 use crate::layout::{Glyphs, Layout, Width};
 use crate::navigation::AmbientContext;
+use crate::navigator_groups::{self, NavigatorRow};
 use crate::project_workspace_render::workspace_section_label;
 use crate::project_world_api::ProjectWorldApplicationService;
 use crate::theme::Theme;
@@ -79,7 +82,7 @@ impl ApplicationSurfaceRequest {
             host,
             initial_query: None,
             initial_relation_view: RelationView::List,
-            initial_workspace_section: WorkspaceSection::Projects,
+            initial_workspace_section: WorkspaceSection::Worlds,
             glyphs: None,
         }
     }
@@ -106,7 +109,7 @@ impl ApplicationSurfaceRequest {
     #[must_use]
     pub fn opening_relations(mut self, view: RelationView) -> Self {
         self.initial_relation_view = view;
-        self.initial_workspace_section = WorkspaceSection::Explore;
+        self.initial_workspace_section = WorkspaceSection::Knowledge;
         self
     }
 }
@@ -157,6 +160,10 @@ pub struct ApplicationSurfaceController {
     /// two. This counter is the direct, deterministic witness integration
     /// tests assert on instead of wall-clock timing.
     graph_layout_recomputes: u64,
+    /// The wide-shell Inspector column's content for the current selection
+    /// (spec §2.1), refreshed alongside `relation` on every dispatch — see
+    /// [`Self::refresh_inspector`]. `None` when nothing is selected.
+    inspector: Option<InspectorSnapshot>,
 }
 
 impl ApplicationSurfaceController {
@@ -202,8 +209,10 @@ impl ApplicationSurfaceController {
             graph_glyphs,
             graph_filter_editing: false,
             graph_layout_recomputes: 0,
+            inspector: None,
         };
         controller.refresh_relation(backend)?;
+        controller.refresh_inspector(backend)?;
         Ok(controller)
     }
 
@@ -213,6 +222,14 @@ impl ApplicationSurfaceController {
 
     pub fn relation(&self) -> Option<&RelationReadModel> {
         self.relation.as_ref()
+    }
+
+    /// The wide-shell Inspector column's content for the current selection.
+    /// `None` means nothing is selected; a snapshot with both fields `None`
+    /// means the selection is outside every Explain source `inspector_render`
+    /// reads — both are legitimate, disclosable states, not errors.
+    pub fn inspector(&self) -> Option<&InspectorSnapshot> {
+        self.inspector.as_ref()
     }
 
     /// Test/debug witness for [`Self::sync_graph_layout`]'s caching
@@ -275,10 +292,69 @@ impl ApplicationSurfaceController {
             );
         }
         if self.semantic.presentation == PresentationMode::Workspace
-            && self.semantic.workspace_section == WorkspaceSection::Explore
+            && self.semantic.workspace_section == WorkspaceSection::Knowledge
         {
             self.draw_relations(frame);
         }
+        self.draw_inspector(frame);
+    }
+
+    /// Spec §2.1: in a wide Workspace shell the Inspector is a persistent
+    /// column, always showing the current selection's Explain content — not
+    /// something reached only through `Overlay::Explain`. `Layout::split`
+    /// exposes `panes.inspector` only at `Width::Wide` (`None` at Medium/
+    /// Narrow, exactly like `panes.preview`), so this is a pure no-op below
+    /// Wide: narrow/medium behaviour is genuinely unchanged, not merely
+    /// visually absent. Quick keeps its existing preview-pane behaviour
+    /// untouched too — this column is a Workspace-shell concept (spec §2.1),
+    /// distinct from the Universal Navigator (§3).
+    ///
+    /// Skipped while `ConfirmApply`/`CompositionPreview` are on screen: those
+    /// are a different, unrelated modal workflow (staging confirmation) that
+    /// legitimately wants the full preview pane, and this method never
+    /// touches that Rect.
+    fn draw_inspector(&self, frame: &mut ratatui::Frame) {
+        if self.semantic.presentation != PresentationMode::Workspace {
+            return;
+        }
+        if matches!(
+            self.semantic.overlay,
+            Some(Overlay::ConfirmApply) | Some(Overlay::CompositionPreview)
+        ) {
+            return;
+        }
+        // `frame.area()`, not `self.semantic.area`: this is a draw-time
+        // method with the real Frame in hand, exactly like `draw_relations`
+        // below (whose own `inner` computation this mirrors) and unlike
+        // `handle_mouse`/`graph_content_rect`, which have no Frame and so
+        // must fall back to the last `UiAction::Resize` this surface saw.
+        let area = frame.area();
+        if area.width < 3 || area.height < 3 {
+            return;
+        }
+        let inner = Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        let panes = Layout::for_width(inner.width).split(inner);
+        let Some(inspector_area) = panes.inspector else {
+            return;
+        };
+        let lines = inspector_render::inspector_lines(
+            &self.semantic,
+            self.project_world.as_ref(),
+            self.inspector.as_ref(),
+            &self.shell_glyphs,
+        )
+        .into_iter()
+        .map(Line::raw)
+        .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            inspector_area,
+        );
     }
 
     pub fn draw_terminal<T: Backend>(&self, terminal: &mut Terminal<T>) -> Result<()>
@@ -325,6 +401,16 @@ impl ApplicationSurfaceController {
         if ctrl && code == KeyCode::Char('w') {
             return self.toggle_presentation(backend);
         }
+        // Ctrl+K is the Universal Navigator: an explicit "go to Quick" alias,
+        // consistent with Ctrl+T already being an explicit view-rotation alias
+        // rather than a toggle. Quick is already the Navigator presentation
+        // (search over the one shared ResourceSearchIndex, "things" and
+        // "places" alike — see `crate::workspace_navigation`); this binding
+        // adds no new state, it only jumps to it from wherever the operator
+        // currently is, preserving query/selection/staged/mutation_scope.
+        if ctrl && matches!(code, KeyCode::Char('k') | KeyCode::Char('K')) {
+            return self.dispatch(backend, UiAction::SetPresentation(PresentationMode::Quick));
+        }
         if alt && code == KeyCode::Left {
             return self.dispatch(backend, UiAction::PreviousWorkspaceSection);
         }
@@ -341,7 +427,7 @@ impl ApplicationSurfaceController {
             self.dispatch(backend, UiAction::SetPresentation(PresentationMode::Workspace))?;
             return self.dispatch(
                 backend,
-                UiAction::SetWorkspaceSection(WorkspaceSection::Explore),
+                UiAction::SetWorkspaceSection(WorkspaceSection::Knowledge),
             );
         }
         if ctrl && code == KeyCode::Char('s') {
@@ -583,8 +669,24 @@ impl ApplicationSurfaceController {
             && row >= panes.list.y
             && row < panes.list.y.saturating_add(panes.list.height)
         {
-            let index = usize::from(row.saturating_sub(panes.list.y));
-            if let Some(item) = self.semantic.read_model.resources.get(index) {
+            // The exact same row plan and scroll window `v2_render::draw_resources`
+            // computes — never a hand-rolled re-derivation — so a click can never
+            // resolve to a different resource than the one actually drawn under
+            // it, and a click on a group header/spacer (never selectable) is
+            // simply a no-op rather than falling through to whatever resource
+            // happens to sit at that raw row offset.
+            let rows = navigator_groups::resource_pane_rows(&self.semantic);
+            let selected_resource_index = self
+                .semantic
+                .selected
+                .as_ref()
+                .and_then(|selected| self.semantic.read_model.position(selected))
+                .unwrap_or(0);
+            let selected_row = navigator_groups::row_position(&rows, selected_resource_index);
+            let (_, visible) =
+                navigator_groups::visible_window(&rows, selected_row, panes.list.height as usize);
+            let local_row = usize::from(row.saturating_sub(panes.list.y));
+            if let Some(NavigatorRow::Item { item, .. }) = visible.get(local_row) {
                 return self.dispatch(backend, UiAction::Select(item.resource.clone()));
             }
         }
@@ -669,7 +771,8 @@ impl ApplicationSurfaceController {
             self.semantic = self.runtime.step(&mut service, self.semantic.clone(), action)?;
             self.project_world = service.project_world().ok();
         }
-        self.refresh_relation(backend)
+        self.refresh_relation(backend)?;
+        self.refresh_inspector(backend)
     }
 
     fn refresh_relation<B: PaletteBackend>(&mut self, backend: &mut B) -> Result<()> {
@@ -683,6 +786,40 @@ impl ApplicationSurfaceController {
             .relations_at_depth(&subject, self.semantic.graph.depth)
             .ok();
         self.sync_graph_layout();
+        Ok(())
+    }
+
+    /// Recompute the Inspector column's content for the current canonical
+    /// selection (`semantic.selected` — always the plain selection, unlike
+    /// `relation_subject` which Graph can redirect to its own `graph.focus`:
+    /// the Inspector answers "what is selected", not "what neighbourhood is
+    /// the Graph showing"). Called after every dispatched Action, exactly
+    /// like `refresh_relation`, so `draw_inspector` can treat `inspector` as
+    /// an up-to-date, already-computed read rather than reaching for the
+    /// backend itself at render time.
+    ///
+    /// Both `explain` and `explain_evidence` are read-only projections
+    /// (`&self` on `ApplicationService`, no mutation) — the same ones
+    /// `invoke_action` calls for the `action/capability/explain` /
+    /// `EXPLAIN_ACTION_REF` contextual Actions — fetched here proactively so
+    /// the column reflects the selection without the user ever pressing `:`.
+    /// A lookup failure for either (the subject is outside the navigation
+    /// index, or the underlying backend call errors) becomes `None`, which
+    /// `inspector_render::inspector_lines` renders as an honest disclosure,
+    /// never a fabricated value.
+    fn refresh_inspector<B: PaletteBackend>(&mut self, backend: &mut B) -> Result<()> {
+        let Some(subject) = self.semantic.selected.clone() else {
+            self.inspector = None;
+            return Ok(());
+        };
+        let service = ApplicationService::new(backend);
+        let explain = service.explain(&subject).ok();
+        let evidence = service.explain_evidence(&subject).ok();
+        self.inspector = Some(InspectorSnapshot {
+            subject,
+            explain,
+            evidence,
+        });
         Ok(())
     }
 
@@ -750,7 +887,7 @@ impl ApplicationSurfaceController {
     /// the precondition for every Graph-specific key/mouse binding.
     fn graph_projection_active(&self) -> bool {
         self.semantic.presentation == PresentationMode::Workspace
-            && self.semantic.workspace_section == WorkspaceSection::Explore
+            && self.semantic.workspace_section == WorkspaceSection::Knowledge
             && self.semantic.relation_view == RelationView::Graph
     }
 

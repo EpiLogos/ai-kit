@@ -32,32 +32,49 @@ pub enum PresentationMode {
     Workspace,
 }
 
+/// The six top-level Workspace destinations, in spec order (`docs/v2/23-TUI-
+/// HUMAN-EXPERIENCE-SPEC.md` §3-§8, carried unmerged on PR #212 as of this
+/// writing — see `crate::workspace_navigation` for the single source-of-truth
+/// destination table this enum is projected through for Ctrl+K navigation).
+///
+/// `Projection` (the old "Explain" tab) is deliberately retired here: spec §17
+/// states "Explain is not a top-level destination in the final IA" — it is an
+/// Inspector depth reached through the `:` Explain contextual Action and shown
+/// in `Overlay::Explain`, not a Workspace section. `Work` and `System` are new,
+/// grounded destinations (see `crate::project_workspace_render::work_lines`/
+/// `system_lines`), not placeholders: `Work` surfaces the real, already-
+/// resolved actor/runtime facts this application boundary exposes; `System`
+/// names a real destination Ctrl+K can reach today even though this boundary
+/// does not yet expose credential/provider disclosure through it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WorkspaceSection {
-    Projects,
+    Worlds,
     Compose,
-    Explore,
-    Projection,
+    Work,
+    Knowledge,
     History,
+    System,
 }
 
 impl WorkspaceSection {
-    pub const ALL: [Self; 5] = [
-        Self::Projects,
+    pub const ALL: [Self; 6] = [
+        Self::Worlds,
         Self::Compose,
-        Self::Explore,
-        Self::Projection,
+        Self::Work,
+        Self::Knowledge,
         Self::History,
+        Self::System,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Projects => "Projects",
+            Self::Worlds => "Worlds",
             Self::Compose => "Compose",
-            Self::Explore => "Explore",
-            Self::Projection => "Projection",
+            Self::Work => "Work",
+            Self::Knowledge => "Knowledge",
             Self::History => "History",
+            Self::System => "System",
         }
     }
 
@@ -242,6 +259,17 @@ pub enum ActionOutcome {
     Status {
         summary: String,
     },
+    /// A Ctrl+K "place" hit was invoked: the Navigator's generic single-
+    /// immediate-action pipeline (the same `open_selected_action` path that
+    /// already opens a Project) resolved to a Workspace destination rather
+    /// than a Resource. `section` is looked up from the invoked Action's
+    /// subject by `crate::workspace_navigation::workspace_section_for_destination`
+    /// — this variant carries the already-resolved section, not a second Ref
+    /// the reducer would have to re-interpret.
+    NavigatedTo {
+        section: WorkspaceSection,
+        summary: String,
+    },
 }
 
 impl ActionOutcome {
@@ -251,6 +279,7 @@ impl ActionOutcome {
             | Self::Explained { summary, .. }
             | Self::History { summary, .. }
             | Self::Staged { summary, .. }
+            | Self::NavigatedTo { summary, .. }
             | Self::Status { summary } => summary,
         }
     }
@@ -487,7 +516,7 @@ impl Default for TuiState {
             staged: StagedChanges::default(),
             mutation_scope: None,
             presentation: PresentationMode::Quick,
-            workspace_section: WorkspaceSection::Projects,
+            workspace_section: WorkspaceSection::Worlds,
             relation_view: RelationView::List,
             graph: GraphPresentation::default(),
             overlay: None,
@@ -788,6 +817,16 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 } => {
                     state.staged.stage(resource.clone(), *intent);
                     state.preview = None;
+                }
+                ActionOutcome::NavigatedTo { section, .. } => {
+                    state.navigation.push(NavigationPoint {
+                        selected: state.selected.clone(),
+                        relation_view: state.relation_view,
+                        workspace_section: state.workspace_section,
+                    });
+                    state.overlay = None;
+                    state.presentation = PresentationMode::Workspace;
+                    state.workspace_section = *section;
                 }
                 ActionOutcome::Status { .. } => {}
             }
