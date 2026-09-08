@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 
+use aikit_tui::application::Overlay;
 use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
 use aikit_tui::event::PaletteEvent;
 use aikit_tui::host::UiHost;
@@ -175,13 +176,131 @@ fn wide_workspace_renders_context_compose_and_explain_from_one_world() {
     assert!(compose.contains("Intent        eligibility unresolved"));
     assert!(compose.contains("Effective     available · 0 providers"));
 
-    surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
-    surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
-    assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Explain");
-    let explain = rendered(&draw_width(&surface, 140, 30));
+    // Projection is retired as a top-level Workspace tab (spec §17: "Explain
+    // is not a top-level destination in the final IA"); the same authored-
+    // intent/effective-state content is now reached through the Explain
+    // contextual action, available from any section via `:`.
+    surface
+        .handle(&mut backend, key(KeyCode::Char(':')))
+        .unwrap();
+    for character in "explain".chars() {
+        surface
+            .handle(&mut backend, key(KeyCode::Char(character)))
+            .unwrap();
+    }
+    surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
+    assert_eq!(surface.semantic().overlay, Some(Overlay::Explain));
+    // The provider Explain evidence (pretty-printed JSON) precedes the
+    // project_workspace_render::explain_lines block this overlay now also
+    // carries, so the frame needs more rows than the tab views above to keep
+    // "Catalog"/"Resolution" on screen.
+    let explain = rendered(&draw_width(&surface, 140, 80));
     assert!(explain.contains("Explain · authored intent and effective state"));
     assert!(explain.contains("Catalog"));
     assert!(explain.contains("Resolution"));
+}
+
+#[test]
+fn work_and_system_sections_disclose_real_facts_without_fabricating_factory_or_credential_state() {
+    let (_dir, mut backend) = fixture();
+    let mut surface = ApplicationSurfaceController::new(
+        &mut backend,
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup)
+            .with_query("review")
+            .with_glyphs(Glyphs::unicode()),
+    )
+    .unwrap();
+    surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
+
+    surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Compose
+    surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Work
+    assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Work");
+    let work = rendered(&draw_width(&surface, 140, 30));
+    assert!(work.contains("Work · what is actually running"));
+    assert!(work.contains("Factory work    not exposed by application boundary"));
+    assert!(
+        !work.contains("Journey") && !work.contains("Run "),
+        "Work must not fabricate Factory Journey/Run state this application boundary does not expose"
+    );
+
+    surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Knowledge
+    surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // History
+    surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // System
+    assert_eq!(workspace_section_label(surface.semantic().workspace_section), "System");
+    let system = rendered(&draw_width(&surface, 140, 30));
+    assert!(system.contains("System · installation and provider disclosure"));
+    assert!(system.contains("Credentials   not exposed by application boundary"));
+}
+
+#[test]
+fn ctrl_k_navigator_finds_and_opens_a_workspace_destination() {
+    let (_dir, mut backend) = fixture();
+    let mut surface = ApplicationSurfaceController::new(
+        &mut backend,
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_glyphs(Glyphs::unicode()),
+    )
+    .unwrap();
+    assert_eq!(surface.semantic().presentation, aikit_tui::PresentationMode::Workspace);
+    let before_section = surface.semantic().workspace_section;
+
+    surface
+        .handle(
+            &mut backend,
+            PaletteEvent::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+        )
+        .unwrap();
+    assert_eq!(surface.semantic().presentation, aikit_tui::PresentationMode::Quick);
+
+    for character in "system".chars() {
+        surface
+            .handle(&mut backend, key(KeyCode::Char(character)))
+            .unwrap();
+    }
+    let hit = surface
+        .semantic()
+        .read_model
+        .resources
+        .iter()
+        .find(|item| item.kind == aikit_core::resource::ResourceKind::Surface)
+        .expect("a Surface destination hit must be present for query \"system\"")
+        .clone();
+    assert_eq!(hit.resource.as_str(), "surface/workspace/system");
+
+    let index = surface
+        .semantic()
+        .read_model
+        .position(&hit.resource)
+        .expect("the Surface hit must be present in the read model it was read from");
+    for _ in 0..=index {
+        surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
+    }
+    assert_eq!(surface.semantic().selected.as_ref(), Some(&hit.resource));
+
+    // A destination Surface also carries the global Explain/History contextual
+    // actions (every indexed Resource does, via
+    // `aikit_core::install_explain_history_actions`), so more than one
+    // immediate action is available and `open_selected_action`'s single-
+    // immediate-action fast path correctly declines to guess — exactly the
+    // same "press : and choose one" fallback the rest of this surface already
+    // uses for any multi-action resource. Choose "Open" explicitly.
+    surface
+        .handle(&mut backend, key(KeyCode::Char(':')))
+        .unwrap();
+    for character in "open".chars() {
+        surface
+            .handle(&mut backend, key(KeyCode::Char(character)))
+            .unwrap();
+    }
+    surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
+
+    assert_eq!(surface.semantic().presentation, aikit_tui::PresentationMode::Workspace);
+    assert_eq!(
+        workspace_section_label(surface.semantic().workspace_section),
+        "System"
+    );
+
+    surface.handle(&mut backend, key(KeyCode::Esc)).unwrap();
+    assert_eq!(surface.semantic().workspace_section, before_section);
 }
 
 #[test]
