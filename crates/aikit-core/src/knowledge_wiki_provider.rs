@@ -3,8 +3,8 @@ use std::collections::{BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::knowledge::{
-    KnowledgeReading, KnowledgeRelationView, RelationDirection, RelationEdge, RelationNode,
-    RelationOrigin, RelationQuery,
+    ContainmentRole, KnowledgeReading, KnowledgeRelationView, RelationDirection, RelationEdge,
+    RelationNode, RelationOrigin, RelationQuery,
 };
 use crate::knowledge_wiki::{WikiEdgeOrigin, WikiFrame, WikiObject, WikiProvenanceRef};
 use crate::knowledge_wiki_index::{
@@ -235,16 +235,19 @@ impl<'a> SemanticWikiProvider<'a> {
                         continue;
                     }
                     seen_edges.insert(key);
-                    view.push_edge(RelationEdge::new(
-                        current.clone(),
-                        other.clone(),
-                        relation,
-                        RelationDirection::Outgoing,
-                        RelationOrigin::new(SourceAuthority::Authored)
-                            .from_provider(self.provider.clone())
-                            .in_lens("semantic-wiki")
-                            .at_revision(space.revision.to_string()),
-                    ))?;
+                    view.push_edge(
+                        RelationEdge::new(
+                            current.clone(),
+                            other.clone(),
+                            relation,
+                            RelationDirection::Outgoing,
+                            RelationOrigin::new(SourceAuthority::Authored)
+                                .from_provider(self.provider.clone())
+                                .in_lens("semantic-wiki")
+                                .at_revision(space.revision.to_string()),
+                        )
+                        .with_containment(ContainmentRole::Encloses),
+                    )?;
                     if seen.insert(other.clone()) {
                         queue.push_back((other.clone(), depth + 1));
                     }
@@ -303,16 +306,19 @@ impl<'a> SemanticWikiProvider<'a> {
                     continue;
                 }
                 seen_edges.insert(key);
-                view.push_edge(RelationEdge::new(
-                    container.clone(),
-                    current.clone(),
-                    relation,
-                    RelationDirection::Incoming,
-                    RelationOrigin::new(SourceAuthority::Authored)
-                        .from_provider(self.provider.clone())
-                        .in_lens("semantic-wiki")
-                        .at_revision(container_space.revision.to_string()),
-                ))?;
+                view.push_edge(
+                    RelationEdge::new(
+                        container.clone(),
+                        current.clone(),
+                        relation,
+                        RelationDirection::Incoming,
+                        RelationOrigin::new(SourceAuthority::Authored)
+                            .from_provider(self.provider.clone())
+                            .in_lens("semantic-wiki")
+                            .at_revision(container_space.revision.to_string()),
+                    )
+                    .with_containment(ContainmentRole::Encloses),
+                )?;
                 if seen.insert(container.clone()) {
                     queue.push_back((container, depth + 1));
                 }
@@ -341,16 +347,19 @@ impl<'a> SemanticWikiProvider<'a> {
                                 continue;
                             }
                             seen_edges.insert(key);
-                            view.push_edge(RelationEdge::new(
-                                current.clone(),
-                                other.clone(),
-                                relation,
-                                RelationDirection::Outgoing,
-                                RelationOrigin::new(SourceAuthority::Derived)
-                                    .from_provider(self.provider.clone())
-                                    .in_lens("semantic-wiki")
-                                    .at_revision(local_space.revision.to_string()),
-                            ))?;
+                            view.push_edge(
+                                RelationEdge::new(
+                                    current.clone(),
+                                    other.clone(),
+                                    relation,
+                                    RelationDirection::Outgoing,
+                                    RelationOrigin::new(SourceAuthority::Derived)
+                                        .from_provider(self.provider.clone())
+                                        .in_lens("semantic-wiki")
+                                        .at_revision(local_space.revision.to_string()),
+                                )
+                                .with_containment(ContainmentRole::Encloses),
+                            )?;
                             if seen.insert(other.clone()) {
                                 queue.push_back((other.clone(), depth + 1));
                             }
