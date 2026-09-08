@@ -15,11 +15,25 @@ use crate::{AikitError, Result};
 
 pub const NATIVE_SEMANTIC_WIKI_PROVIDER: &str = "provider/semantic-wiki/native";
 
+/// Content-derived invalidation key for one canonical Wiki register.
+///
+/// `register` is owner-authored identity (for example Central's root or Project
+/// Wiki space ref). `revision` describes the exact canonical JSON bytes read for
+/// that register; it is never used as identity and a materialisation store must
+/// not replace either field with its own row or transaction id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiRegisterRevision {
+    pub register: ResourceRef,
+    pub revision: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticWikiProviderStatus {
     pub provider: ProviderRef,
     pub available: bool,
     pub index: WikiIndexStatus,
+    #[serde(default)]
+    pub registers: Vec<WikiRegisterRevision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,6 +59,7 @@ pub struct WikiExplanation {
 pub struct SemanticWikiProvider<'a> {
     index: &'a SemanticWikiIndex,
     provider: ProviderRef,
+    registers: Vec<WikiRegisterRevision>,
 }
 
 impl<'a> SemanticWikiProvider<'a> {
@@ -53,7 +68,20 @@ impl<'a> SemanticWikiProvider<'a> {
             index,
             provider: ProviderRef::parse(NATIVE_SEMANTIC_WIKI_PROVIDER)
                 .expect("static SemanticWiki provider ref must be valid"),
+            registers: Vec::new(),
         }
+    }
+
+    pub fn with_register_revisions(
+        mut self,
+        revisions: impl IntoIterator<Item = WikiRegisterRevision>,
+    ) -> Self {
+        self.registers = revisions.into_iter().collect();
+        self.registers
+            .sort_by(|left, right| left.register.cmp(&right.register));
+        self.registers
+            .dedup_by(|left, right| left.register == right.register);
+        self
     }
 
     pub fn status(&self) -> SemanticWikiProviderStatus {
@@ -61,6 +89,7 @@ impl<'a> SemanticWikiProvider<'a> {
             provider: self.provider.clone(),
             available: true,
             index: self.index.status(),
+            registers: self.registers.clone(),
         }
     }
 
@@ -510,8 +539,20 @@ mod tests {
     #[test]
     fn provider_exposes_complete_native_application_surface() {
         let index = fixture();
-        let provider = SemanticWikiProvider::new(&index);
-        assert!(provider.status().available);
+        let provider = SemanticWikiProvider::new(&index).with_register_revisions([
+            WikiRegisterRevision {
+                register: ResourceRef::parse("wiki:space:register-b").unwrap(),
+                revision: "blake3:b".into(),
+            },
+            WikiRegisterRevision {
+                register: ResourceRef::parse("wiki:space:register-a").unwrap(),
+                revision: "blake3:a".into(),
+            },
+        ]);
+        let status = provider.status();
+        assert!(status.available);
+        assert_eq!(status.registers.len(), 2);
+        assert_eq!(status.registers[0].register.as_str(), "wiki:space:register-a");
         assert_eq!(provider.discover().len(), 4);
         assert_eq!(provider.search("Alpha", 10).len(), 1);
         let alpha = ResourceRef::parse("wiki:node:a").unwrap();

@@ -36,6 +36,7 @@ const MAX_DISCOVERY_FILES: usize = 4096;
 
 pub(super) struct KnowledgeRuntime {
     wiki: Option<SemanticWikiIndex>,
+    wiki_registers: Vec<aikit_core::knowledge_wiki_provider::WikiRegisterRevision>,
     material: Vec<SourceMaterial>,
     native_source: NativeSourcePoolProvider,
     bkmr: Option<BkmrSourcePoolProvider<SystemRunner>>,
@@ -50,7 +51,10 @@ impl KnowledgeRuntime {
             .with_source_pool(&self.native_source, &self.material)
             .with_project_map(&self.project_map);
         if let Some(index) = &self.wiki {
-            application = application.with_wiki(SemanticWikiProvider::new(index));
+            application = application.with_wiki(
+                SemanticWikiProvider::new(index)
+                    .with_register_revisions(self.wiki_registers.clone()),
+            );
         }
         if let Some(provider) = &self.bkmr {
             application = application.with_source_pool(provider, &self.material);
@@ -337,12 +341,17 @@ impl Service {
             .as_deref()
             .unwrap_or(&self.invocation_cwd);
         let mut absences = Vec::new();
+        let mut wiki_registers = Vec::new();
         let central_root = root.ancestors().find(|candidate| candidate.join("Control").is_dir() && candidate.join("Work").is_dir());
         let mut discovered = discover_material(root, self.home.root(), &mut absences, central_root.is_none())?;
         if let Some(central_root)=central_root {
             let executable=std::env::var_os("CENTRAL_CTRL_BIN").or_else(||std::env::var_os("OI_CENTRAL_CTRL_BIN")).map(PathBuf::from).unwrap_or_else(||PathBuf::from("ctrl"));
             match aikit_adapters::central_wiki::read_central_wiki(&SystemRunner::new(), &executable, central_root) {
-                Ok(reading)=>{discovered.wiki=reading.objects;absences.extend(reading.absences);}
+                Ok(reading)=>{
+                    discovered.wiki=reading.objects;
+                    wiki_registers=reading.registers;
+                    absences.extend(reading.absences);
+                }
                 Err(error)=>absences.push(format!("Central wiki discovery unavailable: {}",error.message())),
             }
             // W10 V3: compiled entity materialisation joins the discovered
@@ -466,6 +475,7 @@ impl Service {
 
         Ok(KnowledgeRuntime {
             wiki,
+            wiki_registers,
             material,
             native_source,
             bkmr,
