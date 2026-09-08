@@ -21,6 +21,7 @@ pub mod knowledge_service;
 pub mod layout;
 pub mod model_roster_surface;
 pub mod navigation;
+pub mod navigator_groups;
 pub mod project_workspace;
 pub mod project_workspace_render;
 pub mod project_world_api;
@@ -63,6 +64,10 @@ pub use navigation::{
     keyboard_invoke_action, keyboard_open_hit, keyboard_select_hit, keyboard_set_presentation,
     mouse_invoke_action, mouse_open_hit, mouse_select_hit, mouse_set_presentation, stage_action,
     AmbientContext, NavigationIntent,
+};
+pub use navigator_groups::{
+    group_for, navigator_rows, resource_pane_rows, row_position, visible_window, NavigatorGroup,
+    NavigatorRow,
 };
 pub use project_workspace::{ComposeHorizon, ProjectWorkspaceSelection, ProjectWorkspaceState};
 pub use project_world_api::ProjectWorldApplicationService;
