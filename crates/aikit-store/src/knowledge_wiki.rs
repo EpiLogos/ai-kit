@@ -163,6 +163,10 @@ impl WikiProvider for SqliteWikiProvider {
     fn sources(&self, resource: &ResourceRef) -> Vec<SourceRef> {
         self.semantic().sources(resource)
     }
+
+    fn citing_nodes(&self, source: &SourceRef) -> Vec<ResourceRef> {
+        self.semantic().citing_nodes(source)
+    }
     fn provenance(&self, resource: &ResourceRef) -> Vec<WikiProvenanceRef> {
         self.semantic().provenance(resource)
     }
