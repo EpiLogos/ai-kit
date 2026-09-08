@@ -21,6 +21,7 @@ pub mod clients;
 pub mod composition_topology;
 pub mod connection_process;
 pub mod credential_provider;
+pub mod secret_resolver;
 pub mod deepseek_harness;
 pub mod deepseek_live;
 pub mod deepseek_maximal;

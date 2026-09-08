@@ -2158,10 +2158,14 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
-            let items = aikit_cli::env::project(service.resolved(), &home)?;
+            let mut items = aikit_cli::env::project(service.resolved(), &home)?;
+            items.extend(service.secret_env_items(&service.projection_context()?)?);
             // Raw shell syntax: this is eval'd by the shell integration, so it
             // must not be wrapped in an envelope.
-            Ok(Reply::Text(aikit_cli::env::render_shell(&items, &a.shell)?))
+            let resolver = aikit_adapters::secret_resolver::SuiteSecretResolver::default();
+            Ok(Reply::Text(aikit_cli::env::render_shell(
+                &items, &a.shell, &resolver,
+            )?))
         }
         ContextSub::Reset(_) => {
             use aikit_store::state::StateStore;
