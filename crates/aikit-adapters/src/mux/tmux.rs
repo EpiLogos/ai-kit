@@ -773,9 +773,12 @@ impl<R: CommandRunner> MuxAdapter for Tmux<R> {
         let out = self.must(&[
             "display-message",
             "-p",
-            "#{session_name}\t#{window_id}\t#{pane_id}\t#{host}",
+            // tmux 3.6a sanitizes embedded control characters (including a
+            // literal tab) in format output, rewriting them to `_`; `|` is
+            // not touched, so it survives across tmux versions.
+            "#{session_name}|#{window_id}|#{pane_id}|#{host}",
         ])?;
-        let fields: Vec<&str> = out.line().split('\t').collect();
+        let fields: Vec<&str> = out.line().split('|').collect();
         let field = |i: usize| fields.get(i).map(|s| s.trim()).filter(|s| !s.is_empty());
         Ok(MuxLocation {
             kind: MuxKind::Tmux,

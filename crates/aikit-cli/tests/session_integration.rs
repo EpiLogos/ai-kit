@@ -293,12 +293,15 @@ fn diff_and_reconcile_compile_the_explicit_portable_spec() {
         "-t",
         "portable:main",
         "-F",
-        "#{@aikit_pane}\t#{pane_id}",
+        "#{@aikit_pane}|#{pane_id}",
     ]);
     let logs = String::from_utf8_lossy(&panes.stdout)
         .lines()
         .find_map(|line| {
-            let (tag, pane) = line.split_once('\t')?;
+            // tmux 3.6a sanitizes embedded control characters (including a
+            // literal tab) in `-F` output, rewriting them to `_`; `|` is not
+            // touched, so it survives on both 3.6a and 3.7c.
+            let (tag, pane) = line.split_once('|')?;
             (tag == "main/logs").then_some(pane.to_string())
         })
         .expect("the explicit spec created its logs pane");
