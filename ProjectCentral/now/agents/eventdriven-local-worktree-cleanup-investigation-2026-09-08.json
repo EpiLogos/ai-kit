@@ -1,0 +1,15 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "eventdriven-local-worktree-cleanup-investigation-2026-09-08",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "codex",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1788880686,
+  "subject": "Event-driven local worktree cleanup investigation",
+  "result": "Removed the clean merged context-pressure worktree through the existing local prune command as a real acceptance case. Existing build-hygiene script is manual, only recognizes ancestry merges, and fails outside repo. A repository cannot observe GitHub PR merge events locally; CI cannot remove local /private/tmp paths. Need the creator/finisher integration point for these external worktrees before implementing a reliable event-driven trigger. AIKit task close only manages .aikit/tasks worktrees, not the observed /private/tmp worktrees.",
+  "status": "waiting",
+  "evidence_refs": [
+    "/Users/admin/Central/Work/ai-kit/scripts/build-hygiene.sh",
+    "/Users/admin/Central/Work/ai-kit/crates/aikit-cli/src/task.rs"
+  ]
+}

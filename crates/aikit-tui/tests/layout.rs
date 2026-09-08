@@ -35,13 +35,50 @@ fn a_wide_terminal_shows_the_list_and_the_preview_at_once() {
     let preview = panes.preview.expect("a wide layout has a preview pane");
 
     assert!(panes.list.width >= 50, "the list must stay readable: {panes:?}");
-    assert!(preview.width >= 30, "a preview narrower than this explains nothing");
+    assert!(preview.width >= 18, "a preview narrower than this explains nothing");
     assert_eq!(
         panes.list.x + panes.list.width,
         preview.x,
         "list and preview must abut without overlapping"
     );
-    assert_eq!(preview.x + preview.width, 120);
+}
+
+#[test]
+fn a_wide_terminal_also_reserves_a_persistent_inspector_column() {
+    // Spec §2.1: the Inspector is a persistent column in a wide shell. It is
+    // carved out of the preview pane's own share of a wide terminal — the
+    // list pane keeps exactly the width it always had (`the_documented_
+    // breakpoints_are_exactly_where_they_say_they_are` and `a_wide_terminal_
+    // shows_the_list_and_the_preview_at_once` above are unaffected by
+    // Inspector's arrival for that reason) — so `preview` ends earlier than
+    // it used to and `inspector` fills the gap up to the frame's edge.
+    let layout = Layout::for_width(120);
+    let panes = layout.split(Rect::new(0, 0, 120, 20));
+    let preview = panes.preview.expect("a wide layout has a preview pane");
+    let inspector = panes.inspector.expect("a wide layout has an Inspector column");
+
+    assert!(inspector.width >= 18, "an Inspector narrower than this explains nothing");
+    assert_eq!(
+        preview.x + preview.width,
+        inspector.x,
+        "preview and Inspector must abut without overlapping"
+    );
+    assert_eq!(
+        inspector.x + inspector.width,
+        120,
+        "Inspector reaches the frame's edge, where preview alone used to"
+    );
+}
+
+#[test]
+fn medium_and_narrow_terminals_never_carry_an_inspector_column() {
+    // Requirement: narrow/medium shell behaviour is unchanged — the existing
+    // modal `Overlay::Explain` remains the only way in, exactly as before
+    // Inspector existed.
+    for cols in [40u16, 59, 60, 80, 99] {
+        let panes = Layout::for_width(cols).split(Rect::new(0, 0, cols, 20));
+        assert!(panes.inspector.is_none(), "{cols} columns must not carry an Inspector column");
+    }
 }
 
 #[test]

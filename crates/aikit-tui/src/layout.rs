@@ -38,6 +38,17 @@ const MEDIUM_COLUMNS: u16 = 60;
 /// The preview's share of a wide terminal.
 const PREVIEW_NUMERATOR: u16 = 2;
 const PREVIEW_DENOMINATOR: u16 = 5;
+/// The Inspector's target width once a wide terminal has room for one (spec
+/// `23-TUI-HUMAN-EXPERIENCE-SPEC.md` §2.1's "always visible" column). Fixed
+/// rather than proportional, matching the preview pane's own `.max(30)`
+/// floor: Inspector content is label/fact prose, not something that benefits
+/// from stretching arbitrarily wide.
+const INSPECTOR_COLUMNS: u16 = 28;
+/// Preview keeps at least this many columns once Inspector is carved out of
+/// its share. The list pane is never touched by Inspector's arrival — only
+/// the preview pane, which was already sized from the same `body.width`,
+/// gives up part of its own share.
+const MIN_PREVIEW_WITH_INSPECTOR: u16 = 16;
 
 /// Which of the three renderings applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +68,13 @@ pub struct Panes {
     pub list: Rect,
     /// `None` at every width below [`Width::Wide`].
     pub preview: Option<Rect>,
+    /// The persistent Inspector column (spec §2.1). `None` at every width
+    /// below [`Width::Wide`], exactly like `preview` — narrow/medium keep
+    /// their existing modal `Overlay::Explain` path unchanged. Carved from
+    /// the preview pane's own share of a wide terminal, never from `list`:
+    /// the resource list keeps exactly the width it had before Inspector
+    /// existed.
+    pub inspector: Option<Rect>,
     pub footer: Rect,
 }
 
@@ -64,6 +82,7 @@ impl Panes {
     pub fn all(&self) -> Vec<Rect> {
         let mut out = vec![self.query, self.list, self.footer];
         out.extend(self.preview);
+        out.extend(self.inspector);
         out
     }
 }
@@ -112,6 +131,7 @@ impl Layout {
                 query,
                 list: body,
                 preview: None,
+                inspector: None,
                 footer: Rect {
                     height: footer_height.max(1),
                     ..footer
@@ -119,8 +139,16 @@ impl Layout {
             };
         }
 
-        let preview_width = (body.width * PREVIEW_NUMERATOR / PREVIEW_DENOMINATOR).max(30);
-        let list_width = body.width.saturating_sub(preview_width);
+        // `list_width` is derived from `preview_width_total` exactly as it
+        // always was — Inspector never takes from the list. It is carved out
+        // of the preview share only, after that share is already fixed, so a
+        // narrower preview is the one and only geometry cost of Inspector
+        // existing.
+        let preview_width_total = (body.width * PREVIEW_NUMERATOR / PREVIEW_DENOMINATOR).max(30);
+        let list_width = body.width.saturating_sub(preview_width_total);
+        let inspector_width =
+            INSPECTOR_COLUMNS.min(preview_width_total.saturating_sub(MIN_PREVIEW_WITH_INSPECTOR));
+        let preview_width = preview_width_total - inspector_width;
         Panes {
             query,
             list: Rect {
@@ -130,6 +158,11 @@ impl Layout {
             preview: Some(Rect {
                 x: body.x + list_width,
                 width: preview_width,
+                ..body
+            }),
+            inspector: Some(Rect {
+                x: body.x + list_width + preview_width,
+                width: inspector_width,
                 ..body
             }),
             footer: Rect {

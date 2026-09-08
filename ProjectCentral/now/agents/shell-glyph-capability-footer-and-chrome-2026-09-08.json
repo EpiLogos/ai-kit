@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "shell-glyph-capability-footer-and-chrome-2026-09-08",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "claude-opus-5",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1788886480,
+  "subject": "Shell glyph capability: footer and chrome now honour Glyphs (branch tui/shell-glyph-capability)",
+  "result": "Done and verified on branch tui/shell-glyph-capability, commit 1e82703, based on d061fc0 (PR #218 head). Worked in an isolated git worktree at /private/tmp/claude-501/-Users-admin-Central/4970b022-7603-4469-835f-6d5c505aa365/scratchpad/glyph-worktree because a concurrent session was editing crates/aikit-core and crates/aikit-tui/src/graph_layout.rs in the main checkout and reverted two of my files mid-edit. Fix: v2_render footer emitted hardcoded ↑↓ / Alt+←/→ and · separators regardless of the resolved glyph set; so did the row cursor, elision mark, relation arrows, tree branch marks and the block borders. Glyphs (layout.rs) gains the chrome vocabulary; ApplicationSurfaceRequest::with_graph_glyphs becomes with_glyphs, one capability read once at ApplicationSurfaceController::new with GraphGlyphs derived from it via graph_glyphs_for. Unicode output is byte-identical to before, so only the three ASCII goldens moved. New test nothing_in_an_ascii_rendering_is_non_ascii guards the whole frame. Verified: 173 tests pass under LANG=C.UTF-8 LC_ALL=C.UTF-8 and with LANG/LC_ALL/LC_CTYPE unset; cargo clippy --locked --workspace --all-targets -- -D warnings clean.",
+  "status": "active"
+}
