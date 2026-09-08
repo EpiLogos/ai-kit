@@ -1527,7 +1527,21 @@ mod tests {
         let app = KnowledgeApplication::new(aikit_core::FamiliarityContext::default())
             .with_wiki(SemanticWikiProvider::new(&wiki));
         let result = app.search("Purpose", 10);
-        assert_eq!(result.hits.len(), 1);
+        // Two distinct hits, not one: the curated node, and the authored
+        // human source it cites (`purpose.md`), which is findable through
+        // its citing node's label without ever becoming curated identity.
+        // The curated node leads — findability never displaces the field.
+        assert_eq!(result.hits.len(), 2);
+        assert_eq!(
+            result.hits[0].address,
+            KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:purpose").unwrap())
+        );
+        assert_eq!(
+            result.hits[1].address,
+            KnowledgeAddress::Source(SourceRef::parse(PURPOSE_REF).unwrap())
+        );
+        assert_eq!(result.hits[1].kind, aikit_core::ResourceKind::KnowledgeSource);
+
         let address = KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:purpose").unwrap());
         assert!(app.read(&address).unwrap().content.is_some());
         assert!(!app.relations(&address, 1, 16, 16).unwrap().nodes.is_empty());
