@@ -255,6 +255,12 @@ pub enum ProjectionItem {
     /// Like [`ProjectionItem::Shim`] it has no filesystem destination, so what is
     /// validated is the *name*.
     Env { name: String, value: String },
+    /// An environment variable whose value is a secret, declared as a reference
+    /// and resolved at materialisation time. The plan carries the REF, never the
+    /// value: the digest, the artifacts and every log line stay value-free, and
+    /// a rotated secret changes nothing about the projection's identity
+    /// (central.security/v1).
+    SecretEnv { name: String, secret_ref: crate::secret_ref::SecretRef },
 }
 
 impl ProjectionItem {
@@ -332,13 +338,38 @@ impl ProjectionItem {
         })
     }
 
+    /// A secret-bearing environment variable, declared by reference. The name
+    /// must be exportable (same rules as [`ProjectionItem::env`]); the ref was
+    /// already validated when the capsule schema was parsed.
+    pub fn secret_env(
+        name: impl Into<String>,
+        secret_ref: crate::secret_ref::SecretRef,
+    ) -> Result<Self> {
+        let name = name.into();
+        let invalid = name.is_empty()
+            || name.starts_with(|c: char| c.is_ascii_digit())
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if invalid {
+            return Err(AikitError::new(
+                "projection.invalid_env_name",
+                format!("`{name}` is not a name a shell can export"),
+            )
+            .with("name", name));
+        }
+        Ok(Self::SecretEnv { name, secret_ref })
+    }
+
     pub fn destination(&self) -> Option<&Path> {
         match self {
             ProjectionItem::Link { to, .. } | ProjectionItem::Copy { to, .. } => Some(to),
             ProjectionItem::Write { path, .. } => Some(path),
             // Neither lands a file: a shim's directory is the adapter's to choose,
             // and an env var is not on the filesystem at all.
-            ProjectionItem::Shim { .. } | ProjectionItem::Env { .. } => None,
+            ProjectionItem::Shim { .. }
+            | ProjectionItem::Env { .. }
+            | ProjectionItem::SecretEnv { .. } => None,
         }
     }
 
@@ -365,6 +396,13 @@ impl ProjectionItem {
             // The VALUE is part of the identity: pointing a context at a different
             // database is a different projection, not a cosmetic relabel.
             ProjectionItem::Env { name, value } => format!("env|{name}|{value}"),
+            // A secret's identity is its REF: the value is unknown at plan time
+            // and must stay out of every artifact. Rotation that preserves the
+            // ref is then a no-op for the projection's identity — the property
+            // that makes ref-based secret declaration worth having.
+            ProjectionItem::SecretEnv { name, secret_ref } => {
+                format!("secret-env|{name}|{secret_ref}")
+            }
         }
     }
 }
