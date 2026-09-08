@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json as jval, Value};
 use sha2::Digest;
 
+use aikit_core::knowledge_ingest::{ingest_corpus, select_ingestable_records};
 use aikit_core::knowledge_wiki::{
     WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject, WikiProvenanceRef, WikiSpace, OKF_WIKI_PROFILE,
 };
@@ -31,11 +32,11 @@ use aikit_core::knowledge_wiki_write::{
 };
 use aikit_core::projectcentral::{CENTRAL_ROOT_WIKI_SOURCE, PROJECTCENTRAL_WIKI_SOURCE};
 use aikit_core::resource::{ResourceRef, SourceRef};
-use aikit_core::{AikitError, Result};
+use aikit_core::{AikitError, Result, SemanticWikiIndex};
 
 use crate::cli::{
-    WikiCmd, WikiEdgeArgs, WikiNodeArgs, WikiRootAdoptArgs, WikiRootAnchorArgs, WikiRootArgs,
-    WikiRootPruneArgs,
+    WikiCmd, WikiEdgeArgs, WikiIngestArgs, WikiNodeArgs, WikiQueryRefArgs, WikiQuerySearchArgs,
+    WikiQuerySub, WikiRootAdoptArgs, WikiRootAnchorArgs, WikiRootArgs, WikiRootPruneArgs,
     WikiSpaceCreateArgs, WikiSpaceLinkArgs, WikiStageArgs,
 };
 use crate::json;
@@ -97,6 +98,12 @@ pub fn run(cwd: &Path, command: WikiCmd) -> Result<WikiOutcome> {
             WikiRootSub::Anchor(args) => root_anchor(cwd, &args),
         },
         WikiSub::Stage(args) => stage(&args),
+        WikiSub::Ingest(args) => ingest(&args),
+        WikiSub::Query(query) => match query.command {
+            WikiQuerySub::Search(args) => query_search(&args),
+            WikiQuerySub::Neighbours(args) => query_neighbours(&args),
+            WikiQuerySub::Backlinks(args) => query_backlinks(&args),
+        },
     }
 }
 
@@ -1152,6 +1159,272 @@ fn first_heading(text: &str) -> Option<String> {
         .map(str::trim)
         .filter(|heading| !heading.is_empty())
         .map(str::to_string)
+}
+
+// ---------------------------------------------------------------------------
+// ingest — the corpus on-ramp
+// ---------------------------------------------------------------------------
+
+/// A defensive bound, not a real limit: the Return of Zero corpus itself is
+/// ~2,600 files, so this is headroom against pointing the walker at the
+/// wrong directory entirely (a home directory, a mounted drive), not
+/// against a corpus this shape is meant for.
+const WIKI_INGEST_MAX_FILES: usize = 50_000;
+
+/// Walk `root` into [`ingest_corpus`]'s input shape: `(relative path, text)`
+/// pairs, sorted lexicographically so ingestion never depends on filesystem
+/// iteration order — the record-id collision policy in
+/// `select_ingestable_records` keeps the *first* claim to an id, so a stable
+/// order is what makes that choice reproducible across machines and runs,
+/// not just deterministic on one. A file that cannot be read, or does not
+/// decode as UTF-8, is set aside with an honest diagnostic rather than
+/// aborting the whole walk; a tree this size always has a few of both
+/// (a stray binary asset with a `.md`-adjacent name, a symlink into
+/// somewhere unreadable).
+/// The raw corpus read from disk: every readable, UTF-8 `.<extension>` file
+/// as `(relative path, text)`, plus the diagnostics for what the walk itself
+/// could not read.
+struct WalkedCorpus {
+    files: Vec<(String, String)>,
+    skipped: Vec<String>,
+}
+
+fn walk_corpus(root: &Path, extension: &str) -> Result<WalkedCorpus> {
+    if !root.is_dir() {
+        return Err(AikitError::new(
+            "knowledge.ingest_corpus_unreadable",
+            format!(
+                "{} is not a directory; ingest walks a corpus root, not a single file",
+                root.display()
+            ),
+        )
+        .with("corpus", root.display().to_string()));
+    }
+    let suffix = format!(".{extension}");
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !name.ends_with(&suffix) {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        found.push((relative, path.to_path_buf()));
+    }
+    if found.len() > WIKI_INGEST_MAX_FILES {
+        return Err(AikitError::new(
+            "knowledge.ingest_corpus_too_large",
+            format!(
+                "{} holds {} `.{extension}` files, past the {WIKI_INGEST_MAX_FILES}-file bound; \
+                 point ingest at a narrower corpus root",
+                root.display(),
+                found.len()
+            ),
+        )
+        .with("corpus", root.display().to_string()));
+    }
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut corpus = Vec::with_capacity(found.len());
+    let mut skipped = Vec::new();
+    for (relative, path) in found {
+        match std::fs::read(&path) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => corpus.push((relative, text)),
+                Err(_) => skipped.push(format!(
+                    "{relative}: not valid UTF-8; set aside, not ingested"
+                )),
+            },
+            Err(error) => skipped.push(format!(
+                "{relative}: unreadable ({error}); set aside, not ingested"
+            )),
+        }
+    }
+    Ok(WalkedCorpus {
+        files: corpus,
+        skipped,
+    })
+}
+
+/// Ingest an authored corpus directory into a Wiki file.
+///
+/// Three stages, each disclosed in the reply rather than folded away: the
+/// filesystem walk (`walk_corpus`, IO — this crate's business, never
+/// `aikit-core`'s), record selection over the real mixed tree
+/// (`select_ingestable_records`), and compilation (`ingest_corpus`). Dry run
+/// by default, like `wiki root prune`: `--apply` is required to actually
+/// write, and `--update` is required to replace a ref the file already
+/// holds — ingest never silently overwrites an authored or previously
+/// ingested object.
+fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
+    let walked = walk_corpus(&args.corpus, &args.extension)?;
+    let (raw_corpus, io_skipped) = (walked.files, walked.skipped);
+    let selection = select_ingestable_records(&raw_corpus);
+    let (objects, absences) = ingest_corpus(&selection.records)?;
+
+    let mut warnings: Vec<String> = Vec::new();
+    warnings.extend(io_skipped.iter().cloned());
+    warnings.extend(selection.unparseable.iter().map(|path| {
+        format!(
+            "{path}: a `---` frontmatter fence opened but carried no readable `key: value` \
+             pairs; set aside, not ingested"
+        )
+    }));
+    warnings.extend(selection.duplicate_record_id.iter().cloned());
+    warnings.extend(absences.iter().cloned());
+
+    let (mut nodes, mut edges, mut spaces) = (0usize, 0usize, 0usize);
+    for object in &objects {
+        match object {
+            WikiObject::Node(_) => nodes += 1,
+            WikiObject::Edge(_) => edges += 1,
+            WikiObject::Space(_) => spaces += 1,
+            WikiObject::Frame(_) | WikiObject::Reading(_) => {}
+        }
+    }
+    let mut summary = jval!({
+        "command": "ingest",
+        "corpus": args.corpus.display().to_string(),
+        "file": args.file.display().to_string(),
+        "files_read": raw_corpus.len(),
+        "io_skipped": io_skipped.len(),
+        "records_selected": selection.records.len(),
+        "skipped_no_record_id": selection.skipped_no_record_id,
+        "duplicate_record_id": selection.duplicate_record_id.len(),
+        "unparseable": selection.unparseable.len(),
+        "objects": objects.len(),
+        "nodes": nodes,
+        "edges": edges,
+        "spaces": spaces,
+        "absences": absences.len(),
+    });
+
+    if !args.apply {
+        let held = WikiDocument::parse(&read(&args.file)?)?;
+        let already_held = objects
+            .iter()
+            .filter(|object| held.holds(object.ref_id()))
+            .count();
+        summary["applied"] = jval!(false);
+        summary["already_held"] = jval!(already_held);
+        summary["note"] = jval!(
+            "dry run; re-run with --apply to write these objects \
+             (pass --update too if any are already held and should advance)"
+        );
+        return Ok(WikiOutcome::reported(summary, warnings, json::EXIT_OK));
+    }
+
+    let update = args.update;
+    let file_display = args.file.display().to_string();
+    let outcome = mutate_file(&args.file, |doc, ledger| {
+        for object in objects {
+            let ref_id = object.ref_id().clone();
+            let touched = if doc.holds(&ref_id) {
+                if !update {
+                    return Err(AikitError::new(
+                        "knowledge.wiki_ref_exists",
+                        format!(
+                            "{ref_id} is already held by {file_display}; pass --update to \
+                             advance its revision"
+                        ),
+                    )
+                    .with("ref", ref_id.to_string()));
+                }
+                doc.update_object(object)?
+            } else {
+                doc.create_object(object)?
+            };
+            ledger.record(touched);
+        }
+        Ok(())
+    })?;
+    summary["applied"] = jval!(true);
+    summary["outcome"] = mutation_outcome(&outcome);
+    let mut reply = WikiOutcome::wrote(summary, &outcome);
+    reply.warnings.extend(warnings);
+    Ok(reply)
+}
+
+// ---------------------------------------------------------------------------
+// query — read the semantic index over a Wiki file
+// ---------------------------------------------------------------------------
+
+/// Rebuild the semantic index over exactly what `file` holds. This is the
+/// plain in-memory `SemanticWikiIndex` — the same read path `wiki validate`
+/// already runs — not the materialised SQLite provider `aikit search` reads
+/// from an AIKit home; a query needs only the file it names.
+fn read_index(file: &Path) -> Result<SemanticWikiIndex> {
+    let document = WikiDocument::parse(&read(file)?)?;
+    SemanticWikiIndex::rebuild(document.objects().to_vec())
+}
+
+fn query_search(args: &WikiQuerySearchArgs) -> Result<WikiOutcome> {
+    let index = read_index(&args.file)?;
+    let hits = index.search(&args.query, args.limit);
+    Ok(WikiOutcome::reported(
+        jval!({
+            "command": "query.search",
+            "file": args.file.display().to_string(),
+            "query": args.query,
+            "hits": serde_json::to_value(&hits).unwrap_or_default(),
+        }),
+        Vec::new(),
+        json::EXIT_OK,
+    ))
+}
+
+/// Every object `--ref` points at, outgoing and incoming alike — the ordinary
+/// traversal view. Tags and backlinks ride here exactly as any other edge:
+/// nothing about a `tagged` relation or an ingested `references` edge is
+/// special-cased.
+fn query_neighbours(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
+    let index = read_index(&args.file)?;
+    let resource = ResourceRef::parse(&args.resource_ref)?;
+    let neighbours = index.neighbours(&resource, args.limit);
+    Ok(WikiOutcome::reported(
+        jval!({
+            "command": "query.neighbours",
+            "file": args.file.display().to_string(),
+            "ref": resource.to_string(),
+            "neighbours": serde_json::to_value(&neighbours).unwrap_or_default(),
+        }),
+        Vec::new(),
+        json::EXIT_OK,
+    ))
+}
+
+/// Every object that points *at* `--ref` — what cites it. First-class over
+/// an ingested corpus: an argument's authored citations and a tag's members
+/// are both ordinary backlinks here, not a derived view bolted on after.
+fn query_backlinks(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
+    let index = read_index(&args.file)?;
+    let resource = ResourceRef::parse(&args.resource_ref)?;
+    let mut backlinks = index.backlinks(&resource);
+    backlinks.truncate(args.limit);
+    Ok(WikiOutcome::reported(
+        jval!({
+            "command": "query.backlinks",
+            "file": args.file.display().to_string(),
+            "ref": resource.to_string(),
+            "backlinks": serde_json::to_value(&backlinks).unwrap_or_default(),
+        }),
+        Vec::new(),
+        json::EXIT_OK,
+    ))
 }
 
 // ---------------------------------------------------------------------------
