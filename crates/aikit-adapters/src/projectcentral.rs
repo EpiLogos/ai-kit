@@ -25,6 +25,7 @@ use aikit_core::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::Digest;
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -420,6 +421,24 @@ impl ProjectCentralFilesystemBinding {
     }
 
     pub fn load_wiki(&self, source: &SourceRef) -> Result<Vec<aikit_core::WikiObject>> {
+        Ok(self.read_wiki_source(source)?.1)
+    }
+
+    /// Read the canonical Agent Wiki for a maintenance cycle, alongside the
+    /// SHA-256 of the exact bytes read. The wiki is agent-maintained, so
+    /// concurrent writers — two agents, or an agent and a human — are the
+    /// normal case: this hash is the compare-and-swap base that must be
+    /// passed back to `persist_agent_wiki`, captured at the same read that
+    /// feeds `plan_agent_wiki_maintenance`'s `current_objects`, not from any
+    /// later, separate read.
+    pub fn load_project_wiki_for_maintenance(
+        &self,
+    ) -> Result<(Vec<aikit_core::WikiObject>, String)> {
+        let (input, objects) = self.read_wiki_source(&self.semantic.canonical_wiki)?;
+        Ok((objects, content_hash(input.as_bytes())))
+    }
+
+    fn read_wiki_source(&self, source: &SourceRef) -> Result<(String, Vec<aikit_core::WikiObject>)> {
         let key = ResourceRef::parse(source.as_str())?;
         let path = self.paths.get(&key).ok_or_else(|| {
             AikitError::new(
@@ -429,7 +448,8 @@ impl ProjectCentralFilesystemBinding {
         })?;
         let input = fs::read_to_string(path)
             .map_err(|error| io_error("projectcentral.wiki_read", path, error))?;
-        parse_wiki_objects(&input)
+        let objects = parse_wiki_objects(&input)?;
+        Ok((input, objects))
     }
 
     pub fn observed_source_revisions(&self) -> BTreeMap<SourceRef, aikit_core::SemanticRevision> {
@@ -450,7 +470,18 @@ impl ProjectCentralFilesystemBinding {
     /// Persist only the canonical Agent Wiki. Human source paths are not accepted
     /// by this operation, so a HumanSourceRevisionProposal can never become a
     /// filesystem mutation by accident.
-    pub fn persist_agent_wiki(&self, plan: &AgentWikiMaintenancePlan) -> Result<()> {
+    ///
+    /// `base_hash` is the SHA-256 `load_project_wiki_for_maintenance` returned
+    /// alongside the objects `plan` was built from. The wiki is agent-maintained,
+    /// so concurrent writers are the normal case: this re-verifies that hash
+    /// against the file on disk immediately before the rename — mirroring the
+    /// gate `crates/aikit-cli/src/wiki.rs` runs on its own write paths — and
+    /// refuses with the same typed error rather than silently discarding a
+    /// peer's write that landed first. The refusal leaves the on-disk file
+    /// exactly as the peer left it and removes the temp file; nothing of this
+    /// mutation is applied. A rewrite that happens to land byte-identical
+    /// content is never treated as a conflict.
+    pub fn persist_agent_wiki(&self, plan: &AgentWikiMaintenancePlan, base_hash: &str) -> Result<()> {
         let key = ResourceRef::parse(self.semantic.canonical_wiki.as_str())?;
         let path = self.paths.get(&key).ok_or_else(|| {
             AikitError::new(
@@ -460,8 +491,21 @@ impl ProjectCentralFilesystemBinding {
         })?;
         let rendered = render_wiki_objects(&plan.next_objects)?;
         let temporary = path.with_extension("json.aikit-tmp");
-        fs::write(&temporary, rendered)
+        fs::write(&temporary, &rendered)
             .map_err(|error| io_error("projectcentral.wiki_write", &temporary, error))?;
+
+        if current_wiki_hash(path)?.as_deref() != Some(base_hash) {
+            let _ = fs::remove_file(&temporary);
+            return Err(AikitError::new(
+                "knowledge.wiki_concurrent_write",
+                format!(
+                    "{} changed since it was read; a peer write landed first. Re-read the file and re-apply this mutation.",
+                    path.display()
+                ),
+            )
+            .with("path", path.display().to_string()));
+        }
+
         fs::rename(&temporary, path)
             .map_err(|error| io_error("projectcentral.wiki_replace", path, error))?;
         Ok(())
@@ -904,6 +948,27 @@ fn io_error(code: &'static str, path: &Path, error: std::io::Error) -> AikitErro
     AikitError::new(code, format!("{}: {error}", path.display()))
 }
 
+/// SHA-256 of exactly these bytes, hex-encoded — the same compare-and-swap
+/// primitive `crates/aikit-cli/src/wiki.rs` uses for its own write gate. A
+/// rewrite that happens to land byte-identical content is never a conflict,
+/// only a peer write that actually changed the file is.
+fn content_hash(bytes: &[u8]) -> String {
+    let mut digest = sha2::Sha256::new();
+    digest.update(bytes);
+    format!("{:x}", digest.finalize())
+}
+
+/// The current on-disk hash of the canonical Agent Wiki at `path`, or `None`
+/// when the file no longer exists — itself a change from whatever a caller
+/// read, so a base hash can never match it.
+fn current_wiki_hash(path: &Path) -> Result<Option<String>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(content_hash(&bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error("projectcentral.wiki_read", path, error)),
+    }
+}
+
 fn render_wiki_objects(objects: &[aikit_core::WikiObject]) -> Result<String> {
     let objects = objects
         .iter()
@@ -1242,7 +1307,7 @@ mod tests {
             project.join("ProjectCentral/user/research/deep/purpose.md"),
         )
         .unwrap();
-        let current = binding.load_project_wiki().unwrap();
+        let (current, base_hash) = binding.load_project_wiki_for_maintenance().unwrap();
         let source_ref = SourceRef::parse(PURPOSE_REF).unwrap();
         let update = WikiObject::Node(WikiNode {
             profile: CENTRAL_WIKI_PROFILE.into(),
@@ -1277,7 +1342,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(plan.human_source_proposals.len(), 1);
-        binding.persist_agent_wiki(&plan).unwrap();
+        binding.persist_agent_wiki(&plan, &base_hash).unwrap();
         let reloaded = binding.load_project_wiki().unwrap();
         let index = SemanticWikiIndex::rebuild(reloaded).unwrap();
         assert_eq!(
@@ -1292,6 +1357,166 @@ mod tests {
                 .unwrap(),
             before
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Concurrency: the write gate against a peer that lands between read and
+    // rename, mirroring `crates/aikit-cli/src/wiki.rs`'s own
+    // `concurrency_tests` module for its write path (EpiLogos/ai-kit#215).
+    // `persist_agent_wiki` is not yet wired to any CLI command, but the wiki
+    // it writes is explicitly agent-maintained, so concurrent writers are the
+    // normal case the moment it is. These are unit tests, not integration
+    // tests, for the same reason #215's are: the race is a *sequence* — read
+    // (capture base), a peer's independent read-mutate-persist, then this
+    // writer's persist — and driving `load_project_wiki_for_maintenance` and
+    // `persist_agent_wiki` directly gives that exact interleaving
+    // deterministically, using the very functions a real maintenance caller
+    // would compose.
+    // -----------------------------------------------------------------------
+
+    fn maintenance_node(ref_id: &str) -> WikiObject {
+        WikiObject::Node(WikiNode {
+            profile: CENTRAL_WIKI_PROFILE.into(),
+            ref_id: ResourceRef::parse(ref_id).unwrap(),
+            revision: 1,
+            provenance: vec![WikiProvenanceRef {
+                source_ref: SourceRef::parse(PURPOSE_REF).unwrap(),
+                source_revision: None,
+                producer_ref: Some(ResourceRef::parse("agent:test").unwrap()),
+                generation_ref: Some(ResourceRef::parse("run:test").unwrap()),
+                extensions: BTreeMap::new(),
+            }],
+            node_type: "ProjectKnowledge".into(),
+            title: Some(ref_id.into()),
+            space_refs: vec![ResourceRef::parse("wiki:space:project").unwrap()],
+            source_refs: vec![SourceRef::parse(PURPOSE_REF).unwrap()],
+            local_space_ref: None,
+            extensions: BTreeMap::new(),
+        })
+    }
+
+    fn maintenance_plan(
+        binding: &ProjectCentralFilesystemBinding,
+        current: Vec<WikiObject>,
+        upsert_ref: &str,
+    ) -> AgentWikiMaintenancePlan {
+        plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
+            current_objects: current,
+            upserts: vec![maintenance_node(upsert_ref)],
+            observed_source_revisions: binding.observed_source_revisions(),
+            human_source_proposals: vec![],
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn an_uncontended_agent_wiki_write_still_succeeds() {
+        let (_temp, central, project) = fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+
+        let (current, base_hash) = binding.load_project_wiki_for_maintenance().unwrap();
+        let plan = maintenance_plan(&binding, current, "wiki:node:uncontended");
+        binding.persist_agent_wiki(&plan, &base_hash).unwrap();
+
+        let reloaded = SemanticWikiIndex::rebuild(binding.load_project_wiki().unwrap()).unwrap();
+        assert!(reloaded
+            .node(&ResourceRef::parse("wiki:node:uncontended").unwrap())
+            .is_some());
+    }
+
+    /// The race this whole change exists for: writer A reads the canonical
+    /// wiki and builds its maintenance plan from that snapshot; before A
+    /// persists, writer B independently reads, plans and persists against the
+    /// *same* file; A then attempts to commit its now-stale plan. Without the
+    /// fix, A's `rename` simply wins and B's write vanishes with no trace.
+    /// With it, A's `persist_agent_wiki` must refuse: B's content is the only
+    /// thing on disk afterwards, byte for byte, and no temp file is left
+    /// behind.
+    #[test]
+    fn a_peer_write_between_read_and_persist_is_refused_and_survives_byte_identical() {
+        let (_temp, central, project) = fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+
+        // Writer A: read (captures the base) and build its plan in memory. No
+        // write has happened yet — exactly where a maintenance caller stands
+        // right before its own `persist_agent_wiki` call.
+        let (current_a, base_hash_a) = binding.load_project_wiki_for_maintenance().unwrap();
+        let plan_a = maintenance_plan(&binding, current_a, "wiki:node:from-a");
+
+        // Writer B: an independent, complete read-plan-persist that lands
+        // first, through the exact same production path.
+        let (current_b, base_hash_b) = binding.load_project_wiki_for_maintenance().unwrap();
+        let plan_b = maintenance_plan(&binding, current_b, "wiki:node:from-b");
+        binding.persist_agent_wiki(&plan_b, &base_hash_b).unwrap();
+        let after_b = fs::read(&path).unwrap();
+
+        // Writer A now tries to commit its stale plan.
+        let error = binding.persist_agent_wiki(&plan_a, &base_hash_a).unwrap_err();
+        assert_eq!(error.code(), "knowledge.wiki_concurrent_write");
+        assert!(
+            error.message().to_lowercase().contains("re-read"),
+            "the refusal must say what to do next: {}",
+            error.message()
+        );
+
+        // B's write is untouched: byte for byte, not just semantically.
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            after_b,
+            "a refused write leaves the file exactly as the peer left it"
+        );
+        let surviving = SemanticWikiIndex::rebuild(
+            parse_wiki_objects(&String::from_utf8(after_b).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(surviving
+            .node(&ResourceRef::parse("wiki:node:from-b").unwrap())
+            .is_some());
+        assert!(surviving
+            .node(&ResourceRef::parse("wiki:node:from-a").unwrap())
+            .is_none());
+        assert!(
+            surviving
+                .node(&ResourceRef::parse("wiki:node:purpose").unwrap())
+                .is_some(),
+            "the document is still whole and valid, not half-written"
+        );
+
+        // The refused write's temp file does not linger next to the target.
+        let temp = path.with_extension("json.aikit-tmp");
+        assert!(
+            !temp.exists(),
+            "a refused write must not leave a temp file behind: {}",
+            temp.display()
+        );
+    }
+
+    /// A rewrite that lands byte-identical content is not a peer's change —
+    /// only a peer write that actually altered the file trips the gate.
+    #[test]
+    fn a_rewrite_that_lands_the_same_bytes_is_not_a_conflict() {
+        let (_temp, central, project) = fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let original = fs::read(&path).unwrap();
+
+        let (current, base_hash) = binding.load_project_wiki_for_maintenance().unwrap();
+        let plan = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
+            current_objects: current,
+            upserts: vec![],
+            observed_source_revisions: binding.observed_source_revisions(),
+            human_source_proposals: vec![],
+        })
+        .unwrap();
+
+        // "Someone" rewrites the file to the exact bytes it already held —
+        // e.g. a filesystem sync or an editor save with no real change.
+        fs::write(&path, &original).unwrap();
+
+        // Re-committing over that base is not a conflict, because the bytes
+        // on disk never actually changed.
+        binding.persist_agent_wiki(&plan, &base_hash).unwrap();
     }
 
     #[test]
