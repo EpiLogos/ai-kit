@@ -356,6 +356,17 @@ impl Service {
             let matrices=aikit_adapters::capability_matrix::compile_world_matrices(central_root);
             absences.extend(matrices.absences);
             aikit_adapters::central_entities::adopt_into(&mut discovered.wiki, matrices.objects);
+            // CASE 19 / W10 V9.4: authored Markdown under each project's
+            // ProjectCentral/user/** compiles its explicit [[wikilinks]]
+            // into the same SemanticWiki as ordinary Compiled edges — never
+            // as new WikiNodes. Unresolved links stay disclosed as
+            // absences, never as synthetic edges.
+            let authored_wiki=aikit_adapters::projectcentral_authored_wiki::compile_world_authored_wiki(central_root);
+            absences.extend(authored_wiki.absences);
+            aikit_adapters::central_entities::adopt_into(
+                &mut discovered.wiki,
+                authored_wiki.edges.into_iter().map(WikiObject::Edge).collect(),
+            );
             // W10 V5: a project context binds the same entity refs through
             // Central's effective world sources — never a second subject;
             // declared exclusions withhold, per-hop provenance is recorded.
