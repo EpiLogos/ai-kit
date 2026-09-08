@@ -209,11 +209,16 @@ pub fn parse_wikilinks(text: &str) -> Vec<String> {
 
 /// Extract `[text](target)` markdown-link targets that address another
 /// record rather than the outside world: relative paths ending `.md`
-/// (an optional `#anchor` is stripped, same as a wikilink's). The real
-/// corpus cites overwhelmingly through this form — `[A24](../../arguments/
-/// A24-….md)` — not `[[wikilinks]]`, which it reserves for a minority of
-/// records (mostly the protected historical carriers). An absolute URL
-/// (`http(s)://`, `mailto:`) is not a corpus reference and is excluded.
+/// (an optional `#anchor` is stripped, same as a wikilink's). An absolute
+/// URL (`http(s)://`, `mailto:`) is not a corpus reference and is excluded.
+///
+/// This form and `[[wikilinks]]` are both load-bearing, at rough parity:
+/// measured over the Return of Zero corpus's `episteme/arguments` records,
+/// 36 of 37 files carry a markdown link and 31 carry a wikilink, with 469
+/// and 489 occurrences respectively. Individual rooms lean hard either way
+/// — the Arbitration cluster cites entirely through markdown links, `A04`
+/// entirely through wikilinks — so neither form can be treated as the
+/// exception. Parsing only one would lose about half the citation graph.
 pub fn parse_markdown_links(text: &str) -> Vec<String> {
     let mut links = Vec::new();
     let mut rest = text;
