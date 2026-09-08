@@ -23,6 +23,7 @@ jobs:
         run: |
           rustup toolchain install 1.98.0 --profile minimal --component clippy
           rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
       - name: Install tmux
         run: brew install tmux
       - name: Verify repository
@@ -53,11 +54,16 @@ jobs:
         run: |
           rustup toolchain install 1.98.0 --profile minimal
           rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.87.8
+        with:
+          tool: cargo-nextest
       - name: Test ${{ matrix.package }}
         shell: bash
         run: |
           set +e
-          cargo test --locked -p '${{ matrix.package }}' --all-targets --no-fail-fast -- --test-threads=1 2>&1 | tee /tmp/aikit.log
+          cargo nextest run --locked -p '${{ matrix.package }}' --all-targets 2>&1 | tee /tmp/aikit.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             grep -E '(^error(\[|:)|^warning:|^failures:|^test result:|^thread .*panicked|^  left:|^ right:|^note:|^help:|^  -->|^   -->)' /tmp/aikit.log | tail -n 100 > /tmp/aikit-focus.log || true
@@ -77,6 +83,7 @@ jobs:
         run: |
           rustup toolchain install 1.98.0 --profile minimal --component clippy
           rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
       - name: Clippy all targets
         shell: bash
         run: |
@@ -90,8 +97,6 @@ jobs:
             echo "::error title=Clippy failure::$message"
           fi
           exit "$status"
-      - name: Release build
-        run: cargo build --locked --workspace --release
       - name: Diff hygiene
         run: git diff --check
 
@@ -105,6 +110,7 @@ jobs:
         run: |
           rustup toolchain install 1.98.0 --profile minimal
           rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -125,6 +131,7 @@ jobs:
         run: |
           rustup toolchain install 1.98.0 --profile minimal
           rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
       - uses: actions/setup-node@v6
         with:
           node-version: "24.11.0"
@@ -156,6 +163,7 @@ jobs:
         run: |
           rustup toolchain install 1.98.0 --profile minimal
           rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
       - uses: actions/setup-node@v6
         with:
           node-version: "24.11.0"
