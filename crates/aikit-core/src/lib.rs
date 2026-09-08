@@ -35,6 +35,7 @@ pub mod context_activation;
 pub mod context_resolution;
 pub mod context_source;
 pub mod credential;
+pub mod credential_world;
 pub mod duration;
 pub mod effects;
 pub mod error;
@@ -161,6 +162,11 @@ pub use credential::{
     ProviderResolutionExplanation, SecretMaterialisationClass, SecretProvider,
     SecretProviderDescriptor, SecretProviderRef, SecretProviderTier, SecretRequirement,
     SecretRequirementRef, SecretValue, CREDENTIAL_RESOLUTION_VERSION,
+};
+pub use credential_world::{
+    disclose_credential_world, CredentialResolutionDisclosure, CredentialStatusKnowledge,
+    CredentialWorldDisclosure, ProviderResolutionDisclosure, ProviderRosterKnowledge,
+    CREDENTIAL_WORLD_VERSION,
 };
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
