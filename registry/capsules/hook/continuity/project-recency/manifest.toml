@@ -1,0 +1,10 @@
+schema = 1
+id = "hook/continuity/project-recency"
+kind = "hook"
+name = "Continuity project recency"
+description = "First-party continuity reaction (W5/CASE 11): when composed at a root SessionStart, projects with current activity evidence share a bounded automatic horizon; cold and unknown registrations are disclosed as suppressed but remain reachable through explicit project listing. New activity evidence reactivates a project without re-registration. Not composed by default."
+tags = ["aikit", "continuity", "engine", "project", "recency", "sessionstart"]
+
+[hook]
+entry = "payload/project-recency"
+events = ["SessionStart"]
