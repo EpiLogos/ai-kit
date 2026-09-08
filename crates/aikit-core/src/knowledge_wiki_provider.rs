@@ -51,6 +51,62 @@ pub struct WikiExplanation {
     pub relations: Vec<WikiNeighbour>,
 }
 
+/// Replaceable read surface for one materialised Wiki projection.
+///
+/// Implementations may use the in-memory semantic index, SQLite, or another
+/// deletable projection. They must preserve the canonical Wiki refs and
+/// register revisions supplied by authored storage; provider-local keys are
+/// never identity.
+pub trait WikiProvider {
+    fn status(&self) -> SemanticWikiProviderStatus;
+    fn discover(&self) -> Vec<ResourceRef>;
+    fn search(&self, query: &str, limit: usize) -> Vec<WikiSearchHit>;
+    fn resolve(&self, resource: &ResourceRef) -> Option<WikiObject>;
+    fn read(&self, resource: &ResourceRef) -> Result<KnowledgeReading>;
+    fn neighbours(&self, resource: &ResourceRef, limit: usize) -> Vec<WikiNeighbour>;
+    fn relations(&self, query: RelationQuery) -> Result<KnowledgeRelationView>;
+    fn frame(&self, resource: &ResourceRef) -> Option<WikiFrame>;
+    fn sources(&self, resource: &ResourceRef) -> Vec<SourceRef>;
+    fn provenance(&self, resource: &ResourceRef) -> Vec<WikiProvenanceRef>;
+    fn explain(&self, resource: &ResourceRef) -> Result<WikiExplanation>;
+}
+
+impl<T: WikiProvider + ?Sized> WikiProvider for &T {
+    fn status(&self) -> SemanticWikiProviderStatus {
+        (**self).status()
+    }
+    fn discover(&self) -> Vec<ResourceRef> {
+        (**self).discover()
+    }
+    fn search(&self, query: &str, limit: usize) -> Vec<WikiSearchHit> {
+        (**self).search(query, limit)
+    }
+    fn resolve(&self, resource: &ResourceRef) -> Option<WikiObject> {
+        (**self).resolve(resource)
+    }
+    fn read(&self, resource: &ResourceRef) -> Result<KnowledgeReading> {
+        (**self).read(resource)
+    }
+    fn neighbours(&self, resource: &ResourceRef, limit: usize) -> Vec<WikiNeighbour> {
+        (**self).neighbours(resource, limit)
+    }
+    fn relations(&self, query: RelationQuery) -> Result<KnowledgeRelationView> {
+        (**self).relations(query)
+    }
+    fn frame(&self, resource: &ResourceRef) -> Option<WikiFrame> {
+        (**self).frame(resource)
+    }
+    fn sources(&self, resource: &ResourceRef) -> Vec<SourceRef> {
+        (**self).sources(resource)
+    }
+    fn provenance(&self, resource: &ResourceRef) -> Vec<WikiProvenanceRef> {
+        (**self).provenance(resource)
+    }
+    fn explain(&self, resource: &ResourceRef) -> Result<WikiExplanation> {
+        (**self).explain(resource)
+    }
+}
+
 /// Native application surface over the rebuildable SemanticWiki index.
 ///
 /// The index remains derived state and relation names remain Wiki vocabulary.
@@ -81,6 +137,11 @@ impl<'a> SemanticWikiProvider<'a> {
             .sort_by(|left, right| left.register.cmp(&right.register));
         self.registers
             .dedup_by(|left, right| left.register == right.register);
+        self
+    }
+
+    pub fn with_provider_ref(mut self, provider: ProviderRef) -> Self {
+        self.provider = provider;
         self
     }
 
@@ -263,13 +324,10 @@ impl<'a> SemanticWikiProvider<'a> {
             if let Some(node) = self.index.node(&current) {
                 if let Some(local_ref) = &node.local_space_ref {
                     if let Some(local_space) = self.index.space(local_ref) {
-                        for (other, relation) in local_space
-                            .node_refs
-                            .iter()
-                            .map(|r| (r, "local-member"))
+                        for (other, relation) in
+                            local_space.node_refs.iter().map(|r| (r, "local-member"))
                         {
-                            let key =
-                                format!("local-whole\0{}\0{}\0{}", current, other, relation);
+                            let key = format!("local-whole\0{}\0{}\0{}", current, other, relation);
                             if seen_edges.contains(&key) {
                                 continue;
                             }
@@ -394,6 +452,52 @@ impl<'a> SemanticWikiProvider<'a> {
             "knowledge.wiki_object_missing",
             format!("Wiki object or relation endpoint {resource} is not indexed"),
         ))
+    }
+}
+
+impl WikiProvider for SemanticWikiProvider<'_> {
+    fn status(&self) -> SemanticWikiProviderStatus {
+        SemanticWikiProvider::status(self)
+    }
+
+    fn discover(&self) -> Vec<ResourceRef> {
+        SemanticWikiProvider::discover(self)
+    }
+
+    fn search(&self, query: &str, limit: usize) -> Vec<WikiSearchHit> {
+        SemanticWikiProvider::search(self, query, limit)
+    }
+
+    fn resolve(&self, resource: &ResourceRef) -> Option<WikiObject> {
+        SemanticWikiProvider::resolve(self, resource)
+    }
+
+    fn read(&self, resource: &ResourceRef) -> Result<KnowledgeReading> {
+        SemanticWikiProvider::read(self, resource)
+    }
+
+    fn neighbours(&self, resource: &ResourceRef, limit: usize) -> Vec<WikiNeighbour> {
+        SemanticWikiProvider::neighbours(self, resource, limit)
+    }
+
+    fn relations(&self, query: RelationQuery) -> Result<KnowledgeRelationView> {
+        SemanticWikiProvider::relations(self, query)
+    }
+
+    fn frame(&self, resource: &ResourceRef) -> Option<WikiFrame> {
+        SemanticWikiProvider::frame(self, resource)
+    }
+
+    fn sources(&self, resource: &ResourceRef) -> Vec<SourceRef> {
+        SemanticWikiProvider::sources(self, resource)
+    }
+
+    fn provenance(&self, resource: &ResourceRef) -> Vec<WikiProvenanceRef> {
+        SemanticWikiProvider::provenance(self, resource)
+    }
+
+    fn explain(&self, resource: &ResourceRef) -> Result<WikiExplanation> {
+        SemanticWikiProvider::explain(self, resource)
     }
 }
 
@@ -552,7 +656,10 @@ mod tests {
         let status = provider.status();
         assert!(status.available);
         assert_eq!(status.registers.len(), 2);
-        assert_eq!(status.registers[0].register.as_str(), "wiki:space:register-a");
+        assert_eq!(
+            status.registers[0].register.as_str(),
+            "wiki:space:register-a"
+        );
         assert_eq!(provider.discover().len(), 4);
         assert_eq!(provider.search("Alpha", 10).len(), 1);
         let alpha = ResourceRef::parse("wiki:node:a").unwrap();
@@ -676,7 +783,9 @@ mod tests {
         let index = fixture();
         let provider = SemanticWikiProvider::new(&index);
         let focus = ResourceRef::parse("wiki:node:a").unwrap();
-        let view = provider.relations(RelationQuery::local(focus.clone())).unwrap();
+        let view = provider
+            .relations(RelationQuery::local(focus.clone()))
+            .unwrap();
 
         let enclosing: Vec<_> = view
             .edges
@@ -693,7 +802,10 @@ mod tests {
         assert_eq!(edge.direction, RelationDirection::Incoming);
         assert_eq!(edge.origin.authority, SourceAuthority::Authored);
         assert_eq!(edge.origin.revision.as_deref(), Some("1"));
-        assert!(view.nodes.iter().any(|n| n.resource.as_str() == "wiki:space:root"));
+        assert!(view
+            .nodes
+            .iter()
+            .any(|n| n.resource.as_str() == "wiki:space:root"));
     }
 
     /// Reaching both ends of one membership must yield one edge, not two.
@@ -740,7 +852,9 @@ mod tests {
         let index = SemanticWikiIndex::rebuild(objects).unwrap();
         let provider = SemanticWikiProvider::new(&index);
         let focus = ResourceRef::parse("wiki:space:child").unwrap();
-        let view = provider.relations(RelationQuery::local(focus.clone())).unwrap();
+        let view = provider
+            .relations(RelationQuery::local(focus.clone()))
+            .unwrap();
 
         let parents: Vec<_> = view
             .edges

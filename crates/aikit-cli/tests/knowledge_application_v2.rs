@@ -55,6 +55,19 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
 
     let (route_ref, destination, context) = {
         let mut service = open_service(&temp);
+        let status = service.knowledge_status().unwrap();
+        let wiki_status = status.wiki.expect("Wiki provider is materialised");
+        assert_eq!(
+            wiki_status.provider.as_str(),
+            "provider/semantic-wiki/sqlite",
+            "the production dispatch surface reads through the SQLite provider"
+        );
+        let cache = temp.path().join("aikit-home/cache/knowledge/wiki");
+        assert_eq!(
+            fs::read_dir(cache).unwrap().count(),
+            1,
+            "one project horizon owns one deletable SQLite projection"
+        );
         let result = service.knowledge_search("authentication", 50).unwrap();
         let wiki = result
             .hits
