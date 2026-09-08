@@ -752,13 +752,12 @@ impl Service {
                 None => None,
             };
 
-            let mut resolution = match &composed {
-                Some(composed) => aikit_tui::project_world_service::context_resolution_with_actors(
-                    self,
-                    composed.requested_actors.clone(),
-                )?,
-                None => aikit_tui::project_world_service::context_resolution(self)?,
-            };
+            let resources = aikit_tui::project_world_service::resource_index_with_records(
+                self, composed.as_ref().map(|c|c.source_resources.clone()).unwrap_or_default(),
+            )?;
+            let mut resolution = aikit_tui::project_world_service::context_resolution_from_resources(
+                self, composed.as_ref().map(|c|c.requested_actors.clone()).unwrap_or_default(), &resources,
+            )?;
             // Detection intake, same law as compose_plan: Actuation owns
             // what operative bodies exist; detected harnesses join the
             // candidates as ephemeral resources; a failed run is disclosed
@@ -843,25 +842,21 @@ impl Service {
             )
         })?;
         let central_root = process_central_root(Some(project_root));
-        let mut composition_error: Option<String> = None;
-        let composed = central_root.as_ref().and_then(|central| {
-            let runner = SystemRunner::new();
-            match compose_live_actor_inputs(&runner, central, project_root) {
-                Ok(composed) => composed,
-                Err(error) => {
-                    composition_error = Some(error.to_string());
-                    None
-                }
-            }
-        });
+        // Explicit composition must report a broken source as a failure, not
+        // present a successful plan silently stripped of its authored basis.
+        // A missing optional Central root/profile remains an honest absence.
+        let composed = central_root
+            .as_ref()
+            .map(|central| compose_live_actor_inputs(&SystemRunner::new(), central, project_root))
+            .transpose()?
+            .flatten();
 
-        let mut resolution = match &composed {
-            Some(composed) => aikit_tui::project_world_service::context_resolution_with_actors(
-                self,
-                composed.requested_actors.clone(),
-            )?,
-            None => aikit_tui::project_world_service::context_resolution(self)?,
-        };
+        let resources = aikit_tui::project_world_service::resource_index_with_records(
+            self, composed.as_ref().map(|c|c.source_resources.clone()).unwrap_or_default(),
+        )?;
+        let mut resolution = aikit_tui::project_world_service::context_resolution_from_resources(
+            self, composed.as_ref().map(|c|c.requested_actors.clone()).unwrap_or_default(), &resources,
+        )?;
         // Harness detection is owned by Actuation and consumed here — one
         // live `actuation harness detect` run discloses which operative
         // bodies exist on this machine. Detected harnesses join the
@@ -1008,11 +1003,6 @@ impl Service {
                  set the Central root for this project or run under ~/Central/Work"
                     .to_owned(),
             );
-        } else if composition_error.is_some() {
-            composition_notes.push(format!(
-                "Central composition failed: {} — detection and projection continue without it",
-                composition_error.as_deref().unwrap_or_default()
-            ));
         } else if plan.agent.is_none() {
             match &home_seed {
                 Some(seed) => composition_notes.push(format!(
@@ -1065,7 +1055,7 @@ impl Service {
         Ok(serde_json::json!({
             "project_root": project_root.display().to_string(),
             "central_root": central_root.as_ref().map(|p| p.display().to_string()),
-            "composition_error": composition_error,
+            "composition_error": null,
             "composition_notes": composition_notes,
             "home_agent_seed": home_seed.as_ref().map(|seed| serde_json::json!({
                 "id": seed.id,
@@ -1073,6 +1063,9 @@ impl Service {
                 "description": seed.description,
             })),
             "composed_inputs": composed.as_ref().map(|c| serde_json::json!({
+                "authored_basis": c.authored,
+                "source_resources": c.source_resources,
+                "authored_basis_standing": "requested-source-not-effective-selection",
                 "agent": c.requested_actors.agent,
                 "agency": c.requested_actors.agency,
                 "host": c.requested_actors.host,
@@ -1828,6 +1821,13 @@ fn create_directory_link(target: &Path, link: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 impl PaletteBackend for Service {
+    fn context_resource_records(&self) -> Result<Vec<aikit_core::resource::ResourceRecord>> {
+        let Some(project) = self.descriptor.project_root.as_deref() else { return Ok(Vec::new()) };
+        let Some(central) = process_central_root(Some(project)) else { return Ok(Vec::new()) };
+        Ok(compose_live_actor_inputs(&SystemRunner::new(), &central, project)?
+            .map(|inputs|inputs.source_resources).unwrap_or_default())
+    }
+
     fn project_binding(&self) -> Result<Option<aikit_core::project::ProjectBinding>> {
         let Some(root) = self.descriptor.project_root.as_ref() else { return Ok(None) };
         match std::fs::symlink_metadata(root.join("ProjectCentral/project.json")) {

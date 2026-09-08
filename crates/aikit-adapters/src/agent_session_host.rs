@@ -41,6 +41,8 @@ use std::time::{Duration, Instant};
 use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
 use serde_json::Value;
+use serde::{Serialize,Deserialize};
+use crate::session_event_queue::EventQueue;
 
 use crate::agent_connection::{
     CancelRequest, ConnectionCommand, ConnectionDescriptor, ConnectionSignal, ConnectionSignalKind,
@@ -53,11 +55,9 @@ use crate::interactive_connection::{InteractiveAgentConnectionAdapter, Permissio
 
 pub const AGENT_SESSION_HOST_VERSION: &str = "aikit.agent-session-host/v1";
 
-/// Upper bound on signals one turn may produce before the host closes it as
-/// [`TurnStop::Failed`] and leaves the session resident. The same bound a
-/// blocking consumer needs, stated here so a runaway turn cannot outgrow the
-/// host that carries it.
-pub const DEFAULT_MAX_SIGNALS_PER_TURN: usize = 512;
+/// Zero means no operational total-event limit. Retention is bounded separately
+/// by the disk-backed event lane; legitimate reasoning is not a protocol fault.
+pub const DEFAULT_MAX_SIGNALS_PER_TURN: usize = 0;
 
 /// Signals retained for natives no lane on this host claims. The host does not
 /// silently drop what it cannot attribute.
@@ -83,7 +83,7 @@ impl Default for AgentSessionHostLimits {
 }
 
 /// One ordered host event as observed on a session lane.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HostEvent {
     /// A provenance-bearing signal, in observed wire order.
     Signal(ConnectionSignal),
@@ -92,16 +92,17 @@ pub enum HostEvent {
 }
 
 /// How a turn actually stopped, as observed on the wire.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnStop {
     Completed { stop_reason: String },
     Cancelled,
+    OperationalLimit { max_signals: usize },
     Failed { reason: String },
 }
 
 /// Who asked for the stop. A human interrupt and a provider-side cancellation
 /// are different facts and are recorded as such.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InterruptOrigin {
     Human,
     Provider,
@@ -110,7 +111,7 @@ pub enum InterruptOrigin {
 /// The recorded interruption of one turn. It exists only once a stop has
 /// actually been observed; a request that is still in flight is an
 /// [`InterruptReceipt`], which is a different fact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnInterruption {
     pub agent_session: ResourceRef,
     pub native_session_id: String,
@@ -140,7 +141,7 @@ pub struct InterruptReceipt {
 
 /// The full record of one finished turn, delivered as `HostEvent::TurnEnded`
 /// and retained per session until the next turn replaces it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnRecord {
     pub agent_session: ResourceRef,
     pub binding: NativeSessionBinding,
@@ -192,6 +193,13 @@ pub struct TurnHandle {
     lane: Arc<LaneCore>,
 }
 
+/// Durable canonical encounter events belong to the native owner. Production
+/// encounter services supply this sink; the host orders writes before delivery.
+/// A failed append is a resource failure, never a provider cancellation.
+pub trait SessionEventJournal: Send + Sync {
+    fn append(&self, agent_session:&ResourceRef, event:&HostEvent) -> Result<()>;
+}
+
 pub struct AgentSessionHost {
     shared: Arc<HostShared>,
     reader: Option<JoinHandle<()>>,
@@ -209,37 +217,21 @@ struct HostShared {
     /// correlated control response is awaited at a time.
     control_gate: Mutex<()>,
     limits: AgentSessionHostLimits,
+    journal: Option<Arc<dyn SessionEventJournal>>,
 }
 
 struct LaneCore {
     agent_session: ResourceRef,
-    /// Taken (dropped) when the bridge stops, so a caller parked in `recv`
-    /// wakes and every later read sees the end instead of blocking forever on
-    /// a transport that can no longer produce anything.
-    sender: Mutex<Option<Sender<HostEvent>>>,
-    events: Mutex<Receiver<HostEvent>>,
+    events: Mutex<EventQueue>,
+    queue: EventQueue,
+    journal: Option<Arc<dyn SessionEventJournal>>,
 }
-
 impl LaneCore {
-    fn deliver(&self, event: HostEvent) {
-        let sender = self
-            .sender
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(sender) = sender.as_ref() {
-            let _ = sender.send(event);
-        }
+    fn deliver(&self,event:HostEvent) -> std::io::Result<()> {
+        if let Some(journal)=&self.journal {journal.append(&self.agent_session,&event).map_err(|e|std::io::Error::other(e.to_string()))?;}
+        self.queue.send(event)
     }
-
-    /// Wake every caller parked on this lane and end every later read. Events
-    /// already queued stay readable; what ends is the lane's future.
-    fn close(&self) {
-        let mut sender = self
-            .sender
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *sender = None;
-    }
+    fn close(&self) { self.queue.close(); }
 }
 
 #[derive(Default)]
@@ -249,7 +241,7 @@ struct HostState {
     lanes: BTreeMap<String, Arc<LaneCore>>,
     sessions: BTreeMap<ResourceRef, SessionRecord>,
     turns: BTreeMap<String, ActiveTurn>,
-    trail: BTreeMap<ResourceRef, Vec<TurnInterruption>>,
+    trail: BTreeMap<ResourceRef, VecDeque<TurnInterruption>>,
     last_turn: BTreeMap<ResourceRef, TurnRecord>,
     unattributed: VecDeque<ConnectionSignal>,
     last_sequence: u64,
@@ -267,6 +259,7 @@ struct ActiveTurn {
     last_sequence: u64,
     signals: usize,
     interrupt: Option<PendingInterrupt>,
+    operational_limit: Option<usize>,
 }
 
 struct PendingInterrupt {
@@ -314,6 +307,11 @@ impl AgentSessionHost {
     where
         A: InteractiveAgentConnectionAdapter + Send + 'static,
     {
+        Self::launch_with_journal(adapter,argv,cwd,limits,None)
+    }
+
+    pub fn launch_with_journal<A>(adapter:A,argv:&[String],cwd:Option<&Path>,limits:AgentSessionHostLimits,journal:Option<Arc<dyn SessionEventJournal>>) -> Result<Self>
+    where A: InteractiveAgentConnectionAdapter + Send + 'static {
         let (writer, reader, control) = ConnectionProcess::spawn_split(argv, cwd)?;
         let shared = Arc::new(HostShared {
             adapter: Mutex::new(Box::new(adapter)),
@@ -323,6 +321,7 @@ impl AgentSessionHost {
             io: Mutex::new(()),
             control_gate: Mutex::new(()),
             limits,
+            journal,
         });
         let thread_shared = Arc::clone(&shared);
         let reader_thread = std::thread::Builder::new()
@@ -389,11 +388,12 @@ impl AgentSessionHost {
                 ));
             }
         }
-        let (event_sender, event_receiver) = mpsc::channel();
+        let queue = EventQueue::new().map_err(|e|AikitError::new("agent_session_host.event_storage",e.to_string()))?;
         let lane = Arc::new(LaneCore {
             agent_session: canonical.clone(),
-            sender: Mutex::new(Some(event_sender)),
-            events: Mutex::new(event_receiver),
+            events: Mutex::new(queue.clone()),
+            queue,
+            journal:self.shared.journal.clone(),
         });
         let command = {
             let mut adapter = self.shared.adapter()?;
@@ -490,11 +490,11 @@ impl AgentSessionHost {
         })
     }
 
-    /// The interruption trail of one session: every recorded interruption, in
-    /// the order the turns ended. Empty means none was ever observed.
+    /// The most recent 128 observed interruptions, in turn order. The durable
+    /// owner journal retains the complete history beyond this memory window.
     pub fn interruptions(&self, agent_session: &ResourceRef) -> Result<Vec<TurnInterruption>> {
         let state = self.shared.state()?;
-        Ok(state.trail.get(agent_session).cloned().unwrap_or_default())
+        Ok(state.trail.get(agent_session).map(|trail|trail.iter().cloned().collect()).unwrap_or_default())
     }
 
     /// The last finished turn of one session, if any.
@@ -675,12 +675,15 @@ impl SessionLane {
         self.locked(|events| events.recv_timeout(timeout))
     }
 
-    fn locked<T>(&self, read: impl FnOnce(&mut Receiver<HostEvent>) -> T) -> T {
+    fn locked<T>(&self, read: impl FnOnce(&mut EventQueue) -> T) -> T {
         let mut events = self
             .shared
             .lane_events(&self.lane)
             .expect("session lane event lock poisoned");
-        read(&mut events)
+        let result=read(&mut events);
+        drop(events);
+        if let Some(error)=self.lane.queue.error() {state_stop_bridge(&self.shared.state,&format!("agent_session_host.event_storage: {error}"),false);let _=self.shared.control.terminate();}
+        result
     }
 }
 
@@ -752,12 +755,15 @@ impl TurnHandle {
         }
     }
 
-    fn locked<T>(&self, read: impl FnOnce(&mut Receiver<HostEvent>) -> T) -> T {
+    fn locked<T>(&self, read: impl FnOnce(&mut EventQueue) -> T) -> T {
         let mut events = self
             .shared
             .lane_events(&self.lane)
             .expect("session lane event lock poisoned");
-        read(&mut events)
+        let result=read(&mut events);
+        drop(events);
+        if let Some(error)=self.lane.queue.error() {state_stop_bridge(&self.shared.state,&format!("agent_session_host.event_storage: {error}"),false);let _=self.shared.control.terminate();}
+        result
     }
 }
 
@@ -838,6 +844,7 @@ impl HostShared {
     /// Route interpreted signals to their lanes and turn bookkeeping.
     fn route(self: &Arc<Self>, signals: Vec<ConnectionSignal>) {
         let mut deliveries: Vec<(Arc<LaneCore>, HostEvent)> = Vec::new();
+        let mut limited=Vec::new();
         {
             let Ok(mut state) = self.state.lock() else {
                 return;
@@ -869,18 +876,19 @@ impl HostShared {
                         state.record_turn(&record);
                         deliveries.push((lane, HostEvent::TurnEnded(record)));
                     }
-                } else if let Some(record) =
-                    state.exceed_limit(&native_session_id, self.limits.max_signals_per_turn)
-                {
-                    state.record_turn(&record);
-                    if let Some(lane) = state.lanes.get(&record.binding.native_session_id).cloned()
-                    {
-                        deliveries.push((lane, HostEvent::TurnEnded(record)));
-                    }
+                } else if state.reached_limit(&native_session_id,self.limits.max_signals_per_turn) {
+                    limited.push(native_session_id);
                 }
             }
         }
         self.deliver(deliveries);
+        for native_session_id in limited {
+            let commands=self.adapter().and_then(|mut adapter|adapter.coordinated_cancel(CancelRequest{native_session_id}));
+            match commands {
+                Ok(commands)=>for command in commands {if let Err(error)=self.dispatch(&command){self.record_transport_failure(error);return;}},
+                Err(error)=>{self.record_transport_failure(error);return;}
+            }
+        }
     }
 
     fn record_transport_failure(self: &Arc<Self>, error: AikitError) {
@@ -889,7 +897,11 @@ impl HostShared {
 
     fn deliver(&self, deliveries: Vec<(Arc<LaneCore>, HostEvent)>) {
         for (lane, event) in deliveries {
-            lane.deliver(event);
+            if let Err(error)=lane.deliver(event) {
+                state_stop_bridge(&self.state,&format!("agent_session_host.event_storage: owner event storage failed: {error}"),false);
+                let _=self.control.terminate();
+                return;
+            }
         }
     }
 
@@ -963,6 +975,7 @@ impl HostShared {
                 last_sequence,
                 signals: 0,
                 interrupt: None,
+                operational_limit: None,
             },
         );
         Ok(())
@@ -1087,7 +1100,7 @@ impl HostShared {
         lock(&self.control_gate)
     }
 
-    fn lane_events<'a>(&self, lane: &'a LaneCore) -> Result<MutexGuard<'a, Receiver<HostEvent>>> {
+    fn lane_events<'a>(&self, lane: &'a LaneCore) -> Result<MutexGuard<'a, EventQueue>> {
         lock(&lane.events)
     }
 
@@ -1174,7 +1187,7 @@ fn state_stop_bridge(state: &Mutex<HostState>, reason: &str, deliberate: bool) {
             if let Some(lane) = state.lanes.get(&native_session_id).cloned() {
                 // Queue the record before the lane ends: closing the sender
                 // first would drop the very event that explains the stop.
-                lane.deliver(HostEvent::TurnEnded(record));
+                let _ = lane.deliver(HostEvent::TurnEnded(record));
             }
         }
     }
@@ -1207,10 +1220,9 @@ impl HostState {
 
     fn record_turn(&mut self, record: &TurnRecord) {
         if let Some(interruption) = &record.interruption {
-            self.trail
-                .entry(record.agent_session.clone())
-                .or_default()
-                .push(interruption.clone());
+            let trail=self.trail.entry(record.agent_session.clone()).or_default();
+            if trail.len()==128 {trail.pop_front();}
+            trail.push_back(interruption.clone());
         }
         self.last_turn
             .insert(record.agent_session.clone(), record.clone());
@@ -1223,13 +1235,13 @@ impl HostState {
         signal: &ConnectionSignal,
     ) -> Option<TurnRecord> {
         let turn = self.turns.remove(native_session_id)?;
-        let stop = match &signal.kind {
+        let stop = if let Some(max_signals)=turn.operational_limit {TurnStop::OperationalLimit{max_signals}} else {match &signal.kind {
             ConnectionSignalKind::Completed { stop_reason } => TurnStop::Completed {
                 stop_reason: stop_reason.clone(),
             },
             ConnectionSignalKind::Failed { reason } => TurnStop::Failed { reason: reason.clone() },
             _ => TurnStop::Cancelled,
-        };
+        }};
         let interruption = match (&turn.interrupt, &stop) {
             // A cancel was asked for and the provider stopped the turn: a human
             // interruption, however the stop was carried on the wire.
@@ -1258,7 +1270,7 @@ impl HostState {
             (None, _) => None,
             // A transport failure is `fail_turn`'s record to make; `close_turn`
             // only closes turns the provider stopped on the wire.
-            (Some(_), TurnStop::Failed { .. }) => None,
+            (Some(_), TurnStop::Failed { .. } | TurnStop::OperationalLimit { .. }) => None,
         };
         Some(TurnRecord {
             agent_session: turn.agent_session.clone(),
@@ -1298,14 +1310,12 @@ impl HostState {
         })
     }
 
-    /// Close a turn that outgrew its signal bound. The session stays resident.
-    fn exceed_limit(&mut self, native_session_id: &str, limit: usize) -> Option<TurnRecord> {
-        let signals = self.turns.get(native_session_id)?.signals;
-        if signals <= limit {
-            return None;
-        }
-        let reason = format!("turn exceeded {limit} signals without completing");
-        self.fail_turn(native_session_id, &reason)
+    /// An explicit operational ceiling requests cancellation and leaves the
+    /// turn in flight until a native terminal event is observed.
+    fn reached_limit(&mut self,native_session_id:&str,limit:usize)->bool {
+        let Some(turn)=self.turns.get_mut(native_session_id) else {return false;};
+        if limit==0 || turn.signals<=limit || turn.operational_limit.is_some(){return false;}
+        turn.operational_limit=Some(limit);true
     }
 
     fn binding_for(&self, native_session_id: &str) -> NativeSessionBinding {

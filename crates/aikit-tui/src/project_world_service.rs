@@ -5,7 +5,7 @@
 //! the TUI/backend adapter plus disclosure of ContextSource horizon state.
 
 use aikit_core::context_source::{ContextSourceEntry, ContextSourceIndex};
-use aikit_core::resource::ResourceKind;
+use aikit_core::resource::{ResourceKind, ResourceIndex};
 use aikit_core::{
     application_context_resolution, disclose_project_world, ContextResolution,
     ProjectWorldReadModel, RequestedActors, Result,
@@ -29,20 +29,60 @@ pub fn context_resolution_with_actors(
     backend: &dyn PaletteBackend,
     actors: RequestedActors,
 ) -> Result<ContextResolution> {
-    let resources = backend.navigation_index();
+    let resources = resource_index(backend)?;
+    context_resolution_from_resources(backend, actors, &resources)
+}
+
+/// Resolve once-observed resources without fetching their owners again.
+pub fn context_resolution_from_resources(
+    backend: &dyn PaletteBackend,
+    actors: RequestedActors,
+    resources: &dyn ResourceIndex,
+) -> Result<ContextResolution> {
     if let Some(binding) = backend.project_binding()? {
         return aikit_core::application_context_resolution_with_binding(
             backend.context(), backend.view(), backend.scope_layers().unwrap_or(&[]),
-            &resources, actors, binding,
+            resources, actors, binding,
         );
     }
     application_context_resolution(
         backend.context(),
         backend.view(),
         backend.scope_layers().unwrap_or(&[]),
-        &resources,
+        resources,
         actors,
     )
+}
+
+/// Shared canonical resource join used by Context and situated Method resolution.
+pub fn resource_index(backend: &dyn PaletteBackend) -> Result<aikit_core::resource::ResourceSearchIndex> {
+    resource_index_with_records(backend, backend.context_resource_records()?)
+}
+
+/// Join an already-observed owner snapshot; this function performs no source read.
+pub fn resource_index_with_records(
+    backend: &dyn PaletteBackend,
+    records: Vec<aikit_core::resource::ResourceRecord>,
+) -> Result<aikit_core::resource::ResourceSearchIndex> {
+    let mut resources = backend.navigation_index();
+    for record in records {
+        let joined = if let Some(existing) = resources.resource(&record.descriptor.id) {
+            if existing.descriptor.kind != record.descriptor.kind {
+                return Err(aikit_core::AikitError::new("context.source_kind_conflict",
+                    format!("Observed source kind conflicts with existing resource {}", record.descriptor.id)));
+            }
+            let mut joined = existing.clone();
+            for source in record.descriptor.sources {
+                if !joined.descriptor.sources.contains(&source) { joined.descriptor.sources.push(source); }
+            }
+            for (key,value) in record.descriptor.annotations {
+                joined.descriptor.annotations.entry(key).or_insert(value);
+            }
+            joined
+        } else { record };
+        resources.insert_resource(joined, Vec::new());
+    }
+    Ok(resources)
 }
 
 pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadModel> {

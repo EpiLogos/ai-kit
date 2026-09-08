@@ -468,14 +468,29 @@ fn cmd_project(cwd: &std::path::Path, command: ProjectCmd) -> Result<Reply> {
 fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
     use aikit_cli::skill_sources;
 
-    let service = Service::discover(cwd)?;
-    let home = service.home();
+    // Source repair must remain available when an active snapshot makes the
+    // effective capability view unresolvable (including a removed enabled Skill).
+    // Discover context identity without loading or resolving that view.
+    let owned_home = AikitHome::discover()?;
+    owned_home.ensure_layout()?;
+    let home = &owned_home;
+    let project = aikit_cli::discover::discover_project_with_home(home, cwd)?;
+    let env = |key: &str| std::env::var(key).ok();
+    let descriptor = match project.as_ref().map(|project| &project.root) {
+        Some(root) => aikit_cli::discover::descriptor_from(root, env),
+        None => aikit_cli::discover::global_descriptor(env),
+    };
+    let source_reply = |data, warnings| Reply::Data {
+        context: EnvelopeContext::from_descriptor(&descriptor),
+        data,
+        warnings,
+        exit_code: json::EXIT_OK,
+    };
     match command.command {
         SourceSub::AddDirectory(args) => {
             let spec =
                 skill_sources::add_directory(home, &args.id, &args.directory, args.control_ground)?;
-            Ok(reply(
-                &service,
+            Ok(source_reply(
                 jval!({
                     "id": spec.id,
                     "kind": spec.kind.label(),
@@ -493,8 +508,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                 &args.revision,
                 &args.root,
             )?;
-            Ok(reply(
-                &service,
+            Ok(source_reply(
                 jval!({
                     "id": spec.id,
                     "kind": spec.kind.label(),
@@ -509,8 +523,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                 skill_sources::SourceKind::Git { revision, .. } => revision,
                 skill_sources::SourceKind::Directory { .. } => unreachable!(),
             };
-            Ok(reply(
-                &service,
+            Ok(source_reply(
                 jval!({
                     "id": spec.id,
                     "revision": revision,
@@ -522,8 +535,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
         SourceSub::Sync(args) => {
             let snapshot = skill_sources::sync(home, &args.id)?;
             let status = skill_sources::status(home, &args.id)?;
-            Ok(reply(
-                &service,
+            Ok(source_reply(
                 jval!({
                     "id": args.id,
                     "candidate_snapshot": snapshot.digest,
@@ -549,8 +561,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     })
                     .unwrap_or(0)
             };
-            Ok(reply(
-                &service,
+            Ok(source_reply(
                 jval!({
                     "id": status.spec.id,
                     "kind": status.spec.kind.label(),
@@ -571,8 +582,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
         SourceSub::Promote(args) => {
             let (snapshot, trusted) =
                 skill_sources::promote(home, &args.id, args.trust, &args.trust_skills)?;
-            Ok(reply(
-                &service,
+            Ok(source_reply(
                 jval!({
                     "id": args.id,
                     "active_snapshot": snapshot.digest,
@@ -584,8 +594,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
         }
         SourceSub::Rollback(args) => {
             let snapshot = skill_sources::rollback(home, &args.id)?;
-            Ok(reply(
-                &service,
+            Ok(source_reply(
                 jval!({
                     "id": args.id,
                     "active_snapshot": snapshot.digest,
@@ -1644,10 +1653,15 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
 /// situated operational patterns visible as such, with their effective
 /// state in the current context.
 fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
-    let MethodArgs {
-        command: MethodCommand::List { filter },
-    } = a;
     let service = Service::discover(cwd)?;
+    let filter = match a.command {
+        MethodCommand::Resolve { source, focus } => {
+            let focus = focus.iter().map(aikit_core::ResourceRef::parse).collect::<Result<Vec<_>>>()?;
+            let data = aikit_cli::method_source::resolve_source(&service, &source, &focus)?;
+            return Ok(reply(&service, data, diagnostic_warnings(&service)));
+        }
+        MethodCommand::List { filter } => filter,
+    };
     let view = service.resolved();
     let filter = filter.as_deref().map(str::to_lowercase);
     let mut methods: Vec<Value> = view

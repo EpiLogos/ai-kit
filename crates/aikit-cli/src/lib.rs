@@ -30,6 +30,7 @@ pub mod hook;
 pub mod json;
 pub mod jump;
 pub mod model_roster;
+pub mod method_source;
 pub mod multicall;
 pub mod mux_install;
 pub mod profile_ops;
@@ -47,3 +48,5 @@ pub mod wiki;
 
 pub use session_space_ops::SessionSpaceCliAdapter;
 pub use session_space_service::SessionSpaceServiceOps;
+
+pub mod encounter_service;

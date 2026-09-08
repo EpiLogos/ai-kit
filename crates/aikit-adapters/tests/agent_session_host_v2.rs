@@ -706,7 +706,8 @@ fn the_stated_turn_bound_is_a_guard_and_not_the_ordinary_turn_end() {
         .unwrap();
     let record = turn.wait().unwrap();
     assert_eq!(record.agent_session, canonical);
-    assert!(record.signals < DEFAULT_MAX_SIGNALS_PER_TURN);
+    assert_eq!(DEFAULT_MAX_SIGNALS_PER_TURN, 0);
+    assert!(record.signals > 0);
     assert_eq!(
         record.stop,
         TurnStop::Completed {

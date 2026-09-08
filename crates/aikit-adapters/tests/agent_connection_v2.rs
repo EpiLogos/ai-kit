@@ -259,3 +259,27 @@ fn classic_process_uses_same_connection_seam_without_acp_identity_or_permission_
         ConnectionSignalKind::AgentMessageChunk { .. }
     ));
 }
+
+#[test]
+fn acp_open_retains_reported_model_configuration_without_promoting_model_identity() {
+    // A codec contract test; live provider acceptance is separately required.
+    let mut adapter = AcpV1ConnectionAdapter::new(r("connection/acp/model-codec"), Vec::new());
+    adapter.initialize().unwrap();
+    adapter
+        .ingest(json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}))
+        .unwrap();
+    adapter.open_session(create_request()).unwrap();
+    let opened = adapter
+        .ingest(json!({"jsonrpc":"2.0","id":2,"result":{
+        "sessionId":"native-codec-session","models":{"currentModelId":"provider/model",
+        "availableModels":[{"modelId":"provider/model","name":"Provider Model"}]}}}))
+        .unwrap();
+    let ConnectionSignalKind::SessionOpened { binding } = &opened[0].kind else {
+        panic!("expected opened binding")
+    };
+    let observation = binding.model_observation.as_ref().unwrap();
+    assert_eq!(observation.current_model_id, "provider/model");
+    assert_eq!(observation.available_models[0].model_id, "provider/model");
+    assert!(observation.standing.contains("not-independent"));
+    assert!(binding.agent.is_none() && binding.agent_session.is_none());
+}

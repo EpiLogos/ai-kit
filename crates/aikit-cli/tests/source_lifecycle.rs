@@ -66,6 +66,34 @@ fn data(value: &Value) -> &Value {
 }
 
 #[test]
+fn rollback_remains_available_when_a_promoted_source_removed_an_enabled_skill() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let source = temp.path().join("source");
+    let cwd = temp.path().join("work");
+    fs::create_dir_all(&cwd).unwrap();
+    skill(&source.join("keep"), "keep", "stable");
+    skill(&source.join("required"), "required", "required original");
+    aikit(&home, &cwd, &["source", "add-directory", "recovery", source.to_str().unwrap()]);
+    aikit(&home, &cwd, &["source", "sync", "recovery"]);
+    let promoted = aikit(&home, &cwd, &["source", "promote", "recovery", "--trust"]);
+    aikit(&home, &cwd, &["enable", "skill/recovery/required", "--scope", "global"]);
+    fs::remove_dir_all(source.join("required")).unwrap();
+    aikit(&home, &cwd, &["source", "sync", "recovery"]);
+    aikit(&home, &cwd, &["source", "promote", "recovery", "--trust"]);
+    let broken = Command::cargo_bin("aikit").unwrap()
+        .env("AIKIT_HOME", &home).current_dir(&cwd)
+        .args(["--json", "status", "--all"]).output().unwrap();
+    assert!(!broken.status.success());
+    assert!(String::from_utf8_lossy(&broken.stdout).contains("skill/recovery/required"));
+    // Inspection and native recovery cannot depend on the broken view.
+    aikit(&home, &cwd, &["source", "show", "recovery"]);
+    let restored = aikit(&home, &cwd, &["source", "rollback", "recovery"]);
+    assert_eq!(data(&restored)["active_snapshot"], data(&promoted)["active_snapshot"]);
+    aikit(&home, &cwd, &["status", "--all"]);
+}
+
+#[test]
 fn git_sources_require_an_exact_commit_and_a_contained_root() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("aikit-home");

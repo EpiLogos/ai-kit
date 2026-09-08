@@ -10,6 +10,10 @@
 use std::path::Path;
 
 use aikit_core::context_resolution::RequestedActors;
+use aikit_core::resource::{
+    ResourceDescriptor, ResourceKind, ResourceLocator, ResourceRecord, ResourceSource,
+    SourceAuthority, SourceRef, SourceRevision, SourceState,
+};
 use aikit_core::{AikitError, Result};
 use serde_json::{json, Value};
 
@@ -32,15 +36,26 @@ pub fn compose_live_actor_inputs<R: CommandRunner>(
     central_root: &Path,
     project_root: &Path,
 ) -> Result<Option<ComposedActorInputs>> {
-    let central = read_project_agent_profile(runner, central_root, project_root)?
-        .map(|profile| profile.authored_projection())
+    let profile = read_project_agent_profile(runner, central_root, project_root)?;
+    let central = profile
+        .as_ref()
+        .map(|(profile, _)| profile.authored_projection())
         .unwrap_or_default();
+    let mut source_resources: Vec<ResourceRecord> =
+        profile.into_iter().map(|(_, record)| record).collect();
     let actuation = read_actuation_instantiation(project_root)?;
 
     match actuation {
-        Some(actuation) => Ok(Some(compose_actor_inputs(&actuation, &central))),
+        Some((actuation, record)) => {
+            source_resources.push(record);
+            let mut composed = compose_actor_inputs(&actuation, &central);
+            composed.source_resources = source_resources;
+            Ok(Some(composed))
+        }
         None if central.agent_ref.is_some() || !central.profile_refs.is_empty() => {
             Ok(Some(ComposedActorInputs {
+                authored: central.clone(),
+                source_resources,
                 requested_actors: RequestedActors {
                     agent: central.agent_ref,
                     agency: None,
@@ -62,7 +77,7 @@ fn read_project_agent_profile<R: CommandRunner>(
     runner: &R,
     central_root: &Path,
     project_root: &Path,
-) -> Result<Option<CentralAgentProfileProjection>> {
+) -> Result<Option<(CentralAgentProfileProjection, ResourceRecord)>> {
     let Some(member) = project_member(central_root, project_root) else {
         return Ok(None);
     };
@@ -75,8 +90,14 @@ fn read_project_agent_profile<R: CommandRunner>(
     let Some(profiles) = list.get("profiles").and_then(Value::as_array) else {
         return Ok(None);
     };
-    let [entry] = profiles.as_slice() else {
+    if profiles.is_empty() {
         return Ok(None);
+    }
+    let [entry] = profiles.as_slice() else {
+        return Err(AikitError::new(
+            "actor_composition.ambiguous_profile",
+            "Multiple Central profiles require explicit selection; none is guessed",
+        ));
     };
     let source = entry.get("profile").ok_or_else(|| {
         AikitError::new(
@@ -84,14 +105,76 @@ fn read_project_agent_profile<R: CommandRunner>(
             "Central agent-profile.list returned an entry without a profile",
         )
     })?;
-    Ok(Some(CentralAgentProfileProjection::parse(source)?))
+    let profile = CentralAgentProfileProjection::parse(source)?;
+    let relative = entry
+        .get("source_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            AikitError::new(
+                "actor_composition.profile_source_missing",
+                "Central profile listing lacks source_path",
+            )
+        })?;
+    let root = std::fs::canonicalize(project_root).map_err(source_error)?;
+    let path = std::fs::canonicalize(root.join(relative)).map_err(source_error)?;
+    if !path.starts_with(&root) {
+        return Err(AikitError::new(
+            "actor_composition.profile_source_outside",
+            "Central profile source escapes Project",
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(source_error)?;
+    let current: Value = serde_json::from_slice(&bytes).map_err(source_error)?;
+    if CentralAgentProfileProjection::parse(&current)? != profile {
+        return Err(AikitError::new(
+            "actor_composition.profile_source_changed",
+            "Central profile changed after owner listing",
+        ));
+    }
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(root.join("ProjectCentral/project.json")).map_err(source_error)?,
+    )
+    .map_err(source_error)?;
+    let project_id = manifest
+        .get("project_id")
+        .and_then(Value::as_str)
+        .unwrap_or(&member);
+    let relative = path
+        .strip_prefix(&root)
+        .map_err(source_error)?
+        .to_string_lossy()
+        .replace('%', "%25")
+        .replace(':', "%3A")
+        .replace(' ', "%20");
+    let reference = format!("central:source:project:{project_id}:{relative}");
+    let mut descriptor = ResourceDescriptor::new(
+        profile.agent_ref.clone(),
+        ResourceKind::Agent,
+        profile
+            .role
+            .clone()
+            .unwrap_or_else(|| profile.agent_ref.to_string()),
+        profile.purpose.clone().unwrap_or_default(),
+    );
+    descriptor
+        .sources
+        .push(observed_source(&reference, &profile.revision, &path)?);
+    descriptor.annotations.insert(
+        "source_bytes_blake3".into(),
+        blake3::hash(&bytes).to_hex().to_string(),
+    );
+    descriptor.annotations.insert(
+        "standing".into(),
+        "Central source observed; runtime admission undetermined".into(),
+    );
+    Ok(Some((profile, ResourceRecord::new(descriptor))))
 }
 
 /// Read an authored Actuation instantiation receipt. Absence is `None`, never an
 /// error and never a synthesized model-bearing object.
 fn read_actuation_instantiation(
     project_root: &Path,
-) -> Result<Option<ActuationInstantiationProjection>> {
+) -> Result<Option<(ActuationInstantiationProjection, ResourceRecord)>> {
     let path = project_root.join(ACTUATION_MODEL_BEARING_FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -109,7 +192,40 @@ fn read_actuation_instantiation(
             format!("{}: {error}", path.display()),
         )
     })?;
-    Ok(Some(ActuationInstantiationProjection::parse(&value)?))
+    let projection = ActuationInstantiationProjection::parse(&value)?;
+    let path = std::fs::canonicalize(path).map_err(source_error)?;
+    let revision = format!("blake3:{}", blake3::hash(text.as_bytes()));
+    let mut descriptor = ResourceDescriptor::new(
+        projection.agency_ref.clone(),
+        ResourceKind::Agency,
+        projection.agency_ref.to_string(),
+        "Agency referenced by observed native Actuation instantiation source",
+    );
+    // This native receipt supplies its own identity; path/revision disclose the
+    // observed source, without asserting fresh detection or an authority grant.
+    descriptor.sources.push(observed_source(
+        projection.actuation_ref.as_str(),
+        &revision,
+        &path,
+    )?);
+    descriptor.annotations.insert(
+        "standing".into(),
+        "Actuation receipt observed; runtime admission undetermined".into(),
+    );
+    Ok(Some((projection, ResourceRecord::new(descriptor))))
+}
+
+fn source_error(error: impl std::fmt::Display) -> AikitError {
+    AikitError::new("actor_composition.source_unavailable", error.to_string())
+}
+fn observed_source(reference: &str, revision: &str, path: &Path) -> Result<ResourceSource> {
+    Ok(ResourceSource {
+        source: SourceRef::parse(reference)?,
+        revision: Some(SourceRevision::parse(revision)?),
+        locator: Some(ResourceLocator::Path(path.to_path_buf())),
+        authority: Some(SourceAuthority::Observed),
+        state: SourceState::Available,
+    })
 }
 
 /// Central Action invocation, mirroring the temporal adapter's owner-call path:
@@ -150,7 +266,10 @@ fn central_action<R: CommandRunner>(
             .pointer("/error/message")
             .and_then(Value::as_str)
             .unwrap_or("Central Action failed");
-        return Err(AikitError::new("actor_composition.central_action_failed", message));
+        return Err(AikitError::new(
+            "actor_composition.central_action_failed",
+            message,
+        ));
     }
     result.get("data").cloned().ok_or_else(|| {
         AikitError::new(
@@ -175,8 +294,8 @@ fn project_member(central_root: &Path, project_root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aikit_core::resource::ResourceRef;
     use crate::runner::ScriptedRunner;
+    use aikit_core::resource::ResourceRef;
 
     fn profile() -> Value {
         json!({
@@ -217,12 +336,17 @@ mod tests {
     fn temp_project() -> (std::path::PathBuf, std::path::PathBuf) {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nonce = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let central = std::env::temp_dir().join(format!(
-            "actor-central-{}-{nonce}",
-            std::process::id()
-        ));
+        let central =
+            std::env::temp_dir().join(format!("actor-central-{}-{nonce}", std::process::id()));
         let project = central.join("Work/example");
         std::fs::create_dir_all(project.join(".aikit")).unwrap();
+        std::fs::create_dir_all(project.join("ProjectCentral")).unwrap();
+        std::fs::write(
+            project.join("ProjectCentral/project.json"),
+            json!({"project_id":"example"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(project.join("p.json"), profile().to_string()).unwrap();
         (central, project)
     }
 
@@ -231,7 +355,9 @@ mod tests {
         let (central, project) = temp_project();
         let runner = ScriptedRunner::new().on(
             "agent-profile.list",
-            &list_data(vec![json!({ "source_path": "p.json", "profile": profile() })]),
+            &list_data(vec![
+                json!({ "source_path": "p.json", "profile": profile() }),
+            ]),
         );
         std::fs::write(
             project.join(ACTUATION_MODEL_BEARING_FILE),
@@ -239,7 +365,9 @@ mod tests {
         )
         .unwrap();
 
-        let composed = compose_live_actor_inputs(&runner, &central, &project).unwrap().unwrap();
+        let composed = compose_live_actor_inputs(&runner, &central, &project)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             composed.requested_actors.agent,
             Some(ResourceRef::parse("agent/mahamaya").unwrap())
@@ -256,7 +384,10 @@ mod tests {
             composed.selected_model,
             Some(ResourceRef::parse("model/deepseek-chat").unwrap())
         );
-        assert_eq!(composed.agent_session, Some("agent-session/codex-7".to_string()));
+        assert_eq!(
+            composed.agent_session,
+            Some("agent-session/codex-7".to_string())
+        );
         std::fs::remove_dir_all(&central).unwrap();
     }
 
@@ -265,10 +396,14 @@ mod tests {
         let (central, project) = temp_project();
         let runner = ScriptedRunner::new().on(
             "agent-profile.list",
-            &list_data(vec![json!({ "source_path": "p.json", "profile": profile() })]),
+            &list_data(vec![
+                json!({ "source_path": "p.json", "profile": profile() }),
+            ]),
         );
 
-        let composed = compose_live_actor_inputs(&runner, &central, &project).unwrap().unwrap();
+        let composed = compose_live_actor_inputs(&runner, &central, &project)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             composed.requested_actors.agent,
             Some(ResourceRef::parse("agent/mahamaya").unwrap())
@@ -290,11 +425,18 @@ mod tests {
                 json!({ "source_path": "b.json", "profile": profile() }),
             ]),
         );
-        assert!(compose_live_actor_inputs(&two, &central, &project).unwrap().is_none());
+        assert_eq!(
+            compose_live_actor_inputs(&two, &central, &project)
+                .unwrap_err()
+                .code(),
+            "actor_composition.ambiguous_profile"
+        );
 
         // Zero profiles: same, nothing is invented.
         let zero = ScriptedRunner::new().on("agent-profile.list", &list_data(vec![]));
-        assert!(compose_live_actor_inputs(&zero, &central, &project).unwrap().is_none());
+        assert!(compose_live_actor_inputs(&zero, &central, &project)
+            .unwrap()
+            .is_none());
         std::fs::remove_dir_all(&central).unwrap();
     }
 

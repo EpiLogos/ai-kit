@@ -105,7 +105,10 @@ impl ActuationInstantiationProjection {
     pub fn parse(value: &Value) -> Result<Self> {
         // Accept window: documents carrying the legacy schema string read as
         // instantiation receipts; anything else is refused loudly.
-        let schema = value.get("schema").and_then(Value::as_str).unwrap_or_default();
+        let schema = value
+            .get("schema")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         match schema {
             ACTUATION_INSTANTIATION_SCHEMA | LEGACY_MODEL_BEARING_SCHEMA => {}
             other => {
@@ -221,6 +224,10 @@ pub struct CentralAuthoredProjection {
     pub host_ref: Option<ResourceRef>,
     #[serde(default)]
     pub profile_refs: Vec<ResourceRef>,
+    /// Exact parsed Central source, including its revision and distinct assignment
+    /// categories. Retention is not effective selection, disclosure or authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_source: Option<crate::central_agent_profile::CentralAgentProfileProjection>,
 }
 
 /// Where the two authoritative projections meet: Actuation supplies the live
@@ -229,6 +236,11 @@ pub struct CentralAuthoredProjection {
 /// Neither projection is re-owned; only canonical refs move.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposedActorInputs {
+    /// Requested authored basis retained for downstream resolution and Explain.
+    /// This does not claim that its sources or praxis are active in the harness.
+    pub authored: CentralAuthoredProjection,
+    /// Ephemeral observed source records; no execution/provider grant.
+    pub source_resources: Vec<aikit_core::resource::ResourceRecord>,
     pub requested_actors: RequestedActors,
     pub selected_harness: Option<ResourceRef>,
     pub selected_model: Option<ResourceRef>,
@@ -240,6 +252,8 @@ pub fn compose_actor_inputs(
     central: &CentralAuthoredProjection,
 ) -> ComposedActorInputs {
     ComposedActorInputs {
+        authored: central.clone(),
+        source_resources: Vec::new(),
         requested_actors: RequestedActors {
             agent: central.agent_ref.clone(),
             agency: Some(actuation.agency_ref.clone()),
@@ -339,8 +353,12 @@ mod tests {
         let mut wrong = projection_value();
         wrong["schema"] = serde_json::json!("actuation.model-bearing/v2");
         let error = ActuationInstantiationProjection::parse(&wrong).unwrap_err();
-        assert!(error.to_string().contains("schema must be actuation.instantiation/v1"));
-        assert!(error.to_string().contains("legacy actuation.model-bearing/v1 accepted"));
+        assert!(error
+            .to_string()
+            .contains("schema must be actuation.instantiation/v1"));
+        assert!(error
+            .to_string()
+            .contains("legacy actuation.model-bearing/v1 accepted"));
     }
 
     #[test]
@@ -400,6 +418,7 @@ mod tests {
             agent_ref: Some(ResourceRef::parse("agent/mahamaya").unwrap()),
             host_ref: Some(ResourceRef::parse("host/central").unwrap()),
             profile_refs: vec![ResourceRef::parse("profile/central/build").unwrap()],
+            ..Default::default()
         };
 
         let inputs = compose_actor_inputs(&actuation, &central);

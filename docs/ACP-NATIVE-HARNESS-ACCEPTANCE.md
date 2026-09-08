@@ -32,10 +32,15 @@ connection process for this harness. Dropping or moving a presentation is not
 closing that process. Other ACP harnesses retain their native negotiated
 capabilities; the Pi limitation must not become a universal ACP assumption.
 
-This acceptance configures the existing host limit to 16,384 signals per turn.
-The SDK default of 512 can be exhausted by legitimate reasoning updates before
-answer text; desktop harness configuration must choose and disclose an adequate
-bound. Exceeding that bound is a host failure, not evidence that the provider
-cancelled. ACP thinking updates currently arrive as status observations rather
-than rendered reasoning content; full desktop thinking presentation remains a
-separate integration obligation.
+The integrated resident host preserves ordered events with disk-backed delivery;
+normal turns have no total signal-count ceiling. A caller can select a nonzero
+operational limit, whose terminal result is distinct from provider cancellation.
+The native test crosses the former 512-event ceiling with real thinking updates,
+cancels, and continues on the same binding. Thinking bytes are now preserved as
+`AgentThoughtChunk` and retained by the resident encounter journal.
+
+See `encounter-runtime.md` for the desktop owner route and
+`ACP-REQUIRED-CONTEXT-ADMISSION.md` for opt-in source prerequisite checks. Those
+checks do not establish that every provider tool is governed or that a model
+understood the supplied context. The desktop uses the generic ACP connection;
+Pi RPC remains internal to the pinned bridge, not a competing desktop route.

@@ -168,6 +168,7 @@ impl AcpStableConnectionAdapter {
             .filter_map(|option| {
                 Some(NativePermissionChoice {
                     option_id: option.get("optionId")?.as_str()?.to_string(),
+                    kind: option.get("kind").and_then(Value::as_str).map(ToOwned::to_owned),
                     label: option.get("name")?.as_str()?.to_string(),
                 })
             })
@@ -186,6 +187,8 @@ impl AcpStableConnectionAdapter {
                     native_request_id: token,
                     native_session_id,
                     tool_call_id,
+                    tool_call: params.get("toolCall").cloned().unwrap_or(Value::Null),
+                    raw: params.clone(),
                     choices,
                     provenance: descriptor.provenance.clone(),
                 },

@@ -67,6 +67,65 @@ pub struct ConnectionDescriptor {
     pub provenance: Vec<String>,
 }
 
+/// Model configuration disclosed by the native ACP provider. This is a
+/// provider report, not AIKit catalog availability or proof of inference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeModelObservation {
+    pub current_model_id: String,
+    pub available_models: Vec<NativeAdvertisedModel>,
+    pub standing: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeAdvertisedModel {
+    pub model_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+impl NativeModelObservation {
+    fn from_acp(value: &Value) -> Result<Self> {
+        let current = value
+            .get("currentModelId")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                AikitError::new(
+                    "connection.acp.invalid_model_observation",
+                    "models.currentModelId must be non-empty",
+                )
+            })?;
+        let models: Vec<NativeAdvertisedModel> = serde_json::from_value(
+            value
+                .get("availableModels")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        )
+        .map_err(|error| {
+            AikitError::new(
+                "connection.acp.invalid_model_observation",
+                error.to_string(),
+            )
+        })?;
+        if models
+            .iter()
+            .any(|model| model.model_id.trim().is_empty() || model.name.trim().is_empty())
+        {
+            return Err(AikitError::new(
+                "connection.acp.invalid_model_observation",
+                "advertised Model id/name must be non-empty",
+            ));
+        }
+        Ok(Self {
+            current_model_id: current.into(),
+            available_models: models,
+            standing:
+                "provider-reported-configuration-not-independent-selection-or-inference-proof"
+                    .into(),
+        })
+    }
+}
+
 /// Explicit bridge between a transport-native session and canonical AIKit
 /// identity. `agent_session` is intentionally optional: transport session ids are
 /// not promoted automatically.
@@ -78,6 +137,8 @@ pub struct NativeSessionBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<ResourceRef>,
     pub opened_as: SessionOpenMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<NativeModelObservation>,
     #[serde(default)]
     pub provenance: Vec<String>,
 }
@@ -89,6 +150,7 @@ impl NativeSessionBinding {
             agent_session: None,
             agent: None,
             opened_as,
+            model_observation: None,
             provenance: Vec::new(),
         }
     }
@@ -153,6 +215,8 @@ pub struct ConnectionDegradation {
 pub struct NativePermissionChoice {
     pub option_id: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// A transport-native permission request. This is deliberately *not* a Factory
@@ -164,6 +228,10 @@ pub struct NativePermissionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default)]
+    pub tool_call: Value,
+    #[serde(default)]
+    pub raw: Value,
+    #[serde(default)]
     pub choices: Vec<NativePermissionChoice>,
     #[serde(default)]
     pub provenance: Vec<String>,
@@ -172,16 +240,39 @@ pub struct NativePermissionRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ConnectionSignalKind {
-    SessionOpened { binding: NativeSessionBinding },
-    AgentMessageChunk { text: String },
-    ToolCall { payload: Value },
-    ToolResult { payload: Value },
-    PermissionRequested { request: NativePermissionRequest },
-    Completed { stop_reason: String },
+    SessionOpened {
+        binding: NativeSessionBinding,
+    },
+    AgentMessageChunk {
+        text: String,
+    },
+    /// Provider-exposed thinking, never reconstructed hidden reasoning.
+    AgentThoughtChunk {
+        text: String,
+        content: Value,
+    },
+    ToolCall {
+        payload: Value,
+    },
+    ToolResult {
+        payload: Value,
+    },
+    PermissionRequested {
+        request: NativePermissionRequest,
+    },
+    Completed {
+        stop_reason: String,
+    },
     Cancelled,
-    Failed { reason: String },
-    Status { message: String },
-    Degraded { degradation: ConnectionDegradation },
+    Failed {
+        reason: String,
+    },
+    Status {
+        message: String,
+    },
+    Degraded {
+        degradation: ConnectionDegradation,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -229,7 +320,9 @@ enum PendingAcpRequest {
         mode: SessionOpenMode,
         canonical_agent_session: Option<ResourceRef>,
     },
-    Prompt { native_session_id: String },
+    Prompt {
+        native_session_id: String,
+    },
 }
 
 impl AcpV1ConnectionAdapter {
@@ -351,10 +444,7 @@ impl AcpV1ConnectionAdapter {
                 format!("ACP request {id} failed: {error}"),
             ));
         }
-        let result = message
-            .get("result")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let result = message.get("result").cloned().unwrap_or_else(|| json!({}));
         match pending {
             PendingAcpRequest::Initialize => {
                 self.apply_initialize_result(&result)?;
@@ -382,6 +472,11 @@ impl AcpV1ConnectionAdapter {
                 let mut binding = NativeSessionBinding::unbound(native_session_id.clone(), mode);
                 binding.agent_session = canonical_agent_session;
                 binding.provenance = self.provenance.clone();
+                binding.model_observation = result
+                    .get("models")
+                    .filter(|v| !v.is_null())
+                    .map(NativeModelObservation::from_acp)
+                    .transpose()?;
                 Ok(vec![self.signal(
                     Some(native_session_id),
                     ConnectionSignalKind::SessionOpened { binding },
@@ -419,6 +514,10 @@ impl AcpV1ConnectionAdapter {
                 let kind = match kind_name {
                     "agent_message_chunk" => ConnectionSignalKind::AgentMessageChunk {
                         text: extract_text(&update),
+                    },
+                    "agent_thought_chunk" => ConnectionSignalKind::AgentThoughtChunk {
+                        text: extract_text(&update),
+                        content: update,
                     },
                     "tool_call" | "tool_call_update" => {
                         ConnectionSignalKind::ToolCall { payload: update }
@@ -461,6 +560,10 @@ impl AcpV1ConnectionAdapter {
             .filter_map(|option| {
                 Some(NativePermissionChoice {
                     option_id: option.get("optionId")?.as_str()?.to_string(),
+                    kind: option
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
                     label: option
                         .get("name")
                         .or_else(|| option.get("label"))?
@@ -473,6 +576,8 @@ impl AcpV1ConnectionAdapter {
             native_request_id: id.to_string(),
             native_session_id: native_session_id.clone(),
             tool_call_id,
+            tool_call: params.get("toolCall").cloned().unwrap_or(Value::Null),
+            raw: params.clone(),
             choices,
             provenance: self.provenance.clone(),
         };
@@ -606,17 +711,11 @@ impl AgentConnectionAdapter for AcpV1ConnectionAdapter {
         let id = message.get("id").and_then(Value::as_u64);
         match (method.as_deref(), id) {
             (Some("session/request_permission"), Some(id)) => {
-                let params = message
-                    .get("params")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
+                let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
                 self.ingest_permission_request(id, &params)
             }
             (Some(method), _) => {
-                let params = message
-                    .get("params")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
+                let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
                 self.ingest_notification(method, &params)
             }
             (None, Some(id)) => self.ingest_response(id, &message),
@@ -638,11 +737,7 @@ pub struct ClassicProcessConnectionAdapter {
 }
 
 impl ClassicProcessConnectionAdapter {
-    pub fn new(
-        connection_ref: ResourceRef,
-        argv: Vec<String>,
-        provenance: Vec<String>,
-    ) -> Self {
+    pub fn new(connection_ref: ResourceRef, argv: Vec<String>, provenance: Vec<String>) -> Self {
         Self {
             descriptor: ConnectionDescriptor {
                 adapter_ref: ResourceRef::parse("connection-adapter/classic-process/v1")

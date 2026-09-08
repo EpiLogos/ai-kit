@@ -28,6 +28,17 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Start the native resident owner once, independently of this CLI client.
+    #[cfg(unix)]
+    EncounterStart,
+    /// Run the resident generic ACP owner. Client exit never stops providers.
+    #[cfg(unix)]
+    EncounterServe { #[arg(long)] socket: Option<PathBuf> },
+    /// Configure a native ACP provider. This operation is not exposed over IPC.
+    EncounterConfigure { #[arg(long)] provider_json: String },
+    /// Apply a canonical encounter action to the resident owner.
+    #[cfg(unix)]
+    Encounter { #[arg(long)] request_json: String, #[arg(long)] socket: Option<PathBuf> },
     /// Read the current canonical Project + ContextResolution binding for typed stage intent.
     ProjectContext,
     /// List persisted SessionSpaces.
@@ -95,6 +106,16 @@ fn run() -> Result<()> {
     let service = Service::discover(&cwd)?;
 
     match cli.command {
+        #[cfg(unix)]
+        Command::EncounterStart => emit(&aikit_cli::encounter_service::start(service.home(),&cwd)?),
+        #[cfg(unix)]
+        Command::EncounterServe{socket} => aikit_cli::encounter_service::serve(service.home().clone(),&socket.unwrap_or_else(||aikit_cli::encounter_service::socket_path(service.home()))),
+        Command::EncounterConfigure{provider_json} => {
+            aikit_cli::encounter_service::EncounterService::configure(service.home(),parse_json_arg(&provider_json)?)?;
+            emit(&serde_json::json!({"configured":true}))
+        },
+        #[cfg(unix)]
+        Command::Encounter{request_json,socket} => emit(&aikit_cli::encounter_service::request(&socket.unwrap_or_else(||aikit_cli::encounter_service::socket_path(service.home())),&parse_json_arg(&request_json)?)?),
         Command::ProjectContext => {
             let resolution = aikit_tui::project_world_service::context_resolution(&service)?;
             let context = ContextResolutionEvidence::from_resolution(&resolution)?;

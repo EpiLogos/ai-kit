@@ -303,6 +303,12 @@ pub trait PaletteBackend {
     /// Package catalogue entries are projected directly from the one resolved
     /// catalogue; no `SearchDoc` row is converted back into application identity.
     /// Slow/deep providers remain outside this low-latency baseline.
+    /// Additional source-owned resource observations for canonical Context.
+    /// This read may fail; it never manufactures provider offers or admission.
+    fn context_resource_records(&self) -> Result<Vec<ResourceRecord>> {
+        Ok(Vec::new())
+    }
+
     fn navigation_index(&self) -> ResourceSearchIndex {
         let recent: BTreeSet<CapsuleId> = self
             .recent()
