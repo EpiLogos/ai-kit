@@ -35,6 +35,7 @@ use crate::graph_presentation;
 use crate::host::UiHost;
 use crate::layout::{Glyphs, Layout, Width};
 use crate::navigation::AmbientContext;
+use crate::navigator_groups::{self, NavigatorRow};
 use crate::project_workspace_render::workspace_section_label;
 use crate::project_world_api::ProjectWorldApplicationService;
 use crate::theme::Theme;
@@ -593,8 +594,24 @@ impl ApplicationSurfaceController {
             && row >= panes.list.y
             && row < panes.list.y.saturating_add(panes.list.height)
         {
-            let index = usize::from(row.saturating_sub(panes.list.y));
-            if let Some(item) = self.semantic.read_model.resources.get(index) {
+            // The exact same row plan and scroll window `v2_render::draw_resources`
+            // computes — never a hand-rolled re-derivation — so a click can never
+            // resolve to a different resource than the one actually drawn under
+            // it, and a click on a group header/spacer (never selectable) is
+            // simply a no-op rather than falling through to whatever resource
+            // happens to sit at that raw row offset.
+            let rows = navigator_groups::resource_pane_rows(&self.semantic);
+            let selected_resource_index = self
+                .semantic
+                .selected
+                .as_ref()
+                .and_then(|selected| self.semantic.read_model.position(selected))
+                .unwrap_or(0);
+            let selected_row = navigator_groups::row_position(&rows, selected_resource_index);
+            let (_, visible) =
+                navigator_groups::visible_window(&rows, selected_row, panes.list.height as usize);
+            let local_row = usize::from(row.saturating_sub(panes.list.y));
+            if let Some(NavigatorRow::Item { item, .. }) = visible.get(local_row) {
                 return self.dispatch(backend, UiAction::Select(item.resource.clone()));
             }
         }

@@ -18,6 +18,7 @@ use crate::application::{
 };
 use crate::layout::{Glyphs, Layout};
 use crate::navigation::AmbientContext;
+use crate::navigator_groups::{self, NavigatorRow};
 use crate::project_workspace_render::{explain_lines, project_world_lines, workspace_section_label};
 use crate::theme::Theme;
 
@@ -152,6 +153,14 @@ fn query_line<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragra
     Paragraph::new(Line::from(spans))
 }
 
+/// Render the resource pane: DESTINATIONS/RESOURCES/RECENT ROUTES headers in
+/// Quick (Navigator) presentation (`docs/v2/23-TUI-HUMAN-EXPERIENCE-SPEC.md`
+/// §3.3), the prior flat one-row-per-resource list everywhere else. Both
+/// shapes share [`navigator_groups::resource_pane_rows`] and
+/// [`navigator_groups::visible_window`] with `handle_mouse`'s hit-testing in
+/// `application_surface.rs`, so a screen row a viewer clicks and a screen
+/// row this function draws can never disagree about which resource (or
+/// which non-selectable header/spacer) it is.
 fn draw_resources(
     frame: &mut Frame,
     state: &TuiState,
@@ -174,58 +183,84 @@ fn draw_resources(
         return;
     }
 
-    let height = area.height as usize;
-    let selected_index = state
+    let rows = navigator_groups::resource_pane_rows(state);
+    let grouped = state.presentation == PresentationMode::Quick;
+    // Preserves the pre-grouping default: with nothing explicitly selected,
+    // the first resource reads as selected. `row_position` re-expresses that
+    // resource index in the (possibly header-bearing) row plan so the
+    // highlight can never land on a `Header`/`Spacer` line.
+    let selected_resource_index = state
         .selected
         .as_ref()
         .and_then(|selected| state.read_model.position(selected))
         .unwrap_or(0);
-    let first = selected_index.saturating_sub(height.saturating_sub(1));
-    let lines = state
-        .read_model
-        .resources
+    let selected_row = navigator_groups::row_position(&rows, selected_resource_index);
+
+    let height = area.height as usize;
+    let (first, visible) = navigator_groups::visible_window(&rows, selected_row, height);
+    let lines = visible
         .iter()
         .enumerate()
-        .skip(first)
-        .take(height)
-        .map(|(index, item)| {
-            resource_line(state, theme, item, index == selected_index, area.width, glyphs)
+        .map(|(offset, row)| {
+            let is_selected = selected_row == Some(first + offset);
+            pane_row_line(state, theme, glyphs, row, is_selected, grouped, area.width)
         })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+fn pane_row_line<'a>(
+    state: &TuiState,
+    theme: &Theme,
+    glyphs: Glyphs,
+    row: &NavigatorRow<'a>,
+    selected: bool,
+    grouped: bool,
+    width: u16,
+) -> Line<'a> {
+    match row {
+        NavigatorRow::Header(group) => {
+            Line::from(Span::styled(group.label(), theme.heading()))
+        }
+        NavigatorRow::Spacer => Line::raw(""),
+        NavigatorRow::Item { item, .. } => {
+            let indent = if grouped { 2 } else { 0 };
+            resource_line(state, theme, glyphs, item, selected, indent, width)
+        }
+    }
+}
+
 fn resource_line<'a>(
     state: &TuiState,
     theme: &Theme,
+    glyphs: Glyphs,
     item: &'a ResourceListItem,
     selected: bool,
+    indent: usize,
     width: u16,
-    glyphs: Glyphs,
 ) -> Line<'a> {
     let staged = state.staged.get(&item.resource).is_some();
     let cursor = if selected { glyphs.list_cursor() } else { " " };
-    let staged_mark = if staged { '*' } else { ' ' };
+    let staged_mark = if staged { glyphs.staged() } else { ' ' };
     let kind = format!("[{}]", item.kind.as_str());
-    let fixed = 5 + kind.chars().count();
+    let fixed = indent + 5 + kind.chars().count();
     let available = (width as usize).saturating_sub(fixed);
     let label_width = available.min(28);
     let summary_width = available.saturating_sub(label_width + 1);
 
-    let mut spans = vec![
-        Span::styled(
-            format!("{cursor}{staged_mark} "),
-            if staged { theme.staged() } else { theme.accent() },
-        ),
-        Span::styled(
-            format!("{} ", pad(&kind, 20.min(kind.chars().count().max(8)), glyphs)),
-            theme.dim(),
-        ),
-        Span::styled(
-            pad(&item.label, label_width, glyphs),
-            if selected { theme.selected() } else { theme.base() },
-        ),
-    ];
+    let mut spans = vec![Span::raw(" ".repeat(indent))];
+    spans.push(Span::styled(
+        format!("{cursor}{staged_mark} "),
+        if staged { theme.staged() } else { theme.accent() },
+    ));
+    spans.push(Span::styled(
+        format!("{} ", pad(&kind, 20.min(kind.chars().count().max(8)), glyphs)),
+        theme.dim(),
+    ));
+    spans.push(Span::styled(
+        pad(&item.label, label_width, glyphs),
+        if selected { theme.selected() } else { theme.base() },
+    ));
     if summary_width > 3 {
         spans.push(Span::styled(
             format!(
