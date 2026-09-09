@@ -9,22 +9,23 @@ use aikit_adapters::runner::SystemRunner;
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
 use aikit_core::knowledge_code::CodeIndexProvider;
 use aikit_core::knowledge_source_pool::{
-    material_for_actor, NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider,
+    NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider, material_for_actor,
 };
-use aikit_core::knowledge_wiki::{parse_wiki_objects, OkfWikiBundle, WikiObject};
+use aikit_core::knowledge_wiki::{OkfWikiBundle, WikiObject, parse_wiki_objects};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
 use aikit_core::resource::{
-    ProviderRef, ResourceIndex, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
+    parse_or_search_expression, resolve_subjects, ProviderRef, ResolveExpression,
+    ResourceIndex, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
 };
 use aikit_core::{
-    FamiliarityContext, ForgetScope, KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation,
-    KnowledgeProviderStatus, KnowledgeRankingEvidence, KnowledgeSearchResult, KnowledgeSources,
-    Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+    DEFAULT_FAMILIARITY_HALF_LIFE_MS, FamiliarityContext, ForgetScope, KnowledgeAddress,
+    KnowledgeApplication, KnowledgeExplanation, KnowledgeOpenReceipt, KnowledgeProviderStatus,
+    KnowledgeRankingEvidence, KnowledgeSearchResult, KnowledgeSources, Result,
 };
 use aikit_store::{
-    append_familiarity_observation, append_familiarity_reset, KnowledgeApplicationReceipt,
-    KnowledgeApplicationStore, SqliteWikiProvider,
+    KnowledgeApplicationReceipt, KnowledgeApplicationStore, SqliteWikiProvider,
+    append_familiarity_observation, append_familiarity_reset,
 };
 use aikit_tui::backend::PaletteBackend;
 
@@ -44,6 +45,15 @@ pub(super) struct KnowledgeRuntime {
 }
 
 impl KnowledgeRuntime {
+    /// Flow cognition (W1.4/W1.5) reads identity and material through these
+    /// same owners; it creates no second wiki or source-pool access path.
+    pub(super) fn wiki_index(&self) -> Option<&SemanticWikiIndex> {
+        self.wiki.as_ref().map(SqliteWikiProvider::index)
+    }
+
+    pub(super) fn source_material(&self) -> &[SourceMaterial] {
+        &self.material
+    }
     fn application(&self, context: FamiliarityContext) -> KnowledgeApplication<'_> {
         let mut application = KnowledgeApplication::new(context)
             .with_source_pool(&self.native_source, &self.material)
@@ -66,7 +76,7 @@ impl Service {
         self.knowledge_runtime.borrow_mut().take();
     }
 
-    fn knowledge_context(&self) -> FamiliarityContext {
+    pub(super) fn knowledge_context(&self) -> FamiliarityContext {
         FamiliarityContext {
             project: self
                 .descriptor
@@ -83,7 +93,7 @@ impl Service {
         KnowledgeApplicationStore::new(self.home.clone())
     }
 
-    fn with_knowledge<T>(
+    pub(super) fn with_knowledge<T>(
         &self,
         operation: impl FnOnce(&KnowledgeRuntime, KnowledgeApplication<'_>) -> Result<T>,
     ) -> Result<T> {
@@ -100,13 +110,24 @@ impl Service {
     }
 
     pub fn knowledge_search(&self, query: &str, limit: usize) -> Result<KnowledgeSearchResult> {
+        let expression = parse_or_search_expression(query)?;
+        let mut result = self.knowledge_resolve(&expression, limit)?;
+        result.query = query.into();
+        Ok(result)
+    }
+
+    pub fn knowledge_resolve(
+        &self,
+        expression: &ResolveExpression,
+        limit: usize,
+    ) -> Result<KnowledgeSearchResult> {
         let candidate_limit = if limit == 0 { 0 } else { limit.max(256) };
         let mut result = self.with_knowledge(|runtime, application| {
-            let mut result = application.search(query, candidate_limit);
+            let mut result = application.resolve(expression, candidate_limit);
             result.absences.extend(runtime.absences.clone());
             Ok(result)
         })?;
-        self.apply_learned_accessibility(query, &mut result)?;
+        self.apply_learned_accessibility(&resolve_subjects(expression), &mut result)?;
         result.hits.truncate(limit);
         if let Err(error) = self.knowledge_store().remember_search_hits(&result.hits) {
             result.absences.push(format!(
@@ -117,9 +138,38 @@ impl Service {
         Ok(result)
     }
 
+    /// Human/shell front over [`Self::knowledge_resolve`]: it parses the typed
+    /// input through the one operative grammar and delegates. `aikit knowledge
+    /// search` reaches retrieval only through here.
+    pub fn knowledge_open(&mut self, resource: &ResourceRef) -> Result<KnowledgeOpenReceipt> {
+        let address = self.knowledge_address(resource)?.ok_or_else(|| {
+            aikit_core::AikitError::new(
+                "knowledge.open_unresolved",
+                format!("no knowledge provider resolves {resource}"),
+            )
+        })?;
+        let reading = self.knowledge_read(&address)?;
+        let observation_id = format!("knowledge-open-use/{}", aikit_core::EventId::generate());
+        let observation = aikit_core::FamiliarityObservation::destination(
+            observation_id.clone(),
+            resource.clone(),
+            self.knowledge_context(),
+            now_ms(),
+        )
+        .from_surface(ResourceRef::parse("surface/aikit/knowledge")?);
+        append_familiarity_observation(&self.index, observation)?;
+        Ok(KnowledgeOpenReceipt {
+            opened: resource.clone(),
+            address,
+            provider: reading.provider.map(|provider| provider.to_string()),
+            recorded: "familiarity/resource-use".into(),
+            observation_id,
+        })
+    }
+
     fn apply_learned_accessibility(
         &self,
-        query: &str,
+        subjects: &[&str],
         result: &mut KnowledgeSearchResult,
     ) -> Result<()> {
         let Some(store) = PaletteBackend::familiarity(self)? else {
@@ -176,8 +226,8 @@ impl Service {
         }
         if influenced {
             result.hits.sort_by(|left, right| {
-                exact_knowledge_hit(left, query)
-                    .cmp(&exact_knowledge_hit(right, query))
+                exact_knowledge_hit(left, subjects)
+                    .cmp(&exact_knowledge_hit(right, subjects))
                     .reverse()
                     .then_with(|| {
                         let left_score = left
@@ -222,7 +272,8 @@ impl Service {
             if runtime.project_map.endpoint(resource).is_some() {
                 return Ok(Some(KnowledgeAddress::ProjectMap(resource.clone())));
             }
-            let result = application.search(resource.as_str(), 256);
+            let result =
+                application.resolve(&ResolveExpression::ordinary_search(resource.as_str()), 256);
             Ok(result
                 .hits
                 .into_iter()
@@ -294,7 +345,7 @@ impl Service {
         // Explain keeps provider-native detail and learned ranking evidence separate.
         let resource = address.resource_ref();
         let ranking = self
-            .knowledge_search(resource.as_str(), 256)?
+            .knowledge_resolve(&ResolveExpression::ordinary_search(resource.as_str()), 256)?
             .hits
             .into_iter()
             .find(|hit| hit.resource == resource)
@@ -770,15 +821,17 @@ fn resolve_provider_path(root: &Path, raw: &str) -> PathBuf {
     }
 }
 
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or_default()
 }
 
-fn exact_knowledge_hit(hit: &aikit_core::KnowledgeSearchHit, query: &str) -> bool {
-    !query.is_empty()
-        && (hit.resource.as_str().eq_ignore_ascii_case(query)
-            || hit.label.eq_ignore_ascii_case(query))
+fn exact_knowledge_hit(hit: &aikit_core::KnowledgeSearchHit, subjects: &[&str]) -> bool {
+    subjects.iter().any(|subject| {
+        !subject.is_empty()
+            && (hit.resource.as_str().eq_ignore_ascii_case(subject)
+                || hit.label.eq_ignore_ascii_case(subject))
+    })
 }

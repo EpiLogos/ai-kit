@@ -22,8 +22,8 @@ use aikit_core::projection::ActivationEffect;
 use aikit_core::resolve::ResolvedView;
 use aikit_core::resource::{
     ActionStageability, ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass,
-    OwnerRef, ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
-    ResourceSource, SourceAuthority, SourceRef, SourceState,
+    OwnerRef, ResolveExpression, ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef,
+    ResourceSearchIndex, ResourceSource, SourceAuthority, SourceRef, SourceState,
 };
 use aikit_core::scope::{ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
@@ -588,9 +588,9 @@ pub trait PaletteBackend {
     // Knowledge operations deliberately live on the same shared application seam
     // as CLI/TUI. Defaults preserve deterministic fake backends; production owns
     // materialisation and returns Some(..) for the supported operation family.
-    fn knowledge_search(
+    fn knowledge_resolve(
         &self,
-        _query: &str,
+        _expression: &ResolveExpression,
         _limit: usize,
     ) -> Result<Option<KnowledgeSearchResult>> {
         Ok(None)

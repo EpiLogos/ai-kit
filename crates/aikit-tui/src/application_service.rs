@@ -13,7 +13,7 @@ use aikit_core::composition_mutation::{changed_ground, CompositionBasis};
 use aikit_core::id::{CapsuleId, EventId};
 use aikit_core::resource::{
     action_semantic_profile, parse_or_search_expression, resolve_action_candidates,
-    resolve_expression, resolve_path_identity, ContextualActionDescriptor, NavigationEvidence,
+    resolve_expression, resolve_path_identity, resolve_subjects, ContextualActionDescriptor, NavigationEvidence,
     NavigationEvidenceClass, ResolveExpression, ResolvePath, ResolvePathStep, ResourceDescriptor,
     ResourceIndex, ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
 };
@@ -114,7 +114,11 @@ impl<'a> ApplicationService<'a> {
             if subject.trim().is_empty() {
                 continue;
             }
-            if let Some(knowledge) = backend.knowledge_search(subject, 256)? {
+            // A subject is already a subject: it reaches Knowledge as a typed
+            // expression, never as raw text to be lexed a second time.
+            if let Some(knowledge) =
+                backend.knowledge_resolve(&ResolveExpression::ordinary_search(subject), 256)?
+            {
                 for hit in knowledge.hits {
                     if ResourceIndex::resource(&index, &hit.resource).is_some() {
                         continue;
@@ -1025,28 +1029,6 @@ impl TuiApplicationService for ApplicationService<'_> {
     }
 }
 
-fn resolve_subjects(expression: &ResolveExpression) -> Vec<&str> {
-    let mut subjects = Vec::new();
-    collect_resolve_subjects(expression, &mut subjects);
-    subjects.sort_unstable();
-    subjects.dedup();
-    subjects
-}
-
-fn collect_resolve_subjects<'a>(expression: &'a ResolveExpression, subjects: &mut Vec<&'a str>) {
-    match expression {
-        ResolveExpression::Subject { value } => subjects.push(value.as_str()),
-        ResolveExpression::Address { expression, .. }
-        | ResolveExpression::Unary { expression, .. }
-        | ResolveExpression::Frame { expression } => {
-            collect_resolve_subjects(expression, subjects);
-        }
-        ResolveExpression::Binary { left, right, .. } => {
-            collect_resolve_subjects(left, subjects);
-            collect_resolve_subjects(right, subjects);
-        }
-    }
-}
 
 fn familiarity_context(context: &aikit_core::ContextDescriptor) -> FamiliarityContext {
     FamiliarityContext {

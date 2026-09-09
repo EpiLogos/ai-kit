@@ -1,0 +1,84 @@
+# The wiki's own authoring conventions, as data the engine can read.
+#
+# Every rule below is a restatement of a sentence that was already authored
+# somewhere else; `provenance` names that file. Nothing here is a house rule
+# invented for this declaration — PROGRAMME §7 forbids agent-authored
+# material from becoming authored source, and a domain that invented its own
+# conventions would be exactly that violation wearing the engine's voice.
+#
+# Path-addressed only (no prompt trigger): it becomes operative when
+# `hook/continuity/file-context` is composed and an operation is about to
+# touch wiki or NOW Markdown.
+
+schema = "aikit.knowledge-domain/v1"
+id = "domain/wiki-inhabitation"
+title = "Wiki inhabitation — authoring conventions for wiki and NOW Markdown"
+revision = "r1"
+source = "central:source:project:ai-kit:.aikit/domains/wiki-inhabitation.toml"
+
+# The wiki field's own Markdown (returns included) and the NOW field, which
+# W10 rev 4 §3 names as a localised wiki instance inside the same system.
+# `**` crosses `/` here, so each field needs its direct-child pattern too.
+path_patterns = [
+    "ProjectCentral/agents/wiki/*.md",
+    "ProjectCentral/agents/wiki/**/*.md",
+    "ProjectCentral/now/*.md",
+    "ProjectCentral/now/**/*.md",
+]
+
+# @2 Pratibimba (readings and interpretations) through @3 Language (forms,
+# documents, source) — PROGRAMME §6's horizon table. Wiki authoring produces
+# readings in document form; it addresses nothing outside that span, and in
+# particular never reaches @1 personal ground.
+[horizon_range]
+min = 2
+max = 3
+
+# The only `standing` rule here, and the reason the classification exists:
+# a violation of this one cannot be undone from inside the wiki. Restates the
+# Boundary section of the shipped wiki-inhabitation Skill capsule ("Wiki
+# generation leaves authored source in place… generation alone confers no
+# authorship or adoption"), which is the capsule form of PROGRAMME §7's
+# provenance law and of the §4.1 invariant-law column. A standing rule is
+# reasserted every turn, so its rationale is kept to one sentence.
+[[guidance]]
+rule = "Wiki generation leaves authored source in place: generating, staging or populating wiki material confers no authorship or adoption, and observed, inferred or learned material becomes authored source only through human Recognition."
+rationale = "generated material that lands in the authored account is indistinguishable from authored ground the moment it is written, and no wiki operation reaches back out of the wiki to correct it"
+provenance = "central:source:project:ai-kit:registry/capsules/skill/aikit/wiki-inhabitation/payload/SKILL.md#boundary"
+classification = "standing"
+
+[[guidance]]
+rule = "Record source refs and exact revisions before interpreting content."
+rationale = "Authored verbatim as step 1 of the documentation population contract."
+provenance = "central:source:project:ai-kit:docs/v2/21-PROJECT-REFLECTION-AND-LOCAL-ARTICULATION.md#15-documentation-population-contract"
+classification = "ordinary"
+
+[[guidance]]
+rule = "Attribute inferred relations separately from source-explicit relations; an address with no attributable determination to record stays empty."
+rationale = "Population contract step 4: 'Attribute inferred relations separately from source-explicit relations. An empty matrix address remains empty unless there is an attributable determination to record.'"
+provenance = "central:source:project:ai-kit:docs/v2/21-PROJECT-REFLECTION-AND-LOCAL-ARTICULATION.md#15-documentation-population-contract"
+classification = "ordinary"
+
+[[guidance]]
+rule = "Resolve explicit [[links]], resource maps, memberships and declared tags against the inventory; preserve pending and ambiguous targets rather than manufacturing nodes. Tags aid discovery; they do not establish semantic edges or authority by themselves."
+rationale = "Population contract step 3, joined to the Skill capsule's 'retain pending/ambiguous targets rather than manufacturing nodes'."
+provenance = "central:source:project:ai-kit:docs/v2/21-PROJECT-REFLECTION-AND-LOCAL-ARTICULATION.md#15-documentation-population-contract"
+classification = "ordinary"
+
+[[guidance]]
+rule = "A source item can remain an ordinary `1`; a `0/1` discloses a whole with an explicit anchor, actual members and Return. The material and the question determine the grain, a partial whole stays partial, and declared partial, twofold, threefold, fourfold, sixfold and conjugated forms are preserved where present."
+rationale = "The grain paragraph of the population contract, restated with the Skill capsule's 'A partial whole stays partial.'"
+provenance = "central:source:project:ai-kit:docs/v2/21-PROJECT-REFLECTION-AND-LOCAL-ARTICULATION.md#15-documentation-population-contract"
+classification = "ordinary"
+
+[[guidance]]
+rule = "Generate only the knowledge the current task requires; the source files remain the authored account."
+rationale = "Population contract step 4 ('Generate only the knowledge required for this population task') and the Skill capsule's 'The source files remain the authored account; populate only the bounded knowledge required to disclose their relations and answer the task.'"
+provenance = "central:source:project:ai-kit:registry/capsules/skill/aikit/wiki-inhabitation/payload/SKILL.md#population-and-return"
+classification = "ordinary"
+
+[[guidance]]
+rule = "NOW is an ad hoc localised wiki inside the same mental system, not a parallel one: its disclosures stay lean and use the wikilink convention, leaning on the main wiki's relational intelligence rather than restating it."
+rationale = "W10 rev 4 §3, an owner refinement: 'NOW is an ad hoc localised wiki — inside the mental system, not parallel to it… ad hoc, lean disclosures, wikilink convention enforced… NOW disclosures lean on the main wiki's relational intelligence rather than restating it.' This is the rule that earns ProjectCentral/now/**/*.md its place in the patterns above."
+provenance = "Work/wiki-continuity-2026-09-06/W10-WIKI-INHABITANTS.md#rev-4-final-owner-refinements-2026-09-07"
+classification = "ordinary"

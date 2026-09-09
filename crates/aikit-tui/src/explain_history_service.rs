@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use aikit_core::resource::{ResourceIndex, ResourceRef, SourceAuthority};
+use aikit_core::resource::{ResolveExpression, ResourceIndex, ResourceRef, SourceAuthority};
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::{
     explain_resource_evidence, EvidenceProvenance, ExplainEvidence, ExplainFact,
@@ -99,7 +99,9 @@ impl ExplainHistoryApplicationService for ApplicationService<'_> {
                 });
             }
 
-            if let Some(search) = backend.knowledge_search(resource.as_str(), 256)? {
+            if let Some(search) = backend
+                .knowledge_resolve(&ResolveExpression::ordinary_search(resource.as_str()), 256)?
+            {
                 if let Some(ranking) = search
                     .hits
                     .into_iter()

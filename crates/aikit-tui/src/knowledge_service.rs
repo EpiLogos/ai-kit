@@ -5,6 +5,7 @@
 //! search, read, relations, routes, context packs, sources, explain and history;
 //! the TUI is only a consumer of those typed read models.
 
+use aikit_core::resource::ResolveExpression;
 use aikit_core::{
     KnowledgeAddress, KnowledgeApplication, KnowledgeContextPack, KnowledgeExplanation,
     KnowledgeOperations, KnowledgeProviderStatus, KnowledgeReading, KnowledgeRelationView,
@@ -12,6 +13,11 @@ use aikit_core::{
 };
 
 pub trait KnowledgeNavigationService {
+    fn knowledge_resolve(
+        &self,
+        expression: &ResolveExpression,
+        limit: usize,
+    ) -> KnowledgeSearchResult;
     fn knowledge_search(&self, query: &str, limit: usize) -> KnowledgeSearchResult;
     fn knowledge_read(&self, address: &KnowledgeAddress) -> Result<KnowledgeReading>;
     fn knowledge_relations(
@@ -38,6 +44,14 @@ pub trait KnowledgeNavigationService {
 }
 
 impl KnowledgeNavigationService for KnowledgeApplication<'_> {
+    fn knowledge_resolve(
+        &self,
+        expression: &ResolveExpression,
+        limit: usize,
+    ) -> KnowledgeSearchResult {
+        KnowledgeOperations::resolve(self, expression, limit)
+    }
+
     fn knowledge_search(&self, query: &str, limit: usize) -> KnowledgeSearchResult {
         KnowledgeOperations::search(self, query, limit)
     }

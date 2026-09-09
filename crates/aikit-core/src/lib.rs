@@ -44,6 +44,7 @@ pub mod explain_history;
 pub mod explain_history_actions;
 pub mod familiarity;
 pub mod flow;
+pub mod flow_cognition;
 pub mod frecency;
 pub mod guidance;
 pub mod harness_admission;
@@ -61,6 +62,7 @@ pub mod knowledge_living_transport;
 pub mod knowledge_navigation;
 pub mod knowledge_okf;
 pub mod knowledge_operations;
+pub mod knowledge_resolution;
 pub mod knowledge_source_pool;
 pub mod knowledge_wiki;
 pub mod knowledge_wiki_index;
@@ -91,6 +93,7 @@ pub mod scope;
 pub mod search;
 pub mod session;
 pub mod session_ecology;
+pub mod session_lifecycle;
 pub mod session_space;
 pub mod session_space_application;
 pub mod session_space_contribution;
@@ -201,6 +204,12 @@ pub use flow::{
     FLOW_GUIDANCE_CAPSULE, FLOW_KNOWLEDGE_NAVIGATION_REF, FLOW_LIVING_KNOWLEDGE_REF,
     FLOW_METHOD_REF, FLOW_METHOD_SOURCE, FLOW_SKILL_REF,
 };
+pub use flow_cognition::{
+    changed_since_thought, explain_flow_contemplate_preflight, explicit_flow_contemplate_validated,
+    flow_cognition_from_outcome, validate_flow_contemplate_record, FlowChangedSince,
+    FlowChangedSinceState, FlowCognition, FlowThoughtOutcome, FlowThoughtRecord,
+    FLOW_CHANGED_SINCE_VERSION, FLOW_COGNITION_VERSION, FLOW_CONTEMPLATE_USE_RECORDED,
+};
 pub use frecency::{Candidate, Jump, Tiebreak};
 pub use guidance::{
     compose, estimate_tokens, Composition, CompositionEntry, CompositionRequest, FragmentStatus,
@@ -218,8 +227,8 @@ pub use hooks::{
     StepRecord, StepResult, StepVerdict,
 };
 pub use id::{
-    CapsuleId, ContextId, EventId, GenerationId, InboxId, ProcedureId, ProfileId, ProjectId,
-    RegistrySource, Revision, SessionId,
+    CapsuleId, ContextId, EventId, GenerationId, InboxId, PermissionRequestId, ProcedureId,
+    ProfileId, ProjectId, RegistrySource, Revision, SessionActivityId, SessionId,
 };
 pub use knowledge::{
     ContainmentRole, ContextPackBudget, KnowledgeContextPack, KnowledgeReading,
@@ -266,6 +275,12 @@ pub use knowledge_navigation::{
 pub use knowledge_okf::{validate_okf, OkfDocument, OKF_VERSION};
 pub use knowledge_operations::{
     KnowledgeOperations, KnowledgeSources, KNOWLEDGE_OPERATIONS_VERSION,
+};
+pub use knowledge_resolution::{
+    KnowledgeOpenReceipt, KnowledgeResolution, ResolutionKind, ResolutionRow, UnavailableProvider,
+    ACTION_CONTEMPLATE_FLOW, ACTION_KNOWLEDGE_EXPLAIN, ACTION_KNOWLEDGE_OPEN,
+    ACTION_KNOWLEDGE_READ, ACTION_KNOWLEDGE_RELATIONS, ACTION_KNOWLEDGE_ROUTE,
+    ACTION_KNOWLEDGE_SOURCES, ACTION_RUN, ACTION_SKILL_OVERLAY_SET, KNOWLEDGE_RESOLUTION_VERSION,
 };
 pub use knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceBinding, SourceHit, SourceMaterial,

@@ -34,9 +34,10 @@ pub use model_roster::{
     MODEL_ROSTER_VERSION,
 };
 pub use operative::{
-    action_semantic_profile, horizons_for_resource, parse_or_search_expression,
+    action_semantic_profile, horizons_for_kind, horizons_for_resource, parse_or_search_expression,
     parse_resolve_expression, resolve_action_candidates, resolve_expression, resolve_path_identity,
-    resolve_search, six_horizon_disclosure, ActionRef, ActionSemanticProfile, AddressHorizon,
+    resolve_search, resolve_subjects, six_horizon_disclosure, ActionRef, ActionSemanticProfile,
+    AddressHorizon,
     RelationOp, ResolveCandidate, ResolveExpression, ResolvePath, ResolvePathStep,
     ResolvedActionCandidate, OPERATIVE_SYNTAX_VERSION,
 };
