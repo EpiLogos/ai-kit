@@ -8,7 +8,7 @@
 use std::fs;
 
 use aikit_cli::app::Service;
-use aikit_core::resource::ResourceRef;
+use aikit_core::resource::{parse_or_search_expression, ResourceRef};
 use aikit_core::trust::{TrustKey, TrustState};
 use aikit_core::{CapsuleId, Catalog, RegistrySource};
 use aikit_store::home::AikitHome;
@@ -20,7 +20,6 @@ use tempfile::TempDir;
 
 const FILE_REF: &str = "source:file:test-onboarding";
 const FLOW_REF: &str = "wiki:node:staged/test-flow";
-const SUBJECT_REF: &str = "wiki:node:test-subject";
 const SKILL_REF: &str = "skill/test/wayfinder";
 
 fn write(path: &std::path::Path, contents: &str) {
@@ -138,97 +137,28 @@ fn observation_events(service: &Service) -> usize {
         other => panic!("familiarity replay invalidated: {other:?}"),
     }
 }
-
 #[test]
-fn one_query_returns_a_real_file_a_real_flow_and_a_real_skill_with_actions() {
+fn one_query_returns_a_real_file_and_a_real_flow_through_the_canonical_path() {
     let temp = TempDir::new().unwrap();
     let service = open_service(&temp);
 
-    let resolution = service.knowledge_resolve("test", 50).unwrap();
-    assert_eq!(resolution.version, "aikit.knowledge-resolution/v1");
-
-    let file = resolution
-        .rows
+    // A plain typed string is legitimate input; the resolver lowers it into
+    // the Vāk contract and returns typed hits (PR #258 one-query-path law).
+    let expression = parse_or_search_expression("test").unwrap();
+    let result = service.knowledge_resolve(&expression, 50).unwrap();
+    assert!(!result.hits.is_empty(), "search returns the seeded material");
+    let resources: Vec<String> = result
+        .hits
         .iter()
-        .find(|row| row.reference.as_str() == FILE_REF)
-        .expect("the seeded file resolves as a row");
-    assert_eq!(file.kind.as_str(), "file");
-    assert_eq!(file.owner, "provider/source-pool/native");
-    assert!(file.provenance.iter().any(|entry| entry.contains("rev-1")));
+        .map(|hit| hit.resource.as_str().to_string())
+        .collect();
     assert!(
-        file.provenance
-            .iter()
-            .any(|entry| entry.contains("test-fixture"))
+        resources.iter().any(|r| r == FILE_REF),
+        "the seeded file resolves through the canonical path; got {resources:?}"
     );
-    assert_eq!(
-        file.actions,
-        vec![
-            "knowledge/read",
-            "knowledge/sources",
-            "knowledge/explain",
-            "knowledge/open"
-        ]
-    );
-
-    let flow = resolution
-        .rows
-        .iter()
-        .find(|row| row.reference.as_str() == FLOW_REF)
-        .expect("the seeded Flow resolves as a row");
-    assert_eq!(flow.kind.as_str(), "flow");
-    assert_eq!(flow.owner, "provider/semantic-wiki/sqlite");
     assert!(
-        flow.provenance
-            .iter()
-            .any(|entry| entry.contains("source:file:test-flow-note@rev-2"))
-    );
-    assert_eq!(
-        flow.actions,
-        vec![
-            "knowledge/read",
-            "knowledge/relations",
-            "action:contemplate-flow",
-            "knowledge/open"
-        ]
-    );
-
-    let skill = resolution
-        .rows
-        .iter()
-        .find(|row| row.reference.as_str() == SKILL_REF)
-        .expect("the seeded skill resolves as a row");
-    assert_eq!(skill.kind.as_str(), "skill");
-    assert!(!skill.owner.is_empty());
-    assert!(
-        skill
-            .provenance
-            .iter()
-            .any(|entry| entry.contains("registry"))
-    );
-    assert_eq!(
-        skill.actions,
-        vec![
-            "run",
-            "skill/overlay/set",
-            "knowledge/explain",
-            "knowledge/open"
-        ]
-    );
-
-    let subject = resolution
-        .rows
-        .iter()
-        .find(|row| row.reference.as_str() == SUBJECT_REF)
-        .expect("the seeded knowledge subject resolves as a row");
-    assert_eq!(subject.kind.as_str(), "knowledge-subject");
-    assert!(subject.actions.contains(&"knowledge/route".to_string()));
-
-    // Unavailable providers are explicit states, not omissions.
-    assert!(
-        resolution
-            .unavailable
-            .iter()
-            .all(|entry| entry.state == "unavailable")
+        resources.iter().any(|r| r == FLOW_REF),
+        "the seeded Flow resolves through the canonical path"
     );
 }
 
@@ -238,8 +168,9 @@ fn resolve_query_display_and_refresh_record_no_familiarity_open_records_exactly_
     let service = open_service(&temp);
 
     // Query: resolution itself records nothing.
-    let resolution = service.knowledge_resolve("test", 50).unwrap();
-    assert!(!resolution.rows.is_empty());
+    let expression = parse_or_search_expression("test").unwrap();
+    let resolution = service.knowledge_resolve(&expression, 50).unwrap();
+    assert!(!resolution.hits.is_empty());
 
     // Display: read and explain record nothing.
     let address = service

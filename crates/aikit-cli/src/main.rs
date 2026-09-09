@@ -1602,7 +1602,11 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             jval!(result)
         }
         KnowledgeSub::Resolve(a) => {
-            let resolution = service.knowledge_resolve(&a.query, a.limit)?;
+            // One query path: a plain typed string is legitimate input and is
+            // lowered into the Vāk resolver contract before resolution.
+            let expression =
+                aikit_core::resource::parse_or_search_expression(&a.query)?;
+            let resolution = service.knowledge_resolve(&expression, a.limit)?;
             warnings.extend(resolution.absences.clone());
             jval!(resolution)
         }
