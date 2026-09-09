@@ -78,6 +78,19 @@ impl AikitHome {
         self.root.join("registries")
     }
 
+    /// The personal KnowledgeDomain register, `<home>/domains`.
+    ///
+    /// Domains have been project-layer data only (`<project>/.aikit/domains`),
+    /// which meant a convention could be declared inside one project and
+    /// nowhere else — including not at the root register, where the root wiki
+    /// and cross-project work live. This is the personal-scope half of the same
+    /// declaration: same schema, same grammar, lower precedence than a
+    /// project's own, so a project can still say something different about
+    /// itself.
+    pub fn domains(&self) -> PathBuf {
+        self.root.join("domains")
+    }
+
     /// The personal profile tree, `<home>/profiles`. Distinct from a registry's
     /// own `profiles/` directory.
     pub fn profiles(&self) -> PathBuf {
@@ -210,6 +223,7 @@ impl AikitHome {
         for dir in [
             self.root.clone(),
             self.registries(),
+            self.domains(),
             self.profiles(),
             self.inbox_ready(),
             self.inbox_quarantine(),

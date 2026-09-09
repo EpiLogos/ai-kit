@@ -21,34 +21,83 @@ use aikit_core::pressure::Block;
 use aikit_core::hooks::HookEvent;
 use aikit_store::index::Index;
 
-/// Load the domain declarations declared in the project layer.
-pub fn load_domains(project_root: &Path) -> (Vec<KnowledgeDomain>, Vec<String>) {
-    let mut domains = Vec::new();
+/// Load the domain declarations in force, personal register first, then the
+/// project's own.
+///
+/// Domains were project-layer data only, and that had a consequence nobody
+/// intended: a convention could be declared inside one project and be
+/// unreachable everywhere else — including at the root register, where the root
+/// wiki and all cross-project work live. A rule about how to write the wiki was
+/// armed in whichever project happened to hold the file.
+///
+/// Two registers, same schema, same grammar:
+///
+/// * `<aikit home>/domains` — personal scope, in force wherever this person
+///   works, including outside any project;
+/// * `<project>/.aikit/domains` — the project's own, and the more specific of
+///   the two.
+///
+/// Precedence is by domain id: a project declaration with the same id as a
+/// personal one **replaces** it rather than merging with it. Merging two
+/// rule lists that were authored separately would produce guidance neither
+/// author wrote, and the more specific declaration is the one whose author knew
+/// about the project.
+pub fn load_domains_in(
+    home_domains: Option<&Path>,
+    project_root: Option<&Path>,
+) -> (Vec<KnowledgeDomain>, Vec<String>) {
+    let mut domains: Vec<KnowledgeDomain> = Vec::new();
     let mut warnings = Vec::new();
-    let dir = project_root.join(".aikit/domains");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(_) => return (domains, warnings), // no domains declared: honest absence
-    };
-    let mut paths: Vec<_> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("toml"))
-        .collect();
-    paths.sort();
-    for path in paths {
-        match std::fs::read_to_string(&path)
-            .map_err(|error| error.to_string())
-            .and_then(|text| KnowledgeDomain::from_toml_str(&text))
-        {
-            Ok(domain) => domains.push(domain),
-            Err(error) => warnings.push(format!(
-                "domain declaration {} refused: {error}",
-                path.display()
-            )),
+    for dir in [
+        home_domains.map(Path::to_path_buf),
+        project_root.map(|root| root.join(".aikit/domains")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue, // no domains declared here: honest absence
+        };
+        let mut paths: Vec<_> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("toml"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            match std::fs::read_to_string(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|text| KnowledgeDomain::from_toml_str(&text))
+            {
+                Ok(domain) => {
+                    // Later register wins by id; the replacement is visible
+                    // rather than silent, because an operator debugging which
+                    // guidance arrived needs to know one declaration shadowed
+                    // another.
+                    if let Some(existing) = domains.iter().position(|held| held.id == domain.id) {
+                        warnings.push(format!(
+                            "domain {} declared in the project layer replaces the personal declaration of the same id",
+                            domain.id
+                        ));
+                        domains[existing] = domain;
+                    } else {
+                        domains.push(domain);
+                    }
+                }
+                Err(error) => warnings.push(format!(
+                    "domain declaration {} refused: {error}",
+                    path.display()
+                )),
+            }
         }
     }
     (domains, warnings)
+}
+
+/// The project-layer-only load, kept for callers that have no home to consult.
+pub fn load_domains(project_root: &Path) -> (Vec<KnowledgeDomain>, Vec<String>) {
+    load_domains_in(None, Some(project_root))
 }
 
 /// The prompt text a submit event carries, if any.
