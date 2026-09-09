@@ -67,6 +67,11 @@ pub enum Command {
     Knowledge(KnowledgeCmd),
     /// Validate, write and repair `okf-wiki/v1` Agent Wiki files.
     Wiki(WikiCmd),
+    /// Declare, validate and compress QL-shaped `WikiConstellation`s against
+    /// the pinned QL shape contract (CASE 18: the shape system's own product
+    /// surface, separate from `wiki` so this case never has to touch that
+    /// command's dispatch).
+    WikiShape(WikiShapeCmd),
     /// Show the effective view for the current context.
     Status(StatusArgs),
     /// Explain why a capability or V2 Resource has its current effective evidence.
@@ -794,6 +799,63 @@ pub enum WikiSub {
     Ingest(WikiIngestArgs),
     /// Read a Wiki file's semantic index: search, neighbours, backlinks.
     Query(WikiQueryCmd),
+}
+
+/// `aikit wiki-shape` — CASE 18's product surface over the QL shape
+/// contract: declaring, validating and compressing `WikiConstellation`s.
+/// A sibling of `wiki`, not a subcommand of it, so this case's work never
+/// touches `wiki`'s own dispatch.
+#[derive(Debug, Args)]
+pub struct WikiShapeCmd {
+    #[command(subcommand)]
+    pub command: WikiShapeSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WikiShapeSub {
+    /// Write a WikiFrame carrying one QL-shaped WikiConstellation into a Wiki
+    /// file. The whole Frame JSON body is read from stdin (the same
+    /// convention as `wiki node create --stdin`); the structural floor
+    /// (conjugate-requires-direct, shape declaration, whole-anchor law) is
+    /// enforced before the write lands, not only when `validate` is run later.
+    Declare(WikiShapeDeclareArgs),
+    /// Validate every constellation a Wiki file holds against the pinned QL
+    /// shape contract: conjugate-requires-direct, the declared shape_ref
+    /// against the contract's own field, the declared grain, the return
+    /// canon's ground_kind, and each member/anchor's declared node stance.
+    Validate(WikiShapeValidateArgs),
+    /// Compress one constellation's direct/conjugate sixfold plus its six
+    /// declared generated relations through the 0 // 1 trinity (the 6+6′
+    /// compression).
+    Compress(WikiShapeCompressArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WikiShapeDeclareArgs {
+    /// The Frame ref being declared. Must match the `ref` the stdin body
+    /// carries; a write never rewrites identity.
+    #[arg(value_name = "FRAME_REF")]
+    pub frame_ref: String,
+    /// The wiki.json file to write.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct WikiShapeValidateArgs {
+    /// The wiki.json file to read.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct WikiShapeCompressArgs {
+    /// The constellation's whole-anchor ref.
+    #[arg(value_name = "ANCHOR_REF")]
+    pub anchor_ref: String,
+    /// The wiki.json file to read.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
 }
 
 #[derive(Debug, Args)]
