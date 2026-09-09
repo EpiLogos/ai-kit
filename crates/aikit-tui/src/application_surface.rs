@@ -39,7 +39,7 @@ use crate::layout::{Glyphs, Layout, Width};
 use crate::navigation::AmbientContext;
 use crate::navigator_groups::{self, NavigatorRow};
 use crate::project_workspace_render::{
-    workspace_section_label, SessionSpaceRoster, WorkspaceReading,
+    workspace_section_label, BoundaryReading, HistoryReading, SessionSpaceRoster, WorkspaceReading,
 };
 use crate::project_world_api::ProjectWorldApplicationService;
 use crate::session_space_service::SessionSpaceApplicationProjection;
@@ -135,6 +135,10 @@ pub struct ApplicationSurfaceController {
     /// §5.1 spine's Continuity step must be able to tell "no SessionSpace
     /// exists" from "we could not ask".
     session_spaces: SessionSpaceRoster,
+    /// History evidence as the boundary disclosed it, read alongside
+    /// `project_world` and refreshed with it. Unreadable is kept distinct from
+    /// empty for the same reason as the SessionSpace roster.
+    history: HistoryReading,
     graph_layout: Option<(GraphLayoutCacheKey, GraphLayout)>,
     /// Host glyph capability for the resting shell — the footer's keycap
     /// hints, field separators, cursors and elision marks — resolved exactly
@@ -199,6 +203,7 @@ impl ApplicationSurfaceController {
         let mut runtime = TuiRuntime::new();
         let project_world;
         let session_spaces;
+        let history;
         {
             let mut service = ApplicationService::new(backend);
             semantic = runtime.step(
@@ -208,6 +213,7 @@ impl ApplicationSurfaceController {
             )?;
             project_world = service.project_world().ok();
             session_spaces = discover_session_spaces(&service, project_world.as_ref());
+            history = BoundaryReading::from_result(service.history_evidence(None));
         }
         let mut controller = Self {
             semantic,
@@ -216,6 +222,7 @@ impl ApplicationSurfaceController {
             project_world,
             ambient,
             session_spaces,
+            history,
             graph_layout: None,
             shell_glyphs,
             graph_glyphs,
@@ -292,7 +299,7 @@ impl ApplicationSurfaceController {
                 frame,
                 &self.semantic,
                 &self.ambient,
-                WorkspaceReading::new(world, &self.session_spaces),
+                WorkspaceReading::new(world, &self.session_spaces, &self.history),
                 self.shell_glyphs,
             );
         } else {
@@ -799,6 +806,7 @@ impl ApplicationSurfaceController {
             self.project_world = service.project_world().ok();
             self.session_spaces =
                 discover_session_spaces(&service, self.project_world.as_ref());
+            self.history = BoundaryReading::from_result(service.history_evidence(None));
         }
         self.refresh_relation(backend)?;
         self.refresh_inspector(backend)
@@ -1216,12 +1224,9 @@ fn discover_session_spaces(
     service: &ApplicationService<'_>,
     world: Option<&ProjectWorldReadModel>,
 ) -> SessionSpaceRoster {
-    match service.session_space_discover(world.map(|world| &world.project.project)) {
-        Ok(spaces) => SessionSpaceRoster::Observed(spaces),
-        Err(error) => SessionSpaceRoster::Unreadable {
-            reason: error.to_string(),
-        },
-    }
+    BoundaryReading::from_result(
+        service.session_space_discover(world.map(|world| &world.project.project)),
+    )
 }
 
 fn ambient_context(descriptor: &aikit_core::ContextDescriptor) -> AmbientContext {
