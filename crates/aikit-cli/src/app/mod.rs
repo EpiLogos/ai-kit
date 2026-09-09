@@ -1342,7 +1342,42 @@ impl Service {
                     "continuity/project-recency unavailable: {error}")),
             }
         }
+        // Star prompt-commands come first and, when one matches, the domain
+        // branch does not run: an explicit protocol the user asked for is not
+        // improved by ambient guidance piled on top of it.
+        let mut star_matched = false;
         if event.kind == aikit_core::hooks::HookEventKind::UserPromptSubmit
+            && tuning.allows(aikit_core::continuity::STAR_COMMANDS)
+        {
+            let capsule_id =
+                aikit_core::id::CapsuleId::parse("hook/continuity/star-commands").map_err(
+                    |error| {
+                        AikitError::new(
+                            "capabilities.invalid_id",
+                            format!("engine reaction id is malformed: {error}"),
+                        )
+                    },
+                )?;
+            let config = self
+                .view
+                .active
+                .get(&capsule_id)
+                .map(|active| crate::star_commands::StarConfig::from_config(Some(&active.config)))
+                .unwrap_or_default();
+            let central_root = crate::temporal::process_central_root(event.cwd.as_deref());
+            let routing = crate::star_commands::routing_context(
+                &config,
+                central_root.as_deref(),
+                event.cwd.as_deref(),
+            );
+            let prompt = crate::domain_activation::prompt_of(event);
+            let reaction = crate::star_commands::run(prompt.as_deref(), &config, &routing);
+            star_matched = reaction.matched_any();
+            decision.injected.extend(reaction.blocks);
+            decision.warnings.extend(reaction.warnings);
+        }
+        if event.kind == aikit_core::hooks::HookEventKind::UserPromptSubmit
+            && !star_matched
             && tuning.allows(aikit_core::continuity::DOMAIN_ACTIVATION)
         {
             // Domains are declared data in the project layer; they load only

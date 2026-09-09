@@ -1,0 +1,9 @@
+#!/bin/sh
+# The composition handle for the star-command engine reaction (W2).
+#
+# The engine (aikit-cli dispatch) resolves the tuning at event time; when this
+# capability is composed *and* its `packs` tuning arms a pack, a prompt naming
+# one of that pack's commands is met with the command's protocol. This payload
+# only proves the chain reached it: exit 0, no output, because hook-chain
+# stdout is a gate channel, not an injection channel.
+exit 0

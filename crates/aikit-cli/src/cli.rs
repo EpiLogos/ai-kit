@@ -98,6 +98,8 @@ pub enum Command {
     Rollback(RollbackArgs),
     /// Inspect and change context bindings.
     Context(ContextCmd),
+    /// Inspect the continuity engine's star commands and verify a close-out.
+    Continuity(ContinuityCmd),
     /// Bring up, attach to and reconcile session topologies.
     Session(SessionCmd),
     /// Compose the launch plan: Central profile + Actuation instantiation receipt → actor bootstrap.
@@ -1512,6 +1514,59 @@ pub struct ContextEnvArgs {
     /// The shell whose syntax to emit: bash, zsh, fish or sh.
     #[arg(long, default_value = "bash", value_name = "SHELL")]
     pub shell: String,
+}
+
+// ---------------------------------------------------------------------------
+// continuity
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct ContinuityCmd {
+    #[command(subcommand)]
+    pub command: ContinuitySub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContinuitySub {
+    /// List the star prompt-commands the active composition arms.
+    Commands(ContinuityCommandsArgs),
+    /// Verify that a close-out left the objects it claims to have left.
+    Closeout(ContinuityCloseoutArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ContinuityCommandsArgs {}
+
+#[derive(Debug, Args)]
+pub struct ContinuityCloseoutArgs {
+    #[command(subcommand)]
+    pub command: ContinuityCloseoutSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContinuityCloseoutSub {
+    /// Read the carriers back and report each close-out clause.
+    Verify(ContinuityCloseoutVerifyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ContinuityCloseoutVerifyArgs {
+    /// The project whose NOW field to read. Defaults to the project this
+    /// working directory stands in.
+    #[arg(long, value_name = "PROJECT")]
+    pub project: Option<String>,
+    /// Only count material recorded at or after this unix timestamp, so a
+    /// clause cannot be satisfied by a record from a previous session.
+    #[arg(long, value_name = "UNIX_SECONDS")]
+    pub since: Option<i64>,
+    /// The Factory development-ledger root to check deferred work against.
+    /// Defaults to the composition's `factory_ledger_root` tuning.
+    #[arg(long, value_name = "PATH")]
+    pub ledger_root: Option<String>,
+    /// The Factory Run whose ledger to read. Defaults to the composition's
+    /// `factory_run_ref` tuning.
+    #[arg(long, value_name = "RUN_REF")]
+    pub run: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
