@@ -52,6 +52,7 @@ mod telegram_bot_api;
 pub mod telegram_gateway;
 pub mod working_environment;
 pub mod working_environment_control;
+pub mod workcell_instance_intake;
 
 pub use actuation_stream_projection::{
     project_connection_signal_to_actuation_stream, ActuationStreamAppendProjection,
