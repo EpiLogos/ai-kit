@@ -39,6 +39,26 @@ pub struct DetectionReceipts {
     pub executable_is: Option<String>,
 }
 
+/// One provider-native identity a facet's typed inventory named. Opaque route
+/// metadata: `llama3.2:latest` is how one provider spells one offering today,
+/// and it is never a canonical `ModelRef`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectionInventoryItem {
+    pub id: String,
+    #[serde(default)]
+    pub also_known_as: Option<Vec<String>>,
+}
+
+/// The receipt that observed an inventory. Its presence is what separates
+/// "the provider told us these names" from "we guessed".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectionInventoryReceipt {
+    pub kind: String,
+    pub source: String,
+    pub observed_at: String,
+    pub item_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetectionFacet {
     pub kind: String,
@@ -46,6 +66,17 @@ pub struct DetectionFacet {
     pub exists: bool,
     #[serde(default)]
     pub count: Option<usize>,
+    /// The identities this facet holds, when the descriptor declared a typed
+    /// inventory and it could be read. `None` is not an empty inventory: it
+    /// means nothing was read, and `count` alone names nothing.
+    #[serde(default)]
+    pub inventory: Option<Vec<DetectionInventoryItem>>,
+    #[serde(default)]
+    pub inventory_receipt: Option<DetectionInventoryReceipt>,
+    /// Why an inventory that was declared could not be read. Never an empty
+    /// list read as "this provider offers nothing".
+    #[serde(default)]
+    pub inventory_unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +93,12 @@ pub struct DetectionProbe {
 pub struct DetectionEntry {
     pub slug: String,
     pub harness_ref: String,
+    /// The descriptor's declared native kind (`harness`, `model-provider`, …),
+    /// carried across the seam so a model provider is not semantically
+    /// indistinguishable from an agent harness here. `None` means the record
+    /// predates the field: read that as unclassified, never as a default kind.
+    #[serde(default)]
+    pub native_kind: Option<String>,
     pub state: DetectionState,
     #[serde(default)]
     pub version: Option<String>,
@@ -342,6 +379,142 @@ pub fn detected_harness_resource(
         resource: ResourceRecord::new(descriptor),
         availability: Availability::Available,
     })
+}
+
+
+// ---------------------------------------------------------------------------
+// Harness capability: what a detected harness can actually dispatch to
+// ---------------------------------------------------------------------------
+
+pub const ACTUATION_HARNESS_CAPABILITY_SCHEMA: &str = "actuation.harness-capability/v1";
+
+/// How a harness names a model natively — a config key, a flag, an env var.
+/// AIKit carries this so a surface can say *how* a binding would be made,
+/// without AIKit learning any harness's configuration format.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchSelector {
+    pub kind: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchCredential {
+    pub required: bool,
+    #[serde(default)]
+    pub hint: Option<String>,
+}
+
+/// One provider a harness dispatches to. Deliberately no model ids: which
+/// models a provider serves is that provider's catalogue, and a harness cannot
+/// honestly know it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchProvider {
+    pub provider_ref: String,
+    pub selector: DispatchSelector,
+    pub credential: DispatchCredential,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelDispatch {
+    pub kind: String,
+    #[serde(default)]
+    pub providers: Vec<DispatchProvider>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl ModelDispatch {
+    /// `kind: "none"` is a declared absence, not a missing declaration — the
+    /// two are different facts and only the first is evidence.
+    pub fn binds_providers(&self) -> bool {
+        self.kind == "native-provider-binding"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityEntry {
+    pub harness_slug: String,
+    #[serde(default)]
+    pub model_dispatch: Option<ModelDispatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActuationCapabilityRecord {
+    pub schema: String,
+    pub document: String,
+    pub catalog_revision: u32,
+    pub capabilities: Vec<CapabilityEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CapabilityOutcome {
+    Record(Box<ActuationCapabilityRecord>),
+    Unavailable { reason: String },
+}
+
+impl CapabilityOutcome {
+    pub fn dispatch_for(&self, slug: &str) -> Option<&ModelDispatch> {
+        match self {
+            Self::Record(record) => record
+                .capabilities
+                .iter()
+                .find(|entry| entry.harness_slug == slug)
+                .and_then(|entry| entry.model_dispatch.as_ref()),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    pub fn catalog_revision(&self) -> Option<u32> {
+        match self {
+            Self::Record(record) => Some(record.catalog_revision),
+            Self::Unavailable { .. } => None,
+        }
+    }
+}
+
+/// Read Actuation's harness capability catalogue. A failed run is a disclosed
+/// unavailability: not knowing what a harness dispatches to is different from
+/// knowing it dispatches to nothing.
+pub fn intake_actuation_capabilities(
+    runner: &dyn CommandRunner,
+    actuation_bin: &str,
+) -> CapabilityOutcome {
+    let argv = vec![
+        actuation_bin.to_string(),
+        "harness".to_string(),
+        "capability".to_string(),
+        "--json".to_string(),
+    ];
+    let output = match runner.run(&argv) {
+        Ok(output) => output,
+        Err(error) => {
+            return CapabilityOutcome::Unavailable {
+                reason: format!("could not run {actuation_bin}: {error}"),
+            }
+        }
+    };
+    if output.status != 0 {
+        return CapabilityOutcome::Unavailable {
+            reason: format!(
+                "{actuation_bin} harness capability failed ({}): {}",
+                output.status,
+                output.stderr.trim().chars().take(200).collect::<String>()
+            ),
+        };
+    }
+    match serde_json::from_str::<ActuationCapabilityRecord>(&output.stdout) {
+        Ok(record) if record.schema == ACTUATION_HARNESS_CAPABILITY_SCHEMA => {
+            CapabilityOutcome::Record(Box::new(record))
+        }
+        Ok(record) => CapabilityOutcome::Unavailable {
+            reason: format!("unexpected capability schema {:?}", record.schema),
+        },
+        Err(error) => CapabilityOutcome::Unavailable {
+            reason: format!("capability output unparsable: {error}"),
+        },
+    }
 }
 
 #[cfg(test)]

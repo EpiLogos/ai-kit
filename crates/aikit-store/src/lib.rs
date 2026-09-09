@@ -64,6 +64,7 @@ pub mod index;
 pub mod knowledge_application;
 pub mod knowledge_wiki;
 pub mod locks;
+pub mod model_catalogue;
 pub mod procedure;
 pub mod procedure_history;
 pub mod registry;

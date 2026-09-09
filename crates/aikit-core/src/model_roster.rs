@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::resource::{ProviderRef, ResourceRef};
+use crate::resource::{ModelRoute, ModelRouteSet, ProviderRef, ResourceRef};
 
 pub const MODEL_ROSTER_VERSION: &str = "aikit.model-roster/v1";
 
@@ -282,8 +282,15 @@ pub fn rank_model_roster(
             .policy_score
             .partial_cmp(&a.explanation.policy_score)
             .unwrap_or(Ordering::Equal)
-            .then_with(|| a.model.as_str().cmp(b.model.as_str())),
-        (false, false) => a.model.as_str().cmp(b.model.as_str()),
+            .then_with(|| a.model.as_str().cmp(b.model.as_str()))
+            // Several entries may share one ModelRef and differ only by route;
+            // order them deterministically rather than by input accident.
+            .then_with(|| a.provider.as_str().cmp(b.provider.as_str())),
+        (false, false) => a
+            .model
+            .as_str()
+            .cmp(b.model.as_str())
+            .then_with(|| a.provider.as_str().cmp(b.provider.as_str())),
     });
 
     let winner = entries
@@ -312,6 +319,104 @@ pub fn rank_model_roster(
         policy,
         entries,
     }
+}
+
+/// A selected Model, with its viable routes intact.
+///
+/// The roster evaluates `(ModelRef, route)` pairs, because fitness genuinely
+/// differs by route — a locally served copy and a hosted one have different
+/// latency, price and access. Selection then collapses back to the Model:
+/// choosing a Model is not choosing a provider. Every viable route survives so
+/// Actuation can resolve one now and re-resolve a different one later without
+/// the Agent, the Run or the ModelRef changing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelSelection {
+    pub model: ResourceRef,
+    /// Every route still viable for this Model, best-ranked first. Never
+    /// narrowed to the winning pair's provider.
+    pub viable_routes: Vec<ModelRoute>,
+    /// An explicit owner constraint, when one was given. A pin narrows the
+    /// routes considered; it is not part of Model identity.
+    pub pinned_provider: Option<ProviderRef>,
+    /// The explanation of the best-ranked `(model, route)` pair.
+    pub explanation: ModelRankingExplanation,
+}
+
+impl ModelSelection {
+    pub fn is_resolvable(&self) -> bool {
+        !self.viable_routes.is_empty()
+    }
+}
+
+/// Build one roster candidate per `(ModelRef, route)` pair from a Model's
+/// observed routes. `base` supplies the model-level facts (capabilities,
+/// price, fitness); route facts overwrite only what is route-specific.
+pub fn candidates_from_routes(
+    routes: &ModelRouteSet,
+    base: &ModelRosterCandidate,
+) -> Vec<ModelRosterCandidate> {
+    routes
+        .viable()
+        .into_iter()
+        .map(|route| {
+            let mut candidate = base.clone();
+            candidate.model = routes.model.clone();
+            candidate.provider = route.provider.clone();
+            candidate.variant = route.provider_native_id.clone();
+            candidate.available = true;
+            candidate.provider_usable = true;
+            candidate.access.local_placement =
+                route.kind == crate::resource::ModelRouteKind::LocalServing;
+            candidate.provenance.extend(route.provenance.iter().cloned());
+            candidate
+        })
+        .collect()
+}
+
+/// Collapse a ranked roster back onto Model identity for one Model, keeping
+/// every viable route. Returns `None` when the roster ranked no eligible
+/// `(model, route)` pair for it — a Model that is known but not currently
+/// reachable, which is not the same as an unknown Model.
+pub fn select_model(
+    roster: &ModelRoster,
+    routes: &ModelRouteSet,
+    pinned_provider: Option<&ProviderRef>,
+) -> Option<ModelSelection> {
+    let viable: Vec<ModelRoute> = match pinned_provider {
+        Some(provider) => routes.viable_pinned(provider).into_iter().cloned().collect(),
+        None => routes.viable().into_iter().cloned().collect(),
+    };
+    if viable.is_empty() {
+        return None;
+    }
+    let mut ranked: Vec<&ModelRosterEntry> = roster
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.model == routes.model
+                && entry.explanation.eligible
+                && viable
+                    .iter()
+                    .any(|route| route.provider == entry.provider)
+        })
+        .collect();
+    ranked.sort_by_key(|entry| entry.rank.unwrap_or(usize::MAX));
+    let best = ranked.first()?;
+    // Order the surviving routes by how the roster ranked their pair, so the
+    // first route is the one to try first — without deleting the others.
+    let mut ordered = viable;
+    ordered.sort_by_key(|route| {
+        ranked
+            .iter()
+            .position(|entry| entry.provider == route.provider)
+            .unwrap_or(usize::MAX)
+    });
+    Some(ModelSelection {
+        model: routes.model.clone(),
+        viable_routes: ordered,
+        pinned_provider: pinned_provider.cloned(),
+        explanation: best.explanation.clone(),
+    })
 }
 
 fn evaluate(
@@ -649,6 +754,149 @@ mod tests {
         assert_ne!(a.provider, b.provider);
         let roster = rank_model_roster(demand("coding"), ModelRankingPolicy::LocalInspectability, vec![b]);
         assert!(roster.entries[0].access.inference_access && roster.entries[0].access.interior_access && !roster.entries[0].access.control_access);
+    }
+
+    fn observed_route(model: &str, provider: &str, native: &str, kind: crate::resource::ModelRouteKind) -> ModelRoute {
+        ModelRoute {
+            model: r(model),
+            provider: p(provider),
+            kind,
+            provider_native_id: native.into(),
+            endpoint: None,
+            availability: crate::resource::RouteAvailability::Observed {
+                detection_ref: "detection:2026-09-09T00:00:00Z".into(),
+            },
+            credential: crate::resource::CredentialCondition::NotRequired,
+            provenance: vec!["fixture".into()],
+        }
+    }
+
+    fn two_route_set() -> ModelRouteSet {
+        let mut set = ModelRouteSet::new(r("model:stable"));
+        set.routes.push(observed_route(
+            "model:stable",
+            "provider:ollama",
+            "stable:latest",
+            crate::resource::ModelRouteKind::LocalServing,
+        ));
+        set.routes.push(observed_route(
+            "model:stable",
+            "provider:ninerouter",
+            "vendor/stable",
+            crate::resource::ModelRouteKind::RouterRoute,
+        ));
+        set
+    }
+
+    fn roster_over(set: &ModelRouteSet) -> ModelRoster {
+        let base = candidate("model:stable", Some(1.0), Some(2.0), 0.9, 0.9);
+        rank_model_roster(
+            demand("coding"),
+            ModelRankingPolicy::TaskFit,
+            candidates_from_routes(set, &base),
+        )
+    }
+
+    #[test]
+    fn the_roster_evaluates_model_route_pairs_but_selection_returns_one_model() {
+        let set = two_route_set();
+        let roster = roster_over(&set);
+        assert_eq!(roster.entries.len(), 2, "pairs are evaluated internally");
+        assert!(roster.entries.iter().all(|entry| entry.model == set.model));
+        let selection = select_model(&roster, &set, None).unwrap();
+        assert_eq!(selection.model, set.model);
+        assert_eq!(
+            selection.viable_routes.len(),
+            2,
+            "selecting a Model must not narrow it to the winning pair's provider"
+        );
+        assert_eq!(selection.pinned_provider, None);
+        assert!(selection.is_resolvable());
+    }
+
+    #[test]
+    fn selection_orders_routes_by_rank_without_deleting_the_others() {
+        let set = two_route_set();
+        let base = candidate("model:stable", Some(1.0), Some(2.0), 0.9, 0.9);
+        let mut candidates = candidates_from_routes(&set, &base);
+        // Make the router route the fitter pair; the local one must survive.
+        for entry in candidates.iter_mut() {
+            if entry.provider.as_str() == "provider:ninerouter" {
+                entry.task_fitness.insert("coding".into(), 0.99);
+            } else {
+                entry.task_fitness.insert("coding".into(), 0.10);
+            }
+        }
+        let roster = rank_model_roster(demand("coding"), ModelRankingPolicy::TaskFit, candidates);
+        let selection = select_model(&roster, &set, None).unwrap();
+        assert_eq!(selection.viable_routes[0].provider.as_str(), "provider:ninerouter");
+        assert_eq!(selection.viable_routes.len(), 2);
+        assert!(selection
+            .viable_routes
+            .iter()
+            .any(|route| route.provider.as_str() == "provider:ollama"));
+    }
+
+    #[test]
+    fn pinning_a_provider_constrains_the_route_not_the_model_identity() {
+        let set = two_route_set();
+        let roster = roster_over(&set);
+        let pinned = select_model(&roster, &set, Some(&p("provider:ollama"))).unwrap();
+        assert_eq!(pinned.model, set.model, "identity is unchanged by a pin");
+        assert_eq!(pinned.viable_routes.len(), 1);
+        assert_eq!(pinned.pinned_provider, Some(p("provider:ollama")));
+    }
+
+    #[test]
+    fn a_model_with_no_viable_route_selects_to_nothing_rather_than_a_false_choice() {
+        let mut set = ModelRouteSet::new(r("model:stable"));
+        set.routes.push(ModelRoute {
+            availability: crate::resource::RouteAvailability::Unobserved {
+                reason: "nothing observed".into(),
+            },
+            ..observed_route(
+                "model:stable",
+                "provider:ollama",
+                "stable:latest",
+                crate::resource::ModelRouteKind::LocalServing,
+            )
+        });
+        let roster = roster_over(&set);
+        assert!(roster.entries.is_empty());
+        assert!(select_model(&roster, &set, None).is_none());
+    }
+
+    #[test]
+    fn losing_the_selected_route_re_resolves_to_the_survivor_under_the_same_model_ref() {
+        let set = two_route_set();
+        let before = select_model(&roster_over(&set), &set, None).unwrap();
+        let mut after_set = set.clone();
+        after_set
+            .routes
+            .retain(|route| route.provider.as_str() != "provider:ollama");
+        let after = select_model(&roster_over(&after_set), &after_set, None).unwrap();
+        assert_eq!(before.model, after.model, "the ModelRef survives route loss");
+        assert_eq!(after.viable_routes.len(), 1);
+        assert_eq!(after.viable_routes[0].provider.as_str(), "provider:ninerouter");
+    }
+
+    #[test]
+    fn a_route_local_placement_is_route_fact_not_model_fact() {
+        let set = two_route_set();
+        let base = candidate("model:stable", Some(1.0), Some(2.0), 0.9, 0.9);
+        let candidates = candidates_from_routes(&set, &base);
+        let local = candidates
+            .iter()
+            .find(|c| c.provider.as_str() == "provider:ollama")
+            .unwrap();
+        let router = candidates
+            .iter()
+            .find(|c| c.provider.as_str() == "provider:ninerouter")
+            .unwrap();
+        assert!(local.access.local_placement);
+        assert!(!router.access.local_placement);
+        assert_eq!(local.model, router.model);
+        assert_ne!(local.variant, router.variant);
     }
 
     #[test]

@@ -107,6 +107,8 @@ pub enum Command {
     Session(SessionCmd),
     /// Compose the launch plan: Central profile + Actuation instantiation receipt → actor bootstrap.
     Compose(ComposeArgs),
+    /// Read a Provider Source into the canonical Model catalogue, and read the catalogue back.
+    ModelCatalogue(ModelCatalogueCmd),
     /// Spawn, list and close agent tasks.
     Task(TaskCmd),
     /// Show the capture inbox.
@@ -262,7 +264,48 @@ pub enum GatewaySub {
 /// Arguments for `aikit compose` — the composition reads the authored ground;
 /// nothing here selects a model or harness by hand.
 #[derive(Debug, Args)]
-pub struct ComposeArgs {}
+pub struct ComposeArgs {
+    /// Actualise the selected model through Actuation instead of only
+    /// disclosing the plan. Requires --model.
+    #[arg(long)]
+    pub realise: bool,
+    /// The Model to select, as a canonical `model:<stable-id>` ref.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Pin the provider to use. A pin constrains which route is taken; it
+    /// never changes which Model was selected.
+    #[arg(long)]
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ModelCatalogueCmd {
+    #[command(subcommand)]
+    pub command: ModelCatalogueSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ModelCatalogueSub {
+    /// Read a Provider Source's published model list into the local catalogue.
+    Refresh(ModelCatalogueRefreshArgs),
+    /// Show the resolved catalogue: first-party seed, Provider Sources, owner entries.
+    Show(ModelCatalogueShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ModelCatalogueRefreshArgs {
+    /// Which Provider Source to read. Only `openrouter` is implemented; its
+    /// model list is public and no credential is used.
+    #[arg(long, default_value = "openrouter")]
+    pub provider: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ModelCatalogueShowArgs {
+    /// Only show entries whose ModelRef or name contains this text.
+    #[arg(long)]
+    pub filter: Option<String>,
+}
 
 #[derive(Debug, Args)]
 pub struct SkillCmd {
