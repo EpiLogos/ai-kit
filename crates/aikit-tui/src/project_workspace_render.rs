@@ -19,6 +19,7 @@ use aikit_core::context_resolution::Availability;
 use aikit_core::project::ProjectBindingLocator;
 use aikit_core::credential_world::{CredentialStatusKnowledge, ProviderRosterKnowledge};
 use aikit_core::resource::{Eligibility, SourceAuthority};
+use aikit_core::explain_history::{HistoryEvidence, HistoryReadModel, HistoryRecoverability};
 use aikit_core::session_space_application::SessionSpaceAuthoredState;
 use aikit_core::{ContextSourceHit, ProjectWorldReadModel, ProjectWorldResource};
 
@@ -54,50 +55,78 @@ pub fn workspace_section_label(section: WorkspaceSection) -> &'static str {
 pub struct WorkspaceReading<'a> {
     pub world: &'a ProjectWorldReadModel,
     pub session_spaces: &'a SessionSpaceRoster,
+    pub history: &'a HistoryReading,
 }
 
 impl<'a> WorkspaceReading<'a> {
     pub fn new(
         world: &'a ProjectWorldReadModel,
         session_spaces: &'a SessionSpaceRoster,
+        history: &'a HistoryReading,
     ) -> Self {
-        Self { world, session_spaces }
+        Self { world, session_spaces, history }
     }
 }
 
-/// What the application boundary could tell us about authored SessionSpaces.
+/// What the application boundary could tell us when asked for a reading.
 ///
-/// `Observed` with an empty roster is a real, confirmed negative — there are
-/// none — and must never be confused with a roster that could not be read.
-/// `session_space_discover` is fallible, and folding its error into an empty
-/// Vec would make "no SessionSpace exists" and "we could not ask" render
-/// identically, which is the single distinction the §5.1 spine's three
-/// standings exist to keep. This mirrors
-/// [`aikit_core::credential_world::ProviderRosterKnowledge`] deliberately: the
-/// same shape for the same reason, so a reader who has met one knows the
-/// other.
+/// `Observed` with an empty value is a real, confirmed negative — there is
+/// none — and must never be confused with a reading that could not be taken.
+/// Every boundary call behind the Workspace is fallible, and folding an error
+/// into an empty value makes "nothing exists" and "we could not ask" render
+/// identically. That is the one distinction the §5.1 spine's three standings
+/// exist to keep, so it is kept once, here, rather than reinvented per read
+/// model. Deliberately the same shape as
+/// [`aikit_core::credential_world::ProviderRosterKnowledge`], which keeps it
+/// for the same reason on the owner's side of the boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionSpaceRoster {
-    Observed(Vec<SessionSpaceAuthoredState>),
+pub enum BoundaryReading<T> {
+    Observed(T),
     Unreadable { reason: String },
 }
 
-impl SessionSpaceRoster {
-    /// `Some` only when the roster was actually read (possibly empty). `None`
-    /// means unreadable — a caller must not treat that as an empty list.
-    pub fn observed(&self) -> Option<&[SessionSpaceAuthoredState]> {
+impl<T> BoundaryReading<T> {
+    /// `Some` only when the reading was actually taken (possibly empty).
+    /// `None` means unreadable — a caller must not treat that as emptiness.
+    pub fn observed(&self) -> Option<&T> {
         match self {
-            Self::Observed(spaces) => Some(spaces),
+            Self::Observed(value) => Some(value),
             Self::Unreadable { .. } => None,
+        }
+    }
+
+    /// The reason a reading could not be taken, if it could not.
+    pub fn unreadable_reason(&self) -> Option<&str> {
+        match self {
+            Self::Observed(_) => None,
+            Self::Unreadable { reason } => Some(reason),
+        }
+    }
+
+    /// Take the reading, keeping the boundary's own error as the reason rather
+    /// than discarding it for a default.
+    pub fn from_result<E: std::fmt::Display>(result: std::result::Result<T, E>) -> Self {
+        match result {
+            Ok(value) => Self::Observed(value),
+            Err(error) => Self::Unreadable {
+                reason: error.to_string(),
+            },
         }
     }
 }
 
-impl Default for SessionSpaceRoster {
+impl<T: Default> Default for BoundaryReading<T> {
     fn default() -> Self {
-        Self::Observed(Vec::new())
+        Self::Observed(T::default())
     }
 }
+
+/// The authored SessionSpaces the boundary disclosed. Named because the spine
+/// reads it by name; it is a `BoundaryReading` like every other.
+pub type SessionSpaceRoster = BoundaryReading<Vec<SessionSpaceAuthoredState>>;
+
+/// The history evidence the boundary disclosed.
+pub type HistoryReading = BoundaryReading<HistoryReadModel>;
 
 /// Section-specific Project-world lines. Empty means another canonical read model
 /// (currently Knowledge relations) owns the presentation for this section.
@@ -111,7 +140,7 @@ pub fn project_world_lines(
         WorkspaceSection::Worlds => context_lines(world, glyphs),
         WorkspaceSection::Compose => compose_lines(state, reading, glyphs),
         WorkspaceSection::Work => work_lines(state, world, glyphs),
-        WorkspaceSection::History => history_lines(world, glyphs),
+        WorkspaceSection::History => history_lines(reading, glyphs),
         WorkspaceSection::System => system_lines(world, glyphs),
         WorkspaceSection::Knowledge => Vec::new(),
     }
@@ -429,9 +458,19 @@ pub fn explain_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Gl
     lines
 }
 
-fn history_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
+/// §8 History's human question is "why does this world look like this, what
+/// changed, and what can safely be restored".
+///
+/// The effective-revision numbers answer the first part. The rest is real
+/// evidence the boundary already publishes through
+/// `ExplainHistoryApplicationService::history_evidence` and which this section
+/// never read — it was reachable only through the `:` History contextual
+/// action, so the destination named History showed less than the action did.
+fn history_lines(reading: WorkspaceReading<'_>, glyphs: Glyphs) -> Vec<String> {
+    let world = reading.world;
+    let sep = glyphs.separator();
     let mut lines = vec![
-        format!("History {} effective world lineage", glyphs.separator()),
+        format!("History {sep} effective world lineage"),
         String::new(),
         format!("Catalog revision  {}", world.effective_revision.catalog_revision),
         format!("Resolution hash   {}", world.effective_revision.resolution_hash),
@@ -453,9 +492,139 @@ fn history_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
             lines.push(format!("Boundary          {warning}"));
         }
     }
+
     lines.push(String::new());
-    lines.push("Recent/familiar/route history remains application evidence, not a second resolver.".into());
+    lines.extend(history_evidence_lines(reading, glyphs));
     lines
+}
+
+/// The evidence half of §8, grouped by the kind of thing that happened.
+///
+/// Two properties travel with every entry because §8 turns on them. Its
+/// `authorities` are the epistemic classes that truthfully apply — a
+/// SessionSpace receipt is generated evidence of an authored change, so more
+/// than one is normal and collapsing them to the first would misreport what
+/// kind of fact this is. Its `recoverability` is what can actually be done
+/// about it, which is the difference between history a person can act on and
+/// history they can only read.
+///
+/// Familiarity appears here as evidence, never as trust or preference: it is
+/// one `HistoryKind` among others, carrying its own authority like the rest.
+fn history_evidence_lines(reading: WorkspaceReading<'_>, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
+    let Some(history) = reading.history.observed() else {
+        let reason = reading
+            .history
+            .unreadable_reason()
+            .unwrap_or("no reason given");
+        return vec![
+            format!("Evidence          not read {sep} {reason}"),
+            "                  This is an unread history, not an empty one.".into(),
+        ];
+    };
+
+    if history.entries.is_empty() {
+        return vec![
+            "Evidence          none recorded for this world".into(),
+            "                  Observed and empty, not unread.".into(),
+        ];
+    }
+
+    let recoverable = history
+        .entries
+        .iter()
+        .filter(|entry| {
+            !matches!(
+                entry.recoverability,
+                HistoryRecoverability::NotRecoverable | HistoryRecoverability::InspectOnly
+            )
+        })
+        .count();
+    let mut lines = vec![format!(
+        "Evidence          {} entr{} {sep} {recoverable} with a recovery path",
+        history.entries.len(),
+        if history.entries.len() == 1 { "y" } else { "ies" },
+    )];
+
+    // Grouped by kind so a person reads what *sort* of thing changed before
+    // reading which. `entries` arrives in the owner's order; grouping presents
+    // it without reordering the evidence within a kind.
+    let mut kinds: Vec<&'static str> = Vec::new();
+    for entry in &history.entries {
+        let kind = history_kind_label(entry);
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    for kind in kinds {
+        lines.push(String::new());
+        lines.push(kind.to_string());
+        for entry in history
+            .entries
+            .iter()
+            .filter(|entry| history_kind_label(entry) == kind)
+            .take(HISTORY_ROWS)
+        {
+            lines.push(format!("  {}", entry.summary));
+            lines.push(format!(
+                "    {} {sep} {}",
+                authorities_label(entry),
+                recoverability_label(entry.recoverability),
+            ));
+        }
+        let total = history
+            .entries
+            .iter()
+            .filter(|entry| history_kind_label(entry) == kind)
+            .count();
+        if total > HISTORY_ROWS {
+            lines.push(format!("  and {} more", total - HISTORY_ROWS));
+        }
+    }
+    lines
+}
+
+/// How many entries one kind lists before it stops enumerating.
+const HISTORY_ROWS: usize = 4;
+
+fn history_kind_label(entry: &HistoryEvidence) -> &'static str {
+    use aikit_core::explain_history::HistoryKind;
+    match entry.kind {
+        HistoryKind::Recent => "Recent",
+        HistoryKind::Familiarity => "Familiarity",
+        HistoryKind::ResolvePath => "Resolve path",
+        HistoryKind::KnowledgeRoute => "Knowledge route",
+        HistoryKind::KnowledgeFrame => "Knowledge frame",
+        HistoryKind::Generation => "Generation",
+        HistoryKind::HarnessComposition => "Harness composition",
+        HistoryKind::SessionSpace => "SessionSpace",
+        HistoryKind::Procedure => "Procedure",
+        HistoryKind::LiveActivation => "Live activation",
+    }
+}
+
+/// Every authority that truthfully applies, not just the first.
+fn authorities_label(entry: &HistoryEvidence) -> String {
+    if entry.authorities.is_empty() {
+        return "no authority declared".to_string();
+    }
+    entry
+        .authorities
+        .iter()
+        .map(|authority| authority_label(*authority))
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+fn recoverability_label(recoverability: HistoryRecoverability) -> &'static str {
+    match recoverability {
+        HistoryRecoverability::InspectOnly => "inspect only",
+        HistoryRecoverability::RestageThroughCurrentAuthority => {
+            "restageable through current authority"
+        }
+        HistoryRecoverability::ReplayNavigation => "replayable as navigation",
+        HistoryRecoverability::NotRecoverable => "not recoverable",
+    }
 }
 
 fn selected_world_resource<'a>(
@@ -676,5 +845,184 @@ mod credential_disclosure_tests {
         assert!(!rendered.contains("none required"));
         assert!(!rendered.contains("none on this machine"));
         assert!(!rendered.contains("0/0"));
+    }
+}
+
+#[cfg(test)]
+mod history_evidence_tests {
+    use aikit_core::context::ContextDescriptor;
+    use aikit_core::explain_history::{HistoryKind, EXPLAIN_HISTORY_VERSION};
+    use aikit_core::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
+    use aikit_core::resource::ResourceRef;
+
+    use super::*;
+
+    fn world() -> ProjectWorldReadModel {
+        let context = ContextDescriptor::for_project("/work/aikit");
+        ProjectWorldReadModel::empty(
+            ProjectBinding::from_legacy_context(
+                ProjectRef::parse("project:aikit").unwrap(),
+                ProjectConstituentRef::parse("source:working-tree").unwrap(),
+                &context,
+            )
+            .unwrap(),
+            context,
+        )
+    }
+
+    fn entry(
+        id: &str,
+        kind: HistoryKind,
+        authorities: Vec<SourceAuthority>,
+        recoverability: HistoryRecoverability,
+    ) -> HistoryEvidence {
+        HistoryEvidence {
+            schema: EXPLAIN_HISTORY_VERSION.into(),
+            id: id.into(),
+            kind,
+            subject: ResourceRef::parse("capability:deploy").unwrap(),
+            authorities,
+            occurred_at_unix_ms: None,
+            summary: format!("{id} happened"),
+            canonical_refs: Vec::new(),
+            provenance: Vec::new(),
+            recoverability,
+            details: Default::default(),
+        }
+    }
+
+    fn lines(history: &HistoryReading) -> Vec<String> {
+        let world = world();
+        let spaces = SessionSpaceRoster::default();
+        history_lines(
+            WorkspaceReading::new(&world, &spaces, history),
+            Glyphs::unicode(),
+        )
+    }
+
+    /// An unread history is not an empty one. The section must say which it is
+    /// looking at, or a person reads "nothing has happened" off a failed call.
+    #[test]
+    fn an_unread_history_does_not_render_as_an_empty_one() {
+        let unread = lines(&HistoryReading::Unreadable {
+            reason: "application home unavailable".into(),
+        });
+        let empty = lines(&HistoryReading::Observed(HistoryReadModel::new(Vec::new())));
+
+        let unread = unread.join("\n");
+        let empty = empty.join("\n");
+        assert!(unread.contains("not read"));
+        assert!(unread.contains("application home unavailable"));
+        assert!(unread.contains("unread history, not an empty one"));
+        assert!(empty.contains("none recorded"));
+        assert!(empty.contains("Observed and empty, not unread"));
+        assert_ne!(unread, empty);
+    }
+
+    /// More than one authority may truthfully apply to one entry — a
+    /// SessionSpace receipt is generated evidence of an authored change — so
+    /// collapsing to the first would misreport what kind of fact it is.
+    #[test]
+    fn every_authority_that_applies_is_shown_not_just_the_first() {
+        let rendered = lines(&HistoryReading::Observed(HistoryReadModel::new(vec![entry(
+            "receipt",
+            HistoryKind::SessionSpace,
+            vec![SourceAuthority::Generated, SourceAuthority::Authored],
+            HistoryRecoverability::RestageThroughCurrentAuthority,
+        )])))
+        .join("\n");
+
+        assert!(rendered.contains("generated+authored"), "got:\n{rendered}");
+    }
+
+    /// §8's point is what can safely be done, so recoverability travels with
+    /// every entry and the count names only entries with a real path.
+    #[test]
+    fn only_entries_with_a_recovery_path_are_counted_as_recoverable() {
+        let rendered = lines(&HistoryReading::Observed(HistoryReadModel::new(vec![
+            entry(
+                "restageable",
+                HistoryKind::Generation,
+                vec![SourceAuthority::Authored],
+                HistoryRecoverability::RestageThroughCurrentAuthority,
+            ),
+            entry(
+                "replayable",
+                HistoryKind::KnowledgeRoute,
+                vec![SourceAuthority::Observed],
+                HistoryRecoverability::ReplayNavigation,
+            ),
+            entry(
+                "inspect-only",
+                HistoryKind::Familiarity,
+                vec![SourceAuthority::Learned],
+                HistoryRecoverability::InspectOnly,
+            ),
+            entry(
+                "gone",
+                HistoryKind::LiveActivation,
+                vec![SourceAuthority::Observed],
+                HistoryRecoverability::NotRecoverable,
+            ),
+        ])))
+        .join("\n");
+
+        assert!(rendered.contains("4 entries"), "got:\n{rendered}");
+        assert!(rendered.contains("2 with a recovery path"), "got:\n{rendered}");
+        assert!(rendered.contains("not recoverable"));
+        assert!(rendered.contains("inspect only"));
+    }
+
+    /// Familiarity is evidence like any other kind, carrying its own authority.
+    /// It must never render as trust or preference.
+    #[test]
+    fn familiarity_is_one_evidence_kind_and_not_a_preference() {
+        let rendered = lines(&HistoryReading::Observed(HistoryReadModel::new(vec![entry(
+            "familiar",
+            HistoryKind::Familiarity,
+            vec![SourceAuthority::Learned],
+            HistoryRecoverability::InspectOnly,
+        )])))
+        .join("\n");
+
+        assert!(rendered.contains("Familiarity"));
+        assert!(rendered.contains("learned"));
+        assert!(!rendered.to_lowercase().contains("trust"));
+        assert!(!rendered.to_lowercase().contains("preferred"));
+    }
+
+    /// Entries group by kind so a person reads what sort of thing changed
+    /// before reading which.
+    #[test]
+    fn entries_group_under_their_kind() {
+        let rendered = lines(&HistoryReading::Observed(HistoryReadModel::new(vec![
+            entry("g1", HistoryKind::Generation, vec![], HistoryRecoverability::InspectOnly),
+            entry("r1", HistoryKind::Recent, vec![], HistoryRecoverability::InspectOnly),
+            entry("g2", HistoryKind::Generation, vec![], HistoryRecoverability::InspectOnly),
+        ])))
+        .join("\n");
+
+        let generation = rendered.find("Generation").unwrap();
+        let recent = rendered.find("Recent").unwrap();
+        assert!(generation < recent, "kinds keep first-seen order:\n{rendered}");
+        assert!(rendered.find("g2 happened").unwrap() < recent, "g2 belongs under Generation");
+        assert!(rendered.contains("no authority declared"));
+    }
+
+    /// The revision lineage the section already showed is not lost to the
+    /// evidence block.
+    #[test]
+    fn the_effective_revision_lineage_survives_beside_the_evidence() {
+        let rendered = lines(&HistoryReading::Observed(HistoryReadModel::new(vec![entry(
+            "one",
+            HistoryKind::Recent,
+            vec![],
+            HistoryRecoverability::InspectOnly,
+        )])))
+        .join("\n");
+
+        assert!(rendered.contains("Catalog revision"));
+        assert!(rendered.contains("Resolution hash"));
+        assert!(rendered.contains("Evidence"));
     }
 }

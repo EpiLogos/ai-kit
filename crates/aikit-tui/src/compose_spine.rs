@@ -552,7 +552,7 @@ fn step_detail(
             lines
         }
 
-        ComposeStep::Continuity => match reading.session_spaces.observed() {
+        ComposeStep::Continuity => match reading.session_spaces.observed().map(Vec::as_slice) {
             None => vec!["  The SessionSpace roster could not be read; see the row above.".into()],
             Some([]) => {
                 vec!["  No authored SessionSpace exists for this Project.".into()]
@@ -617,6 +617,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::project_workspace_render::HistoryReading;
 
     fn world() -> ProjectWorldReadModel {
         let context = ContextDescriptor::for_project("/work/aikit");
@@ -635,8 +636,10 @@ mod tests {
         world: &'a ProjectWorldReadModel,
         session_spaces: &'a SessionSpaceRoster,
     ) -> WorkspaceReading<'a> {
-        WorkspaceReading::new(world, session_spaces)
+        WorkspaceReading::new(world, session_spaces, NO_HISTORY.get_or_init(Default::default))
     }
+
+    static NO_HISTORY: std::sync::OnceLock<HistoryReading> = std::sync::OnceLock::new();
 
     fn observed(spaces: Vec<SessionSpaceAuthoredState>) -> SessionSpaceRoster {
         SessionSpaceRoster::Observed(spaces)
