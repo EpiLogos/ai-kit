@@ -800,6 +800,78 @@ fn stage_replaces_only_when_told_and_advances_the_revision() {
 // root anchor
 // ---------------------------------------------------------------------------
 
+/// The anchor cites the identity that is live, not the one that was folded.
+///
+/// `Control/user/identity.md` was folded into `Control/user/identity/` on
+/// 2026-09-03 and survives only so older named selections resolve. The entity
+/// materialisation path already reads `identity/manifest.json`; the anchor read
+/// the stub, so the two paths cited different sources for the same node.
+#[test]
+fn the_root_anchor_cites_the_live_identity_manifest_over_the_folded_stub() {
+    let (work, scratch) = fixture();
+    let central = work.path().join("Central");
+    write(&central.join("Control/agents/wiki/wiki.json"), &root_document(&[]));
+    write(
+        &central.join("Control/user/identity.md"),
+        "# Identity\n\n**Status:** folded into `identity/`\n",
+    );
+    write(
+        &central.join("Control/user/identity/manifest.json"),
+        r#"{"schema":"central.pasu.identity-manifest/v1","subject":"central:pasu:nara:local"}"#,
+    );
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "root", "anchor", "--root", central.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+
+    let held: Value = serde_json::from_str(&read(&central.join("Control/agents/wiki/wiki.json"))).unwrap();
+    let identity = held["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["ref"] == "wiki:node:identity")
+        .unwrap();
+    let cited = serde_json::to_string(&identity["source_refs"]).unwrap();
+    assert!(
+        cited.contains("identity/manifest.json"),
+        "the anchor must cite the live manifest: {cited}"
+    );
+    assert!(
+        !cited.contains("user/identity.md"),
+        "and not the folded stub: {cited}"
+    );
+}
+
+/// A world that has not folded its identity yet still anchors on the stub.
+#[test]
+fn a_world_without_the_manifest_still_anchors_on_the_stub() {
+    let (work, scratch) = fixture();
+    let central = work.path().join("Central");
+    write(&central.join("Control/agents/wiki/wiki.json"), &root_document(&[]));
+    write(&central.join("Control/user/identity.md"), "# Identity\n\nthe short seed\n");
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "root", "anchor", "--root", central.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+
+    let held: Value = serde_json::from_str(&read(&central.join("Control/agents/wiki/wiki.json"))).unwrap();
+    let identity = held["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["ref"] == "wiki:node:identity")
+        .unwrap();
+    assert!(
+        serde_json::to_string(&identity["source_refs"]).unwrap().contains("user/identity.md"),
+        "the stub remains the fallback where nothing has been folded"
+    );
+}
+
+
 #[test]
 fn anchor_root_creates_a_minimal_identity_node_and_is_idempotent() {
     let (work, scratch) = fixture();

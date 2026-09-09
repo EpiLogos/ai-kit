@@ -733,16 +733,28 @@ fn root_anchor(cwd: &Path, args: &WikiRootAnchorArgs) -> Result<WikiOutcome> {
         }
         None => {
             let root = resolve_root_wiki(cwd, args.root.as_deref())?;
-            let identity_file = central_root(&root)?.join("Control/user/identity.md");
+            let central = central_root(&root)?;
+            // The identity the anchor cites is the live manifest, not the
+            // stub. `Control/user/identity.md` was folded into
+            // `Control/user/identity/` on 2026-09-03 and says so in its own
+            // body — it survives only so older named selections still
+            // resolve. `central_entities::read_identity_entity` already reads
+            // the manifest; anchoring against the tombstone made the two
+            // paths cite different sources for the same node. The stub stays
+            // as the fallback for a world that has not folded yet.
+            let manifest = "Control/user/identity/manifest.json";
+            let stub = "Control/user/identity.md";
+            let source = if central.join(manifest).is_file() {
+                Some(manifest)
+            } else if central.join(stub).is_file() {
+                Some(stub)
+            } else {
+                None
+            };
             (
                 root,
                 ROOT_WIKI_SPACE_REF.to_string(),
-                minimal_root_node(
-                    "wiki:node:identity",
-                    "identity",
-                    "User identity",
-                    identity_file.is_file().then_some("Control/user/identity.md"),
-                )?,
+                minimal_root_node("wiki:node:identity", "identity", "User identity", source)?,
             )
         }
     };
