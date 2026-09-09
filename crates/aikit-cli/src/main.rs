@@ -13,11 +13,12 @@ use clap::Parser;
 use serde_json::{json as jval, Value};
 
 use aikit_cli::app::{
-    AikitApplication, ApplyRequest, PromoteRequest, RunRequest, Service, SessionRequest,
+    AikitApplication, ApplyRequest, FlowContemplateBasis, PromoteRequest, RunRequest, Service,
+    SessionRequest,
 };
 use aikit_cli::cli::*;
 use aikit_cli::json::{self, EnvelopeContext};
-use aikit_cli::{credential, hook, multicall, run, ui};
+use aikit_cli::{credential, hook, multicall, run, ui, SessionLifecycleServiceOps};
 use aikit_tui::{application_service::ApplicationService, ExplainHistoryApplicationService};
 
 use aikit_core::hooks::HookEvent;
@@ -180,6 +181,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
         Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
+        Some(Command::Flow(c)) => cmd_flow(cwd, c),
         Some(Command::Method(a)) => cmd_method(cwd, a),
         Some(Command::Routine(c)) => cmd_routine(c),
         Some(Command::Factory(c)) => cmd_factory(c),
@@ -1599,6 +1601,19 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             warnings.extend(result.absences.clone());
             jval!(result)
         }
+        KnowledgeSub::Resolve(a) => {
+            // One query path: a plain typed string is legitimate input and is
+            // lowered into the Vāk resolver contract before resolution.
+            let expression =
+                aikit_core::resource::parse_or_search_expression(&a.query)?;
+            let resolution = service.knowledge_resolve(&expression, a.limit)?;
+            warnings.extend(resolution.absences.clone());
+            jval!(resolution)
+        }
+        KnowledgeSub::Open(a) => {
+            let resource = ResourceRef::parse(&a.resource)?;
+            jval!(service.knowledge_open(&resource)?)
+        }
         KnowledgeSub::Read(a) => {
             let address = parse_knowledge_address(&a.address)?;
             jval!(service.knowledge_read(&address)?)
@@ -1660,6 +1675,92 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
                 "forgot": scope,
                 "preserved": ["canonical-resource-identity", "provider-truth", "knowledge-operation-history"]
             })
+        }
+    };
+    Ok(reply(&service, data, warnings))
+}
+
+/// `aikit flow` — owner-side Flow cognition (W1.4/W1.5).
+///
+/// Contemplate is the explicit owner operation behind the canonical
+/// `action:contemplate-flow` Action. The CLI surface carries the owner seams
+/// as JSON files and never supplies an Agent/model executor: a `contemplate`
+/// here always stops at the record gate with an `unavailable` reading unless
+/// a host kernel cell supplies the executor — Contemplate is never
+/// auto-invoked (#138 §7).
+fn cmd_flow(cwd: &std::path::Path, c: FlowCmd) -> Result<Reply> {
+    use aikit_core::knowledge_living::KnowledgeChangeHorizon;
+    use aikit_core::model_runtime::ModelRuntimeReadModel;
+    use aikit_core::resource::ResourceRef;
+
+    fn read_json<T: serde::de::DeserializeOwned>(
+        path: &std::path::Path,
+        code: &'static str,
+    ) -> Result<T> {
+        let body = std::fs::read_to_string(path).map_err(|error| {
+            AikitError::new(code, format!("cannot read {}: {error}", path.display()))
+        })?;
+        serde_json::from_str(&body).map_err(|error| {
+            AikitError::new(code, format!("invalid JSON in {}: {error}", path.display()))
+        })
+    }
+
+    let mut service = Service::discover(cwd)?;
+    let warnings = diagnostic_warnings(&service);
+    let data = match c.command {
+        FlowSub::Preflight(a) => {
+            let basis = FlowContemplateBasis {
+                horizon: a
+                    .horizon
+                    .as_deref()
+                    .map(|path| {
+                        read_json::<KnowledgeChangeHorizon>(path, "flow.horizon_unreadable")
+                    })
+                    .transpose()?,
+                runtime: a
+                    .runtime
+                    .as_deref()
+                    .map(|path| read_json::<ModelRuntimeReadModel>(path, "flow.runtime_unreadable"))
+                    .transpose()?,
+                agent: None,
+                agency: None,
+            };
+            let flow_ref = ResourceRef::parse(&a.flow_ref)?;
+            jval!(service.flow_contemplate_preflight(&flow_ref, &basis)?)
+        }
+        FlowSub::Contemplate(a) => {
+            let basis = FlowContemplateBasis {
+                horizon: a
+                    .horizon
+                    .as_deref()
+                    .map(|path| {
+                        read_json::<KnowledgeChangeHorizon>(path, "flow.horizon_unreadable")
+                    })
+                    .transpose()?,
+                runtime: a
+                    .runtime
+                    .as_deref()
+                    .map(|path| read_json::<ModelRuntimeReadModel>(path, "flow.runtime_unreadable"))
+                    .transpose()?,
+                agent: None,
+                agency: None,
+            };
+            let flow_ref = ResourceRef::parse(&a.flow_ref)?;
+            // The CLI surface never carries a host executor: the reading is
+            // produced through the same record gate and is explicitly
+            // `unavailable` — which is also why no familiarity observation is
+            // recorded here.
+            jval!(service.flow_contemplate(&flow_ref, &basis, None)?)
+        }
+        FlowSub::ChangedSince(a) => {
+            let thought =
+                read_json::<aikit_core::FlowThoughtRecord>(&a.thought, "flow.thought_unreadable")?;
+            let horizon = a
+                .horizon
+                .as_deref()
+                .map(|path| read_json::<KnowledgeChangeHorizon>(path, "flow.horizon_unreadable"))
+                .transpose()?;
+            jval!(service.flow_changed_since(&thought, horizon)?)
         }
     };
     Ok(reply(&service, data, warnings))
@@ -2677,6 +2778,125 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
             });
             Ok(reply(&service, data, vec![]))
         }
+        SessionSub::Lifecycle(c) => cmd_session_lifecycle(&service, c),
+    }
+}
+
+fn cmd_session_lifecycle(service: &Service, c: SessionLifecycleCmd) -> Result<Reply> {
+    use aikit_core::session_lifecycle::SessionLifecycleRecord;
+    let event_json = |event: &aikit_core::session_lifecycle::SessionLifecycleEvent| {
+        serde_json::to_value(event).expect("lifecycle events are always serializable")
+    };
+    match c.command {
+        SessionLifecycleSub::List(_) => {
+            let sessions: Vec<String> = service
+                .session_lifecycle_list()?
+                .into_iter()
+                .map(|session| session.to_string())
+                .collect();
+            Ok(reply(
+                service,
+                jval!({ "sessions": sessions, "count": sessions.len() }),
+                vec![],
+            ))
+        }
+        SessionLifecycleSub::History(a) => {
+            let events = service.session_lifecycle_history(&a.session)?;
+            let events: Vec<Value> = events.iter().map(event_json).collect();
+            Ok(reply(
+                service,
+                jval!({ "session": a.session.to_string(), "events": events, "count": events.len() }),
+                vec![],
+            ))
+        }
+        SessionLifecycleSub::Show(a) => {
+            let model = service.session_lifecycle_read_model(&a.session)?;
+            let data = serde_json::to_value(&model).map_err(|error| {
+                aikit_core::AikitError::new(
+                    "session_lifecycle.cli_projection_unserializable",
+                    format!("could not project the session lifecycle read model: {error}"),
+                )
+            })?;
+            Ok(reply(service, data, vec![]))
+        }
+        SessionLifecycleSub::Start(a) => {
+            let event = service.session_lifecycle_record(
+                a.session,
+                SessionLifecycleRecord::Start,
+                a.activity,
+                a.origin,
+            )?;
+            Ok(reply(service, event_json(&event), vec![]))
+        }
+        SessionLifecycleSub::End(a) => {
+            let event = service.session_lifecycle_record(
+                a.session,
+                SessionLifecycleRecord::End,
+                a.activity,
+                a.origin,
+            )?;
+            Ok(reply(service, event_json(&event), vec![]))
+        }
+        SessionLifecycleSub::Thinking(a) => {
+            let event = service.session_lifecycle_record(
+                a.session,
+                SessionLifecycleRecord::Thinking { state: a.state },
+                a.activity,
+                a.origin,
+            )?;
+            Ok(reply(service, event_json(&event), vec![]))
+        }
+        SessionLifecycleSub::Cancel(a) => {
+            let event = service.session_lifecycle_record(
+                a.session,
+                SessionLifecycleRecord::Cancel {
+                    reason: a.reason,
+                },
+                a.activity,
+                a.origin,
+            )?;
+            Ok(reply(service, event_json(&event), vec![]))
+        }
+        SessionLifecycleSub::Permission(p) => match p.command {
+            SessionLifecyclePermissionSub::Request(a) => {
+                let event = service.session_lifecycle_record(
+                    a.session,
+                    SessionLifecycleRecord::PermissionRequest {
+                        tool: a.tool,
+                        activity: a
+                            .activity
+                            .unwrap_or_else(aikit_core::SessionActivityId::generate),
+                        request: a.request,
+                    },
+                    None,
+                    a.origin,
+                )?;
+                Ok(reply(service, event_json(&event), vec![]))
+            }
+            SessionLifecyclePermissionSub::Grant(a) => {
+                let event = service.session_lifecycle_record(
+                    a.session,
+                    SessionLifecycleRecord::PermissionGrant {
+                        request: a.request,
+                    },
+                    None,
+                    a.origin,
+                )?;
+                Ok(reply(service, event_json(&event), vec![]))
+            }
+            SessionLifecyclePermissionSub::Refuse(a) => {
+                let event = service.session_lifecycle_record(
+                    a.session,
+                    SessionLifecycleRecord::PermissionRefuse {
+                        request: a.request,
+                        reason: a.reason,
+                    },
+                    None,
+                    a.origin,
+                )?;
+                Ok(reply(service, event_json(&event), vec![]))
+            }
+        },
     }
 }
 

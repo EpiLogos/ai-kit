@@ -65,6 +65,9 @@ pub enum Command {
     Search(SearchArgs),
     /// Navigate provider-neutral project knowledge through the shared application faculty.
     Knowledge(KnowledgeCmd),
+    /// Owner-side Flow cognition: explicit Contemplate(FlowRef) with
+    /// preflight and Explain disclosure, and the changed-since-thought read.
+    Flow(FlowCmd),
     /// Validate, write and repair `okf-wiki/v1` Agent Wiki files.
     Wiki(WikiCmd),
     /// Declare, validate and compress QL-shaped `WikiConstellation`s against
@@ -738,9 +741,63 @@ pub struct KnowledgeCmd {
     pub command: KnowledgeSub,
 }
 
+#[derive(Debug, Args)]
+pub struct FlowCmd {
+    #[command(subcommand)]
+    pub command: FlowSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FlowSub {
+    /// Disclose the deterministic Contemplate preflight — exactly what will
+    /// be read and touched — before anything crosses the Agent/model seam.
+    /// Inert: records nothing.
+    Preflight(FlowContemplateArgs),
+    /// One explicit Contemplate(FlowRef): preflight → Explain disclosure →
+    /// record-gated execution. Contemplate is never auto-invoked: without the
+    /// owner seams (or a host executor) the typed reading is `unavailable`.
+    Contemplate(FlowContemplateArgs),
+    /// W1.5 owner read: what changed relative to one recorded thought —
+    /// changed sources, affected knowledge, unresolved — each with provenance.
+    ChangedSince(FlowChangedSinceArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct FlowContemplateArgs {
+    /// ResourceRef of the Flow node, as listed by `knowledge resolve`.
+    #[arg(value_name = "FLOW_REF")]
+    pub flow_ref: String,
+    /// Path to a provider-neutral `KnowledgeChangeHorizon` JSON owner seam
+    /// (e.g. Central's `central.source-change-horizon/v1`, adapted).
+    #[arg(long, value_name = "FILE")]
+    pub horizon: Option<std::path::PathBuf>,
+    /// Path to a host `ModelRuntimeReadModel` JSON owner seam identifying
+    /// model, Agent, Agency and AgentSession for attribution.
+    #[arg(long, value_name = "FILE")]
+    pub runtime: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct FlowChangedSinceArgs {
+    /// Path to a recorded `aikit.flow-cognition/v1` thought JSON (as emitted
+    /// by a successful `flow contemplate`).
+    #[arg(long, value_name = "FILE")]
+    pub thought: std::path::PathBuf,
+    /// Path to a provider-neutral `KnowledgeChangeHorizon` JSON owner seam.
+    /// Without it the reading is explicitly `unavailable`, never guessed.
+    #[arg(long, value_name = "FILE")]
+    pub horizon: Option<std::path::PathBuf>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum KnowledgeSub {
     Search(KnowledgeSearchArgs),
+    /// Owner-side resolution rows: every row is a ref carrying owner,
+    /// provenance and its available canonical Actions.
+    Resolve(KnowledgeSearchArgs),
+    /// Explicit open: resolve and read the ref, recording exactly one
+    /// successful-use familiarity observation.
+    Open(KnowledgeOpenArgs),
     Read(KnowledgeAddressArgs),
     Relations(KnowledgeRelationsArgs),
     Route(KnowledgeRouteArgs),
@@ -758,6 +815,13 @@ pub struct KnowledgeSearchArgs {
     pub query: String,
     #[arg(long, default_value_t = 50)]
     pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeOpenArgs {
+    /// ResourceRef to open, as listed by `knowledge resolve`.
+    #[arg(value_name = "RESOURCE")]
+    pub resource: String,
 }
 
 #[derive(Debug, Args)]
@@ -1627,6 +1691,155 @@ pub enum SessionSub {
     Reconcile(SessionReconcileArgs),
     /// Tear down a session.
     Down(SessionDownArgs),
+    /// Durable lifecycle history of sessions: start/end, thinking,
+    /// cancellation and permission events with stable identities.
+    Lifecycle(SessionLifecycleCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct SessionLifecycleCmd {
+    #[command(subcommand)]
+    pub command: SessionLifecycleSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionLifecycleSub {
+    /// List sessions that have a durable lifecycle history.
+    List(SessionLifecycleListArgs),
+    /// The durable event history of one session.
+    History(SessionLifecycleSessionArgs),
+    /// The typed, schema-stamped read model of one session.
+    Show(SessionLifecycleSessionArgs),
+    /// Record a session-started event.
+    Start(SessionLifecycleRecordArgs),
+    /// Record a session-ended event.
+    End(SessionLifecycleRecordArgs),
+    /// Record an in-flight thinking state.
+    Thinking(SessionLifecycleThinkingArgs),
+    /// Record a cancellation with its reason.
+    Cancel(SessionLifecycleCancelArgs),
+    /// Permission events: request issued / granted / refused.
+    Permission(SessionLifecyclePermissionCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct SessionLifecycleListArgs {}
+
+#[derive(Debug, Args)]
+pub struct SessionLifecycleSessionArgs {
+    /// The session identity.
+    #[arg(value_name = "SESSION")]
+    pub session: aikit_core::SessionId,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionLifecycleRecordArgs {
+    /// The session identity.
+    #[arg(value_name = "SESSION")]
+    pub session: aikit_core::SessionId,
+    /// Stable activity identity to record; minted when omitted.
+    #[arg(long, value_name = "ACTIVITY")]
+    pub activity: Option<aikit_core::SessionActivityId>,
+    /// Who or what originated the event.
+    #[arg(long, default_value = "operator")]
+    pub origin: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionLifecycleThinkingArgs {
+    /// The session identity.
+    #[arg(value_name = "SESSION")]
+    pub session: aikit_core::SessionId,
+    /// The in-flight reasoning state label.
+    #[arg(long, value_name = "STATE")]
+    pub state: String,
+    /// Stable activity identity to record; minted when omitted.
+    #[arg(long, value_name = "ACTIVITY")]
+    pub activity: Option<aikit_core::SessionActivityId>,
+    /// Who or what originated the event.
+    #[arg(long, default_value = "operator")]
+    pub origin: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionLifecycleCancelArgs {
+    /// The session identity.
+    #[arg(value_name = "SESSION")]
+    pub session: aikit_core::SessionId,
+    /// Why the session was cancelled.
+    #[arg(long, value_name = "REASON")]
+    pub reason: String,
+    /// Stable activity identity to record; minted when omitted.
+    #[arg(long, value_name = "ACTIVITY")]
+    pub activity: Option<aikit_core::SessionActivityId>,
+    /// Who or what originated the event.
+    #[arg(long, default_value = "operator")]
+    pub origin: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionLifecyclePermissionCmd {
+    #[command(subcommand)]
+    pub command: SessionLifecyclePermissionSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionLifecyclePermissionSub {
+    /// Issue a tool permission request. Prints the stable request and
+    /// activity identities a correlator quotes verbatim.
+    Request(SessionLifecyclePermissionRequestArgs),
+    /// Grant a previously issued request.
+    Grant(SessionLifecyclePermissionAnswerArgs),
+    /// Refuse a previously issued request.
+    Refuse(SessionLifecyclePermissionRefuseArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SessionLifecyclePermissionRequestArgs {
+    /// The session identity.
+    #[arg(value_name = "SESSION")]
+    pub session: aikit_core::SessionId,
+    /// The tool the request names.
+    #[arg(long, value_name = "TOOL")]
+    pub tool: String,
+    /// Stable activity identity the request belongs to; minted when omitted.
+    #[arg(long, value_name = "ACTIVITY")]
+    pub activity: Option<aikit_core::SessionActivityId>,
+    /// Stable request identity to record; minted when omitted.
+    #[arg(long, value_name = "REQUEST")]
+    pub request: Option<aikit_core::PermissionRequestId>,
+    /// Who or what originated the event.
+    #[arg(long, default_value = "agent")]
+    pub origin: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionLifecyclePermissionAnswerArgs {
+    /// The session identity.
+    #[arg(value_name = "SESSION")]
+    pub session: aikit_core::SessionId,
+    /// The issued request identity to answer.
+    #[arg(long, value_name = "REQUEST")]
+    pub request: aikit_core::PermissionRequestId,
+    /// Who or what originated the event.
+    #[arg(long, default_value = "operator")]
+    pub origin: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionLifecyclePermissionRefuseArgs {
+    /// The session identity.
+    #[arg(value_name = "SESSION")]
+    pub session: aikit_core::SessionId,
+    /// The issued request identity to answer.
+    #[arg(long, value_name = "REQUEST")]
+    pub request: aikit_core::PermissionRequestId,
+    /// Why the request was refused.
+    #[arg(long, value_name = "REASON")]
+    pub reason: String,
+    /// Who or what originated the event.
+    #[arg(long, default_value = "operator")]
+    pub origin: String,
 }
 
 #[derive(Debug, Args)]
