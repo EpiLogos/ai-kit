@@ -136,7 +136,7 @@ fn the_ascii_workspace_panes_carry_the_same_resolved_world() {
 
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
     let compose = rendered(&draw_width(&surface, 220, 30));
-    assert!(compose.contains("Compose - resolved Project world"));
+    assert!(compose.contains("Compose - intention to operative world"));
     assert!(compose.contains("Intent        eligibility unresolved"));
     assert!(compose.contains("Effective     available - 0 providers"));
     assert!(
@@ -176,11 +176,22 @@ fn wide_workspace_renders_context_compose_and_explain_from_one_world() {
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
     assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Compose");
     let compose = rendered(&draw_width(&surface, 220, 30));
-    assert!(compose.contains("Compose · resolved Project world"));
-    assert!(compose.contains("Capabilities"));
-    assert!(compose.contains("Information"));
-    assert!(compose.contains("Actor/Runtime"));
-    assert!(compose.contains("Projection"));
+    assert!(compose.contains("Compose · intention to operative world"));
+    // §5.1's spine, not the four read-model horizon counts it replaced: a
+    // person reads their own progress off the steps, and each step carries
+    // strictly more than the count row it retired.
+    for step in [
+        "Intention", "Identity", "Governance", "Praxis", "Information",
+        "Worlds/bounds", "Runtime", "Continuity", "Preview", "Enter work",
+    ] {
+        assert!(compose.contains(step), "Compose must carry the §5.1 step `{step}`");
+    }
+    // Step *content* — including Praxis's "no Profile/SkillSet/Skill/Method
+    // contract here" — is pinned by `compose_spine`'s unit tests. The pane is
+    // narrow and wraps, so only the labels (first token on their line) can be
+    // asserted safely from a rendering.
+    // The selected Resource's own detail stays in view: it is the most
+    // specific thing in the pane and must outrank chrome for the rows.
     assert!(compose.contains("Intent        eligibility unresolved"));
     assert!(compose.contains("Effective     available · 0 providers"));
 
@@ -383,9 +394,9 @@ fn narrow_workspace_progressively_discloses_project_world_without_a_second_contr
 
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
     let compose = rendered(&draw_width(&surface, 60, 24));
-    assert!(compose.contains("Compose · resolved Project world"));
-    assert!(compose.contains("Capabilities"));
+    assert!(compose.contains("Compose · intention to operative world"));
     assert!(compose.contains("Information"));
+    assert!(compose.contains("Runtime"));
     assert_eq!(
         surface.semantic().selected,
         selected,

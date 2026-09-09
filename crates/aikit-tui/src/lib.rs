@@ -12,6 +12,7 @@ pub mod application_service;
 pub mod application_surface;
 pub mod backend;
 pub mod compose_preview;
+pub mod compose_spine;
 pub mod credential_surface;
 pub mod event;
 pub mod explain_history_service;

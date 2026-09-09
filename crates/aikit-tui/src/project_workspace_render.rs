@@ -22,6 +22,7 @@ use aikit_core::resource::{Eligibility, SourceAuthority};
 use aikit_core::{ContextSourceHit, ProjectWorldReadModel, ProjectWorldResource};
 
 use crate::application::{TuiState, WorkspaceSection};
+use crate::compose_spine::compose_spine_lines;
 use crate::layout::Glyphs;
 
 /// Canonical product label for each Workspace slot.
@@ -122,50 +123,27 @@ fn context_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
     lines
 }
 
+/// Compose's human question (spec §5) is "what could I build, and how far
+/// have I got building it". §5.1 answers the second half with an ordered
+/// ten-step spine, so the spine — not a set of read-model horizon counts — is
+/// what this pane leads with. `Capabilities 12 · 8 actions` says how much
+/// resolved, which is a different question from where a person stands.
+///
+/// The four read-model horizon count rows this pane used to carry are retired
+/// into the spine rather than kept beside it. They said less than the rows
+/// that replaced them — `Information 9 visible sources` against the spine's
+/// `9 eligible sources, 4 planned retrievals`; `Actor/Runtime 6 effective or
+/// candidate` against `1 harness, 2 models, 2 available` — and keeping both
+/// meant two structures competing for one pane, with the person's own selected
+/// Resource pushed off the bottom to make room for the weaker one.
+/// [`crate::project_workspace::ComposeHorizon`] still owns the horizons as a
+/// grouping of the read model; it was never the spine.
+///
+/// Order is by specificity: spine, then whatever the person actually has
+/// selected, then the effective actor/runtime roster, then staged changes.
 fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
     let sep = glyphs.separator();
-    let actor_runtime_count = usize::from(world.actor_runtime.agent.effective.is_some())
-        + usize::from(world.actor_runtime.agency.effective.is_some())
-        + usize::from(world.actor_runtime.host.effective.is_some())
-        + world.actor_runtime.models.len()
-        + world.actor_runtime.harnesses.len()
-        + world.actor_runtime.execution_offers.len();
-    let mut lines = vec![
-        format!("Compose {sep} resolved Project world"),
-        String::new(),
-        format!(
-            "Capabilities  {} capabilities {sep} {} actions",
-            world.capability_horizon.capabilities.len(),
-            world.capability_horizon.actions.len(),
-        ),
-        format!(
-            "Information   {} visible sources {sep} {} planned retrievals",
-            world.information_horizon.sources.len(),
-            world.information_horizon.planned_retrieval.len(),
-        ),
-        format!("Actor/Runtime {actor_runtime_count} effective or candidate resources"),
-        format!(
-            "Projection    {} targets {sep} {} effective capabilities",
-            world.projection.targets.len(),
-            world.projection.active_capabilities.len(),
-        ),
-    ];
-
-    if let Some(agent) = world.actor_runtime.agent.effective.as_ref() {
-        lines.push(format!("Agent         {}", agent.resource));
-    }
-    if let Some(agency) = world.actor_runtime.agency.effective.as_ref() {
-        lines.push(format!("Agency        {}", agency.resource));
-    }
-    for harness in &world.actor_runtime.harnesses {
-        lines.push(format!("Harness       {}", harness.resource));
-    }
-    for model in &world.actor_runtime.models {
-        lines.push(format!("Model         {}", model.resource));
-    }
-    for offer in &world.actor_runtime.execution_offers {
-        lines.push(format!("Execution     {}", offer.resource));
-    }
+    let mut lines = compose_spine_lines(state, world, glyphs);
 
     if let Some(selected) = state.selected.as_ref() {
         if let Some(resource) = selected_world_resource(world, selected) {
@@ -180,6 +158,23 @@ fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs
             lines.push(String::new());
             lines.extend(context_source_lines(source, glyphs));
         }
+    }
+
+    lines.push(String::new());
+    if let Some(agent) = world.actor_runtime.agent.effective.as_ref() {
+        lines.push(format!("Agent         {}", agent.resource));
+    }
+    if let Some(agency) = world.actor_runtime.agency.effective.as_ref() {
+        lines.push(format!("Agency        {}", agency.resource));
+    }
+    for harness in &world.actor_runtime.harnesses {
+        lines.push(format!("Harness       {}", harness.resource));
+    }
+    for model in &world.actor_runtime.models {
+        lines.push(format!("Model         {}", model.resource));
+    }
+    for offer in &world.actor_runtime.execution_offers {
+        lines.push(format!("Execution     {}", offer.resource));
     }
 
     if !state.staged.is_empty() {
