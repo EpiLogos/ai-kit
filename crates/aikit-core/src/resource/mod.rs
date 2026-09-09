@@ -9,8 +9,12 @@ mod action_search;
 mod factory;
 mod index;
 mod model;
+#[path = "../model_catalogue.rs"]
+mod model_catalogue;
 #[path = "../model_roster.rs"]
 mod model_roster;
+#[path = "../model_route.rs"]
+mod model_route;
 mod operative;
 mod operative_provider;
 mod refs;
@@ -27,11 +31,22 @@ pub use model::{
     ResourceExplanation, ResourceKind, ResourceLocator, ResourceRecord, ResourceSource,
     SourceAuthority, SourceState,
 };
+pub use model_catalogue::{
+    canonical_model_ref, catalogue_from_observations, migrate_model_ref, DeclaredRoute,
+    ModelCatalogue, ModelCatalogueEntry, ProviderCatalogDocument, ProviderCatalogObservation,
+    FIRST_PARTY_CATALOGUE_SOURCE, MODEL_CATALOGUE_VERSION, MODEL_REF_PREFIX,
+    PROVIDER_CATALOG_OBSERVATION_SCHEMA, PROVIDER_CATALOG_SOURCE,
+};
+pub use model_route::{
+    CredentialCondition, ModelRoute, ModelRouteKind, ModelRouteSet, RouteAvailability,
+    RouteUsability, UnmatchedModelOffer, MODEL_ROUTE_VERSION,
+};
 pub use model_roster::{
-    rank_model_roster, ExactSpendObservation, FitnessObservation, FitnessScope,
+    candidates_from_routes, rank_model_roster, select_model, ExactSpendObservation,
+    FitnessObservation, FitnessScope,
     ModelAccessProfileView, ModelPriceObservation, ModelRankingExplanation, ModelRankingPolicy,
-    ModelRoster, ModelRosterCandidate, ModelRosterDemand, ModelRosterEntry, RankingComponent,
-    MODEL_ROSTER_VERSION,
+    ModelRoster, ModelRosterCandidate, ModelRosterDemand, ModelRosterEntry, ModelSelection,
+    RankingComponent, MODEL_ROSTER_VERSION,
 };
 pub use operative::{
     action_semantic_profile, horizons_for_kind, horizons_for_resource, parse_or_search_expression,

@@ -206,6 +206,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Capabilities(c)) => cmd_capabilities(cwd, c),
         Some(Command::Session(c)) => cmd_session(cwd, c),
         Some(Command::Compose(a)) => cmd_compose(cwd, a),
+        Some(Command::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
         Some(Command::Inbox(a)) => cmd_inbox(cwd, a),
         Some(Command::Capture(a)) => cmd_capture(cwd, a),
@@ -474,9 +475,36 @@ fn cmd_skill(cwd: &std::path::Path, command: SkillCmd) -> Result<Reply> {
     }
 }
 
-fn cmd_compose(cwd: &std::path::Path, _args: ComposeArgs) -> Result<Reply> {
+fn cmd_compose(cwd: &std::path::Path, args: ComposeArgs) -> Result<Reply> {
     let service = Service::discover(cwd)?;
-    let data = service.compose_plan()?;
+    let mut data = service.compose_plan()?;
+    if args.realise {
+        let model = args.model.as_deref().ok_or_else(|| {
+            AikitError::new(
+                "compose.realise_needs_model",
+                "--realise needs --model <model:stable-id>: a model is selected, never guessed",
+            )
+        })?;
+        let realisation = service.realise_model(&data, model, args.provider.as_deref())?;
+        if let Some(object) = data.as_object_mut() {
+            object.insert("realisation".into(), realisation);
+        }
+    }
+    Ok(reply(&service, data, diagnostic_warnings(&service)))
+}
+
+/// The Provider Source plumbing for the canonical Model catalogue.
+///
+/// This is not a roster command over the model field — selection surfaces
+/// through `compose`, where the catalogue meets live route availability.
+/// `refresh` reads what a provider publishes; `show` reads back what the
+/// three catalogue layers resolved to.
+fn cmd_model_catalogue(cwd: &std::path::Path, args: ModelCatalogueCmd) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let data = match args.command {
+        ModelCatalogueSub::Refresh(args) => service.refresh_model_catalogue(&args.provider)?,
+        ModelCatalogueSub::Show(args) => service.show_model_catalogue(args.filter.as_deref())?,
+    };
     Ok(reply(&service, data, diagnostic_warnings(&service)))
 }
 

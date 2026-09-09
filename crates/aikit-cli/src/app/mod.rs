@@ -780,6 +780,354 @@ impl Service {
             .unwrap_or(&[])
     }
 
+    /// Join the canonical Model catalogue against the route availability this
+    /// detection run observed, and lay the result onto the resolution.
+    ///
+    /// Direction is the whole point: catalogue -> availability -> selection.
+    /// The catalogue supplies identity (first-party seed, owner entries layered
+    /// over it); Actuation supplies whether any route to that identity is
+    /// actually there. Nothing here mints a Model from what happens to be
+    /// installed, and nothing reads usage telemetry.
+    fn join_model_routes(
+        &self,
+        resolution: &mut aikit_core::ContextResolution,
+        detection: &aikit_adapters::actuation_harness_detection::DetectionOutcome,
+    ) -> Vec<String> {
+        let (catalogue, mut notes) = aikit_store::model_catalogue::resolved_catalogue(&self.home);
+
+        // Availability comes from two independent kinds of evidence, and they
+        // stay distinguishable: what Actuation detected on this machine, and
+        // what a Provider Source published. Neither is allowed to stand in for
+        // the other, and neither mints identity.
+        let (mut observed, detection_notes) =
+            aikit_adapters::actuation_model_routes::observed_provider_models(detection);
+        notes.extend(detection_notes);
+
+        let (documents, problems) =
+            aikit_store::model_catalogue::load_provider_catalogs(&self.home);
+        notes.extend(problems);
+        for document in documents {
+            let outcome =
+                aikit_adapters::provider_catalog_source::ProviderCatalogOutcome::Observed {
+                    observations: document.observations,
+                    source: document.source,
+                    observed_at: document.observed_at,
+                };
+            observed.extend(
+                aikit_adapters::provider_catalog_source::observed_router_routes(&outcome),
+            );
+        }
+
+        // Harness workability: a harness that is actually installed here and
+        // declares which provider it dispatches to is evidence that the
+        // provider is reachable from this machine. It is the only evidence a
+        // hosted provider can have short of calling its API with a key.
+        let capabilities = aikit_adapters::actuation_harness_detection
+            ::intake_actuation_capabilities(&SystemRunner::new(), "actuation");
+        let (reachable, reach_notes) =
+            aikit_adapters::actuation_model_routes::harness_provider_reachability(
+                detection,
+                &capabilities,
+            );
+        notes.extend(reach_notes);
+        if !reachable.is_empty() {
+            notes.push(format!(
+                "harness dispatch reaches: {}",
+                reachable
+                    .iter()
+                    .map(|reach| format!("{} via {}", reach.provider, reach.through))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+
+        // Credentials qualify usability and nothing else. Only the fact that a
+        // binding is recorded is read; no secret is materialised or carried.
+        let credentials = match aikit_store::credentials::CredentialBindingStore::new(&self.home)
+            .list()
+        {
+            Ok(bindings) => aikit_adapters::actuation_model_routes::CredentialEvidence::from_binding_refs(
+                bindings
+                    .into_iter()
+                    .filter(|binding| !binding.revoked)
+                    .map(|binding| binding.credential_ref.as_str().to_string()),
+            ),
+            Err(error) => {
+                notes.push(format!(
+                    "credential bindings unreadable ({error}) — observed routes are reported \
+                     without their credential state, never as usable"
+                ));
+                aikit_adapters::actuation_model_routes::CredentialEvidence::default()
+            }
+        };
+        if !credentials.is_empty() {
+            notes.push(format!(
+                "credential bindings observed for: {}",
+                credentials.providers().join(", ")
+            ));
+        }
+
+        let join = aikit_adapters::actuation_model_routes::join_model_routes_with_reach(
+            &catalogue,
+            &observed,
+            &reachable,
+            &credentials,
+        );
+        notes.extend(join.notes.clone());
+        // Catalogue-joined Models are the model candidates. An authored Model
+        // already in the index keeps its record; the join adds the rest.
+        let known: Vec<String> = resolution
+            .model_candidates
+            .iter()
+            .map(|candidate| candidate.resource.descriptor.id.to_string())
+            .collect();
+        for model in join.models {
+            if !known
+                .iter()
+                .any(|id| id == &model.resource.descriptor.id.to_string())
+            {
+                resolution.model_candidates.push(model);
+            }
+        }
+        resolution.model_routes = join.route_sets;
+        resolution.unmatched_model_offers = join.unmatched.clone();
+        for offer in &join.unmatched {
+            notes.push(format!(
+                "unmatched provider offer: {} from {} — {}",
+                offer.provider_native_id, offer.provider, offer.reason
+            ));
+        }
+        notes
+    }
+
+    /// Actualise a selected Model through Actuation, keeping its routes plural
+    /// right up to the boundary.
+    ///
+    /// The whole chain in one place, in its own direction: the composed
+    /// resolution already carries the catalogue↔availability join, so this
+    /// selects a Model out of it (never a provider), ranks its viable routes,
+    /// asks Workcell for a material body only where one is actually needed,
+    /// and hands the first workable route to Actuation. Actuation re-runs live
+    /// detection and applies its own evidence gate; a refusal comes back as a
+    /// refusal, never as a success with a missing field.
+    pub fn realise_model(
+        &self,
+        composed: &serde_json::Value,
+        model: &str,
+        provider: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        use aikit_adapters::model_realisation::{
+            material_body_plan, realise, MaterialBodyOutcome, RealisationOutcome,
+            RealisationRequest,
+        };
+        use aikit_core::resource::{
+            canonical_model_ref, candidates_from_routes, rank_model_roster, select_model,
+            ModelRankingPolicy, ModelRouteSet, ProviderRef,
+        };
+
+        let model_ref = canonical_model_ref(model)?;
+        let route_sets: Vec<ModelRouteSet> =
+            serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
+                .map_err(|error| {
+                    AikitError::new("compose.route_sets_unreadable", error.to_string())
+                })?;
+        let routes = route_sets
+            .into_iter()
+            .find(|set| set.model == model_ref)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "compose.model_not_catalogued",
+                    format!(
+                        "{model_ref} is not in the resolved catalogue — a Model is selected from                          the catalogue, never minted at selection time"
+                    ),
+                )
+            })?;
+        let pin = provider.map(ProviderRef::parse).transpose()?;
+
+        let base = model_roster_candidate_for(&model_ref);
+        let roster = rank_model_roster(
+            model_roster_demand(),
+            ModelRankingPolicy::Balanced,
+            candidates_from_routes(&routes, &base),
+        );
+        let Some(selection) = select_model(&roster, &routes, pin.as_ref()) else {
+            return Ok(serde_json::json!({
+                "model": model_ref,
+                "selected": false,
+                "reason": format!(
+                    "{model_ref} is catalogued but has no viable route{} — known-but-unavailable, \
+                     which is not the same as unknown",
+                    pin.as_ref().map(|p| format!(" through the pinned {p}")).unwrap_or_default()
+                ),
+                "routes": routes.routes,
+            }));
+        };
+
+        // Selection keeps every viable route. Only actualisation picks one,
+        // and the rest stay on the record so a later loss re-resolves.
+        let runner = SystemRunner::new();
+        let mut attempts = Vec::new();
+        for route in &selection.viable_routes {
+            let body = material_body_plan(&runner, "workcell", &model_ref, route);
+            if let MaterialBodyOutcome::Unsatisfiable { omissions } = &body {
+                attempts.push(serde_json::json!({
+                    "route": route,
+                    "material_body": "unsatisfiable",
+                    "omissions": omissions,
+                    "outcome": "skipped — Workcell cannot supply the body this route needs",
+                }));
+                continue;
+            }
+            let request = RealisationRequest {
+                actuation_ref: format!("actuation:{}", self.descriptor.host),
+                agency_ref: composed
+                    .pointer("/composed_inputs/agency")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("agency:aikit-compose")
+                    .to_string(),
+                world_binding_ref: composed
+                    .pointer("/plan/session_space")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("binding:aikit-compose")
+                    .to_string(),
+                agent_session_ref: composed
+                    .pointer("/composed_inputs/agent_session")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                harness_ref: composed
+                    .pointer("/plan/harness/resource")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                model: model_ref.clone(),
+                route: route.clone(),
+                evidence_refs: Vec::new(),
+            };
+            match realise(&runner, "actuation", &request) {
+                RealisationOutcome::Instantiated {
+                    receipt,
+                    detection_ref,
+                } => {
+                    return Ok(serde_json::json!({
+                        "model": model_ref,
+                        "selected": true,
+                        "selection": selection,
+                        "realised_through": route,
+                        "material_body": body_reading(&body),
+                        "detection_ref": detection_ref,
+                        "instantiation": receipt,
+                        "attempts": attempts,
+                        "standing": "Actuation actualised this relation under its own evidence \
+                                     gate; the model's other viable routes remain on the selection \
+                                     for re-resolution",
+                    }));
+                }
+                RealisationOutcome::Refused { reason } => attempts.push(serde_json::json!({
+                    "route": route, "outcome": "refused by Actuation", "reason": reason,
+                })),
+                RealisationOutcome::Unavailable { reason } => attempts.push(serde_json::json!({
+                    "route": route, "outcome": "Actuation unavailable", "reason": reason,
+                })),
+            }
+        }
+        Ok(serde_json::json!({
+            "model": model_ref,
+            "selected": true,
+            "selection": selection,
+            "realised": false,
+            "reason": "every viable route was tried and none actualised; see attempts",
+            "attempts": attempts,
+        }))
+    }
+
+    /// Read one Provider Source's published model list into the local
+    /// catalogue. The listing is public; no credential is used, because the
+    /// catalogue half of the question ("what exists") is deliberately
+    /// separable from the credential half ("what can I use today").
+    pub fn refresh_model_catalogue(&self, provider: &str) -> Result<serde_json::Value> {
+        use aikit_adapters::provider_catalog_source::{
+            fetch_openrouter_catalog, ProviderCatalogOutcome, OPENROUTER_PROVIDER,
+        };
+        if provider != "openrouter" {
+            return Err(AikitError::new(
+                "model_catalogue.unknown_provider_source",
+                format!("no Provider Source is implemented for {provider:?} (have: openrouter)"),
+            ));
+        }
+        let observed_at = jiff::Timestamp::now().to_string();
+        let outcome = fetch_openrouter_catalog(&SystemRunner::new(), &observed_at);
+        match outcome {
+            ProviderCatalogOutcome::Observed {
+                observations,
+                source,
+                observed_at,
+            } => {
+                let document = aikit_core::resource::ProviderCatalogDocument::new(
+                    aikit_core::resource::ProviderRef::parse(OPENROUTER_PROVIDER)?,
+                    source.clone(),
+                    observed_at.clone(),
+                    observations,
+                );
+                let path = aikit_store::model_catalogue::save_provider_catalog(&self.home, &document)?;
+                let folded =
+                    aikit_core::resource::catalogue_from_observations(&document.observations)?;
+                Ok(serde_json::json!({
+                    "provider": OPENROUTER_PROVIDER,
+                    "source": source,
+                    "observed_at": observed_at,
+                    "listings_read": document.observations.len(),
+                    "models_catalogued": folded.len(),
+                    "cached_at": path.display().to_string(),
+                    "standing": "provider-published observation, not authored ground; \
+                                 an owner entry supersedes it by canonical ModelRef",
+                }))
+            }
+            ProviderCatalogOutcome::Unavailable { reason } => Err(AikitError::new(
+                "model_catalogue.provider_source_unavailable",
+                reason,
+            )),
+        }
+    }
+
+    /// Read the resolved catalogue back: the first-party seed, whatever
+    /// Provider Sources published, and the owner's own entries, layered by
+    /// canonical ModelRef. This reports identity only — whether any of it is
+    /// reachable is the join's answer, and it lives on `compose`.
+    pub fn show_model_catalogue(&self, filter: Option<&str>) -> Result<serde_json::Value> {
+        let (catalogue, notes) = aikit_store::model_catalogue::resolved_catalogue(&self.home);
+        let needle = filter.map(str::to_lowercase);
+        let entries: Vec<serde_json::Value> = catalogue
+            .entries()
+            .filter(|entry| match &needle {
+                None => true,
+                Some(needle) => {
+                    entry.model.as_str().to_lowercase().contains(needle)
+                        || entry.name.to_lowercase().contains(needle)
+                }
+            })
+            .map(|entry| {
+                serde_json::json!({
+                    "model": entry.model,
+                    "name": entry.name,
+                    "source": entry.source,
+                    "declared_routes": entry.routes.iter().map(|route| serde_json::json!({
+                        "provider": route.provider,
+                        "kind": route.kind.as_str(),
+                        "provider_native_ids": route.provider_native_ids,
+                        "credential_required": route.credential.requires_credential(),
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "catalogued": catalogue.len(),
+            "shown": entries.len(),
+            "notes": notes,
+            "standing": "catalogue identity only — a catalogued Model is not thereby available; \
+                         see `aikit compose --json` for route availability",
+            "entries": entries,
+        }))
+    }
+
     fn projection_context_for(&self, source_view: &ResolvedView) -> Result<ResolvedContext> {
         let mut view = source_view.clone();
         let selected = self.project_skill_sets();
@@ -861,6 +1209,10 @@ impl Service {
                     }
                 }
             }
+            // The Model catalogue joins the same detection evidence: catalogued
+            // identity plus observed route availability, never identity minted
+            // from what is installed.
+            let _ = self.join_model_routes(&mut resolution, &detection);
             // The World (SessionSpace) identity is discoverable from the
             // Project. When exactly one authored SessionSpace names this
             // Project, disclose it as the canonical World identity; ambiguity
@@ -993,6 +1345,7 @@ impl Service {
                 ));
             }
         }
+        detection_notes.extend(self.join_model_routes(&mut resolution, &detection));
         // Runtime self-identification: which harness environment this very
         // invocation runs inside. Actuation owns the marker knowledge; the
         // resolved self is an observation, never an authored selection —
@@ -1115,9 +1468,37 @@ impl Service {
             ));
         }
         if plan.model.is_none() {
+            // Available and known-but-unavailable are different facts and are
+            // reported as different lists. A Model with no proven route must
+            // never appear as if it could be used.
+            let mut available: Vec<String> = Vec::new();
+            let mut unavailable: Vec<String> = Vec::new();
+            for set in &resolution.model_routes {
+                let line = format!(
+                    "{} ({})",
+                    set.model,
+                    set.viable()
+                        .into_iter()
+                        .map(|route| format!(
+                            "{} via {}",
+                            route.provider_native_id, route.provider
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                );
+                if set.is_available() {
+                    available.push(line);
+                } else {
+                    unavailable.push(set.model.to_string());
+                }
+            }
             composition_notes.push(format!(
-                "no model selected by an authored source — detected candidates: [{}]",
-                plan.model_candidates.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ")
+                "no model selected by an authored source — catalogued models with a proven \
+                 route: [{}]; catalogued but no route proven here: [{}]; selection is not \
+                 provider selection, so a selected model keeps every viable route for \
+                 Actuation to resolve",
+                available.join(", "),
+                unavailable.join(", ")
             ));
         }
 
@@ -1145,6 +1526,11 @@ impl Service {
                 "agent_session": c.agent_session,
             })),
             "plan": plan,
+            // The catalogue-to-availability join, in the direction it runs.
+            // Routes stay plural: selecting a Model is not selecting a
+            // provider, and Actuation resolves an actual route from this set.
+            "model_routes": resolution.model_routes,
+            "unmatched_model_offers": resolution.unmatched_model_offers,
         }))
     }
 
@@ -2620,4 +3006,84 @@ fn plan_effect(adapter: &dyn TargetAdapter, rc: &ResolvedContext) -> Option<Acti
         .plan(rc)
         .ok()
         .map(|plan| adapter.activation_effect(None, &plan))
+}
+
+/// A neutral roster demand for compose-time selection. The roster exists to
+/// order `(Model, route)` pairs; compose does not invent task fitness it has
+/// not observed, so the demand carries only what it can honestly state.
+fn model_roster_demand() -> aikit_core::resource::ModelRosterDemand {
+    aikit_core::resource::ModelRosterDemand {
+        project: None,
+        profile: None,
+        agency: None,
+        use_type: "compose".into(),
+        required_capabilities: Default::default(),
+        required_modalities: Default::default(),
+        required_tools: Default::default(),
+        required_contracts: Default::default(),
+        context_characteristics: Default::default(),
+        independence_from: Default::default(),
+        estimated_input_tokens: None,
+        estimated_output_tokens: None,
+        cost_ceiling_usd: None,
+    }
+}
+
+/// The model-level facts a compose-time candidate carries. Route-level facts
+/// are filled in per route by `candidates_from_routes`; nothing here asserts
+/// fitness, price or authorisation that has not been observed.
+fn model_roster_candidate_for(
+    model: &aikit_core::resource::ResourceRef,
+) -> aikit_core::resource::ModelRosterCandidate {
+    aikit_core::resource::ModelRosterCandidate {
+        model: model.clone(),
+        variant: model.to_string(),
+        provider: aikit_core::resource::ProviderRef::parse("provider:unresolved")
+            .expect("static provider ref"),
+        provider_revision: None,
+        available: false,
+        authorised: true,
+        provider_usable: false,
+        policy_allowed: true,
+        contract_compatible: true,
+        harness_compatible: true,
+        harness_composition: None,
+        native_capabilities: Default::default(),
+        harness_capabilities: Default::default(),
+        profile_skills: Default::default(),
+        modalities: Default::default(),
+        tool_support: Default::default(),
+        contracts: Default::default(),
+        task_fitness: Default::default(),
+        role_fitness: Default::default(),
+        profile_fit: None,
+        authored_preference: None,
+        frecency: None,
+        latency_ms: None,
+        reliability: None,
+        context_window_tokens: None,
+        price: None,
+        exact_spend: Vec::new(),
+        observed_fitness: Vec::new(),
+        access: Default::default(),
+        provenance: Vec::new(),
+    }
+}
+
+fn body_reading(outcome: &aikit_adapters::model_realisation::MaterialBodyOutcome) -> serde_json::Value {
+    use aikit_adapters::model_realisation::MaterialBodyOutcome;
+    match outcome {
+        MaterialBodyOutcome::NotRequired { reason } => {
+            serde_json::json!({ "state": "not-required", "reason": reason })
+        }
+        MaterialBodyOutcome::Satisfiable { plan_ref } => {
+            serde_json::json!({ "state": "satisfiable", "plan_ref": plan_ref })
+        }
+        MaterialBodyOutcome::Unsatisfiable { omissions } => {
+            serde_json::json!({ "state": "unsatisfiable", "omissions": omissions })
+        }
+        MaterialBodyOutcome::Unavailable { reason } => {
+            serde_json::json!({ "state": "unavailable", "reason": reason })
+        }
+    }
 }

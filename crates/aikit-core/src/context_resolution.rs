@@ -14,8 +14,8 @@ use crate::platform::TargetId;
 use crate::project::ProjectBinding;
 use crate::resolve::ResolvedView;
 use crate::resource::{
-    Eligibility, ProviderState, ResourceIndex, ResourceKind, ResourceRecord, ResourceRef,
-    SourceState,
+    Eligibility, ModelRouteSet, ProviderState, ResourceIndex, ResourceKind, ResourceRecord,
+    ResourceRef, SourceState, UnmatchedModelOffer,
 };
 use crate::scope::{ScopeKind, ScopeLayer};
 
@@ -152,6 +152,19 @@ pub struct ContextResolution {
     pub developmental_resources: Vec<ResolvedResource>,
     pub context_sources: Vec<ResolvedResource>,
     pub model_candidates: Vec<ResolvedResource>,
+    /// The catalogue↔availability join for this resolution: one entry per
+    /// catalogued Model that this join considered, each carrying every route
+    /// currently known for it. Routes stay plural here on purpose — selecting
+    /// a Model is not selecting a provider, and Actuation resolves (and
+    /// re-resolves) an actual route from this set.
+    #[serde(default)]
+    pub model_routes: Vec<ModelRouteSet>,
+    /// Provider-native model identities that were observed but that no
+    /// catalogue entry claims. They are visible as offers, never as Models:
+    /// minting identity from what happens to be installed today is exactly
+    /// what stable-identity-across-provider-renames forbids.
+    #[serde(default)]
+    pub unmatched_model_offers: Vec<UnmatchedModelOffer>,
     pub harness_candidates: Vec<ResolvedResource>,
     /// Actuation's detection ground for this resolution. Additive evidence:
     /// candidates above may include ephemeral detection-sourced resources,
@@ -257,6 +270,8 @@ pub fn compose_context_resolution(
         developmental_resources,
         context_sources,
         model_candidates: take_group(&mut grouped, ResourceKind::Model),
+        model_routes: Vec::new(),
+        unmatched_model_offers: Vec::new(),
         harness_candidates: take_group(&mut grouped, ResourceKind::Harness),
         harness_detection: None,
         execution_offers: take_group(&mut grouped, ResourceKind::ExecutionOffer),
