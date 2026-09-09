@@ -10,7 +10,6 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use aikit_core::resource::ActionStageability;
-use aikit_core::ProjectWorldReadModel;
 
 use crate::application::{
     visible_contextual_actions, ActionOutcome, Overlay, PresentationMode, ResourceListItem,
@@ -20,7 +19,9 @@ use crate::layout::{Glyphs, Layout};
 use crate::navigation::AmbientContext;
 use crate::navigator_groups::{self, NavigatorRow};
 use crate::compose_preview::compose_preview_lines;
-use crate::project_workspace_render::{explain_lines, project_world_lines, workspace_section_label};
+use crate::project_workspace_render::{
+    explain_lines, project_world_lines, workspace_section_label, WorkspaceReading,
+};
 use crate::theme::Theme;
 
 /// Render the resting shell with an already-resolved host glyph capability.
@@ -52,17 +53,17 @@ pub fn draw_with_project_world(
     frame: &mut Frame,
     state: &TuiState,
     ambient: &AmbientContext,
-    world: &ProjectWorldReadModel,
+    reading: WorkspaceReading<'_>,
     glyphs: Glyphs,
 ) {
-    draw_shell(frame, state, ambient, Some(world), glyphs);
+    draw_shell(frame, state, ambient, Some(reading), glyphs);
 }
 
 fn draw_shell(
     frame: &mut Frame,
     state: &TuiState,
     ambient: &AmbientContext,
-    world: Option<&ProjectWorldReadModel>,
+    reading: Option<WorkspaceReading<'_>>,
     glyphs: Glyphs,
 ) {
     let theme = Theme::new();
@@ -98,8 +99,8 @@ fn draw_shell(
     let compact_world_lines = if panes.preview.is_none()
         && state.presentation == PresentationMode::Workspace
     {
-        world
-            .map(|world| project_world_lines(state, world, glyphs))
+        reading
+            .map(|reading| project_world_lines(state, reading, glyphs))
             .filter(|lines| !lines.is_empty())
     } else {
         None
@@ -111,7 +112,7 @@ fn draw_shell(
     }
 
     if let Some(preview) = panes.preview {
-        frame.render_widget(preview_pane(state, &theme, world, glyphs), preview);
+        frame.render_widget(preview_pane(state, &theme, reading, glyphs), preview);
     }
     frame.render_widget(footer(state, &theme, glyphs), panes.footer);
 }
@@ -277,9 +278,10 @@ fn resource_line<'a>(
 fn preview_pane<'a>(
     state: &'a TuiState,
     theme: &Theme,
-    world: Option<&ProjectWorldReadModel>,
+    reading: Option<WorkspaceReading<'a>>,
     glyphs: Glyphs,
 ) -> Paragraph<'a> {
+    let world = reading.map(|reading| reading.world);
     let sep = glyphs.separator();
     if state.overlay == Some(Overlay::ConfirmApply) {
         let summary = state
@@ -366,8 +368,8 @@ fn preview_pane<'a>(
     }
 
     if state.presentation == PresentationMode::Workspace {
-        if let Some(world) = world {
-            let lines = project_world_lines(state, world, glyphs);
+        if let Some(reading) = reading {
+            let lines = project_world_lines(state, reading, glyphs);
             if !lines.is_empty() {
                 return project_world_pane(lines, theme);
             }
