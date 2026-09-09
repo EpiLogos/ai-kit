@@ -306,8 +306,18 @@ fn title_from_body(body: &str) -> Option<String> {
 /// corpus root.
 pub fn parse_ingestable_record(relative: &str, text: &str) -> Result<IngestedRecord> {
     let (front, _list, body) = strip_frontmatter(text);
+    // Identity comes from what the record declares, in the same order the
+    // selection rule uses: `record_id`, then `source_id`. The file-stem
+    // fallback is last and genuinely last-resort — it is not identity, it is
+    // a guess, and two same-named files in different directories make the
+    // same guess. The corpus has eight `P1-CANONICAL-ALIGNMENT.md`, one per
+    // room, each with its own `source_id`; keying them by stem collapsed all
+    // eight onto one ref and the ingest died claiming the file already held
+    // it. Declared identity first means that cannot happen.
     let record_id = front
         .get("record_id")
+        .or_else(|| front.get("source_id"))
+        .filter(|id| !id.trim().is_empty())
         .cloned()
         .unwrap_or_else(|| {
             std::path::Path::new(relative)
@@ -661,7 +671,22 @@ pub fn select_ingestable_records(corpus: &[(String, String)]) -> CorpusSelection
             selection.unparseable.push(relative.clone());
             continue;
         }
-        let Some(record_id) = front.get("record_id").filter(|id| !id.trim().is_empty()) else {
+        // A corpus record identifies itself with `record_id` or `source_id`.
+        //
+        // Reading only `record_id` was too narrow for the corpus this engine
+        // was written for: the essay's section movements, its stations and
+        // its passages all identify by `source_id` while carrying the same
+        // record furniture — `title`, `claim_status`, `evidence_status`,
+        // `tags`. Skipping them dropped 497 real documents, and with them
+        // every tag the corpus actually declares, which is why tags looked
+        // unexercised when they are in fact the corpus's richest facet.
+        // They are also what the argument records cite: 103 of the 105
+        // `source_ids` referenced by records resolve to one of these files.
+        let Some(record_id) = front
+            .get("record_id")
+            .or_else(|| front.get("source_id"))
+            .filter(|id| !id.trim().is_empty())
+        else {
             selection.skipped_no_record_id += 1;
             continue;
         };
@@ -802,6 +827,65 @@ mod tests {
         assert!(
             !index.contains(&ResourceRef::parse("central:source:corpus:bratton-2026-agentworld-brief").unwrap()),
             "citing a work never makes it a curated node"
+        );
+    }
+
+    /// The corpus identifies records by `record_id` *or* `source_id` — its
+    /// section movements use the latter, and they carry the tags. Keying
+    /// identity off the filename instead collapsed every same-named file in
+    /// the corpus onto one ref.
+    #[test]
+    fn a_record_is_identified_by_what_it_declares_not_by_its_filename() {
+        let a = "---\nsource_id: 01-differentiating-mind-p1-canonical-alignment\ntags:\n                   - station/s0\n---\n\n# Alignment\n";
+        let b = "---\nsource_id: 02-return-of-zero-p1-canonical-alignment\ntags:\n                   - station/s1\n---\n\n# Alignment\n";
+        let selection = select_ingestable_records(&[
+            ("rooms/01/P1-CANONICAL-ALIGNMENT.md".into(), a.into()),
+            ("rooms/02/P1-CANONICAL-ALIGNMENT.md".into(), b.into()),
+        ]);
+        assert_eq!(selection.records.len(), 2, "both are ingestable records");
+        assert!(
+            selection.duplicate_record_id.is_empty(),
+            "distinct source_ids are not duplicates: {:?}",
+            selection.duplicate_record_id
+        );
+
+        let (objects, _) = ingest_corpus(&selection.records).unwrap();
+        let refs: Vec<String> = objects
+            .iter()
+            .filter_map(|o| match o {
+                WikiObject::Node(n) if n.node_type != "tag" => Some(n.ref_id.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            refs.contains(&"wiki:node:record/01-differentiating-mind-p1-canonical-alignment".to_owned())
+                && refs.contains(&"wiki:node:record/02-return-of-zero-p1-canonical-alignment".to_owned()),
+            "each room's file keeps its own declared identity: {refs:?}"
+        );
+    }
+
+    /// Tags declared by `source_id` records reach the field. This is the
+    /// corpus's richest facet and it was invisible while only `record_id`
+    /// files were read.
+    #[test]
+    fn tags_on_source_id_records_reach_the_field() {
+        let text = "---\nsource_id: 09-s0-p2-vikalpa-samkalpa\nnode_type: section\ntags:                     [argument-map/section, station/s0]\n---\n\n# Vikalpa\n";
+        let selection =
+            select_ingestable_records(&[("movements/09-s0-p2.md".into(), text.into())]);
+        assert_eq!(selection.records.len(), 1, "a source_id record is ingestable");
+
+        let (objects, _) = ingest_corpus(&selection.records).unwrap();
+        let tagged: Vec<String> = objects
+            .iter()
+            .filter_map(|o| match o {
+                WikiObject::Edge(e) if e.relation == "tagged" => Some(e.to_ref.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            tagged.contains(&"wiki:node:tag/argument-map/section".to_owned())
+                && tagged.contains(&"wiki:node:tag/station/s0".to_owned()),
+            "both declared tags compile as tagged edges: {tagged:?}"
         );
     }
 
