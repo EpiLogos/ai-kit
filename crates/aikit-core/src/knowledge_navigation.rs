@@ -959,12 +959,18 @@ impl<'a> KnowledgeApplication<'a> {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
-        self.source_material(source).ok_or_else(|| {
-            AikitError::new(
+        // A source's relations are the curated nodes that cite it. That is a
+        // fact the Wiki holds whether or not the SourcePool can materialise
+        // the source's content, so requiring material here refused to answer
+        // a question we could answer: a cited-but-unmaterialised source came
+        // back `source_missing` while dozens of nodes demonstrably cited it.
+        // Refuse only when nothing knows the source at all.
+        if self.source_material(source).is_none() && self.wiki_citations(source).is_empty() {
+            return Err(AikitError::new(
                 "knowledge.source_missing",
                 format!("Source {source} is absent"),
-            )
-        })?;
+            ));
+        }
         let focus = ResourceRef::parse(source.as_str())?;
         let query = RelationQuery {
             focus: focus.clone(),

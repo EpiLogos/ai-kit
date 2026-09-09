@@ -183,6 +183,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Method(a)) => cmd_method(cwd, a),
         Some(Command::Trust(a)) => cmd_trust(cwd, a),
         Some(Command::Wiki(c)) => cmd_wiki(cwd, c),
+        Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),
         Some(Command::Status(a)) => cmd_status(cwd, a),
         Some(Command::Explain(a)) => cmd_explain(cwd, a),
         Some(Command::History(a)) => cmd_history(cwd, a),
@@ -1583,6 +1584,20 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
 /// home, so the envelope context is built directly rather than discovered.
 fn cmd_wiki(cwd: &std::path::Path, c: WikiCmd) -> Result<Reply> {
     let outcome = aikit_cli::wiki::run(cwd, c)?;
+    Ok(Reply::Data {
+        context: EnvelopeContext {
+            context_id: None,
+            session_id: None,
+            project_root: Some(cwd.display().to_string()),
+        },
+        data: outcome.data,
+        warnings: outcome.warnings,
+        exit_code: outcome.exit_code,
+    })
+}
+
+fn cmd_wiki_shape(cwd: &std::path::Path, c: WikiShapeCmd) -> Result<Reply> {
+    let outcome = aikit_cli::wiki_shape::run(c)?;
     Ok(Reply::Data {
         context: EnvelopeContext {
             context_id: None,

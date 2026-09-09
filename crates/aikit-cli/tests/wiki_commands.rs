@@ -988,19 +988,25 @@ fn cited_bibliography_is_findable_and_an_empty_traversal_says_why() {
         "central:source:corpus:ostrom-1990-governing-commons"
     );
 
-    // Asking it for neighbours discloses that it is a cited source, not a
-    // curated object with nothing attached.
+    // Asking it for neighbours answers with the nodes that cite it. Its
+    // citations are its neighbourhood; returning an empty list and a note
+    // pointing elsewhere was a lecture where an answer belonged.
     let (code, envelope) = wiki(
         scratch.path(),
         &["wiki", "query", "neighbours", "central:source:corpus:ostrom-1990-governing-commons",
           "--file", wiki_json.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
-    assert!(envelope["data"]["neighbours"].as_array().unwrap().is_empty());
-    let warnings = envelope["warnings"].as_array().unwrap();
+    let neighbours = envelope["data"]["neighbours"].as_array().unwrap();
     assert!(
-        warnings.iter().any(|w| w.as_str().unwrap_or_default().contains("authored source cited by")),
-        "an empty traversal over a cited source explains itself: {warnings:?}"
+        neighbours.iter().any(|n| n["resource"] == "wiki:node:record/A24"
+            && n["relation"] == "cites"
+            && n["direction"] == "incoming"),
+        "the citing node is the source's neighbourhood: {envelope}"
+    );
+    assert!(
+        envelope["warnings"].as_array().unwrap().is_empty(),
+        "nothing to apologise for once the question is answered: {envelope}"
     );
 
     // A ref the field does not hold at all is a different answer again.
@@ -1020,6 +1026,54 @@ fn cited_bibliography_is_findable_and_an_empty_traversal_says_why() {
         &["wiki", "query", "neighbours", "wiki:node:record/A24", "--file", wiki_json.to_str().unwrap()],
     );
     assert!(envelope["warnings"].as_array().unwrap().is_empty());
+}
+
+/// Same-named bibliography files in different rooms, each with its own
+/// declared `source_id`, must not collide — and the dry run must predict
+/// that the apply succeeds rather than promising a write that then fails.
+#[test]
+fn same_named_source_files_do_not_collide_and_the_dry_run_predicts_the_apply() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    for (room, id) in [
+        ("01-differentiating-mind", "01-differentiating-mind-p1"),
+        ("02-return-of-zero", "02-return-of-zero-p1"),
+    ] {
+        write(
+            &corpus.join(format!("section-rooms/{room}/P1-CANONICAL-ALIGNMENT.md")),
+            &format!("---\nsource_id: {id}\ntags: [station/s0]\n---\n\n# Alignment\n"),
+        );
+    }
+    // One curated record so the ingest has a node population too.
+    write(
+        &corpus.join("arguments/A24.md"),
+        "---\nrecord_id: A24\nrecord_type: argument\nsource_ids:\n           - 01-differentiating-mind-p1\n---\n\n# A24\n",
+    );
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\n  \"objects\": []\n}\n");
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(
+        envelope["data"]["self_colliding_refs"], 0,
+        "distinct source_ids in same-named files do not collide: {envelope}"
+    );
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply"],
+    );
+    assert_eq!(code, 0, "the apply the dry run promised must succeed: {envelope}");
+
+    // The record's cited bibliography is reachable from the record.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "neighbours", "wiki:node:record/A24", "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
 }
 
 #[test]

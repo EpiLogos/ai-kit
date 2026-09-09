@@ -1339,6 +1339,25 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
         "absences": absences.len(),
     });
 
+    // A proposal set that collides with itself cannot be written, whatever
+    // the file holds. Report it here rather than letting `--apply` discover
+    // it: a dry run that cannot predict its own apply is worse than none,
+    // and this one used to promise "re-run with --apply to write these
+    // objects" and then die on a duplicate ref against an empty file.
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    for object in &objects {
+        *seen.entry(object.ref_id().to_string()).or_default() += 1;
+    }
+    let colliding: Vec<String> = seen
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(reference, count)| {
+            format!("{count} proposed objects claim `{reference}`; the apply would refuse")
+        })
+        .collect();
+    summary["self_colliding_refs"] = jval!(colliding.len());
+    warnings.extend(colliding.iter().cloned());
+
     if !args.apply {
         let held = WikiDocument::parse(&read(&args.file)?)?;
         let already_held = objects
@@ -1348,10 +1367,13 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
         summary["applied"] = jval!(false);
         summary["already_held"] = jval!(already_held);
         summary["source_pool_files"] = jval!(0);
-        summary["note"] = jval!(
+        summary["note"] = jval!(if colliding.is_empty() {
             "dry run; re-run with --apply to write these objects \
              (pass --update too if any are already held and should advance)"
-        );
+        } else {
+            "dry run; this proposal set collides with itself and --apply would \
+             refuse — see the warnings naming each contested ref"
+        });
         return Ok(WikiOutcome::reported(summary, warnings, json::EXIT_OK));
     }
 
@@ -1504,7 +1526,14 @@ fn query_search(args: &WikiQuerySearchArgs) -> Result<WikiOutcome> {
 fn query_neighbours(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
     let index = read_index(&args.file)?;
     let resource = ResourceRef::parse(&args.resource_ref)?;
-    let neighbours = index.neighbours(&resource, args.limit);
+    let mut neighbours: Vec<Value> = index
+        .neighbours(&resource, args.limit)
+        .into_iter()
+        .map(|n| serde_json::to_value(n).unwrap_or_default())
+        .collect();
+    // The nodes citing an authored source are its neighbourhood, incoming.
+    neighbours.extend(citations_of(&index, &resource));
+    neighbours.truncate(args.limit);
     Ok(WikiOutcome::reported(
         jval!({
             "command": "query.neighbours",
@@ -1523,26 +1552,47 @@ fn query_neighbours(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
 /// where the truth is "not here". Say which.
 ///
 /// A cited authored source lands in the second case by design — it is
-/// findable through search without ever being a curated object — so the
-/// warning names that rather than implying the ref is unknown.
+/// findable through search without ever being a curated object.
 fn absent_ref_warnings(index: &SemanticWikiIndex, resource: &ResourceRef) -> Vec<String> {
+    if index.contains(resource) || !citations_of(index, resource).is_empty() {
+        return Vec::new();
+    }
+    vec![format!(
+        "{resource} is not in this Wiki file: an empty result here means absent, not unrelated"
+    )]
+}
+
+/// The curated nodes citing `resource`, when `resource` names an authored
+/// source rather than a curated object.
+///
+/// A citation is a real, directional, authored fact: these nodes point at this
+/// source. Reporting it costs the source nothing — it still does not resolve,
+/// is not in `all_refs`, and is not discoverable as an object. What it does buy
+/// is an answer where there used to be an empty list and an apology.
+///
+/// The entries carry no `edge_ref`, because no edge object exists: the claim
+/// lives in each node's `source_refs`. Saying so is more honest than inventing
+/// an edge to make the shape uniform.
+fn citations_of(index: &SemanticWikiIndex, resource: &ResourceRef) -> Vec<Value> {
     if index.contains(resource) {
         return Vec::new();
     }
-    let source = SourceRef::parse(resource.as_str())
-        .ok()
-        .filter(|source| !index.citing_nodes(source).is_empty());
-    match source {
-        Some(source) => vec![format!(
-            "{resource} is an authored source cited by {} curated node(s), not a curated object: \
-             it has no relations of its own. Search finds it; `query backlinks` on the nodes \
-             that cite it shows the citation.",
-            index.citing_nodes(&source).len()
-        )],
-        None => vec![format!(
-            "{resource} is not in this Wiki file: an empty result here means absent, not unrelated"
-        )],
-    }
+    let Ok(source) = SourceRef::parse(resource.as_str()) else {
+        return Vec::new();
+    };
+    index
+        .citing_nodes(&source)
+        .into_iter()
+        .map(|node| {
+            jval!({
+                "resource": node.to_string(),
+                "relation": "cites",
+                "direction": "incoming",
+                "origin": "authored",
+                "via": "source_refs",
+            })
+        })
+        .collect()
 }
 
 /// Every object that points *at* `--ref` — what cites it. First-class over
@@ -1551,7 +1601,14 @@ fn absent_ref_warnings(index: &SemanticWikiIndex, resource: &ResourceRef) -> Vec
 fn query_backlinks(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
     let index = read_index(&args.file)?;
     let resource = ResourceRef::parse(&args.resource_ref)?;
-    let mut backlinks = index.backlinks(&resource);
+    let mut backlinks: Vec<Value> = index
+        .backlinks(&resource)
+        .into_iter()
+        .map(|n| serde_json::to_value(n).unwrap_or_default())
+        .collect();
+    // An authored source's backlinks are the nodes that cite it. First-class
+    // here, not a footnote pointing somewhere else.
+    backlinks.extend(citations_of(&index, &resource));
     backlinks.truncate(args.limit);
     let warnings = absent_ref_warnings(&index, &resource);
     Ok(WikiOutcome::reported(
