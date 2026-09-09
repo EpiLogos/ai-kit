@@ -934,6 +934,19 @@ fn ingest_corpus_fixture(root: &Path) {
         &root.join("symbolon/episteme/arguments/A24-Arbitration.md"),
         "---\nrecord_id: A24\nrecord_type: argument\nregister: episteme\nclaim_status: \"Argued\"\nsource_ids:\n  - ostrom-1990-governing-commons\ntags:\n  - arbitration\n  - measure\n---\n\n# A24 — Arbitration and the Usurpation of Measure\n",
     );
+    // The bibliography A24 cites, as the corpus files it: a source page
+    // declaring `source_id` and the corpus's own authored tag vocabulary.
+    write(
+        &root.join("symbolon/episteme/sources/ostrom/SOURCE.md"),
+        "---\nsource_id: ostrom-1990-governing-commons\nnode_type: source-house\nrecord_type: book\ntitle_full: \"Governing the Commons\"\ntags:\n  - source-bank/record\n  - source-bank/commons\n---\n\n# Governing the Commons\n",
+    );
+    // A register page: authored tag vocabulary, no identity to place it by.
+    // Counted-not-named, this is what hid a whole tag vocabulary from a
+    // reader who concluded the corpus declared no tags.
+    write(
+        &root.join("symbolon/episteme/concepts/reference-notes/measure.md"),
+        "---\ntitle: \"Measure\"\nnode_type: reference\ntags:\n  - argument-map/reference\n---\n\n# Measure\n",
+    );
     // The stale checkpoint: same record_id as the canonical whole-field,
     // sorting after it lexicographically (`submission` < `working`, mirrored
     // here by `symbolon` < `working`), so it is the one set aside.
@@ -1025,19 +1038,40 @@ fn ingest_dry_run_reports_the_real_mixed_tree_and_writes_nothing() {
     assert_eq!(code, 0, "{envelope}");
     let data = &envelope["data"];
     assert_eq!(data["applied"], Value::from(false));
-    // README.md is the one non-record file; the snapshot re-declares
-    // etymology-arbitration's id and is set aside, not ingested.
-    assert_eq!(data["skipped_no_record_id"], Value::from(1));
+    // README.md carries nothing to place and is counted; the register page
+    // carries an authored `tags:` vocabulary and no identity, so it is named;
+    // the snapshot re-declares etymology-arbitration's id and is set aside.
+    assert_eq!(data["skipped_inert"], Value::from(1));
+    assert_eq!(data["skipped_unaddressable"], Value::from(1));
     assert_eq!(data["duplicate_record_id"], Value::from(1));
     assert_eq!(data["records_selected"], Value::from(2));
-    // Two record nodes, two tag nodes (arbitration, measure), one room space
-    // (`symbolon`), and the one resolved markdown-link edge (A24 -> whole
-    // field is not asserted; the whole field cites A24, so the edge is
-    // whole-field -> A24) plus two tagged edges.
-    assert_eq!(data["nodes"], Value::from(4));
-    assert_eq!(data["edges"], Value::from(3));
+    assert_eq!(data["sources_selected"], Value::from(1));
+    // Two record nodes — and no tag node, because a tag is not curated
+    // identity. One room space (`symbolon`), and the one resolved
+    // markdown-link edge (the whole field cites A24, so the edge is
+    // whole-field -> A24). No `tagged` edges.
+    assert_eq!(data["nodes"], Value::from(2));
+    assert_eq!(data["edges"], Value::from(1));
     assert_eq!(data["spaces"], Value::from(1));
     assert_eq!(data["absences"], Value::from(0));
+    // Tags ride the SourcePool: one binding per record and per source.
+    assert_eq!(data["source_bindings"], Value::from(3));
+    assert_eq!(data["tag_vocabulary"], Value::from(4));
+    assert_eq!(data["tagged_bindings"], Value::from(2));
+    assert_eq!(data["source_pool_files"], Value::from(0), "a dry run writes no pool");
+
+    assert!(
+        envelope["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| {
+                let w = w.as_str().unwrap_or_default();
+                w.contains("reference-notes/measure.md") && w.contains("`tags:`")
+            }),
+        "a file carrying corpus metadata is named, not counted: {:?}",
+        envelope["warnings"]
+    );
 
     assert!(envelope["warnings"]
         .as_array()
@@ -1078,7 +1112,44 @@ fn ingest_apply_writes_objects_then_refuses_a_rerun_without_update() {
     assert!(objects
         .iter()
         .any(|o| o["ref"] == "wiki:node:record/etymology-arbitration"));
-    assert!(objects.iter().any(|o| o["ref"] == "wiki:node:tag/arbitration"));
+    assert!(
+        !objects
+            .iter()
+            .any(|o| o["ref"].as_str().unwrap_or_default().starts_with("wiki:node:tag/")),
+        "a tag is not curated Wiki identity"
+    );
+
+    // The tags landed in the SourcePool instead, as discoverable shards.
+    let pool = work.path().join("ingested.sources");
+    let shards: Vec<_> = std::fs::read_dir(&pool)
+        .expect("the source pool directory is written")
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(shards.len(), 1, "{shards:?}");
+    let material: Value = serde_json::from_str(&read(&shards[0])).unwrap();
+    let a24 = material
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["binding"]["source"] == "central:source:corpus:A24")
+        .expect("the record binds its own text as source material");
+    let tags: Vec<&str> = a24["binding"]["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tag| tag.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tags,
+        vec![
+            "arbitration",
+            "measure",
+            "source-bank/record",
+            "source-bank/commons"
+        ],
+        "its own declared tags, then the vocabulary of the source it cites"
+    );
 
     // A second apply without --update refuses and leaves the file untouched.
     let before = read(&wiki_json);
@@ -1123,8 +1194,10 @@ fn ingest_apply_writes_objects_then_refuses_a_rerun_without_update() {
 
 /// The capability proof: after ingesting, `wiki query backlinks` and
 /// `wiki query search` answer real questions over the ingested field
-/// through the ordinary semantic-index surface — backlinks and tags are
-/// first-class results, not merely present on the objects.
+/// through the ordinary semantic-index surface — backlinks are first-class
+/// results, not merely present on the objects. Tags are deliberately not
+/// among them: they are a SourcePool property, exercised by
+/// `ingest_apply_writes_objects_then_refuses_a_rerun_without_update`.
 #[test]
 fn query_backlinks_and_search_see_the_ingested_field_as_first_class_results() {
     let (work, scratch) = fixture();
@@ -1156,17 +1229,23 @@ fn query_backlinks_and_search_see_the_ingested_field_as_first_class_results() {
         .iter()
         .any(|n| n["resource"] == "wiki:node:record/etymology-arbitration" && n["relation"] == "references"));
 
-    // The `arbitration` tag's backlinks are the tagged records — first-class,
-    // not a side channel.
+    // A tag ref is not in the Wiki field at all, and asking says so rather
+    // than answering an empty list.
     let (code, envelope) = wiki(
         scratch.path(),
         &["wiki", "query", "backlinks", "wiki:node:tag/arbitration", "--file", wiki_json.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
-    let backlinks = envelope["data"]["backlinks"].as_array().unwrap();
-    assert!(backlinks
-        .iter()
-        .any(|n| n["resource"] == "wiki:node:record/A24" && n["relation"] == "tagged"));
+    assert!(envelope["data"]["backlinks"].as_array().unwrap().is_empty());
+    assert!(
+        envelope["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains("not in this Wiki file")),
+        "{:?}",
+        envelope["warnings"]
+    );
 
     // Search finds the ingested record by its title.
     let (code, envelope) = wiki(

@@ -706,7 +706,18 @@ fn discover_material(
                 Err(_) => continue,
             };
 
-            if discover_wiki && text.contains("okf-wiki/v1") {
+            // SourcePool material is identified structurally, before the
+            // Wiki's content sniff runs. A corpus source binding carries the
+            // body of an authored file, and an authored file that happens to
+            // discuss the wiki profile puts the literal `okf-wiki/v1` inside
+            // that body — which used to make the sniff claim the shard as
+            // malformed Wiki material and warn on every search. What parses
+            // as SourceMaterial is SourceMaterial.
+            let source_items = serde_json::from_str::<SourceMaterial>(&text)
+                .map(|item| vec![item])
+                .or_else(|_| serde_json::from_str::<Vec<SourceMaterial>>(&text));
+
+            if source_items.is_err() && discover_wiki && text.contains("okf-wiki/v1") {
                 match parse_wiki_objects(&text) {
                     Ok(objects) => discovered.wiki.extend(objects),
                     Err(collection_error) => match OkfWikiBundle::parse_json(&text) {
@@ -720,9 +731,6 @@ fn discover_material(
                 }
             }
 
-            let source_items = serde_json::from_str::<SourceMaterial>(&text)
-                .map(|item| vec![item])
-                .or_else(|_| serde_json::from_str::<Vec<SourceMaterial>>(&text));
             if let Ok(items) = source_items {
                 for item in items {
                     let source = item.binding.source.clone();
