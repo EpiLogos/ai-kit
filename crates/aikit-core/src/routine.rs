@@ -16,8 +16,10 @@ use crate::{AikitError, Result};
 
 pub const ROUTINE_VERSION: &str = "aikit.routine/v1";
 pub const METHOD_PROOF_VERSION: &str = "aikit.method-proof/v1";
+pub const ROUTINE_INVOCATION_EVIDENCE_VERSION: &str = "aikit.routine-invocation-evidence/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MethodProofInput {
     pub proof_ref: ResourceRef,
     pub context_resolution_ref: ResourceRef,
@@ -36,6 +38,7 @@ pub struct MethodProofInput {
 /// Exact evidence basis under which one Method revision became eligible for
 /// explicit automation. A successful invocation alone never creates this value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProvenMethodBasis {
     pub version: String,
     pub method: ResourceRef,
@@ -101,7 +104,7 @@ pub fn prove_method(method: &Method, input: MethodProofInput) -> Result<ProvenMe
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum RoutineTrigger {
     Manual,
     Schedule { schedule_ref: String },
@@ -132,8 +135,12 @@ impl RoutineTrigger {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoutineAuthority {
     pub authority_ref: ResourceRef,
+    /// Exact revision of the owner-supplied authority relation when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<SourceRevision>,
     pub action_refs: Vec<ResourceRef>,
     pub granted: bool,
     pub unattended: bool,
@@ -184,6 +191,7 @@ pub enum RoutineSchedulerState {
 /// Material/provider observation attached to a semantic Routine. `provider_job_id`
 /// may change without changing Routine identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoutineSchedulerBinding {
     pub provider: ProviderRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,6 +216,7 @@ impl RoutineSchedulerBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Routine {
     pub id: ResourceRef,
     pub source: SourceRef,
@@ -233,6 +242,53 @@ pub struct Routine {
 }
 
 impl Routine {
+    fn validate_declared_basis(&self, method: &Method) -> Result<()> {
+        if self.name.trim().is_empty() {
+            return Err(AikitError::new(
+                "routine.name_empty",
+                "Routine name must be non-empty",
+            ));
+        }
+        method.validate()?;
+        if self.method != method.id
+            || method.revision.as_ref() != Some(&self.method_revision)
+            || !self.proof.matches_method(method)
+        {
+            return Err(AikitError::new(
+                "routine.proof_method_mismatch",
+                "Routine proof must match the exact Method identity and revision",
+            ));
+        }
+        if self.proof.version != METHOD_PROOF_VERSION {
+            return Err(AikitError::new(
+                "routine.unsupported_proof_version",
+                format!("Routine proof must use the public {METHOD_PROOF_VERSION} contract"),
+            ));
+        }
+        if self.proof.activity_refs.is_empty()
+            || self.proof.return_refs.is_empty()
+            || self.proof.evidence_refs.is_empty()
+            || self.proof.verification_refs.is_empty()
+        {
+            return Err(AikitError::new(
+                "routine.proof_evidence_incomplete",
+                "Method proof requires Activity, Return, Evidence and verification references",
+            ));
+        }
+        ensure_unique_refs(&self.proof.activity_refs, "proof Activity")?;
+        ensure_unique_refs(&self.proof.return_refs, "proof Return")?;
+        ensure_unique_refs(&self.proof.evidence_refs, "proof Evidence")?;
+        ensure_unique_refs(&self.proof.verification_refs, "proof verification")?;
+        self.trigger.validate()?;
+        self.authority.validate_for_method(method)?;
+        ensure_unique_refs(&self.authority.action_refs, "authority Action")?;
+        ensure_unique_refs(&self.context_scope_refs, "context scope")?;
+        if let Some(binding) = &self.scheduler {
+            binding.validate()?;
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: ResourceRef,
@@ -305,10 +361,7 @@ impl Routine {
 
     /// Record that the semantic trigger occurred. This is evidence only and does
     /// not itself authorise any Action.
-    pub fn observe_trigger(
-        &self,
-        observation_ref: ResourceRef,
-    ) -> RoutineTriggerObservation {
+    pub fn observe_trigger(&self, observation_ref: ResourceRef) -> RoutineTriggerObservation {
         RoutineTriggerObservation {
             routine: self.id.clone(),
             observation_ref,
@@ -450,6 +503,7 @@ impl Routine {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoutineTriggerObservation {
     pub routine: ResourceRef,
     pub observation_ref: ResourceRef,
@@ -457,6 +511,7 @@ pub struct RoutineTriggerObservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoutineInvocation {
     pub routine: ResourceRef,
     pub method: ResourceRef,
@@ -469,6 +524,345 @@ pub struct RoutineInvocation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_profile_ref: Option<ResourceRef>,
     pub context_scope_refs: Vec<ResourceRef>,
+}
+
+/// Caller-established evidence needed to identify one trigger occurrence.
+/// AIKit validates the supplied timestamp but never substitutes its own clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineInvocationOccurrence {
+    pub invocation_ref: ResourceRef,
+    pub trigger_observation: RoutineTriggerObservation,
+    pub observed_at: String,
+}
+
+/// Owner-supplied receipt provenance at the exact point the invocation is
+/// resolved. AIKit revalidates it against the supplied Routine; this value does
+/// not claim AIKit independently queried the external authority owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineAuthorityValidation {
+    pub validation_ref: ResourceRef,
+    pub authority_ref: ResourceRef,
+    pub authority_revision: SourceRevision,
+    pub validated_at: String,
+    pub granted: bool,
+    pub unattended: bool,
+    pub standing: RoutineAuthorityStanding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RoutineAuthorityStanding {
+    /// The caller supplied this owner receipt. AIKit checked its internal
+    /// relation to the supplied Routine but did not query the authority owner.
+    OwnerAttested,
+}
+
+/// Optional material delivery evidence. Provider job and restart identity are
+/// provenance only; neither changes the semantic Routine or invocation identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineProviderDelivery {
+    pub provider: ProviderRef,
+    pub delivery_ref: ResourceRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_ref: Option<ResourceRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RoutineProofStanding {
+    /// The proof matches the exact Routine and Method bodies supplied to this
+    /// admission. No canonical source lookup occurred at this boundary.
+    CurrentOnSuppliedBasis,
+}
+
+/// Public AIKit-owned evidence for one authorised Routine occurrence. This is
+/// an invocation request, not proof that any Action ran or completed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineInvocationEvidence {
+    pub schema: String,
+    pub owner: String,
+    pub invocation_ref: ResourceRef,
+    pub routine_ref: ResourceRef,
+    pub routine_source: SourceRef,
+    pub routine_revision: SourceRevision,
+    pub routine_state: RoutineState,
+    pub method_ref: ResourceRef,
+    pub method_revision: SourceRevision,
+    pub proof_ref: ResourceRef,
+    pub proof_standing: RoutineProofStanding,
+    pub context_resolution_ref: ResourceRef,
+    pub trigger_observation_ref: ResourceRef,
+    pub trigger: RoutineTrigger,
+    pub trigger_observed_at: String,
+    pub authority_validation: RoutineAuthorityValidation,
+    pub action_refs: Vec<ResourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_profile_ref: Option<ResourceRef>,
+    #[serde(default)]
+    pub context_scope_refs: Vec<ResourceRef>,
+    #[serde(default)]
+    pub provider_deliveries: Vec<RoutineProviderDelivery>,
+}
+
+/// Structured application input. The Method and Routine bodies are supplied so
+/// the native owner can re-run their real validation rather than trusting a
+/// consumer-prepared projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineInvocationAuthorisationRequest {
+    pub routine: Routine,
+    pub method: Method,
+    pub occurrence: RoutineInvocationOccurrence,
+    pub authority_validation: RoutineAuthorityValidation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_delivery: Option<RoutineProviderDelivery>,
+}
+
+impl RoutineInvocationAuthorisationRequest {
+    pub fn authorise(mut self) -> Result<RoutineInvocationEvidence> {
+        self.routine.authorised_invocation_evidence(
+            &self.method,
+            self.occurrence,
+            self.authority_validation,
+            self.provider_delivery,
+        )
+    }
+}
+
+impl RoutineInvocationEvidence {
+    /// Compare the semantic invocation facts while allowing the delivery ledger
+    /// to accumulate retry/restart provenance for the same occurrence.
+    pub fn has_same_invocation_basis(&self, other: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = other.clone();
+        left.provider_deliveries.clear();
+        right.provider_deliveries.clear();
+        left == right
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema != ROUTINE_INVOCATION_EVIDENCE_VERSION || self.owner != "aikit" {
+            return Err(AikitError::new(
+                "routine.invalid_invocation_evidence",
+                "Routine invocation evidence has an unsupported schema or owner",
+            ));
+        }
+        if self.routine_state != RoutineState::Enabled
+            || self.proof_standing != RoutineProofStanding::CurrentOnSuppliedBasis
+            || !self.authority_validation.granted
+            || self.authority_validation.standing != RoutineAuthorityStanding::OwnerAttested
+        {
+            return Err(AikitError::new(
+                "routine.invalid_invocation_evidence",
+                "authorised invocation evidence must retain enabled proof, granted authority and owner-attested receipt standing",
+            ));
+        }
+        let observed = parse_timestamp(&self.trigger_observed_at, "trigger observation")?;
+        let validated = parse_timestamp(
+            &self.authority_validation.validated_at,
+            "authority validation",
+        )?;
+        if validated < observed {
+            return Err(AikitError::new(
+                "routine.authority_validation_precedes_trigger",
+                "current authority validation cannot precede the trigger observation",
+            ));
+        }
+        ensure_unique_refs(&self.action_refs, "Action")?;
+        ensure_unique_refs(&self.context_scope_refs, "context scope")?;
+        if self.action_refs.is_empty() {
+            return Err(AikitError::new(
+                "routine.action_authority_required",
+                "Routine invocation evidence must name at least one authorised Action",
+            ));
+        }
+        let mut delivery_refs = std::collections::BTreeSet::new();
+        for delivery in &self.provider_deliveries {
+            if !delivery_refs.insert(&delivery.delivery_ref) {
+                return Err(AikitError::new(
+                    "routine.duplicate_provider_delivery",
+                    "Routine invocation evidence cannot repeat a delivery_ref",
+                ));
+            }
+            if delivery
+                .provider_job_id
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                return Err(AikitError::new(
+                    "routine.provider_job_id_empty",
+                    "provider job id must be non-empty when supplied",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Routine {
+    /// Resolve one public invocation envelope from explicit owner evidence.
+    /// Disabled, stale, or revoked Routines return an error and no envelope.
+    pub fn authorised_invocation_evidence(
+        &mut self,
+        method: &Method,
+        occurrence: RoutineInvocationOccurrence,
+        authority_validation: RoutineAuthorityValidation,
+        provider_delivery: Option<RoutineProviderDelivery>,
+    ) -> Result<RoutineInvocationEvidence> {
+        // All bodies arrive through serde at the public boundary, so re-run the
+        // same invariants enforced by constructors before trusting any field.
+        self.validate_declared_basis(method)?;
+        occurrence.trigger_observation.trigger.validate()?;
+        let observed_at = parse_timestamp(&occurrence.observed_at, "trigger observation")?;
+        let validated_at =
+            parse_timestamp(&authority_validation.validated_at, "authority validation")?;
+        if validated_at < observed_at {
+            return Err(AikitError::new(
+                "routine.authority_validation_precedes_trigger",
+                "current authority validation cannot precede the trigger observation",
+            ));
+        }
+        let routine_revision = self.revision.clone().ok_or_else(|| {
+            AikitError::new(
+                "routine.source_revision_required",
+                "an authorised invocation envelope requires the exact Routine source revision",
+            )
+            .with("routine", self.id.to_string())
+        })?;
+        if occurrence.trigger_observation.trigger != self.trigger {
+            return Err(AikitError::new(
+                "routine.trigger_observation_mismatch",
+                "trigger observation does not match the Routine trigger intent",
+            ));
+        }
+        if authority_validation.authority_ref != self.authority.authority_ref {
+            return Err(AikitError::new(
+                "routine.authority_validation_mismatch",
+                "authority validation receipt belongs to another authority relation",
+            ));
+        }
+        if self.authority.revision.as_ref() != Some(&authority_validation.authority_revision) {
+            return Err(AikitError::new(
+                "routine.authority_validation_revision_mismatch",
+                "authority validation revision does not match the exact Routine authority basis",
+            ));
+        }
+        if authority_validation.granted != self.authority.granted
+            || authority_validation.unattended != self.authority.unattended
+        {
+            return Err(AikitError::new(
+                "routine.authority_validation_stale",
+                "authority validation receipt does not match current Routine authority state",
+            ));
+        }
+        if authority_validation.standing != RoutineAuthorityStanding::OwnerAttested {
+            return Err(AikitError::new(
+                "routine.authority_validation_standing_unsupported",
+                "authority validation must disclose owner-attested receipt standing",
+            ));
+        }
+        let invocation = self.authorised_invocation(method, &occurrence.trigger_observation)?;
+        let mut provider_deliveries = Vec::new();
+        if let Some(delivery) = provider_delivery {
+            validate_provider_delivery(self, &delivery)?;
+            provider_deliveries.push(delivery);
+        }
+        let evidence = RoutineInvocationEvidence {
+            schema: ROUTINE_INVOCATION_EVIDENCE_VERSION.into(),
+            owner: "aikit".into(),
+            invocation_ref: occurrence.invocation_ref,
+            routine_ref: invocation.routine,
+            routine_source: self.source.clone(),
+            routine_revision,
+            routine_state: RoutineState::Enabled,
+            method_ref: invocation.method,
+            method_revision: invocation.method_revision,
+            proof_ref: invocation.proof_ref,
+            proof_standing: RoutineProofStanding::CurrentOnSuppliedBasis,
+            context_resolution_ref: invocation.context_resolution_ref,
+            trigger_observation_ref: invocation.trigger_observation_ref,
+            trigger: occurrence.trigger_observation.trigger,
+            trigger_observed_at: occurrence.observed_at,
+            authority_validation,
+            action_refs: invocation.action_refs,
+            agent_profile_ref: invocation.agent_profile_ref,
+            context_scope_refs: invocation.context_scope_refs,
+            provider_deliveries,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+}
+
+fn parse_timestamp(value: &str, label: &str) -> Result<jiff::Timestamp> {
+    value.parse::<jiff::Timestamp>().map_err(|error| {
+        AikitError::new(
+            "routine.invalid_timestamp",
+            format!("{label} time `{value}` is not an RFC 3339 timestamp: {error}"),
+        )
+    })
+}
+
+fn validate_provider_delivery(routine: &Routine, delivery: &RoutineProviderDelivery) -> Result<()> {
+    if delivery
+        .provider_job_id
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(AikitError::new(
+            "routine.provider_job_id_empty",
+            "provider job id must be non-empty when supplied",
+        ));
+    }
+    let binding = routine.scheduler.as_ref().ok_or_else(|| {
+        AikitError::new(
+            "routine.provider_delivery_without_binding",
+            "provider delivery provenance requires a Routine scheduler binding",
+        )
+    })?;
+    if binding.provider != delivery.provider {
+        return Err(AikitError::new(
+            "routine.provider_delivery_mismatch",
+            "provider delivery does not match the Routine scheduler binding",
+        ));
+    }
+    match (
+        binding.provider_job_id.as_deref(),
+        delivery.provider_job_id.as_deref(),
+    ) {
+        (Some(binding_job), Some(delivery_job)) if binding_job != delivery_job => {
+            return Err(AikitError::new(
+                "routine.provider_delivery_mismatch",
+                "provider delivery job does not match the current Routine scheduler binding",
+            ));
+        }
+        (Some(_), None) => {
+            return Err(AikitError::new(
+                "routine.provider_delivery_job_unavailable",
+                "provider delivery must retain the scheduler job identity when the binding supplies one",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn ensure_unique_refs(values: &[ResourceRef], label: &str) -> Result<()> {
+    let mut refs = std::collections::BTreeSet::new();
+    if values.iter().all(|value| refs.insert(value)) {
+        Ok(())
+    } else {
+        Err(AikitError::new(
+            "routine.duplicate_invocation_ref",
+            format!("Routine invocation evidence contains duplicate {label} refs"),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -541,6 +935,7 @@ mod tests {
     fn authority() -> RoutineAuthority {
         RoutineAuthority {
             authority_ref: resource("authority:routine:research"),
+            revision: Some(revision("authority-rev-7")),
             action_refs: vec![resource("action:research")],
             granted: true,
             unattended: true,
@@ -584,7 +979,10 @@ mod tests {
         let method = method(Some("method-rev-1"));
         let proof = prove_method(&method, proof_input(true)).unwrap();
         assert!(proof.matches_method(&method));
-        assert_eq!(proof.context_resolution_ref.as_str(), "context-resolution:abc123");
+        assert_eq!(
+            proof.context_resolution_ref.as_str(),
+            "context-resolution:abc123"
+        );
     }
 
     #[test]
@@ -635,7 +1033,12 @@ mod tests {
             .unwrap();
         assert_eq!(routine.id, routine_ref);
         assert_eq!(
-            routine.scheduler.as_ref().unwrap().provider_job_id.as_deref(),
+            routine
+                .scheduler
+                .as_ref()
+                .unwrap()
+                .provider_job_id
+                .as_deref(),
             Some("timer-two")
         );
     }
@@ -721,5 +1124,145 @@ mod tests {
             explanation.scheduler.unwrap().provider.as_str(),
             "provider:cron"
         );
+    }
+
+    fn occurrence(routine: &Routine, suffix: &str) -> RoutineInvocationOccurrence {
+        RoutineInvocationOccurrence {
+            invocation_ref: resource(&format!("routine-invocation:{suffix}")),
+            trigger_observation: routine
+                .observe_trigger(resource(&format!("trigger-observation:{suffix}"))),
+            observed_at: "2026-09-09T09:30:00Z".into(),
+        }
+    }
+
+    fn validation(routine: &Routine) -> RoutineAuthorityValidation {
+        RoutineAuthorityValidation {
+            validation_ref: resource("authority-validation:research:1"),
+            authority_ref: routine.authority.authority_ref.clone(),
+            authority_revision: revision("authority-rev-7"),
+            validated_at: "2026-09-09T09:30:01Z".into(),
+            granted: routine.authority.granted,
+            unattended: routine.authority.unattended,
+            standing: RoutineAuthorityStanding::OwnerAttested,
+        }
+    }
+
+    #[test]
+    fn enabled_current_routine_yields_exact_public_invocation_evidence() {
+        let method = method(Some("method-rev-1"));
+        let proof = prove_method(&method, proof_input(true)).unwrap();
+        let mut routine = routine(&method, proof);
+        routine.enable(&method).unwrap();
+        let occurrence = occurrence(&routine, "one");
+        let authority = validation(&routine);
+        let evidence = routine
+            .authorised_invocation_evidence(&method, occurrence, authority, None)
+            .unwrap();
+
+        assert_eq!(evidence.schema, ROUTINE_INVOCATION_EVIDENCE_VERSION);
+        assert_eq!(evidence.owner, "aikit");
+        assert_eq!(evidence.routine_revision.as_str(), "routine-rev-1");
+        assert_eq!(evidence.method_revision.as_str(), "method-rev-1");
+        assert_eq!(
+            evidence.proof_standing,
+            RoutineProofStanding::CurrentOnSuppliedBasis
+        );
+        assert!(evidence.provider_deliveries.is_empty());
+    }
+
+    #[test]
+    fn manual_invocation_needs_no_scheduler_or_provider_evidence() {
+        let method = method(Some("method-rev-1"));
+        let proof = prove_method(&method, proof_input(true)).unwrap();
+        let mut routine = Routine::new(
+            resource("routine:manual-research"),
+            source("source:control:routines"),
+            Some(revision("routine-rev-manual")),
+            "Manual research",
+            "",
+            &method,
+            proof,
+            RoutineTrigger::Manual,
+            RoutineAuthority {
+                unattended: false,
+                ..authority()
+            },
+            None,
+            vec![],
+        )
+        .unwrap();
+        routine.enable(&method).unwrap();
+        let occurrence = occurrence(&routine, "manual");
+        let authority = validation(&routine);
+        let evidence = routine
+            .authorised_invocation_evidence(&method, occurrence, authority, None)
+            .unwrap();
+        assert_eq!(evidence.trigger, RoutineTrigger::Manual);
+        assert!(evidence.provider_deliveries.is_empty());
+    }
+
+    #[test]
+    fn false_or_stale_authority_validation_yields_no_envelope() {
+        let method = method(Some("method-rev-1"));
+        let proof = prove_method(&method, proof_input(true)).unwrap();
+        let mut routine = routine(&method, proof);
+        routine.enable(&method).unwrap();
+        let occurrence = occurrence(&routine, "denied");
+        let mut authority = validation(&routine);
+        authority.granted = false;
+        let error = routine
+            .authorised_invocation_evidence(&method, occurrence, authority, None)
+            .unwrap_err();
+        assert_eq!(error.code(), "routine.authority_validation_stale");
+    }
+
+    #[test]
+    fn envelope_rejects_guessed_time() {
+        let method = method(Some("method-rev-1"));
+        let proof = prove_method(&method, proof_input(true)).unwrap();
+        let mut routine = routine(&method, proof);
+        routine.enable(&method).unwrap();
+        let mut occurrence = occurrence(&routine, "guessed-time");
+        let authority = validation(&routine);
+        occurrence.observed_at = "now".into();
+        let error = routine
+            .authorised_invocation_evidence(&method, occurrence, authority, None)
+            .unwrap_err();
+        assert_eq!(error.code(), "routine.invalid_timestamp");
+    }
+
+    #[test]
+    fn envelope_requires_exact_routine_source_revision() {
+        let method = method(Some("method-rev-1"));
+        let proof = prove_method(&method, proof_input(true)).unwrap();
+        let mut routine = routine(&method, proof);
+        routine.enable(&method).unwrap();
+        routine.revision = None;
+        let occurrence = occurrence(&routine, "missing-revision");
+        let authority = validation(&routine);
+        let error = routine
+            .authorised_invocation_evidence(&method, occurrence, authority, None)
+            .unwrap_err();
+        assert_eq!(error.code(), "routine.source_revision_required");
+    }
+
+    #[test]
+    fn provider_delivery_must_match_an_actual_binding() {
+        let method = method(Some("method-rev-1"));
+        let proof = prove_method(&method, proof_input(true)).unwrap();
+        let mut routine = routine(&method, proof);
+        routine.enable(&method).unwrap();
+        let occurrence = occurrence(&routine, "provider");
+        let authority = validation(&routine);
+        let delivery = RoutineProviderDelivery {
+            provider: ProviderRef::parse("provider:cron").unwrap(),
+            delivery_ref: resource("provider-delivery:cron:1"),
+            provider_job_id: Some("job-1".into()),
+            restart_ref: None,
+        };
+        let error = routine
+            .authorised_invocation_evidence(&method, occurrence, authority, Some(delivery))
+            .unwrap_err();
+        assert_eq!(error.code(), "routine.provider_delivery_without_binding");
     }
 }

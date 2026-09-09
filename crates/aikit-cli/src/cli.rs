@@ -126,6 +126,8 @@ pub enum Command {
     Jobs(JobsArgs),
     /// Discover Methods: skills whose description carries the METHOD: prefix.
     Method(MethodArgs),
+    /// Authorise and read versioned Routine invocation evidence.
+    Routine(RoutineCmd),
     /// Record review decisions for catalogued capsule revisions.
     Trust(TrustCmd),
     /// List recently run invocations.
@@ -187,6 +189,29 @@ pub struct GatewayQueryArgs {
 pub struct GatewayCmd {
     #[command(subcommand)]
     pub command: GatewaySub,
+}
+
+#[derive(Debug, Args)]
+pub struct RoutineCmd {
+    #[command(subcommand)]
+    pub command: RoutineSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RoutineSub {
+    /// Validate and idempotently admit one authorised Routine occurrence.
+    AuthoriseInvocation {
+        /// Structured request JSON. Prefix a path with @ to read a file.
+        #[arg(long = "request-json", value_name = "JSON|@FILE")]
+        request_json: String,
+    },
+    /// Read one previously admitted invocation envelope.
+    Invocation {
+        #[arg(value_name = "INVOCATION_REF")]
+        invocation_ref: String,
+    },
+    /// List all admitted invocation envelopes in stable identity order.
+    Invocations,
 }
 
 #[derive(Debug, Subcommand)]

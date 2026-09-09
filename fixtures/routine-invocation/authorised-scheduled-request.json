@@ -1,0 +1,84 @@
+{
+  "routine": {
+    "id": "routine:daily-research",
+    "source": "source:control:routines",
+    "revision": "routine-rev-1",
+    "name": "Daily research",
+    "description": "",
+    "method": "method:verified-research",
+    "method_revision": "method-rev-1",
+    "proof": {
+      "version": "aikit.method-proof/v1",
+      "method": "method:verified-research",
+      "method_revision": "method-rev-1",
+      "proof_ref": "proof:research:v1",
+      "context_resolution_ref": "context-resolution:abc123",
+      "activity_refs": ["activity:research:1"],
+      "return_refs": ["return:research:1"],
+      "evidence_refs": ["evidence:research:1"],
+      "verification_refs": ["verification:research:1"]
+    },
+    "trigger": {
+      "kind": "schedule",
+      "schedule_ref": "schedule:daily"
+    },
+    "authority": {
+      "authority_ref": "authority:routine:research",
+      "revision": "authority-rev-7",
+      "action_refs": ["action:research"],
+      "granted": true,
+      "unattended": true
+    },
+    "agent_profile_ref": "agent-profile:researcher",
+    "context_scope_refs": ["world:personal"],
+    "state": "enabled",
+    "scheduler": {
+      "provider": "provider:cron",
+      "provider_job_id": "job-42",
+      "observed_state": "active"
+    }
+  },
+  "method": {
+    "id": "method:verified-research",
+    "source": "source:project-method",
+    "revision": "method-rev-1",
+    "name": "Verified research return",
+    "description": "",
+    "focus": [],
+    "project_domain": [],
+    "skills": [],
+    "actions": ["action:research"],
+    "capabilities": [],
+    "context_sources": [],
+    "verification": ["verification:research"],
+    "expected_resolve": null,
+    "expected_return_forms": ["evidence-bearing-return"]
+  },
+  "occurrence": {
+    "invocation_ref": "routine-invocation:2026-09-09:daily-research:1",
+    "trigger_observation": {
+      "routine": "routine:daily-research",
+      "observation_ref": "trigger-observation:2026-09-09:1",
+      "trigger": {
+        "kind": "schedule",
+        "schedule_ref": "schedule:daily"
+      }
+    },
+    "observed_at": "2026-09-09T09:30:00Z"
+  },
+  "authority_validation": {
+    "validation_ref": "authority-validation:2026-09-09:1",
+    "authority_ref": "authority:routine:research",
+    "authority_revision": "authority-rev-7",
+    "validated_at": "2026-09-09T09:30:01Z",
+    "granted": true,
+    "unattended": true,
+    "standing": "owner-attested"
+  },
+  "provider_delivery": {
+    "provider": "provider:cron",
+    "delivery_ref": "provider-delivery:2026-09-09:1",
+    "provider_job_id": "job-42",
+    "restart_ref": "provider-restart:cron:8"
+  }
+}
