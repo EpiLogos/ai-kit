@@ -13,7 +13,7 @@ use crate::knowledge_navigation::{
     KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation, KnowledgeProviderStatus,
     KnowledgeSearchResult,
 };
-use crate::resource::{ProviderRef, SourceAuthority, SourceRef};
+use crate::resource::{ProviderRef, ResolveExpression, SourceAuthority, SourceRef};
 use crate::Result;
 
 pub const KNOWLEDGE_OPERATIONS_VERSION: &str = "aikit.knowledge-operations/v1";
@@ -39,6 +39,10 @@ pub struct KnowledgeSources {
 /// canonical ContextSource. `route` records traversal and never mutates provider
 /// graphs. `sources` exposes provenance already owned by the native provider.
 pub trait KnowledgeOperations {
+    /// Canonical retrieval: one operative Resolve expression, one query path.
+    fn resolve(&self, expression: &ResolveExpression, limit: usize) -> KnowledgeSearchResult;
+    /// Human/shell front over [`Self::resolve`]. It parses and delegates; it is
+    /// not a second retrieval path.
     fn search(&self, query: &str, limit: usize) -> KnowledgeSearchResult;
     fn read(&self, address: &KnowledgeAddress) -> Result<KnowledgeReading>;
     fn relations(
@@ -65,6 +69,10 @@ pub trait KnowledgeOperations {
 }
 
 impl KnowledgeOperations for KnowledgeApplication<'_> {
+    fn resolve(&self, expression: &ResolveExpression, limit: usize) -> KnowledgeSearchResult {
+        KnowledgeApplication::resolve(self, expression, limit)
+    }
+
     fn search(&self, query: &str, limit: usize) -> KnowledgeSearchResult {
         KnowledgeApplication::search(self, query, limit)
     }
