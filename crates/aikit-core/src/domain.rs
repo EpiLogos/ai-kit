@@ -277,9 +277,27 @@ pub struct InjectionDecision {
     pub has_standing: bool,
     /// The caller should record this injection in the ledger.
     pub record: bool,
-    /// The lines the block carries: standing first, then ordinary unless the
-    /// ordinary payload deduped out.
-    pub lines: Vec<String>,
+    /// Standing lines, reasserted whenever the block renders at all.
+    ///
+    /// Kept apart from `ordinary` rather than concatenated because the two
+    /// have different fates twice over: standing guidance is exempt from dedup
+    /// (this module's law) *and* exempt from context pressure
+    /// ([`crate::pressure`]). A merged line list could only be bounded by
+    /// cutting standing guidance along with the rest.
+    pub standing: Vec<String>,
+    /// Ordinary lines, empty when the ordinary payload deduped out.
+    pub ordinary: Vec<String>,
+}
+
+impl InjectionDecision {
+    /// The block's lines in render order: standing first, then ordinary.
+    pub fn lines(&self) -> Vec<String> {
+        self.standing
+            .iter()
+            .chain(self.ordinary.iter())
+            .cloned()
+            .collect()
+    }
 }
 
 /// Apply the standing-guidance dedup exemption.
@@ -310,11 +328,6 @@ pub fn decide_injection(
     let has_ordinary = !ordinary.is_empty();
     let has_standing = !standing.is_empty();
     let deduped = has_ordinary && ordinary_seen;
-    let lines = if deduped {
-        standing
-    } else {
-        standing.into_iter().chain(ordinary).collect()
-    };
     InjectionDecision {
         suppressed: deduped && !has_standing,
         deduped,
@@ -322,7 +335,8 @@ pub fn decide_injection(
         // Only the ordinary payload is ledger-tracked; standing lines are
         // never recorded, which is what keeps them permanently exempt.
         record: !deduped && has_ordinary,
-        lines,
+        standing,
+        ordinary: if deduped { Vec::new() } else { ordinary },
     }
 }
 
@@ -520,17 +534,17 @@ classification = "standing"
         assert!(!fresh.deduped);
         assert!(fresh.record, "a fresh ordinary payload is recorded");
         for line in &standing {
-            assert!(fresh.lines.contains(line), "standing line missing: {line}");
+            assert!(fresh.lines().contains(line), "standing line missing: {line}");
         }
-        assert_eq!(fresh.lines.len(), 4, "standing then ordinary");
-        assert_eq!(&fresh.lines[..2], &standing[..], "standing renders first");
+        assert_eq!(fresh.lines().len(), 4, "standing then ordinary");
+        assert_eq!(&fresh.lines()[..2], &standing[..], "standing renders first");
 
         let repeat = decide_injection(lines("ordinary", 2), standing.clone(), true);
         assert!(!repeat.suppressed, "standing guidance keeps the block alive");
         assert!(repeat.deduped);
         assert!(!repeat.record);
         assert_eq!(
-            repeat.lines, standing,
+            repeat.lines(), standing,
             "deduped ordinary lines leave the block; standing lines never do"
         );
     }
@@ -556,7 +570,7 @@ classification = "standing"
         for seen in [false, true] {
             let decision = decide_injection(ordinary.clone(), standing.clone(), seen);
             for line in &standing {
-                assert!(decision.lines.contains(line), "standing dropped when seen={seen}");
+                assert!(decision.lines().contains(line), "standing dropped when seen={seen}");
             }
         }
     }
@@ -570,12 +584,12 @@ classification = "standing"
         assert!(!decision.deduped, "nothing was injected, so nothing deduped");
         assert!(!decision.suppressed);
         assert!(!decision.record, "there is no ordinary payload to record");
-        assert_eq!(decision.lines, standing);
+        assert_eq!(decision.lines(), standing);
 
         let nothing = decide_injection(vec![], vec![], true);
         assert!(!nothing.deduped);
         assert!(!nothing.suppressed, "an empty domain is not a dedup event");
-        assert!(nothing.lines.is_empty());
+        assert!(nothing.lines().is_empty());
     }
 
 

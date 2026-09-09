@@ -283,6 +283,23 @@ CREATE INDEX project_activity_by_project
     ON project_activity_events(project_root, occurred_ns DESC, evidence_id DESC);
 "#,
     ),
+    (
+        "0008-prompt-ticks",
+        // W1/CASE 04: how many prompt turns a session has already spent. This
+        // is the denominator-free half of the context-pressure fallback: no
+        // harness capability descriptor reports context consumption today, so
+        // pressure is read from turn count until one does. A hook dispatcher
+        // is a fresh process every turn, so the count has to be durable — an
+        // in-memory counter would read 1 forever.
+        r#"
+CREATE TABLE prompt_ticks (
+    tick_id  TEXT PRIMARY KEY,
+    scope    TEXT NOT NULL,
+    spent_ns INTEGER NOT NULL
+);
+CREATE INDEX prompt_ticks_by_scope ON prompt_ticks(scope, spent_ns);
+"#,
+    ),
 ];
 
 /// Tables `reindex` is allowed to empty.
@@ -1092,6 +1109,38 @@ impl Index {
             )
             .map_err(|e| sql_error("index.read_failed", &e))?;
         Ok(seen > 0)
+    }
+
+    /// Record that a session spent a prompt turn.
+    ///
+    /// Append-only, one row per turn: the count is evidence of what happened,
+    /// not a counter that could be decremented or reset by a later reading.
+    pub fn record_prompt(&self, scope: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO prompt_ticks (tick_id, scope, spent_ns) VALUES (?1, ?2, ?3)",
+                params![
+                    EventId::generate().as_str(),
+                    scope,
+                    Timestamp::now().as_nanos()
+                ],
+            )
+            .map_err(|e| sql_error("index.write_failed", &e))?;
+        Ok(())
+    }
+
+    /// How many prompt turns this scope has spent. A scope that has never been
+    /// seen has spent none — a real answer, not a missing one.
+    pub fn prompt_count(&self, scope: &str) -> Result<u32> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_ticks WHERE scope = ?1",
+                params![scope],
+                |row| row.get(0),
+            )
+            .map_err(|e| sql_error("index.read_failed", &e))?;
+        Ok(count.max(0) as u32)
     }
 
     /// Append a completed project activity receipt. Evidence is never overwritten.

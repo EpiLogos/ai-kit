@@ -78,6 +78,15 @@ pub const PROJECT_RECENCY: &str = "project-recency";
 /// capability being composed is not the same as a protocol being armed.
 pub const STAR_COMMANDS: &str = "star-commands";
 
+/// Context pressure (W1/CASE 04): when composed, the engine reads how full
+/// the window is — from the harness's own figure when it reports one, else
+/// from this session's prompt-turn count — and bounds ordinary payload
+/// through the composition's declared brackets. Standing guidance is exempt
+/// by the same classification that exempts it from dedup, and every bound is
+/// disclosed. Uncomposed, blocks render exactly as they did before this
+/// existed.
+pub const CONTEXT_PRESSURE: &str = "context-pressure";
+
 /// The reactions the engine itself implements, as opposed to hook capsules
 /// that merely ride the chain. A reaction listed here is answerable when
 /// asked even while it is not composed: the engine says "not composed"
@@ -91,6 +100,7 @@ pub const ENGINE_REACTIONS: &[&str] = &[
     ACTIVITY_EVIDENCE,
     PROJECT_RECENCY,
     STAR_COMMANDS,
+    CONTEXT_PRESSURE,
 ];
 
 /// True when the capsule id names a first-party continuity reaction.

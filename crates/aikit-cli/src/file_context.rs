@@ -23,6 +23,7 @@
 use std::path::Path;
 
 use aikit_core::domain::{decide_injection, dedup_hash, render_guidance_lines, KnowledgeDomain};
+use aikit_core::pressure::Block;
 use aikit_core::hooks::HookEvent;
 use aikit_core::skillset::glob_matches;
 use aikit_core::{parse_wiki_objects, SemanticWikiIndex, WikiObject};
@@ -140,7 +141,7 @@ pub fn run(
     path: &str,
     domains: &[KnowledgeDomain],
     wiki_objects: Vec<WikiObject>,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<Block>, Vec<String>) {
     let mut blocks = Vec::new();
     let mut warnings = Vec::new();
     let relative_path = relative(project_root, path);
@@ -160,9 +161,11 @@ pub fn run(
                                 "continuity/file-context ledger unavailable: {error}"
                             ));
                         }
-                        blocks.push(format!(
-                            "[continuity/file-context] wiki relations for {relative_path} (composed):\n{}",
-                            lines.join("\n")
+                        blocks.push(Block::ordinary(
+                            format!(
+                                "[continuity/file-context] wiki relations for {relative_path} (composed):"
+                            ),
+                            lines,
                         ));
                     }
                 }
@@ -196,7 +199,7 @@ pub fn run(
             }
         }
         let (deduped, has_standing) = (decision.deduped, decision.has_standing);
-        let mut block = format!(
+        let header = format!(
             "[continuity/file-context] domain {} armed for {relative_path} — horizon: {}; \
              source: {} revision {};{}{}",
             domain.id,
@@ -218,11 +221,11 @@ pub fn run(
                 ""
             }
         );
-        for line in &decision.lines {
-            block.push('\n');
-            block.push_str(line);
-        }
-        blocks.push(block);
+        blocks.push(Block {
+            header,
+            standing: decision.standing,
+            ordinary: decision.ordinary,
+        });
     }
     (blocks, warnings)
 }

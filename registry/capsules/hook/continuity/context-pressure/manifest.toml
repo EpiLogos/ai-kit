@@ -1,0 +1,10 @@
+schema = 1
+id = "hook/continuity/context-pressure"
+kind = "hook"
+name = "Continuity context pressure"
+description = "First-party continuity reaction (W1/CASE 04): when composed, the engine reads how full the context window is — from the harness's own figure when it reports one, otherwise from this session's prompt-turn count — and bounds ordinary payload through the composition's declared brackets (FRESH ≤20%, MODERATE ≤45%, DEPLETED ≤70%, CRITICAL above). Guidance classified `standing` where it was authored is exempt from the bound, by the same classification that exempts it from dedup; every bound is disclosed, per block and per turn. Thresholds and the fallback budget are tunings of this capsule and are printable through `aikit continuity pressure`. Not composed by default."
+tags = ["aikit", "continuity", "engine", "pressure", "brackets", "budget"]
+
+[hook]
+entry = "payload/context-pressure"
+events = ["UserPromptSubmit", "PreToolUse"]

@@ -17,6 +17,7 @@ use std::path::Path;
 use aikit_core::domain::{
     activate, decide_injection, dedup_hash, render_header, render_rules, KnowledgeDomain,
 };
+use aikit_core::pressure::Block;
 use aikit_core::hooks::HookEvent;
 use aikit_store::index::Index;
 
@@ -86,7 +87,7 @@ pub fn run(
     scope: &str,
     domains: &[KnowledgeDomain],
     prompt: Option<&str>,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<Block>, Vec<String>) {
     let mut blocks = Vec::new();
     let mut warnings = Vec::new();
     let Some(prompt) = prompt else {
@@ -117,12 +118,11 @@ pub fn run(
                 ));
             }
         }
-        let mut block = render_header(&activation, decision.deduped, decision.has_standing);
-        for line in &decision.lines {
-            block.push('\n');
-            block.push_str(line);
-        }
-        blocks.push(block);
+        blocks.push(Block {
+            header: render_header(&activation, decision.deduped, decision.has_standing),
+            standing: decision.standing,
+            ordinary: decision.ordinary,
+        });
     }
     (blocks, warnings)
 }
