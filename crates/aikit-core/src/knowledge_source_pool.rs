@@ -296,10 +296,14 @@ impl SourcePoolProvider for NativeSourcePoolProvider {
             return Ok(Vec::new());
         }
         let query_tokens = tokens(query);
-        if query_tokens.is_empty() {
+        let required_tags: BTreeSet<&str> = tags.iter().map(String::as_str).collect();
+        // An empty query is only a no-op when nothing else narrows the pool.
+        // With a tag filter it is an ordinary browse — "everything carrying
+        // these tags" — and returning nothing would make the tag filter look
+        // broken rather than empty.
+        if query_tokens.is_empty() && required_tags.is_empty() {
             return Ok(Vec::new());
         }
-        let required_tags: BTreeSet<&str> = tags.iter().map(String::as_str).collect();
         let mut scored = self
             .material
             .iter()
