@@ -67,6 +67,7 @@ pub mod locks;
 pub mod procedure;
 pub mod procedure_history;
 pub mod registry;
+pub mod routine_invocation;
 pub mod scan;
 pub mod session_space_application;
 pub mod session_space_evidence;
@@ -112,6 +113,10 @@ pub use locks::{ContextLock, LockOptions};
 pub use procedure::{plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner};
 pub use procedure_history::procedure_history_evidence;
 pub use registry::{load_project_local, load_registry, RegistryLoad, RegistryProblem, Snapshot};
+pub use routine_invocation::{
+    RoutineInvocationAdmission, RoutineInvocationAdmissionStatus, RoutineInvocationStore,
+    ROUTINE_INVOCATION_ADMISSION_VERSION, ROUTINE_INVOCATION_LEDGER_VERSION,
+};
 pub use scan::{Finding, Scanner};
 pub use session_space_application::{
     SessionSpaceApplicationStore, SessionSpaceHistoryComparison, SessionSpaceReceipt,

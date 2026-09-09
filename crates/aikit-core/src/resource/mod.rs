@@ -48,9 +48,12 @@ pub use operative_provider::{
 pub use refs::{OwnerRef, ProviderRef, ResourceRef, SourceRef, SourceRevision};
 pub use routine::{
     prove_method, MethodProofInput, ProvenMethodBasis, Routine, RoutineAuthority,
-    RoutineExplanation, RoutineInvocation, RoutineSchedulerBinding, RoutineSchedulerState,
-    RoutineState, RoutineTrigger, RoutineTriggerObservation, METHOD_PROOF_VERSION,
-    ROUTINE_VERSION,
+    RoutineAuthorityValidation, RoutineExplanation, RoutineInvocation,
+    RoutineInvocationAuthorisationRequest, RoutineInvocationEvidence, RoutineInvocationOccurrence,
+    RoutineAuthorityStanding, RoutineProofStanding, RoutineProviderDelivery,
+    RoutineSchedulerBinding, RoutineSchedulerState, RoutineState, RoutineTrigger,
+    RoutineTriggerObservation, METHOD_PROOF_VERSION,
+    ROUTINE_INVOCATION_EVIDENCE_VERSION, ROUTINE_VERSION,
 };
 pub use search::{
     ActionStageability, ContextualActionDescriptor, NavigationEvidence, NavigationEvidenceClass,

@@ -181,6 +181,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Search(a)) => cmd_search(cwd, a),
         Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
         Some(Command::Method(a)) => cmd_method(cwd, a),
+        Some(Command::Routine(c)) => cmd_routine(c),
         Some(Command::Trust(a)) => cmd_trust(cwd, a),
         Some(Command::Wiki(c)) => cmd_wiki(cwd, c),
         Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),
@@ -219,6 +220,63 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Shell(c)) => cmd_shell(c),
         Some(Command::Gateway(c)) => cmd_gateway(c),
     }
+}
+
+fn cmd_routine(command: RoutineCmd) -> Result<Reply> {
+    let home = AikitHome::discover()?;
+    let store = aikit_store::RoutineInvocationStore::new(home);
+    let data = match command.command {
+        RoutineSub::AuthoriseInvocation { request_json } => {
+            let request: aikit_core::resource::routine::RoutineInvocationAuthorisationRequest =
+                parse_structured_json(&request_json, "Routine invocation request")?;
+            serde_json::to_value(store.admit(request)?).map_err(|error| {
+                AikitError::new(
+                    "cli.routine_json_failed",
+                    format!("could not encode Routine invocation admission: {error}"),
+                )
+            })?
+        }
+        RoutineSub::Invocation { invocation_ref } => {
+            let invocation_ref = aikit_core::ResourceRef::parse(&invocation_ref)?;
+            serde_json::to_value(store.get(&invocation_ref)?).map_err(|error| {
+                AikitError::new(
+                    "cli.routine_json_failed",
+                    format!("could not encode Routine invocation evidence: {error}"),
+                )
+            })?
+        }
+        RoutineSub::Invocations => serde_json::to_value(store.list()?).map_err(|error| {
+            AikitError::new(
+                "cli.routine_json_failed",
+                format!("could not encode Routine invocation evidence: {error}"),
+            )
+        })?,
+    };
+    Ok(Reply::Data {
+        context: EnvelopeContext::default(),
+        data,
+        warnings: vec![],
+        exit_code: json::EXIT_OK,
+    })
+}
+
+fn parse_structured_json<T: serde::de::DeserializeOwned>(raw: &str, label: &str) -> Result<T> {
+    let text = if let Some(path) = raw.strip_prefix('@') {
+        std::fs::read_to_string(path).map_err(|error| {
+            AikitError::new(
+                "cli.structured_json_unreadable",
+                format!("could not read {label} from {path}: {error}"),
+            )
+        })?
+    } else {
+        raw.to_owned()
+    };
+    serde_json::from_str(&text).map_err(|error| {
+        AikitError::new(
+            "cli.structured_json_invalid",
+            format!("invalid {label} JSON: {error}"),
+        )
+    })
 }
 
 /// The Agency Gateway front door: run the service, or query a running one.

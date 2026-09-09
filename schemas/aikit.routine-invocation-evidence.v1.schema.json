@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/EpiLogos/ai-kit/schemas/aikit.routine-invocation-evidence.v1.schema.json",
+  "title": "AIKit authorised Routine invocation evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "owner", "invocation_ref", "routine_ref", "routine_source",
+    "routine_revision", "routine_state", "method_ref", "method_revision",
+    "proof_ref", "proof_standing", "context_resolution_ref",
+    "trigger_observation_ref", "trigger", "trigger_observed_at",
+    "authority_validation", "action_refs", "context_scope_refs",
+    "provider_deliveries"
+  ],
+  "properties": {
+    "schema": { "const": "aikit.routine-invocation-evidence/v1" },
+    "owner": { "const": "aikit" },
+    "invocation_ref": { "$ref": "#/$defs/nonempty" },
+    "routine_ref": { "$ref": "#/$defs/nonempty" },
+    "routine_source": { "$ref": "#/$defs/nonempty" },
+    "routine_revision": { "$ref": "#/$defs/nonempty" },
+    "routine_state": { "const": "enabled" },
+    "method_ref": { "$ref": "#/$defs/nonempty" },
+    "method_revision": { "$ref": "#/$defs/nonempty" },
+    "proof_ref": { "$ref": "#/$defs/nonempty" },
+    "proof_standing": {
+      "const": "current-on-supplied-basis",
+      "description": "The proof matches the exact supplied Routine and Method bodies; this boundary did not query their canonical source owners."
+    },
+    "context_resolution_ref": { "$ref": "#/$defs/nonempty" },
+    "trigger_observation_ref": { "$ref": "#/$defs/nonempty" },
+    "trigger": { "$ref": "#/$defs/trigger" },
+    "trigger_observed_at": { "type": "string", "format": "date-time" },
+    "authority_validation": { "$ref": "#/$defs/authorityValidation" },
+    "action_refs": { "$ref": "#/$defs/nonemptyRefs" },
+    "agent_profile_ref": { "$ref": "#/$defs/nonempty" },
+    "context_scope_refs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonempty" },
+      "uniqueItems": true
+    },
+    "provider_deliveries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/providerDelivery" }
+    }
+  },
+  "$defs": {
+    "nonempty": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" },
+    "nonemptyRefs": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": { "$ref": "#/$defs/nonempty" }
+    },
+    "trigger": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "manual" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "schedule_ref"], "properties": { "kind": { "const": "schedule" }, "schedule_ref": { "$ref": "#/$defs/nonempty" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "event_ref"], "properties": { "kind": { "const": "event" }, "event_ref": { "$ref": "#/$defs/nonempty" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "trigger_ref"], "properties": { "kind": { "const": "external" }, "trigger_ref": { "$ref": "#/$defs/nonempty" } } }
+      ]
+    },
+    "authorityValidation": {
+      "type": "object", "additionalProperties": false,
+      "description": "Owner-supplied authority receipt provenance revalidated against the supplied Routine; not a claim that this CLI independently queried an external authority owner.",
+      "required": ["validation_ref", "authority_ref", "authority_revision", "validated_at", "granted", "unattended", "standing"],
+      "properties": {
+        "validation_ref": { "$ref": "#/$defs/nonempty" },
+        "authority_ref": { "$ref": "#/$defs/nonempty" },
+        "authority_revision": { "$ref": "#/$defs/nonempty" },
+        "validated_at": { "type": "string", "format": "date-time" },
+        "granted": { "const": true },
+        "unattended": { "type": "boolean" },
+        "standing": { "const": "owner-attested" }
+      }
+    },
+    "providerDelivery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "delivery_ref"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/nonempty" },
+        "delivery_ref": { "$ref": "#/$defs/nonempty" },
+        "provider_job_id": { "$ref": "#/$defs/nonempty" },
+        "restart_ref": { "$ref": "#/$defs/nonempty" }
+      }
+    }
+  }
+}

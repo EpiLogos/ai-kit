@@ -1,0 +1,40 @@
+{
+  "schema": "aikit.routine-invocation-evidence/v1",
+  "owner": "aikit",
+  "invocation_ref": "routine-invocation:2026-09-09:daily-research:1",
+  "routine_ref": "routine:daily-research",
+  "routine_source": "source:control:routines",
+  "routine_revision": "routine-rev-1",
+  "routine_state": "enabled",
+  "method_ref": "method:verified-research",
+  "method_revision": "method-rev-1",
+  "proof_ref": "proof:research:v1",
+  "proof_standing": "current-on-supplied-basis",
+  "context_resolution_ref": "context-resolution:abc123",
+  "trigger_observation_ref": "trigger-observation:2026-09-09:1",
+  "trigger": {
+    "kind": "schedule",
+    "schedule_ref": "schedule:daily"
+  },
+  "trigger_observed_at": "2026-09-09T09:30:00Z",
+  "authority_validation": {
+    "validation_ref": "authority-validation:2026-09-09:1",
+    "authority_ref": "authority:routine:research",
+    "authority_revision": "authority-rev-7",
+    "validated_at": "2026-09-09T09:30:01Z",
+    "granted": true,
+    "unattended": true,
+    "standing": "owner-attested"
+  },
+  "action_refs": ["action:research"],
+  "agent_profile_ref": "agent-profile:researcher",
+  "context_scope_refs": ["world:personal"],
+  "provider_deliveries": [
+    {
+      "provider": "provider:cron",
+      "delivery_ref": "provider-delivery:2026-09-09:1",
+      "provider_job_id": "job-42",
+      "restart_ref": "provider-restart:cron:8"
+    }
+  ]
+}

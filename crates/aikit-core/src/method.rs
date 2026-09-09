@@ -36,6 +36,7 @@ pub fn method_payload(description: &str) -> Option<&str> {
 /// Profile/scope resolution. Situated-use metadata only points at the resulting
 /// exact digest; it does not introduce another overlay store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageOverlayRef {
     pub skill: ResourceRef,
     pub scope: String,
@@ -69,6 +70,7 @@ impl UsageOverlayRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SituatedSkillRef {
     pub skill: ResourceRef,
     #[serde(default)]
@@ -81,6 +83,7 @@ pub struct SituatedSkillRef {
 /// the evidence that supplied these relations, not a Method source object.
 /// Every related member remains independently owned and no body is copied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SkillPraxisMetadata {
     pub id: ResourceRef,
     pub source: SourceRef,
