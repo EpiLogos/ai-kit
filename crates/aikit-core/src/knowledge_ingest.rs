@@ -1,13 +1,42 @@
 //! Authored-source ingestion (W10 V9.4): the essay on-ramp — the authored
-//! half of W4's compiled/authored producer seam. Rooms, records, links, tags
-//! and register frontmatter compile into Authored edges/nodes resolved
-//! against record and article nodes; backlinks ride the ordinary index and
-//! tags are first-class objects.
+//! half of W4's compiled/authored producer seam. Rooms, records, links and
+//! register frontmatter compile into Authored edges/nodes resolved against
+//! record and article nodes; backlinks ride the ordinary index.
 //!
 //! The Return of Zero corpus is the design input and first client: records
 //! declare `record_id`, `record_type`, `register`, `claim_status` (and
 //! optionally `source_ids`) in frontmatter; the first path segment under the
 //! corpus root is the room.
+//!
+//! ## A tag is a property of a Source, not a curated node
+//!
+//! Ingest does not mint a Wiki node per declared tag. AIKit already has one
+//! tag carrier — [`SourceBinding::tags`] — searched by every SourcePool
+//! provider through `SourcePoolProvider::search`'s tag filter, which the
+//! native baseline and the bkmr provider both implement. A second tag
+//! namespace living as `wiki:node:tag/*` objects would be a parallel
+//! facility with its own (arbitrary, first-declarer-wins) provenance, no
+//! vocabulary discipline, and no relation to the tags the corpus's own
+//! bibliography already carries. Tags therefore compile into the
+//! [`SourceMaterial`] this module emits beside its Wiki objects, and reach
+//! the reader through the SourcePool the rest of Knowledge already reads.
+//!
+//! ## Two populations, one corpus
+//!
+//! A real corpus tree holds two kinds of addressable file, and ingest reads
+//! both:
+//!
+//! * a **record** declares `record_id` and compiles to a curated WikiNode;
+//! * a **source** declares `source_id` and compiles to a SourcePool binding
+//!   — never to a curated node. Citing a source does not curate it.
+//!
+//! Records cite sources two ways, and both resolve to the same stable
+//! `central:source:corpus:<id>` ref: by declaring `source_ids:` in
+//! frontmatter, and by ordinary markdown links into the corpus's own
+//! bibliography tree. A record's effective tags are its own declared tags
+//! together with the tags of every source it cites — the vocabulary is read
+//! off the register and the bibliography that already author it, never
+//! generated from a record's own `record_type` or `register`.
 //!
 //! ## Two link forms, one resolution
 //!
@@ -37,9 +66,13 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
+use crate::knowledge_source_pool::{
+    SourceBinding, SourceMaterial, SourceVisibility,
+};
 use crate::knowledge_wiki::{
     WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject, WikiProvenanceRef, WikiSpace, OKF_WIKI_PROFILE,
 };
+use crate::resource::{ResourceLocator, SourceRevision};
 use crate::{AikitError, ResourceRef, Result, SourceRef, SemanticRevision};
 
 pub const INGEST_VERSION: &str = "aikit.knowledge-ingest/v1";
@@ -53,6 +86,41 @@ pub const INGEST_REGISTERS: [&str; 4] = [
     "operational-homology",
     "poetic-phonic-reentry",
 ];
+
+/// The stable source namespace every corpus citation addresses. A record's
+/// own text and the bibliography it cites are both authored corpus material,
+/// so both are addressed here; a `record_id` and a `source_id` never collide.
+pub const CORPUS_SOURCE_PREFIX: &str = "central:source:corpus:";
+
+/// The stable `SourceRef` for one corpus id.
+pub fn corpus_source_ref(id: &str) -> Result<SourceRef> {
+    SourceRef::parse(format!("{CORPUS_SOURCE_PREFIX}{id}")).map_err(|error| {
+        AikitError::new("knowledge.ingest_invalid_record", error.to_string())
+    })
+}
+
+/// One ingestable authored source: a bibliography page declaring `source_id`.
+///
+/// A source is evidence, not curated identity, so this compiles to a
+/// [`SourceBinding`] and never to a `WikiNode`. Its `tags` are the corpus's
+/// own authored vocabulary — `source-bank/...`, `argument-map/...` — and are
+/// carried verbatim into the SourcePool, where every provider's tag filter
+/// (native baseline and bkmr alike) can already read them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IngestedSource {
+    pub source_ref: SourceRef,
+    pub source_id: String,
+    /// What the corpus calls this kind of source (`book`, `journal-article`,
+    /// `reference`, `concept`…), read from `record_type` or `node_type`.
+    pub source_type: String,
+    pub title: String,
+    pub tags: Vec<String>,
+    /// The corpus-relative path, both as the binding's locator and as the
+    /// address records cite it by when they link rather than declare.
+    pub relative: String,
+    pub content_revision: String,
+    pub body: String,
+}
 
 /// One ingestable authored record.
 #[derive(Debug, Clone, PartialEq)]
@@ -77,6 +145,10 @@ pub struct IngestedRecord {
     /// resolution can address a target relative to the record that cites
     /// it, the way the corpus's own relative links do.
     pub relative: String,
+    /// The record's own text, verbatim. A record is authored source material
+    /// as well as curated identity, and its SourcePool binding carries this
+    /// as the body a full-text or tag search actually reads.
+    pub body: String,
 }
 
 fn content_revision(bytes: &[u8]) -> String {
@@ -306,18 +378,8 @@ fn title_from_body(body: &str) -> Option<String> {
 /// corpus root.
 pub fn parse_ingestable_record(relative: &str, text: &str) -> Result<IngestedRecord> {
     let (front, _list, body) = strip_frontmatter(text);
-    // Identity comes from what the record declares, in the same order the
-    // selection rule uses: `record_id`, then `source_id`. The file-stem
-    // fallback is last and genuinely last-resort — it is not identity, it is
-    // a guess, and two same-named files in different directories make the
-    // same guess. The corpus has eight `P1-CANONICAL-ALIGNMENT.md`, one per
-    // room, each with its own `source_id`; keying them by stem collapsed all
-    // eight onto one ref and the ingest died claiming the file already held
-    // it. Declared identity first means that cannot happen.
     let record_id = front
         .get("record_id")
-        .or_else(|| front.get("source_id"))
-        .filter(|id| !id.trim().is_empty())
         .cloned()
         .unwrap_or_else(|| {
             std::path::Path::new(relative)
@@ -359,6 +421,145 @@ pub fn parse_ingestable_record(relative: &str, text: &str) -> Result<IngestedRec
         room,
         content_revision: content_revision(text.as_bytes()),
         relative: relative.to_owned(),
+        body: text.to_owned(),
+    })
+}
+
+/// Parse one authored source page — a corpus file declaring `source_id`.
+///
+/// The corpus's bibliography pages carry a fuller title in `title_full` than
+/// in `title` (`title` is the short shelf label, `title_full` the cited one),
+/// so the cited form wins where both are present. `record_type` names the
+/// kind of source on a bibliography page; the register and reference pages
+/// use `node_type` for the same purpose.
+pub fn parse_ingestable_source(relative: &str, text: &str) -> Result<IngestedSource> {
+    let (front, _list, body) = strip_frontmatter(text);
+    let source_id = front
+        .get("source_id")
+        .map(String::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned();
+    if source_id.is_empty() {
+        return Err(AikitError::new(
+            "knowledge.ingest_invalid_source",
+            format!("source `{relative}` carries no source_id"),
+        ));
+    }
+    let title = front
+        .get("title_full")
+        .or_else(|| front.get("title"))
+        .cloned()
+        .or_else(|| title_from_body(body))
+        .unwrap_or_else(|| source_id.clone());
+    let source_type = front
+        .get("record_type")
+        .or_else(|| front.get("node_type"))
+        .cloned()
+        .unwrap_or_else(|| "source".to_owned());
+    Ok(IngestedSource {
+        source_ref: corpus_source_ref(&source_id)?,
+        source_id,
+        source_type,
+        title,
+        tags: parse_list(front.get("tags").cloned()),
+        relative: relative.to_owned(),
+        content_revision: content_revision(text.as_bytes()),
+        body: text.to_owned(),
+    })
+}
+
+/// The SourcePool binding one authored source page compiles to.
+fn source_binding(source: &IngestedSource) -> Result<SourceMaterial> {
+    Ok(SourceMaterial {
+        binding: SourceBinding {
+            source: source.source_ref.clone(),
+            revision: SourceRevision::parse(&source.content_revision).map_err(|error| {
+                AikitError::new("knowledge.ingest_invalid_source", error.to_string())
+            })?,
+            title: source.title.clone(),
+            tags: source.tags.clone(),
+            // Project-horizon visibility, not `Personal`. `Personal`
+            // material is readable only by a named owner, and ingest has no
+            // owner to name — every binding would be withheld by
+            // `material_for_actor` and the whole corpus would vanish from
+            // the pool without a word. `Team` is the honest reading: this is
+            // the project's own authored ground, eligible to whoever holds
+            // the project horizon.
+            visibility: SourceVisibility::Team,
+            owners: Vec::new(),
+            media_type: "text/markdown".into(),
+            locator: Some(ResourceLocator::Path(source.relative.clone().into())),
+            metadata: BTreeMap::from([
+                ("corpus_kind".to_owned(), json!("source")),
+                ("source_type".to_owned(), json!(source.source_type)),
+                ("relative_path".to_owned(), json!(source.relative)),
+            ]),
+        },
+        body: source.body.clone(),
+    })
+}
+
+/// The SourcePool binding one record compiles to, beside its curated node.
+///
+/// A record's own text is authored source material — `ingest_provenance`
+/// already asserts `central:source:corpus:<record_id>` as the node's
+/// provenance — so binding it here is what makes that assertion readable
+/// rather than a dangling ref. Its tags are its own declared tags together
+/// with the tags of every source it cites: the corpus authors its vocabulary
+/// on the bibliography and register pages, and a record inherits the
+/// vocabulary of what it stands on.
+fn record_binding(
+    record: &IngestedRecord,
+    cited: &[SourceRef],
+    source_tags: &BTreeMap<SourceRef, Vec<String>>,
+) -> Result<SourceMaterial> {
+    let mut tags = record.tags.clone();
+    // `cited` is the record's whole `source_refs` list, its own ref included;
+    // a record is not in `source_tags`, so its own entry contributes nothing
+    // and needs no special case.
+    for source in cited {
+        if let Some(inherited) = source_tags.get(source) {
+            for tag in inherited {
+                if !tags.contains(tag) {
+                    tags.push(tag.clone());
+                }
+            }
+        }
+    }
+    let mut metadata = BTreeMap::from([
+        ("corpus_kind".to_owned(), json!("record")),
+        ("record_type".to_owned(), json!(record.record_type)),
+        ("relative_path".to_owned(), json!(record.relative)),
+        (
+            "declared_tags".to_owned(),
+            json!(record.tags),
+        ),
+    ]);
+    if let Some(register) = &record.register {
+        metadata.insert("register".to_owned(), json!(register));
+    }
+    if let Some(claim_status) = &record.claim_status {
+        metadata.insert("claim_status".to_owned(), json!(claim_status));
+    }
+    Ok(SourceMaterial {
+        binding: SourceBinding {
+            source: corpus_source_ref(&record.record_id)?,
+            revision: SourceRevision::parse(&record.content_revision).map_err(|error| {
+                AikitError::new("knowledge.ingest_invalid_record", error.to_string())
+            })?,
+            title: record
+                .title
+                .clone()
+                .unwrap_or_else(|| record.record_id.clone()),
+            tags,
+            visibility: SourceVisibility::Team,
+            owners: Vec::new(),
+            media_type: "text/markdown".into(),
+            locator: Some(ResourceLocator::Path(record.relative.clone().into())),
+            metadata,
+        },
+        body: record.body.clone(),
     })
 }
 
@@ -374,8 +575,18 @@ pub fn parse_ingestable_record(relative: &str, text: &str) -> Result<IngestedRec
 ///
 /// Deduplicated and ordered so the same record always yields the same node.
 /// Citing a source still never makes it a curated node.
-fn record_source_refs(record: &IngestedRecord) -> Vec<SourceRef> {
-    let mut ids: Vec<&str> = vec![record.record_id.as_str()];
+///
+/// `linked` carries the sources this record cited by ordinary markdown link
+/// into the corpus's bibliography rather than by declaring `source_ids`.
+/// Both forms are citation and both land here: over the Return of Zero
+/// corpus, links into `episteme/sources/**` outnumber declared `source_ids`
+/// by roughly two to one, and reading only the declared form dropped most of
+/// the bibliography on the floor as unresolved links.
+fn record_source_refs(record: &IngestedRecord, linked: &[SourceRef]) -> Vec<SourceRef> {
+    let mut refs: Vec<SourceRef> = Vec::new();
+    if let Ok(own) = corpus_source_ref(&record.record_id) {
+        refs.push(own);
+    }
     let mut cited: Vec<&str> = record
         .source_ids
         .iter()
@@ -384,10 +595,19 @@ fn record_source_refs(record: &IngestedRecord) -> Vec<SourceRef> {
         .collect();
     cited.sort_unstable();
     cited.dedup();
-    ids.extend(cited);
-    ids.into_iter()
-        .filter_map(|id| SourceRef::parse(format!("central:source:corpus:{id}")).ok())
-        .collect()
+    for id in cited {
+        if let Ok(source) = corpus_source_ref(id) {
+            if !refs.contains(&source) {
+                refs.push(source);
+            }
+        }
+    }
+    for source in linked {
+        if !refs.contains(source) {
+            refs.push(source.clone());
+        }
+    }
+    refs
 }
 
 fn ingest_provenance(record: &IngestedRecord) -> WikiProvenanceRef {
@@ -478,21 +698,82 @@ fn resolve_link(
     None
 }
 
-/// Ingest a corpus of authored records (relative path + text). Records
-/// compile first, then their links — `[[wikilinks]]` and the corpus's more
-/// common `[text](path.md)` markdown links alike — resolve against the
-/// record set by record id, title or corpus-relative path; unresolved links
-/// are disclosed, never silently dropped. Tags compile as first-class nodes
-/// with Authored `tagged` edges; rooms compile as spaces carrying their
-/// records.
-pub fn ingest_corpus(corpus: &[(String, String)]) -> Result<(Vec<WikiObject>, Vec<String>)> {
+/// What one ingestion run compiled: the Wiki objects, the SourcePool
+/// material that carries the corpus's tags and bibliography, and the
+/// absences neither could account for.
+#[derive(Debug, Clone, Default)]
+pub struct IngestedCorpus {
+    pub objects: Vec<WikiObject>,
+    /// One binding per record and per source page. This is where tags live:
+    /// there is no `wiki:node:tag/*` object and no `tagged` edge.
+    pub material: Vec<SourceMaterial>,
+    pub absences: Vec<String>,
+}
+
+/// Ingest a corpus of authored records and the bibliography they cite.
+///
+/// Records compile first, then their links — `[[wikilinks]]` and the
+/// corpus's more common `[text](path.md)` markdown links alike — resolve
+/// against the record set by record id, title or corpus-relative path, and
+/// then against the source set by the path the corpus cites it at. A link
+/// that lands on a record becomes an Authored `references` edge; a link that
+/// lands on a source becomes a citation in the record's `source_refs`, never
+/// an edge and never a curated node. Unresolved links are disclosed, never
+/// silently dropped. Rooms compile as spaces carrying their records.
+///
+/// Tags compile into [`SourceMaterial`], not into Wiki objects — see this
+/// module's header for why.
+pub fn ingest_corpus(
+    records: &[(String, String)],
+    sources: &[(String, String)],
+    room_depth: usize,
+) -> Result<IngestedCorpus> {
     let mut objects = Vec::new();
     let mut absences = Vec::new();
-    let mut records = Vec::new();
-    for (relative, text) in corpus {
-        let record = parse_ingestable_record(relative, text)?;
-        records.push(record);
+    let mut material = Vec::new();
+    let mut parsed = Vec::new();
+    for (relative, text) in records {
+        parsed.push(parse_ingestable_record(relative, text)?);
     }
+    let records = parsed;
+
+    let mut parsed_sources = Vec::new();
+    for (relative, text) in sources {
+        parsed_sources.push(parse_ingestable_source(relative, text)?);
+    }
+    let sources = parsed_sources;
+
+    // The bibliography's own indices: by declared id, by the corpus-relative
+    // path records link it at, and by an unambiguous filename stem. A source
+    // tree that files every entry as `SOURCE.md` makes the stem index
+    // deliberately useless — which is correct: an ambiguous stem resolves to
+    // nothing rather than guessing which of 139 sources was meant.
+    let mut source_by_id: BTreeMap<String, SourceRef> = BTreeMap::new();
+    let mut source_by_relpath: BTreeMap<String, SourceRef> = BTreeMap::new();
+    let mut source_by_filestem: BTreeMap<String, Option<SourceRef>> = BTreeMap::new();
+    let mut source_tags: BTreeMap<SourceRef, Vec<String>> = BTreeMap::new();
+    for source in &sources {
+        source_by_id.insert(source.source_id.clone(), source.source_ref.clone());
+        source_by_relpath
+            .entry(strip_md_extension(&source.relative).to_owned())
+            .or_insert_with(|| source.source_ref.clone());
+        let stem = strip_md_extension(&source.relative)
+            .rsplit('/')
+            .next()
+            .unwrap_or(&source.relative)
+            .to_owned();
+        source_by_filestem
+            .entry(stem)
+            .and_modify(|existing| {
+                if existing.as_ref() != Some(&source.source_ref) {
+                    *existing = None;
+                }
+            })
+            .or_insert_with(|| Some(source.source_ref.clone()));
+        source_tags.insert(source.source_ref.clone(), source.tags.clone());
+        material.push(source_binding(source)?);
+    }
+
     // Title index for link resolution (first title wins deterministically).
     let mut by_title: BTreeMap<String, ResourceRef> = BTreeMap::new();
     let mut by_id: BTreeMap<String, ResourceRef> = BTreeMap::new();
@@ -529,8 +810,58 @@ pub fn ingest_corpus(corpus: &[(String, String)]) -> Result<(Vec<WikiObject>, Ve
     // Room spaces: first path segment groups its records.
     let mut rooms: BTreeMap<String, Vec<ResourceRef>> = BTreeMap::new();
 
-    let mut emitted_tags: Vec<String> = Vec::new();
     for record in &records {
+        // Every link — `[[wikilink]]` or `[text](path.md)` alike — resolves
+        // through the same address forms, against records first and then
+        // against the bibliography. Repeated links to the same target within
+        // one record are one relation; targets that resolve to nothing are
+        // disclosed, never silently dropped.
+        let mut linked: Vec<ResourceRef> = Vec::new();
+        let mut cited: Vec<SourceRef> = Vec::new();
+        for link in record.wikilinks.iter().chain(record.markdown_links.iter()) {
+            if let Some(target) =
+                resolve_link(record, link, &by_id, &by_title, &by_relpath, &by_filestem)
+            {
+                if !linked.contains(&target) {
+                    linked.push(target);
+                }
+                continue;
+            }
+            if let Some(source) = resolve_source_link(
+                record,
+                link,
+                &source_by_id,
+                &source_by_relpath,
+                &source_by_filestem,
+            ) {
+                if !cited.contains(&source) {
+                    cited.push(source);
+                }
+                continue;
+            }
+            absences.push(format!(
+                "record {} links `{link}`, which resolves to no record and no source; \
+                 edge omitted",
+                record.record_id
+            ));
+        }
+        // A declared `source_ids:` entry that names no source page in this
+        // corpus is a citation the reader cannot open. Ingest still asserts
+        // the ref — the citation is the author's — but says so.
+        for declared in &record.source_ids {
+            if declared == &record.record_id {
+                continue;
+            }
+            if !source_by_id.contains_key(declared) {
+                absences.push(format!(
+                    "record {} declares source_id `{declared}`, which no source page in this \
+                     corpus claims; the citation is asserted but not materialised",
+                    record.record_id
+                ));
+            }
+        }
+
+        let source_refs = record_source_refs(record, &cited);
         let node = WikiNode {
             profile: OKF_WIKI_PROFILE.into(),
             ref_id: record.record_ref.clone(),
@@ -539,57 +870,17 @@ pub fn ingest_corpus(corpus: &[(String, String)]) -> Result<(Vec<WikiObject>, Ve
             node_type: record.record_type.clone(),
             title: record.title.clone().or(Some(record.record_id.clone())),
             space_refs: Vec::new(),
-            source_refs: record_source_refs(record),
+            source_refs: source_refs.clone(),
             local_space_ref: None,
             extensions: ingest_extension(record),
         };
         objects.push(WikiObject::Node(node));
-        if let Some(room) = &record.room {
+        material.push(record_binding(record, &source_refs, &source_tags)?);
+        if let Some(room) = room_of(&record.relative, room_depth) {
             rooms
-                .entry(room.clone())
+                .entry(room)
                 .or_default()
                 .push(record.record_ref.clone());
-        }
-        // Tags are first-class: one tag node per declared tag across the
-        // corpus, Authored edges from every record that carries it.
-        for tag in &record.tags {
-            let tag_ref = ResourceRef::parse(format!("wiki:node:tag/{tag}")).map_err(|error| {
-                AikitError::new("knowledge.ingest_invalid_record", error.to_string())
-            })?;
-            if !emitted_tags.contains(tag) {
-                emitted_tags.push(tag.clone());
-                objects.push(WikiObject::Node(WikiNode {
-                    profile: OKF_WIKI_PROFILE.into(),
-                    ref_id: tag_ref.clone(),
-                    revision: 1,
-                    provenance: vec![ingest_provenance(record)],
-                    node_type: "tag".into(),
-                    title: Some(tag.clone()),
-                    space_refs: Vec::new(),
-                    source_refs: Vec::new(),
-                    local_space_ref: None,
-                    extensions: BTreeMap::new(),
-                }));
-            }
-            objects.push(authored_edge(&record.record_ref, tag_ref, "tagged"));
-        }
-        // Every link — `[[wikilink]]` or `[text](path.md)` alike — resolves
-        // through the same address forms. Repeated links to the same target
-        // within one record are one relation; targets that resolve to
-        // nothing are disclosed, never silently dropped.
-        let mut linked: Vec<ResourceRef> = Vec::new();
-        for link in record.wikilinks.iter().chain(record.markdown_links.iter()) {
-            match resolve_link(record, link, &by_id, &by_title, &by_relpath, &by_filestem) {
-                Some(target) => {
-                    if !linked.contains(&target) {
-                        linked.push(target);
-                    }
-                }
-                None => absences.push(format!(
-                    "record {} links `{link}`, which resolves to no record; edge omitted",
-                    record.record_id
-                )),
-            }
         }
         for target in linked {
             objects.push(authored_edge(&record.record_ref, target, "references"));
@@ -612,94 +903,201 @@ pub fn ingest_corpus(corpus: &[(String, String)]) -> Result<(Vec<WikiObject>, Ve
         }));
     }
 
-    Ok((objects, absences))
+    Ok(IngestedCorpus {
+        objects,
+        material,
+        absences,
+    })
 }
 
-/// The subset of a raw corpus tree that is actually a record, plus the
-/// honest accounting of what was set aside and why.
+/// The room a record belongs to: the first `depth` segments of its
+/// corpus-relative path.
+///
+/// Depth is the caller's, because a room is relative to the root ingest was
+/// pointed at. The Return of Zero corpus reads one way from its `symbolon/`
+/// publication body — where the first segment names `episteme`, `mytheme`,
+/// `matheme` — and another from the Obsidian vault root a directory above,
+/// where that same structure sits one segment deeper and a depth of 1 would
+/// collapse every record into a single `symbolon` room. Neither root is
+/// wrong; the depth says which one is being read.
+fn room_of(relative: &str, depth: usize) -> Option<String> {
+    if depth == 0 {
+        return None;
+    }
+    let segments: Vec<&str> = relative
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    // A file needs at least one segment beyond the room, or it is not *in* a
+    // room — it is a document sitting at that level.
+    if segments.len() <= depth {
+        return None;
+    }
+    Some(segments[..depth].join("/"))
+}
+
+/// Resolve one link target against the bibliography, in the same order the
+/// record resolver uses: a declared `source_id`, the corpus-relative path as
+/// given, that path relative to the citing record's own directory, and
+/// finally an unambiguous filename stem.
+fn resolve_source_link(
+    record: &IngestedRecord,
+    link: &str,
+    by_id: &BTreeMap<String, SourceRef>,
+    by_relpath: &BTreeMap<String, SourceRef>,
+    by_filestem: &BTreeMap<String, Option<SourceRef>>,
+) -> Option<SourceRef> {
+    if let Some(source) = by_id.get(link) {
+        return Some(source.clone());
+    }
+    let as_given = strip_md_extension(link);
+    if let Some(source) = by_relpath.get(as_given) {
+        return Some(source.clone());
+    }
+    let from_referrer = resolve_relative_path(dirname(&record.relative), link);
+    let from_referrer = strip_md_extension(&from_referrer);
+    if let Some(source) = by_relpath.get(from_referrer) {
+        return Some(source.clone());
+    }
+    let stem = as_given.rsplit('/').next().unwrap_or(as_given);
+    if let Some(Some(source)) = by_filestem.get(stem) {
+        return Some(source.clone());
+    }
+    None
+}
+
+/// The addressable subset of a raw corpus tree, plus the honest accounting
+/// of what was set aside and why.
 ///
 /// A real corpus directory is a mixed tree: the Return of Zero corpus is
-/// ~2,600 markdown files, of which only a few hundred declare `record_id`
-/// in frontmatter — the rest are READMEs, indexes, working notes and other
-/// non-record prose that `ingest_corpus` was never designed to swallow
-/// (its own fallback, filename-stem-as-id, exists for a corpus a caller has
-/// already curated down to records; run across an *uncurated* directory it
-/// would mint one fabricated record per stray file and collide constantly
-/// on generic stems like `README` or `SOURCE`). Selection is the filter
-/// between the two: a file counts as a record only when it declares
-/// `record_id` itself.
+/// ~2,600 markdown files, of which a few hundred declare `record_id` and a
+/// further couple of hundred declare `source_id`. The rest are READMEs,
+/// indexes, working notes and other non-record prose that has no identity to
+/// address it by. Selection is the filter between the raw walk and
+/// [`ingest_corpus`]: a file counts as a record when it declares `record_id`,
+/// as a source when it declares `source_id`, and otherwise is set aside.
 ///
-/// A second real-corpus condition selection also has to name: the same
-/// `record_id` can legitimately appear more than once in a directory tree —
-/// a `working/…/snapshots/…/before/` checkpoint is a deliberate point-in-time
-/// copy of a canonical record, kept for diffing, not a second record. The
-/// first occurrence in corpus order wins (callers that want the canonical
-/// copy to win pass a corpus sorted so the canonical path sorts first, which
-/// a plain lexicographic sort already achieves for this corpus's own layout
-/// — `submission-package/` precedes `working/`); every later occurrence is
-/// named in `duplicate_record_id` rather than silently dropped or left to
-/// collide downstream in `SemanticWikiIndex::rebuild`.
+/// ## Setting aside is not the same as saying nothing
+///
+/// This used to report the set-aside majority as a bare integer, on the
+/// reasoning that itemising several hundred READMEs would bury the findings
+/// that matter. That reasoning holds for inert prose and fails badly for
+/// everything else: a file carrying `tags:`, `node_type:` or `aliases:` is
+/// authored corpus material that ingest could not place, and a count hid
+/// exactly that. It hid, in this corpus, a complete authored tag vocabulary
+/// — `source-bank/...`, `argument-map/...` — sitting in files ingest walked
+/// past in silence, which is how a reader came to conclude the corpus
+/// declared no tags at all.
+///
+/// So the two are separated. Files with nothing to place are counted;
+/// files carrying corpus metadata but no identity are named, with the
+/// metadata they carry, so the gap is visible without the noise.
 #[derive(Debug, Clone, Default)]
 pub struct CorpusSelection {
     /// The records to hand to [`ingest_corpus`], in input order.
     pub records: Vec<(String, String)>,
-    /// How many input files declared no `record_id` and were set aside
-    /// (a count, not a per-file list — usually the large majority of a real
-    /// tree, and itemising each one would bury the findings that matter).
-    pub skipped_no_record_id: usize,
+    /// The source pages to hand to [`ingest_corpus`], in input order.
+    pub sources: Vec<(String, String)>,
+    /// How many input files declared no identity and carried no corpus
+    /// metadata at all — ordinary prose, correctly and quietly set aside.
+    pub skipped_inert: usize,
+    /// One entry per file that carries corpus metadata but declares neither
+    /// `record_id` nor `source_id`: authored material ingest cannot place,
+    /// named rather than counted.
+    pub skipped_unaddressable: Vec<String>,
     /// One entry per later occurrence of a `record_id` already claimed by an
     /// earlier file: which id, the path that was kept, the path set aside.
     pub duplicate_record_id: Vec<String>,
+    /// The same accounting for a `source_id` claimed twice.
+    pub duplicate_source_id: Vec<String>,
     /// A file whose frontmatter could not be read as frontmatter at all
     /// (empty after the `---` fence, for example) is set aside rather than
-    /// guessed at; named here, distinct from the bulk no-`record_id` count
-    /// because it signals a malformed file rather than an ordinary
-    /// non-record document.
+    /// guessed at; named here, distinct from the bulk inert count because it
+    /// signals a malformed file rather than an ordinary non-record document.
     pub unparseable: Vec<String>,
 }
 
-/// Filter a raw `(relative path, text)` corpus down to the records
-/// [`ingest_corpus`] should actually compile, in the input's own order (a
+/// The frontmatter keys that make a file authored corpus material even when
+/// it declares no identity. A file carrying any of these was written into
+/// the corpus's own vocabulary; setting it aside silently loses that.
+const CORPUS_METADATA_KEYS: [&str; 7] = [
+    "tags",
+    "node_type",
+    "aliases",
+    "register",
+    "claim_status",
+    "record_type",
+    "source_ids",
+];
+
+/// Filter a raw `(relative path, text)` corpus down to the records and
+/// sources [`ingest_corpus`] should compile, in the input's own order (a
 /// caller that wants deterministic, canonical-first selection sorts the
 /// corpus before calling this, as the directory loader does).
+///
+/// A file declaring both identities is a record: curated identity is the
+/// stronger claim, and its own text is bound as a source either way.
 pub fn select_ingestable_records(corpus: &[(String, String)]) -> CorpusSelection {
     let mut selection = CorpusSelection::default();
-    let mut claimed: BTreeMap<String, String> = BTreeMap::new();
+    let mut claimed_records: BTreeMap<String, String> = BTreeMap::new();
+    let mut claimed_sources: BTreeMap<String, String> = BTreeMap::new();
     for (relative, text) in corpus {
         let (front, _list, _body) = strip_frontmatter(text);
         if front.is_empty() && text.starts_with("---\n") {
             selection.unparseable.push(relative.clone());
             continue;
         }
-        // A corpus record identifies itself with `record_id` or `source_id`.
-        //
-        // Reading only `record_id` was too narrow for the corpus this engine
-        // was written for: the essay's section movements, its stations and
-        // its passages all identify by `source_id` while carrying the same
-        // record furniture — `title`, `claim_status`, `evidence_status`,
-        // `tags`. Skipping them dropped 497 real documents, and with them
-        // every tag the corpus actually declares, which is why tags looked
-        // unexercised when they are in fact the corpus's richest facet.
-        // They are also what the argument records cite: 103 of the 105
-        // `source_ids` referenced by records resolve to one of these files.
-        let Some(record_id) = front
+        let record_id = front
             .get("record_id")
-            .or_else(|| front.get("source_id"))
-            .filter(|id| !id.trim().is_empty())
-        else {
-            selection.skipped_no_record_id += 1;
-            continue;
-        };
-        match claimed.get(record_id) {
-            Some(kept_path) => {
-                selection.duplicate_record_id.push(format!(
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty());
+        if let Some(record_id) = record_id {
+            match claimed_records.get(record_id) {
+                Some(kept_path) => selection.duplicate_record_id.push(format!(
                     "record_id `{record_id}` is already claimed by `{kept_path}`; `{relative}` is set aside, not ingested"
-                ));
+                )),
+                None => {
+                    claimed_records.insert(record_id.to_owned(), relative.clone());
+                    selection.records.push((relative.clone(), text.clone()));
+                }
             }
-            None => {
-                claimed.insert(record_id.clone(), relative.clone());
-                selection.records.push((relative.clone(), text.clone()));
+            continue;
+        }
+        let source_id = front
+            .get("source_id")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty());
+        if let Some(source_id) = source_id {
+            match claimed_sources.get(source_id) {
+                Some(kept_path) => selection.duplicate_source_id.push(format!(
+                    "source_id `{source_id}` is already claimed by `{kept_path}`; `{relative}` is set aside, not ingested"
+                )),
+                None => {
+                    claimed_sources.insert(source_id.to_owned(), relative.clone());
+                    selection.sources.push((relative.clone(), text.clone()));
+                }
             }
+            continue;
+        }
+        let carried: Vec<&str> = CORPUS_METADATA_KEYS
+            .iter()
+            .copied()
+            .filter(|key| front.contains_key(*key))
+            .collect();
+        if carried.is_empty() {
+            selection.skipped_inert += 1;
+        } else {
+            selection.skipped_unaddressable.push(format!(
+                "{relative}: declares {} but neither `record_id` nor `source_id`; its corpus \
+                 metadata — tags included — cannot be placed",
+                carried
+                    .iter()
+                    .map(|key| format!("`{key}:`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
     }
     selection
@@ -708,6 +1106,7 @@ pub fn select_ingestable_records(corpus: &[(String, String)]) -> CorpusSelection
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::knowledge_source_pool::SourcePoolProvider as _;
     use crate::SemanticWikiIndex;
 
     /// The Return of Zero corpus is the design input (W10 rev 3, V9.4):
@@ -736,12 +1135,14 @@ mod tests {
     #[test]
     fn corpus_ingests_as_authored_records_with_register_frontmatter() {
         let corpus = arbitration_corpus();
-        let (objects, absences) = ingest_corpus(&corpus).unwrap();
+        let compiled = ingest_corpus(&corpus, &[], 1).unwrap();
         // The one absence is honest: A24 links [[A24p]], which is not in
         // this corpus slice; the disclosure is the contract.
+        let absences = compiled.absences;
         assert_eq!(absences.len(), 1, "{absences:?}");
         assert!(absences[0].contains("A24p"));
-        let index = SemanticWikiIndex::rebuild(objects).expect("ingested corpus rebuilds");
+        let index =
+            SemanticWikiIndex::rebuild(compiled.objects).expect("ingested corpus rebuilds");
 
         let a24 = index
             .node(
@@ -768,9 +1169,9 @@ mod tests {
     #[test]
     fn wikilinks_compile_as_authored_edges_resolved_against_records() {
         let corpus = arbitration_corpus();
-        let (objects, absences) = ingest_corpus(&corpus).unwrap();
-        assert_eq!(absences.len(), 1, "{absences:?}");
-        let index = SemanticWikiIndex::rebuild(objects).unwrap();
+        let compiled = ingest_corpus(&corpus, &[], 1).unwrap();
+        assert_eq!(compiled.absences.len(), 1, "{:?}", compiled.absences);
+        let index = SemanticWikiIndex::rebuild(compiled.objects).unwrap();
 
         // Backlinks are first-class: the whole-field sees the incoming
         // authored references.
@@ -791,7 +1192,9 @@ mod tests {
     #[test]
     fn declared_bibliography_becomes_citable_authored_sources() {
         let text = "---\nrecord_id: A25\nrecord_type: argument\nsource_ids:\n                      - bratton-2026-agentworld-brief\n  - ostrom-1990-governing-commons\n                    ---\n\n# Arbitration\n";
-        let (objects, _) = ingest_corpus(&[("arguments/A25.md".into(), text.into())]).unwrap();
+        let objects = ingest_corpus(&[("arguments/A25.md".into(), text.into())], &[], 1)
+            .unwrap()
+            .objects;
 
         let node = objects
             .iter()
@@ -830,81 +1233,269 @@ mod tests {
         );
     }
 
-    /// The corpus identifies records by `record_id` *or* `source_id` — its
-    /// section movements use the latter, and they carry the tags. Keying
-    /// identity off the filename instead collapsed every same-named file in
-    /// the corpus onto one ref.
+    /// Tags ride the SourcePool, which is the one tag carrier AIKit has,
+    /// and never appear as Wiki objects. A `wiki:node:tag/*` namespace was
+    /// a second facility with arbitrary provenance, no vocabulary
+    /// discipline, and no relation to the tags the corpus's bibliography
+    /// already carried — see this module's header.
     #[test]
-    fn a_record_is_identified_by_what_it_declares_not_by_its_filename() {
-        let a = "---\nsource_id: 01-differentiating-mind-p1-canonical-alignment\ntags:\n                   - station/s0\n---\n\n# Alignment\n";
-        let b = "---\nsource_id: 02-return-of-zero-p1-canonical-alignment\ntags:\n                   - station/s1\n---\n\n# Alignment\n";
-        let selection = select_ingestable_records(&[
-            ("rooms/01/P1-CANONICAL-ALIGNMENT.md".into(), a.into()),
-            ("rooms/02/P1-CANONICAL-ALIGNMENT.md".into(), b.into()),
-        ]);
-        assert_eq!(selection.records.len(), 2, "both are ingestable records");
-        assert!(
-            selection.duplicate_record_id.is_empty(),
-            "distinct source_ids are not duplicates: {:?}",
-            selection.duplicate_record_id
-        );
-
-        let (objects, _) = ingest_corpus(&selection.records).unwrap();
-        let refs: Vec<String> = objects
-            .iter()
-            .filter_map(|o| match o {
-                WikiObject::Node(n) if n.node_type != "tag" => Some(n.ref_id.to_string()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            refs.contains(&"wiki:node:record/01-differentiating-mind-p1-canonical-alignment".to_owned())
-                && refs.contains(&"wiki:node:record/02-return-of-zero-p1-canonical-alignment".to_owned()),
-            "each room's file keeps its own declared identity: {refs:?}"
-        );
-    }
-
-    /// Tags declared by `source_id` records reach the field. This is the
-    /// corpus's richest facet and it was invisible while only `record_id`
-    /// files were read.
-    #[test]
-    fn tags_on_source_id_records_reach_the_field() {
-        let text = "---\nsource_id: 09-s0-p2-vikalpa-samkalpa\nnode_type: section\ntags:                     [argument-map/section, station/s0]\n---\n\n# Vikalpa\n";
-        let selection =
-            select_ingestable_records(&[("movements/09-s0-p2.md".into(), text.into())]);
-        assert_eq!(selection.records.len(), 1, "a source_id record is ingestable");
-
-        let (objects, _) = ingest_corpus(&selection.records).unwrap();
-        let tagged: Vec<String> = objects
-            .iter()
-            .filter_map(|o| match o {
-                WikiObject::Edge(e) if e.relation == "tagged" => Some(e.to_ref.to_string()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            tagged.contains(&"wiki:node:tag/argument-map/section".to_owned())
-                && tagged.contains(&"wiki:node:tag/station/s0".to_owned()),
-            "both declared tags compile as tagged edges: {tagged:?}"
-        );
-    }
-
-    #[test]
-    fn tags_are_first_class_objects_in_the_ingested_field() {
+    fn tags_compile_into_source_material_not_into_wiki_nodes() {
         let corpus = arbitration_corpus();
-        let (objects, _absences) = ingest_corpus(&corpus).unwrap();
-        let index = SemanticWikiIndex::rebuild(objects).unwrap();
-        let arbitration_tag = index
-            .node(
-                &ResourceRef::parse("wiki:node:tag/arbitration").unwrap(),
-            )
-            .expect("tag node is first-class");
-        assert_eq!(arbitration_tag.node_type, "tag");
-        // Both arbitration records ride the tag.
-        let backlinks = index.backlinks(
-            &ResourceRef::parse("wiki:node:tag/arbitration").unwrap(),
+        let compiled = ingest_corpus(&corpus, &[], 1).unwrap();
+
+        assert!(
+            !compiled
+                .objects
+                .iter()
+                .any(|object| object.ref_id().as_str().starts_with("wiki:node:tag/")),
+            "no tag node is minted"
         );
-        assert_eq!(backlinks.len(), 2);
+        assert!(
+            !compiled.objects.iter().any(|object| matches!(
+                object,
+                WikiObject::Edge(edge) if edge.relation == "tagged"
+            )),
+            "no `tagged` edge is minted"
+        );
+
+        let history = compiled
+            .material
+            .iter()
+            .find(|item| item.binding.source.as_str() == "central:source:corpus:t09-history")
+            .expect("every record binds its own text as source material");
+        assert_eq!(
+            history.binding.tags,
+            vec![
+                "arbitration".to_owned(),
+                "latin".to_owned(),
+                "greek".to_owned()
+            ],
+            "the record's declared tags ride its binding verbatim"
+        );
+
+        // And the pool's own tag filter is what reads them back.
+        let bindings = compiled
+            .material
+            .iter()
+            .map(|item| item.binding.clone())
+            .collect();
+        let pool = crate::knowledge_source_pool::SourcePool::new("pool:test", bindings).unwrap();
+        let visible = crate::knowledge_source_pool::material_for_actor(
+            &pool,
+            &compiled.material,
+            None,
+            true,
+        )
+        .expect("project-horizon material is eligible without a named owner");
+        assert_eq!(
+            visible.len(),
+            compiled.material.len(),
+            "no binding is silently withheld by the privacy membrane"
+        );
+        let mut provider = crate::knowledge_source_pool::NativeSourcePoolProvider::new();
+        provider.rebuild(&visible).unwrap();
+        let hits = provider
+            .search(
+                "",
+                crate::knowledge_source_pool::SourceSearchMode::Fulltext,
+                &["arbitration".to_owned()],
+                10,
+            )
+            .unwrap();
+        let tagged: Vec<&str> = hits.iter().map(|hit| hit.source.as_str()).collect();
+        assert_eq!(
+            tagged,
+            vec![
+                "central:source:corpus:t09-history",
+                "central:source:corpus:t09-whole-field"
+            ],
+            "a tag filter alone browses the pool; both arbitration records ride the tag"
+        );
+    }
+
+    /// A source page compiles to a binding, never to a curated node, and a
+    /// record that cites it inherits its vocabulary. This is what "tags are
+    /// picked up from the register and the sources" means concretely.
+    #[test]
+    fn a_cited_source_binds_its_own_tags_and_lends_them_to_its_citing_record() {
+        let records = vec![(
+            "arguments/A30.md".to_owned(),
+            "---\nrecord_id: A30\nrecord_type: argument\nsource_ids:\n  - jung-1978-aion\n---\n\n# A30\n\nSee [the master](../episteme/sources/psychology/mcgilchrist/SOURCE.md).\n".to_owned(),
+        )];
+        let sources = vec![
+            (
+                "episteme/sources/psychology/jung/SOURCE.md".to_owned(),
+                "---\nsource_id: jung-1978-aion\nnode_type: source-house\nrecord_type: book\ntitle_full: 'Aion'\ntags:\n  - source-bank/record\n  - source-bank/jung\n---\n\n# Aion\n".to_owned(),
+            ),
+            (
+                "episteme/sources/psychology/mcgilchrist/SOURCE.md".to_owned(),
+                "---\nsource_id: mcgilchrist-2009-master-emissary\nnode_type: source-house\nrecord_type: book\ntitle_full: 'The Master and His Emissary'\ntags:\n  - source-bank/record\n  - source-bank/psychology\n---\n\n# The Master\n".to_owned(),
+            ),
+        ];
+        let compiled = ingest_corpus(&records, &sources, 1).unwrap();
+
+        // Neither source became a curated node.
+        let index = SemanticWikiIndex::rebuild(compiled.objects.clone()).unwrap();
+        for source in ["jung-1978-aion", "mcgilchrist-2009-master-emissary"] {
+            assert!(
+                !index.contains(
+                    &ResourceRef::parse(format!("central:source:corpus:{source}")).unwrap()
+                ),
+                "citing {source} never curates it"
+            );
+        }
+
+        // The record cites both: one declared, one reached by link.
+        let node = compiled
+            .objects
+            .iter()
+            .find_map(|object| match object {
+                WikiObject::Node(node) if node.ref_id.as_str().ends_with("/A30") => Some(node),
+                _ => None,
+            })
+            .expect("the record ingests as a node");
+        let refs: Vec<&str> = node.source_refs.iter().map(SourceRef::as_str).collect();
+        assert_eq!(
+            refs,
+            vec![
+                "central:source:corpus:A30",
+                "central:source:corpus:jung-1978-aion",
+                "central:source:corpus:mcgilchrist-2009-master-emissary",
+            ],
+            "a markdown link into the bibliography is a citation, not an unresolved link"
+        );
+        assert!(
+            compiled.absences.is_empty(),
+            "nothing is left unresolved: {:?}",
+            compiled.absences
+        );
+
+        // And the record's binding carries the vocabulary of what it stands on.
+        let binding = compiled
+            .material
+            .iter()
+            .find(|item| item.binding.source.as_str() == "central:source:corpus:A30")
+            .expect("the record binds its own text");
+        assert_eq!(
+            binding.binding.tags,
+            vec![
+                "source-bank/record".to_owned(),
+                "source-bank/jung".to_owned(),
+                "source-bank/psychology".to_owned(),
+            ],
+            "tags are inherited from the sources cited, deduplicated, in citation order"
+        );
+    }
+
+    /// A declared `source_ids:` entry no source page claims is a citation
+    /// the reader cannot open. It is still asserted — the citation is the
+    /// author's — but it is never silently asserted.
+    #[test]
+    fn a_citation_with_no_source_page_is_disclosed() {
+        let records = vec![(
+            "arguments/A31.md".to_owned(),
+            "---\nrecord_id: A31\nrecord_type: argument\nsource_ids:\n  - nobody-1900-missing\n---\n\n# A31\n".to_owned(),
+        )];
+        let compiled = ingest_corpus(&records, &[], 1).unwrap();
+        assert!(
+            compiled
+                .absences
+                .iter()
+                .any(|absence| absence.contains("nobody-1900-missing")
+                    && absence.contains("not materialised")),
+            "{:?}",
+            compiled.absences
+        );
+    }
+
+    /// Selection used to report every non-record as one integer. That count
+    /// hid this corpus's whole authored tag vocabulary: files carrying
+    /// `tags:` but no identity walked past in silence, and a reader
+    /// concluded the corpus declared no tags at all.
+    #[test]
+    fn files_carrying_corpus_metadata_are_named_not_counted() {
+        let corpus = vec![
+            (
+                "README.md".to_owned(),
+                "# Just prose\n\nNothing to place here.\n".to_owned(),
+            ),
+            (
+                "episteme/concepts/reference-notes/blind-spot.md".to_owned(),
+                "---\ntitle: 'Blind Spot'\nnode_type: reference\ntags:\n  - argument-map/reference\n---\n\n# Blind Spot\n".to_owned(),
+            ),
+            (
+                "episteme/sources/jung/SOURCE.md".to_owned(),
+                "---\nsource_id: jung-1978-aion\ntags: [source-bank/record]\n---\n\n# Aion\n".to_owned(),
+            ),
+            (
+                "arguments/A24.md".to_owned(),
+                "---\nrecord_id: A24\nrecord_type: argument\n---\n\n# A24\n".to_owned(),
+            ),
+        ];
+        let selection = select_ingestable_records(&corpus);
+        assert_eq!(selection.records.len(), 1);
+        assert_eq!(selection.sources.len(), 1, "a source_id is an identity too");
+        assert_eq!(selection.skipped_inert, 1, "ordinary prose is still counted");
+        assert_eq!(selection.skipped_unaddressable.len(), 1);
+        let disclosed = &selection.skipped_unaddressable[0];
+        assert!(disclosed.contains("blind-spot.md"), "{disclosed}");
+        assert!(disclosed.contains("`tags:`"), "{disclosed}");
+        assert!(disclosed.contains("`node_type:`"), "{disclosed}");
+    }
+
+    /// A room is relative to the root ingest was pointed at. The same corpus
+    /// read from its publication body and from the Obsidian vault root one
+    /// directory above must not answer "one room called symbolon".
+    #[test]
+    fn room_depth_follows_the_root_ingest_was_pointed_at() {
+        let from_vault = vec![
+            (
+                "symbolon/episteme/arguments/A24.md".to_owned(),
+                "---\nrecord_id: A24\nrecord_type: argument\n---\n\n# A24\n".to_owned(),
+            ),
+            (
+                "symbolon/mytheme/myth/uroboros.md".to_owned(),
+                "---\nrecord_id: M01\nrecord_type: myth\n---\n\n# Uroboros\n".to_owned(),
+            ),
+        ];
+        let one = ingest_corpus(&from_vault, &[], 1).unwrap();
+        let rooms = |compiled: &IngestedCorpus| {
+            let mut names: Vec<String> = compiled
+                .objects
+                .iter()
+                .filter_map(|object| match object {
+                    WikiObject::Space(space) => Some(space.ref_id.to_string()),
+                    _ => None,
+                })
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            rooms(&one),
+            vec!["wiki:space:room/symbolon"],
+            "depth 1 from the vault root collapses the whole body into one room"
+        );
+        let two = ingest_corpus(&from_vault, &[], 2).unwrap();
+        assert_eq!(
+            rooms(&two),
+            vec![
+                "wiki:space:room/symbolon/episteme",
+                "wiki:space:room/symbolon/mytheme"
+            ],
+            "depth 2 recovers the structure the corpus actually has there"
+        );
+        assert!(
+            rooms(&ingest_corpus(&from_vault, &[], 0).unwrap()).is_empty(),
+            "depth 0 compiles no rooms at all"
+        );
+        // A record with no segment beyond the room depth sits at that level
+        // rather than naming a room of its own.
+        let shallow = vec![(
+            "README-record.md".to_owned(),
+            "---\nrecord_id: R1\nrecord_type: document\n---\n\n# R\n".to_owned(),
+        )];
+        assert!(rooms(&ingest_corpus(&shallow, &[], 1).unwrap()).is_empty());
     }
 
     #[test]
@@ -913,7 +1504,7 @@ mod tests {
             "arguments/A24.md".to_owned(),
             "---\nrecord_id: A24\nrecord_type: argument\n---\n\n# A24\n\nSee [[t09-history]].\n".to_owned(),
         )];
-        let (_objects, absences) = ingest_corpus(&corpus).unwrap();
+        let absences = ingest_corpus(&corpus, &[], 1).unwrap().absences;
         assert!(absences.iter().any(|a| a.contains("t09-history")));
     }
 
@@ -980,9 +1571,13 @@ mod tests {
                 "---\nrecord_id: A19\nrecord_type: argument\nregister: episteme\n---\n\n# A19\n".to_owned(),
             ),
         ];
-        let (objects, absences) = ingest_corpus(&corpus).unwrap();
-        assert!(absences.is_empty(), "both markdown links resolve: {absences:?}");
-        let index = SemanticWikiIndex::rebuild(objects).unwrap();
+        let compiled = ingest_corpus(&corpus, &[], 1).unwrap();
+        assert!(
+            compiled.absences.is_empty(),
+            "both markdown links resolve: {:?}",
+            compiled.absences
+        );
+        let index = SemanticWikiIndex::rebuild(compiled.objects).unwrap();
 
         let a24 = index.backlinks(&ResourceRef::parse("wiki:node:record/A24").unwrap());
         assert!(
@@ -1015,9 +1610,9 @@ mod tests {
                 "---\nrecord_id: A31\nrecord_type: argument\nregister: episteme\n---\n\n# A31\n".to_owned(),
             ),
         ];
-        let (objects, absences) = ingest_corpus(&corpus).unwrap();
-        assert!(absences.is_empty(), "{absences:?}");
-        let index = SemanticWikiIndex::rebuild(objects).unwrap();
+        let compiled = ingest_corpus(&corpus, &[], 1).unwrap();
+        assert!(compiled.absences.is_empty(), "{:?}", compiled.absences);
+        let index = SemanticWikiIndex::rebuild(compiled.objects).unwrap();
         let backlinks = index.backlinks(&ResourceRef::parse("wiki:node:record/A31").unwrap());
         assert!(backlinks
             .iter()
@@ -1029,7 +1624,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn selection_sets_aside_files_that_declare_no_record_id() {
+    fn selection_sets_aside_files_that_declare_no_identity() {
         let corpus = vec![
             ("README.md".to_owned(), "# Read this first\n\nNo frontmatter at all.\n".to_owned()),
             (
@@ -1044,7 +1639,11 @@ mod tests {
         let selection = select_ingestable_records(&corpus);
         assert_eq!(selection.records.len(), 1);
         assert_eq!(selection.records[0].0, "symbolon/episteme/arguments/A24-Arbitration.md");
-        assert_eq!(selection.skipped_no_record_id, 2);
+        // The README carries nothing to place; the movement carries
+        // `node_type:` and `claim_status:` and so is named, not counted.
+        assert_eq!(selection.skipped_inert, 1);
+        assert_eq!(selection.skipped_unaddressable.len(), 1);
+        assert!(selection.skipped_unaddressable[0].contains("01-immutable-gap.md"));
         assert!(selection.duplicate_record_id.is_empty());
     }
 

@@ -880,6 +880,21 @@ pub struct WikiIngestArgs {
     /// Only files with this extension are read as candidate records.
     #[arg(long, value_name = "EXT", default_value = "md")]
     pub extension: String,
+    /// How many leading path segments of a record's corpus-relative path
+    /// name its room. A room is relative to the root ingest was pointed at:
+    /// reading the Return of Zero corpus from its `symbolon/` body wants 1,
+    /// reading it from the Obsidian vault root a directory above wants 2, or
+    /// every record collapses into a single `symbolon` room. 0 compiles no
+    /// room spaces at all.
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    pub room_depth: usize,
+    /// Where to write the SourcePool material the corpus compiles to — the
+    /// bindings that carry its bibliography and its tags. Defaults to a
+    /// `<wiki-file-stem>.sources/` directory beside `--file`. Written only
+    /// with `--apply`, and only files this command itself owns
+    /// (`corpus-*.json`) are replaced.
+    #[arg(long, value_name = "DIR")]
+    pub source_pool: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]

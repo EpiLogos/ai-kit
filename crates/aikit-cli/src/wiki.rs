@@ -23,6 +23,7 @@ use serde_json::{json as jval, Value};
 use sha2::Digest;
 
 use aikit_core::knowledge_ingest::{ingest_corpus, select_ingestable_records};
+use aikit_core::knowledge_source_pool::SourceMaterial;
 use aikit_core::knowledge_wiki::{
     WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject, WikiProvenanceRef, WikiSpace, OKF_WIKI_PROFILE,
 };
@@ -1274,7 +1275,10 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
     let walked = walk_corpus(&args.corpus, &args.extension)?;
     let (raw_corpus, io_skipped) = (walked.files, walked.skipped);
     let selection = select_ingestable_records(&raw_corpus);
-    let (objects, absences) = ingest_corpus(&selection.records)?;
+    let compiled = ingest_corpus(&selection.records, &selection.sources, args.room_depth)?;
+    let (objects, material, absences) =
+        (compiled.objects, compiled.material, compiled.absences);
+    let pool_dir = source_pool_dir(args);
 
     let mut warnings: Vec<String> = Vec::new();
     warnings.extend(io_skipped.iter().cloned());
@@ -1285,6 +1289,11 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
         )
     }));
     warnings.extend(selection.duplicate_record_id.iter().cloned());
+    warnings.extend(selection.duplicate_source_id.iter().cloned());
+    // Files carrying corpus metadata but no identity are named, not counted:
+    // this is where an authored tag vocabulary hides when ingest cannot
+    // place it.
+    warnings.extend(selection.skipped_unaddressable.iter().cloned());
     warnings.extend(absences.iter().cloned());
 
     let (mut nodes, mut edges, mut spaces) = (0usize, 0usize, 0usize);
@@ -1296,20 +1305,37 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
             WikiObject::Frame(_) | WikiObject::Reading(_) => {}
         }
     }
+    let mut tag_vocabulary: BTreeMap<String, usize> = BTreeMap::new();
+    for item in &material {
+        for tag in &item.binding.tags {
+            *tag_vocabulary.entry(tag.clone()).or_default() += 1;
+        }
+    }
     let mut summary = jval!({
         "command": "ingest",
         "corpus": args.corpus.display().to_string(),
         "file": args.file.display().to_string(),
+        "source_pool": pool_dir.display().to_string(),
+        "room_depth": args.room_depth,
         "files_read": raw_corpus.len(),
         "io_skipped": io_skipped.len(),
         "records_selected": selection.records.len(),
-        "skipped_no_record_id": selection.skipped_no_record_id,
+        "sources_selected": selection.sources.len(),
+        "skipped_inert": selection.skipped_inert,
+        "skipped_unaddressable": selection.skipped_unaddressable.len(),
         "duplicate_record_id": selection.duplicate_record_id.len(),
+        "duplicate_source_id": selection.duplicate_source_id.len(),
         "unparseable": selection.unparseable.len(),
         "objects": objects.len(),
         "nodes": nodes,
         "edges": edges,
         "spaces": spaces,
+        "source_bindings": material.len(),
+        "tag_vocabulary": tag_vocabulary.len(),
+        "tagged_bindings": material
+            .iter()
+            .filter(|item| !item.binding.tags.is_empty())
+            .count(),
         "absences": absences.len(),
     });
 
@@ -1340,6 +1366,7 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
             .count();
         summary["applied"] = jval!(false);
         summary["already_held"] = jval!(already_held);
+        summary["source_pool_files"] = jval!(0);
         summary["note"] = jval!(if colliding.is_empty() {
             "dry run; re-run with --apply to write these objects \
              (pass --update too if any are already held and should advance)"
@@ -1374,11 +1401,94 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
         }
         Ok(())
     })?;
+    let written = write_source_pool(&pool_dir, &material)?;
     summary["applied"] = jval!(true);
+    summary["source_pool_files"] = jval!(written);
     summary["outcome"] = mutation_outcome(&outcome);
     let mut reply = WikiOutcome::wrote(summary, &outcome);
     reply.warnings.extend(warnings);
     Ok(reply)
+}
+
+/// Where the corpus's SourcePool material is written: `--source-pool` if
+/// given, else a `<wiki-file-stem>.sources/` directory beside `--file`.
+fn source_pool_dir(args: &WikiIngestArgs) -> PathBuf {
+    if let Some(dir) = &args.source_pool {
+        return dir.clone();
+    }
+    let stem = args
+        .file
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| "wiki".to_owned());
+    args.file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.sources"))
+}
+
+/// A shard budget, not a limit: Knowledge discovery skips any candidate file
+/// over 4 MiB, and a corpus of a few hundred records with their bodies is
+/// comfortably past that in one file. Sharding at 1 MiB keeps every shard
+/// discoverable with headroom for a single outsized record.
+const SOURCE_POOL_SHARD_BYTES: usize = 1024 * 1024;
+
+/// Write the SourcePool material as discoverable `corpus-NNN.json` shards.
+///
+/// Only files this command owns are touched: stale `corpus-*.json` shards
+/// from a previous, larger run are removed so a shrinking corpus cannot
+/// leave orphaned bindings behind, and nothing else in the directory is
+/// read, moved or deleted.
+fn write_source_pool(dir: &Path, material: &[SourceMaterial]) -> Result<usize> {
+    std::fs::create_dir_all(dir).map_err(|error| {
+        AikitError::new(
+            "knowledge.ingest_source_pool_unwritable",
+            format!("{} could not be created: {error}", dir.display()),
+        )
+    })?;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("corpus-") && name.ends_with(".json") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let mut shards = 0usize;
+    let mut shard: Vec<&SourceMaterial> = Vec::new();
+    let mut bytes = 0usize;
+    let flush = |shard: &mut Vec<&SourceMaterial>, shards: &mut usize| -> Result<()> {
+        if shard.is_empty() {
+            return Ok(());
+        }
+        let path = dir.join(format!("corpus-{:03}.json", *shards));
+        let text = serde_json::to_string_pretty(&shard).map_err(|error| {
+            AikitError::new(
+                "knowledge.ingest_source_pool_unwritable",
+                format!("SourcePool material could not be rendered: {error}"),
+            )
+        })?;
+        std::fs::write(&path, text).map_err(|error| {
+            AikitError::new(
+                "knowledge.ingest_source_pool_unwritable",
+                format!("{} could not be written: {error}", path.display()),
+            )
+        })?;
+        *shards += 1;
+        shard.clear();
+        Ok(())
+    };
+    for item in material {
+        let size = item.body.len() + item.binding.title.len() + 512;
+        if bytes + size > SOURCE_POOL_SHARD_BYTES && !shard.is_empty() {
+            flush(&mut shard, &mut shards)?;
+            bytes = 0;
+        }
+        shard.push(item);
+        bytes += size;
+    }
+    flush(&mut shard, &mut shards)?;
+    Ok(shards)
 }
 
 // ---------------------------------------------------------------------------

@@ -102,6 +102,29 @@ pub struct KnowledgeExplanation {
     pub detail: Option<Value>,
 }
 
+/// Split a query into its free text and its `tag:<value>` filters.
+///
+/// The filter form is explicit rather than inferred: a bare `#word` is
+/// ordinary prose in a corpus that writes markdown headings, and guessing
+/// would turn text searches into silently-narrowed ones. `tag:` is dropped
+/// from the text so it is not also matched as a word.
+pub fn split_tag_filters(query: &str) -> (String, Vec<String>) {
+    let mut text: Vec<&str> = Vec::new();
+    let mut tags: Vec<String> = Vec::new();
+    for term in query.split_whitespace() {
+        match term.strip_prefix("tag:") {
+            Some(tag) if !tag.is_empty() => {
+                let tag = tag.to_owned();
+                if !tags.contains(&tag) {
+                    tags.push(tag);
+                }
+            }
+            _ => text.push(term),
+        }
+    }
+    (text.join(" "), tags)
+}
+
 pub struct SourcePoolBinding<'a> {
     pub provider: &'a dyn SourcePoolProvider,
     pub material: &'a [SourceMaterial],
@@ -269,6 +292,14 @@ impl<'a> KnowledgeApplication<'a> {
             ));
         }
 
+        // A `tag:<value>` term narrows the SourcePool rather than being
+        // matched as text. This is the one tag facility AIKit has: the
+        // corpus's authored vocabulary rides `SourceBinding::tags`, and
+        // every provider — the native baseline and bkmr's `--tags` alike —
+        // already filters on it. Passing an empty filter here, as this call
+        // did, left that facility implemented, capability-detected and never
+        // reachable from a query.
+        let (source_query, tag_filter) = split_tag_filters(query);
         for binding in &self.sources {
             let status = binding.provider.status();
             if !status.available {
@@ -278,12 +309,26 @@ impl<'a> KnowledgeApplication<'a> {
                 ));
                 continue;
             }
+            if !tag_filter.is_empty() && !status.capabilities.tags {
+                // Dropping the filter and searching anyway would answer a
+                // narrower question than the one that was asked, silently.
+                absences.push(format!(
+                    "SourcePool provider {} cannot filter by tag; the tag filter [{}] was not \
+                     applied and this provider was not searched",
+                    status.provider,
+                    tag_filter.join(", ")
+                ));
+                continue;
+            }
             let mode = if status.capabilities.hybrid {
                 SourceSearchMode::Hybrid
             } else {
                 SourceSearchMode::Fulltext
             };
-            match binding.provider.search(query, mode, &[], limit) {
+            match binding
+                .provider
+                .search(&source_query, mode, &tag_filter, limit)
+            {
                 Ok(provider_hits) => hits.extend(provider_hits.into_iter().map(|hit| {
                     let resource = ResourceRef::parse(hit.source.as_str())
                         .expect("SourceRef is a valid ResourceRef");
@@ -1327,6 +1372,58 @@ mod tests {
             revision: None,
             label: Some(resource.to_string()),
         }
+    }
+
+    /// A `tag:` term narrows the SourcePool instead of being matched as
+    /// text. Before this, the one production call to a provider's search
+    /// passed an empty tag slice, so the tag facility every provider
+    /// implements — and bkmr advertises through its `--tags` flag — was
+    /// unreachable from a query.
+    #[test]
+    fn a_tag_term_narrows_the_source_pool_rather_than_being_matched_as_text() {
+        assert_eq!(
+            split_tag_filters("rotate tag:auth tag:spec tokens"),
+            ("rotate tokens".to_owned(), vec!["auth".to_owned(), "spec".to_owned()])
+        );
+        // `#word` is ordinary prose in a markdown corpus and is left alone.
+        assert_eq!(
+            split_tag_filters("the #1 position"),
+            ("the #1 position".to_owned(), Vec::new())
+        );
+
+        let material = vec![material()];
+        let mut native = NativeSourcePoolProvider::new();
+        native.rebuild(&material).unwrap();
+        let app = KnowledgeApplication::new(FamiliarityContext {
+            project: None,
+            actor: None,
+            agency: None,
+            focus: None,
+        })
+        .with_source_pool(&native, &material);
+
+        let matched = app.search("Authentication tag:auth", 10);
+        assert!(
+            matched
+                .hits
+                .iter()
+                .any(|hit| hit.resource.as_str() == "source:spec"),
+            "the tag filter selects the source and the remaining text still matches"
+        );
+        let excluded = app.search("Authentication tag:absent-tag", 10);
+        assert!(
+            !excluded
+                .hits
+                .iter()
+                .any(|hit| hit.resource.as_str() == "source:spec"),
+            "a tag the source does not carry excludes it"
+        );
+        // A tag alone is a browse, not an empty query.
+        let browsed = app.search("tag:auth", 10);
+        assert!(browsed
+            .hits
+            .iter()
+            .any(|hit| hit.resource.as_str() == "source:spec"));
     }
 
     #[test]
