@@ -48,6 +48,7 @@ pub mod temporal;
 pub mod tree_build;
 pub mod ui;
 pub mod wiki;
+pub mod wiki_shape;
 
 pub use session_space_ops::SessionSpaceCliAdapter;
 pub use session_space_service::SessionSpaceServiceOps;
