@@ -9,23 +9,26 @@ use aikit_adapters::runner::SystemRunner;
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
 use aikit_core::knowledge_code::CodeIndexProvider;
 use aikit_core::knowledge_source_pool::{
-    material_for_actor, NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider,
+    NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider, material_for_actor,
 };
-use aikit_core::knowledge_wiki::{parse_wiki_objects, OkfWikiBundle, WikiObject};
+use aikit_core::knowledge_wiki::{OkfWikiBundle, WikiObject, parse_wiki_objects};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
 use aikit_core::resource::{
-    parse_or_search_expression, resolve_subjects, ProviderRef, ResolveExpression, ResourceIndex,
-    ResourceKind, ResourceRef, SourceAuthority, SourceRef,
+    ProviderRef, ResourceIndex, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
 };
 use aikit_core::{
-    FamiliarityContext, ForgetScope, KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation,
-    KnowledgeProviderStatus, KnowledgeRankingEvidence, KnowledgeSearchResult, KnowledgeSources,
-    Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+    ACTION_CONTEMPLATE_FLOW, ACTION_KNOWLEDGE_EXPLAIN, ACTION_KNOWLEDGE_OPEN,
+    ACTION_KNOWLEDGE_READ, ACTION_KNOWLEDGE_RELATIONS, ACTION_KNOWLEDGE_ROUTE,
+    ACTION_KNOWLEDGE_SOURCES, ACTION_RUN, ACTION_SKILL_OVERLAY_SET,
+    DEFAULT_FAMILIARITY_HALF_LIFE_MS, FamiliarityContext, ForgetScope, KnowledgeAddress,
+    KnowledgeApplication, KnowledgeExplanation, KnowledgeOpenReceipt, KnowledgeProviderStatus,
+    KnowledgeRankingEvidence, KnowledgeResolution, KnowledgeSearchResult, KnowledgeSources,
+    ResolutionKind, ResolutionRow, Result,
 };
 use aikit_store::{
-    append_familiarity_observation, append_familiarity_reset, KnowledgeApplicationReceipt,
-    KnowledgeApplicationStore, SqliteWikiProvider,
+    KnowledgeApplicationReceipt, KnowledgeApplicationStore, SqliteWikiProvider,
+    append_familiarity_observation, append_familiarity_reset,
 };
 use aikit_tui::backend::PaletteBackend;
 
@@ -45,6 +48,15 @@ pub(super) struct KnowledgeRuntime {
 }
 
 impl KnowledgeRuntime {
+    /// Flow cognition (W1.4/W1.5) reads identity and material through these
+    /// same owners; it creates no second wiki or source-pool access path.
+    pub(super) fn wiki_index(&self) -> Option<&SemanticWikiIndex> {
+        self.wiki.as_ref().map(SqliteWikiProvider::index)
+    }
+
+    pub(super) fn source_material(&self) -> &[SourceMaterial] {
+        &self.material
+    }
     fn application(&self, context: FamiliarityContext) -> KnowledgeApplication<'_> {
         let mut application = KnowledgeApplication::new(context)
             .with_source_pool(&self.native_source, &self.material)
@@ -67,7 +79,7 @@ impl Service {
         self.knowledge_runtime.borrow_mut().take();
     }
 
-    fn knowledge_context(&self) -> FamiliarityContext {
+    pub(super) fn knowledge_context(&self) -> FamiliarityContext {
         FamiliarityContext {
             project: self
                 .descriptor
@@ -84,7 +96,7 @@ impl Service {
         KnowledgeApplicationStore::new(self.home.clone())
     }
 
-    fn with_knowledge<T>(
+    pub(super) fn with_knowledge<T>(
         &self,
         operation: impl FnOnce(&KnowledgeRuntime, KnowledgeApplication<'_>) -> Result<T>,
     ) -> Result<T> {
@@ -100,20 +112,14 @@ impl Service {
         operation(runtime, application)
     }
 
-    /// Canonical Knowledge retrieval on the production service: one operative
-    /// Resolve expression, evaluated by the one resolver contract.
-    pub fn knowledge_resolve(
-        &self,
-        expression: &ResolveExpression,
-        limit: usize,
-    ) -> Result<KnowledgeSearchResult> {
+    pub fn knowledge_search(&self, query: &str, limit: usize) -> Result<KnowledgeSearchResult> {
         let candidate_limit = if limit == 0 { 0 } else { limit.max(256) };
         let mut result = self.with_knowledge(|runtime, application| {
-            let mut result = application.resolve(expression, candidate_limit);
+            let mut result = application.search(query, candidate_limit);
             result.absences.extend(runtime.absences.clone());
             Ok(result)
         })?;
-        self.apply_learned_accessibility(&resolve_subjects(expression), &mut result)?;
+        self.apply_learned_accessibility(query, &mut result)?;
         result.hits.truncate(limit);
         if let Err(error) = self.knowledge_store().remember_search_hits(&result.hits) {
             result.absences.push(format!(
@@ -124,19 +130,153 @@ impl Service {
         Ok(result)
     }
 
-    /// Human/shell front over [`Self::knowledge_resolve`]: it parses the typed
-    /// input through the one operative grammar and delegates. `aikit knowledge
-    /// search` reaches retrieval only through here.
-    pub fn knowledge_search(&self, query: &str, limit: usize) -> Result<KnowledgeSearchResult> {
-        let expression = parse_or_search_expression(query)?;
-        let mut result = self.knowledge_resolve(&expression, limit)?;
-        result.query = query.into();
-        Ok(result)
+    /// The canonical owner resolution operation for the U3.1 aperture.
+    ///
+    /// Rows cover the real provider set — Central sources/files, Flows, skills
+    /// and knowledge subjects — and each row is a ref carrying its owner, its
+    /// provenance and the canonical Actions available on it. Resolution is
+    /// inert: it records no familiarity; only [`Service::knowledge_open`]
+    /// records one successful use.
+    pub fn knowledge_resolve(&self, query: &str, limit: usize) -> Result<KnowledgeResolution> {
+        let mut resolution = self.with_knowledge(|runtime, _| {
+            let mut resolution = KnowledgeResolution::new(query);
+            for item in &runtime.material {
+                let mut provenance = vec![format!("revision {}", item.binding.revision)];
+                if let Some(origin) = item.binding.metadata.get("origin") {
+                    provenance.push(format!("origin: {origin}"));
+                }
+                resolution.offer_row(ResolutionRow {
+                    reference: ResourceRef::parse(item.binding.source.as_str())?,
+                    kind: ResolutionKind::File,
+                    label: item.binding.title.clone(),
+                    owner: "provider/source-pool/native".to_string(),
+                    provenance,
+                    actions: vec![
+                        ACTION_KNOWLEDGE_READ.into(),
+                        ACTION_KNOWLEDGE_SOURCES.into(),
+                        ACTION_KNOWLEDGE_EXPLAIN.into(),
+                        ACTION_KNOWLEDGE_OPEN.into(),
+                    ],
+                });
+            }
+            if let Some(index) = runtime.wiki.as_ref().map(SqliteWikiProvider::index) {
+                for resource in index.discover() {
+                    let object = index
+                        .resolve(&resource)
+                        .expect("discovered SemanticWiki ref resolves");
+                    let (node, is_flow) = match &object {
+                        WikiObject::Node(node) => (node, node.node_type == "flow"),
+                        _ => continue,
+                    };
+                    let mut provenance: Vec<String> = node
+                        .provenance
+                        .iter()
+                        .map(|entry| match &entry.source_revision {
+                            Some(revision) => {
+                                format!("{}@{}", entry.source_ref, revision_text(revision))
+                            }
+                            None => entry.source_ref.to_string(),
+                        })
+                        .collect();
+                    provenance.push(format!("revision {}", node.revision));
+                    let (kind, actions) = if is_flow {
+                        (
+                            ResolutionKind::Flow,
+                            vec![
+                                ACTION_KNOWLEDGE_READ.into(),
+                                ACTION_KNOWLEDGE_RELATIONS.into(),
+                                ACTION_CONTEMPLATE_FLOW.into(),
+                                ACTION_KNOWLEDGE_OPEN.into(),
+                            ],
+                        )
+                    } else {
+                        (
+                            ResolutionKind::KnowledgeSubject,
+                            vec![
+                                ACTION_KNOWLEDGE_READ.into(),
+                                ACTION_KNOWLEDGE_RELATIONS.into(),
+                                ACTION_KNOWLEDGE_EXPLAIN.into(),
+                                ACTION_KNOWLEDGE_ROUTE.into(),
+                                ACTION_KNOWLEDGE_OPEN.into(),
+                            ],
+                        )
+                    };
+                    resolution.offer_row(ResolutionRow {
+                        reference: node.ref_id.clone(),
+                        kind,
+                        label: node.title.clone().unwrap_or_default(),
+                        owner: "provider/semantic-wiki/sqlite".to_string(),
+                        provenance,
+                        actions,
+                    });
+                }
+            }
+            resolution.disclose_absences(&runtime.absences);
+            Ok(resolution)
+        })?;
+        for capability in self
+            .view
+            .active
+            .values()
+            .filter(|capability| capability.kind == aikit_core::capsule::Kind::Skill)
+        {
+            let mut provenance: Vec<String> = vec![capability.origin.describe()];
+            if let Some(revision) = &capability.revision {
+                provenance.push(format!("revision {revision}"));
+            }
+            if let Some(source) = &capability.source {
+                provenance.push(format!("registry {source}"));
+            }
+            resolution.offer_row(ResolutionRow {
+                reference: ResourceRef::parse(capability.id.to_string())?,
+                kind: ResolutionKind::Skill,
+                label: capability.name.clone(),
+                owner: capability.origin.describe(),
+                provenance,
+                actions: vec![
+                    ACTION_RUN.into(),
+                    ACTION_SKILL_OVERLAY_SET.into(),
+                    ACTION_KNOWLEDGE_EXPLAIN.into(),
+                    ACTION_KNOWLEDGE_OPEN.into(),
+                ],
+            });
+        }
+        Ok(resolution.finish(limit))
+    }
+
+    /// The explicit open: resolve the ref, read it successfully through the
+    /// owner operation, then record exactly one successful-use familiarity
+    /// observation. A ref that does not resolve, or a read that fails, records
+    /// nothing.
+    pub fn knowledge_open(&mut self, resource: &ResourceRef) -> Result<KnowledgeOpenReceipt> {
+        let address = self.knowledge_address(resource)?.ok_or_else(|| {
+            aikit_core::AikitError::new(
+                "knowledge.open_unresolved",
+                format!("no knowledge provider resolves {resource}"),
+            )
+        })?;
+        let reading = self.knowledge_read(&address)?;
+        let observation_id = format!("knowledge-open-use/{}", aikit_core::EventId::generate());
+        let observation = aikit_core::FamiliarityObservation::destination(
+            observation_id.clone(),
+            resource.clone(),
+            self.knowledge_context(),
+            now_ms(),
+        )
+        .from_surface(ResourceRef::parse("surface/aikit/knowledge")?);
+        append_familiarity_observation(&self.index, observation)?;
+        Ok(KnowledgeOpenReceipt {
+            opened: resource.clone(),
+            address,
+            provider: reading.provider.map(|provider| provider.to_string()),
+            recorded: "familiarity/resource-use".into(),
+            observation_id,
+        })
     }
 
     fn apply_learned_accessibility(
         &self,
-        subjects: &[&str],
+        query: &str,
         result: &mut KnowledgeSearchResult,
     ) -> Result<()> {
         let Some(store) = PaletteBackend::familiarity(self)? else {
@@ -193,8 +333,8 @@ impl Service {
         }
         if influenced {
             result.hits.sort_by(|left, right| {
-                exact_knowledge_hit(left, subjects)
-                    .cmp(&exact_knowledge_hit(right, subjects))
+                exact_knowledge_hit(left, query)
+                    .cmp(&exact_knowledge_hit(right, query))
                     .reverse()
                     .then_with(|| {
                         let left_score = left
@@ -239,8 +379,7 @@ impl Service {
             if runtime.project_map.endpoint(resource).is_some() {
                 return Ok(Some(KnowledgeAddress::ProjectMap(resource.clone())));
             }
-            let result =
-                application.resolve(&ResolveExpression::ordinary_search(resource.as_str()), 256);
+            let result = application.search(resource.as_str(), 256);
             Ok(result
                 .hits
                 .into_iter()
@@ -312,7 +451,7 @@ impl Service {
         // Explain keeps provider-native detail and learned ranking evidence separate.
         let resource = address.resource_ref();
         let ranking = self
-            .knowledge_resolve(&ResolveExpression::ordinary_search(resource.as_str()), 256)?
+            .knowledge_search(resource.as_str(), 256)?
             .hits
             .into_iter()
             .find(|hit| hit.resource == resource)
@@ -788,18 +927,22 @@ fn resolve_provider_path(root: &Path, raw: &str) -> PathBuf {
     }
 }
 
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or_default()
 }
 
-/// A hit is exact when it names one of the expression's own subject terms.
-fn exact_knowledge_hit(hit: &aikit_core::KnowledgeSearchHit, subjects: &[&str]) -> bool {
-    subjects.iter().any(|subject| {
-        !subject.is_empty()
-            && (hit.resource.as_str().eq_ignore_ascii_case(subject)
-                || hit.label.eq_ignore_ascii_case(subject))
-    })
+fn exact_knowledge_hit(hit: &aikit_core::KnowledgeSearchHit, query: &str) -> bool {
+    !query.is_empty()
+        && (hit.resource.as_str().eq_ignore_ascii_case(query)
+            || hit.label.eq_ignore_ascii_case(query))
+}
+
+fn revision_text(revision: &aikit_core::SemanticRevision) -> String {
+    match revision {
+        aikit_core::SemanticRevision::Number(number) => number.to_string(),
+        aikit_core::SemanticRevision::Text(text) => text.clone(),
+    }
 }

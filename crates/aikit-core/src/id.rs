@@ -302,6 +302,20 @@ prefixed_id!(
 );
 prefixed_id!(EventId, "evt_", "A recorded observability event.");
 prefixed_id!(
+    SessionActivityId,
+    "act_",
+    "A durable activity identity within a session lifecycle. Every side that \
+     correlates lifecycle events — Actuation, an O:I kernel, a UI — quotes this \
+     string verbatim; it is never re-derived."
+);
+prefixed_id!(
+    PermissionRequestId,
+    "prq_",
+    "A durable permission-request identity. It is the join key across the \
+     issued/granted/refused lifecycle events and survives history reopen \
+     unchanged."
+);
+prefixed_id!(
     CandidateId,
     "cnd_",
     "A capture candidate awaiting promotion."
