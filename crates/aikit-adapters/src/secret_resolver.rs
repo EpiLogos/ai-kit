@@ -1,14 +1,16 @@
 //! Projection-time secret resolution.
 //!
 //! The implementations each delegate to a genuine store boundary — the
-//! OS secure store via `keyring`, the 1Password CLI (`op read`, the same SDK
-//! boundary the Workcell onepassword adapter uses), the varlock CLI
-//! (`printenv`, the documents-side boundary), and the process environment
-//! for the legacy `env://` escape hatch. No vault client is reimplemented
-//! here.
+//! pass(1) CLI (`pass show`, the free gpg-backed store), the OS secure store
+//! via `keyring`, the 1Password CLI (`op read`, the same SDK boundary the
+//! Workcell onepassword adapter uses), the varlock CLI (`printenv`, the
+//! documents-side boundary), and the process environment for the legacy
+//! `env://` escape hatch. No vault client is reimplemented here.
 //!
-//! Resolution order per `central.security/v1`: `op://` > `keychain://` >
-//! `varlock://` > flagged `env://`. Dispatch is by the ref's declared
+//! Resolution order per `central.security/v1` (2026-09-09 owner decision,
+//! providers all optional): `varlock://` (native default, `keychain()`
+//! backing proven) > `pass://` (free cross-machine) > `keychain://` >
+//! `op://` (optional) > gated `env://`. Dispatch is by the ref's declared
 //! scheme — the order governs which scheme an author should declare, not
 //! runtime fallback between stores.
 //!
@@ -229,6 +231,97 @@ impl<R: VarlockRead> SecretResolver for VarlockSecretResolver<R> {
     }
 }
 
+/// The seam a pass resolver reads through — scripted in tests.
+pub trait PassRead: Send + Sync + fmt::Debug {
+    fn show(&self, path: &str) -> std::result::Result<String, String>;
+}
+
+/// The genuine pass(1) CLI: `pass show <path>`. gpg-agent holds any key
+/// passphrase; this resolver never sees gpg material directly.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PassCli;
+
+impl PassRead for PassCli {
+    fn show(&self, path: &str) -> std::result::Result<String, String> {
+        let output = std::process::Command::new("pass")
+            .args(["show", path])
+            .output()
+            .map_err(|error| {
+                format!("failed to spawn `pass` (is passwordstore installed?): {error}")
+            })?;
+        if output.status.success() {
+            return String::from_utf8(output.stdout)
+                .map(|value| value.trim_end_matches(['\n', '\r']).to_string())
+                .map_err(|_| "pass show returned non-UTF-8 material".to_string());
+        }
+        Err(classify_pass_error(&String::from_utf8_lossy(
+            &output.stderr,
+        )))
+    }
+}
+
+/// Map pass stderr to a capability fact: a missing entry, a missing gpg key
+/// and a missing store are different remediations.
+fn classify_pass_error(stderr: &str) -> String {
+    let lowered = stderr.to_lowercase();
+    if lowered.contains("no secret key")
+        || lowered.contains("no private key")
+        || lowered.contains("decryption failed")
+        || lowered.contains("passphrase")
+        || lowered.contains("cancelled")
+    {
+        "gpg could not decrypt the pass entry; check the receiving key is present and gpg-agent can serve it".to_string()
+    } else if lowered.contains("is not in the password store") || lowered.contains("not found") {
+        "pass entry not found for the given store path".to_string()
+    } else if lowered.contains("not a password store") || lowered.contains(".password-store") {
+        "password store is not initialized (`pass init <gpg-id>`)".to_string()
+    } else {
+        let first = stderr.trim().lines().next().unwrap_or("(no stderr)");
+        format!(
+            "pass show failed: {}",
+            first.chars().take(200).collect::<String>()
+        )
+    }
+}
+
+/// `pass://<store-path>` via the genuine pass(1) CLI — the free, gpg-backed,
+/// git-syncable adapter of the `central.security/v1` scheme.
+#[derive(Debug, Clone)]
+pub struct PassSecretResolver<R: PassRead = PassCli> {
+    runner: R,
+}
+
+impl<R: PassRead> PassSecretResolver<R> {
+    pub fn new(runner: R) -> Self {
+        Self { runner }
+    }
+}
+
+impl Default for PassSecretResolver<PassCli> {
+    fn default() -> Self {
+        Self { runner: PassCli }
+    }
+}
+
+impl<R: PassRead> SecretResolver for PassSecretResolver<R> {
+    fn resolve(&self, secret_ref: &SecretRef) -> Result<SecretValue> {
+        let SecretRef::Pass { path } = secret_ref else {
+            return Err(unsupported_scheme(secret_ref, "pass://"));
+        };
+        let value = self
+            .runner
+            .show(path)
+            .map_err(|message| unavailable("secret_resolver.pass_unavailable", message))?;
+        if value.is_empty() {
+            return Err(unavailable(
+                "secret_resolver.empty_material",
+                format!("pass show returned empty material for {secret_ref}"),
+            ));
+        }
+        SecretValue::new(value)
+    }
+}
+
 /// `env://<NAME>` — the legacy escape hatch. Constructed with `allow: false`
 /// by default: presence of a matching variable never makes import eligible.
 /// The variable source is injectable so tests never mutate process state.
@@ -296,12 +389,13 @@ impl SecretResolver for EnvImportSecretResolver {
     }
 }
 
-/// The default composite: keychain + 1Password + varlock, with the
+/// The default composite: varlock + pass + keychain + 1Password, with the
 /// environment import gate closed unless the operator opened it.
 #[derive(Debug, Default)]
 pub struct SuiteSecretResolver {
     pub keychain: KeychainSecretResolver,
     pub onepassword: OnePasswordSecretResolver<OpCli>,
+    pub pass: PassSecretResolver<PassCli>,
     pub varlock: VarlockSecretResolver<VarlockCli>,
     pub env_import: EnvImportSecretResolver,
 }
@@ -321,6 +415,7 @@ impl SecretResolver for SuiteSecretResolver {
         match secret_ref {
             SecretRef::Keychain { .. } => self.keychain.resolve(secret_ref),
             SecretRef::OnePassword { .. } => self.onepassword.resolve(secret_ref),
+            SecretRef::Pass { .. } => self.pass.resolve(secret_ref),
             SecretRef::Varlock { .. } => self.varlock.resolve(secret_ref),
             SecretRef::Env { .. } => self.env_import.resolve(secret_ref),
         }
@@ -484,5 +579,58 @@ mod tests {
         assert!(classify_varlock_error("variable not found").contains("not found"));
         assert!(classify_varlock_error("no such file").contains("env file not found"));
         assert!(classify_varlock_error("boom").contains("varlock printenv failed"));
+    }
+
+    #[derive(Debug, Clone)]
+    struct ScriptedPass {
+        result: std::result::Result<String, String>,
+    }
+
+    impl PassRead for ScriptedPass {
+        fn show(&self, _path: &str) -> std::result::Result<String, String> {
+            self.result.clone()
+        }
+    }
+
+    fn pass_ref() -> SecretRef {
+        SecretRef::parse("pass://providers/gemini-api-key").unwrap()
+    }
+
+    #[test]
+    fn pass_resolves_material_and_refuses_empty() {
+        let resolver = PassSecretResolver::new(ScriptedPass {
+            result: Ok("fixture-material".to_string()),
+        });
+        let material = resolver.resolve(&pass_ref()).unwrap();
+        assert_eq!(material.expose(), "fixture-material");
+
+        let empty = PassSecretResolver::new(ScriptedPass {
+            result: Ok(String::new()),
+        });
+        let err = empty.resolve(&pass_ref()).unwrap_err();
+        assert!(err.message().contains("empty"));
+    }
+
+    #[test]
+    fn pass_rejects_wrong_scheme_without_touching_cli() {
+        let resolver = PassSecretResolver::new(ScriptedPass {
+            result: Err("must not be called".to_string()),
+        });
+        let err = resolver
+            .resolve(&SecretRef::parse("varlock://secrets/providers.env/NAME").unwrap())
+            .unwrap_err();
+        assert!(err.message().contains("pass://"));
+    }
+
+    #[test]
+    fn pass_error_classifier_names_capability_facts() {
+        assert!(classify_pass_error("gpg: decryption failed: No secret key").contains("gpg"));
+        assert!(classify_pass_error("gpg: cancelled by user").contains("gpg"));
+        assert!(
+            classify_pass_error("Error: providers/x is not in the password store.")
+                .contains("not found")
+        );
+        assert!(classify_pass_error("Error: not a password store").contains("pass init"));
+        assert!(classify_pass_error("boom").contains("pass show failed"));
     }
 }
