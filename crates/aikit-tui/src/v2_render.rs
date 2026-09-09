@@ -19,6 +19,7 @@ use crate::application::{
 use crate::layout::{Glyphs, Layout};
 use crate::navigation::AmbientContext;
 use crate::navigator_groups::{self, NavigatorRow};
+use crate::compose_preview::compose_preview_lines;
 use crate::project_workspace_render::{explain_lines, project_world_lines, workspace_section_label};
 use crate::theme::Theme;
 
@@ -304,17 +305,33 @@ fn preview_pane<'a>(
             .as_ref()
             .map(|preview| preview.summary.as_str())
             .unwrap_or("preview unavailable");
-        return Paragraph::new(vec![
+        let mut lines = vec![
             Line::from(Span::styled("Composition preview", theme.heading())),
             Line::from(""),
             Line::from(Span::raw(summary.to_string())),
-            Line::from(""),
-            Line::from(Span::styled(
-                format!("Ctrl+S proceeds to confirmation {sep} Esc returns"),
-                theme.dim(),
-            )),
-        ])
-        .wrap(Wrap { trim: false });
+        ];
+        // The package-toggle summary above answers "what does applying this
+        // change"; spec §5.1's Preview answers "what did this actually resolve
+        // to" about the whole composed World. Both belong here — folded in the
+        // same way `Overlay::Explain` folds in `explain_lines`, so Preview
+        // stays one route rather than becoming a second destination.
+        if let Some(world) = world {
+            let world_lines = compose_preview_lines(state, world, glyphs);
+            if !world_lines.is_empty() {
+                lines.push(Line::from(""));
+                lines.extend(
+                    world_lines
+                        .into_iter()
+                        .map(|line| Line::from(Span::raw(line))),
+                );
+            }
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("Ctrl+S proceeds to confirmation {sep} Esc returns"),
+            theme.dim(),
+        )));
+        return Paragraph::new(lines).wrap(Wrap { trim: false });
     }
     if state.overlay == Some(Overlay::Explain) {
         if let Some(ActionOutcome::Explained { subject, summary }) = state.action_result.as_ref() {
