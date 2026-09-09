@@ -15,6 +15,8 @@
 //! `explain_lines`' content alongside the provider Explain evidence rather
 //! than losing it).
 
+use std::collections::BTreeSet;
+
 use aikit_core::context_resolution::Availability;
 use aikit_core::project::ProjectBindingLocator;
 use aikit_core::credential_world::{CredentialStatusKnowledge, ProviderRosterKnowledge};
@@ -24,6 +26,7 @@ use aikit_core::session_space_application::SessionSpaceAuthoredState;
 use aikit_core::{ContextSourceHit, ProjectWorldReadModel, ProjectWorldResource};
 
 use crate::application::{TuiState, WorkspaceSection};
+use crate::backend::FactoryWorkEntry;
 use crate::compose_spine::compose_spine_lines;
 use crate::layout::Glyphs;
 
@@ -56,6 +59,7 @@ pub struct WorkspaceReading<'a> {
     pub world: &'a ProjectWorldReadModel,
     pub session_spaces: &'a SessionSpaceRoster,
     pub history: &'a HistoryReading,
+    pub factory_work_entry: &'a FactoryWorkEntry,
 }
 
 impl<'a> WorkspaceReading<'a> {
@@ -64,7 +68,21 @@ impl<'a> WorkspaceReading<'a> {
         session_spaces: &'a SessionSpaceRoster,
         history: &'a HistoryReading,
     ) -> Self {
-        Self { world, session_spaces, history }
+        static UNAVAILABLE: std::sync::OnceLock<FactoryWorkEntry> = std::sync::OnceLock::new();
+        Self {
+            world,
+            session_spaces,
+            history,
+            factory_work_entry: UNAVAILABLE.get_or_init(|| FactoryWorkEntry::Unavailable {
+                reason: "no Factory Commission binding supplied to this application".into(),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn with_factory_work_entry(mut self, entry: &'a FactoryWorkEntry) -> Self {
+        self.factory_work_entry = entry;
+        self
     }
 }
 
@@ -139,7 +157,7 @@ pub fn project_world_lines(
     match state.workspace_section {
         WorkspaceSection::Worlds => context_lines(world, glyphs),
         WorkspaceSection::Compose => compose_lines(state, reading, glyphs),
-        WorkspaceSection::Work => work_lines(state, world, glyphs),
+        WorkspaceSection::Work => work_lines(state, reading, glyphs),
         WorkspaceSection::History => history_lines(reading, glyphs),
         WorkspaceSection::System => system_lines(world, glyphs),
         WorkspaceSection::Knowledge => Vec::new(),
@@ -263,43 +281,118 @@ fn compose_lines(state: &TuiState, reading: WorkspaceReading<'_>, glyphs: Glyphs
     lines
 }
 
-/// Work's human question (spec §6) is "what is actually running", distinct
-/// from Compose's "what could I build". Grounded in real, already-resolved
-/// `actor_runtime` facts (the same facts `compose_lines` already folds in) —
-/// this section is honest-minimal rather than fabricated: the fuller §6.3
-/// Active-Work (DIRECT/FACTORY/ATTENTION) dashboard remains bounded by owner
-/// evidence. Factory rows appear only when the application admitted native
-/// Factory readings into the shared Resource field.
-fn work_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
+/// Work's three headings are presentation over shared application state, not
+/// new lifecycle categories: DIRECT never receives Factory ancestry by
+/// proximity; FACTORY contains only admitted native owner readings; ATTENTION
+/// contains only explicit owner requests or recognitions in those readings.
+fn work_lines(state: &TuiState, reading: WorkspaceReading<'_>, glyphs: Glyphs) -> Vec<String> {
+    let world = reading.world;
     let sep = glyphs.separator();
-    let mut lines = vec![format!("Work {sep} what is actually running"), String::new()];
+    let mut lines = vec![format!("Work {sep} direct and developmental activity"), String::new()];
+
+    lines.push("DIRECT".into());
     let mut any_runtime = false;
     if let Some(agent) = world.actor_runtime.agent.effective.as_ref() {
-        lines.push(format!("Agent         {}", agent.resource));
+        lines.push(format!("  Agent       {}", agent.resource));
         any_runtime = true;
     }
     if let Some(agency) = world.actor_runtime.agency.effective.as_ref() {
-        lines.push(format!("Agency        {}", agency.resource));
+        lines.push(format!("  Agency      {}", agency.resource));
         any_runtime = true;
     }
     if let Some(host) = world.actor_runtime.host.effective.as_ref() {
-        lines.push(format!("Host          {}", host.resource));
+        lines.push(format!("  Host        {}", host.resource));
         any_runtime = true;
     }
     for harness in &world.actor_runtime.harnesses {
-        lines.push(format!("Harness       {}", harness.resource));
+        lines.push(format!("  Harness     {}", harness.resource));
         any_runtime = true;
     }
     for model in &world.actor_runtime.models {
-        lines.push(format!("Model         {}", model.resource));
+        lines.push(format!("  Model       {}", model.resource));
         any_runtime = true;
     }
     for offer in &world.actor_runtime.execution_offers {
-        lines.push(format!("Execution     {}", offer.resource));
+        lines.push(format!("  Execution   {}", offer.resource));
         any_runtime = true;
     }
+    if let Some(session) = &world.context.session_id {
+        lines.push(format!(
+            "  Session     {session} {sep} current context; Factory ancestry not supplied"
+        ));
+        any_runtime = true;
+    }
+    match reading.session_spaces {
+        BoundaryReading::Observed(spaces) => {
+            for space in spaces {
+                for session in space.agent_sessions.keys() {
+                    lines.push(format!(
+                        "  Attached    {session} {sep} SessionSpace {} {sep} liveness not observed",
+                        space.id()
+                    ));
+                    any_runtime = true;
+                }
+            }
+        }
+        BoundaryReading::Unreadable { reason } => {
+            lines.push(format!("  Sessions    unreadable {sep} {reason}"));
+        }
+    }
     if !any_runtime {
-        lines.push("Runtime       no effective Actor/Runtime resource in this world".into());
+        lines.push("  none observed; external sessions have no inferred Factory ancestry".into());
+    }
+
+    lines.push(String::new());
+    lines.push("FACTORY".into());
+    if world.developmental_work.is_empty() {
+        lines.push("  no Factory owner readings admitted".into());
+    } else {
+        for resource in &world.developmental_work {
+            let revision = resource
+                .annotations
+                .get("factory.owner-revision")
+                .map(|value| format!(" {sep} owner r{value}"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "  {:<12} {}{revision}",
+                match resource.kind {
+                    ResourceKind::Journey => "Journey",
+                    ResourceKind::Run => "Run",
+                    ResourceKind::WorkflowUnit => "WorkflowUnit",
+                    _ => "Factory",
+                },
+                resource.resource,
+            ));
+            lines.push(format!("    {}", resource.description));
+        }
+        for commission in factory_commission_rows(&world.developmental_work, sep) {
+            lines.push(format!("  {commission}"));
+        }
+    }
+    match reading.factory_work_entry {
+        FactoryWorkEntry::Ready => lines.push(format!(
+            "  Start Factory Work  ready {sep} select Work in Navigator, then press :"
+        )),
+        FactoryWorkEntry::Unavailable { reason } => {
+            lines.push(format!("  Start Factory Work  unavailable {sep} {reason}"));
+        }
+    }
+    lines.push(String::new());
+    lines.push("ATTENTION".into());
+    let attention = factory_attention_rows(&world.developmental_work);
+    if attention.is_empty() {
+        lines.push("  none in supplied Factory owner readings".into());
+    } else {
+        lines.extend(attention.into_iter().map(|row| format!("  {row}")));
+    }
+
+    if let Some(crate::application::ActionOutcome::FactoryWorkStarted { summary, receipt }) =
+        state.action_result.as_ref()
+    {
+        lines.push(String::new());
+        lines.push(format!("  {summary}"));
+        lines.push("  Owner receipt".into());
+        lines.extend(receipt.lines().map(|line| format!("    {line}")));
     }
 
     if let Some(selected) = state.selected.as_ref() {
@@ -308,30 +401,50 @@ fn work_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -
             lines.extend(resource_lines(resource, glyphs));
         }
     }
+    lines
+}
 
-    lines.push(String::new());
-    lines.push(
-        "Direct Session  reachable through Search (kind session-space)".into(),
-    );
-    if world.developmental_work.is_empty() {
-        lines.push("Factory work    not exposed by application boundary".into());
-    } else {
-        lines.push("Factory work    observed from Factory owner readings".into());
-        for resource in &world.developmental_work {
-            lines.push(format!(
-                "{:<14} {}  {}",
-                match resource.kind {
-                    ResourceKind::Journey => "Journey",
-                    ResourceKind::Run => "Run",
-                    ResourceKind::WorkflowUnit => "WorkflowUnit",
-                    _ => "Factory",
-                },
-                resource.resource,
-                resource.description,
-            ));
+fn factory_commission_rows(resources: &[ProjectWorldResource], sep: &str) -> Vec<String> {
+    let mut rows = BTreeSet::new();
+    for resource in resources {
+        for (key, encoded) in &resource.annotations {
+            let Some(request_ref) = key.strip_prefix("factory.commission.") else {
+                continue;
+            };
+            let Ok(reading) = serde_json::from_str::<serde_json::Value>(encoded) else {
+                continue;
+            };
+            let standing = reading
+                .pointer("/commission/request/rootAct/standing")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("standing unavailable");
+            rows.insert(format!("Commission {request_ref} {sep} {standing}"));
         }
     }
-    lines
+    rows.into_iter().collect()
+}
+
+fn factory_attention_rows(resources: &[ProjectWorldResource]) -> Vec<String> {
+    let mut rows = BTreeSet::new();
+    for resource in resources {
+        let Some(encoded) = resource.annotations.get("factory.owner-reading") else {
+            continue;
+        };
+        let Ok(reading) = serde_json::from_str::<serde_json::Value>(encoded) else {
+            continue;
+        };
+        for (field, label) in [
+            ("humanRequests", "HumanRequest"),
+            ("recognitions", "Recognition"),
+        ] {
+            if let Some(values) = reading.get(field).and_then(serde_json::Value::as_array) {
+                for value in values {
+                    rows.insert(format!("{label} {value}"));
+                }
+            }
+        }
+    }
+    rows.into_iter().collect()
 }
 
 /// System's human question (spec §11) is "what does this installation depend

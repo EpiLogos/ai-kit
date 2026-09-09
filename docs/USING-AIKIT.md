@@ -153,6 +153,28 @@ real binary and owner-generated state. A missing half-binding is an error. With
 no binding, direct Sessions and externally discovered Harnesses remain
 zero-Factory.
 
+The Work destination presents these same application readings under visibly
+separate `DIRECT`, `FACTORY`, and `ATTENTION` headings. Direct/current-context
+Sessions never gain Factory ancestry merely because Factory readings are also
+visible. Factory rows retain the exact owner refs and revisions; HumanRequest
+and Recognition rows appear only when the owner readings supply them.
+
+To expose the native **Start Factory Work** contextual Action in the Work
+destination, provide a reviewed Commission request as well as its target state:
+
+```sh
+AIKIT_FACTORY_STATE=/path/to/developmental-state.json \
+AIKIT_FACTORY_REQUEST_FILE=/path/to/factory-commission-request.json \
+AIKIT_FACTORY_BIN=/path/to/factory \
+aikit ui
+```
+
+Select `Work` in the Navigator, press `:`, then choose `Start Factory Work`.
+The application invokes the same native Factory boundary as
+`aikit factory start-work`, re-reads the owner state, and displays the exact
+receipt. A new state path is a truthful zero-Factory view until that Action is
+accepted. Its root Act remains `commissioned-not-executed`.
+
 ## Agency Gateway
 
 The Agency Gateway is the persistent contact plane through which the same

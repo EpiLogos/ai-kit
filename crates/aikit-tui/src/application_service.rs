@@ -33,11 +33,12 @@ use crate::application::{
     HistoryEntry, RelationReadModel, ResolvedActionReadModel, ResolvedSearchReadModel,
     ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService,
 };
-use crate::backend::{PaletteBackend, Toggle};
+use crate::backend::{FactoryWorkEntry, PaletteBackend, Toggle};
 use crate::session_space_service::install_session_space_navigation_resources;
 use crate::staging::is_on;
 use crate::workspace_navigation::{
-    install_workspace_destination_navigation_resources, workspace_section_for_destination,
+    install_start_factory_work_action, install_workspace_destination_navigation_resources,
+    workspace_section_for_destination, START_FACTORY_WORK_ACTION_REF,
     WORKSPACE_DESTINATION_ACTION_REF,
 };
 
@@ -62,6 +63,10 @@ impl<'a> ApplicationService<'a> {
         self.backend
     }
 
+    pub fn factory_work_entry(&self) -> FactoryWorkEntry {
+        self.backend.factory_work_entry()
+    }
+
     fn navigation_index(&self) -> Result<ResourceSearchIndex> {
         Self::navigation_index_from(self.backend)
     }
@@ -74,6 +79,9 @@ impl<'a> ApplicationService<'a> {
         let session_spaces = backend.session_space_navigation()?;
         install_session_space_navigation_resources(&mut index, &session_spaces);
         install_workspace_destination_navigation_resources(&mut index)?;
+        if backend.factory_work_entry().is_ready() {
+            install_start_factory_work_action(&mut index)?;
+        }
         install_explain_history_actions(&mut index)?;
         if let Some(familiarity) = backend.familiarity()? {
             index.apply_familiarity(
@@ -969,6 +977,13 @@ impl TuiApplicationService for ApplicationService<'_> {
                 ActionOutcome::NavigatedTo {
                     section,
                     summary: format!("opened {}", action.subject),
+                }
+            }
+            START_FACTORY_WORK_ACTION_REF => {
+                let started = self.backend.start_factory_work()?;
+                ActionOutcome::FactoryWorkStarted {
+                    summary: started.summary,
+                    receipt: started.receipt,
                 }
             }
             "action/capability/explain" => {

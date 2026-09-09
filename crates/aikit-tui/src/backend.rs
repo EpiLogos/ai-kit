@@ -256,6 +256,29 @@ fn session_space_store(home: Option<&AikitHome>) -> Result<SessionSpaceApplicati
     Ok(SessionSpaceApplicationStore::new(home))
 }
 
+/// Whether the shared application backend can cross the already-accepted
+/// Factory Commission boundary. This is configuration/readiness evidence only;
+/// `Ready` does not imply that any Commission or execution exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FactoryWorkEntry {
+    Ready,
+    Unavailable { reason: String },
+}
+
+impl FactoryWorkEntry {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+/// Exact owner receipt returned after the Factory start-work operation.
+/// `receipt` is pretty-printed but otherwise unmodified Factory JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactoryWorkStartReceipt {
+    pub summary: String,
+    pub receipt: String,
+}
+
 /// Low-level resolved/package/runtime backend beneath `ApplicationService`.
 ///
 /// Despite the retained compatibility name, this trait owns no application state,
@@ -325,6 +348,23 @@ pub trait PaletteBackend {
     /// This read may fail; it never manufactures provider offers or admission.
     fn context_resource_records(&self) -> Result<Vec<ResourceRecord>> {
         Ok(Vec::new())
+    }
+
+    /// Readiness of the native Factory Commission entry point. Backends that
+    /// do not own such a binding remain explicitly unavailable.
+    fn factory_work_entry(&self) -> FactoryWorkEntry {
+        FactoryWorkEntry::Unavailable {
+            reason: "no Factory Commission binding supplied to this application".into(),
+        }
+    }
+
+    /// Invoke the configured native Factory start-work operation. The default
+    /// refuses rather than manufacturing a local Commission.
+    fn start_factory_work(&mut self) -> Result<FactoryWorkStartReceipt> {
+        Err(aikit_core::AikitError::new(
+            "factory.start_work_unavailable",
+            "this application backend has no native Factory Commission binding",
+        ))
     }
 
     fn navigation_index(&self) -> ResourceSearchIndex {

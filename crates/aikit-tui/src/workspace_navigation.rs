@@ -30,6 +30,7 @@ use crate::application::WorkspaceSection;
 /// through, mirroring `action/project/open`'s shape: one Action identity,
 /// many subjects, no per-destination Action manufactured.
 pub const WORKSPACE_DESTINATION_ACTION_REF: &str = "action/workspace/open-destination";
+pub const START_FACTORY_WORK_ACTION_REF: &str = "action/factory/start-work";
 
 /// One row of the single source-of-truth destination table. `slug` forms the
 /// Surface ResourceRef (`surface/workspace/<slug>`); `question` is the
@@ -136,6 +137,43 @@ pub fn install_workspace_destination_navigation_resources(
         )?;
     }
     Ok(())
+}
+
+/// Add the native Factory Commission entry to the Work destination when the
+/// application backend has a complete binding. The Action remains Factory-
+/// owned and immediate: the reviewed request file is the exact owner input,
+/// and the returned value is the exact Factory receipt.
+pub fn install_start_factory_work_action(index: &mut ResourceSearchIndex) -> Result<()> {
+    let action = ResourceRef::parse(START_FACTORY_WORK_ACTION_REF)?;
+    let mut descriptor = ResourceDescriptor::new(
+        action.clone(),
+        ResourceKind::Action,
+        "Start Factory Work",
+        "submit the configured Commission request through Factory's native owner operation",
+    );
+    descriptor.owner = Some(OwnerRef::parse("factory")?);
+    descriptor.sources.push(ResourceSource {
+        source: SourceRef::parse("factory.developmental-local-provider/v1")?,
+        authority: Some(SourceAuthority::Observed),
+        revision: None,
+        locator: None,
+        state: SourceState::Available,
+    });
+    descriptor.annotations.insert(
+        "action.expected-return-forms".into(),
+        "factory.commission-receipt/v1".into(),
+    );
+    index.insert_resource(ResourceRecord::new(descriptor), Vec::new());
+    index.insert_action(
+        ContextualActionDescriptor::new(
+            action,
+            ResourceRef::parse("surface/workspace/work")?,
+            "Start Factory Work",
+            "commission the configured developmental difference; this does not execute it",
+            ActionStageability::NotStageable,
+        )
+        .with_keywords(["factory", "commission", "start work"]),
+    )
 }
 
 /// The inverse of the same table: which [`WorkspaceSection`] a destination

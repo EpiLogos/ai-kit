@@ -185,6 +185,7 @@ jobs:
         run: |
           cargo test --locked -p aikit-adapters --test factory_developmental_native -- --ignored --nocapture
           cargo test --locked -p aikit-cli --test factory_start_work_native -- --ignored --nocapture
+          cargo test --locked -p aikit-cli --test factory_work_tui_native -- --ignored --nocapture
           project_ref=$(python3 -c 'import json; print(json.load(open("${{ runner.temp }}/factory-developmental-manifest.json"))["projectRef"])')
           echo "AIKIT_FACTORY_PROJECT_REF=$project_ref" >> "$GITHUB_ENV"
       - name: Resolve the Factory WorkflowUnit through AIKit's real structured CLI

@@ -254,9 +254,12 @@ fn work_and_system_sections_disclose_real_facts_without_fabricating_factory_or_c
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Compose
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Work
     assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Work");
-    let work = rendered(&draw_width(&surface, 220, 30));
-    assert!(work.contains("Work · what is actually running"));
-    assert!(work.contains("Factory work    not exposed by application boundary"));
+    let work = rendered(&draw_width(&surface, 300, 50));
+    assert!(work.contains("Work · direct and developmental activity"));
+    assert!(work.contains("DIRECT"));
+    assert!(work.contains("FACTORY"));
+    assert!(work.contains("no Factory owner readings admitted"));
+    assert!(work.contains("ATTENTION"));
     assert!(
         !work.contains("Journey") && !work.contains("Run "),
         "Work must not fabricate Factory Journey/Run state this application boundary does not expose"
@@ -293,6 +296,35 @@ fn factory_record(reference: &str, kind: ResourceKind, description: &str) -> Res
         description,
     );
     descriptor.owner = Some(OwnerRef::parse("factory").unwrap());
+    descriptor
+        .annotations
+        .insert("factory.owner-revision".into(), "7".into());
+    let owner_reading = match kind {
+        ResourceKind::Journey => serde_json::json!({
+            "contract": "factory.journey-reading/v1",
+            "journeyRef": reference,
+            "status": "active",
+            "frontier": "publish the vertical",
+            "recognitions": []
+        }),
+        ResourceKind::Run => serde_json::json!({
+            "contract": "factory.run-reading/v1",
+            "runRef": reference,
+            "lifecycle": "active",
+            "humanRequests": [{
+                "humanRequestRef": "human-request:01ARZ3NDEKTSV4RRFFQ69G5FAC",
+                "status": "open"
+            }]
+        }),
+        _ => serde_json::json!({
+            "contract": "factory.workflow-unit-reading/v1",
+            "workflowUnitRef": reference
+        }),
+    };
+    descriptor.annotations.insert(
+        "factory.owner-reading".into(),
+        serde_json::to_string(&owner_reading).unwrap(),
+    );
     descriptor.sources.push(ResourceSource {
         source: SourceRef::parse("factory.developmental-local-provider/v1").unwrap(),
         authority: Some(SourceAuthority::Observed),
@@ -327,10 +359,23 @@ fn owner_observed_factory_resources_enter_navigator_and_replace_only_the_unexpos
     ).unwrap();
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Compose
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Work
-    let work = rendered(&draw_width(&surface, 220, 30));
-    assert!(work.contains("Factory work    observed from Factory owner readings"));
+    let work = rendered(&draw_width(&surface, 300, 50));
+    assert!(work.contains("DIRECT"));
+    assert!(work.contains("FACTORY"));
     assert!(work.contains("Journey") && work.contains("Run") && work.contains("WorkflowUnit"));
-    assert!(!work.contains("Factory work    not exposed by application boundary"));
+    assert!(work.contains("owner r7"));
+    assert!(work.contains("ATTENTION"));
+    assert!(work.contains("HumanRequest"));
+    assert!(
+        work.contains("human-request:01ARZ3NDEKTSV4RRFFQ69G5FAC"),
+        "Work must retain the exact owner Attention ref: {work}"
+    );
+
+    let narrow = rendered(&draw_width(&surface, 78, 42));
+    assert!(narrow.contains("DIRECT"));
+    assert!(narrow.contains("FACTORY"));
+    assert!(narrow.contains("ATTENTION"));
+    assert!(narrow.contains("journey:01ARZ3NDEKTSV4RRFFQ69G5FAD"));
 
     let world = surface.project_world().unwrap();
     assert_eq!(world.developmental_work.len(), 3);
