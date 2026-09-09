@@ -110,6 +110,49 @@ The operational store at `~/.aikit` is never treated as a project marker. A
 project is scoped by its own `.aikit/` directory (or its exported
 `AIKIT_PROJECT_ID`), even when `AIKIT_HOME` points somewhere custom.
 
+## Start and observe Factory work
+
+Start a developmental difference with Factory's exact versioned Commission
+request. AIKit forwards the file to the native owner operation, returns the
+exact Factory receipt, and immediately reads the resulting owner state back:
+
+```sh
+aikit --json factory start-work \
+  --state /path/to/developmental-state.json \
+  --request-file /path/to/factory-commission-request.json \
+  --factory-bin /path/to/factory
+```
+
+Factory—not AIKit—mints the Project, Journey and initial Run identities and
+persists them atomically. The Central composition remains explicitly
+`membership-non-authoritative`, and the bounded root act remains
+`commissioned-not-executed`; starting Factory work does not claim that an Agent
+or execution has run.
+
+AIKit can add a Factory-owned developmental field to Search, the Navigator and
+the Work view without creating an AIKit copy of Factory state. Bind both the
+native Factory provider state and its exact canonical Project ref:
+
+```sh
+AIKIT_FACTORY_STATE=/path/to/developmental-state.json \
+AIKIT_FACTORY_PROJECT_REF=project:01ARZ3NDEKTSV4RRFFQ69G5FAE \
+AIKIT_FACTORY_BIN=/path/to/factory \
+aikit ui
+```
+
+`AIKIT_FACTORY_BIN` defaults to `factory` on `PATH`; the state and Project ref
+never default. AIKit asks that executable for its public versioned Project,
+Journey, Run, Routine-continuation, WorkflowUnit and telemetry readings. The
+start-work operation additionally preserves the exact Commission reading on its
+related Project, Journey and Run. AIKit indexes only stable owner refs and
+existing Factory Actions. The resource annotation records
+the exact accepted Factory contract revision and schema digest AIKit consumes;
+it does not claim to identify an arbitrary configured executable. The mandatory
+cross-product conformance lane separately checks that accepted revision with its
+real binary and owner-generated state. A missing half-binding is an error. With
+no binding, direct Sessions and externally discovered Harnesses remain
+zero-Factory.
+
 ## Agency Gateway
 
 The Agency Gateway is the persistent contact plane through which the same

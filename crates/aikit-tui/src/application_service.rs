@@ -67,7 +67,10 @@ impl<'a> ApplicationService<'a> {
     }
 
     fn navigation_index_from(backend: &dyn PaletteBackend) -> Result<ResourceSearchIndex> {
-        let mut index = backend.navigation_index();
+        let mut index = crate::project_world_service::resource_index_with_records(
+            backend,
+            backend.context_resource_records()?,
+        )?;
         let session_spaces = backend.session_space_navigation()?;
         install_session_space_navigation_resources(&mut index, &session_spaces);
         install_workspace_destination_navigation_resources(&mut index)?;

@@ -26,6 +26,7 @@ pub mod deepseek_harness;
 pub mod deepseek_live;
 pub mod deepseek_maximal;
 pub mod factory_run_thought_authored_wiki;
+pub mod factory_developmental;
 pub mod flow_authored_wiki;
 pub mod gateway_client;
 pub mod gateway_connector;

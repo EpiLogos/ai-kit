@@ -8,6 +8,12 @@ use super::refs::{OwnerRef, ProviderRef, ResourceRef, SourceRef, SourceRevision}
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceKind {
     Project,
+    /// Factory-owned developmental Journey, indexed without importing its ontology.
+    Journey,
+    /// Factory-owned developmental Run, indexed without importing its ontology.
+    Run,
+    /// Factory-owned compiled WorkflowUnit, indexed without importing its ontology.
+    WorkflowUnit,
     Profile,
     SkillSet,
     Routine,
@@ -42,6 +48,9 @@ impl ResourceKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Project => "project",
+            Self::Journey => "journey",
+            Self::Run => "run",
+            Self::WorkflowUnit => "workflow-unit",
             Self::Profile => "profile",
             Self::SkillSet => "skill-set",
             Self::Routine => "routine",

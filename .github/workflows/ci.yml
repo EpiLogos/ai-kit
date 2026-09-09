@@ -156,6 +156,47 @@ jobs:
           fi
           exit "$status"
 
+  factory-developmental-real:
+    name: Real Factory developmental consumer conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Rust 1.98
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Checkout exact Factory owner revision
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/agent-system-design
+          ref: 12a721dbbb51e3c70d52ef00220efa859ef930fd
+          path: factory-owner
+      - name: Build native Factory CLI
+        working-directory: factory-owner
+        run: cargo build --locked -p epilogos-factory --bin factory
+      - name: Consume owner-generated state through the real Factory CLI
+        env:
+          AIKIT_FACTORY_REAL_BIN: ${{ github.workspace }}/factory-owner/target/debug/factory
+          AIKIT_FACTORY_COMMISSION_REQUEST: ${{ github.workspace }}/factory-owner/contracts/factory/fixtures/oi-self-hosting-commission-request.json
+          AIKIT_FACTORY_TEST_STATE_OUT: ${{ runner.temp }}/factory-developmental-state.json
+          AIKIT_FACTORY_TEST_MANIFEST_OUT: ${{ runner.temp }}/factory-developmental-manifest.json
+        run: |
+          cargo test --locked -p aikit-adapters --test factory_developmental_native -- --ignored --nocapture
+          cargo test --locked -p aikit-cli --test factory_start_work_native -- --ignored --nocapture
+          project_ref=$(python3 -c 'import json; print(json.load(open("${{ runner.temp }}/factory-developmental-manifest.json"))["projectRef"])')
+          echo "AIKIT_FACTORY_PROJECT_REF=$project_ref" >> "$GITHUB_ENV"
+      - name: Resolve the Factory WorkflowUnit through AIKit's real structured CLI
+        env:
+          AIKIT_HOME: ${{ runner.temp }}/aikit-home
+          AIKIT_FACTORY_BIN: ${{ github.workspace }}/factory-owner/target/debug/factory
+          AIKIT_FACTORY_STATE: ${{ runner.temp }}/factory-developmental-state.json
+        run: |
+          mkdir -p ${{ runner.temp }}/aikit-project/.aikit
+          cargo run --locked -p aikit-cli --bin aikit -- --json -C ${{ runner.temp }}/aikit-project search implement > ${{ runner.temp }}/aikit-factory-search.json
+          grep -q '"resource_kind":"workflow-unit"' ${{ runner.temp }}/aikit-factory-search.json
+
   deepseek-cordis-real:
     name: Real DeepSeek Cordis SessionSpace activation
     runs-on: ubuntu-latest

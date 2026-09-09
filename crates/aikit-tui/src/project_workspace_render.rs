@@ -18,7 +18,7 @@
 use aikit_core::context_resolution::Availability;
 use aikit_core::project::ProjectBindingLocator;
 use aikit_core::credential_world::{CredentialStatusKnowledge, ProviderRosterKnowledge};
-use aikit_core::resource::{Eligibility, SourceAuthority};
+use aikit_core::resource::{Eligibility, ResourceKind, SourceAuthority};
 use aikit_core::explain_history::{HistoryEvidence, HistoryReadModel, HistoryRecoverability};
 use aikit_core::session_space_application::SessionSpaceAuthoredState;
 use aikit_core::{ContextSourceHit, ProjectWorldReadModel, ProjectWorldResource};
@@ -267,11 +267,9 @@ fn compose_lines(state: &TuiState, reading: WorkspaceReading<'_>, glyphs: Glyphs
 /// from Compose's "what could I build". Grounded in real, already-resolved
 /// `actor_runtime` facts (the same facts `compose_lines` already folds in) —
 /// this section is honest-minimal rather than fabricated: the fuller §6.3
-/// Active-Work (DIRECT/FACTORY/ATTENTION) dashboard needs Factory Journey/Run
-/// read-model plumbing this application boundary does not expose yet, so this
-/// says so plainly instead of inventing rows, reusing this codebase's own
-/// established "not exposed by application boundary" disclosure idiom
-/// (`context_lines`'s `Scopes` row).
+/// Active-Work (DIRECT/FACTORY/ATTENTION) dashboard remains bounded by owner
+/// evidence. Factory rows appear only when the application admitted native
+/// Factory readings into the shared Resource field.
 fn work_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
     let sep = glyphs.separator();
     let mut lines = vec![format!("Work {sep} what is actually running"), String::new()];
@@ -315,7 +313,24 @@ fn work_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -
     lines.push(
         "Direct Session  reachable through Search (kind session-space)".into(),
     );
-    lines.push("Factory work    not exposed by application boundary".into());
+    if world.developmental_work.is_empty() {
+        lines.push("Factory work    not exposed by application boundary".into());
+    } else {
+        lines.push("Factory work    observed from Factory owner readings".into());
+        for resource in &world.developmental_work {
+            lines.push(format!(
+                "{:<14} {}  {}",
+                match resource.kind {
+                    ResourceKind::Journey => "Journey",
+                    ResourceKind::Run => "Run",
+                    ResourceKind::WorkflowUnit => "WorkflowUnit",
+                    _ => "Factory",
+                },
+                resource.resource,
+                resource.description,
+            ));
+        }
+    }
     lines
 }
 
@@ -640,6 +655,7 @@ fn selected_world_resource<'a>(
         .chain(world.actor_runtime.models.iter())
         .chain(world.actor_runtime.harnesses.iter())
         .chain(world.actor_runtime.execution_offers.iter())
+        .chain(world.developmental_work.iter())
         .chain(world.actor_runtime.agent.effective.iter())
         .chain(world.actor_runtime.agency.effective.iter())
         .chain(world.actor_runtime.host.effective.iter())

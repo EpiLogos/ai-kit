@@ -61,6 +61,7 @@ use aikit_adapters::clients::pi::PiAdapter;
 use aikit_adapters::clients::qwen::QwenAdapter;
 use aikit_adapters::clients::zcode::ZcodeAdapter;
 use aikit_adapters::runner::SystemRunner;
+use aikit_adapters::factory_developmental::{read_factory_developmental, FactoryDevelopmentalBinding};
 
 use aikit_tui::backend::{
     ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
@@ -2096,9 +2097,30 @@ fn create_directory_link(target: &Path, link: &Path) -> Result<()> {
 impl PaletteBackend for Service {
     fn context_resource_records(&self) -> Result<Vec<aikit_core::resource::ResourceRecord>> {
         let Some(project) = self.descriptor.project_root.as_deref() else { return Ok(Vec::new()) };
-        let Some(central) = process_central_root(Some(project)) else { return Ok(Vec::new()) };
-        Ok(compose_live_actor_inputs(&SystemRunner::new(), &central, project)?
-            .map(|inputs|inputs.source_resources).unwrap_or_default())
+        let mut records = if let Some(central) = process_central_root(Some(project)) {
+            compose_live_actor_inputs(&SystemRunner::new(), &central, project)?
+                .map(|inputs| inputs.source_resources)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let state = std::env::var_os("AIKIT_FACTORY_STATE");
+        let project_ref = std::env::var("AIKIT_FACTORY_PROJECT_REF").ok();
+        match (state, project_ref) {
+            (None, None) => {}
+            (Some(state), Some(project_ref)) => {
+                let executable = std::env::var_os("AIKIT_FACTORY_BIN")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("factory"));
+                let binding = FactoryDevelopmentalBinding::new(executable, state, project_ref)?;
+                records.extend(read_factory_developmental(&SystemRunner::new(), &binding)?.resources);
+            }
+            _ => return Err(AikitError::new(
+                "factory.developmental_incomplete_binding",
+                "Factory navigation requires both AIKIT_FACTORY_STATE and AIKIT_FACTORY_PROJECT_REF; no Factory identity is inferred from the current Session or harness",
+            )),
+        }
+        Ok(records)
     }
 
     fn project_binding(&self) -> Result<Option<aikit_core::project::ProjectBinding>> {

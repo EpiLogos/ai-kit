@@ -5,6 +5,7 @@ use common::*;
 use aikit_tui::application::Overlay;
 use aikit_tui::compose_spine::ComposeStep;
 use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
+use aikit_tui::application_service::ApplicationService;
 use aikit_tui::event::PaletteEvent;
 use aikit_tui::host::UiHost;
 use aikit_tui::layout::Glyphs;
@@ -12,6 +13,8 @@ use aikit_tui::project_workspace_render::workspace_section_label;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+
+use aikit_core::resource::{Eligibility, OwnerRef, ProviderOffer, ProviderRef, ProviderState, ResourceDescriptor, ResourceKind, ResourceRecord, ResourceSource, SourceAuthority, SourceRef, SourceRevision, SourceState};
 
 fn fixture() -> (tempfile::TempDir, Fixture) {
     let dir = tempfile::tempdir().unwrap();
@@ -280,6 +283,58 @@ fn work_and_system_sections_disclose_real_facts_without_fabricating_factory_or_c
         !system.contains("none on this machine") && !system.contains("none required"),
         "System must not turn an unread credential world into a confirmed negative"
     );
+}
+
+fn factory_record(reference: &str, kind: ResourceKind, description: &str) -> ResourceRecord {
+    let mut descriptor = ResourceDescriptor::new(
+        aikit_core::resource::ResourceRef::parse(reference).unwrap(),
+        kind,
+        reference,
+        description,
+    );
+    descriptor.owner = Some(OwnerRef::parse("factory").unwrap());
+    descriptor.sources.push(ResourceSource {
+        source: SourceRef::parse("factory.developmental-local-provider/v1").unwrap(),
+        authority: Some(SourceAuthority::Observed),
+        revision: Some(SourceRevision::parse("7").unwrap()),
+        locator: None,
+        state: SourceState::Available,
+    });
+    let mut record = ResourceRecord::new(descriptor);
+    record.eligibility = Eligibility::Eligible;
+    record.providers.push(ProviderOffer {
+        provider: ProviderRef::parse("factory.developmental-local-provider/v1").unwrap(),
+        locator: None,
+        state: ProviderState::Available,
+    });
+    record
+}
+
+#[test]
+fn owner_observed_factory_resources_enter_navigator_and_replace_only_the_unexposed_work_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let records = vec![
+        factory_record("journey:01ARZ3NDEKTSV4RRFFQ69G5FAD", ResourceKind::Journey, "active · publish the vertical"),
+        factory_record("run:01ARZ3NDEKTSV4RRFFQ69G5FAA", ResourceKind::Run, "active · main"),
+        factory_record("workflow-unit:01ARZ3NDEKTSV4RRFFQ69G5FAB", ResourceKind::WorkflowUnit, "verify the accepted change"),
+    ];
+    let mut backend = Fixture::new(dir.path(), vec![]).with_context_records(records);
+    let search = ApplicationService::resolve_search_from(&backend, "verify").unwrap();
+    assert!(search.resources.resources.iter().any(|row| row.kind == ResourceKind::WorkflowUnit));
+    let mut surface = ApplicationSurfaceController::new(
+        &mut backend,
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_glyphs(Glyphs::unicode()),
+    ).unwrap();
+    surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Compose
+    surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Work
+    let work = rendered(&draw_width(&surface, 220, 30));
+    assert!(work.contains("Factory work    observed from Factory owner readings"));
+    assert!(work.contains("Journey") && work.contains("Run") && work.contains("WorkflowUnit"));
+    assert!(!work.contains("Factory work    not exposed by application boundary"));
+
+    let world = surface.project_world().unwrap();
+    assert_eq!(world.developmental_work.len(), 3);
+    assert!(world.developmental_work.iter().all(|resource| matches!(resource.kind, ResourceKind::Journey | ResourceKind::Run | ResourceKind::WorkflowUnit)));
 }
 
 #[test]
