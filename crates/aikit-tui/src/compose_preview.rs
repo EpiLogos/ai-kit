@@ -376,6 +376,7 @@ mod tests {
             kind: ResourceKind::Capability,
             name: id.into(),
             description: String::new(),
+            annotations: Default::default(),
             intent: ResourceIntentDisclosure {
                 eligibility,
                 preference: None,

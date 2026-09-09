@@ -272,6 +272,13 @@ pub enum ActionOutcome {
         section: WorkspaceSection,
         summary: String,
     },
+    /// Factory accepted (or idempotently reopened) the exact configured
+    /// Commission request. The receipt is owner JSON carried as text so the
+    /// TUI does not acquire a second Factory model.
+    FactoryWorkStarted {
+        summary: String,
+        receipt: String,
+    },
 }
 
 impl ActionOutcome {
@@ -282,6 +289,7 @@ impl ActionOutcome {
             | Self::History { summary, .. }
             | Self::Staged { summary, .. }
             | Self::NavigatedTo { summary, .. }
+            | Self::FactoryWorkStarted { summary, .. }
             | Self::Status { summary } => summary,
         }
     }
@@ -839,6 +847,10 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                     state.overlay = None;
                     state.presentation = PresentationMode::Workspace;
                     state.workspace_section = *section;
+                }
+                ActionOutcome::FactoryWorkStarted { .. } => {
+                    state.presentation = PresentationMode::Workspace;
+                    state.workspace_section = WorkspaceSection::Work;
                 }
                 ActionOutcome::Status { .. } => {}
             }

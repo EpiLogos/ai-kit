@@ -41,6 +41,7 @@ use crate::navigator_groups::{self, NavigatorRow};
 use crate::project_workspace_render::{
     workspace_section_label, BoundaryReading, HistoryReading, SessionSpaceRoster, WorkspaceReading,
 };
+use crate::backend::FactoryWorkEntry;
 use crate::project_world_api::ProjectWorldApplicationService;
 use crate::session_space_service::SessionSpaceApplicationProjection;
 use crate::theme::Theme;
@@ -139,6 +140,7 @@ pub struct ApplicationSurfaceController {
     /// `project_world` and refreshed with it. Unreadable is kept distinct from
     /// empty for the same reason as the SessionSpace roster.
     history: HistoryReading,
+    factory_work_entry: FactoryWorkEntry,
     graph_layout: Option<(GraphLayoutCacheKey, GraphLayout)>,
     /// Host glyph capability for the resting shell — the footer's keycap
     /// hints, field separators, cursors and elision marks — resolved exactly
@@ -204,6 +206,7 @@ impl ApplicationSurfaceController {
         let project_world;
         let session_spaces;
         let history;
+        let factory_work_entry;
         {
             let mut service = ApplicationService::new(backend);
             semantic = runtime.step(
@@ -214,6 +217,7 @@ impl ApplicationSurfaceController {
             project_world = service.project_world().ok();
             session_spaces = discover_session_spaces(&service, project_world.as_ref());
             history = BoundaryReading::from_result(service.history_evidence(None));
+            factory_work_entry = service.factory_work_entry();
         }
         let mut controller = Self {
             semantic,
@@ -223,6 +227,7 @@ impl ApplicationSurfaceController {
             ambient,
             session_spaces,
             history,
+            factory_work_entry,
             graph_layout: None,
             shell_glyphs,
             graph_glyphs,
@@ -299,7 +304,8 @@ impl ApplicationSurfaceController {
                 frame,
                 &self.semantic,
                 &self.ambient,
-                WorkspaceReading::new(world, &self.session_spaces, &self.history),
+                WorkspaceReading::new(world, &self.session_spaces, &self.history)
+                    .with_factory_work_entry(&self.factory_work_entry),
                 self.shell_glyphs,
             );
         } else {
@@ -807,6 +813,7 @@ impl ApplicationSurfaceController {
             self.session_spaces =
                 discover_session_spaces(&service, self.project_world.as_ref());
             self.history = BoundaryReading::from_result(service.history_evidence(None));
+            self.factory_work_entry = service.factory_work_entry();
         }
         self.refresh_relation(backend)?;
         self.refresh_inspector(backend)

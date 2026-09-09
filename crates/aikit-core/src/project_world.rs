@@ -6,6 +6,8 @@
 //! this module makes that answer inspectable without collapsing authored/declared
 //! intent into effective provider state.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::context::ContextDescriptor;
@@ -51,6 +53,11 @@ pub struct ProjectWorldResource {
     pub kind: ResourceKind,
     pub name: String,
     pub description: String,
+    /// Owner/provider annotations carried through unchanged from the admitted
+    /// Resource. Presentation may disclose these receipts, but must not infer
+    /// new domain state from their presence.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
     pub intent: ResourceIntentDisclosure,
     pub effective: ResourceEffectiveDisclosure,
 }
@@ -62,6 +69,7 @@ impl From<&ResolvedResource> for ProjectWorldResource {
             kind: value.resource.descriptor.kind,
             name: value.resource.descriptor.name.clone(),
             description: value.resource.descriptor.description.clone(),
+            annotations: value.resource.descriptor.annotations.clone(),
             intent: ResourceIntentDisclosure {
                 eligibility: value.resource.eligibility.clone(),
                 preference: value.resource.preference.clone(),

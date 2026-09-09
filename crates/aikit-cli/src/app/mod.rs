@@ -61,10 +61,13 @@ use aikit_adapters::clients::pi::PiAdapter;
 use aikit_adapters::clients::qwen::QwenAdapter;
 use aikit_adapters::clients::zcode::ZcodeAdapter;
 use aikit_adapters::runner::SystemRunner;
-use aikit_adapters::factory_developmental::{read_factory_developmental, FactoryDevelopmentalBinding};
+use aikit_adapters::factory_developmental::{
+    read_factory_developmental, start_factory_work, FactoryDevelopmentalBinding,
+};
 
 use aikit_tui::backend::{
-    ClientEffect, JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle,
+    ClientEffect, FactoryWorkEntry, FactoryWorkStartReceipt, JobOutput, PaletteBackend, Projected,
+    PromotionDraft, RunIntent, Toggle,
 };
 pub use aikit_tui::staging::StagedDiff;
 
@@ -247,6 +250,14 @@ pub struct Service {
     view: ResolvedView,
     invocation_cwd: PathBuf,
     knowledge_runtime: std::cell::RefCell<Option<knowledge::KnowledgeRuntime>>,
+    factory_executable: PathBuf,
+    factory_state: Option<PathBuf>,
+    factory_project_ref: Option<String>,
+    factory_request_file: Option<PathBuf>,
+    /// Owner observations returned by a Factory Commission in this running
+    /// application. This is an ephemeral read cache, not an AIKit Factory
+    /// store; restarting re-observes through the configured owner binding.
+    factory_started_resources: Option<Vec<aikit_core::resource::ResourceRecord>>,
 }
 
 impl Service {
@@ -359,6 +370,12 @@ impl Service {
 
         let layers = assemble_layers(&home, &descriptor, project.as_ref())?;
         let view = resolve_or_explain(&catalog, &trust, &descriptor, &layers, &policy)?;
+        let factory_executable = env("AIKIT_FACTORY_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("factory"));
+        let factory_state = env("AIKIT_FACTORY_STATE").map(PathBuf::from);
+        let factory_project_ref = env("AIKIT_FACTORY_PROJECT_REF");
+        let factory_request_file = env("AIKIT_FACTORY_REQUEST_FILE").map(PathBuf::from);
 
         Ok(Self {
             home,
@@ -373,6 +390,11 @@ impl Service {
             view,
             invocation_cwd: cwd.to_path_buf(),
             knowledge_runtime: std::cell::RefCell::new(None),
+            factory_executable,
+            factory_state,
+            factory_project_ref,
+            factory_request_file,
+            factory_started_resources: None,
         })
     }
 
@@ -2109,23 +2131,98 @@ impl PaletteBackend for Service {
         } else {
             Vec::new()
         };
-        let state = std::env::var_os("AIKIT_FACTORY_STATE");
-        let project_ref = std::env::var("AIKIT_FACTORY_PROJECT_REF").ok();
-        match (state, project_ref) {
+        if let Some(started) = &self.factory_started_resources {
+            records.extend(started.clone());
+            return Ok(records);
+        }
+        match (&self.factory_state, &self.factory_project_ref) {
             (None, None) => {}
-            (Some(state), Some(project_ref)) => {
-                let executable = std::env::var_os("AIKIT_FACTORY_BIN")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("factory"));
-                let binding = FactoryDevelopmentalBinding::new(executable, state, project_ref)?;
-                records.extend(read_factory_developmental(&SystemRunner::new(), &binding)?.resources);
+            (Some(state), Some(project_ref)) if state.is_file() => {
+                let binding = FactoryDevelopmentalBinding::new(
+                    self.factory_executable.clone(),
+                    state.clone(),
+                    project_ref.clone(),
+                )?;
+                records.extend(
+                    read_factory_developmental(&SystemRunner::new(), &binding)?.resources,
+                );
             }
-            _ => return Err(AikitError::new(
-                "factory.developmental_incomplete_binding",
-                "Factory navigation requires both AIKIT_FACTORY_STATE and AIKIT_FACTORY_PROJECT_REF; no Factory identity is inferred from the current Session or harness",
-            )),
+            // A configured start-work request may legitimately point at a new
+            // state path. Until the owner accepts the Commission, this is a
+            // confirmed zero-Factory reading rather than a broken read.
+            (Some(state), _) if self.factory_request_file.is_some() && !state.exists() => {}
+            _ => {
+                return Err(AikitError::new(
+                    "factory.developmental_incomplete_binding",
+                    "Factory navigation requires an existing AIKIT_FACTORY_STATE plus AIKIT_FACTORY_PROJECT_REF, or a complete AIKIT_FACTORY_STATE + AIKIT_FACTORY_REQUEST_FILE start-work binding; no Factory identity is inferred from the current Session or harness",
+                ))
+            }
         }
         Ok(records)
+    }
+
+    fn factory_work_entry(&self) -> FactoryWorkEntry {
+        match (&self.factory_state, &self.factory_request_file) {
+            (Some(_), Some(_)) => FactoryWorkEntry::Ready,
+            (None, None) => FactoryWorkEntry::Unavailable {
+                reason: "set AIKIT_FACTORY_STATE and AIKIT_FACTORY_REQUEST_FILE to expose the native Factory Commission action".into(),
+            },
+            _ => FactoryWorkEntry::Unavailable {
+                reason: "Factory start-work binding is incomplete; both AIKIT_FACTORY_STATE and AIKIT_FACTORY_REQUEST_FILE are required".into(),
+            },
+        }
+    }
+
+    fn start_factory_work(&mut self) -> Result<FactoryWorkStartReceipt> {
+        let state = self.factory_state.clone().ok_or_else(|| {
+            AikitError::new(
+                "factory.start_work_unavailable",
+                "AIKIT_FACTORY_STATE is required for Start Factory Work",
+            )
+        })?;
+        let request_file = self.factory_request_file.clone().ok_or_else(|| {
+            AikitError::new(
+                "factory.start_work_unavailable",
+                "AIKIT_FACTORY_REQUEST_FILE is required for Start Factory Work",
+            )
+        })?;
+        let started = start_factory_work(
+            &SystemRunner::new(),
+            self.factory_executable.clone(),
+            state,
+            request_file,
+        )?;
+        let receipt = serde_json::to_string_pretty(&started.receipt).map_err(|error| {
+            AikitError::new(
+                "factory.start_work_receipt_unserializable",
+                format!("could not present Factory Commission receipt: {error}"),
+            )
+        })?;
+        let commission = started
+            .receipt
+            .get("commission")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "factory.start_work_receipt_invalid",
+                    "validated Factory receipt omitted its Commission",
+                )
+            })?;
+        let journey_ref = commission
+            .get("journeyRef")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Factory Journey");
+        let run_ref = commission
+            .get("runRef")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Factory Run");
+        self.factory_started_resources = Some(started.observation.resources);
+        Ok(FactoryWorkStartReceipt {
+            summary: format!(
+                "Factory commissioned {journey_ref} / {run_ref}; execution remains commissioned-not-executed"
+            ),
+            receipt,
+        })
     }
 
     fn project_binding(&self) -> Result<Option<aikit_core::project::ProjectBinding>> {
