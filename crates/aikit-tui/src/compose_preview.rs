@@ -310,7 +310,12 @@ fn all_resources(world: &ProjectWorldReadModel) -> Vec<&ProjectWorldResource> {
         .collect()
 }
 
-fn availability_label(availability: &Availability) -> String {
+/// How an `Availability` reads to a person, with its reasons.
+///
+/// Shared with `compose_spine` rather than duplicated: two renderings of the
+/// same owner enum would drift, and the first thing to drift would be whether
+/// `Unresolved` and `Unavailable` still read as different facts.
+pub(crate) fn availability_label(availability: &Availability) -> String {
     match availability {
         Availability::Available => "available".to_string(),
         Availability::Unresolved { reasons } => format!("unresolved: {}", join_reasons(reasons)),
@@ -318,7 +323,7 @@ fn availability_label(availability: &Availability) -> String {
     }
 }
 
-fn join_reasons(reasons: &[String]) -> String {
+pub(crate) fn join_reasons(reasons: &[String]) -> String {
     if reasons.is_empty() {
         "no reason given".to_string()
     } else {

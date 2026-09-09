@@ -46,14 +46,17 @@
 use aikit_core::context_resolution::Availability;
 use aikit_core::credential_world::ProviderRosterKnowledge;
 use aikit_core::session_space_application::SessionSpaceAuthoredState;
+use serde::{Deserialize, Serialize};
 
 use crate::application::TuiState;
+use crate::compose_preview::availability_label;
 use crate::layout::Glyphs;
 use crate::project_workspace_render::{SessionSpaceRoster, WorkspaceReading};
 
 /// The ten §5.1 steps, in spec order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ComposeStep {
+    #[default]
     Intention,
     Identity,
     Governance,
@@ -79,6 +82,24 @@ impl ComposeStep {
         Self::Preview,
         Self::EnterWork,
     ];
+
+    /// Move along the spine, clamping at both ends. Clamped rather than
+    /// wrapping: the spine is an ordered path from intention to work, and
+    /// wrapping from `Enter work` back to `Intention` would suggest a cycle
+    /// the composition does not have.
+    pub fn relative(self, delta: isize) -> Self {
+        let current = Self::ALL
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(0);
+        let last = Self::ALL.len().saturating_sub(1);
+        let next = if delta.is_negative() {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            (current + delta as usize).min(last)
+        };
+        Self::ALL[next]
+    }
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -360,16 +381,219 @@ pub fn compose_spine_lines(
         String::new(),
     ];
     for (index, row) in rows.iter().enumerate() {
+        let here = row.step == state.compose_step;
         lines.push(format!(
-            "{:>2} {} {:<14}{}",
+            "{} {:>2} {} {:<14}{}",
+            if here { glyphs.selected() } else { ' ' },
             index + 1,
             row.standing.marker(glyphs),
             row.step.as_str(),
             row.standing.detail(),
         ));
     }
+
+    // The step in hand discloses what stands behind its one-line summary.
+    // Alt+Up/Down walks the spine; without this the spine would be a legend
+    // rather than a place to work, and the detail each step already has would
+    // stay unreachable.
+    let detail = step_detail(state.compose_step, state, reading, glyphs);
+    if !detail.is_empty() {
+        lines.push(String::new());
+        lines.push(format!(
+            "{} {sep} Alt+{}/{} walks the spine",
+            state.compose_step.as_str(),
+            glyphs.step_up(),
+            glyphs.step_down(),
+        ));
+        lines.extend(detail);
+    }
     lines
 }
+
+/// What the step in hand discloses beyond its summary row.
+///
+/// Every branch reads an owner's read model that is already in the reading.
+/// A step with no boundary contract discloses *which* contract is missing
+/// rather than an empty pane: "nothing here" and "nothing can be here" are the
+/// same distinction the standings keep, and it survives into the detail.
+fn step_detail(
+    step: ComposeStep,
+    state: &TuiState,
+    reading: WorkspaceReading<'_>,
+    glyphs: Glyphs,
+) -> Vec<String> {
+    let sep = glyphs.separator();
+    let world = reading.world;
+    match step {
+        ComposeStep::Intention => vec![
+            "  A natural-language intention is the spine's first step and has".into(),
+            "  no contract at this application boundary - nothing here can".into(),
+            "  capture one, and nothing has silently captured one elsewhere.".into(),
+        ],
+
+        ComposeStep::Identity => {
+            let mut lines = Vec::new();
+            for (label, actor) in [
+                ("Agent", &world.actor_runtime.agent),
+                ("Agency", &world.actor_runtime.agency),
+                ("Host", &world.actor_runtime.host),
+            ] {
+                let value = match (actor.effective.as_ref(), actor.requested.as_ref()) {
+                    (Some(effective), _) => format!(
+                        "{} {sep} {}",
+                        effective.resource,
+                        availability_label(&effective.effective.availability)
+                    ),
+                    (None, Some(requested)) => format!("{requested} {sep} requested, not resolved"),
+                    (None, None) => "not requested".to_string(),
+                };
+                lines.push(format!("  {label:<8}{value}"));
+                if let Some(warning) = actor.warning.as_ref() {
+                    lines.push(format!("          {warning}"));
+                }
+            }
+            lines
+        }
+
+        ComposeStep::Governance => {
+            let mut lines = Vec::new();
+            for profile in &world.resolution_basis.profiles {
+                lines.push(format!("  profile  {profile}"));
+            }
+            for scope in &world.resolution_basis.scopes {
+                lines.push(format!(
+                    "  scope    {:?} {sep} depth {} {sep} {}",
+                    scope.kind, scope.depth, scope.origin
+                ));
+            }
+            if lines.is_empty() {
+                lines.push("  No authored profile or scope resolved for this world.".into());
+            }
+            lines
+        }
+
+        ComposeStep::Praxis => vec![
+            "  aikit-core publishes praxis - resolve_praxis, PraxisResolution,".into(),
+            "  SelectedMethod - but no praxis contract crosses this application".into(),
+            "  boundary, so no Profile/SkillSet/Skill/Method can be chosen here.".into(),
+            format!(
+                "  What does resolve: {} capabilit{}, {} action{}.",
+                world.capability_horizon.capabilities.len(),
+                if world.capability_horizon.capabilities.len() == 1 { "y" } else { "ies" },
+                world.capability_horizon.actions.len(),
+                s(world.capability_horizon.actions.len()),
+            ),
+        ],
+
+        ComposeStep::Information => {
+            let mut lines = Vec::new();
+            for source in world.information_horizon.sources.iter().take(DETAIL_ROWS) {
+                // Eligible and retrieved are orthogonal: this read model never
+                // retrieves, so `retrieved` is an observation about the source,
+                // not a consequence of looking at it here.
+                lines.push(format!(
+                    "  {} {sep} {} {sep} {}",
+                    source.name,
+                    if source.eligibility.is_eligible() { "eligible" } else { "not eligible" },
+                    if source.disclosure.retrieved { "retrieved" } else { "not retrieved" },
+                ));
+            }
+            if world.information_horizon.sources.len() > DETAIL_ROWS {
+                lines.push(format!(
+                    "  and {} more",
+                    world.information_horizon.sources.len() - DETAIL_ROWS
+                ));
+            }
+            if lines.is_empty() {
+                lines.push("  No ContextSource is visible in this world's horizon.".into());
+            }
+            lines
+        }
+
+        ComposeStep::WorldsAndBounds => {
+            let mut lines = vec![format!("  Project  {}", world.project.project)];
+            if let Some(root) = world.context.project_root.as_ref() {
+                lines.push(format!("  Root     {}", root.display()));
+            }
+            match world.versioned_world.as_ref() {
+                Some(versioned) => lines.push(format!(
+                    "  Material {} {sep} {}",
+                    versioned.repository.branch.as_deref().unwrap_or("unnamed"),
+                    versioned.repository.head.as_str(),
+                )),
+                None => lines
+                    .push("  Material no versioned provider attached to this reading".into()),
+            }
+            for target in &world.projection.targets {
+                lines.push(format!("  target   {target}"));
+            }
+            lines
+        }
+
+        ComposeStep::Runtime => {
+            let runtime = &world.actor_runtime;
+            let mut lines = Vec::new();
+            for resource in runtime
+                .harnesses
+                .iter()
+                .chain(runtime.models.iter())
+                .chain(runtime.execution_offers.iter())
+                .take(DETAIL_ROWS)
+            {
+                lines.push(format!(
+                    "  {} {sep} {}",
+                    resource.resource,
+                    availability_label(&resource.effective.availability)
+                ));
+            }
+            if lines.is_empty() {
+                lines.push("  No Harness, model or execution offer resolved.".into());
+            }
+            lines
+        }
+
+        ComposeStep::Continuity => match reading.session_spaces.observed() {
+            None => vec!["  The SessionSpace roster could not be read; see the row above.".into()],
+            Some([]) => {
+                vec!["  No authored SessionSpace exists for this Project.".into()]
+            }
+            Some(spaces) => spaces
+                .iter()
+                .take(DETAIL_ROWS)
+                .map(|space| {
+                    format!(
+                        "  {} {sep} {} Project context{} {sep} {}",
+                        space.definition.id.as_resource_ref(),
+                        space.project_contexts.len(),
+                        s(space.project_contexts.len()),
+                        if space.focus.is_some() { "focused" } else { "not focused" },
+                    )
+                })
+                .collect(),
+        },
+
+        ComposeStep::Preview => {
+            if state.staged.is_empty() {
+                vec!["  Nothing is staged; Ctrl+S still previews the resolved world.".into()]
+            } else {
+                vec![format!(
+                    "  Ctrl+S previews {} staged change{}, then Ctrl+S confirms.",
+                    state.staged.len(),
+                    s(state.staged.len())
+                )]
+            }
+        }
+
+        ComposeStep::EnterWork => vec![
+            "  There are two ways in: a direct session and Factory work. Neither".into(),
+            "  has a contract at this application boundary - no session-start,".into(),
+            "  and Factory publishes no Run/Journey status (ai-kit#227).".into(),
+        ],
+    }
+}
+
+/// How many rows a step's detail lists before it stops enumerating.
+const DETAIL_ROWS: usize = 6;
 
 fn s(count: usize) -> &'static str {
     if count == 1 {
@@ -623,6 +847,75 @@ mod tests {
 
         let empty = compose_spine(&TuiState::default(), reading(&world, &observed(Vec::new())));
         assert_ne!(standing, &row(&empty, ComposeStep::Continuity).standing);
+    }
+
+    /// The spine is an ordered path from intention to work, not a cycle.
+    /// Wrapping from `Enter work` back to `Intention` would suggest a return
+    /// the composition does not have, so movement clamps at both ends.
+    #[test]
+    fn walking_the_spine_clamps_rather_than_wraps() {
+        assert_eq!(ComposeStep::Intention.relative(-1), ComposeStep::Intention);
+        assert_eq!(ComposeStep::EnterWork.relative(1), ComposeStep::EnterWork);
+        assert_eq!(ComposeStep::Intention.relative(1), ComposeStep::Identity);
+        assert_eq!(ComposeStep::EnterWork.relative(-1), ComposeStep::Preview);
+    }
+
+    /// A step with no boundary contract still discloses something: which
+    /// contract is missing. An empty detail pane would read as "nothing to
+    /// see", which is the misreading the standings exist to prevent.
+    #[test]
+    fn an_unexposed_step_in_hand_discloses_the_contract_that_is_missing() {
+        let world = world();
+        let roster = observed(Vec::new());
+        for (step, expected) in [
+            (ComposeStep::Praxis, "no praxis contract crosses this application"),
+            (ComposeStep::Intention, "no contract at this application boundary"),
+            (ComposeStep::EnterWork, "no session-start"),
+        ] {
+            let state = TuiState { compose_step: step, ..Default::default() };
+            let lines = compose_spine_lines(&state, reading(&world, &roster), Glyphs::unicode());
+            let rendered = lines.join("\n");
+            assert!(
+                rendered.contains(expected),
+                "{step:?} must name the missing contract; got:\n{rendered}"
+            );
+        }
+    }
+
+    /// Every step in hand renders detail, and every one of them stays ASCII
+    /// under ASCII glyphs — the prose included, which is where a stray `§` or
+    /// em dash gets in.
+    #[test]
+    fn every_step_discloses_detail_and_stays_ascii() {
+        let world = world();
+        let roster = observed(Vec::new());
+        for step in ComposeStep::ALL {
+            let state = TuiState { compose_step: step, ..Default::default() };
+            let lines = compose_spine_lines(&state, reading(&world, &roster), Glyphs::ascii());
+            assert!(
+                lines.len() > ComposeStep::ALL.len() + 2,
+                "{step:?} in hand must disclose detail beneath the spine"
+            );
+            for line in &lines {
+                assert!(line.is_ascii(), "non-ASCII with {step:?} in hand: {line}");
+            }
+        }
+    }
+
+    /// The cursor marks exactly one step: the one in hand.
+    #[test]
+    fn exactly_one_step_carries_the_cursor() {
+        let world = world();
+        let roster = observed(Vec::new());
+        let state = TuiState { compose_step: ComposeStep::Runtime, ..Default::default() };
+        let lines = compose_spine_lines(&state, reading(&world, &roster), Glyphs::unicode());
+        let cursor = Glyphs::unicode().selected();
+        let marked: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.starts_with(cursor))
+            .collect();
+        assert_eq!(marked.len(), 1, "got {marked:?}");
+        assert!(marked[0].contains("Runtime"));
     }
 
     /// Progress counts only the steps a person can act on. Counting against

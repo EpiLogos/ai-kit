@@ -25,6 +25,8 @@ use aikit_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::compose_spine::ComposeStep;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PresentationMode {
@@ -490,6 +492,13 @@ pub struct TuiState {
     pub mutation_scope: Option<ScopeKind>,
     pub presentation: PresentationMode,
     pub workspace_section: WorkspaceSection,
+    /// Where the operator stands on §5.1's composition spine. Kept beside
+    /// `workspace_section` because it is the same kind of fact — which part of
+    /// the field is in hand — and not a second selection: `selected` remains
+    /// the one canonical Resource selection, unchanged by moving along the
+    /// spine.
+    #[serde(default)]
+    pub compose_step: ComposeStep,
     pub relation_view: RelationView,
     #[serde(default)]
     pub graph: GraphPresentation,
@@ -517,6 +526,7 @@ impl Default for TuiState {
             mutation_scope: None,
             presentation: PresentationMode::Quick,
             workspace_section: WorkspaceSection::Worlds,
+            compose_step: ComposeStep::default(),
             relation_view: RelationView::List,
             graph: GraphPresentation::default(),
             overlay: None,
@@ -555,6 +565,8 @@ pub enum UiAction {
     SetPresentation(PresentationMode),
     SetWorkspaceSection(WorkspaceSection),
     NextWorkspaceSection,
+    NextComposeStep,
+    PreviousComposeStep,
     PreviousWorkspaceSection,
     SetRelationView(RelationView),
     /// Highlight a node the Graph projection actually laid out. Distinct from
@@ -876,6 +888,8 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         UiAction::PreviousWorkspaceSection => {
             state.workspace_section = state.workspace_section.relative(-1)
         }
+        UiAction::NextComposeStep => state.compose_step = state.compose_step.relative(1),
+        UiAction::PreviousComposeStep => state.compose_step = state.compose_step.relative(-1),
         UiAction::SetRelationView(view) => {
             state.relation_view = view;
             // Entering Graph latches its focus onto whatever is canonically

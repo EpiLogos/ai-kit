@@ -429,6 +429,21 @@ impl ApplicationSurfaceController {
         if alt && code == KeyCode::Right {
             return self.dispatch(backend, UiAction::NextWorkspaceSection);
         }
+        // Alt+Left/Right crosses the Workspace field; Alt+Up/Down walks §5.1's
+        // composition spine within Compose. The same modifier for the same
+        // kind of movement, one axis each — and it stays inert outside Compose
+        // rather than silently moving a cursor the operator cannot see.
+        if alt
+            && matches!(code, KeyCode::Up | KeyCode::Down)
+            && self.semantic.workspace_section == WorkspaceSection::Compose
+        {
+            let action = if code == KeyCode::Up {
+                UiAction::PreviousComposeStep
+            } else {
+                UiAction::NextComposeStep
+            };
+            return self.dispatch(backend, action);
+        }
         if ctrl && code == KeyCode::Char('t') {
             let view = match self.semantic.relation_view {
                 RelationView::List => RelationView::Tree,
