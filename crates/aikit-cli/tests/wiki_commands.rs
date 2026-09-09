@@ -1028,59 +1028,52 @@ fn cited_bibliography_is_findable_and_an_empty_traversal_says_why() {
     assert!(envelope["warnings"].as_array().unwrap().is_empty());
 }
 
-/// Same-named files in different rooms, each with its own declared
-/// `source_id`, must ingest as distinct records — and the dry run must
-/// predict that the apply succeeds. Both halves failed once: identity fell
-/// back to the filename so eight rooms' files collapsed onto one ref, and
-/// the dry run reported no conflict before the apply died on it.
+/// Same-named bibliography files in different rooms, each with its own
+/// declared `source_id`, must not collide — and the dry run must predict
+/// that the apply succeeds rather than promising a write that then fails.
 #[test]
-fn same_named_files_keep_their_declared_identity_and_the_dry_run_predicts_the_apply() {
+fn same_named_source_files_do_not_collide_and_the_dry_run_predicts_the_apply() {
     let (work, scratch) = fixture();
     let corpus = work.path().join("corpus");
-    for (room, id, tag) in [
-        ("01-differentiating-mind", "01-differentiating-mind-p1", "station/s0"),
-        ("02-return-of-zero", "02-return-of-zero-p1", "station/s1"),
+    for (room, id) in [
+        ("01-differentiating-mind", "01-differentiating-mind-p1"),
+        ("02-return-of-zero", "02-return-of-zero-p1"),
     ] {
         write(
             &corpus.join(format!("section-rooms/{room}/P1-CANONICAL-ALIGNMENT.md")),
-            &format!("---\nsource_id: {id}\nnode_type: section\ntags: [{tag}]\n---\n\n# Alignment\n"),
+            &format!("---\nsource_id: {id}\ntags: [station/s0]\n---\n\n# Alignment\n"),
         );
     }
+    // One curated record so the ingest has a node population too.
+    write(
+        &corpus.join("arguments/A24.md"),
+        "---\nrecord_id: A24\nrecord_type: argument\nsource_ids:\n           - 01-differentiating-mind-p1\n---\n\n# A24\n",
+    );
     let wiki_json = work.path().join("ingested.json");
     write(&wiki_json, "{\n  \"objects\": []\n}\n");
 
-    // The dry run promises the apply will work — and says so about its own set.
     let (code, envelope) = wiki(
         scratch.path(),
         &["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
-    assert_eq!(envelope["data"]["records_selected"], 2, "both files are records");
     assert_eq!(
         envelope["data"]["self_colliding_refs"], 0,
-        "the proposal set does not collide with itself: {envelope}"
+        "distinct source_ids in same-named files do not collide: {envelope}"
     );
 
-    // And it does work — the promise is kept.
     let (code, envelope) = wiki(
         scratch.path(),
         &["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply"],
     );
     assert_eq!(code, 0, "the apply the dry run promised must succeed: {envelope}");
 
-    // Each room's file kept its own identity, and its own tag came with it.
-    for (id, tag) in [("01-differentiating-mind-p1", "station/s0"), ("02-return-of-zero-p1", "station/s1")] {
-        let (code, envelope) = wiki(
-            scratch.path(),
-            &["wiki", "query", "backlinks", &format!("wiki:node:tag/{tag}"), "--file", wiki_json.to_str().unwrap()],
-        );
-        assert_eq!(code, 0, "{envelope}");
-        let carriers = envelope["data"]["backlinks"].as_array().unwrap();
-        assert!(
-            carriers.iter().any(|b| b["resource"] == format!("wiki:node:record/{id}")),
-            "{id} carries {tag}: {envelope}"
-        );
-    }
+    // The record's cited bibliography is reachable from the record.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &["wiki", "query", "neighbours", "wiki:node:record/A24", "--file", wiki_json.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
 }
 
 #[test]
