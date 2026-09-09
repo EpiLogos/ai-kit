@@ -1403,14 +1403,26 @@ impl Service {
             && !star_matched
             && tuning.allows(aikit_core::continuity::DOMAIN_ACTIVATION)
         {
-            // Domains are declared data in the project layer; they load only
-            // under this composition, never ambient.
-            if let Some(project_root)=self.descriptor.project_root.as_deref() {
+            // Domains are declared data; they load only under this
+            // composition, never ambient. Two registers are consulted: the
+            // personal one at `<aikit home>/domains`, in force wherever this
+            // person works — including the root register, outside any project
+            // — and the project's own, which is the more specific of the two.
+            // Before the personal register existed a convention could only be
+            // declared inside one project, which left the root wiki's own
+            // authoring rules armed nowhere.
+            {
+                let project_root=self.descriptor.project_root.as_deref();
                 let (domains, mut load_warnings)=
-                    crate::domain_activation::load_domains(project_root);
+                    crate::domain_activation::load_domains_in(
+                        Some(&self.home.domains()), project_root);
                 decision.warnings.append(&mut load_warnings);
                 let prompt=crate::domain_activation::prompt_of(event);
-                let scope=crate::domain_activation::dedup_scope(event, Some(project_root));
+                // Dedup needs a scope. In a project the root is the fallback;
+                // outside one the client's session id is the only scope there
+                // is, and without either we would re-inject the same guidance
+                // every turn, so the reaction stands down.
+                let scope=crate::domain_activation::dedup_scope(event, project_root);
                 let Some(scope)=scope else {
                     return Ok(self.under_pressure(decision, &blocks, event));
                 };
@@ -1429,7 +1441,8 @@ impl Service {
             if let Some(project_root)=self.descriptor.project_root.as_deref() {
                 if let Some(path)=crate::file_context::file_path_of(event) {
                     let (domains, mut load_warnings)=
-                        crate::domain_activation::load_domains(project_root);
+                        crate::domain_activation::load_domains_in(
+                            Some(&self.home.domains()), Some(project_root));
                     decision.warnings.append(&mut load_warnings);
                     let (objects, mut wiki_warnings)=
                         crate::file_context::load_project_wiki(project_root);
