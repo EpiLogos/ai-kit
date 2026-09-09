@@ -195,6 +195,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Rollback(_)) => cmd_rollback(cwd),
         Some(Command::Prune(a)) => cmd_prune(cwd, a),
         Some(Command::Context(c)) => cmd_context(cwd, c),
+        Some(Command::Continuity(c)) => cmd_continuity(cwd, c),
         Some(Command::Task(c)) => cmd_task(cwd, c),
         Some(Command::Bypass(c)) => cmd_bypass(cwd, c),
         Some(Command::Bypasses(_)) => cmd_bypasses(cwd),
@@ -2133,6 +2134,114 @@ fn cmd_prune(cwd: &std::path::Path, a: PruneArgs) -> Result<Reply> {
         "removed": removed.iter().map(|g| g.to_string()).collect::<Vec<_>>(),
     });
     Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit continuity ...` — the inspection instrument for the star command
+/// system and the machine-checkable close-out verification.
+///
+/// Both answers come from the same places the engine itself reads: the armed
+/// commands from the active composition's own tuning, the close-out clauses
+/// from the native owners' carriers. Neither invents state, and neither writes
+/// any.
+fn cmd_continuity(cwd: &std::path::Path, c: ContinuityCmd) -> Result<Reply> {
+    use aikit_cli::star_commands::StarConfig;
+
+    let service = Service::discover(cwd)?;
+    let capsule_id = CapsuleId::parse("hook/continuity/star-commands")?;
+    let active = service.resolved().active.get(&capsule_id);
+    let config = active
+        .map(|active| StarConfig::from_config(Some(&active.config)))
+        .unwrap_or_default();
+    let composed = active.is_some();
+
+    match c.command {
+        ContinuitySub::Commands(_) => {
+            let armed = config.armed();
+            let warnings = aikit_core::star::unknown_packs(&config.packs)
+                .into_iter()
+                .map(|pack| format!("composition declares unknown pack `{pack}`; it arms nothing"))
+                .collect::<Vec<_>>();
+            let data = jval!({
+                // Composed and armed are different facts and are reported
+                // separately: a composition can select the capability and arm
+                // no pack, in which case every star token is ordinary prose.
+                "composed": composed,
+                "composition": active.map(|active| active.origin.describe()),
+                "packs": config.packs,
+                "known_packs": aikit_core::star::KNOWN_PACKS,
+                "armed": armed.iter().map(|command| jval!({
+                    "command": command.to_string(),
+                    "pack": command.pack(),
+                    "synopsis": command.synopsis(),
+                })).collect::<Vec<_>>(),
+                "factory_ledger_root": config.factory_ledger_root,
+                "factory_run_ref": config.factory_run_ref,
+            });
+            Ok(reply(&service, data, warnings))
+        }
+        ContinuitySub::Closeout(closeout) => match closeout.command {
+            ContinuityCloseoutSub::Verify(a) => {
+                use aikit_adapters::runner::SystemRunner;
+                use aikit_cli::closeout::FactoryBinding;
+
+                let central_root = aikit_cli::temporal::process_central_root(Some(cwd))
+                    .ok_or_else(|| {
+                        AikitError::new(
+                            "cli.usage",
+                            "no Central world for this working directory; \
+                             close-out verification reads a project's NOW field",
+                        )
+                    })?;
+                let project = match a.project {
+                    Some(project) => project,
+                    None => aikit_cli::orientation_packet::project_of(&central_root, cwd)
+                        .ok_or_else(|| {
+                            AikitError::new(
+                                "cli.usage",
+                                "this directory is not inside a project of the Central world; \
+                                 name one with --project",
+                            )
+                        })?,
+                };
+                let ledger_root = a.ledger_root.or(config.factory_ledger_root);
+                let run_ref = a.run.or(config.factory_run_ref);
+                let factory_bin = std::env::var("FACTORY_BIN")
+                    .or_else(|_| std::env::var("OI_FACTORY_BIN"))
+                    .unwrap_or_else(|_| "factory".to_owned());
+                let binding = match (&ledger_root, &run_ref) {
+                    (Some(root), Some(run)) => Some(FactoryBinding {
+                        binary: &factory_bin,
+                        ledger_root: root,
+                        run_ref: run,
+                    }),
+                    _ => None,
+                };
+                let verification = aikit_cli::closeout::verify(
+                    &SystemRunner::new(),
+                    &central_root,
+                    &project,
+                    a.since,
+                    binding,
+                )
+                .map_err(|error| AikitError::new("continuity.closeout", error))?;
+                let exit_code = if verification.verified {
+                    json::EXIT_OK
+                } else {
+                    json::EXIT_GENERIC
+                };
+                // Publish the findings *and* fail, the way `wiki validate`
+                // does: a close-out that did not leave its objects must not
+                // exit zero just because the check ran.
+                Ok(Reply::Data {
+                    context: EnvelopeContext::from_descriptor(service.descriptor()),
+                    data: serde_json::to_value(&verification)
+                        .map_err(|error| AikitError::new("continuity.closeout", error.to_string()))?,
+                    warnings: vec![],
+                    exit_code,
+                })
+            }
+        },
+    }
 }
 
 fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {

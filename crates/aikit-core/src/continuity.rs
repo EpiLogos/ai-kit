@@ -70,6 +70,14 @@ pub const ACTIVITY_EVIDENCE: &str = "activity-evidence";
 /// W5/CASE 11: root SessionStart project horizon, bounded by durable recency.
 pub const PROJECT_RECENCY: &str = "project-recency";
 
+/// Star prompt-commands (W2/CASE 07 + CASE 08): when composed, a prompt that
+/// names an armed star command is met with that command's protocol before
+/// domain matching, and the match short-circuits the domain branch. Packs are
+/// profile tunables and the default arms none, so a composition that selects
+/// this capability without declaring a pack still recognises nothing — the
+/// capability being composed is not the same as a protocol being armed.
+pub const STAR_COMMANDS: &str = "star-commands";
+
 /// The reactions the engine itself implements, as opposed to hook capsules
 /// that merely ride the chain. A reaction listed here is answerable when
 /// asked even while it is not composed: the engine says "not composed"
@@ -82,6 +90,7 @@ pub const ENGINE_REACTIONS: &[&str] = &[
     ORIENTATION_PACKET,
     ACTIVITY_EVIDENCE,
     PROJECT_RECENCY,
+    STAR_COMMANDS,
 ];
 
 /// True when the capsule id names a first-party continuity reaction.

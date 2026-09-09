@@ -1,0 +1,11 @@
+schema = 1
+id = "hook/continuity/star-commands"
+kind = "hook"
+name = "Continuity star commands"
+description = "First-party continuity reaction (W2/CASE 07 + CASE 08): when composed, a prompt naming an armed star command (*end, *fork, *handoff) is met with that command's close-out protocol before domain matching, and the match short-circuits the domain branch. Packs are profile tunables and the default arms none, so composing this capability without declaring `packs` still recognises nothing. The protocol names the routing and the owners' own commands; it never writes a carrier and never claims to have. Not composed by default."
+tags = ["aikit", "continuity", "engine", "star", "closeout", "handoff", "fork"]
+
+[hook]
+entry = "payload/star-commands"
+events = ["UserPromptSubmit"]
+

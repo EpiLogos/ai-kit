@@ -139,10 +139,24 @@ pub fn orientation_packet_in<R: CommandRunner>(
 
 /// One ctrl call, for exactly this project: no other project's field is ever
 /// requested, so no other project's material can arrive.
-fn inspect_project_now<R: CommandRunner>(
+///
+/// Shared with the close-out verification, which asks the same owner the same
+/// question: what does this project's NOW field actually hold? Two readers of
+/// one call site cannot drift apart in how they address the field.
+pub fn inspect_project_now<R: CommandRunner>(
     runner: &R,
     central_root: &Path,
     project: &str,
+) -> Result<Value, String> {
+    inspect_project_now_for(runner, central_root, project, "continuity/orientation-packet")
+}
+
+/// The same call, with the caller's own name on any failure it reports.
+pub fn inspect_project_now_for<R: CommandRunner>(
+    runner: &R,
+    central_root: &Path,
+    project: &str,
+    reader: &str,
 ) -> Result<Value, String> {
     let executable = ctrl_executable();
     let input = format!(r#"{{"project":"{project}"}}"#);
@@ -158,19 +172,19 @@ fn inspect_project_now<R: CommandRunner>(
     ];
     let output = runner
         .run(&argv)
-        .map_err(|error| format!("continuity/orientation-packet ctrl unavailable: {error}"))?;
+        .map_err(|error| format!("{reader} ctrl unavailable: {error}"))?;
     if output.status != 0 {
         return Err(format!(
-            "continuity/orientation-packet ctrl failed ({}): {}",
+            "{reader} ctrl failed ({}): {}",
             output.status,
             output.stderr.trim()
         ));
     }
     let envelope: Value = serde_json::from_str(&output.stdout)
-        .map_err(|error| format!("continuity/orientation-packet unreadable ctrl reply: {error}"))?;
+        .map_err(|error| format!("{reader} unreadable ctrl reply: {error}"))?;
     if envelope["ok"] != true {
         return Err(format!(
-            "continuity/orientation-packet ctrl refused: {}",
+            "{reader} ctrl refused: {}",
             envelope["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error")
