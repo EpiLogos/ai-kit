@@ -130,6 +130,8 @@ pub enum Command {
     Method(MethodArgs),
     /// Authorise and read versioned Routine invocation evidence.
     Routine(RoutineCmd),
+    /// Start developmental work through Factory's native Commission boundary.
+    Factory(FactoryCmd),
     /// Record review decisions for catalogued capsule revisions.
     Trust(TrustCmd),
     /// List recently run invocations.
@@ -197,6 +199,28 @@ pub struct GatewayCmd {
 pub struct RoutineCmd {
     #[command(subcommand)]
     pub command: RoutineSub,
+}
+
+#[derive(Debug, Args)]
+pub struct FactoryCmd {
+    #[command(subcommand)]
+    pub command: FactorySub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FactorySub {
+    /// Commission one developmental difference through the Factory owner CLI.
+    StartWork {
+        /// Factory-owned developmental provider state to create or reopen.
+        #[arg(long, value_name = "PATH")]
+        state: std::path::PathBuf,
+        /// Exact factory.commission-request/v1 JSON file.
+        #[arg(long = "request-file", value_name = "PATH")]
+        request_file: std::path::PathBuf,
+        /// Native Factory executable; defaults to AIKIT_FACTORY_BIN or `factory`.
+        #[arg(long = "factory-bin", value_name = "PATH")]
+        factory_bin: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

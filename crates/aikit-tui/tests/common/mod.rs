@@ -173,6 +173,7 @@ pub struct Fixture {
     pub applied: Vec<(ScopeKind, Vec<Toggle>)>,
     pub promoted: Vec<CapsuleId>,
     pub familiarity: FamiliarityStore,
+    pub context_records: Vec<aikit_core::resource::ResourceRecord>,
 }
 
 impl Fixture {
@@ -221,6 +222,7 @@ impl Fixture {
             applied: Vec::new(),
             promoted: Vec::new(),
             familiarity: FamiliarityStore::new(),
+            context_records: Vec::new(),
         };
         fixture.write_overlay();
         fixture.refresh();
@@ -287,6 +289,14 @@ impl Fixture {
 
     pub fn with_job(mut self, job: JobOutput) -> Self {
         self.job = job;
+        self
+    }
+
+    pub fn with_context_records(
+        mut self,
+        records: Vec<aikit_core::resource::ResourceRecord>,
+    ) -> Self {
+        self.context_records = records;
         self
     }
 
@@ -359,6 +369,10 @@ impl Fixture {
 }
 
 impl PaletteBackend for Fixture {
+    fn context_resource_records(&self) -> Result<Vec<aikit_core::resource::ResourceRecord>> {
+        Ok(self.context_records.clone())
+    }
+
     fn context(&self) -> &ContextDescriptor {
         &self.descriptor
     }

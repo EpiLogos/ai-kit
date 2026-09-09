@@ -878,7 +878,12 @@ pub fn horizons_for_resource(record: &ResourceRecord) -> BTreeSet<AddressHorizon
             BTreeSet::from([AddressHorizon::H1, AddressHorizon::H3])
         }
         ResourceKind::Profile => BTreeSet::from([AddressHorizon::H1, AddressHorizon::H4]),
-        ResourceKind::Project => BTreeSet::from([AddressHorizon::H4]),
+        ResourceKind::Project | ResourceKind::Journey | ResourceKind::Run => {
+            BTreeSet::from([AddressHorizon::H4])
+        }
+        ResourceKind::WorkflowUnit => {
+            BTreeSet::from([AddressHorizon::H4, AddressHorizon::H5])
+        }
         ResourceKind::Agent | ResourceKind::Agency => {
             BTreeSet::from([AddressHorizon::H2, AddressHorizon::H4, AddressHorizon::H5])
         }

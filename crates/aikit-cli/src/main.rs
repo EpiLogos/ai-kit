@@ -182,6 +182,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
         Some(Command::Method(a)) => cmd_method(cwd, a),
         Some(Command::Routine(c)) => cmd_routine(c),
+        Some(Command::Factory(c)) => cmd_factory(c),
         Some(Command::Trust(a)) => cmd_trust(cwd, a),
         Some(Command::Wiki(c)) => cmd_wiki(cwd, c),
         Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),
@@ -252,6 +253,33 @@ fn cmd_routine(command: RoutineCmd) -> Result<Reply> {
                 format!("could not encode Routine invocation evidence: {error}"),
             )
         })?,
+    };
+    Ok(Reply::Data {
+        context: EnvelopeContext::default(),
+        data,
+        warnings: vec![],
+        exit_code: json::EXIT_OK,
+    })
+}
+
+fn cmd_factory(command: FactoryCmd) -> Result<Reply> {
+    let data = match command.command {
+        FactorySub::StartWork {
+            state,
+            request_file,
+            factory_bin,
+        } => {
+            let executable = factory_bin
+                .or_else(|| std::env::var_os("AIKIT_FACTORY_BIN").map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("factory"));
+            let started = aikit_adapters::factory_developmental::start_factory_work(
+                &aikit_adapters::runner::SystemRunner::new(),
+                executable,
+                state,
+                request_file,
+            )?;
+            started.receipt
+        }
     };
     Ok(Reply::Data {
         context: EnvelopeContext::default(),

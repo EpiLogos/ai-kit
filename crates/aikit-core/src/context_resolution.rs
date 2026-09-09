@@ -147,6 +147,9 @@ pub struct ContextResolution {
     pub host: Option<ReferenceResolution>,
     pub capabilities: Vec<ResolvedResource>,
     pub actions: Vec<ResolvedResource>,
+    /// Factory-owned developmental resources, retained only as navigation categories.
+    #[serde(default)]
+    pub developmental_resources: Vec<ResolvedResource>,
     pub context_sources: Vec<ResolvedResource>,
     pub model_candidates: Vec<ResolvedResource>,
     pub harness_candidates: Vec<ResolvedResource>,
@@ -234,6 +237,12 @@ pub fn compose_context_resolution(
         }
     }
 
+    let mut developmental_resources = Vec::new();
+    for kind in [ResourceKind::Journey, ResourceKind::Run, ResourceKind::WorkflowUnit] {
+        developmental_resources.extend(take_group(&mut grouped, kind));
+    }
+    developmental_resources.sort_by(|left, right| left.resource.descriptor.id.cmp(&right.resource.descriptor.id));
+
     ContextResolution {
         version: CONTEXT_RESOLUTION_VERSION.to_string(),
         project_binding,
@@ -245,6 +254,7 @@ pub fn compose_context_resolution(
         host,
         capabilities: take_group(&mut grouped, ResourceKind::Capability),
         actions: take_group(&mut grouped, ResourceKind::Action),
+        developmental_resources,
         context_sources,
         model_candidates: take_group(&mut grouped, ResourceKind::Model),
         harness_candidates: take_group(&mut grouped, ResourceKind::Harness),

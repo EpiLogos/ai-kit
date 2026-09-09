@@ -148,6 +148,10 @@ pub struct ProjectWorldReadModel {
     pub capability_horizon: CapabilityHorizonDisclosure,
     pub information_horizon: InformationHorizonDisclosure,
     pub actor_runtime: ActorRuntimeDisclosure,
+    /// Factory owner observations admitted into the shared Resource/Navigator field.
+    /// These categories carry no AIKit-owned developmental semantics.
+    #[serde(default)]
+    pub developmental_work: Vec<ProjectWorldResource>,
     pub projection: ProjectionDisclosure,
     pub effective_revision: EffectiveRevisionDisclosure,
     /// Optional material/version reading from an accepted provider such as native
@@ -216,6 +220,7 @@ impl ProjectWorldReadModel {
             capability_horizon: CapabilityHorizonDisclosure::default(),
             information_horizon: InformationHorizonDisclosure::default(),
             actor_runtime: ActorRuntimeDisclosure::default(),
+            developmental_work: Vec::new(),
             projection: ProjectionDisclosure {
                 targets: Vec::new(),
                 active_capabilities: Vec::new(),
@@ -267,6 +272,7 @@ pub fn disclose_project_world(
             harnesses: disclose_resources(&resolution.harness_candidates),
             execution_offers: disclose_resources(&resolution.execution_offers),
         },
+        developmental_work: disclose_resources(&resolution.developmental_resources),
         projection: ProjectionDisclosure {
             targets: resolution.projection.targets.clone(),
             active_capabilities: resolution.projection.active_capabilities.clone(),
@@ -387,6 +393,7 @@ mod tests {
             capability_horizon: CapabilityHorizonDisclosure::default(),
             information_horizon: InformationHorizonDisclosure::default(),
             actor_runtime: ActorRuntimeDisclosure::default(),
+            developmental_work: Vec::new(),
             projection: ProjectionDisclosure { targets: vec![], active_capabilities: vec![] },
             effective_revision: EffectiveRevisionDisclosure {
                 generation: None,

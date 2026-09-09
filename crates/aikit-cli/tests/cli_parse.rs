@@ -4,7 +4,9 @@
 //! `task spawn` must default to a **shared** working tree, with `--worktree` the
 //! only thing that asks for a git worktree.
 
-use aikit_cli::cli::{BypassSub, Cli, Command, ContextSub, HookSub, Isolation, MuxSub, TaskSub};
+use aikit_cli::cli::{
+    BypassSub, Cli, Command, ContextSub, FactorySub, HookSub, Isolation, MuxSub, TaskSub,
+};
 use clap::Parser;
 
 fn parse(args: &[&str]) -> Cli {
@@ -81,10 +83,44 @@ fn json_is_accepted_on_substantive_commands() {
         vec!["aikit", "apply", "--json"],
         vec!["aikit", "context", "current", "--json"],
         vec!["aikit", "session", "list", "--json"],
+        vec![
+            "aikit",
+            "factory",
+            "start-work",
+            "--state",
+            "state.json",
+            "--request-file",
+            "commission.json",
+            "--json",
+        ],
     ] {
         let cli = parse(&args);
         assert!(cli.json, "`{args:?}` should set --json");
     }
+}
+
+#[test]
+fn factory_start_work_requires_explicit_owner_state_and_request_file() {
+    let cli = parse(&[
+        "aikit",
+        "factory",
+        "start-work",
+        "--state",
+        "state.json",
+        "--request-file",
+        "commission.json",
+    ]);
+    let Some(Command::Factory(factory)) = cli.command else {
+        panic!("expected Factory command");
+    };
+    let FactorySub::StartWork {
+        state,
+        request_file,
+        factory_bin,
+    } = factory.command;
+    assert_eq!(state, std::path::PathBuf::from("state.json"));
+    assert_eq!(request_file, std::path::PathBuf::from("commission.json"));
+    assert!(factory_bin.is_none());
 }
 
 #[test]
