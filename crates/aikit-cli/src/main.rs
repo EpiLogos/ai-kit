@@ -2179,6 +2179,52 @@ fn cmd_continuity(cwd: &std::path::Path, c: ContinuityCmd) -> Result<Reply> {
             });
             Ok(reply(&service, data, warnings))
         }
+        ContinuitySub::Pressure(a) => {
+            use aikit_core::pressure::PressureBrackets;
+
+            let pressure_id = CapsuleId::parse("hook/continuity/context-pressure")?;
+            let pressure_active = service.resolved().active.get(&pressure_id);
+            let (brackets, warnings) =
+                PressureBrackets::from_config(pressure_active.map(|active| &active.config));
+            // The scope is the one the engine itself keys on, so the count
+            // reported here is the count the next turn will be read against.
+            let scope = a
+                .session
+                .or_else(|| {
+                    service
+                        .descriptor()
+                        .session_id
+                        .as_ref()
+                        .map(ToString::to_string)
+                })
+                .or_else(|| {
+                    service
+                        .descriptor()
+                        .project_root
+                        .as_ref()
+                        .map(|root| root.display().to_string())
+                });
+            let reading = match &scope {
+                Some(scope) => {
+                    let prompts = service.index().prompt_count(scope)?;
+                    Some(aikit_core::pressure::Reading::from_prompt_count(
+                        &brackets, prompts,
+                    ))
+                }
+                None => None,
+            };
+            let data = jval!({
+                // Composed and armed are one fact here — but the brackets are
+                // printable either way, so an operator can see what *would*
+                // apply before composing it.
+                "composed": pressure_active.is_some(),
+                "composition": pressure_active.map(|active| active.origin.describe()),
+                "brackets": brackets.describe(),
+                "scope": scope,
+                "reading": reading.as_ref().map(|reading| reading.describe()),
+            });
+            Ok(reply(&service, data, warnings))
+        }
         ContinuitySub::Closeout(closeout) => match closeout.command {
             ContinuityCloseoutSub::Verify(a) => {
                 use aikit_adapters::runner::SystemRunner;

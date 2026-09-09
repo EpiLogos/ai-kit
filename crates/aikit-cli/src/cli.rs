@@ -1530,12 +1530,22 @@ pub struct ContinuityCmd {
 pub enum ContinuitySub {
     /// List the star prompt-commands the active composition arms.
     Commands(ContinuityCommandsArgs),
+    /// Show the context-pressure brackets in effect and this session's reading.
+    Pressure(ContinuityPressureArgs),
     /// Verify that a close-out left the objects it claims to have left.
     Closeout(ContinuityCloseoutArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct ContinuityCommandsArgs {}
+
+#[derive(Debug, Args)]
+pub struct ContinuityPressureArgs {
+    /// Read the pressure for this session id rather than for the current
+    /// working directory's scope.
+    #[arg(long, value_name = "SESSION")]
+    pub session: Option<String>,
+}
 
 #[derive(Debug, Args)]
 pub struct ContinuityCloseoutArgs {

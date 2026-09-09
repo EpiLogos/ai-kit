@@ -1275,19 +1275,31 @@ impl Service {
         // tuning is resolved from the view at event time, never from global
         // config.
         let tuning = ContinuityTuning::resolve(&self.view);
+
+        // The engine's own blocks are collected classified rather than pushed
+        // straight at the decision, because the last stage — context pressure
+        // — bounds ordinary payload and must never bound standing guidance.
+        // The floor's temporal reground is already in `decision.injected` and
+        // is deliberately not in this list: it is law, and law is not bounded
+        // by a capability.
+        let mut blocks: Vec<aikit_core::pressure::Block> = Vec::new();
+
         if event.kind == aikit_core::hooks::HookEventKind::UserPromptSubmit
             && tuning.allows(aikit_core::continuity::TURN_LEDGER)
         {
-            decision.injected.push(format!(
-                "[continuity/turn-ledger] composed by this context's composition; event {}                  dispatched for {}",
-                event.kind, event.client,
+            blocks.push(aikit_core::pressure::Block::ordinary(
+                format!(
+                    "[continuity/turn-ledger] composed by this context's composition; event {}                  dispatched for {}",
+                    event.kind, event.client,
+                ),
+                Vec::new(),
             ));
         }
         if event.kind == aikit_core::hooks::HookEventKind::SessionStart
             && tuning.allows(aikit_core::continuity::ENTITY_DISCLOSURE)
         {
             match crate::continuity_disclosure::entity_disclosure(event) {
-                Ok(Some(block)) => decision.injected.push(block),
+                Ok(Some(block)) => blocks.push(aikit_core::pressure::Block::ordinary(block, Vec::new())),
                 Ok(None) => {}
                 Err(error) => decision.warnings.push(format!(
                     "continuity/entity-disclosure unavailable: {error}"
@@ -1317,7 +1329,7 @@ impl Service {
                 None => crate::orientation_packet::OrientationConfig::default(),
             };
             match crate::orientation_packet::orientation_packet(event, &tuned) {
-                Ok(Some(block)) => decision.injected.push(block),
+                Ok(Some(block)) => blocks.push(aikit_core::pressure::Block::ordinary(block, Vec::new())),
                 Ok(None) => {}
                 Err(error) => decision.warnings.push(error),
             }
@@ -1336,8 +1348,10 @@ impl Service {
                 crate::project_recency::classify_all(
                     &self.index, &specs, aikit_store::Timestamp::now(), config)
             }) {
-                Ok(rows) => decision.injected.push(
-                    crate::project_recency::render_session_start(&rows, config.max_projects)),
+                Ok(rows) => blocks.push(aikit_core::pressure::Block::ordinary(
+                    crate::project_recency::render_session_start(&rows, config.max_projects),
+                    Vec::new(),
+                )),
                 Err(error) => decision.warnings.push(format!(
                     "continuity/project-recency unavailable: {error}")),
             }
@@ -1373,7 +1387,15 @@ impl Service {
             let prompt = crate::domain_activation::prompt_of(event);
             let reaction = crate::star_commands::run(prompt.as_deref(), &config, &routing);
             star_matched = reaction.matched_any();
-            decision.injected.extend(reaction.blocks);
+            // Standing, not ordinary: the user asked for this protocol by
+            // name. Bounding away the thing that was explicitly requested
+            // would be pressure deciding what the user meant.
+            blocks.extend(
+                reaction
+                    .blocks
+                    .into_iter()
+                    .map(|text| aikit_core::pressure::Block::standing(text, Vec::new())),
+            );
             decision.warnings.extend(reaction.warnings);
         }
         if event.kind == aikit_core::hooks::HookEventKind::UserPromptSubmit
@@ -1388,10 +1410,12 @@ impl Service {
                 decision.warnings.append(&mut load_warnings);
                 let prompt=crate::domain_activation::prompt_of(event);
                 let scope=crate::domain_activation::dedup_scope(event, Some(project_root));
-                let Some(scope)=scope else { return Ok(decision) };
-                let (blocks, mut reaction_warnings)=crate::domain_activation::run(
+                let Some(scope)=scope else {
+                    return Ok(self.under_pressure(decision, &blocks, event));
+                };
+                let (domain_blocks, mut reaction_warnings)=crate::domain_activation::run(
                     &self.index, &scope, &domains, prompt.as_deref());
-                decision.injected.extend(blocks);
+                blocks.extend(domain_blocks);
                 decision.warnings.append(&mut reaction_warnings);
             }
         }
@@ -1410,10 +1434,12 @@ impl Service {
                         crate::file_context::load_project_wiki(project_root);
                     decision.warnings.append(&mut wiki_warnings);
                     let scope=crate::domain_activation::dedup_scope(event, Some(project_root));
-                    let Some(scope)=scope else { return Ok(decision) };
-                    let (blocks, mut reaction_warnings)=crate::file_context::run(
+                    let Some(scope)=scope else {
+                        return Ok(self.under_pressure(decision, &blocks, event));
+                    };
+                    let (file_blocks, mut reaction_warnings)=crate::file_context::run(
                         &self.index, &scope, project_root, &path, &domains, objects);
-                    decision.injected.extend(blocks);
+                    blocks.extend(file_blocks);
                     decision.warnings.append(&mut reaction_warnings);
                 }
             }
@@ -1431,7 +1457,62 @@ impl Service {
             }
         }
 
-        Ok(decision)
+        Ok(self.under_pressure(decision, &blocks, event))
+    }
+
+    /// The last stage of the reaction engine: render the turn's blocks, under
+    /// the composition's pressure brackets when it composed any.
+    ///
+    /// Uncomposed, this renders every block whole — the descope law again: a
+    /// capability nobody selected changes nothing, including how much of
+    /// something else arrives. Composed, ordinary payload is bounded by the
+    /// bracket the reading falls in, standing guidance is exempt, and both the
+    /// per-block and the per-turn withholding are stated.
+    fn under_pressure(
+        &self,
+        mut decision: aikit_core::hooks::HookDecision,
+        blocks: &[aikit_core::pressure::Block],
+        event: &aikit_core::hooks::HookEvent,
+    ) -> aikit_core::hooks::HookDecision {
+        let tuning = ContinuityTuning::resolve(&self.view);
+        let reading = if tuning.allows(aikit_core::continuity::CONTEXT_PRESSURE) {
+            let config = aikit_core::id::CapsuleId::parse("hook/continuity/context-pressure")
+                .ok()
+                .and_then(|id| self.view.active.get(&id))
+                .map(|active| active.config.clone());
+            let (brackets, mut warnings) =
+                aikit_core::pressure::PressureBrackets::from_config(config.as_ref());
+            decision.warnings.append(&mut warnings);
+            let scope = crate::domain_activation::dedup_scope(
+                event,
+                self.descriptor.project_root.as_deref(),
+            );
+            match scope {
+                Some(scope) => {
+                    let (reading, mut warnings) =
+                        crate::pressure::read(&self.index, &scope, event, &brackets);
+                    decision.warnings.append(&mut warnings);
+                    // The turn is counted after it is read, so a session's
+                    // first prompt is read as a fresh window rather than as
+                    // one turn already spent.
+                    if event.kind == aikit_core::hooks::HookEventKind::UserPromptSubmit {
+                        decision
+                            .warnings
+                            .extend(crate::pressure::record_turn(&self.index, &scope));
+                    }
+                    Some(reading)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let bounded = crate::pressure::apply(blocks, reading.as_ref());
+        decision.injected.extend(bounded.blocks);
+        if let Some(notice) = bounded.notice {
+            decision.injected.push(notice);
+        }
+        decision
     }
 
     /// The continuity composition in force for this context, resolved from

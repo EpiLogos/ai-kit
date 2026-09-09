@@ -1,0 +1,8 @@
+#!/bin/sh
+# The composition handle for the context-pressure engine reaction (W1).
+#
+# The engine (aikit-cli dispatch) resolves the brackets at event time and
+# applies them to the turn's ordinary payload. This payload only proves the
+# chain reached it: exit 0, no output, because hook-chain stdout is a gate
+# channel, not an injection channel.
+exit 0

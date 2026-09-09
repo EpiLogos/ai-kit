@@ -9,6 +9,23 @@ use aikit_cli::domain_activation::{load_domains, prompt_of, run};
 use aikit_core::hooks::{HookEvent, HookEventKind};
 use aikit_store::index::Index;
 
+/// The reactions hand back classified blocks now, so the pressure stage can
+/// bound ordinary payload without touching standing guidance. These tests
+/// assert on what a session actually sees, which is the rendered block.
+fn rendered(
+    result: (Vec<aikit_core::pressure::Block>, Vec<String>),
+) -> (Vec<String>, Vec<String>) {
+    (
+        result
+            .0
+            .iter()
+            .map(aikit_core::pressure::Block::render)
+            .collect(),
+        result.1,
+    )
+}
+
+
 fn fixture() -> (PathBuf, PathBuf) {
     let root = tempfile::tempdir().unwrap().keep();
     let domains = root.join(".aikit/domains");
@@ -76,7 +93,7 @@ fn a_matching_prompt_activates_and_the_explanation_names_trigger_horizon_source(
     let index = index(&db);
     let (domains, warnings) = load_domains(&tmp);
     assert!(warnings.is_empty());
-    let (blocks, warnings) = run(&index, &scope(), &domains, Some("please prepare this RELEASE"));
+    let (blocks, warnings) = rendered(run(&index, &scope(), &domains, Some("please prepare this RELEASE")));
     assert!(warnings.is_empty());
     assert_eq!(blocks.len(), 1);
     let block = &blocks[0];
@@ -95,13 +112,13 @@ fn unchanged_ordinary_payload_dedups_but_standing_rules_reassert() {
     let ctx = scope();
     let (domains, _) = load_domains(&tmp);
 
-    let (first, _) = run(&index, &ctx, &domains, Some("prepare this release"));
+    let (first, _) = rendered(run(&index, &ctx, &domains, Some("prepare this release")));
     assert_eq!(first.len(), 1);
     assert!(!first[0].contains("deduped"));
 
     // Same prompt again: the ordinary payload is deduped; the standing rule
     // is exempt by classification and reasserts with its exemption visible.
-    let (second, _) = run(&index, &ctx, &domains, Some("prepare this release"));
+    let (second, _) = rendered(run(&index, &ctx, &domains, Some("prepare this release")));
     assert_eq!(second.len(), 1, "only the standing rule reasserts");
     assert!(second[0].contains("ordinary payload deduped"), "{:?}", second[0]);
     assert!(second[0].contains("standing rules reasserted"), "{:?}", second[0]);
@@ -109,7 +126,7 @@ fn unchanged_ordinary_payload_dedups_but_standing_rules_reassert() {
     assert!(!second[0].contains("[ordinary]"), "the ordinary line does not re-inject: {:?}", second[0]);
 
     // A third ask changes nothing about the verdict.
-    let (third, _) = run(&index, &ctx, &domains, Some("prepare this release"));
+    let (third, _) = rendered(run(&index, &ctx, &domains, Some("prepare this release")));
     assert_eq!(third.len(), 1);
 }
 
@@ -119,7 +136,7 @@ fn changed_guidance_content_re_arms_injection() {
     let index = index(&db);
     let ctx = scope();
     let (domains, _) = load_domains(&tmp);
-    let (first, _) = run(&index, &ctx, &domains, Some("prepare this release"));
+    let (first, _) = rendered(run(&index, &ctx, &domains, Some("prepare this release")));
     assert_eq!(first.len(), 1);
 
     // Edit the ordinary guidance: the rendered content changes, so the next
@@ -130,7 +147,7 @@ fn changed_guidance_content_re_arms_injection() {
         .replace("before tagging", "before cutting");
     fs::write(&domain_file, updated).unwrap();
     let (domains, _) = load_domains(&tmp);
-    let (second, _) = run(&index, &ctx, &domains, Some("prepare this release"));
+    let (second, _) = rendered(run(&index, &ctx, &domains, Some("prepare this release")));
     assert_eq!(second.len(), 1);
     assert!(!second[0].contains("deduped"), "changed content re-arms: {:?}", second[0]);
 }
@@ -140,7 +157,7 @@ fn a_non_matching_prompt_activates_nothing() {
     let (tmp, db) = fixture();
     let index = index(&db);
     let (domains, _) = load_domains(&tmp);
-    let (blocks, warnings) = run(&index, &scope(), &domains, Some("water the garden"));
+    let (blocks, warnings) = rendered(run(&index, &scope(), &domains, Some("water the garden")));
     assert!(blocks.is_empty());
     assert!(warnings.is_empty());
 }
