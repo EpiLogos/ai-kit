@@ -103,6 +103,28 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
     }
 
     let mut world = disclose_project_world(&resolution, &source_index, None);
+
+    // The versioned material World, when the backend can observe one. A
+    // mismatched ProjectRef is refused by `with_versioned_world` rather than
+    // renaming the canonical Project, and an observation that fails becomes a
+    // warning on the reading: a Compose preview that cannot see the material
+    // must say so, not fall back to a clean-looking absence that means
+    // something else.
+    match backend.versioned_world() {
+        Ok(Some(versioned)) => match world.clone().with_versioned_world(versioned) {
+            Ok(attached) => world = attached,
+            Err(error) => world.warnings.push(format!(
+                "versioned material was observed but does not belong to this Project: {}",
+                error.message()
+            )),
+        },
+        Ok(None) => {}
+        Err(error) => world.warnings.push(format!(
+            "versioned material provider could not observe this Project: {}",
+            error.message()
+        )),
+    }
+
     if backend.scope_layers().is_none() {
         world.warnings.push(
             "Project-world basis does not include the ordered scope-layer stack because this application-service boundary does not expose it; scope provenance is not reconstructed from partial evidence"
@@ -128,9 +150,33 @@ mod tests {
         context: ContextDescriptor,
         view: aikit_core::ResolvedView,
         layers: Option<Vec<ScopeLayer>>,
+        /// What this backend can observe about versioned material: nothing,
+        /// an observation, or a provider that fell over.
+        versioned: VersionedAnswer,
+    }
+
+    #[derive(Default)]
+    enum VersionedAnswer {
+        #[default]
+        Nothing,
+        Observed(Box<aikit_core::resource::VersionedProjectWorld>),
+        Failed,
     }
 
     impl PaletteBackend for Backend {
+        fn versioned_world(
+            &self,
+        ) -> Result<Option<aikit_core::resource::VersionedProjectWorld>> {
+            match &self.versioned {
+                VersionedAnswer::Nothing => Ok(None),
+                VersionedAnswer::Observed(world) => Ok(Some(world.as_ref().clone())),
+                VersionedAnswer::Failed => Err(aikit_core::AikitError::new(
+                    "versioned_world.git_spawn_failed",
+                    "failed to invoke git",
+                )),
+            }
+        }
+
         fn context(&self) -> &ContextDescriptor {
             &self.context
         }
@@ -199,6 +245,7 @@ mod tests {
             context,
             view,
             layers: Some(Vec::new()),
+            versioned: VersionedAnswer::Nothing,
         };
 
         let resolution = context_resolution(&backend).unwrap();
@@ -218,6 +265,7 @@ mod tests {
             context,
             view,
             layers: None,
+            versioned: VersionedAnswer::Nothing,
         };
 
         let world = project_world(&backend).unwrap();
@@ -243,6 +291,7 @@ mod tests {
             context,
             view,
             layers: Some(layers),
+            versioned: VersionedAnswer::Nothing,
         };
 
         let world = project_world(&backend).unwrap();
@@ -256,5 +305,108 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("scope-layer stack")));
+    }
+
+    /// A fixture observation for the Project the fake backend resolves to.
+    fn observed(project: &str) -> aikit_core::resource::VersionedProjectWorld {
+        use aikit_core::resource::{
+            GitRepositoryRelation, VersionRevision, VersionedProjectWorld,
+            GitWorkingState, VersionedWorldProviderDescriptor, VersionedWorldProviderStatus,
+            VERSIONED_WORLD_VERSION,
+        };
+        VersionedProjectWorld {
+            version: VERSIONED_WORLD_VERSION.to_string(),
+            project: aikit_core::project::ProjectRef::parse(project).unwrap(),
+            provider: VersionedWorldProviderDescriptor {
+                provider: aikit_core::resource::ProviderRef::parse("provider:aikit.git-cli").unwrap(),
+                status: VersionedWorldProviderStatus::Available,
+                capabilities: Vec::new(),
+                implementation_version: Some("2.43.0".into()),
+            },
+            repository: GitRepositoryRelation {
+                repository_root: "/work/aikit".into(),
+                worktree_root: "/work/aikit".into(),
+                head: VersionRevision::new("c0ffee"),
+                branch: Some("main".into()),
+                detached: false,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+            },
+            working: GitWorkingState::default(),
+            worktrees: Vec::new(),
+        }
+    }
+
+    fn world_from(versioned: VersionedAnswer) -> aikit_core::ProjectWorldReadModel {
+        let mut context = ContextDescriptor::for_project("/work/aikit");
+        context.host = "test-host".into();
+        let view = resolved(&context, Vec::new());
+        project_world(&Backend {
+            context,
+            view,
+            layers: Some(Vec::new()),
+            versioned,
+        })
+        .unwrap()
+    }
+
+    /// Before this wiring the socket was permanently empty and the Compose
+    /// preview said so on every reading. An observation the backend can make
+    /// now reaches the model the preview renders.
+    #[test]
+    fn an_observation_the_backend_can_make_reaches_the_reading() {
+        let world = world_from(VersionedAnswer::Observed(Box::new(observed(
+            "project:aikit",
+        ))));
+        let versioned = world
+            .versioned_world
+            .as_ref()
+            .expect("the observation reaches the reading");
+        assert_eq!(versioned.repository.branch.as_deref(), Some("main"));
+        assert!(world.warnings.iter().all(|w| !w.contains("versioned")));
+    }
+
+    /// A backend with nothing to say leaves the absence exactly as it was —
+    /// this capability changes nothing for a Project nobody can observe.
+    #[test]
+    fn a_backend_that_observes_nothing_leaves_an_honest_absence() {
+        let world = world_from(VersionedAnswer::Nothing);
+        assert!(world.versioned_world.is_none());
+        assert!(world.warnings.iter().all(|w| !w.contains("versioned")));
+    }
+
+    /// A provider that could not run is disclosed, not silently folded into
+    /// the same absence as "this Project has no versioned material".
+    #[test]
+    fn a_provider_that_could_not_run_is_disclosed_rather_than_read_as_absence() {
+        let world = world_from(VersionedAnswer::Failed);
+        assert!(world.versioned_world.is_none());
+        assert!(
+            world
+                .warnings
+                .iter()
+                .any(|w| w.contains("could not observe this Project")),
+            "{:?}",
+            world.warnings
+        );
+    }
+
+    /// Material belonging to another Project is refused: a provider may not
+    /// rename or rebind the canonical Project through this door.
+    #[test]
+    fn material_from_another_project_is_refused_and_disclosed() {
+        let world = world_from(VersionedAnswer::Observed(Box::new(observed(
+            "project:elsewhere",
+        ))));
+        assert!(world.versioned_world.is_none());
+        assert!(
+            world
+                .warnings
+                .iter()
+                .any(|w| w.contains("does not belong to this Project")),
+            "{:?}",
+            world.warnings
+        );
     }
 }

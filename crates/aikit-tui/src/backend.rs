@@ -269,6 +269,24 @@ pub trait PaletteBackend {
     /// never permission to derive a replacement identity from presentation.
     fn project_binding(&self) -> Result<Option<aikit_core::project::ProjectBinding>> { Ok(None) }
 
+    /// Optional already-observed versioned material World for this Project.
+    ///
+    /// The observation belongs to the backend, not to this crate and not to
+    /// the core: `aikit-core` is I/O-free by construction, and `aikit-tui`
+    /// cannot reach a provider because it does not depend on `aikit-adapters`.
+    /// So the shape is the same as [`PaletteBackend::project_binding`] — the
+    /// caller who *can* observe hands the observation over, and a backend that
+    /// cannot observe answers `None` rather than pretending.
+    ///
+    /// `None` is a real answer with two distinct meanings the reading keeps
+    /// apart: no provider was attached at all, versus a provider that looked
+    /// and found the Project is not under version control.
+    fn versioned_world(
+        &self,
+    ) -> Result<Option<aikit_core::resource::VersionedProjectWorld>> {
+        Ok(None)
+    }
+
     fn scope_layers(&self) -> Option<&[ScopeLayer]> {
         None
     }
