@@ -281,6 +281,40 @@ impl Glyphs {
         }
     }
 
+    /// Where a §5.1 composition step stands.
+    ///
+    /// Three marks, not two, because `open` and `not exposed` are different
+    /// facts: one is a choice waiting for the person, the other is a contract
+    /// this application boundary does not publish. Drawing them alike would
+    /// send someone to make a choice that cannot be made. Each is one cell in
+    /// both sets, so the spine's columns line up either way.
+    pub fn step_determined(&self) -> char {
+        if self.ascii {
+            '*'
+        } else {
+            '\u{25cf}'
+        }
+    }
+
+    /// See [`Self::step_determined`].
+    pub fn step_open(&self) -> char {
+        if self.ascii {
+            'o'
+        } else {
+            '\u{25cb}'
+        }
+    }
+
+    /// See [`Self::step_determined`]. Shares the `undeclared` dot deliberately:
+    /// nothing has been declared here and nothing can be.
+    pub fn step_not_exposed(&self) -> char {
+        if self.ascii {
+            '.'
+        } else {
+            '\u{b7}'
+        }
+    }
+
     /// The mark on a row the user has staged but not applied.
     pub fn staged(&self) -> char {
         if self.ascii {
