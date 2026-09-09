@@ -1,19 +1,24 @@
 //! Secret references for capsules, `central.security/v1` grammar.
 //!
-//! A capsule declares *where* a secret lives, never *what* it is. The four
-//! schemes are the ones the security map ratified, in preference order:
-//! `op://` (1Password item field), `keychain://` (macOS secure store),
-//! `varlock://` (varlock-sealed env file, the documents-side boundary), and
-//! `env://` — the legacy escape hatch, admissible only as an explicit
-//! environment import.
+//! A capsule declares *where* a secret lives, never *what* it is. The five
+//! schemes are the ones the security map ratified, in declared preference
+//! order per the 2026-09-09 owner decision (providers all optional):
+//! `varlock://` (documents-side boundary; the native default — its env file
+//! may seal values or hold `keychain()` refs backed by the macOS Keychain),
+//! `pass://` (zx2c4's gpg-backed password store, the free cross-machine
+//! adapter), `keychain://` (macOS secure store, signed consumers),
+//! `op://` (1Password item field, optional paid adapter), and `env://` —
+//! the legacy escape hatch, admissible only as an explicit environment
+//! import.
 //!
 //! Two laws live here:
 //!   * Refs are location only. No type in this module can hold material, so
 //!     a ref cannot leak a value by construction.
 //!   * Resolution is somebody else's job. [`SecretResolver`] is the seam;
 //!     implementations live in the adapter layer over the genuine store
-//!     boundaries (the OS keychain via `keyring`, the 1Password CLI, the
-//!     varlock CLI). The core never reimplements vault access.
+//!     boundaries (the pass(1) CLI, the OS keychain via `keyring`, the
+//!     1Password CLI, the varlock CLI). The core never reimplements vault
+//!     access.
 
 use std::fmt;
 
@@ -24,6 +29,7 @@ use crate::{AikitError, Result};
 
 pub const KEYCHAIN_SCHEME: &str = "keychain://";
 pub const ONEPASSWORD_SCHEME: &str = "op://";
+pub const PASS_SCHEME: &str = "pass://";
 pub const VARLOCK_SCHEME: &str = "varlock://";
 pub const ENV_SCHEME: &str = "env://";
 
@@ -57,6 +63,12 @@ pub enum SecretRef {
         vault: String,
         item: String,
         field: String,
+    },
+    /// A pass(1) entry: `pass://<store-path>`. Paths are hierarchical and
+    /// slash-separated (`providers/gemini-api-key`); every segment must be
+    /// non-empty and whitespace-free.
+    Pass {
+        path: String,
     },
     /// A varlock-sealed env file: `varlock://<path>/<NAME>`. The path may
     /// contain slashes (the split is at the last one); NAME must be
@@ -109,6 +121,21 @@ impl SecretRef {
                 field: parts[2].to_string(),
             });
         }
+        if let Some(rest) = value.strip_prefix(PASS_SCHEME) {
+            let valid = !rest.is_empty()
+                && !rest.starts_with('/')
+                && !rest.ends_with('/')
+                && !rest.chars().any(|c| c.is_whitespace())
+                && rest.split('/').all(|segment| !segment.is_empty());
+            if !valid {
+                return Err(invalid(format!(
+                    "pass ref must be {PASS_SCHEME}<store-path> with non-empty, whitespace-free segments"
+                )));
+            }
+            return Ok(Self::Pass {
+                path: rest.to_string(),
+            });
+        }
         if let Some(rest) = value.strip_prefix(VARLOCK_SCHEME) {
             // The split is at the LAST slash so the file path may itself
             // contain directories; NAME is the final segment.
@@ -147,7 +174,7 @@ impl SecretRef {
             });
         }
         Err(invalid(format!(
-            "unsupported secret ref scheme: expected {ONEPASSWORD_SCHEME}, {KEYCHAIN_SCHEME}, {VARLOCK_SCHEME} or {ENV_SCHEME}"
+            "unsupported secret ref scheme: expected {VARLOCK_SCHEME}, {PASS_SCHEME}, {KEYCHAIN_SCHEME}, {ONEPASSWORD_SCHEME} or {ENV_SCHEME}"
         )))
     }
 
@@ -156,6 +183,7 @@ impl SecretRef {
         match self {
             Self::Keychain { .. } => "keychain",
             Self::OnePassword { .. } => "onepassword",
+            Self::Pass { .. } => "pass",
             Self::Varlock { .. } => "varlock",
             Self::Env { .. } => "env",
         }
@@ -171,6 +199,7 @@ impl fmt::Display for SecretRef {
             Self::OnePassword { vault, item, field } => {
                 write!(f, "{ONEPASSWORD_SCHEME}{vault}/{item}/{field}")
             }
+            Self::Pass { path } => write!(f, "{PASS_SCHEME}{path}"),
             Self::Varlock { file, name } => write!(f, "{VARLOCK_SCHEME}{file}/{name}"),
             Self::Env { name } => write!(f, "{ENV_SCHEME}{name}"),
         }
@@ -205,7 +234,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_all_four_schemes() {
+    fn parses_all_five_schemes() {
         let keychain = SecretRef::parse("keychain://workcell/op-service-account").unwrap();
         assert_eq!(keychain.scheme(), "keychain");
         assert_eq!(
@@ -216,6 +245,10 @@ mod tests {
         let op = SecretRef::parse("op://Central/central-security/credential").unwrap();
         assert_eq!(op.scheme(), "onepassword");
         assert_eq!(op.to_string(), "op://Central/central-security/credential");
+
+        let pass = SecretRef::parse("pass://providers/gemini-api-key").unwrap();
+        assert_eq!(pass.scheme(), "pass");
+        assert_eq!(pass.to_string(), "pass://providers/gemini-api-key");
 
         let varlock = SecretRef::parse("varlock://secrets/providers.env/GEMINI_API_KEY").unwrap();
         assert_eq!(varlock.scheme(), "varlock");
@@ -237,6 +270,10 @@ mod tests {
         assert!(SecretRef::parse("keychain:// /acct").is_err());
         assert!(SecretRef::parse("op://vault/item").is_err());
         assert!(SecretRef::parse("op://vault//field").is_err());
+        assert!(SecretRef::parse("pass://").is_err());
+        assert!(SecretRef::parse("pass://lead/trail/").is_err());
+        assert!(SecretRef::parse("pass://a//b").is_err());
+        assert!(SecretRef::parse("pass://has space/x").is_err());
         assert!(SecretRef::parse("varlock://NO_NAME").is_err());
         assert!(SecretRef::parse("varlock:// /NAME").is_err());
         assert!(SecretRef::parse("varlock://f/9BAD").is_err());
@@ -251,6 +288,7 @@ mod tests {
         for text in [
             "keychain://svc/acct",
             "op://v/i/f",
+            "pass://providers/gemini-api-key",
             "varlock://config/providers.env/NAME",
             "env://NAME",
         ] {
@@ -269,9 +307,10 @@ mod tests {
         // Mechanical backstop for the location-only law: the Debug of every
         // variant contains only its declared segments.
         let rendered = format!(
-            "{:?} {:?} {:?} {:?}",
+            "{:?} {:?} {:?} {:?} {:?}",
             SecretRef::parse("keychain://svc/acct").unwrap(),
             SecretRef::parse("op://v/i/f").unwrap(),
+            SecretRef::parse("pass://providers/gemini-api-key").unwrap(),
             SecretRef::parse("varlock://config/providers.env/NAME").unwrap(),
             SecretRef::parse("env://NAME").unwrap(),
         );
@@ -281,6 +320,8 @@ mod tests {
             "v",
             "i",
             "f",
+            "providers",
+            "gemini-api-key",
             "config",
             "providers.env",
             "NAME",
