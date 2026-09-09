@@ -39,14 +39,17 @@
 //! `Workspace / continuity` is deliberately *not* in that list: the boundary
 //! does publish `SessionSpaceApplicationProjection`, so that step is `Open`
 //! rather than `NotExposed` — a real difference, and the reason the two
-//! standings are separate values rather than one "unavailable".
+//! standings are separate values rather than one "unavailable". It becomes
+//! `NotExposed` only when the roster itself could not be read, which is the
+//! one Continuity case where nothing can honestly be said.
 
 use aikit_core::context_resolution::Availability;
 use aikit_core::credential_world::ProviderRosterKnowledge;
-use aikit_core::ProjectWorldReadModel;
+use aikit_core::session_space_application::SessionSpaceAuthoredState;
 
 use crate::application::TuiState;
 use crate::layout::Glyphs;
+use crate::project_workspace_render::{SessionSpaceRoster, WorkspaceReading};
 
 /// The ten §5.1 steps, in spec order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,17 +137,18 @@ pub struct ComposeSpineRow {
 /// The whole spine for a resolved world, in spec order. Always ten rows: a
 /// step that cannot be answered still occupies its place, because a spine with
 /// gaps silently renumbers a person's sense of where they are.
-pub fn compose_spine(state: &TuiState, world: &ProjectWorldReadModel) -> Vec<ComposeSpineRow> {
+pub fn compose_spine(state: &TuiState, reading: WorkspaceReading<'_>) -> Vec<ComposeSpineRow> {
     ComposeStep::ALL
         .into_iter()
         .map(|step| ComposeSpineRow {
             step,
-            standing: standing_for(step, state, world),
+            standing: standing_for(step, state, reading),
         })
         .collect()
 }
 
-fn standing_for(step: ComposeStep, state: &TuiState, world: &ProjectWorldReadModel) -> StepStanding {
+fn standing_for(step: ComposeStep, state: &TuiState, reading: WorkspaceReading<'_>) -> StepStanding {
+    let world = reading.world;
     match step {
         ComposeStep::Intention => StepStanding::NotExposed(
             "no intention contract at this application boundary".into(),
@@ -261,10 +265,54 @@ fn standing_for(step: ComposeStep, state: &TuiState, world: &ProjectWorldReadMod
             StepStanding::Determined(detail)
         }
 
-        // The boundary does publish `SessionSpaceApplicationProjection`, so
-        // this is an open choice rather than an unexposed one.
+        // The boundary publishes `SessionSpaceApplicationProjection` — list,
+        // discover, show, open, stage, apply — so continuity is a real open
+        // choice, and this row reports the actual authored SessionSpaces
+        // rather than asserting that some exist.
+        //
+        // "Names this Project" is read from each space's own
+        // `project_contexts`, which is the space's authored claim about which
+        // Projects it carries context for. It is not a binding: no contract
+        // binds a SessionSpace to a resolved world, so the row never says one
+        // is bound.
         ComposeStep::Continuity => {
-            StepStanding::Open("SessionSpace selectable, none bound to this reading".into())
+            // An unreadable roster is not an absence of SessionSpaces. It is
+            // the one Continuity case where nothing can be said, so it is the
+            // one case that reads as unexposed rather than open.
+            let Some(spaces) = reading.session_spaces.observed() else {
+                let SessionSpaceRoster::Unreadable { reason } = reading.session_spaces else {
+                    unreachable!("observed() is None only for Unreadable")
+                };
+                return StepStanding::NotExposed(format!(
+                    "SessionSpace roster could not be read: {reason}"
+                ));
+            };
+
+            let project = &world.project.project;
+            let naming: Vec<&SessionSpaceAuthoredState> = spaces
+                .iter()
+                .filter(|space| space.project_contexts.contains_key(project))
+                .collect();
+            let discovered = spaces.len();
+
+            if naming.is_empty() {
+                return StepStanding::Open(if discovered == 0 {
+                    "no authored SessionSpace discovered".into()
+                } else {
+                    format!("{discovered} SessionSpace{} discovered, none names this Project", s(discovered))
+                });
+            }
+            let focused = naming.iter().filter(|space| space.focus.is_some()).count();
+            let mut detail = if let [only] = naming.as_slice() {
+                only.definition.id.as_resource_ref().as_str().to_string()
+            } else {
+                format!("{} name this Project", naming.len())
+            };
+            if focused > 0 {
+                detail.push_str(&format!(", {focused} focused"));
+            }
+            detail.push_str(", none bound to this reading");
+            StepStanding::Open(detail)
         }
 
         ComposeStep::Preview => StepStanding::Open(format!(
@@ -285,11 +333,11 @@ fn standing_for(step: ComposeStep, state: &TuiState, world: &ProjectWorldReadMod
 /// The Compose pane's spine block.
 pub fn compose_spine_lines(
     state: &TuiState,
-    world: &ProjectWorldReadModel,
+    reading: WorkspaceReading<'_>,
     glyphs: Glyphs,
 ) -> Vec<String> {
     let sep = glyphs.separator();
-    let rows = compose_spine(state, world);
+    let rows = compose_spine(state, reading);
     let determined = rows
         .iter()
         .filter(|row| matches!(row.standing, StepStanding::Determined(_)))
@@ -334,8 +382,15 @@ fn s(count: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use aikit_core::context::ContextDescriptor;
-    use aikit_core::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
+    use aikit_core::ProjectWorldReadModel;
+    use aikit_core::project::{
+        ProjectBinding, ProjectBindingLocator, ProjectConstituentRef, ProjectRef,
+    };
     use aikit_core::resource::ResourceRef;
+    use aikit_core::session_space::SessionSpaceRef;
+    use aikit_core::session_space_application::{
+        ContextResolutionBasis, ContextResolutionEvidence, SessionSpaceFocus,
+    };
 
     use super::*;
 
@@ -352,6 +407,59 @@ mod tests {
         )
     }
 
+    fn reading<'a>(
+        world: &'a ProjectWorldReadModel,
+        session_spaces: &'a SessionSpaceRoster,
+    ) -> WorkspaceReading<'a> {
+        WorkspaceReading::new(world, session_spaces)
+    }
+
+    fn observed(spaces: Vec<SessionSpaceAuthoredState>) -> SessionSpaceRoster {
+        SessionSpaceRoster::Observed(spaces)
+    }
+
+    /// An authored SessionSpace that claims context for `project`.
+    fn space(id: &str, project: &str, focused: bool) -> SessionSpaceAuthoredState {
+        let project = ProjectRef::parse(project).unwrap();
+        let binding = ProjectBinding::new(
+            project.clone(),
+            ProjectConstituentRef::parse("source:working-tree").unwrap(),
+            ProjectBindingLocator::Remote {
+                locator: "https://example.invalid/space".into(),
+            },
+        );
+        // `ContextResolutionRef` has no public constructor — it is
+        // content-addressed by the resolver that mints it — so the evidence is
+        // built through its own serde representation rather than by widening
+        // the owner's API for a test.
+        let evidence: ContextResolutionEvidence = serde_json::from_value(serde_json::json!({
+            "reference": "context-resolution/test",
+            "basis": ContextResolutionBasis {
+                project_binding: binding,
+                resolver_hash: "hash".into(),
+                catalog_revision: "catalog-1".into(),
+                scopes: Vec::new(),
+                context_sources: Vec::new(),
+                host: None,
+                context_activations: Vec::new(),
+                observed_source_resources: Vec::new(),
+            },
+            "provenance": [],
+        }))
+        .unwrap();
+        let mut state =
+            SessionSpaceAuthoredState::new(SessionSpaceRef::parse(id).unwrap());
+        state.project_contexts.insert(project, evidence);
+        if focused {
+            state.focus = Some(SessionSpaceFocus {
+                target: ResourceRef::parse("surface/terminal").unwrap(),
+                region: None,
+                provenance: Vec::new(),
+            });
+        }
+        state
+    }
+
     fn row(rows: &[ComposeSpineRow], step: ComposeStep) -> &ComposeSpineRow {
         rows.iter().find(|row| row.step == step).expect("a row per step")
     }
@@ -360,7 +468,7 @@ mod tests {
     /// are, so every step keeps its place whatever its standing.
     #[test]
     fn the_spine_is_always_ten_steps_in_spec_order() {
-        let rows = compose_spine(&TuiState::default(), &world());
+        let rows = compose_spine(&TuiState::default(), reading(&world(), &observed(Vec::new())));
         assert_eq!(rows.len(), 10);
         assert_eq!(
             rows.iter().map(|row| row.step).collect::<Vec<_>>(),
@@ -374,7 +482,7 @@ mod tests {
     /// not exist.
     #[test]
     fn open_and_not_exposed_are_different_standings_with_different_marks() {
-        let rows = compose_spine(&TuiState::default(), &world());
+        let rows = compose_spine(&TuiState::default(), reading(&world(), &observed(Vec::new())));
         let praxis = &row(&rows, ComposeStep::Praxis).standing;
         let continuity = &row(&rows, ComposeStep::Continuity).standing;
 
@@ -396,7 +504,7 @@ mod tests {
     /// Profile/SkillSet/Skill/Method picker exists.
     #[test]
     fn praxis_names_the_missing_boundary_contract_not_a_missing_feature() {
-        let rows = compose_spine(&TuiState::default(), &world());
+        let rows = compose_spine(&TuiState::default(), reading(&world(), &observed(Vec::new())));
         let StepStanding::NotExposed(detail) = &row(&rows, ComposeStep::Praxis).standing else {
             panic!("Praxis has no application-boundary contract and must read as NotExposed");
         };
@@ -410,7 +518,7 @@ mod tests {
     fn an_unexposed_step_still_reports_the_part_of_it_that_does_resolve() {
         let mut world = world();
         world.capability_horizon.actions = Vec::new();
-        let rows = compose_spine(&TuiState::default(), &world);
+        let rows = compose_spine(&TuiState::default(), reading(&world, &observed(Vec::new())));
         let detail = row(&rows, ComposeStep::Praxis).standing.detail().to_string();
         assert!(detail.contains("0 capabilities"));
         assert!(detail.contains("0 actions"));
@@ -421,7 +529,7 @@ mod tests {
     /// to `NotExposed` the spine has started lying about what exists.
     #[test]
     fn continuity_is_open_because_the_boundary_publishes_session_spaces() {
-        let rows = compose_spine(&TuiState::default(), &world());
+        let rows = compose_spine(&TuiState::default(), reading(&world(), &observed(Vec::new())));
         assert!(matches!(
             row(&rows, ComposeStep::Continuity).standing,
             StepStanding::Open(_)
@@ -434,7 +542,7 @@ mod tests {
     fn a_requested_agent_that_did_not_resolve_is_open_and_says_which_agent() {
         let mut world = world();
         world.actor_runtime.agent.requested = Some(ResourceRef::parse("agent:researcher").unwrap());
-        let rows = compose_spine(&TuiState::default(), &world);
+        let rows = compose_spine(&TuiState::default(), reading(&world, &observed(Vec::new())));
         let StepStanding::Open(detail) = &row(&rows, ComposeStep::Identity).standing else {
             panic!("an unresolved request is not a determined identity");
         };
@@ -442,13 +550,88 @@ mod tests {
         assert!(detail.contains("not resolved"));
     }
 
+    /// A SessionSpace naming this Project is real continuity to report — but
+    /// nothing binds one to a resolved world, so the row must never say bound.
+    #[test]
+    fn continuity_names_the_session_space_that_claims_this_project() {
+        let world = world();
+        let spaces = vec![space("session-space/alpha", "project:aikit", false)];
+        let rows = compose_spine(&TuiState::default(), reading(&world, &observed(spaces)));
+        let detail = row(&rows, ComposeStep::Continuity).standing.detail().to_string();
+        assert!(detail.contains("session-space/alpha"), "got {detail}");
+        assert!(detail.contains("none bound to this reading"));
+    }
+
+    /// A SessionSpace that exists but claims a different Project is not this
+    /// world's continuity, and must not be counted as if it were.
+    #[test]
+    fn a_session_space_for_another_project_is_not_this_worlds_continuity() {
+        let world = world();
+        let spaces = vec![space("session-space/other", "project:elsewhere", false)];
+        let rows = compose_spine(&TuiState::default(), reading(&world, &observed(spaces)));
+        let detail = row(&rows, ComposeStep::Continuity).standing.detail().to_string();
+        assert!(detail.contains("1 SessionSpace discovered, none names this Project"), "got {detail}");
+        assert!(!detail.contains("session-space/other"));
+    }
+
+    /// No SessionSpaces at all is a different reading from some existing but
+    /// none matching, and a person acts differently on each.
+    #[test]
+    fn an_empty_roster_reads_differently_from_a_non_matching_one() {
+        let world = world();
+        let empty = compose_spine(&TuiState::default(), reading(&world, &observed(Vec::new())));
+        let other = vec![space("session-space/other", "project:elsewhere", false)];
+        let non_matching = compose_spine(&TuiState::default(), reading(&world, &observed(other)));
+        assert_ne!(
+            row(&empty, ComposeStep::Continuity).standing,
+            row(&non_matching, ComposeStep::Continuity).standing
+        );
+        assert!(row(&empty, ComposeStep::Continuity)
+            .standing
+            .detail()
+            .contains("no authored SessionSpace discovered"));
+    }
+
+    #[test]
+    fn a_focused_session_space_says_so() {
+        let world = world();
+        let spaces = vec![
+            space("session-space/alpha", "project:aikit", true),
+            space("session-space/beta", "project:aikit", false),
+        ];
+        let rows = compose_spine(&TuiState::default(), reading(&world, &observed(spaces)));
+        let detail = row(&rows, ComposeStep::Continuity).standing.detail().to_string();
+        assert!(detail.contains("2 name this Project"));
+        assert!(detail.contains("1 focused"));
+    }
+
+    /// A roster that could not be read is not an absence of SessionSpaces.
+    /// This is the one Continuity case where nothing can honestly be said, and
+    /// it must not render as "no authored SessionSpace discovered".
+    #[test]
+    fn an_unreadable_roster_is_not_an_empty_one() {
+        let world = world();
+        let unreadable = SessionSpaceRoster::Unreadable {
+            reason: "application home unavailable".into(),
+        };
+        let rows = compose_spine(&TuiState::default(), reading(&world, &unreadable));
+        let standing = &row(&rows, ComposeStep::Continuity).standing;
+
+        assert!(matches!(standing, StepStanding::NotExposed(_)));
+        assert!(standing.detail().contains("application home unavailable"));
+        assert!(!standing.detail().contains("no authored SessionSpace discovered"));
+
+        let empty = compose_spine(&TuiState::default(), reading(&world, &observed(Vec::new())));
+        assert_ne!(standing, &row(&empty, ComposeStep::Continuity).standing);
+    }
+
     /// Progress counts only the steps a person can act on. Counting against
     /// all ten would report unexposed steps as work they had failed to do.
     #[test]
     fn progress_is_counted_against_available_steps_not_all_ten() {
-        let lines = compose_spine_lines(&TuiState::default(), &world(), Glyphs::unicode());
+        let lines = compose_spine_lines(&TuiState::default(), reading(&world(), &observed(Vec::new())), Glyphs::unicode());
         let heading = &lines[0];
-        let rows = compose_spine(&TuiState::default(), &world());
+        let rows = compose_spine(&TuiState::default(), reading(&world(), &observed(Vec::new())));
         let exposed = rows
             .iter()
             .filter(|row| !matches!(row.standing, StepStanding::NotExposed(_)))
@@ -464,7 +647,7 @@ mod tests {
     /// both sets and never drawn as literals.
     #[test]
     fn the_spine_renders_pure_ascii_under_ascii_glyphs() {
-        let lines = compose_spine_lines(&TuiState::default(), &world(), Glyphs::ascii());
+        let lines = compose_spine_lines(&TuiState::default(), reading(&world(), &observed(Vec::new())), Glyphs::ascii());
         for line in &lines {
             assert!(line.is_ascii(), "non-ASCII in ASCII spine row: {line}");
         }

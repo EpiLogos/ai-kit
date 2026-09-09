@@ -38,8 +38,11 @@ use crate::inspector_render::{self, InspectorSnapshot};
 use crate::layout::{Glyphs, Layout, Width};
 use crate::navigation::AmbientContext;
 use crate::navigator_groups::{self, NavigatorRow};
-use crate::project_workspace_render::workspace_section_label;
+use crate::project_workspace_render::{
+    workspace_section_label, SessionSpaceRoster, WorkspaceReading,
+};
 use crate::project_world_api::ProjectWorldApplicationService;
+use crate::session_space_service::SessionSpaceApplicationProjection;
 use crate::theme::Theme;
 use crate::v2_render;
 use crate::PaletteOutcome;
@@ -126,6 +129,12 @@ pub struct ApplicationSurfaceController {
     relation: Option<RelationReadModel>,
     project_world: Option<ProjectWorldReadModel>,
     ambient: AmbientContext,
+    /// Authored SessionSpaces as the application boundary disclosed them, read
+    /// alongside `project_world` and refreshed with it. A failed read is
+    /// carried as `Unreadable` rather than flattened to an empty roster: the
+    /// §5.1 spine's Continuity step must be able to tell "no SessionSpace
+    /// exists" from "we could not ask".
+    session_spaces: SessionSpaceRoster,
     graph_layout: Option<(GraphLayoutCacheKey, GraphLayout)>,
     /// Host glyph capability for the resting shell — the footer's keycap
     /// hints, field separators, cursors and elision marks — resolved exactly
@@ -189,6 +198,7 @@ impl ApplicationSurfaceController {
         };
         let mut runtime = TuiRuntime::new();
         let project_world;
+        let session_spaces;
         {
             let mut service = ApplicationService::new(backend);
             semantic = runtime.step(
@@ -197,6 +207,7 @@ impl ApplicationSurfaceController {
                 UiAction::SetQuery(request.initial_query.unwrap_or_default()),
             )?;
             project_world = service.project_world().ok();
+            session_spaces = discover_session_spaces(&service, project_world.as_ref());
         }
         let mut controller = Self {
             semantic,
@@ -204,6 +215,7 @@ impl ApplicationSurfaceController {
             relation: None,
             project_world,
             ambient,
+            session_spaces,
             graph_layout: None,
             shell_glyphs,
             graph_glyphs,
@@ -280,7 +292,7 @@ impl ApplicationSurfaceController {
                 frame,
                 &self.semantic,
                 &self.ambient,
-                world,
+                WorkspaceReading::new(world, &self.session_spaces),
                 self.shell_glyphs,
             );
         } else {
@@ -770,6 +782,8 @@ impl ApplicationSurfaceController {
             let mut service = ApplicationService::new(backend);
             self.semantic = self.runtime.step(&mut service, self.semantic.clone(), action)?;
             self.project_world = service.project_world().ok();
+            self.session_spaces =
+                discover_session_spaces(&service, self.project_world.as_ref());
         }
         self.refresh_relation(backend)?;
         self.refresh_inspector(backend)
@@ -1173,6 +1187,26 @@ fn tree_relation_lines<'a>(
     render_group("Context (contains this subject)", &context, &mut lines);
     render_group("Contained (members of this subject)", &contained, &mut lines);
     lines
+}
+
+/// Discover the authored SessionSpaces relevant to a resolved Project,
+/// falling back to the whole roster when no Project has resolved.
+///
+/// Scoped by Project when one is known so the Continuity step reports what
+/// belongs to this world rather than every SessionSpace on the machine. A
+/// failed read keeps the boundary's own reason rather than collapsing to an
+/// empty roster — "none exist" and "could not ask" are different facts and a
+/// person acts differently on each.
+fn discover_session_spaces(
+    service: &ApplicationService<'_>,
+    world: Option<&ProjectWorldReadModel>,
+) -> SessionSpaceRoster {
+    match service.session_space_discover(world.map(|world| &world.project.project)) {
+        Ok(spaces) => SessionSpaceRoster::Observed(spaces),
+        Err(error) => SessionSpaceRoster::Unreadable {
+            reason: error.to_string(),
+        },
+    }
 }
 
 fn ambient_context(descriptor: &aikit_core::ContextDescriptor) -> AmbientContext {

@@ -19,6 +19,7 @@ use aikit_core::context_resolution::Availability;
 use aikit_core::project::ProjectBindingLocator;
 use aikit_core::credential_world::{CredentialStatusKnowledge, ProviderRosterKnowledge};
 use aikit_core::resource::{Eligibility, SourceAuthority};
+use aikit_core::session_space_application::SessionSpaceAuthoredState;
 use aikit_core::{ContextSourceHit, ProjectWorldReadModel, ProjectWorldResource};
 
 use crate::application::{TuiState, WorkspaceSection};
@@ -41,16 +42,74 @@ pub fn workspace_section_label(section: WorkspaceSection) -> &'static str {
     }
 }
 
+/// Everything the Workspace renders from that is a *reading* rather than
+/// state.
+///
+/// Grouped into one borrow so the render path does not grow a parameter every
+/// time a section learns to consume another owner's read model — the Compose
+/// spine needs SessionSpaces, and the next step will need something else.
+/// Selection and staging stay in [`TuiState`]; nothing here can retrieve,
+/// resolve or mutate.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkspaceReading<'a> {
+    pub world: &'a ProjectWorldReadModel,
+    pub session_spaces: &'a SessionSpaceRoster,
+}
+
+impl<'a> WorkspaceReading<'a> {
+    pub fn new(
+        world: &'a ProjectWorldReadModel,
+        session_spaces: &'a SessionSpaceRoster,
+    ) -> Self {
+        Self { world, session_spaces }
+    }
+}
+
+/// What the application boundary could tell us about authored SessionSpaces.
+///
+/// `Observed` with an empty roster is a real, confirmed negative — there are
+/// none — and must never be confused with a roster that could not be read.
+/// `session_space_discover` is fallible, and folding its error into an empty
+/// Vec would make "no SessionSpace exists" and "we could not ask" render
+/// identically, which is the single distinction the §5.1 spine's three
+/// standings exist to keep. This mirrors
+/// [`aikit_core::credential_world::ProviderRosterKnowledge`] deliberately: the
+/// same shape for the same reason, so a reader who has met one knows the
+/// other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionSpaceRoster {
+    Observed(Vec<SessionSpaceAuthoredState>),
+    Unreadable { reason: String },
+}
+
+impl SessionSpaceRoster {
+    /// `Some` only when the roster was actually read (possibly empty). `None`
+    /// means unreadable — a caller must not treat that as an empty list.
+    pub fn observed(&self) -> Option<&[SessionSpaceAuthoredState]> {
+        match self {
+            Self::Observed(spaces) => Some(spaces),
+            Self::Unreadable { .. } => None,
+        }
+    }
+}
+
+impl Default for SessionSpaceRoster {
+    fn default() -> Self {
+        Self::Observed(Vec::new())
+    }
+}
+
 /// Section-specific Project-world lines. Empty means another canonical read model
 /// (currently Knowledge relations) owns the presentation for this section.
 pub fn project_world_lines(
     state: &TuiState,
-    world: &ProjectWorldReadModel,
+    reading: WorkspaceReading<'_>,
     glyphs: Glyphs,
 ) -> Vec<String> {
+    let world = reading.world;
     match state.workspace_section {
         WorkspaceSection::Worlds => context_lines(world, glyphs),
-        WorkspaceSection::Compose => compose_lines(state, world, glyphs),
+        WorkspaceSection::Compose => compose_lines(state, reading, glyphs),
         WorkspaceSection::Work => work_lines(state, world, glyphs),
         WorkspaceSection::History => history_lines(world, glyphs),
         WorkspaceSection::System => system_lines(world, glyphs),
@@ -141,9 +200,10 @@ fn context_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
 ///
 /// Order is by specificity: spine, then whatever the person actually has
 /// selected, then the effective actor/runtime roster, then staged changes.
-fn compose_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
+fn compose_lines(state: &TuiState, reading: WorkspaceReading<'_>, glyphs: Glyphs) -> Vec<String> {
     let sep = glyphs.separator();
-    let mut lines = compose_spine_lines(state, world, glyphs);
+    let world = reading.world;
+    let mut lines = compose_spine_lines(state, reading, glyphs);
 
     if let Some(selected) = state.selected.as_ref() {
         if let Some(resource) = selected_world_resource(world, selected) {
