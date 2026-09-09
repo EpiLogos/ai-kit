@@ -609,10 +609,33 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
         binary_directory.display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    // The markers this test waits for below are the Unicode spellings ("AIKit ·
+    // Workspace", "Relations · Tree", real box-drawing borders), and getting
+    // those bytes out of a real tmux popup depends on two independent locale
+    // reads, both of which are ambient (not passed through by `mux install`
+    // itself) and neither of which this process's own environment is
+    // guaranteed to set — a plain shell with no LANG/LC_* exported is a real
+    // local and CI configuration, not a tmux-version quirk:
+    //   1. The popped-up `aikit ui` process picks Unicode vs. its documented
+    //      ASCII-safe fallback from its own LC_ALL/LC_CTYPE/LANG
+    //      (`aikit_tui::layout::Glyphs::from_env`). Without a declared UTF-8
+    //      locale it correctly (by that module's own design) renders plain
+    //      ASCII instead, which then never matches the markers below.
+    //   2. Separately, tmux decides per attached *client* whether that client
+    //      can take UTF-8 output, from the locale the attaching process had
+    //      when it ran `attach-session` (below) — independent of what the
+    //      popped-up pane's own process sees. A client tmux believes is not
+    //      UTF-8-capable gets any wide character it is sent replaced with a
+    //      placeholder (`~`, `_`), which garbles the same markers even when
+    //      the popup itself rendered them correctly.
+    // Both are pinned explicitly so the assertions hold regardless of the
+    // invoking shell's ambient locale, the same way `TERM` is pinned below
+    // rather than trusted to be ambient.
     for (key, value) in [
         ("PATH", path.as_str()),
         ("AIKIT_HOME", home.path().to_str().unwrap()),
         ("HOME", home.path().to_str().unwrap()),
+        ("LC_ALL", "en_US.UTF-8"),
     ] {
         let output = server.command(&["set-environment", "-g", key, value]);
         assert!(
@@ -634,6 +657,11 @@ fn the_installed_alt_a_opens_the_real_surface_and_ctrl_t_switches_modes() {
             "install-test",
         ])
         .env("TERM", "xterm-256color")
+        // See the locale note above: this is the attaching client's own
+        // locale, which governs whether tmux treats *this* client as
+        // UTF-8-capable. It is a separate mechanism from the `LC_ALL` pushed
+        // onto the server above, and both are required.
+        .env("LC_ALL", "en_US.UTF-8")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
