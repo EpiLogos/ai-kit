@@ -2112,6 +2112,42 @@ impl PaletteBackend for Service {
         Ok(Some(binding.project_binding()?))
     }
 
+    /// Observe the Project's versioned material through the native provider.
+    ///
+    /// This is the layer that *can* look: `aikit-core` is I/O-free and
+    /// `aikit-tui` does not depend on `aikit-adapters`, so the observation has
+    /// to be made here and handed over. Before this existed nobody made it,
+    /// `ProjectWorldReadModel::versioned_world` was permanently `None`, and the
+    /// Compose preview told every user "no versioned material provider
+    /// attached to this reading" — an honest sentence about a socket nothing
+    /// was plugged into.
+    ///
+    /// Three absences stay distinguishable rather than collapsing into one:
+    ///
+    /// * no Project bound, or no ProjectCentral identity — nothing to observe
+    ///   *for*, so `None` with no warning;
+    /// * git unavailable on this machine — the provider says so through its own
+    ///   descriptor status, and that is an error the reading discloses;
+    /// * a Project that is genuinely not under version control — `None`,
+    ///   because "looked, and it is not a worktree" is a real answer and not a
+    ///   failure. The provider reports that as `versioned_world.git_failed`
+    ///   from its first probe, which is the same code a broken repository
+    ///   would produce; the split below prefers the benign reading for a
+    ///   *failed query* and reserves disclosure for a provider that could not
+    ///   run at all (`versioned_world.git_spawn_failed`). Sniffing git's
+    ///   stderr text to separate them would be worse than the coarse split.
+    fn versioned_world(&self) -> Result<Option<aikit_core::resource::VersionedProjectWorld>> {
+        let Some(root) = self.descriptor.project_root.as_deref() else { return Ok(None) };
+        let Some(binding) = self.project_binding()? else { return Ok(None) };
+        use aikit_core::resource::VersionedWorldProvider;
+        let provider = aikit_adapters::native_git::NativeGitProvider::new()?;
+        match provider.inspect(&binding.project, &root.to_string_lossy()) {
+            Ok(observed) => Ok(Some(observed)),
+            Err(error) if error.code() == "versioned_world.git_failed" => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     fn context(&self) -> &ContextDescriptor {
         &self.descriptor
     }
