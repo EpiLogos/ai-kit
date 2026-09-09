@@ -16,7 +16,10 @@ use crate::knowledge_source_pool::{
 use crate::knowledge_wiki_index::WikiSearchAddress;
 use crate::knowledge_wiki_provider::{SemanticWikiProviderStatus, WikiProvider};
 use crate::project_map::{ProjectLens, ProjectMap, ProjectMapEndpoint, ProjectMapStep};
-use crate::resource::{ProviderRef, ResourceKind, ResourceRef, SourceAuthority, SourceRef};
+use crate::resource::{
+    horizons_for_kind, parse_or_search_expression, resolve_path_identity, ProviderRef,
+    ResolveExpression, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
+};
 use crate::{AikitError, Result};
 
 pub const KNOWLEDGE_APPLICATION_VERSION: &str = "aikit.knowledge-application/v1";
@@ -71,6 +74,16 @@ pub struct KnowledgeRankingEvidence {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeSearchResult {
     pub query: String,
+    /// The operative Resolve expression this retrieval expressed through.
+    ///
+    /// Knowledge has no second query path: every hit below was produced by
+    /// evaluating this expression against the federated providers. A raw string
+    /// is still permitted as *input* — it is lowered to `@# (@ text)` — but the
+    /// retrieval itself is the resolver's, and this field is the receipt.
+    pub expression: ResolveExpression,
+    /// `resolve_path_identity(&expression)` — the one path identity, shared with
+    /// `aikit search` so learned evidence rides one path rather than two.
+    pub path_identity: String,
     pub hits: Vec<KnowledgeSearchHit>,
     #[serde(default)]
     pub absences: Vec<String>,
@@ -214,16 +227,131 @@ impl<'a> KnowledgeApplication<'a> {
         }
     }
 
+    /// Human/shell front for [`Self::resolve`].
+    ///
+    /// A plain typed string remains legitimate *input*; a second retrieval path
+    /// does not exist. This parses the input through the one operative grammar
+    /// and delegates — it performs no retrieval of its own. Input the grammar
+    /// cannot read is disclosed and lowered to a single ordinary search subject
+    /// rather than silently answering a different question.
     pub fn search(&self, query: &str, limit: usize) -> KnowledgeSearchResult {
+        let (expression, parse_absence) = match parse_or_search_expression(query) {
+            Ok(expression) => (expression, None),
+            Err(error) => (
+                ResolveExpression::ordinary_search(query),
+                Some(format!(
+                    "Resolve expression did not parse ({}); the input was read as one ordinary \
+                     search subject",
+                    error.message()
+                )),
+            ),
+        };
+        let mut result = self.resolve(&expression, limit);
+        // The caller asked in its own words; the receipt of *how* it was
+        // resolved rides `expression`/`path_identity` beside it.
+        result.query = query.into();
+        if let Some(absence) = parse_absence {
+            result.absences.insert(0, absence);
+        }
+        result
+    }
+
+    /// Canonical Knowledge retrieval: evaluate one operative Resolve expression
+    /// against the federated providers.
+    ///
+    /// This is the same contract `aikit search` resolves through — address
+    /// horizons narrow, relations combine, and the path identity is minted once.
+    /// Providers keep their own relevance; the expression decides what is asked.
+    pub fn resolve(&self, expression: &ResolveExpression, limit: usize) -> KnowledgeSearchResult {
+        let path_identity = resolve_path_identity(expression);
         if limit == 0 {
             return KnowledgeSearchResult {
-                query: query.into(),
+                query: expression.render(),
+                expression: expression.clone(),
+                path_identity,
                 hits: Vec::new(),
                 absences: Vec::new(),
             };
         }
-        let mut hits = Vec::new();
         let mut absences = Vec::new();
+        let mut hits = self.evaluate(expression, limit, &mut absences);
+
+        // ProjectMap is a federation fallback, not a richer operational
+        // address. If a provider-native hit for the same canonical ResourceRef
+        // is already present, keep that native address while leaving provider
+        // relevance to rank distinct resources and duplicate native providers.
+        let native_resources = hits
+            .iter()
+            .filter(|hit| !matches!(hit.address, KnowledgeAddress::ProjectMap(_)))
+            .map(|hit| hit.resource.to_string())
+            .collect::<HashSet<_>>();
+        hits.retain(|hit| {
+            !matches!(hit.address, KnowledgeAddress::ProjectMap(_))
+                || !native_resources.contains(&hit.resource.to_string())
+        });
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.resource.cmp(&right.resource))
+        });
+        let mut seen = HashSet::new();
+        hits.retain(|hit| seen.insert(hit.resource.to_string()));
+        hits.truncate(limit);
+        // A relation evaluates each side against the same provider field, so a
+        // shared absence is one absence, reported once.
+        let mut disclosed = HashSet::new();
+        absences.retain(|absence| disclosed.insert(absence.clone()));
+        KnowledgeSearchResult {
+            query: expression.render(),
+            expression: expression.clone(),
+            path_identity,
+            hits,
+            absences,
+        }
+    }
+
+    /// Walk the expression. The shape mirrors the Resource-field resolver:
+    /// subjects reach providers, an address narrows by horizon, a relation
+    /// combines, a frame groups.
+    fn evaluate(
+        &self,
+        expression: &ResolveExpression,
+        limit: usize,
+        absences: &mut Vec<String>,
+    ) -> Vec<KnowledgeSearchHit> {
+        match expression {
+            ResolveExpression::Subject { value } => self.subject_hits(value, limit, absences),
+            ResolveExpression::Address {
+                horizon,
+                expression,
+            } => {
+                let mut hits = self.evaluate(expression, limit, absences);
+                if let Some(horizon) = horizon {
+                    // The horizon table is the Resource field's own, read here
+                    // from the hit's canonical kind — not a second reading.
+                    hits.retain(|hit| horizons_for_kind(hit.kind).contains(horizon));
+                }
+                hits
+            }
+            ResolveExpression::Unary { expression, .. }
+            | ResolveExpression::Frame { expression } => self.evaluate(expression, limit, absences),
+            ResolveExpression::Binary { left, right, .. } => {
+                let mut hits = self.evaluate(left, limit, absences);
+                hits.extend(self.evaluate(right, limit, absences));
+                hits
+            }
+        }
+    }
+
+    /// Reach every federated provider for one subject term.
+    fn subject_hits(
+        &self,
+        query: &str,
+        limit: usize,
+        absences: &mut Vec<String>,
+    ) -> Vec<KnowledgeSearchHit> {
+        let mut hits = Vec::new();
 
         let mut unreadable: Vec<SourceRef> = Vec::new();
         if let Some(wiki) = &self.wiki {
@@ -417,33 +545,7 @@ impl<'a> KnowledgeApplication<'a> {
             absences.push("ProjectMap endpoint search unavailable: federation absent".into());
         }
 
-        // ProjectMap is a federation fallback, not a richer operational
-        // address. If a provider-native hit for the same canonical ResourceRef
-        // is already present, keep that native address while leaving provider
-        // relevance to rank distinct resources and duplicate native providers.
-        let native_resources = hits
-            .iter()
-            .filter(|hit| !matches!(hit.address, KnowledgeAddress::ProjectMap(_)))
-            .map(|hit| hit.resource.to_string())
-            .collect::<HashSet<_>>();
-        hits.retain(|hit| {
-            !matches!(hit.address, KnowledgeAddress::ProjectMap(_))
-                || !native_resources.contains(&hit.resource.to_string())
-        });
-        hits.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| left.resource.cmp(&right.resource))
-        });
-        let mut seen = HashSet::new();
-        hits.retain(|hit| seen.insert(hit.resource.to_string()));
-        hits.truncate(limit);
-        KnowledgeSearchResult {
-            query: query.into(),
-            hits,
-            absences,
-        }
+        hits
     }
 
     pub fn read(&self, address: &KnowledgeAddress) -> Result<KnowledgeReading> {
@@ -1315,7 +1417,7 @@ mod tests {
     use crate::knowledge_wiki_index::SemanticWikiIndex;
     use crate::knowledge_wiki_provider::SemanticWikiProvider;
     use crate::project_map::{ProjectMapBinding, ProjectMapEndpoint};
-    use crate::resource::SourceRevision;
+    use crate::resource::{AddressHorizon, SourceRevision};
 
     use super::*;
 
@@ -1424,6 +1526,86 @@ mod tests {
             .hits
             .iter()
             .any(|hit| hit.resource.as_str() == "source:spec"));
+    }
+
+    /// Law 3, one query path: the raw-string front is a front, not a second
+    /// retrieval path. It parses through the one operative grammar and
+    /// delegates, so operative syntax is *read* by Knowledge — an address
+    /// horizon narrows the federated result. A substring scanner over the
+    /// literal text `@2 Authentication` could not do this, so this case goes
+    /// red the moment a parallel path is reintroduced here.
+    #[test]
+    fn the_raw_string_front_parses_into_the_resolver_and_delegates() {
+        let index = wiki();
+        let wiki_provider = SemanticWikiProvider::new(&index);
+        let material = vec![material()];
+        let mut native = NativeSourcePoolProvider::new();
+        native.rebuild(&material).unwrap();
+        let app = KnowledgeApplication::new(FamiliarityContext {
+            project: None,
+            actor: None,
+            agency: None,
+            focus: None,
+        })
+        .with_wiki(wiki_provider)
+        .with_source_pool(&native, &material);
+
+        let plain = app.search("Authentication", 10);
+        assert_eq!(
+            plain.expression,
+            ResolveExpression::ordinary_search("Authentication"),
+            "a typed string is lowered into the contract, not handled beside it"
+        );
+        assert_eq!(
+            plain.path_identity,
+            resolve_path_identity(&ResolveExpression::ordinary_search("Authentication"))
+        );
+        assert!(
+            plain
+                .hits
+                .iter()
+                .any(|hit| hit.resource.as_str() == "wiki:node:auth"),
+            "the curated node is reachable"
+        );
+        assert!(
+            plain
+                .hits
+                .iter()
+                .any(|hit| hit.resource.as_str() == "source:spec"),
+            "the source is reachable"
+        );
+
+        // @2 is the reflection/meaning horizon: a KnowledgeNode participates,
+        // a KnowledgeSource does not.
+        let narrowed = app.search("@2 Authentication", 10);
+        assert_eq!(
+            narrowed.expression,
+            ResolveExpression::horizon(
+                AddressHorizon::H2,
+                ResolveExpression::subject("Authentication")
+            ),
+            "the address was parsed by the one grammar, not taken as literal text"
+        );
+        assert!(
+            narrowed
+                .hits
+                .iter()
+                .any(|hit| hit.resource.as_str() == "wiki:node:auth"),
+            "the @2 participant survives the address"
+        );
+        assert!(
+            !narrowed
+                .hits
+                .iter()
+                .any(|hit| hit.resource.as_str() == "source:spec"),
+            "the address narrowed the federated result: {:?}",
+            narrowed.hits
+        );
+
+        // The front adds nothing the canonical entry does not do.
+        let canonical = app.resolve(&parse_or_search_expression("@2 Authentication").unwrap(), 10);
+        assert_eq!(canonical.hits, narrowed.hits);
+        assert_eq!(canonical.path_identity, narrowed.path_identity);
     }
 
     #[test]

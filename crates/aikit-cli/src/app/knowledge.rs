@@ -15,7 +15,8 @@ use aikit_core::knowledge_wiki::{parse_wiki_objects, OkfWikiBundle, WikiObject};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
 use aikit_core::resource::{
-    ProviderRef, ResourceIndex, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
+    parse_or_search_expression, resolve_subjects, ProviderRef, ResolveExpression, ResourceIndex,
+    ResourceKind, ResourceRef, SourceAuthority, SourceRef,
 };
 use aikit_core::{
     FamiliarityContext, ForgetScope, KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation,
@@ -99,14 +100,20 @@ impl Service {
         operation(runtime, application)
     }
 
-    pub fn knowledge_search(&self, query: &str, limit: usize) -> Result<KnowledgeSearchResult> {
+    /// Canonical Knowledge retrieval on the production service: one operative
+    /// Resolve expression, evaluated by the one resolver contract.
+    pub fn knowledge_resolve(
+        &self,
+        expression: &ResolveExpression,
+        limit: usize,
+    ) -> Result<KnowledgeSearchResult> {
         let candidate_limit = if limit == 0 { 0 } else { limit.max(256) };
         let mut result = self.with_knowledge(|runtime, application| {
-            let mut result = application.search(query, candidate_limit);
+            let mut result = application.resolve(expression, candidate_limit);
             result.absences.extend(runtime.absences.clone());
             Ok(result)
         })?;
-        self.apply_learned_accessibility(query, &mut result)?;
+        self.apply_learned_accessibility(&resolve_subjects(expression), &mut result)?;
         result.hits.truncate(limit);
         if let Err(error) = self.knowledge_store().remember_search_hits(&result.hits) {
             result.absences.push(format!(
@@ -117,9 +124,19 @@ impl Service {
         Ok(result)
     }
 
+    /// Human/shell front over [`Self::knowledge_resolve`]: it parses the typed
+    /// input through the one operative grammar and delegates. `aikit knowledge
+    /// search` reaches retrieval only through here.
+    pub fn knowledge_search(&self, query: &str, limit: usize) -> Result<KnowledgeSearchResult> {
+        let expression = parse_or_search_expression(query)?;
+        let mut result = self.knowledge_resolve(&expression, limit)?;
+        result.query = query.into();
+        Ok(result)
+    }
+
     fn apply_learned_accessibility(
         &self,
-        query: &str,
+        subjects: &[&str],
         result: &mut KnowledgeSearchResult,
     ) -> Result<()> {
         let Some(store) = PaletteBackend::familiarity(self)? else {
@@ -176,8 +193,8 @@ impl Service {
         }
         if influenced {
             result.hits.sort_by(|left, right| {
-                exact_knowledge_hit(left, query)
-                    .cmp(&exact_knowledge_hit(right, query))
+                exact_knowledge_hit(left, subjects)
+                    .cmp(&exact_knowledge_hit(right, subjects))
                     .reverse()
                     .then_with(|| {
                         let left_score = left
@@ -222,7 +239,8 @@ impl Service {
             if runtime.project_map.endpoint(resource).is_some() {
                 return Ok(Some(KnowledgeAddress::ProjectMap(resource.clone())));
             }
-            let result = application.search(resource.as_str(), 256);
+            let result =
+                application.resolve(&ResolveExpression::ordinary_search(resource.as_str()), 256);
             Ok(result
                 .hits
                 .into_iter()
@@ -294,7 +312,7 @@ impl Service {
         // Explain keeps provider-native detail and learned ranking evidence separate.
         let resource = address.resource_ref();
         let ranking = self
-            .knowledge_search(resource.as_str(), 256)?
+            .knowledge_resolve(&ResolveExpression::ordinary_search(resource.as_str()), 256)?
             .hits
             .into_iter()
             .find(|hit| hit.resource == resource)
@@ -777,8 +795,11 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
-fn exact_knowledge_hit(hit: &aikit_core::KnowledgeSearchHit, query: &str) -> bool {
-    !query.is_empty()
-        && (hit.resource.as_str().eq_ignore_ascii_case(query)
-            || hit.label.eq_ignore_ascii_case(query))
+/// A hit is exact when it names one of the expression's own subject terms.
+fn exact_knowledge_hit(hit: &aikit_core::KnowledgeSearchHit, subjects: &[&str]) -> bool {
+    subjects.iter().any(|subject| {
+        !subject.is_empty()
+            && (hit.resource.as_str().eq_ignore_ascii_case(subject)
+                || hit.label.eq_ignore_ascii_case(subject))
+    })
 }

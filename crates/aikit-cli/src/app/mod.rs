@@ -2213,12 +2213,12 @@ impl PaletteBackend for Service {
         aikit_store::append_familiarity_observation(&self.index, observation)
     }
 
-    fn knowledge_search(
+    fn knowledge_resolve(
         &self,
-        query: &str,
+        expression: &aikit_core::resource::ResolveExpression,
         limit: usize,
     ) -> Result<Option<aikit_core::KnowledgeSearchResult>> {
-        Service::knowledge_search(self, query, limit).map(Some)
+        Service::knowledge_resolve(self, expression, limit).map(Some)
     }
 
     fn knowledge_address(

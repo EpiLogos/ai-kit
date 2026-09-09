@@ -864,10 +864,41 @@ fn text_score(query: &str, record: &ResourceRecord) -> Option<i64> {
     .then_some(1_000 - terms.len() as i64)
 }
 
-/// Native default horizon participation.  `oi.address-horizons` may add further
-/// comma/space-separated `0..5` positions without changing canonical identity.
-pub fn horizons_for_resource(record: &ResourceRecord) -> BTreeSet<AddressHorizon> {
-    let mut horizons = match record.descriptor.kind {
+/// Every subject term an expression addresses, sorted and deduplicated.
+///
+/// Consumers that must reach a provider before the expression is evaluated ask
+/// here rather than re-lexing the raw text: a subject is already a subject, and
+/// parsing it a second time would give punctuation inside it a second reading.
+pub fn resolve_subjects(expression: &ResolveExpression) -> Vec<&str> {
+    let mut subjects = Vec::new();
+    collect_resolve_subjects(expression, &mut subjects);
+    subjects.sort_unstable();
+    subjects.dedup();
+    subjects
+}
+
+fn collect_resolve_subjects<'a>(expression: &'a ResolveExpression, subjects: &mut Vec<&'a str>) {
+    match expression {
+        ResolveExpression::Subject { value } => subjects.push(value.as_str()),
+        ResolveExpression::Address { expression, .. }
+        | ResolveExpression::Unary { expression, .. }
+        | ResolveExpression::Frame { expression } => {
+            collect_resolve_subjects(expression, subjects);
+        }
+        ResolveExpression::Binary { left, right, .. } => {
+            collect_resolve_subjects(left, subjects);
+            collect_resolve_subjects(right, subjects);
+        }
+    }
+}
+
+/// Native default horizon participation for one ResourceKind.
+///
+/// This is the horizon table itself, separated from record-level extension so
+/// that a consumer holding only a kind — a Knowledge hit, say — reads the same
+/// law as the Resource field rather than inventing a second one.
+pub fn horizons_for_kind(kind: ResourceKind) -> BTreeSet<AddressHorizon> {
+    match kind {
         ResourceKind::KnowledgeSource
         | ResourceKind::KnowledgeSpace
         | ResourceKind::ContextSource => BTreeSet::from([AddressHorizon::H0]),
@@ -901,7 +932,13 @@ pub fn horizons_for_resource(record: &ResourceRecord) -> BTreeSet<AddressHorizon
         ResourceKind::Model | ResourceKind::Host => {
             BTreeSet::from([AddressHorizon::H1, AddressHorizon::H4])
         }
-    };
+    }
+}
+
+/// Native default horizon participation.  `oi.address-horizons` may add further
+/// comma/space-separated `0..5` positions without changing canonical identity.
+pub fn horizons_for_resource(record: &ResourceRecord) -> BTreeSet<AddressHorizon> {
+    let mut horizons = horizons_for_kind(record.descriptor.kind);
     if record.descriptor.kind == ResourceKind::Capability
         && crate::method::method_payload(&record.descriptor.description).is_some()
     {
