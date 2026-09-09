@@ -315,6 +315,28 @@ impl Glyphs {
         }
     }
 
+    /// The arrows named in a keycap hint for vertical movement.
+    ///
+    /// Written through `Glyphs` rather than as literals for the reason this
+    /// module exists: one such literal is all it takes for an ASCII rendering
+    /// to come out three-quarters Unicode.
+    pub fn step_up(&self) -> &'static str {
+        if self.ascii {
+            "Up"
+        } else {
+            "\u{2191}"
+        }
+    }
+
+    /// See [`Self::step_up`].
+    pub fn step_down(&self) -> &'static str {
+        if self.ascii {
+            "Down"
+        } else {
+            "\u{2193}"
+        }
+    }
+
     /// The mark on a row the user has staged but not applied.
     pub fn staged(&self) -> char {
         if self.ascii {

@@ -193,34 +193,20 @@ fn context_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
 /// that replaced them — `Information 9 visible sources` against the spine's
 /// `9 eligible sources, 4 planned retrievals`; `Actor/Runtime 6 effective or
 /// candidate` against `1 harness, 2 models, 2 available` — and keeping both
-/// meant two structures competing for one pane, with the person's own selected
-/// Resource pushed off the bottom to make room for the weaker one.
+/// meant two structures competing for one pane.
 /// [`crate::project_workspace::ComposeHorizon`] still owns the horizons as a
 /// grouping of the read model; it was never the spine.
 ///
-/// Order is by specificity: spine, then whatever the person actually has
-/// selected, then the effective actor/runtime roster, then staged changes.
+/// The selected Resource's own intent/effective detail is likewise not
+/// repeated here. It is already reachable two ways that do not cost the spine
+/// its rows — the wide shell's persistent Inspector column, and the `:` Explain
+/// overlay, which both render it from `explain_lines` — and the step in hand
+/// now discloses its own detail, which is what this pane is for.
 fn compose_lines(state: &TuiState, reading: WorkspaceReading<'_>, glyphs: Glyphs) -> Vec<String> {
     let sep = glyphs.separator();
     let world = reading.world;
     let mut lines = compose_spine_lines(state, reading, glyphs);
 
-    if let Some(selected) = state.selected.as_ref() {
-        if let Some(resource) = selected_world_resource(world, selected) {
-            lines.push(String::new());
-            lines.extend(resource_lines(resource, glyphs));
-        } else if let Some(source) = world
-            .information_horizon
-            .sources
-            .iter()
-            .find(|source| &source.resource == selected)
-        {
-            lines.push(String::new());
-            lines.extend(context_source_lines(source, glyphs));
-        }
-    }
-
-    lines.push(String::new());
     if let Some(agent) = world.actor_runtime.agent.effective.as_ref() {
         lines.push(format!("Agent         {}", agent.resource));
     }

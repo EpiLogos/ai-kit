@@ -3,6 +3,7 @@ mod common;
 use common::*;
 
 use aikit_tui::application::Overlay;
+use aikit_tui::compose_spine::ComposeStep;
 use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
 use aikit_tui::event::PaletteEvent;
 use aikit_tui::host::UiHost;
@@ -137,8 +138,10 @@ fn the_ascii_workspace_panes_carry_the_same_resolved_world() {
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
     let compose = rendered(&draw_width(&surface, 220, 30));
     assert!(compose.contains("Compose - intention to operative world"));
-    assert!(compose.contains("Intent        eligibility unresolved"));
-    assert!(compose.contains("Effective     available - 0 providers"));
+    // The step in hand discloses its own detail. Nothing in the spine, its
+    // cursor, its standing marks or the keycap hint may reach for a Unicode
+    // literal: the whole pane must stay byte-pure ASCII under ASCII glyphs.
+    assert!(compose.contains("Alt+Up/Down walks the spine"));
     assert!(
         compose.is_ascii(),
         "an ASCII Workspace pane still emitted non-ASCII"
@@ -190,10 +193,20 @@ fn wide_workspace_renders_context_compose_and_explain_from_one_world() {
     // contract here" — is pinned by `compose_spine`'s unit tests. The pane is
     // narrow and wraps, so only the labels (first token on their line) can be
     // asserted safely from a rendering.
-    // The selected Resource's own detail stays in view: it is the most
-    // specific thing in the pane and must outrank chrome for the rows.
-    assert!(compose.contains("Intent        eligibility unresolved"));
-    assert!(compose.contains("Effective     available · 0 providers"));
+    let selected_before_walk = surface.semantic().selected.clone();
+    // Alt+Down walks the spine; the step in hand discloses its own detail.
+    // The selected Resource's intent/effective detail is deliberately NOT
+    // repeated in this pane — the Inspector column and the `:` Explain overlay
+    // below both carry it, and duplicating it here cost the spine its rows.
+    surface.handle(&mut backend, alt(KeyCode::Down)).unwrap();
+    surface.handle(&mut backend, alt(KeyCode::Down)).unwrap();
+    assert_eq!(surface.semantic().compose_step, ComposeStep::Governance);
+    let governance = rendered(&draw_width(&surface, 220, 30));
+    assert!(governance.contains("Governance · Alt+"));
+
+    // Movement along the spine is not a second selection: the one canonical
+    // Resource selection is untouched by walking it.
+    assert_eq!(surface.semantic().selected, selected_before_walk);
 
     // Projection is retired as a top-level Workspace tab (spec §17: "Explain
     // is not a top-level destination in the final IA"); the same authored-
