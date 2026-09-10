@@ -212,6 +212,9 @@ fn context_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
     }
 
     lines.push(String::new());
+    lines.extend(git_lines(world, sep));
+
+    lines.push(String::new());
     lines.push(format!(
         "Revision catalog {} {sep} resolution {}{}",
         world.effective_revision.catalog_revision,
@@ -227,6 +230,96 @@ fn context_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
         lines.push(format!("Boundary {warning}"));
     }
     lines
+}
+
+/// The Worlds pane's repository rows, read from
+/// `ProjectWorldReadModel::versioned_world`.
+///
+/// `versioned_world` is `None` for reasons that must not collapse into one
+/// picture: nobody attached a versioned-material provider to this reading at
+/// all, or a provider looked and this Project genuinely is not under version
+/// control. Either way, rendering nothing here — or worse, a blank "clean"
+/// section that looks identical to a real clean repository — would tell the
+/// person less than they had a right to know. `compose_preview::material` and
+/// `compose_spine`'s `WorldsAndBounds` step already carry this exact
+/// discipline and this exact absence sentence for the Compose surfaces; this
+/// is the same fact read from the same field, so it keeps their words rather
+/// than inventing a second vocabulary for one repository.
+fn git_lines(world: &ProjectWorldReadModel, sep: &str) -> Vec<String> {
+    let Some(versioned) = world.versioned_world.as_ref() else {
+        return vec![format!(
+            "{:<8} no versioned material provider attached to this reading",
+            "Git"
+        )];
+    };
+    let repository = &versioned.repository;
+
+    // `detached` and `branch: None` are the same fact reported twice by the
+    // provider (see `NativeGitProvider::inspect`); there is no third case
+    // where a branch name exists but `detached` disagrees, so the fallback
+    // below is defensive, not a live branch.
+    let branch = repository
+        .branch
+        .as_deref()
+        .unwrap_or(if repository.detached { "detached" } else { "unnamed" });
+
+    let mut lines = vec![
+        format!("{:<8} {branch}", "Branch"),
+        format!("{:<8} {}", "Head", short_revision(repository.head.as_str())),
+    ];
+
+    lines.push(match repository.upstream.as_deref() {
+        None => format!("{:<8} no upstream tracked", "Upstream"),
+        Some(upstream) if repository.ahead == 0 && repository.behind == 0 => {
+            format!("{:<8} {upstream} {sep} up to date", "Upstream")
+        }
+        Some(upstream) => format!(
+            "{:<8} {upstream} {sep} {} ahead {sep} {} behind",
+            "Upstream", repository.ahead, repository.behind
+        ),
+    });
+
+    let working = &versioned.working;
+    lines.push(if working.is_clean() {
+        format!("{:<8} clean", "Working")
+    } else {
+        format!(
+            "{:<8} {} staged {sep} {} unstaged {sep} {} untracked {sep} {} conflicted",
+            "Working",
+            working.staged.len(),
+            working.unstaged.len(),
+            working.untracked.len(),
+            working.conflicted.len(),
+        )
+    });
+
+    // `worktrees` names every worktree the provider observed, including this
+    // one (`git worktree list` always does); only the *other*, linked
+    // worktrees are new information for a reader already looking at this one.
+    let linked = versioned
+        .worktrees
+        .iter()
+        .filter(|worktree| worktree.path != repository.worktree_root)
+        .map(|worktree| worktree.path.as_str())
+        .collect::<Vec<_>>();
+    if !linked.is_empty() {
+        lines.push(format!(
+            "{:<8} {} {sep} {}",
+            "Worktrees",
+            linked.len(),
+            linked.join(", ")
+        ));
+    }
+
+    lines
+}
+
+/// A revision short enough for a status line while remaining unambiguous in
+/// any repository this codebase's own scale would produce. Twelve hex
+/// characters of a SHA-1 is the same abbreviation length `git` itself favors
+/// once a repository has grown past a trivial number of objects.
+fn short_revision(revision: &str) -> &str {
+    revision.get(..12).unwrap_or(revision)
 }
 
 /// Compose's human question (spec §5) is "what could I build, and how far

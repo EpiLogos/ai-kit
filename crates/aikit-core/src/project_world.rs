@@ -247,6 +247,20 @@ impl ProjectWorldReadModel {
     }
 }
 
+/// What the System pane's Providers row says when a reading was produced
+/// without ever asking what secrets are configured.
+///
+/// This used to name the internal construction path instead of the fact a
+/// person on the other side of the pane actually needs — "disclose_project_world
+/// was given no credential roster; a caller attaches one with
+/// with_credential_world" is a note to whoever calls this function, not a
+/// sentence about the world being disclosed. The replacement says the same
+/// thing `ProjectWorldReadModel::empty`'s own credential reason already says
+/// in different words: nothing about credentials or providers has been
+/// checked for this reading, so their status is unknown rather than negative.
+const CREDENTIAL_WORLD_NOT_CHECKED_REASON: &str =
+    "no credential or provider check has been run for this reading yet";
+
 pub fn disclose_project_world(
     resolution: &ContextResolution,
     context_sources: &ContextSourceIndex,
@@ -292,7 +306,7 @@ pub fn disclose_project_world(
         },
         versioned_world: None,
         credential_world: CredentialWorldDisclosure::not_attempted(
-            "disclose_project_world was given no credential roster; a caller attaches one with with_credential_world",
+            CREDENTIAL_WORLD_NOT_CHECKED_REASON,
         ),
         warnings: resolution.warnings.clone(),
     }
@@ -553,5 +567,19 @@ mod tests {
             .with_versioned_world(versioned_world("project:other"))
             .unwrap_err();
         assert_eq!(error.code(), "project_world.versioned_project_mismatch");
+    }
+
+    /// The System pane renders `CredentialWorldDisclosure`'s `Unknown` reason
+    /// directly to a human (`project_workspace_render::credential_lines`:
+    /// `"Providers     not observed {sep} {reason}"`). That reason must read
+    /// as a sentence about the world, not a note aimed at whichever caller
+    /// forgot to attach a credential roster -- so this guards both the
+    /// absence of the two internal names the old text carried and the
+    /// presence of a plain statement of what is actually unknown.
+    #[test]
+    fn the_no_credential_check_reason_reads_as_plain_english() {
+        assert!(!CREDENTIAL_WORLD_NOT_CHECKED_REASON.contains("disclose_project_world"));
+        assert!(!CREDENTIAL_WORLD_NOT_CHECKED_REASON.contains("with_credential_world"));
+        assert!(CREDENTIAL_WORLD_NOT_CHECKED_REASON.contains("credential"));
     }
 }
