@@ -384,7 +384,7 @@ fn read_agent_set_entities(
     root: &Path,
     absences: &mut Vec<String>,
 ) -> (Vec<WikiNode>, Vec<WikiEdge>) {
-    let dir = root.join("Control/relations/agent-sets");
+    let dir = root.join("Control/agents/agent-sets");
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
     if !dir.is_dir() {
