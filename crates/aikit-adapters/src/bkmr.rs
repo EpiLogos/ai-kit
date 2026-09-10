@@ -258,6 +258,18 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
                 )
             })?;
         }
+        let ownership = self.db_path.with_extension("aikit-disposable-owner");
+        let owner_text = "aikit.bkmr-disposable/v1\n";
+        if self.db_path.exists() && std::fs::read_to_string(&ownership).ok().as_deref() != Some(owner_text) {
+            return Err(AikitError::new("knowledge.bkmr_not_disposable", "Existing bkmr database is not an AIKit-owned disposable view; adopt it through Central instead of rebuilding"));
+        }
+        if !ownership.exists() {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&ownership)
+                .map_err(|e| AikitError::new("knowledge.bkmr_owner_failed", e.to_string()))?;
+            file.write_all(owner_text.as_bytes()).and_then(|_| file.sync_all())
+                .map_err(|e| AikitError::new("knowledge.bkmr_owner_failed", e.to_string()))?;
+        }
         for suffix in ["", "-wal", "-shm"] {
             let candidate = PathBuf::from(format!("{}{}", self.db_path.display(), suffix));
             if candidate.exists() {

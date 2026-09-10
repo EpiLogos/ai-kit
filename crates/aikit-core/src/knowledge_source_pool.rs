@@ -179,6 +179,12 @@ pub struct SourceHit {
 }
 
 pub trait SourcePoolProvider {
+    /// A durable external owner reads fresh source/policy instead of cached bodies.
+    fn owns_source(&self, _source: &SourceRef) -> bool { false }
+    fn read_owned_source(&self, _source: &SourceRef) -> Result<SourceMaterial> {
+        Err(AikitError::new("knowledge.source_owner_unavailable", "Provider has no live source reader"))
+    }
+
     fn capabilities(&self) -> SourceProviderCapabilities;
 
     /// Build/rebuild derived provider state from already-authorised material.

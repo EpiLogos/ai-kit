@@ -41,6 +41,8 @@ pub enum SourceKind {
         /// without one have unresolved standing and cannot project.
         #[serde(default)]
         control_ground: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        central: Option<aikit_adapters::central_file_map::CentralLocation>,
     },
     Git {
         repository: String,
@@ -104,6 +106,8 @@ pub struct SnapshotRecord {
     pub digest: String,
     #[serde(default)]
     pub git_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub central_revision: Option<String>,
     pub skills: Vec<SnapshotSkill>,
 }
 
@@ -175,6 +179,10 @@ pub fn add_directory(
             format!("{} is not a directory", path.display()),
         ));
     }
+    let central = if control_ground {
+        aikit_adapters::central_file_map::discover_root(&path)
+            .map(|root| aikit_adapters::central_file_map::bind_directory(root, &path)).transpose()?
+    } else { None };
     write_new_spec(
         home,
         SourceSpec {
@@ -183,6 +191,7 @@ pub fn add_directory(
             kind: SourceKind::Directory {
                 path,
                 control_ground,
+                central,
             },
         },
     )
@@ -264,7 +273,15 @@ fn write_new_spec(home: &AikitHome, spec: SourceSpec) -> Result<SourceSpec> {
 }
 
 pub fn sync(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
-    let spec = load_spec(home, id)?;
+    let mut spec = load_spec(home, id)?;
+    if let SourceKind::Directory { path, control_ground: true, central } = &mut spec.kind {
+        if central.is_none() {
+            if let Some(root) = aikit_adapters::central_file_map::discover_root(path) {
+                *central = Some(aikit_adapters::central_file_map::bind_directory(root, path)?);
+                write_toml_atomic(&source_dir(home, id).join(SPEC_FILE), &spec)?;
+            }
+        }
+    }
     let source_dir_path = source_dir(home, id);
     let staging = source_dir_path.join(format!(".staging-{}", ulid::Ulid::generate()));
     fs::create_dir_all(&staging).map_err(|error| io("source.snapshot_failed", &staging, error))?;
@@ -308,6 +325,9 @@ pub fn sync(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
 
 fn prepare_source(spec: &SourceSpec, staging: &Path) -> Result<(PathBuf, Option<String>)> {
     match &spec.kind {
+        SourceKind::Directory { central: Some(location), .. } => {
+            Ok((aikit_adapters::central_file_map::stage_skill_tree(location, staging)?, None))
+        }
         SourceKind::Directory { path, .. } => Ok((path.clone(), None)),
         SourceKind::Git {
             repository,
@@ -485,6 +505,7 @@ fn build_snapshot(
         source: spec.id.clone(),
         digest,
         git_commit,
+        central_revision: fs::read_to_string(staging.join("central-tree-revision")).ok(),
         skills,
     };
     write_toml_atomic(&staging.join(SNAPSHOT_FILE), &record)?;
@@ -509,6 +530,7 @@ pub fn promote(
         )
     })?;
     let record = load_snapshot(home, id, &digest)?;
+    validate_central_snapshot(&load_spec(home, id)?, &record)?;
     let registry = snapshot_dir(home, id, &digest).join("registry");
     let mut trusted = 0;
     let requested: BTreeSet<&str> = trust_skills.iter().map(String::as_str).collect();
@@ -634,6 +656,7 @@ pub fn active_registries(home: &AikitHome) -> Result<Vec<(String, PathBuf)>> {
         let id = entry.file_name().to_string_lossy().to_string();
         let state = load_state(home, &id)?;
         if let Some(active) = state.active_snapshot {
+            validate_central_snapshot(&load_spec(home, &id)?, &load_snapshot(home, &id, &active)?)?;
             out.push((
                 id.clone(),
                 snapshot_dir(home, &id, &active).join("registry"),
@@ -646,6 +669,9 @@ pub fn active_registries(home: &AikitHome) -> Result<Vec<(String, PathBuf)>> {
 
 pub fn active_registry(home: &AikitHome, id: &str) -> Result<Option<PathBuf>> {
     let state = load_state(home, id)?;
+    if let Some(active) = &state.active_snapshot {
+        validate_central_snapshot(&load_spec(home, id)?, &load_snapshot(home, id, active)?)?;
+    }
     Ok(state
         .active_snapshot
         .map(|digest| snapshot_dir(home, id, &digest).join("registry")))
@@ -865,4 +891,14 @@ fn copy_permissions(from: &Path, to: &Path) -> Result<u32> {
 fn io(code: &'static str, path: &Path, error: std::io::Error) -> AikitError {
     AikitError::new(code, format!("{}: {error}", path.display()))
         .with("path", path.display().to_string())
+}
+
+fn validate_central_snapshot(spec:&SourceSpec,record:&SnapshotRecord)->Result<()> {
+    if let SourceKind::Directory { central: Some(location), .. } = &spec.kind {
+        let current=aikit_adapters::central_file_map::tree_revision(location)?;
+        if record.central_revision.as_deref()!=Some(current.as_str()) {
+            return Err(AikitError::new("source.central_changed",format!("Central skill source `{}` changed or its standing was revised; sync and review/promote a new snapshot before projection",spec.id)));
+        }
+    }
+    Ok(())
 }

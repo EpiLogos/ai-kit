@@ -39,6 +39,7 @@ pub(super) struct KnowledgeRuntime {
     material: Vec<SourceMaterial>,
     native_source: NativeSourcePoolProvider,
     bkmr: Option<BkmrSourcePoolProvider<SystemRunner>>,
+    central_map: Option<aikit_adapters::central_file_map::CentralMap<SystemRunner>>,
     code: Option<GitNexusCodeIndexProvider<SystemRunner>>,
     project_map: ProjectMap,
     absences: Vec<String>,
@@ -63,6 +64,9 @@ impl KnowledgeRuntime {
         }
         if let Some(provider) = &self.bkmr {
             application = application.with_source_pool(provider, &self.material);
+        }
+        if let Some(provider) = &self.central_map {
+            application = application.with_source_pool(provider, provider.metadata());
         }
         if let Some(provider) = &self.code {
             application = application.with_code(provider);
@@ -507,7 +511,19 @@ impl Service {
         let mut native_source = NativeSourcePoolProvider::new();
         native_source.rebuild(&material)?;
 
+        let central_map = central_root.map(|central_root| {
+            let scope = root.strip_prefix(central_root).ok().and_then(|relative| {
+                let mut parts=relative.components();
+                if parts.next()?.as_os_str()!="Work" { return None; }
+                parts.next()?.as_os_str().to_str().map(|name|serde_json::json!({"project":name}))
+            }).unwrap_or_else(||serde_json::json!({"scope":"all"}));
+            aikit_adapters::central_file_map::CentralMap::attach(
+                SystemRunner::new(), aikit_adapters::central_file_map::executable(),
+                central_root.to_path_buf(), scope,
+            )
+        });
         let mut bkmr = None;
+        if central_root.is_none() {
         if let Some(config) = self.active_provider_config("tool/search/bkmr") {
             let db = config.get("db").and_then(|value| value.as_str());
             if let Some(db) = db {
@@ -536,6 +552,7 @@ impl Service {
             }
         }
 
+        }
         let mut code = None;
         if let Some(project_id) = self.descriptor.project_id.as_ref() {
             let source = SourceRef::parse(format!("source:project-code:{project_id}"))?;
@@ -566,6 +583,7 @@ impl Service {
             material,
             native_source,
             bkmr,
+            central_map,
             code,
             project_map,
             absences,
