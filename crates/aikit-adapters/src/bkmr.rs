@@ -232,6 +232,14 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
     }
 
     fn rebuild(&mut self, material: &[SourceMaterial]) -> Result<()> {
+        // Central's persistent map is never a disposable SourcePool, even when
+        // a stale standalone configuration still points at that database.
+        let resolved=self.db_path.canonicalize().unwrap_or_else(|_|self.db_path.clone());
+        let parts:Vec<_>=resolved.components().collect();
+        if parts.windows(2).any(|p|p[0].as_os_str()==".central"&&p[1].as_os_str()=="bkmr") {
+            return Err(AikitError::new("knowledge.bkmr_owner_only","Central-owned bkmr storage cannot be rebuilt by AIKit"));
+        }
+
         if let Some(reason) = self.surface_reason() {
             return Err(AikitError::new(
                 "knowledge.bkmr_unavailable",

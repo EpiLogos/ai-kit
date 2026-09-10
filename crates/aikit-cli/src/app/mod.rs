@@ -2311,6 +2311,7 @@ impl AikitApplication for Service {
     }
 
     fn apply(&mut self, r: ApplyRequest) -> Result<AppliedGeneration> {
+        crate::skill_sources::validate_central_generations(&self.home)?;
         // 1. Persist the declaration to the scope's file, so the change survives
         //    the process and a later resolve reads it back.
         if !r.toggles.is_empty() {
@@ -2362,13 +2363,17 @@ impl AikitApplication for Service {
             ))
             .build(&context_dir, &view, &plans)?;
         self.prepare_codex_project_link(&context_dir)?;
+        crate::skill_sources::validate_central_generations(&self.home)?;
         let committed = staged.commit(base.as_ref())?;
+        let mut warnings = self.view.warnings.clone();
+        warnings.extend(crate::skill_sources::report_central_generation(
+            &self.home, &committed.id.to_string(), &context_dir));
         let effects = self.client_effects(&self.view);
 
         Ok(AppliedGeneration {
             id: committed.id,
             replaced: committed.replaced,
-            warnings: self.view.warnings.clone(),
+            warnings,
             effects,
         })
     }

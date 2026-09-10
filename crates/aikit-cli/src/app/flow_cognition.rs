@@ -113,6 +113,7 @@ pub struct FlowChangedSinceReceipt {
 struct KnowledgeFlowProvider<'a> {
     descriptor: FlowSourceDescriptor,
     material: &'a [aikit_core::knowledge_source_pool::SourceMaterial],
+    owner: Option<&'a dyn aikit_core::knowledge_source_pool::SourcePoolProvider>,
 }
 
 impl FlowProvider for KnowledgeFlowProvider<'_> {
@@ -151,6 +152,8 @@ impl FlowProvider for KnowledgeFlowProvider<'_> {
                 reason: "Flow source is not present in the source pool in this context".into(),
             });
         };
+        let live = self.owner.map(|owner| owner.read(&self.descriptor.source_ref)).transpose()?.flatten();
+        let material = live.as_ref().unwrap_or(material);
         if &material.binding.revision != revision {
             return Err(AikitError::new(
                 "flow.revision_conflict",
@@ -298,6 +301,7 @@ impl Service {
         let provider = KnowledgeFlowProvider {
             descriptor: descriptor.clone(),
             material: runtime.source_material(),
+            owner: runtime.owner_source_provider(),
         };
         let standing = bind_flow_for_act(
             &provider,
