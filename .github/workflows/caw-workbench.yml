@@ -8,34 +8,22 @@ concurrency:
   group: caw-branch-workbench
   cancel-in-progress: true
 jobs:
-  source:
+  toolchain:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/checkout@v7.0.1
-        with:
-          repository: EpiLogos/Actuation
-          path: .caw-owners/Actuation
-      - uses: actions/checkout@v7.0.1
-        with:
-          repository: EpiLogos/Central
-          path: .caw-owners/Central
-      - uses: actions/checkout@v7.0.1
-        with:
-          repository: EpiLogos/Workcell
-          path: .caw-owners/Workcell
-      - name: Export exact public source cuts
+      - name: Prepare locked native compiler and dependencies
         run: |
-          mkdir -p /tmp/caw-source
-          git rev-parse HEAD > /tmp/caw-source/ai-kit.sha
-          git archive HEAD | gzip > /tmp/caw-source/ai-kit.tar.gz
-          for owner in Actuation Central Workcell; do
-            git -C ".caw-owners/$owner" rev-parse HEAD > "/tmp/caw-source/$owner.sha"
-            git -C ".caw-owners/$owner" archive HEAD | gzip > "/tmp/caw-source/$owner.tar.gz"
-          done
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.98.0
+          cargo fetch --locked
+          mkdir -p /tmp/caw-toolchain
+          tar -czf /tmp/caw-toolchain/rust.tar.gz -C "$HOME/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu" bin lib libexec
+          tar -czf /tmp/caw-toolchain/registry.tar.gz -C "$HOME/.cargo" registry
       - uses: actions/upload-artifact@v4
         with:
-          name: caw-source-${{ github.sha }}
-          path: /tmp/caw-source
-          retention-days: 3
+          name: caw-toolchain
+          path: /tmp/caw-toolchain
+          compression-level: 0
+          retention-days: 1
