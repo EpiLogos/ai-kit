@@ -176,9 +176,33 @@ pub struct ApplicationSurfaceController {
     /// tests assert on instead of wall-clock timing.
     graph_layout_recomputes: u64,
     /// The wide-shell Inspector column's content for the current selection
-    /// (spec §2.1), refreshed alongside `relation` on every dispatch — see
-    /// [`Self::refresh_inspector`]. `None` when nothing is selected.
+    /// (spec §2.1), refreshed by [`Self::refresh_inspector`] whenever
+    /// `dispatch` finds the canonical selection actually changed (or the
+    /// dispatched Action could have mutated the backend — see
+    /// `action_may_change_world_state`). `None` when nothing is selected.
     inspector: Option<InspectorSnapshot>,
+    /// Test/debug witness for `dispatch`'s "only re-read what the Action can
+    /// actually change" contract, covering the four backend-wide readings
+    /// that are always re-read together — `project_world`, `session_spaces`,
+    /// `history` and `factory_work_entry` — because they share exactly one
+    /// staleness condition: whether the just-dispatched Action could have
+    /// mutated the backend at all (`action_may_change_world_state`). One
+    /// counter honestly witnesses all four rather than four counters that
+    /// would only ever move in lockstep. As with `graph_layout_recomputes`,
+    /// output stability cannot prove this: an unmutated backend queried
+    /// twice returns the same reading whether or not the second query ran,
+    /// so only a direct call-count witness can distinguish "skipped" from
+    /// "recomputed the same answer".
+    world_reads_refreshed: u64,
+    /// Witness for [`Self::refresh_relation`]'s actual provider fetch
+    /// (`relations_at_depth`) — not [`Self::sync_graph_layout`]'s own
+    /// separate cache, which `graph_layout_recomputes` already covers, and
+    /// which still runs on every dispatch because Resize/`GraphSetFilter`
+    /// change its inputs without changing the relation subject at all.
+    relation_refreshed: u64,
+    /// Witness for [`Self::refresh_inspector`]'s actual `explain`/
+    /// `explain_evidence` fetch.
+    inspector_refreshed: u64,
 }
 
 impl ApplicationSurfaceController {
@@ -234,6 +258,9 @@ impl ApplicationSurfaceController {
             graph_filter_editing: false,
             graph_layout_recomputes: 0,
             inspector: None,
+            world_reads_refreshed: 0,
+            relation_refreshed: 0,
+            inspector_refreshed: 0,
         };
         controller.refresh_relation(backend)?;
         controller.refresh_inspector(backend)?;
@@ -263,6 +290,22 @@ impl ApplicationSurfaceController {
     /// assertion.
     pub fn graph_layout_recompute_count(&self) -> u64 {
         self.graph_layout_recomputes
+    }
+
+    /// Test/debug witness for `dispatch`'s world-reads staleness contract.
+    /// See the `world_reads_refreshed` field doc comment.
+    pub fn world_reads_refresh_count(&self) -> u64 {
+        self.world_reads_refreshed
+    }
+
+    /// Test/debug witness for [`Self::refresh_relation`]'s actual fetch.
+    pub fn relation_refresh_count(&self) -> u64 {
+        self.relation_refreshed
+    }
+
+    /// Test/debug witness for [`Self::refresh_inspector`]'s actual fetch.
+    pub fn inspector_refresh_count(&self) -> u64 {
+        self.inspector_refreshed
     }
 
     pub fn project_world(&self) -> Option<&ProjectWorldReadModel> {
@@ -805,18 +848,73 @@ impl ApplicationSurfaceController {
         }
     }
 
+    /// Apply one `UiAction` and refresh exactly the derived readings it could
+    /// have changed — never the whole derived world.
+    ///
+    /// Every dispatch pays for `runtime.step` itself (the reducer, plus
+    /// whatever the settled effect chain needs — a query dispatch pays for
+    /// `search`, a selection dispatch pays for `contextual_actions`, and so
+    /// on: that cost is intrinsic to the Action and not this method's to
+    /// avoid). What *is* this method's to avoid is the five backend re-reads
+    /// that used to run unconditionally after every single one of those
+    /// steps, including a plain keystroke: re-resolving the Project World,
+    /// re-discovering SessionSpaces, re-reading history evidence, re-reading
+    /// the Factory entry, and re-fetching the relation neighbourhood/
+    /// Inspector for a selection that never moved.
+    ///
+    /// The four backend-wide readings (`project_world`/`session_spaces`/
+    /// `history`/`factory_work_entry`) are gated by
+    /// `action_may_change_world_state`: they can only differ from what they
+    /// already hold if this dispatch's effect chain actually mutated the
+    /// backend, which `reduce_tui`'s effect graph only ever does for
+    /// `InvokeAction`/`OpenSelection`/`ConfirmApply` (see that function's own
+    /// doc comment for the proof). Relation and Inspector are gated
+    /// instead by comparing the *subject* they depend on before and after
+    /// this dispatch — `relation_subject()`/`graph.depth` for Relation,
+    /// `semantic.selected` for Inspector — because guessing from the Action
+    /// variant alone would miss the one case that matters most: `SetQuery`
+    /// narrowing the result set out from under the current selection, which
+    /// changes `selected` (via `reconcile_read_model`) without the dispatched
+    /// Action ever being `Select`.
     fn dispatch<B: PaletteBackend>(&mut self, backend: &mut B, action: UiAction) -> Result<()> {
+        let world_reads_are_stale = action_may_change_world_state(&action);
+        let previous_relation_subject = self.relation_subject();
+        let previous_graph_depth = self.semantic.graph.depth;
+        let previous_selected = self.semantic.selected.clone();
+
         {
             let mut service = ApplicationService::new(backend);
             self.semantic = self.runtime.step(&mut service, self.semantic.clone(), action)?;
-            self.project_world = service.project_world().ok();
-            self.session_spaces =
-                discover_session_spaces(&service, self.project_world.as_ref());
-            self.history = BoundaryReading::from_result(service.history_evidence(None));
-            self.factory_work_entry = service.factory_work_entry();
+            if world_reads_are_stale {
+                self.world_reads_refreshed += 1;
+                self.project_world = service.project_world().ok();
+                self.session_spaces =
+                    discover_session_spaces(&service, self.project_world.as_ref());
+                self.history = BoundaryReading::from_result(service.history_evidence(None));
+                self.factory_work_entry = service.factory_work_entry();
+            }
         }
-        self.refresh_relation(backend)?;
-        self.refresh_inspector(backend)
+
+        if world_reads_are_stale
+            || self.relation_subject() != previous_relation_subject
+            || self.semantic.graph.depth != previous_graph_depth
+        {
+            self.refresh_relation(backend)?;
+        } else {
+            // The relation data itself is provably unchanged (same subject,
+            // same depth, and nothing ran that could have mutated the
+            // backend) — but the Graph layout still answers to viewport and
+            // graph-local filter, which this dispatch might have changed
+            // (Resize, GraphSetFilter) without touching the subject at all.
+            // `sync_graph_layout` is already its own cheap, cache-key-guarded
+            // step, so it stays unconditional.
+            self.sync_graph_layout();
+        }
+
+        if world_reads_are_stale || self.semantic.selected != previous_selected {
+            self.refresh_inspector(backend)?;
+        }
+        Ok(())
     }
 
     fn refresh_relation<B: PaletteBackend>(&mut self, backend: &mut B) -> Result<()> {
@@ -825,6 +923,7 @@ impl ApplicationSurfaceController {
             self.graph_layout = None;
             return Ok(());
         };
+        self.relation_refreshed += 1;
         let service = ApplicationService::new(backend);
         self.relation = service
             .relations_at_depth(&subject, self.semantic.graph.depth)
@@ -837,10 +936,11 @@ impl ApplicationSurfaceController {
     /// selection (`semantic.selected` — always the plain selection, unlike
     /// `relation_subject` which Graph can redirect to its own `graph.focus`:
     /// the Inspector answers "what is selected", not "what neighbourhood is
-    /// the Graph showing"). Called after every dispatched Action, exactly
-    /// like `refresh_relation`, so `draw_inspector` can treat `inspector` as
-    /// an up-to-date, already-computed read rather than reaching for the
-    /// backend itself at render time.
+    /// the Graph showing"). Called by `dispatch` whenever `selected` has
+    /// actually changed (or the dispatched Action could have mutated the
+    /// backend under an unchanged selection), so `draw_inspector` can treat
+    /// `inspector` as an up-to-date, already-computed read rather than
+    /// reaching for the backend itself at render time.
     ///
     /// Both `explain` and `explain_evidence` are read-only projections
     /// (`&self` on `ApplicationService`, no mutation) — the same ones
@@ -856,6 +956,7 @@ impl ApplicationSurfaceController {
             self.inspector = None;
             return Ok(());
         };
+        self.inspector_refreshed += 1;
         let service = ApplicationService::new(backend);
         let explain = service.explain(&subject).ok();
         let evidence = service.explain_evidence(&subject).ok();
@@ -1219,6 +1320,36 @@ fn tree_relation_lines<'a>(
     lines
 }
 
+/// Whether dispatching `action` can possibly leave the backend's Project
+/// World, SessionSpace roster, history evidence or Factory entry different
+/// from what `dispatch` already holds for them — the four readings
+/// `ApplicationSurfaceController::dispatch` re-reads together.
+///
+/// This is provable from the reducer's own effect graph, not guessed from
+/// the Action's name. `TuiApplicationService` has exactly three methods that
+/// take `&mut self` and can therefore mutate a backend at all:
+/// `apply_composition`, `observe_resource_use` and `invoke_action`. Every
+/// other method an effect can call — `search`, `contextual_actions`,
+/// `preview_composition`, `explain`, `relations_at_depth` — takes `&self`,
+/// so a well-typed implementation cannot mutate through it; Rust's own
+/// borrow checker is the enforcement, not a convention this function has to
+/// trust. Walking `reduce_tui`'s `effects.push(UiEffect::...)` sites shows
+/// `UiEffect::ApplyComposition`/`ObserveResourceUse`/`InvokeContextualAction`
+/// are reached only from the `ConfirmApply`/`OpenSelection`/`InvokeAction`
+/// arms respectively — every other arm's effects (`Search`,
+/// `LoadContextualActions`, `PreviewComposition`) settle into further
+/// actions (`SearchFinished`, `ContextualActionsLoaded`,
+/// `CompositionPreviewed`) that themselves push only more of the same
+/// non-mutating effects. So a `UiAction` outside this list, however deep the
+/// effect chain `runtime.step` settles for it, cannot have touched the
+/// backend's mutable state.
+fn action_may_change_world_state(action: &UiAction) -> bool {
+    matches!(
+        action,
+        UiAction::InvokeAction(_) | UiAction::OpenSelection | UiAction::ConfirmApply
+    )
+}
+
 /// Discover the authored SessionSpaces relevant to a resolved Project,
 /// falling back to the whole roster when no Project has resolved.
 ///
@@ -1273,12 +1404,26 @@ where
     controller.dispatch(backend, UiAction::Resize(size.width, size.height))?;
     loop {
         controller.draw_terminal(terminal)?;
-        let Some(event) = events.next()? else {
-            return Ok(PaletteOutcome::Closed);
-        };
-        match controller.handle(backend, event)? {
-            ApplicationSurfaceStep::Continue => {}
-            ApplicationSurfaceStep::Outcome(outcome) => return Ok(outcome),
+        // Drain every event the terminal has already handed the process
+        // before drawing again. Fast typing, a held key's autorepeat, or a
+        // paste can queue several events ahead of this loop reading them;
+        // dispatching each one against the terminal's own render cost on
+        // top would fall further behind with every additional queued key
+        // rather than catching up. `poll_ready` is a zero-timeout check —
+        // "is there already something waiting", never "wait to see if
+        // something arrives" — so it only shortens this inner loop, it
+        // never lengthens the ordinary wait for the next event.
+        loop {
+            let Some(event) = events.next()? else {
+                return Ok(PaletteOutcome::Closed);
+            };
+            match controller.handle(backend, event)? {
+                ApplicationSurfaceStep::Continue => {}
+                ApplicationSurfaceStep::Outcome(outcome) => return Ok(outcome),
+            }
+            if !events.poll_ready()? {
+                break;
+            }
         }
     }
 }

@@ -23,6 +23,18 @@ pub enum PaletteEvent {
 
 pub trait EventSource {
     fn next(&mut self) -> Result<Option<PaletteEvent>>;
+
+    /// Is another event already available, with no wait at all?
+    ///
+    /// This answers a different question than `next()`'s own poll: `next()`
+    /// is willing to wait up to a whole `poll_interval` to find out whether
+    /// *anything* is coming; this is the zero-latency check the event loop
+    /// uses, after handling one event, to decide whether the terminal has
+    /// already queued more (fast typing outrunning the loop, a held key's
+    /// autorepeat, a paste) before it draws. Answering `false` never costs
+    /// the caller more than the wait it would have paid anyway on the next
+    /// ordinary `next()` call.
+    fn poll_ready(&mut self) -> Result<bool>;
 }
 
 pub struct CrosstermEvents {
@@ -50,6 +62,15 @@ impl EventSource for CrosstermEvents {
             Event::Mouse(mouse) => Some(PaletteEvent::Mouse(mouse)),
             Event::Resize(cols, rows) => Some(PaletteEvent::Resize(cols, rows)),
             _ => Some(PaletteEvent::Idle),
+        })
+    }
+
+    fn poll_ready(&mut self) -> Result<bool> {
+        poll(Duration::ZERO).map_err(|e| {
+            AikitError::new(
+                "tui.terminal_read_failed",
+                format!("could not poll for a queued event: {e}"),
+            )
         })
     }
 }
@@ -80,5 +101,12 @@ impl ScriptedEvents {
 impl EventSource for ScriptedEvents {
     fn next(&mut self) -> Result<Option<PaletteEvent>> {
         Ok(self.queue.pop_front())
+    }
+
+    /// A script has no terminal to poll; "already available" is simply
+    /// "queued". This is what lets a test script assert draining behaviour
+    /// deterministically — no real clock, no real terminal, just a queue.
+    fn poll_ready(&mut self) -> Result<bool> {
+        Ok(!self.queue.is_empty())
     }
 }
