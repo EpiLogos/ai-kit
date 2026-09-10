@@ -6,12 +6,7 @@
 use aikit_adapters::runner::{CommandRunner, Output};
 use aikit_cli::continuity_disclosure::entity_disclosure_in;
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::PathBuf,
-    sync::Mutex,
-};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
 
 /// Answers `central.world.effective-sources` per invoked world_ref.
 struct WorldRunner {
@@ -153,7 +148,10 @@ fn disclosure_names_the_participants_present_in_a_project_context() {
         entity_disclosure_in(&runner, Some(&root), Some(&project)).expect("fail-open disclosure");
     let disclosure = disclosure.expect("inhabited world discloses participants");
     assert!(disclosure.starts_with("[continuity/entity-disclosure]"));
-    assert!(disclosure.contains("- nara: central:pasu:nara:local"), "{disclosure}");
+    assert!(
+        disclosure.contains("- nara: central:pasu:nara:local"),
+        "{disclosure}"
+    );
     // The Agent subject is Central's canonical paśu form
     // (`PasuRef::for_agent` — ctrl/src/pasu.rs:121), not the bare agent ref.
     assert!(
@@ -164,9 +162,14 @@ fn disclosure_names_the_participants_present_in_a_project_context() {
     // serialises as `ref` — never the `unprofiled` placeholder.
     assert!(disclosure.contains("profile/x"), "{disclosure}");
     assert!(!disclosure.contains("unprofiled"), "{disclosure}");
-    assert!(disclosure.contains("- agent-set: central:pasu:agent-set:world-operators"), "{disclosure}");
     assert!(
-        disclosure.contains("context binding: control:root (1 source(s) effective, root lineage by convention)"),
+        disclosure.contains("- agent-set: central:pasu:agent-set:world-operators"),
+        "{disclosure}"
+    );
+    assert!(
+        disclosure.contains(
+            "context binding: control:root (1 source(s) effective, root lineage by convention)"
+        ),
         "{disclosure}"
     );
     // Durable facts only — no volatile availability claims.
@@ -178,12 +181,17 @@ fn disclosure_names_the_participants_present_in_a_project_context() {
 fn the_root_context_discloses_without_a_binding_line() {
     let root = fixture_root();
     let runner = WorldRunner::with_answer("control:root", json!([]));
-    let disclosure =
-        entity_disclosure_in(&runner, Some(&root), Some(&root)).expect("fail-open");
+    let disclosure = entity_disclosure_in(&runner, Some(&root), Some(&root)).expect("fail-open");
     let disclosure = disclosure.expect("root context still names its inhabitants");
-    assert!(disclosure.contains("- nara: central:pasu:nara:local"), "{disclosure}");
+    assert!(
+        disclosure.contains("- nara: central:pasu:nara:local"),
+        "{disclosure}"
+    );
     assert!(!disclosure.contains("context binding:"), "{disclosure}");
-    assert!(runner.seen.lock().unwrap().is_empty(), "the root is the source side; no binding call");
+    assert!(
+        runner.seen.lock().unwrap().is_empty(),
+        "the root is the source side; no binding call"
+    );
 }
 
 #[test]
@@ -197,8 +205,7 @@ fn an_excluded_identity_source_withholds_the_nara_from_the_disclosure() {
                 "state": "excluded", "effective_revision": "1",
                 "propagation_path": ["project:Sealed", "control:root"]}]),
     );
-    let disclosure =
-        entity_disclosure_in(&runner, Some(&root), Some(&project)).expect("fail-open");
+    let disclosure = entity_disclosure_in(&runner, Some(&root), Some(&project)).expect("fail-open");
     let disclosure = disclosure.expect("other participants remain");
     assert!(
         !disclosure.contains("- nara:"),
@@ -217,24 +224,25 @@ fn an_excluded_identity_source_withholds_the_nara_from_the_disclosure() {
 }
 
 #[test]
-fn a_failed_binding_call_degrades_the_disclosure_fail_open() {
+fn a_failed_binding_call_withholds_participants_instead_of_broadening_context() {
     let root = fixture_root();
     let project = root.join("Work/Broken");
     fs::create_dir_all(&project).unwrap();
     let runner = WorldRunner::with_answer("nothing", json!([]))
         .failing_on("project:Broken")
         .failing_on("control:root");
-    let disclosure =
-        entity_disclosure_in(&runner, Some(&root), Some(&project)).expect("fail-open, never error");
-    let disclosure = disclosure.expect("uncontextualised disclosure still names participants");
-    assert!(disclosure.contains("- nara: central:pasu:nara:local"), "{disclosure}");
-    assert!(!disclosure.contains("context binding:"), "{disclosure}");
+    let error = entity_disclosure_in(&runner, Some(&root), Some(&project))
+        .expect_err("unavailable owner policy must withhold participant material");
+    assert!(error.contains("participant context withheld"), "{error}");
+    assert!(!error.contains("central:pasu:nara:local"), "{error}");
+    assert!(!error.contains("central:pasu:agent:agent:x"), "{error}");
 }
 
-/// A project whose world declaration exists but cannot be read must NOT get
-/// the root lineage. The participants still disclose; the binding does not.
+/// An unreadable declared policy is not an absent policy and cannot authorise
+/// root inheritance. The composed hook reports this refusal as a warning; the
+/// turn remains fail-open, but participant disclosure does not broaden.
 #[test]
-fn an_unreadable_world_declaration_is_not_treated_as_undeclared() {
+fn an_unreadable_world_declaration_withholds_and_never_reads_root_lineage() {
     let root = fixture_root();
     let project = root.join("Work/Corrupt");
     fs::create_dir_all(&project).unwrap();
@@ -245,27 +253,19 @@ fn an_unreadable_world_declaration_is_not_treated_as_undeclared() {
                 "propagation_path": ["control:root"]}]),
     )
     .unreadable_on("project:Corrupt", "world relation record is malformed");
-
-    let disclosure = entity_disclosure_in(&runner, Some(&root), Some(&project))
-        .expect("fail-open")
-        .expect("participants still disclose");
-
-    assert!(
-        !disclosure.contains("context binding:"),
-        "no binding is assumed from an unreadable declaration: {disclosure}"
+    let error = entity_disclosure_in(&runner, Some(&root), Some(&project))
+        .expect_err("malformed policy must not disclose uncontextualised participants");
+    assert!(error.contains("participant context withheld"), "{error}");
+    let seen = runner.seen.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        1,
+        "unreadable policy must never try root fallback"
     );
-    assert!(
-        !disclosure.contains("root lineage by convention"),
-        "the root lineage is not inherited: {disclosure}"
-    );
-    assert!(
-        disclosure.contains("could not be read or validated"),
-        "the failure policy is disclosed: {disclosure}"
-    );
-    assert!(
-        disclosure.contains("- agent: central:pasu:agent:agent:x"),
-        "{disclosure}"
-    );
+    let request: Value = serde_json::from_str(seen[0].last().unwrap()).unwrap();
+    assert_eq!(request["world_ref"], "project:Corrupt");
+    assert!(!error.contains("central:pasu:nara:local"), "{error}");
+    assert!(!error.contains("central:pasu:agent:agent:x"), "{error}");
 }
 
 #[test]
