@@ -25,7 +25,7 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use crate::application::{
     selected_contextual_action, visible_contextual_actions, Overlay, PresentationMode,
     RelationReadModel, RelationView, TuiApplicationService, TuiRuntime, TuiState, UiAction,
-    WorkspaceSection,
+    UiEffect, WorkspaceSection,
 };
 use crate::application_service::ApplicationService;
 use crate::backend::PaletteBackend;
@@ -237,6 +237,15 @@ impl ApplicationSurfaceController {
                 &mut service,
                 semantic,
                 UiAction::SetQuery(request.initial_query.unwrap_or_default()),
+            )?;
+            // Observe the host's working environments once, at the one moment
+            // that is allowed to be slow. Every later reading comes from the
+            // backend's cache, and is refreshed only when this application
+            // itself opened or focused something — never from a keystroke.
+            semantic = runtime.settle(
+                &mut service,
+                semantic,
+                vec![UiEffect::ObserveWorkingEnvironments],
             )?;
             project_world = service.project_world().ok();
             session_spaces = discover_session_spaces(&service, project_world.as_ref());

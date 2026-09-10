@@ -195,6 +195,30 @@ impl PaletteBackend for V2SurfaceService<'_> {
     fn open_source(&mut self, id: &CapsuleId) -> Result<PathBuf> {
         <Service as PaletteBackend>::open_source(self.service, id)
     }
+
+    fn working_environments(
+        &self,
+    ) -> Result<Option<Vec<aikit_core::working_environment::WorkingEnvironmentObservation>>> {
+        <Service as PaletteBackend>::working_environments(self.service)
+    }
+
+    fn working_environment_subjects(&self) -> Result<Vec<aikit_core::resource::ResourceRef>> {
+        <Service as PaletteBackend>::working_environment_subjects(self.service)
+    }
+
+    fn act_in_working_environment(
+        &mut self,
+        provider: &aikit_core::resource::ResourceRef,
+        subject: &aikit_core::resource::ResourceRef,
+        operation: aikit_tui::live_field::WorkingEnvironmentOperation,
+    ) -> Result<aikit_tui::live_field::WorkingEnvironmentOutcome> {
+        <Service as PaletteBackend>::act_in_working_environment(
+            self.service,
+            provider,
+            subject,
+            operation,
+        )
+    }
 }
 
 /// Build a terminal profile from an environment lookup and the `--fullscreen`
