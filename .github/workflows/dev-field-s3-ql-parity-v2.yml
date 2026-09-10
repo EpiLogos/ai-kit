@@ -17,6 +17,13 @@ jobs:
           ref: agent/261-development-field-s3
           fetch-depth: 0
 
+      - name: Compose live main basis
+        run: |
+          git fetch origin main
+          git config user.name Epii
+          git config user.email EpiLogos@users.noreply.github.com
+          git merge --no-edit origin/main
+
       - name: Install Rust 1.98
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -37,14 +44,12 @@ jobs:
           bash scripts/verify
           git diff --check
 
-      - name: Commit verified parity correction
+      - name: Commit verified live-basis correction
         run: |
           rm -f .github/dev-field-s3-ql-parity.py
           rm -f .github/workflows/dev-field-s3-ql-parity.yml
           rm -f .github/workflows/dev-field-s3-ql-parity-v2.yml
           git diff --check
-          git config user.name Epii
-          git config user.email EpiLogos@users.noreply.github.com
           git add -A
           git commit -m 'development-field: align QL S6 carrier parity (#261)'
           git push origin HEAD:agent/261-development-field-s3
