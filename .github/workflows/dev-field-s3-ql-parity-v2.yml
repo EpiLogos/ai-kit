@@ -22,7 +22,26 @@ jobs:
           git fetch origin main
           git config user.name Epii
           git config user.email EpiLogos@users.noreply.github.com
+          set +e
           git merge --no-edit origin/main
+          merge_status=$?
+          set -e
+          if [ "$merge_status" -ne 0 ]; then
+            conflicted="$(git diff --name-only --diff-filter=U | sort)"
+            expected="$(printf '%s\n%s\n' \
+              'crates/aikit-adapters/src/projectcentral.rs' \
+              'crates/aikit-core/src/projectcentral.rs' | sort)"
+            if [ "$conflicted" != "$expected" ]; then
+              echo "Unexpected live-main merge conflicts:"
+              printf '%s\n' "$conflicted"
+              git status --short
+              exit 1
+            fi
+            # #269 moved these owner seams out of the old ProjectCentral modules;
+            # they are not part of S3, so preserve current main's deletion.
+            git rm crates/aikit-adapters/src/projectcentral.rs crates/aikit-core/src/projectcentral.rs
+            git commit --no-edit
+          fi
 
       - name: Install Rust 1.98
         uses: dtolnay/rust-toolchain@stable
