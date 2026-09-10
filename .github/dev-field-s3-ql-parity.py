@@ -1,11 +1,10 @@
 from pathlib import Path
-import re
 
 core_path = Path("crates/aikit-core/src/resource/development_field.rs")
 text = core_path.read_text()
 
 const_anchor = 'pub const DEVELOPMENT_FIELD_BINDING_ANNOTATION: &str = "aikit.development-field-binding";\n'
-const_insert = const_anchor + '''pub const QL_STRUCTURAL_CARRIER_CONTRACT_REF: &str = "ql.structural-carrier/1.0.0";\npub const QL_STRUCTURAL_CARRIER_CONTRACT_VERSION: &str = "1.0.0";\npub const QL_SHAPE_CONTRACT_REF: &str = "ql.shape/1.0.0";\npub const QL_STRUCTURAL_CONTRACT_REF: &str = "ql.structural/2.0.0";\n'''
+const_insert = const_anchor + 'pub const QL_STRUCTURAL_CARRIER_CONTRACT_REF: &str = "ql.structural-carrier/1.0.0";\n'
 if "QL_STRUCTURAL_CARRIER_CONTRACT_REF" not in text:
     if const_anchor not in text:
         raise SystemExit("Development Field constant anchor not found")
@@ -13,8 +12,8 @@ if "QL_STRUCTURAL_CARRIER_CONTRACT_REF" not in text:
 
 start = text.index("/// One QL-owned shape address bound to an owner-native ResourceRef.")
 end = text.index("/// A reference into Workcell-owned material state.")
-new_block = r'''/// QL coordinate face carried exactly as structural identity, without importing
-/// QL's shape algebra into AIKit.
+new_block = r'''/// QL coordinate face carried as structural identity, without importing QL's
+/// shape algebra into AIKit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum QlShapeFaceCarrier {
@@ -22,8 +21,8 @@ pub enum QlShapeFaceCarrier {
     Conjugate,
 }
 
-/// Portable coordinate identity used by the accepted QL structural-carrier
-/// contract. AIKit validates only the stable 0..5 coordinate aperture.
+/// Portable coordinate identity from the accepted QL structural-carrier seam.
+/// AIKit validates only the stable 0..5 coordinate aperture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QlShapeCoordinateCarrier {
     pub position: u8,
@@ -43,7 +42,7 @@ impl QlShapeCoordinateCarrier {
 }
 
 /// Portable view of QL's `ShapeMemberBinding = StructuralParticipation`.
-/// `subject_ref` remains opaque QL/caller identity; the coordinate is structural
+/// `subject_ref` remains opaque caller identity and the coordinate is structural
 /// participation only, never a semantic assertion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QlShapeMemberBinding {
@@ -59,10 +58,8 @@ pub struct QlShapeAddressCarrier {
 }
 
 /// One caller-attributable semantic determination at a QL address.
-///
-/// The accepted QL S6 contract requires evidence for an asserted relation. AIKit
-/// preserves that attribution but deliberately does not decide whether the
-/// relation is true or whether the address belongs to a particular QL field.
+/// QL requires evidence for an asserted relation; AIKit preserves that
+/// attribution but does not decide whether the relation is true.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QlShapeRelationBinding {
     pub address: QlShapeAddressCarrier,
@@ -72,7 +69,7 @@ pub struct QlShapeRelationBinding {
 }
 
 /// Opaque caller/source/standing provenance from QL's accepted ShapeBinding.
-/// These are QL-carrier strings rather than AIKit authority claims.
+/// Standing remains caller-world data, not an AIKit authority claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QlCallerProvenance {
     pub caller_ref: String,
@@ -98,7 +95,7 @@ pub struct QlShapeBindingCarrier {
     #[serde(default)]
     pub basis_refs: Vec<String>,
     #[serde(default)]
-    pub member_bindings: Vec<QlShapeMemberBinding>,
+    pub members: Vec<QlShapeMemberBinding>,
     #[serde(default)]
     pub relation_bindings: Vec<QlShapeRelationBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,7 +104,7 @@ pub struct QlShapeBindingCarrier {
     pub operator_ref: Option<String>,
     #[serde(default)]
     pub return_refs: Vec<String>,
-    pub caller_provenance: QlCallerProvenance,
+    pub provenance: QlCallerProvenance,
 }
 
 fn require_ql_carrier_ref(value: &str, field: &'static str) -> Result<()> {
@@ -145,7 +142,7 @@ impl QlShapeBindingCarrier {
         for reference in &self.basis_refs {
             require_ql_carrier_ref(reference, "basis_ref")?;
         }
-        for member in &self.member_bindings {
+        for member in &self.members {
             require_ql_carrier_ref(&member.subject_ref, "member subject_ref")?;
             member.coordinate.validate()?;
         }
@@ -172,9 +169,9 @@ impl QlShapeBindingCarrier {
         for reference in &self.return_refs {
             require_ql_carrier_ref(reference, "return_ref")?;
         }
-        require_ql_carrier_ref(&self.caller_provenance.caller_ref, "caller_ref")?;
-        require_ql_carrier_ref(&self.caller_provenance.source_ref, "source_ref")?;
-        require_ql_carrier_ref(&self.caller_provenance.standing_ref, "standing_ref")?;
+        require_ql_carrier_ref(&self.provenance.caller_ref, "caller_ref")?;
+        require_ql_carrier_ref(&self.provenance.source_ref, "source_ref")?;
+        require_ql_carrier_ref(&self.provenance.standing_ref, "standing_ref")?;
         Ok(())
     }
 }
@@ -182,10 +179,10 @@ impl QlShapeBindingCarrier {
 '''
 text = text[:start] + new_block + text[end:]
 
-pattern = re.compile(
-    r'''    #\[test\]\n    fn partial_ql_shape_binding_is_carried_without_semantic_inference\(\) \{.*?\n    \}\n\n(?=    #\[test\]\n    fn bounded_read_reports_explicit_relations_and_unknown_refs_without_guessing)''',
-    re.S,
-)
+old_test_start = "    #[test]\n    fn partial_ql_shape_binding_is_carried_without_semantic_inference() {"
+next_test = "    #[test]\n    fn bounded_read_reports_explicit_relations_and_unknown_refs_without_guessing() {"
+test_start = text.index(old_test_start)
+test_end = text.index(next_test, test_start)
 replacement = r'''    #[test]
     fn accepted_ql_shape_binding_round_trips_without_semantic_edge_inference() {
         let mut record = carrier("central:tier:2", DevelopmentFieldCarrierKind::TierBinding);
@@ -199,7 +196,7 @@ replacement = r'''    #[test]
             shape_ref: "ql:shape:1.0.0:constellation:partial-conjugate-9".into(),
             whole_ref: "external:whole:tier-2".into(),
             basis_refs: vec!["external:basis:tier-2".into()],
-            member_bindings: vec![QlShapeMemberBinding {
+            members: vec![QlShapeMemberBinding {
                 subject_ref: "central:tier:member:0".into(),
                 coordinate: QlShapeCoordinateCarrier {
                     position: 0,
@@ -223,7 +220,7 @@ replacement = r'''    #[test]
             derivation_ref: Some("external:derivation:d1".into()),
             operator_ref: Some("ql:carrier:1.0.0:relation-field:cartesian-addresses".into()),
             return_refs: vec!["ql:return:0/1".into()],
-            caller_provenance: QlCallerProvenance {
+            provenance: QlCallerProvenance {
                 caller_ref: "external:caller:agent-3".into(),
                 source_ref: "external:source:run-42".into(),
                 standing_ref: "external:standing:observed".into(),
@@ -234,10 +231,7 @@ replacement = r'''    #[test]
         let shape = restored.shape_binding.unwrap();
         assert_eq!(shape.contract_ref, QL_STRUCTURAL_CARRIER_CONTRACT_REF);
         assert_eq!(shape.relation_bindings.len(), 1);
-        assert_eq!(
-            shape.caller_provenance.standing_ref,
-            "external:standing:observed"
-        );
+        assert_eq!(shape.provenance.standing_ref, "external:standing:observed");
         assert!(
             restored.relations.is_empty(),
             "QL relation/address bindings remain attributable QL carrier content and do not auto-create semantic Resource edges"
@@ -255,7 +249,7 @@ replacement = r'''    #[test]
             shape_ref: "ql:shape:1.0.0:constellation:twofold".into(),
             whole_ref: "external:whole:tier-3".into(),
             basis_refs: Vec::new(),
-            member_bindings: Vec::new(),
+            members: Vec::new(),
             relation_bindings: vec![QlShapeRelationBinding {
                 address: QlShapeAddressCarrier {
                     row: QlShapeCoordinateCarrier {
@@ -273,7 +267,7 @@ replacement = r'''    #[test]
             derivation_ref: None,
             operator_ref: None,
             return_refs: Vec::new(),
-            caller_provenance: QlCallerProvenance {
+            provenance: QlCallerProvenance {
                 caller_ref: "external:caller:agent-3".into(),
                 source_ref: "external:source:run-42".into(),
                 standing_ref: "external:standing:observed".into(),
@@ -287,10 +281,7 @@ replacement = r'''    #[test]
     }
 
 '''
-text, count = pattern.subn(replacement, text, count=1)
-if count != 1:
-    raise SystemExit(f"expected to replace one old QL test block, got {count}")
-
+text = text[:test_start] + replacement + text[test_end:]
 core_path.write_text(text)
 
 doc_path = Path("docs/DEVELOPMENT-FIELD-SUBSTRATE.md")
