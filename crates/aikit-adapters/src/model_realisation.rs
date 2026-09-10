@@ -75,7 +75,10 @@ pub struct RealisationRequest {
 /// The Model is named canonically (`model:<stable-id>`); the provider-native
 /// id rides as `variant_ref`, where it belongs — route metadata, not identity.
 pub fn instantiation_receipt(request: &RealisationRequest) -> Result<Value> {
-    if !request.route.is_viable() {
+    // Availability is a discovery fact, not a credential or authority grant.
+    // Caller-side admission still owns policy; this transport boundary refuses
+    // a route already known to be unusable even if invoked independently.
+    if !request.route.is_usable() {
         return Err(AikitError::new(
             "model_realisation.route_not_viable",
             format!(
@@ -83,6 +86,35 @@ pub fn instantiation_receipt(request: &RealisationRequest) -> Result<Value> {
                 request.route.provider_native_id, request.route.provider
             ),
         ));
+    }
+    if request.route.model != request.model || request.route.provider_native_id.trim().is_empty() {
+        return Err(AikitError::new(
+            "model_realisation.route_identity_drift",
+            "The selected Model and its provider-native route must agree",
+        ));
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    for (name, value) in [
+        ("actuation_ref", Some(request.actuation_ref.as_str())),
+        ("agency_ref", Some(request.agency_ref.as_str())),
+        (
+            "world_binding_ref",
+            Some(request.world_binding_ref.as_str()),
+        ),
+        ("agent_session_ref", request.agent_session_ref.as_deref()),
+        ("harness_ref", request.harness_ref.as_deref()),
+    ] {
+        if let Some(value) = value {
+            ResourceRef::parse(value)?;
+            if value.trim() != value || value.is_empty() || !identities.insert(value) {
+                return Err(AikitError::new(
+                    "model_realisation.invalid_identity",
+                    format!(
+                        "{name} must be nonempty, exact and distinct from the other identity roles"
+                    ),
+                ));
+            }
+        }
     }
     let mut engine = json!({ "provider_ref": request.route.provider.to_string() });
     if let Some(endpoint) = &request.route.endpoint {
@@ -209,21 +241,100 @@ pub fn realise(
             reason: detail.chars().take(400).collect::<String>(),
         };
     }
-    match serde_json::from_str::<Value>(&output.stdout) {
-        Ok(bound) => {
-            let detection_ref = bound
-                .pointer("/receipt/detection_ref")
-                .or_else(|| bound.get("detection_ref"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            RealisationOutcome::Instantiated {
-                receipt: Box::new(bound),
-                detection_ref,
+    let bound = match serde_json::from_str::<Value>(&output.stdout) {
+        Ok(bound) => bound,
+        Err(error) => {
+            return RealisationOutcome::Unavailable {
+                reason: format!("instantiation output unparsable: {error}"),
             }
         }
-        Err(error) => RealisationOutcome::Unavailable {
-            reason: format!("instantiation output unparsable: {error}"),
+    };
+    match validate_bound_receipt(&bound, &receipt, request.harness_ref.is_some()) {
+        Ok(detection_ref) => RealisationOutcome::Instantiated {
+            receipt: Box::new(bound),
+            detection_ref,
         },
+        Err(error) => RealisationOutcome::Unavailable {
+            reason: error.to_string(),
+        },
+    }
+}
+
+/// Validate the native `instantiation record --json` response, not a guessed
+/// success envelope. The owner currently returns the receipt directly and adds
+/// only detection evidence (or explicit unattribution). The source request is
+/// immutable across this boundary: changing access, identities or route facts
+/// would be a different consequence, not a successful answer to this call.
+pub fn validate_bound_receipt(
+    bound: &Value,
+    requested: &Value,
+    requires_harness: bool,
+) -> Result<Option<String>> {
+    let invalid = |message: &str| AikitError::new("model_realisation.invalid_receipt", message);
+    let object = bound
+        .as_object()
+        .ok_or_else(|| invalid("Actuation returned no receipt object"))?;
+    if bound["schema"] != ACTUATION_INSTANTIATION_SCHEMA {
+        return Err(invalid(
+            "Actuation returned an unsupported instantiation schema",
+        ));
+    }
+    crate::actuation_instantiation::ActuationInstantiationProjection::parse(bound)?;
+    let expected = requested
+        .as_object()
+        .ok_or_else(|| invalid("The requested receipt is not an object"))?;
+    for (field, value) in expected {
+        if object.get(field) != Some(value) {
+            return Err(invalid(
+                "Actuation changed a requested identity, route, access or evidence field",
+            )
+            .with("field", field));
+        }
+    }
+    // Absent optional identities cannot appear as if the caller selected them.
+    for field in [
+        "harness_ref",
+        "agent_session_ref",
+        "harness_composition_ref",
+        "bounds_refs",
+        "return_ref",
+    ] {
+        if !expected.contains_key(field) && object.contains_key(field) {
+            return Err(
+                invalid("Actuation introduced an unrequested identity or scope")
+                    .with("field", field),
+            );
+        }
+    }
+    if requires_harness {
+        let detection = bound["detection_ref"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| invalid("Harness-bound receipt lacks detection evidence"))?;
+        let executable = bound
+            .pointer("/harness_receipts/executable")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty());
+        if executable.is_none()
+            || bound
+                .get("unattributed")
+                .is_some_and(|value| value != false)
+        {
+            return Err(invalid(
+                "Harness-bound receipt lacks executable evidence or claims unattribution",
+            ));
+        }
+        Ok(Some(detection.to_owned()))
+    } else {
+        if bound["unattributed"] != true
+            || bound.get("detection_ref").is_some()
+            || bound.get("harness_receipts").is_some()
+        {
+            return Err(invalid(
+                "Unattributed receipt must not claim a detected harness",
+            ));
+        }
+        Ok(None)
     }
 }
 

@@ -319,6 +319,7 @@ enum PendingAcpRequest {
     Open {
         mode: SessionOpenMode,
         canonical_agent_session: Option<ResourceRef>,
+        requested_native_session_id: Option<String>,
     },
     Prompt {
         native_session_id: String,
@@ -458,17 +459,48 @@ impl AcpV1ConnectionAdapter {
             PendingAcpRequest::Open {
                 mode,
                 canonical_agent_session,
+                requested_native_session_id,
             } => {
-                let native_session_id = result
-                    .get("sessionId")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
+                // ACP load/resume retains the identity the client supplied. Load
+                // may return null after replay; neither operation must mint an id.
+                if !result.is_object() && !result.is_null() {
+                    return Err(AikitError::new(
+                        "connection.acp.invalid_session_response",
+                        "Invalid session result",
+                    ));
+                }
+                let returned = match result.get("sessionId") {
+                    Some(Value::String(id)) if !id.trim().is_empty() => Some(id.clone()),
+                    None => None,
+                    _ => {
+                        return Err(AikitError::new(
+                            "connection.acp.invalid_session_response",
+                            "Invalid returned sessionId",
+                        ))
+                    }
+                };
+                let native_session_id = if mode == SessionOpenMode::Create {
+                    returned.ok_or_else(|| {
                         AikitError::new(
                             "connection.acp.invalid_session_response",
-                            "ACP session lifecycle response has no sessionId",
+                            "ACP new response has no sessionId",
                         )
                     })?
-                    .to_string();
+                } else {
+                    let requested = requested_native_session_id.ok_or_else(|| {
+                        AikitError::new(
+                            "connection.native_session_id_required",
+                            "Load/resume has no requested identity",
+                        )
+                    })?;
+                    if returned.as_ref().is_some_and(|id| id != &requested) {
+                        return Err(AikitError::new(
+                            "connection.acp.session_identity_changed",
+                            "ACP load/resume contradicted the requested native identity",
+                        ));
+                    }
+                    requested
+                };
                 let mut binding = NativeSessionBinding::unbound(native_session_id.clone(), mode);
                 binding.agent_session = canonical_agent_session;
                 binding.provenance = self.provenance.clone();
@@ -654,12 +686,16 @@ impl AgentConnectionAdapter for AcpV1ConnectionAdapter {
                 );
             }
             if request.mode != SessionOpenMode::Create {
-                let native_session_id = request.native_session_id.clone().ok_or_else(|| {
-                    AikitError::new(
-                        "connection.native_session_id_required",
-                        format!("{method} requires a protocol-native session id"),
-                    )
-                })?;
+                let native_session_id = request
+                    .native_session_id
+                    .clone()
+                    .filter(|id| !id.trim().is_empty())
+                    .ok_or_else(|| {
+                        AikitError::new(
+                            "connection.native_session_id_required",
+                            format!("{method} requires a protocol-native session id"),
+                        )
+                    })?;
                 object.insert("sessionId".into(), json!(native_session_id));
             }
         }
@@ -669,6 +705,7 @@ impl AgentConnectionAdapter for AcpV1ConnectionAdapter {
             PendingAcpRequest::Open {
                 mode: request.mode,
                 canonical_agent_session: request.agent_session,
+                requested_native_session_id: request.native_session_id,
             },
         ))
     }

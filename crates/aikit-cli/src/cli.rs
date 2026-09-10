@@ -287,6 +287,16 @@ pub enum GatewaySub {
 /// nothing here selects a model or harness by hand.
 #[derive(Debug, Args)]
 pub struct ComposeArgs {
+    /// Exact source-basis JSON for an Actuation agency actualisation request.
+    /// No AgentProfile is required. Source material and native authority are rechecked.
+    #[arg(long, requires_all = ["agent", "world"])]
+    pub agency_source: Option<std::path::PathBuf>,
+    /// Stable AgentRef to enact, not a profile, model, session or display label.
+    #[arg(long, requires = "agency_source")]
+    pub agent: Option<String>,
+    /// Explicit WorldRef of the supplied native WorldBinding.
+    #[arg(long, requires = "agency_source")]
+    pub world: Option<String>,
     /// Actualise the selected model through Actuation instead of only
     /// disclosing the plan. Requires --model.
     #[arg(long)]

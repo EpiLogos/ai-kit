@@ -194,7 +194,11 @@ impl ModelRosterCandidate {
         let relevant: Vec<f64> = self
             .observed_fitness
             .iter()
-            .filter(|observation| observation.scope.applies_to(demand, &self.harness_composition))
+            .filter(|observation| {
+                observation
+                    .scope
+                    .applies_to(demand, &self.harness_composition)
+            })
             .map(|observation| observation.score)
             .collect();
         if relevant.is_empty() {
@@ -364,7 +368,7 @@ pub fn candidates_from_routes(
             candidate.provider = route.provider.clone();
             candidate.variant = route.provider_native_id.clone();
             candidate.available = true;
-            candidate.provider_usable = true;
+            candidate.provider_usable = route.is_usable();
             candidate.access.local_placement =
                 route.kind == crate::resource::ModelRouteKind::LocalServing;
             candidate.provenance.extend(route.provenance.iter().cloned());
@@ -395,20 +399,34 @@ pub fn select_model(
         .filter(|entry| {
             entry.model == routes.model
                 && entry.explanation.eligible
-                && viable
-                    .iter()
-                    .any(|route| route.provider == entry.provider)
+                && viable.iter().any(|route| {
+                    route.is_usable()
+                        && route.provider == entry.provider
+                        && route.provider_native_id == entry.variant
+                })
         })
         .collect();
     ranked.sort_by_key(|entry| entry.rank.unwrap_or(usize::MAX));
     let best = ranked.first()?;
     // Order the surviving routes by how the roster ranked their pair, so the
     // first route is the one to try first — without deleting the others.
-    let mut ordered = viable;
+    // Eligibility is per exact Model/provider/native-variant pair. A winning
+    // route cannot bring a denied sibling back as a fallback on retry.
+    let mut ordered: Vec<ModelRoute> = viable
+        .into_iter()
+        .filter(|route| {
+            route.is_usable()
+                && ranked.iter().any(|entry| {
+                    entry.provider == route.provider && entry.variant == route.provider_native_id
+                })
+        })
+        .collect();
     ordered.sort_by_key(|route| {
         ranked
             .iter()
-            .position(|entry| entry.provider == route.provider)
+            .position(|entry| {
+                entry.provider == route.provider && entry.variant == route.provider_native_id
+            })
             .unwrap_or(usize::MAX)
     });
     Some(ModelSelection {
@@ -474,10 +492,19 @@ fn evaluate(
         );
     }
 
-    let estimated_cost = candidate.price.as_ref().and_then(|p| p.estimate_usd(demand));
-    if policy == ModelRankingPolicy::QualityUnderBudget {
+    let estimated_cost = candidate
+        .price
+        .as_ref()
+        .and_then(|p| p.estimate_usd(demand));
+    if demand.cost_ceiling_usd.is_some() || policy == ModelRankingPolicy::QualityUnderBudget {
         let budget_ok = match (demand.cost_ceiling_usd, estimated_cost) {
-            (Some(ceiling), Some(cost)) => cost <= ceiling,
+            (Some(ceiling), Some(cost)) => {
+                ceiling.is_finite()
+                    && cost.is_finite()
+                    && ceiling >= 0.0
+                    && cost >= 0.0
+                    && cost <= ceiling
+            }
             _ => false,
         };
         gate(budget_ok, "known-cost-within-budget", &mut passed, &mut failed);
@@ -608,7 +635,11 @@ fn fitness_provenance(candidate: &ModelRosterCandidate, demand: &ModelRosterDema
     candidate
         .observed_fitness
         .iter()
-        .filter(|observation| observation.scope.applies_to(demand, &candidate.harness_composition))
+        .filter(|observation| {
+            observation
+                .scope
+                .applies_to(demand, &candidate.harness_composition)
+        })
         .flat_map(|observation| observation.provenance.clone())
         .collect()
 }
@@ -665,12 +696,25 @@ mod tests {
             role_fitness: BTreeMap::from([("agency:builder".into(), coding)]), profile_fit: Some(coding),
             authored_preference: None, frecency: None, latency_ms: Some(500), reliability: Some(0.99),
             context_window_tokens: Some(1_000_000),
-            price: input.zip(output).map(|(i,o)| ModelPriceObservation {
-                source:"provider-price-page".into(), provider:p("provider:example"), model_variant:id.into(), currency:"USD".into(), unit:"1m-tokens".into(),
-                input_per_unit:Some(i), cached_input_per_unit:None, output_per_unit:Some(o), cache_write_per_unit:None,
-                other_charges:BTreeMap::new(), observed_at:"2026-08-17T09:30:00+01:00".into(), source_revision:None, freshness_note:Some("point-in-time provider observation".into())
+            price: input.zip(output).map(|(i, o)| ModelPriceObservation {
+                source: "provider-price-page".into(),
+                provider: p("provider:example"),
+                model_variant: id.into(),
+                currency: "USD".into(),
+                unit: "1m-tokens".into(),
+                input_per_unit: Some(i),
+                cached_input_per_unit: None,
+                output_per_unit: Some(o),
+                cache_write_per_unit: None,
+                other_charges: BTreeMap::new(),
+                observed_at: "2026-08-17T09:30:00+01:00".into(),
+                source_revision: None,
+                freshness_note: Some("point-in-time provider observation".into()),
             }),
-            exact_spend:Vec::new(), observed_fitness:Vec::new(), access:ModelAccessProfileView::default(), provenance:vec!["fixture".into()]
+            exact_spend: Vec::new(),
+            observed_fitness: Vec::new(),
+            access: ModelAccessProfileView::default(),
+            provenance: vec!["fixture".into()],
         }
     }
 

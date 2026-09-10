@@ -223,8 +223,15 @@ fn case17_local_whole_resolves_and_navigation_traverses_membership() {
 
     let set_ref = aikit_core::ResourceRef::parse("wiki:node:pasu:agent-set:central-operators").unwrap();
     let whole = index.local_whole(&set_ref).expect("local whole resolves");
-    assert!(whole.local_space.is_some(), "the local space is materialised");
-    assert_eq!(whole.members.len(), 1, "only materialised members ride the whole");
+    assert!(
+        whole.local_space.is_some(),
+        "the local space is materialised"
+    );
+    assert_eq!(
+        whole.members.len(),
+        2,
+        "profile-less declared membership survives without becoming current reachability"
+    );
 
     let provider = aikit_core::SemanticWikiProvider::new(&index);
     let query = RelationQuery {

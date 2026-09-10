@@ -32,7 +32,7 @@ use aikit_adapters::provider_catalog_source::{
 };
 use aikit_adapters::runner::{CommandRunner, Output};
 use aikit_core::resource::{
-    canonical_model_ref, candidates_from_routes, catalogue_from_observations, rank_model_roster,
+    candidates_from_routes, canonical_model_ref, catalogue_from_observations, rank_model_roster,
     select_model, CredentialCondition, DeclaredRoute, ModelCatalogue, ModelCatalogueEntry,
     ModelRankingPolicy, ModelRosterCandidate, ModelRosterDemand, ModelRouteKind, ModelRouteSet,
     ProviderRef, ResourceRef, SourceRef,
@@ -73,6 +73,15 @@ impl CommandRunner for Replies {
         let joined = argv.join(" ");
         for (needle, output) in &self.0 {
             if joined.contains(needle) {
+                if needle == "instantiation record" && output.ok() {
+                    let path = &argv[argv.len() - 2];
+                    let mut receipt: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                    receipt["detection_ref"] = serde_json::json!("detection:2026-09-09T12:00:00Z");
+                    receipt["harness_receipts"] =
+                        serde_json::json!({"executable":"/fixture/claude"});
+                    return Ok(ok(&receipt.to_string()));
+                }
                 return Ok(output.clone());
             }
         }
@@ -500,7 +509,12 @@ fn an_unprovable_harness_refuses_the_instantiation_rather_than_binding_it() {
 
 #[test]
 fn a_router_route_reaches_actuation_as_a_remote_relation_without_becoming_the_model() {
-    let join = join_model_routes(&catalogue(), &observed(), &CredentialEvidence::default());
+    // Explicit credential fixture: available-but-uncredentialed must not pass.
+    let join = join_model_routes(
+        &catalogue(),
+        &observed(),
+        &CredentialEvidence::from_binding_refs(["credential:openrouter/controlled-fixture".into()]),
+    );
     let routes = set_for(&join.route_sets, "model:claude-sonnet-5");
     let router = routes.viable()[0];
     assert_eq!(router.provider.as_str(), "provider:openrouter");

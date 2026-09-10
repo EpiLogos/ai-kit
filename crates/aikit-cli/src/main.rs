@@ -523,7 +523,25 @@ fn cmd_skill(cwd: &std::path::Path, command: SkillCmd) -> Result<Reply> {
 
 fn cmd_compose(cwd: &std::path::Path, args: ComposeArgs) -> Result<Reply> {
     let service = Service::discover(cwd)?;
-    let mut data = service.compose_plan()?;
+    let admission = args
+        .agency_source
+        .as_ref()
+        .map(|path| -> Result<_> {
+            let basis = serde_json::from_slice(
+                &std::fs::read(path)
+                    .map_err(|e| AikitError::new("compose.source_unavailable", e.to_string()))?,
+            )
+            .map_err(|e| AikitError::new("compose.source_invalid", format!("{e}")))?;
+            aikit_adapters::agency_admission::admit_agency(
+                &aikit_adapters::runner::SystemRunner::new(),
+                "actuation",
+                &basis,
+                &aikit_core::ResourceRef::parse(args.agent.as_deref().unwrap_or(""))?,
+                &aikit_core::ResourceRef::parse(args.world.as_deref().unwrap_or(""))?,
+            )
+        })
+        .transpose()?;
+    let mut data = service.compose_selected_plan(admission.as_ref())?;
     if args.realise {
         let model = args.model.as_deref().ok_or_else(|| {
             AikitError::new(
@@ -626,11 +644,14 @@ fn cmd_project(cwd: &std::path::Path, command: ProjectCmd) -> Result<Reply> {
                 aikit_cli::project_recency::ProjectRecencyConfig::default(),
             )?;
             let needle = args.filter.as_deref().map(str::to_lowercase);
-            let rows = rows.into_iter()
-                .filter(|row| needle.as_ref().is_none_or(|needle| {
-                    row.project.to_lowercase().contains(needle)
-                        || row.root.to_lowercase().contains(needle)
-                }))
+            let rows = rows
+                .into_iter()
+                .filter(|row| {
+                    needle.as_ref().is_none_or(|needle| {
+                        row.project.to_lowercase().contains(needle)
+                            || row.root.to_lowercase().contains(needle)
+                    })
+                })
                 .map(|row| aikit_cli::project_recency::describe(&row))
                 .collect::<Vec<_>>();
             Ok(reply(&service, jval!({ "projects": rows }), vec![]))
@@ -2003,8 +2024,12 @@ fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
         TrustSub::Record(args) => (args.capability.clone(), args.source.clone(), args.note.clone()),
         TrustSub::Show(args) => (args.capability.clone(), None, None),
     };
-    let capability = CapsuleId::parse(&capability_text)
-        .map_err(|error| AikitError::new("trust.unknown_capsule", format!("{capability_text}: {error}")))?;
+    let capability = CapsuleId::parse(&capability_text).map_err(|error| {
+        AikitError::new(
+            "trust.unknown_capsule",
+            format!("{capability_text}: {error}"),
+        )
+    })?;
     let index = aikit_store::index::Index::open(&service.home().database())?;
     let store = aikit_store::trust::TrustStore::new(&index);
     let load = aikit_cli::app::load_catalog(service.home(), None)?;
@@ -2483,8 +2508,9 @@ fn cmd_continuity(cwd: &std::path::Path, c: ContinuityCmd) -> Result<Reply> {
                 // exit zero just because the check ran.
                 Ok(Reply::Data {
                     context: EnvelopeContext::from_descriptor(service.descriptor()),
-                    data: serde_json::to_value(&verification)
-                        .map_err(|error| AikitError::new("continuity.closeout", error.to_string()))?,
+                    data: serde_json::to_value(&verification).map_err(|error| {
+                        AikitError::new("continuity.closeout", error.to_string())
+                    })?,
                     warnings: vec![],
                     exit_code,
                 })

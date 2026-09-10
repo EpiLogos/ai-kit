@@ -1,0 +1,92 @@
+{
+  "schema": "actuation.agency-actualisation/v1",
+  "request_ref": "actualisation-request:delegation",
+  "requester_ref": "human:owner",
+  "governing_binding": {
+    "schema": "actuation.agency/v1",
+    "binding_ref": "binding:governing",
+    "agent_ref": "agent:governor",
+    "agency_ref": "agency:governing",
+    "world_ref": "world:personal",
+    "scope_ref": "scope:personal",
+    "bounds_refs": [
+      "bound:personal",
+      "bound:project:delegation"
+    ],
+    "authority_refs": [
+      "authority:metagency",
+      "authority:project:delegation"
+    ],
+    "return_relation_ref": "return-relation:governing"
+  },
+  "metagency_grant": {
+    "schema": "actuation.agency/v1",
+    "grant_ref": "grant:project-agency",
+    "agency_ref": "agency:governing",
+    "world_binding_ref": "binding:governing",
+    "authority_ref": "authority:metagency",
+    "bounds_refs": [
+      "bound:project:delegation"
+    ],
+    "operations": [
+      "determine-agency",
+      "actualise-agency"
+    ]
+  },
+  "determination": {
+    "schema": "actuation.agency/v1",
+    "determination_ref": "determination:delegation",
+    "kind": "delegation",
+    "determining_agency_ref": "agency:governing",
+    "differentiated_agency_ref": "agency:project:delegation",
+    "world_binding_ref": "binding:project:delegation",
+    "bounds_refs": [
+      "bound:project:delegation"
+    ],
+    "authority_refs": [
+      "authority:project:delegation"
+    ],
+    "delegated_autonomy": {
+      "allowed_action_refs": [
+        "action/aikit/encounter-send"
+      ],
+      "denied_action_refs": [
+        "action:source-mutation"
+      ],
+      "may_determine_within_bounds": true
+    },
+    "return_policy": {
+      "mode": "required",
+      "return_relation_ref": "return-relation:project:delegation"
+    }
+  },
+  "differentiated_binding": {
+    "schema": "actuation.agency/v1",
+    "binding_ref": "binding:project:delegation",
+    "agent_ref": "agent:existing-1",
+    "agency_ref": "agency:project:delegation",
+    "world_ref": "central:project:Example",
+    "scope_ref": "central:project:Example:scope",
+    "determining_agency_ref": "agency:governing",
+    "bounds_refs": [
+      "bound:project:delegation"
+    ],
+    "authority_refs": [
+      "authority:project:delegation"
+    ],
+    "return_relation_ref": "return-relation:project:delegation",
+    "continuity_ref": "continuity:agent:existing-1"
+  },
+  "agent_identity": {
+    "standing": "existing",
+    "evidence_refs": [
+      "evidence/declared-fixture-identity"
+    ]
+  },
+  "provenance": {
+    "source_refs": [
+      "source/controlled-caw-test"
+    ],
+    "context_refs": []
+  }
+}

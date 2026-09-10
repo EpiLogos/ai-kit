@@ -245,6 +245,9 @@ pub struct ComposedActorInputs {
     pub selected_harness: Option<ResourceRef>,
     pub selected_model: Option<ResourceRef>,
     pub agent_session: Option<String>,
+    /// Actual native identities, never inferred from a host or SessionSpace.
+    pub actuation_ref: Option<ResourceRef>,
+    pub world_binding_ref: Option<ResourceRef>,
 }
 
 pub fn compose_actor_inputs(
@@ -262,6 +265,8 @@ pub fn compose_actor_inputs(
         selected_harness: actuation.harness(),
         selected_model: actuation.model(),
         agent_session: actuation.agent_session(),
+        actuation_ref: Some(actuation.actuation_ref.clone()),
+        world_binding_ref: Some(actuation.world_binding_ref.clone()),
     }
 }
 
