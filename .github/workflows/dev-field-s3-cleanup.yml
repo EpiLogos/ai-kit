@@ -1,0 +1,43 @@
+name: Development Field S3 cleanup
+
+on:
+  push:
+    branches: [agent/261-development-field-s3]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: development-field-s3-cleanup
+  cancel-in-progress: true
+
+jobs:
+  narrow-verify-commit:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          ref: agent/261-development-field-s3
+      - name: Restore main and reapply only S3 seams
+        run: python3 .github/dev-field-s3-cleanup.py
+      - name: Install Rust 1.98
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component clippy
+          rustup default 1.98.0
+      - name: Install tmux
+        run: brew install tmux
+      - name: Verify repository-owned gate
+        shell: bash
+        run: bash scripts/verify
+      - name: Commit narrow verified tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git config user.name "Epii"
+          git config user.email "EpiLogos@users.noreply.github.com"
+          git add -A
+          git commit -m "development-field: narrow S3 to owned seams (#261)"
+          git push origin HEAD:agent/261-development-field-s3
