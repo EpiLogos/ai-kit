@@ -4,7 +4,9 @@
 //! existing VersionedWorld provider. It is not a second source store, QL engine,
 //! Workcell lifecycle, or intelligence grammar.
 
+use aikit_adapters::central_development_field::project_development_field_resources;
 use aikit_adapters::native_git::NativeGitProvider;
+use aikit_adapters::runner::SystemRunner;
 use aikit_core::resource::{
     read_development_field, DevelopmentFieldExecutableBasis, DevelopmentFieldExecutableModality,
     DevelopmentFieldGitBasis, DevelopmentFieldReadRequest, DevelopmentFieldReading, ResourceRef,
@@ -13,7 +15,7 @@ use aikit_core::resource::{
 use aikit_core::{AikitError, Result};
 use aikit_tui::backend::PaletteBackend;
 
-use super::Service;
+use super::{process_central_root, Service};
 
 #[derive(Debug, Clone)]
 pub struct DevelopmentFieldApplicationRequest {
@@ -45,7 +47,16 @@ impl Service {
         &self,
         request: DevelopmentFieldApplicationRequest,
     ) -> Result<DevelopmentFieldReading> {
-        let records = <Self as PaletteBackend>::context_resource_records(self)?;
+        let mut records = <Self as PaletteBackend>::context_resource_records(self)?;
+        if let Some(project) = self.descriptor.project_root.as_deref() {
+            if let Some(central) = process_central_root(Some(project)) {
+                records.extend(project_development_field_resources(
+                    &SystemRunner::new(),
+                    &central,
+                    project,
+                )?);
+            }
+        }
         let resources =
             aikit_tui::project_world_service::resource_index_with_records(self, records)?;
         let executable_basis = current_executable_basis();
