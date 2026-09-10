@@ -26,6 +26,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::compose_spine::ComposeStep;
+use crate::live_field::{
+    reach_for, LiveWorkingField, WorkingEnvironmentOperation, WorkingEnvironmentOutcome,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -387,6 +390,40 @@ pub trait TuiApplicationService {
             summary: format!("action {} has no application implementation", action.action),
         })
     }
+
+    /// Observe the host's working-environment providers and derive the live
+    /// field from what they report.
+    ///
+    /// `None` means no provider was attached at this application boundary —
+    /// nobody looked. That is distinct from an attached caller that looked and
+    /// found nothing, which answers an empty field. Minimal and test services
+    /// stay source-compatible through this default and are truthful in doing
+    /// so: they genuinely cannot observe a mux.
+    fn live_working_field(&mut self) -> Result<Option<LiveWorkingField>> {
+        Ok(None)
+    }
+
+    /// Ask one provider to open the canonical subject in a pane/window of its
+    /// own choosing, or to focus the pane it is already bound to.
+    ///
+    /// The default never claims success it did not achieve: it answers
+    /// `NotExposed` naming the missing wiring, so the surface can say so in the
+    /// operator's terms rather than showing a failure they cannot act on.
+    fn act_in_working_environment(
+        &mut self,
+        provider: &ResourceRef,
+        subject: &ResourceRef,
+        operation: WorkingEnvironmentOperation,
+    ) -> Result<WorkingEnvironmentOutcome> {
+        Ok(WorkingEnvironmentOutcome::NotExposed {
+            provider: provider.clone(),
+            subject: subject.clone(),
+            reason: format!(
+                "no working-environment provider is attached at this application boundary, so {} is not available here",
+                operation.as_str()
+            ),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,6 +553,12 @@ pub struct TuiState {
     pub preview: Option<CompositionPreview>,
     pub status: Option<UiStatus>,
     pub area: (u16, u16),
+    /// The live working-environment reading, as last observed. `None` means no
+    /// provider was attached at this application boundary; `Some` of an empty
+    /// field means a caller looked and found none. Presentation keeps them
+    /// apart.
+    #[serde(default)]
+    pub live_field: Option<LiveWorkingField>,
     pub exit_requested: bool,
 }
 
@@ -543,6 +586,7 @@ impl Default for TuiState {
             preview: None,
             status: None,
             area: (80, 24),
+            live_field: None,
             exit_requested: false,
         }
     }
@@ -611,6 +655,19 @@ pub enum UiAction {
     RequestApply,
     ConfirmApply,
     ApplyFinished(ApplyReceipt),
+    /// The live working-environment reading was (re)observed. `None` carries
+    /// the honest "nobody looked" state through to presentation rather than
+    /// being flattened into an empty field.
+    LiveWorkingFieldObserved(Option<LiveWorkingField>),
+    /// Ask a named provider to open or focus the canonical subject. The
+    /// reducer guards the request against the current reading before it
+    /// becomes an effect, so a withheld capability never reaches a provider.
+    ActInWorkingEnvironment {
+        provider: ResourceRef,
+        subject: ResourceRef,
+        operation: WorkingEnvironmentOperation,
+    },
+    WorkingEnvironmentActed(WorkingEnvironmentOutcome),
     Resize(u16, u16),
     Exit,
 }
@@ -635,6 +692,12 @@ pub enum UiEffect {
     },
     ApplyComposition {
         preview: CompositionPreview,
+    },
+    ObserveWorkingEnvironments,
+    ActInWorkingEnvironment {
+        provider: ResourceRef,
+        subject: ResourceRef,
+        operation: WorkingEnvironmentOperation,
     },
 }
 
@@ -678,6 +741,16 @@ impl TuiRuntime {
             )),
             UiEffect::ApplyComposition { preview } => Ok(UiAction::ApplyFinished(
                 service.apply_composition(&preview)?,
+            )),
+            UiEffect::ObserveWorkingEnvironments => Ok(UiAction::LiveWorkingFieldObserved(
+                service.live_working_field()?,
+            )),
+            UiEffect::ActInWorkingEnvironment {
+                provider,
+                subject,
+                operation,
+            } => Ok(UiAction::WorkingEnvironmentActed(
+                service.act_in_working_environment(&provider, &subject, operation)?,
             )),
         }
     }
@@ -1055,6 +1128,52 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             state.status = Some(UiStatus {
                 message: receipt.summary,
             });
+        }
+        UiAction::LiveWorkingFieldObserved(field) => {
+            state.live_field = field;
+        }
+        UiAction::ActInWorkingEnvironment {
+            provider,
+            subject,
+            operation,
+        } => match state.live_field.as_ref() {
+            // No reading means nobody has observed the host yet. Observe first
+            // and let the operator ask again against a real field, rather than
+            // sending a request no reading justifies.
+            None => {
+                effects.push(UiEffect::ObserveWorkingEnvironments);
+                state.status = Some(UiStatus {
+                    message: format!(
+                        "no working-environment reading yet; observing before {} {subject}",
+                        operation.as_str()
+                    ),
+                });
+            }
+            Some(field) => match reach_for(field, &provider, &subject, operation) {
+                Ok(_) => effects.push(UiEffect::ActInWorkingEnvironment {
+                    provider,
+                    subject,
+                    operation,
+                }),
+                // The field already says this cannot work. Refusing here keeps
+                // the provider from being asked something it would have to
+                // fail, and gives the operator the actual condition.
+                Err(error) => {
+                    state.status = Some(UiStatus {
+                        message: error.to_string(),
+                    })
+                }
+            },
+        },
+        UiAction::WorkingEnvironmentActed(outcome) => {
+            state.status = Some(UiStatus {
+                message: outcome.summary(),
+            });
+            // A provider that opened or focused something has changed the host.
+            // Re-observe so the reading and the machine agree.
+            if !matches!(outcome, WorkingEnvironmentOutcome::NotExposed { .. }) {
+                effects.push(UiEffect::ObserveWorkingEnvironments);
+            }
         }
         UiAction::Resize(cols, rows) => state.area = (cols, rows),
         UiAction::Exit => {

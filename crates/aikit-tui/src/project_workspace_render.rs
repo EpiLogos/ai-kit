@@ -23,11 +23,13 @@ use aikit_core::credential_world::{CredentialStatusKnowledge, ProviderRosterKnow
 use aikit_core::resource::{Eligibility, ResourceKind, SourceAuthority};
 use aikit_core::explain_history::{HistoryEvidence, HistoryReadModel, HistoryRecoverability};
 use aikit_core::session_space_application::SessionSpaceAuthoredState;
+use aikit_core::working_environment::WorkingEnvironmentHealth;
 use aikit_core::{ContextSourceHit, ProjectWorldReadModel, ProjectWorldResource};
 
 use crate::application::{TuiState, WorkspaceSection};
 use crate::backend::FactoryWorkEntry;
 use crate::compose_spine::compose_spine_lines;
+use crate::live_field::LiveWorkingField;
 use crate::layout::Glyphs;
 
 /// Canonical product label for each Workspace slot.
@@ -155,7 +157,11 @@ pub fn project_world_lines(
 ) -> Vec<String> {
     let world = reading.world;
     match state.workspace_section {
-        WorkspaceSection::Worlds => context_lines(world, glyphs),
+        WorkspaceSection::Worlds => {
+            let mut lines = context_lines(world, glyphs);
+            lines.extend(live_field_lines(state.live_field.as_ref(), glyphs));
+            lines
+        }
         WorkspaceSection::Compose => compose_lines(state, reading, glyphs),
         WorkspaceSection::Work => work_lines(state, reading, glyphs),
         WorkspaceSection::History => history_lines(reading, glyphs),
@@ -320,6 +326,106 @@ fn git_lines(world: &ProjectWorldReadModel, sep: &str) -> Vec<String> {
 /// once a repository has grown past a trivial number of objects.
 fn short_revision(revision: &str) -> &str {
     revision.get(..12).unwrap_or(revision)
+}
+
+/// The live working-environment block of the Worlds pane (§W6).
+///
+/// Three states, kept apart because they are three different facts about the
+/// machine and collapsing them is how a dashboard starts lying:
+///
+/// * no reading at all — no provider was attached at this application
+///   boundary, so nobody looked;
+/// * a reading with no providers — a caller looked and this host is running
+///   none;
+/// * a reading with providers — each one's health and what it can actually do.
+///
+/// Provider-native ids are printed as `native <id>` beside their provider,
+/// never in the identity column. They are how the provider finds the pane, not
+/// what the pane *is*.
+fn live_field_lines(field: Option<&LiveWorkingField>, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
+    let mut lines = vec![String::new()];
+
+    let Some(field) = field else {
+        lines.push("Environment".into());
+        lines.push("  no working-environment provider is attached here".into());
+        return lines;
+    };
+
+    if field.is_empty() {
+        lines.push("Environment".into());
+        lines.push("  observed: no working environment is running on this host".into());
+        return lines;
+    }
+
+    lines.push(format!("Environment {sep} {} observed", field.observed.len()));
+    for provider in &field.observed {
+        let health = match provider.health {
+            WorkingEnvironmentHealth::Healthy => "healthy",
+            WorkingEnvironmentHealth::Degraded => "degraded",
+            WorkingEnvironmentHealth::Unavailable => "unavailable",
+        };
+        let mut can = Vec::new();
+        if provider.capabilities.open {
+            can.push("open");
+        }
+        if provider.capabilities.focus {
+            can.push("focus");
+        }
+        if provider.capabilities.surface_attach_detach {
+            can.push("attach");
+        }
+        let can = if can.is_empty() {
+            "claims nothing".to_string()
+        } else {
+            can.join("/")
+        };
+        lines.push(format!(
+            "  {} {sep} {health} {sep} {can} {sep} {} bound",
+            provider.provider.as_str(),
+            provider.bound_subjects,
+        ));
+    }
+
+    if field.subjects.is_empty() {
+        lines.push("  nothing here is bound to a provider yet".into());
+        return lines;
+    }
+
+    lines.push(String::new());
+    lines.push("Reachable".into());
+    for subject in &field.subjects {
+        lines.push(format!(
+            "  {} {sep} {}",
+            subject.subject.as_str(),
+            subject.semantic_kind
+        ));
+        for reach in &subject.projections {
+            let focus_mark = if reach.focused { " (focused)" } else { "" };
+            let verbs = match (reach.can_open(), reach.can_focus()) {
+                (true, true) => "open/focus".to_string(),
+                (true, false) => "open".to_string(),
+                (false, true) => "focus".to_string(),
+                // Both withheld: say which condition, so the row explains its
+                // own absence instead of looking like an oversight.
+                (false, false) => reach
+                    .open
+                    .map(|withheld| withheld.describe("open"))
+                    .unwrap_or_else(|| "unavailable".into()),
+            };
+            // A live pane shows the native id it is bound to; one that has
+            // never been started says so instead of showing a blank column.
+            let binding = match reach.native_id.as_deref() {
+                Some(native_id) => format!("native {native_id}"),
+                None => "not live yet".to_string(),
+            };
+            lines.push(format!(
+                "    {} {sep} {verbs} {sep} {binding}{focus_mark}",
+                reach.provider.as_str(),
+            ));
+        }
+    }
+    lines
 }
 
 /// Compose's human question (spec §5) is "what could I build, and how far
@@ -1246,5 +1352,143 @@ mod history_evidence_tests {
         assert!(rendered.contains("Catalog revision"));
         assert!(rendered.contains("Resolution hash"));
         assert!(rendered.contains("Evidence"));
+    }
+}
+
+#[cfg(test)]
+mod live_field_tests {
+    use super::*;
+    use aikit_core::working_environment::{
+        NativeBindingKind, ProviderNativeBinding, WorkingEnvironmentCapabilities,
+        WorkingEnvironmentObservation, WORKING_ENVIRONMENT_PROVIDER_VERSION,
+    };
+    use aikit_core::resource::ResourceRef;
+    use crate::live_field::live_working_field;
+
+    fn r(raw: &str) -> ResourceRef {
+        ResourceRef::parse(raw).unwrap()
+    }
+
+    fn observation(
+        provider: &str,
+        native_id: &str,
+        health: WorkingEnvironmentHealth,
+        open: bool,
+    ) -> WorkingEnvironmentObservation {
+        WorkingEnvironmentObservation {
+            schema: WORKING_ENVIRONMENT_PROVIDER_VERSION.into(),
+            provider: r(provider),
+            provider_version: None,
+            health,
+            capabilities: WorkingEnvironmentCapabilities {
+                discover: true,
+                open,
+                focus: true,
+                terminal_surface: true,
+                surface_attach_detach: true,
+                ..WorkingEnvironmentCapabilities::default()
+            },
+            bindings: vec![ProviderNativeBinding {
+                kind: NativeBindingKind::Surface,
+                native_id: native_id.into(),
+                canonical_ref: Some(r("surface/terminal/main/shell")),
+                provenance: Vec::new(),
+            }],
+            focused_native_id: Some(native_id.into()),
+            provenance: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn no_provider_attached_and_no_provider_running_read_differently() {
+        let nobody_looked = live_field_lines(None, Glyphs::unicode()).join("\n");
+        assert!(nobody_looked.contains("no working-environment provider is attached here"));
+
+        let looked = live_working_field(&[], &[]);
+        let nothing_running = live_field_lines(Some(&looked), Glyphs::unicode()).join("\n");
+        assert!(nothing_running.contains("no working environment is running on this host"));
+        assert_ne!(nobody_looked, nothing_running);
+    }
+
+    #[test]
+    fn two_projections_of_one_subject_are_drawn_under_that_one_subject() {
+        let field = live_working_field(
+            &[
+                observation(
+                    "provider/tmux/current",
+                    "%12",
+                    WorkingEnvironmentHealth::Healthy,
+                    true,
+                ),
+                observation(
+                    "provider/cmux/current",
+                    "surface-3",
+                    WorkingEnvironmentHealth::Healthy,
+                    true,
+                ),
+            ],
+            &[r("surface/terminal/main/shell")],
+        );
+        let rendered = live_field_lines(Some(&field), Glyphs::unicode()).join("\n");
+
+        assert!(rendered.contains("Environment"));
+        assert!(rendered.contains("Reachable"));
+        // The canonical subject appears once; each provider row hangs under it
+        // and carries its own native id, marked as native.
+        assert_eq!(rendered.matches("surface/terminal/main/shell").count(), 1);
+        assert!(rendered.contains("native %12"));
+        assert!(rendered.contains("native surface-3"));
+        assert!(rendered.contains("(focused)"));
+    }
+
+    #[test]
+    fn a_withheld_capability_explains_itself_in_the_row() {
+        let field = live_working_field(
+            &[observation(
+                "provider/tmux/current",
+                "%12",
+                WorkingEnvironmentHealth::Unavailable,
+                true,
+            )],
+            &[r("surface/terminal/main/shell")],
+        );
+        let rendered = live_field_lines(Some(&field), Glyphs::unicode()).join("\n");
+        assert!(rendered.contains("unavailable"));
+        assert!(
+            rendered.contains("provider is unavailable"),
+            "the row must say why, not just go quiet: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_block_is_ascii_pure_under_ascii_glyphs() {
+        let field = live_working_field(
+            &[
+                observation(
+                    "provider/tmux/current",
+                    "%12",
+                    WorkingEnvironmentHealth::Healthy,
+                    true,
+                ),
+                observation(
+                    "provider/cmux/current",
+                    "surface-3",
+                    WorkingEnvironmentHealth::Degraded,
+                    false,
+                ),
+            ],
+            &[r("surface/terminal/main/shell")],
+        );
+        for lines in [
+            live_field_lines(Some(&field), Glyphs::ascii()),
+            live_field_lines(Some(&live_working_field(&[], &[])), Glyphs::ascii()),
+            live_field_lines(None, Glyphs::ascii()),
+        ] {
+            let rendered = lines.join("\n");
+            assert!(
+                rendered.is_ascii(),
+                "ASCII rendering leaked a non-ASCII character: {rendered:?}"
+            );
+        }
     }
 }

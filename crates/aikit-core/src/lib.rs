@@ -102,6 +102,7 @@ pub mod star;
 pub mod surface_material;
 pub mod surfacing;
 pub mod trust;
+pub mod working_environment;
 
 pub use error::{AikitError, Result};
 

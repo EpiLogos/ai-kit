@@ -34,6 +34,10 @@ use crate::application::{
     ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService,
 };
 use crate::backend::{FactoryWorkEntry, PaletteBackend, Toggle};
+use crate::live_field::{
+    live_working_field, parse_action_ref, reach_for, working_environment_actions,
+    LiveWorkingField, WorkingEnvironmentOperation, WorkingEnvironmentOutcome,
+};
 use crate::session_space_service::install_session_space_navigation_resources;
 use crate::staging::is_on;
 use crate::workspace_navigation::{
@@ -543,6 +547,24 @@ impl<'a> ApplicationService<'a> {
 }
 
 impl TuiApplicationService for ApplicationService<'_> {
+    fn live_working_field(&mut self) -> Result<Option<LiveWorkingField>> {
+        let projectable = self.backend.working_environment_subjects()?;
+        Ok(self
+            .backend
+            .working_environments()?
+            .map(|observations| live_working_field(&observations, &projectable)))
+    }
+
+    fn act_in_working_environment(
+        &mut self,
+        provider: &ResourceRef,
+        subject: &ResourceRef,
+        operation: WorkingEnvironmentOperation,
+    ) -> Result<WorkingEnvironmentOutcome> {
+        self.backend
+            .act_in_working_environment(provider, subject, operation)
+    }
+
     fn search(&self, query: &str) -> Result<ResourceListReadModel> {
         Ok(self.resolve_search(query)?.resources)
     }
@@ -930,10 +952,36 @@ impl TuiApplicationService for ApplicationService<'_> {
                 }
             }
         }
+        // Open/focus is offered where the host can actually perform it, and
+        // nowhere else. The backend's reading is cached, so this stays a cheap
+        // lookup rather than a subprocess behind every selection change.
+        if let Some(observations) = self.backend.working_environments()? {
+            let projectable = self.backend.working_environment_subjects()?;
+            let field = live_working_field(&observations, &projectable);
+            actions.extend(working_environment_actions(&field, resource)?);
+        }
         Ok(actions)
     }
 
     fn invoke_action(&mut self, action: &ContextualActionDescriptor) -> Result<ActionOutcome> {
+        // A working-environment Action names the provider that must answer it.
+        // Resolving it against the live reading first means a stale Action —
+        // one whose provider has since gone away — falls through to the
+        // ordinary "no implementation" answer instead of reaching a provider
+        // that is no longer there.
+        if let Some(observations) = self.backend.working_environments()? {
+            let projectable = self.backend.working_environment_subjects()?;
+            let field = live_working_field(&observations, &projectable);
+            if let Some((provider, operation)) = parse_action_ref(&action.action, &field) {
+                reach_for(&field, &provider, &action.subject, operation)?;
+                let outcome =
+                    self.backend
+                        .act_in_working_environment(&provider, &action.subject, operation)?;
+                return Ok(ActionOutcome::Status {
+                    summary: outcome.summary(),
+                });
+            }
+        }
         let outcome = match action.action.as_str() {
             EXPLAIN_ACTION_REF => {
                 let evidence = crate::explain_history_service::ExplainHistoryApplicationService::explain_evidence(

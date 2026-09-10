@@ -310,6 +310,57 @@ pub trait PaletteBackend {
         Ok(None)
     }
 
+    /// Optional already-observed working-environment providers for this host.
+    ///
+    /// Same seam, same reason as [`PaletteBackend::versioned_world`]: tmux,
+    /// cmux, Herdr and Hyprland providers do I/O and live in `aikit-adapters`,
+    /// which this crate does not depend on. So the caller that *can* observe
+    /// hands the observations over, and a backend that cannot observe answers
+    /// `None`.
+    ///
+    /// The two meanings of an absent answer stay apart. `None` is "no provider
+    /// was attached at all — nobody looked". `Some(vec![])` is "a caller looked
+    /// and found no working environment here". A surface renders those
+    /// differently because they are different facts about the machine.
+    fn working_environments(
+        &self,
+    ) -> Result<Option<Vec<aikit_core::working_environment::WorkingEnvironmentObservation>>> {
+        Ok(None)
+    }
+
+    /// Ask one observed provider to open or focus one canonical subject.
+    ///
+    /// The default answers `NotExposed` rather than erroring: a backend with no
+    /// provider attached has not failed at anything, and the operator needs to
+    /// be told the boundary is empty, not shown a failure they cannot act on.
+    fn act_in_working_environment(
+        &mut self,
+        provider: &ResourceRef,
+        subject: &ResourceRef,
+        operation: crate::live_field::WorkingEnvironmentOperation,
+    ) -> Result<crate::live_field::WorkingEnvironmentOutcome> {
+        Ok(crate::live_field::WorkingEnvironmentOutcome::NotExposed {
+            provider: provider.clone(),
+            subject: subject.clone(),
+            reason: format!(
+                "no working-environment provider is attached at this application boundary, so {} is not available here",
+                operation.as_str()
+            ),
+        })
+    }
+
+    /// The canonical subjects this world can project into a working
+    /// environment — the panes the current session plan defines, whether or
+    /// not any of them is live yet.
+    ///
+    /// Separate from [`PaletteBackend::working_environments`] because it
+    /// answers a different question. That one asks the machine what exists;
+    /// this one asks the plan what could. Open needs the second: a subject
+    /// that has never been started is exactly the one worth starting.
+    fn working_environment_subjects(&self) -> Result<Vec<ResourceRef>> {
+        Ok(Vec::new())
+    }
+
     fn scope_layers(&self) -> Option<&[ScopeLayer]> {
         None
     }

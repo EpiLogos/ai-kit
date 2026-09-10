@@ -65,6 +65,8 @@ use aikit_adapters::factory_developmental::{
     read_factory_developmental, start_factory_work, FactoryDevelopmentalBinding,
 };
 
+use aikit_core::working_environment::WorkingEnvironmentObservation;
+use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
 use aikit_tui::backend::{
     ClientEffect, FactoryWorkEntry, FactoryWorkStartReceipt, JobOutput, PaletteBackend, Projected,
     PromotionDraft, RunIntent, Toggle,
@@ -260,6 +262,14 @@ pub struct Service {
     /// application. This is an ephemeral read cache, not an AIKit Factory
     /// store; restarting re-observes through the configured owner binding.
     factory_started_resources: Option<Vec<aikit_core::resource::ResourceRecord>>,
+    /// Working-environment observation cache.
+    ///
+    /// Observing a mux runs real subprocesses. Contextual Actions are loaded on
+    /// every selection change, so an un-cached observation here would put a
+    /// `tmux list-sessions` behind every arrow key — the exact shape of the
+    /// input-responsiveness defect. Observe once, and re-observe only after an
+    /// operation this application performed changed the host.
+    working_environments: std::cell::RefCell<Option<Vec<WorkingEnvironmentObservation>>>,
 }
 
 impl Service {
@@ -397,6 +407,7 @@ impl Service {
             factory_project_ref,
             factory_request_file,
             factory_started_resources: None,
+            working_environments: std::cell::RefCell::new(None),
         })
     }
 
@@ -2510,6 +2521,50 @@ fn create_directory_link(target: &Path, link: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 impl PaletteBackend for Service {
+    /// The host's terminal working environments, observed over this Service's
+    /// own session plan.
+    ///
+    /// `Some` because this boundary *did* look — an empty vector is the
+    /// truthful "no mux is installed here", not "nobody checked". A plan that
+    /// cannot be compiled is the one case that answers `None`: without a plan
+    /// there is nothing to observe over, and claiming an empty host would be a
+    /// second lie on top of the first.
+    fn working_environments(&self) -> Result<Option<Vec<WorkingEnvironmentObservation>>> {
+        if let Some(cached) = self.working_environments.borrow().as_ref() {
+            return Ok(Some(cached.clone()));
+        }
+        let Ok(plan) = self.session_plan(None) else {
+            return Ok(None);
+        };
+        let observed = crate::working_environment_field::observe(&plan)?;
+        *self.working_environments.borrow_mut() = Some(observed.clone());
+        Ok(Some(observed))
+    }
+
+    fn working_environment_subjects(&self) -> Result<Vec<aikit_core::resource::ResourceRef>> {
+        let Ok(plan) = self.session_plan(None) else {
+            return Ok(Vec::new());
+        };
+        Ok(crate::working_environment_field::plan_surfaces(&plan)
+            .into_iter()
+            .map(|(surface, _)| surface)
+            .collect())
+    }
+
+    fn act_in_working_environment(
+        &mut self,
+        provider: &aikit_core::resource::ResourceRef,
+        subject: &aikit_core::resource::ResourceRef,
+        operation: WorkingEnvironmentOperation,
+    ) -> Result<WorkingEnvironmentOutcome> {
+        let plan = self.session_plan(None)?;
+        let outcome = crate::working_environment_field::act(&plan, provider, subject, operation)?;
+        // The host may have changed under us; the next reading must come from
+        // the machine rather than from what it looked like before we acted.
+        *self.working_environments.borrow_mut() = None;
+        Ok(outcome)
+    }
+
     fn context_resource_records(&self) -> Result<Vec<aikit_core::resource::ResourceRecord>> {
         let Some(project) = self.descriptor.project_root.as_deref() else { return Ok(Vec::new()) };
         let mut records = if let Some(central) = process_central_root(Some(project)) {

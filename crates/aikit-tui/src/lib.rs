@@ -22,6 +22,7 @@ pub mod host;
 pub mod inspector_render;
 pub mod knowledge_service;
 pub mod layout;
+pub mod live_field;
 pub mod model_roster_surface;
 pub mod navigation;
 pub mod navigator_groups;
