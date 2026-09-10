@@ -56,9 +56,9 @@ fn world_root(tmp: &Path) -> PathBuf {
 fn a_bound_world_root_reaches_its_own_ground_without_swallowing_a_member_project() {
     let tmp = tempfile::tempdir().unwrap();
     let world = world_root(tmp.path());
-    let home = AikitHome::at(&tmp.path().join("home"));
+    let home = AikitHome::at(tmp.path().join("home"));
     home.ensure_layout().unwrap();
-    projects::bind(&home, "world", &[world.clone()], &[], &[], true).unwrap();
+    projects::bind(&home, "world", std::slice::from_ref(&world), &[], &[], true).unwrap();
 
     let ground = projects::resolve(&home, &world.join("Control")).unwrap();
     let ground = ground.expect("the World's own ground is inside the bound world root");
