@@ -6,7 +6,7 @@
 
 use ratatui::layout::Alignment;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use aikit_core::resource::ActionStageability;
@@ -96,7 +96,27 @@ fn draw_shell(
     let panes = layout.split(inner);
     frame.render_widget(query_line(state, &theme, glyphs), panes.query);
 
-    let compact_world_lines = if panes.preview.is_none()
+    // `ApplicationSurfaceController::draw` (`application_surface.rs`) draws
+    // the Relations panel directly on top of `panes.list` — at this exact
+    // Rect, later in the same frame — whenever the Workspace is showing the
+    // Knowledge section, regardless of `relation_view`. `Paragraph`/`Block`
+    // only touch the cells their own content actually reaches (see
+    // `ratatui::widgets::Clear`'s doc comment: "this will clear/reset the
+    // area first" is something a caller has to ask for, not something
+    // rendering does on its own), so whatever this function drew into that
+    // Rect a moment ago — or what an earlier frame left there, since
+    // `Terminal::draw`'s contract only promises a diff against the
+    // previous frame, not a blanked buffer — stays behind as far as the
+    // panel's own content is shorter than the row it sits over. Rather
+    // than let the list content it will never let the viewer see reach the
+    // buffer at all, this leaves `panes.list` genuinely blank for the
+    // Relations panel to draw onto, the same way a popup clears before it
+    // draws (`Clear`'s own example).
+    let relations_panel_covers_list = state.presentation == PresentationMode::Workspace
+        && state.workspace_section == WorkspaceSection::Knowledge;
+
+    let compact_world_lines = if !relations_panel_covers_list
+        && panes.preview.is_none()
         && state.presentation == PresentationMode::Workspace
     {
         reading
@@ -105,7 +125,9 @@ fn draw_shell(
     } else {
         None
     };
-    if let Some(lines) = compact_world_lines {
+    if relations_panel_covers_list {
+        frame.render_widget(Clear, panes.list);
+    } else if let Some(lines) = compact_world_lines {
         frame.render_widget(project_world_pane(lines, &theme), panes.list);
     } else {
         draw_resources(frame, state, &theme, panes.list, glyphs);
