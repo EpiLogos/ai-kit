@@ -29,6 +29,31 @@ fn aikit(root: &Path, home: &Path, cwd: &Path, args: &[&str]) -> Output {
         .output()
         .unwrap()
 }
+
+fn project_context(root: &Path, home: &Path, cwd: &Path) -> Output {
+    // The public Context receipt lives on the native SessionSpace application
+    // command. `method resolve` is not part of the current CLI grammar.
+    Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+        .env("AIKIT_HOME", home)
+        .env("CENTRAL_ROOT", root)
+        .env_remove("AIKIT_CONTEXT_ID")
+        .env_remove("AIKIT_ISOLATION")
+        .current_dir(cwd)
+        .arg("project-context")
+        .output()
+        .unwrap()
+}
+
+fn succeeded(output: &Output) {
+    assert!(
+        output.status.success(),
+        "status={}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 #[ignore = "requires installed native Central ctrl and Actuation discovery"]
 fn explicit_compose_discloses_authored_basis_and_refuses_broken_source() {
@@ -56,17 +81,9 @@ fn explicit_compose_discloses_authored_basis_and_refuses_broken_source() {
             "--no-default-skill-sets",
         ],
     );
-    assert!(
-        bound.status.success(),
-        "{}",
-        String::from_utf8_lossy(&bound.stderr)
-    );
+    succeeded(&bound);
     let optional = aikit(&root, &home, &project, &["compose"]);
-    assert!(
-        optional.status.success(),
-        "{}",
-        String::from_utf8_lossy(&optional.stdout)
-    );
+    succeeded(&optional);
     let profile = json!({"schema":"central.agent-profile/v1","ref":"profile/compose-proof","revision":"r1",
         "agent_ref":"agent/compose-proof","scope":"project","world_ref":"world/compose-proof",
         "ratified_world_refs":["world/compose-proof"],"governance_refs":["source/compose-proof/law"],
@@ -81,11 +98,7 @@ fn explicit_compose_discloses_authored_basis_and_refuses_broken_source() {
         ],
     );
     let composed = aikit(&root, &home, &project, &["compose"]);
-    assert!(
-        composed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&composed.stdout)
-    );
+    succeeded(&composed);
     let value: Value = serde_json::from_slice(&composed.stdout).unwrap();
     assert_eq!(
         value["data"]["composed_inputs"]["authored_basis"]["profile_source"]["revision"],
@@ -113,40 +126,32 @@ fn explicit_compose_discloses_authored_basis_and_refuses_broken_source() {
     } else {
         project.join(source)
     };
-    let method_path = project.join("method.json");
-    fs::write(&method_path,json!({"id":"method/compose-proof","source":"central:source:project:compose-proof:method.json","name":"Observe commissioned Agent source","focus":["agent/compose-proof"]}).to_string()).unwrap();
-    let method = aikit(
-        &root,
-        &home,
-        &project,
-        &[
-            "method",
-            "resolve",
-            "--source",
-            method_path.to_str().unwrap(),
-            "--focus",
-            "agent/compose-proof",
-        ],
-    );
-    assert!(
-        method.status.success(),
-        "{}",
-        String::from_utf8_lossy(&method.stdout)
-    );
-    let method: Value = serde_json::from_slice(&method.stdout).unwrap();
-    assert_eq!(method["data"]["praxis"]["focus"][0], "agent/compose-proof");
+    let first = project_context(&root, &home, &project);
+    succeeded(&first);
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert!(first["context"]["reference"].is_string());
+    let repeated = project_context(&root, &home, &project);
+    succeeded(&repeated);
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(first, repeated, "unchanged native input has a stable receipt");
+
     // Change actual source bytes without changing the declared owner revision.
     // The next Context receipt must bind the new bytes, not merely the old label.
-    let old_bytes = fs::read(&source).unwrap();
-    let mut changed_bytes = old_bytes.clone();
+    let mut changed_bytes = fs::read(&source).unwrap();
     changed_bytes.push(b'\n');
     fs::write(&source, changed_bytes).unwrap();
-    let changed = aikit(&root, &home, &project, &["method","resolve","--source",method_path.to_str().unwrap(),"--focus","agent/compose-proof"]);
-    assert!(changed.status.success(), "{}", String::from_utf8_lossy(&changed.stdout));
-    let changed:Value = serde_json::from_slice(&changed.stdout).unwrap();
-    assert_ne!(method["data"]["context_resolution"]["reference"],changed["data"]["context_resolution"]["reference"]);
-    assert_eq!(method["data"]["context_resolution"]["basis"]["resolver_hash"],changed["data"]["context_resolution"]["basis"]["resolver_hash"]);
-    assert_eq!(changed["data"]["context_resolution"]["basis"]["observed_source_resources"][0]["sources"][0]["revision"],"r1");
+    let changed = project_context(&root, &home, &project);
+    succeeded(&changed);
+    let changed: Value = serde_json::from_slice(&changed.stdout).unwrap();
+    assert_ne!(first["context"]["reference"], changed["context"]["reference"]);
+    assert_eq!(
+        first["context"]["basis"]["resolver_hash"],
+        changed["context"]["basis"]["resolver_hash"]
+    );
+    assert_eq!(
+        changed["context"]["basis"]["observed_source_resources"][0]["sources"][0]["revision"],
+        "r1"
+    );
     fs::write(source, b"malformed owner profile").unwrap();
     let refused = aikit(&root, &home, &project, &["compose"]);
     assert!(
@@ -155,4 +160,8 @@ fn explicit_compose_discloses_authored_basis_and_refuses_broken_source() {
     );
     let failure: Value = serde_json::from_slice(&refused.stdout).unwrap();
     assert_eq!(failure["ok"], false);
+    assert!(
+        !project_context(&root, &home, &project).status.success(),
+        "the native Context receipt must also refuse broken source"
+    );
 }
