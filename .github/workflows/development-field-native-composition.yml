@@ -1,0 +1,80 @@
+name: Development Field native Central composition
+on:
+  pull_request:
+    paths:
+      - 'crates/aikit-cli/**'
+      - 'crates/aikit-core/**'
+      - 'crates/aikit-adapters/**'
+      - 'crates/aikit-tui/**'
+      - '.github/workflows/development-field-native-composition.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/aikit-cli/**'
+      - 'crates/aikit-core/**'
+      - 'crates/aikit-adapters/**'
+      - 'crates/aikit-tui/**'
+      - '.github/workflows/development-field-native-composition.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-composition:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CENTRAL_SHA: 4cd0fe52b10fb0e09a5a9e4486ea3d40d4946c5c
+      ACTUATION_SHA: 6398b23e0972e85d61295ddc1cfcbb83989dc00b
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Exact native owner dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          for owner in Central Actuation; do
+            revision="$CENTRAL_SHA"
+            if [ "$owner" = Actuation ]; then revision="$ACTUATION_SHA"; fi
+            root="$RUNNER_TEMP/$owner"
+            git init -q "$root"
+            git -C "$root" remote add origin "https://github.com/EpiLogos/$owner.git"
+            git -C "$root" fetch --depth=1 origin "$revision"
+            git -C "$root" checkout --detach FETCH_HEAD
+            test "$(git -C "$root" rev-parse HEAD)" = "$revision"
+          done
+          printf '%s\n' "$RUNNER_TEMP/Central/target/debug" "$RUNNER_TEMP/Actuation/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: |
+            .
+            ${{ runner.temp }}/Central
+      - name: Build native Central
+        run: cargo build --manifest-path "$RUNNER_TEMP/Central/Cargo.toml" --locked --bin ctrl
+      - name: Run native composition and exact source-byte receipt regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p aikit-cli --test compose_native_central -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/composition.log"
+      - name: Retain exact execution context
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "AIKit=$(git rev-parse HEAD)"
+            echo "Central=$CENTRAL_SHA"
+            echo "Actuation=$ACTUATION_SHA"
+            echo 'Standing=native deterministic composition; no live provider or human acceptance'
+            rustc -Vv
+            node --version
+          } > "$RUNNER_TEMP/composition-basis.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: development-field-native-composition
+          path: |
+            ${{ runner.temp }}/composition.log
+            ${{ runner.temp }}/composition-basis.txt
+          if-no-files-found: error
