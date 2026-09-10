@@ -2,7 +2,7 @@
 
 AIKit's Development Field surface is a bounded **read/composition contract** over the resources that their native owners have already supplied. It does not make AIKit the owner of Central source identity, QL form meaning, Factory developmental meaning, Workcell lifecycle, or Actuation actuality.
 
-The core contract is `aikit.development-field-reading/v1`. A carrier remains an ordinary `ResourceRef` and therefore stays in the existing Search/Resolve field. Its optional `aikit.development-field-binding/v1` annotation adds only owner-declared carrier kind, explicit stable-ref relations, an attributable QL `ShapeBinding` carrier when supplied, and Workcell material references. A QL shape address is structural addressability, not a semantic Wiki edge, and partial/developed shapes are valid inputs.
+The core contract is `aikit.development-field-reading/v1`. A carrier remains an ordinary `ResourceRef` and therefore stays in the existing Search/Resolve field. Its optional `aikit.development-field-binding/v1` annotation adds only owner-declared carrier kind, explicit stable-ref relations, an attributable QL `ShapeBinding` carrier when supplied, and Workcell material references. The QL seam pins the accepted owner contract `ql.structural-carrier/1.0.0` (QL-MEF #122/#137): `subject_ref`, `shape_ref`, `whole_ref`, basis/member/relation bindings, optional derivation/operator refs, Return refs and opaque caller/source/standing provenance survive intact. QL relation bindings retain their evidence refs but never auto-create AIKit semantic Resource edges. Partial/developed shapes remain valid because AIKit does not re-run or replace QL shape semantics.
 
 ## Native read
 
