@@ -291,14 +291,42 @@ pub fn normalize_repository_identity(value: &str) -> Result<String> {
     Ok(parts.join("/"))
 }
 
+/// Whether the World's own ground sits at `repository` beneath a bound world
+/// root, rather than being one of the World's member projects.
+///
+/// A bound root must not swallow the member projects beneath it — each of
+/// those carries its own project ground and its own specification, and is
+/// matched on its own terms. The World's own ground is the exception: the
+/// root register is its own repository holding the World record, the Agent
+/// profiles and the Agent sets, and it carries no project ground of its own
+/// because it is the World's source rather than a project inside the World.
+/// Without this, binding the world root binds nothing that the World actually
+/// contains.
+///
+/// Only a direct child of a world root qualifies: member projects live a
+/// level further down, under the directory that indexes them. The world root
+/// is recognised the same way `adopt.rs:547` recognises it — a directory
+/// holding `Control/` beside `.central/`.
+fn world_ground(root: &Path, repository: &Path) -> bool {
+    repository.parent() == Some(root)
+        && root.join(".central").is_dir()
+        && !repository
+            .join("ProjectCentral")
+            .join("project.json")
+            .is_file()
+}
+
 fn same_repository_boundary(root: &Path, cwd: &Path) -> bool {
-    let root_git = git_root(root);
-    let cwd_git = git_root(cwd);
-    match (root_git, cwd_git) {
-        (Some(left), Some(right)) => left == right,
-        (None, Some(right)) => !right.starts_with(root) || right == root,
-        _ => true,
+    let Some(cwd_git) = git_root(cwd) else {
+        // `cwd` stands in no repository, so no repository boundary excludes it.
+        return true;
+    };
+    if git_root(root).as_deref() == Some(cwd_git.as_path()) {
+        return true;
     }
+    // A different repository: inside the boundary when `cwd` is not beneath
+    // `root` at all, or when it is the World's own ground.
+    !cwd_git.starts_with(root) || world_ground(root, &cwd_git)
 }
 
 fn git_root(path: &Path) -> Option<PathBuf> {

@@ -17,6 +17,7 @@ use std::{
 struct WorldRunner {
     answers: BTreeMap<String, Value>,
     fail_on: BTreeMap<String, ()>,
+    unreadable_on: BTreeMap<String, String>,
     seen: Mutex<Vec<Vec<String>>>,
 }
 
@@ -25,12 +26,21 @@ impl WorldRunner {
         Self {
             answers: BTreeMap::from([(world_ref.to_owned(), sources)]),
             fail_on: BTreeMap::new(),
+            unreadable_on: BTreeMap::new(),
             seen: Mutex::new(Vec::new()),
         }
     }
 
+    /// The world has no authored record at all — Central's `missing World`.
     fn failing_on(mut self, world_ref: &str) -> Self {
         self.fail_on.insert(world_ref.to_owned(), ());
+        self
+    }
+
+    /// The world declares relations, but the declaration cannot be read.
+    fn unreadable_on(mut self, world_ref: &str, message: &str) -> Self {
+        self.unreadable_on
+            .insert(world_ref.to_owned(), message.to_owned());
         self
     }
 }
@@ -43,23 +53,42 @@ impl CommandRunner for WorldRunner {
             .and_then(|input| serde_json::from_str::<Value>(input).ok())
             .and_then(|input| input["world_ref"].as_str().map(str::to_owned))
             .unwrap_or_default();
-        let envelope = |ok: bool, sources: Value| {
-            json!({"ok": ok, "data": {"world_ref": world_ref, "sources": sources}}).to_string()
-        };
         Ok(Output {
             status: 0,
-            stdout: if self.fail_on.contains_key(&world_ref) {
-                json!({"ok": false, "error": {"message": format!("no world {world_ref}")}})
-                    .to_string()
+            stdout: if let Some(message) = self.unreadable_on.get(&world_ref) {
+                json!({
+                    "ok": false,
+                    "status": "invalid_input",
+                    "error": {"code": "invalid_input", "message": message}
+                })
+                .to_string()
+            } else if self.fail_on.contains_key(&world_ref) {
+                absent_envelope(&world_ref)
             } else {
                 match self.answers.get(&world_ref) {
-                    Some(sources) => envelope(true, sources.clone()),
-                    None => json!({"ok": false, "error": {"message": "missing world"}}).to_string(),
+                    Some(sources) => json!({
+                        "ok": true,
+                        "data": {"world_ref": world_ref, "sources": sources}
+                    })
+                    .to_string(),
+                    None => absent_envelope(&world_ref),
                 }
             },
             stderr: String::new(),
         })
     }
+}
+
+/// Central's real answer for a world ref with no authored record: the result
+/// status IS the code (`ctrl/src/result.rs:81`) and the absence is named only
+/// in the message (`ctrl/src/world.rs:583`).
+fn absent_envelope(world_ref: &str) -> String {
+    json!({
+        "ok": false,
+        "status": "invalid_input",
+        "error": {"code": "invalid_input", "message": format!("missing World {world_ref}")}
+    })
+    .to_string()
 }
 
 /// An inhabited Central fixture: nara identity manifest + one sourced file,
@@ -125,7 +154,16 @@ fn disclosure_names_the_participants_present_in_a_project_context() {
     let disclosure = disclosure.expect("inhabited world discloses participants");
     assert!(disclosure.starts_with("[continuity/entity-disclosure]"));
     assert!(disclosure.contains("- nara: central:pasu:nara:local"), "{disclosure}");
-    assert!(disclosure.contains("- agent: agent:x"), "{disclosure}");
+    // The Agent subject is Central's canonical paśu form
+    // (`PasuRef::for_agent` — ctrl/src/pasu.rs:121), not the bare agent ref.
+    assert!(
+        disclosure.contains("- agent: central:pasu:agent:agent:x"),
+        "{disclosure}"
+    );
+    // The profile relation is named by its real identifier, which Central
+    // serialises as `ref` — never the `unprofiled` placeholder.
+    assert!(disclosure.contains("profile/x"), "{disclosure}");
+    assert!(!disclosure.contains("unprofiled"), "{disclosure}");
     assert!(disclosure.contains("- agent-set: central:pasu:agent-set:world-operators"), "{disclosure}");
     assert!(
         disclosure.contains("context binding: control:root (1 source(s) effective, root lineage by convention)"),
@@ -162,8 +200,20 @@ fn an_excluded_identity_source_withholds_the_nara_from_the_disclosure() {
     let disclosure =
         entity_disclosure_in(&runner, Some(&root), Some(&project)).expect("fail-open");
     let disclosure = disclosure.expect("other participants remain");
-    assert!(!disclosure.contains("- nara:"), "excluded source withholds the nara: {disclosure}");
-    assert!(disclosure.contains("- agent: agent:x"), "{disclosure}");
+    assert!(
+        !disclosure.contains("- nara:"),
+        "excluded source withholds the nara: {disclosure}"
+    );
+    // A withheld human is not an absent one: no "no human entity established"
+    // claim is made about a World where the human merely was not disclosed.
+    assert!(
+        !disclosure.contains("no human entity established"),
+        "the human is excluded from this context, not absent from the World: {disclosure}"
+    );
+    assert!(
+        disclosure.contains("- agent: central:pasu:agent:agent:x"),
+        "{disclosure}"
+    );
 }
 
 #[test]
@@ -181,6 +231,43 @@ fn a_failed_binding_call_degrades_the_disclosure_fail_open() {
     assert!(!disclosure.contains("context binding:"), "{disclosure}");
 }
 
+/// A project whose world declaration exists but cannot be read must NOT get
+/// the root lineage. The participants still disclose; the binding does not.
+#[test]
+fn an_unreadable_world_declaration_is_not_treated_as_undeclared() {
+    let root = fixture_root();
+    let project = root.join("Work/Corrupt");
+    fs::create_dir_all(&project).unwrap();
+    let runner = WorldRunner::with_answer(
+        "control:root",
+        json!([{"ref": "central:source:control:root:Control/user/identity",
+                "state": "available", "effective_revision": "1",
+                "propagation_path": ["control:root"]}]),
+    )
+    .unreadable_on("project:Corrupt", "world relation record is malformed");
+
+    let disclosure = entity_disclosure_in(&runner, Some(&root), Some(&project))
+        .expect("fail-open")
+        .expect("participants still disclose");
+
+    assert!(
+        !disclosure.contains("context binding:"),
+        "no binding is assumed from an unreadable declaration: {disclosure}"
+    );
+    assert!(
+        !disclosure.contains("root lineage by convention"),
+        "the root lineage is not inherited: {disclosure}"
+    );
+    assert!(
+        disclosure.contains("could not be read or validated"),
+        "the failure policy is disclosed: {disclosure}"
+    );
+    assert!(
+        disclosure.contains("- agent: central:pasu:agent:agent:x"),
+        "{disclosure}"
+    );
+}
+
 #[test]
 fn an_empty_world_discloses_nothing() {
     let temp = tempfile::tempdir().unwrap().keep();
@@ -190,5 +277,49 @@ fn an_empty_world_discloses_nothing() {
         Some(&temp),
     )
     .expect("fail-open");
-    assert!(disclosure.is_none(), "no identity manifest — no disclosure");
+    assert!(
+        disclosure.is_none(),
+        "no entities at all — there is nothing to disclose"
+    );
+}
+
+/// The human identity source is not a precondition for disclosing the other
+/// participants. An absent human must read as "no human established here",
+/// never as "this World contains no Agents".
+#[test]
+fn agents_disclose_when_no_human_identity_is_established() {
+    let root = tempfile::tempdir().unwrap().keep();
+    fs::create_dir_all(root.join("Control/agents/profiles")).unwrap();
+    fs::write(
+        root.join("Control/agents/profiles/profile-x.json"),
+        json!({
+            "schema": "central.agent-profile/v1",
+            "ref": "profile/x", "revision": "r1",
+            "agent_ref": "agent:x", "scope": "personal"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let project = root.join("Work/Alpha");
+    fs::create_dir_all(&project).unwrap();
+    let runner = WorldRunner::with_answer("control:root", json!([])).failing_on("project:Alpha");
+
+    let disclosure = entity_disclosure_in(&runner, Some(&root), Some(&project))
+        .expect("fail-open")
+        .expect("agents are disclosed even with no human identity source");
+
+    assert!(
+        disclosure.contains("- agent: central:pasu:agent:agent:x"),
+        "{disclosure}"
+    );
+    assert!(
+        disclosure.contains("- nara: no human entity established from this source"),
+        "the absent human is disclosed truthfully: {disclosure}"
+    );
+    // An agent-set can be authored without the human source, and the
+    // materialiser reports its absence rather than suppressing it.
+    assert!(
+        disclosure.contains("identity manifest absent"),
+        "the materialisation absence is surfaced: {disclosure}"
+    );
 }

@@ -49,11 +49,22 @@ fn fixture_central() -> PathBuf {
     fs::write(
         central.join("Control/agents/profiles/profile-hermes.json"),
         json!({
+            // Central's serialised shape: ctrl's `AgentProfile` renames the
+            // identifier to `ref` (`ctrl/src/agent_profile.rs:113`). A fixture
+            // that spells it `profile_ref` proves nothing about the real
+            // record — that mismatch is exactly what this file guards.
             "schema": "central.agent-profile/v1",
-            "profile_ref": "agent-profile:hermes",
+            "ref": "profile/hermes",
             "agent_ref": "agent:hermes",
             "revision": "p1",
-            "scope": "personal"
+            "scope": "personal",
+            "intent_provenance": {
+                "schema": "central.agent-profile-provenance/v1",
+                "intent_expression": "be hermes, and hold it",
+                "origin_action": "agent-profile.propose",
+                "authorship": "generated-proposal",
+                "recognition": "unrecognised"
+            }
         })
         .to_string(),
     )
@@ -153,10 +164,17 @@ fn case16_half_profile_revision_change_relinks_the_same_agent_entity() {
         central.join("Control/agents/profiles/profile-hermes.json"),
         json!({
             "schema": "central.agent-profile/v1",
-            "profile_ref": "agent-profile:hermes",
+            "ref": "profile/hermes",
             "agent_ref": "agent:hermes",
             "revision": "p2",
-            "scope": "personal"
+            "scope": "personal",
+            "intent_provenance": {
+                "schema": "central.agent-profile-provenance/v1",
+                "intent_expression": "be hermes, and hold it",
+                "origin_action": "agent-profile.propose",
+                "authorship": "generated-proposal",
+                "recognition": "unrecognised"
+            }
         })
         .to_string(),
     )
@@ -219,4 +237,238 @@ fn case17_local_whole_resolves_and_navigation_traverses_membership() {
     let view = provider.relations(query).expect("relations view");
     assert!(view.edges.iter().any(|edge| edge.relation == "local-member"),
         "navigation traverses the local whole: {:?}", view.edges.iter().map(|e| e.relation.clone()).collect::<Vec<_>>());
+}
+
+/// Central serialises the profile identifier as `ref`
+/// (`ctrl/src/agent_profile.rs:113`). Reading the consumer's own spelling would
+/// leave every real record marked `unprofiled`, so the identifier AND the
+/// generated-proposal block must survive from Central's actual shape.
+#[test]
+fn the_profile_identifier_and_intent_survive_from_centrals_own_shape() {
+    let central = fixture_central();
+    let reading = materialise_central_entities(&central);
+    let hermes = reading
+        .objects
+        .iter()
+        .find_map(|object| match object {
+            WikiObject::Node(node) if node.ref_id.as_str() == "wiki:node:pasu:agent:agent:hermes" => {
+                Some(node.clone())
+            }
+            _ => None,
+        })
+        .expect("agent entity");
+    let profile = &hermes.extensions["aikit.pasu/v1"]["extra"]["profiles"][0];
+
+    assert_eq!(
+        profile["profile_ref"].as_str(),
+        Some("profile/hermes"),
+        "the real identifier, never the placeholder"
+    );
+    assert_eq!(profile["revision"].as_str(), Some("p1"));
+    assert_eq!(profile["scope"].as_str(), Some("personal"));
+    // The intent travels verbatim, and its standing travels with it.
+    assert_eq!(
+        profile["intent_provenance"]["intent_expression"].as_str(),
+        Some("be hermes, and hold it")
+    );
+    assert_eq!(
+        profile["intent_provenance"]["recognition"].as_str(),
+        Some("unrecognised")
+    );
+}
+
+/// The legacy `profile_ref` spelling still reads (records generated before the
+/// rename), and the placeholder marks only a record that names no profile.
+#[test]
+fn legacy_profile_ref_records_still_read_and_absence_is_marked() {
+    let central = fixture_central();
+    fs::write(
+        central.join("Control/agents/profiles/profile-legacy.json"),
+        json!({
+            "schema": "central.agent-profile/v1",
+            "profile_ref": "profile/legacy",
+            "agent_ref": "agent:legacy",
+            "revision": "r1",
+            "scope": "personal"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        central.join("Control/agents/profiles/profile-nameless.json"),
+        json!({
+            "schema": "central.agent-profile/v1",
+            "agent_ref": "agent:nameless",
+            "revision": "r1",
+            "scope": "personal"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let reading = materialise_central_entities(&central);
+    let profile_ref_of = |agent_ref: &str| -> Option<String> {
+        reading.objects.iter().find_map(|object| match object {
+            WikiObject::Node(node)
+                if node.ref_id.as_str() == format!("wiki:node:pasu:agent:{agent_ref}") =>
+            {
+                node.extensions["aikit.pasu/v1"]["extra"]["profiles"][0]["profile_ref"]
+                    .as_str()
+                    .map(str::to_owned)
+            }
+            _ => None,
+        })
+    };
+    assert_eq!(profile_ref_of("agent:legacy").as_deref(), Some("profile/legacy"));
+    assert_eq!(profile_ref_of("agent:nameless").as_deref(), Some("unprofiled"));
+}
+
+/// Central permits colon-bearing set refs (`ctrl/src/agent_set_store.rs:533`
+/// rejects only empty, untrimmed and NUL values). Deriving the local space from
+/// the final colon-separated fragment would collapse two distinct permitted
+/// sets onto one space — and two spaces sharing a ref would corrupt the graph.
+#[test]
+fn colon_bearing_set_refs_get_distinct_local_spaces() {
+    let central = fixture_central();
+    for (file, set_ref) in [
+        ("agent-set-team.json", "team:review"),
+        ("agent-set-other.json", "other:review"),
+    ] {
+        fs::write(
+            central.join("Control/agents/agent-sets").join(file),
+            json!({
+                "schema": "central.agent-set/v1",
+                "ref": set_ref,
+                "revision": "r1",
+                "members": [{"kind": "agent", "agent_ref": "agent:hermes"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    let reading = materialise_central_entities(&central);
+    let spaces: Vec<String> = reading
+        .objects
+        .iter()
+        .filter_map(|object| match object {
+            WikiObject::Space(space) => Some(space.ref_id.as_str().to_owned()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        spaces.iter().any(|s| s == "wiki:space:pasu-local:team:review"),
+        "{spaces:?}"
+    );
+    assert!(
+        spaces.iter().any(|s| s == "wiki:space:pasu-local:other:review"),
+        "{spaces:?}"
+    );
+    let mut unique = spaces.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        spaces.len(),
+        "no two local spaces may share a ref: {spaces:?}"
+    );
+}
+
+/// A real Central-produced record, committed byte-exact from the live store
+/// (`Control/agents/profiles/`), consumed end to end. A fixture that restates
+/// the consumer's own spelling can only ever prove the consumer agrees with
+/// itself; this one fails when Central's serialisation moves.
+#[test]
+fn the_committed_real_central_record_is_consumed_faithfully() {
+    let central = fixture_central();
+    let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/central/profile-factory-bounded-acceptance.json");
+    let body = fs::read_to_string(&real).expect("committed real record");
+    fs::write(central.join("Control/agents/profiles/profile-real.json"), &body).unwrap();
+
+    let reading = materialise_central_entities(&central);
+    let node = reading
+        .objects
+        .iter()
+        .find_map(|object| match object {
+            WikiObject::Node(node)
+                if node.ref_id.as_str()
+                    == "wiki:node:pasu:agent:agent/factory-bounded-acceptance" =>
+            {
+                Some(node.clone())
+            }
+            _ => None,
+        })
+        .expect("the real record materialises as an agent entity");
+    let profile = &node.extensions["aikit.pasu/v1"]["extra"]["profiles"][0];
+
+    assert_eq!(
+        profile["profile_ref"].as_str(),
+        Some("profile/factory-bounded-acceptance")
+    );
+    assert_eq!(profile["revision"].as_str(), Some("commission-v1"));
+    assert_eq!(profile["scope"].as_str(), Some("personal"));
+    // This record was not authored from an expressed intent. No provenance
+    // block is invented for it, and no absence is dressed up as one.
+    assert!(
+        profile.get("intent_provenance").is_none(),
+        "no provenance is fabricated: {profile}"
+    );
+
+    // The record's own bytes are what is read. Central names the identifier
+    // `ref`; `source_profile_ref` is a different field and must not be
+    // mistaken for it.
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        value.get("profile_ref").is_none(),
+        "the live record carries no `profile_ref`"
+    );
+    assert_eq!(value["ref"], profile["profile_ref"]);
+}
+
+/// F5a: the native AgentRef, the canonical paśu subject and the materialised
+/// WikiNode must co-refer. The producer writes the subject and the addressing
+/// grammar resolves it — proven against the producer's own output, so the
+/// producer and the resolver cannot drift apart into different
+/// representations.
+#[test]
+fn produced_agent_subjects_coreference_through_the_addressing_grammar() {
+    let central = fixture_central();
+    let reading = materialise_central_entities(&central);
+
+    let agent = reading
+        .objects
+        .iter()
+        .find_map(|object| match object {
+            WikiObject::Node(node)
+                if node.ref_id.as_str() == "wiki:node:pasu:agent:agent:hermes" =>
+            {
+                Some(node.clone())
+            }
+            _ => None,
+        })
+        .expect("agent entity");
+    let subject = agent.extensions["aikit.pasu/v1"]["subject_ref"]
+        .as_str()
+        .expect("the entity carries its canonical subject")
+        .to_owned();
+
+    // The subject is the paśu form of the agent ref (PasuRef::for_agent —
+    // ctrl/src/pasu.rs:121): a canonical prefix, then the agent ref opaque.
+    assert_eq!(subject, "central:pasu:agent:agent:hermes");
+
+    let index = SemanticWikiIndex::rebuild(reading.objects).expect("rebuild");
+
+    // And that subject is a working address, resolving back to this entity.
+    let resolved = aikit_core::knowledge_entity_address::resolve_participant_expression(
+        &index,
+        "@central:pasu:agent:agent:hermes",
+    )
+    .expect("the canonical subject is an addressable participant");
+    assert_eq!(
+        resolved[0].as_str(),
+        "wiki:node:pasu:agent:agent:hermes",
+        "producer subject and resolver agree on one entity"
+    );
 }

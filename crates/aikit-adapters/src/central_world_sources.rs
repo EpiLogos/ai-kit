@@ -24,11 +24,21 @@
 use crate::runner::CommandRunner;
 use aikit_core::{AikitError, Result, WikiObject};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, collections::BTreeSet, fs, path::Path};
 
 pub const BINDING_PRODUCER_REF: &str = "aikit/central-world-binding/v1";
 pub const BINDING_EXTENSION: &str = "aikit.world-binding/v1";
 pub const ROOT_WORLD_REF: &str = "control:root";
+
+/// A world ref that has no authored record at all: the declaration is
+/// *absent*. This is the only case where the root lineage applies by
+/// convention. Distinct from "unreadable", which must never widen.
+pub const WORLD_DECLARATION_ABSENT: &str = "central.world_declaration_absent";
+
+/// The message Central uses for the absent case (`missing World <ref>`,
+/// ctrl/src/world.rs:583). Kept as a fallback only: Central now names absence
+/// in the error code, which is what a consumer should read.
+const MISSING_WORLD_MARKER: &str = "missing World ";
 
 /// The effective-source reading Central returned for one world.
 #[derive(Debug, Clone, Default)]
@@ -81,12 +91,21 @@ pub fn read_world_binding<R: CommandRunner>(
     let envelope: Value = serde_json::from_str(&output.stdout)
         .map_err(|e| AikitError::new("central.world_sources_invalid", e.to_string()))?;
     if envelope["ok"] != true {
+        let code = envelope["error"]["code"].as_str().unwrap_or_default();
+        let message = envelope["error"]["message"].as_str().unwrap_or("unknown");
+        // Prefer the code: Central names absence explicitly. The marker check
+        // stays for a Central that has not yet been rebuilt with it, and the
+        // two must agree — a code that says absent on some other message would
+        // widen what a turn receives on a failure that is not absence.
+        let absent = code == WORLD_DECLARATION_ABSENT
+            || (code.ends_with("invalid_input") && message.contains(MISSING_WORLD_MARKER));
         return Err(AikitError::new(
-            "central.world_sources_unavailable",
-            format!(
-                "central.world.effective-sources did not succeed: {}",
-                envelope["error"]["message"].as_str().unwrap_or("unknown")
-            ),
+            if absent {
+                WORLD_DECLARATION_ABSENT
+            } else {
+                "central.world_sources_unavailable"
+            },
+            format!("central.world.effective-sources did not succeed: {message}"),
         ));
     }
     let data = &envelope["data"];
@@ -138,9 +157,15 @@ pub fn project_world_ref(central_root: &Path, project: &str) -> String {
     format!("project:{project}")
 }
 
-/// Read a project's effective binding, falling back to the root lineage
-/// when the project declares no world of its own (Central answers
-/// `MissingWorld` for a world ref with no authored record).
+/// Read a project's effective binding, inheriting the root lineage **only**
+/// when the project genuinely declares no world of its own (Central answers
+/// `missing World <ref>` for a world ref with no authored record).
+///
+/// The two failure modes are kept apart deliberately. "No Project-specific
+/// declaration" is convention: one world, one human, so the root lineage
+/// applies and is disclosed as inherited. "The declaration could not be read
+/// or validated" is a source-level failure, and the answer to it is *no
+/// binding* — an unreadable exclusion must never broaden what a turn receives.
 pub fn read_project_binding<R: CommandRunner>(
     runner: &R,
     executable: &Path,
@@ -151,14 +176,14 @@ pub fn read_project_binding<R: CommandRunner>(
     let world_ref = project_world_ref(central_root, project);
     match read_world_binding(runner, executable, central_root, "project", Some(project), &world_ref) {
         Ok(binding) => Some(binding),
-        Err(project_error) => {
+        Err(error) if error.code() == WORLD_DECLARATION_ABSENT => {
             match read_world_binding(runner, executable, central_root, "root", None, ROOT_WORLD_REF)
             {
                 Ok(mut binding) => {
                     binding.inherited_root_lineage = true;
                     absences.push(format!(
                         "Project {project} declares no world relations; the root lineage applies ({})",
-                        project_error.message()
+                        error.message()
                     ));
                     Some(binding)
                 }
@@ -170,6 +195,13 @@ pub fn read_project_binding<R: CommandRunner>(
                     None
                 }
             }
+        }
+        Err(project_error) => {
+            absences.push(format!(
+                "Project {project} world relations could not be read or validated; binding is uncontextualised and no root lineage is assumed: {}",
+                project_error.message()
+            ));
+            None
         }
     }
 }
@@ -265,7 +297,69 @@ pub fn bind_project_context(
     for object in &mut kept {
         annotate_entity(object, binding);
     }
-    *objects = kept;
+    // Coherence: withholding a node must not leave references to it behind.
+    // An edge naming a withheld endpoint, or a space anchored on a withheld
+    // entity, would otherwise survive in the permitted view as a pointer to
+    // material the policy withheld. Membership is repaired in place; the
+    // authored set is untouched at source.
+    let removed: BTreeSet<String> = stand_ins
+        .iter()
+        .map(|object| object.ref_id().as_str().to_owned())
+        .collect();
+    let mut coherent = Vec::with_capacity(kept.len());
+    for mut object in kept {
+        let dangling = match &object {
+            WikiObject::Edge(edge) => {
+                if removed.contains(edge.from_ref.as_str()) {
+                    Some(format!(
+                        "Edge {} withheld with its endpoint {}",
+                        edge.ref_id.as_str(),
+                        edge.from_ref.as_str()
+                    ))
+                } else if removed.contains(edge.to_ref.as_str()) {
+                    Some(format!(
+                        "Edge {} withheld with its endpoint {}",
+                        edge.ref_id.as_str(),
+                        edge.to_ref.as_str()
+                    ))
+                } else {
+                    None
+                }
+            }
+            WikiObject::Space(space) => space
+                .anchor_ref
+                .as_ref()
+                .filter(|anchor| removed.contains(anchor.as_str()))
+                .map(|anchor| {
+                    format!(
+                        "Space {} withheld with its anchor {}",
+                        space.ref_id.as_str(),
+                        anchor.as_str()
+                    )
+                }),
+            _ => None,
+        };
+        if let Some(reason) = dangling {
+            absences.push(reason);
+            stand_ins.push(object);
+            continue;
+        }
+        if let WikiObject::Space(space) = &mut object {
+            let before = space.node_refs.len();
+            space
+                .node_refs
+                .retain(|member| !removed.contains(member.as_str()));
+            if space.node_refs.len() != before {
+                absences.push(format!(
+                    "Space {} dropped {} withheld member(s)",
+                    space.ref_id.as_str(),
+                    before - space.node_refs.len()
+                ));
+            }
+        }
+        coherent.push(object);
+    }
+    *objects = coherent;
     // Withheld/stand-in objects leave the context; they are disclosed above
     // and dropped (nothing outside this context is touched).
     drop(stand_ins);
@@ -300,24 +394,30 @@ fn is_materialised_entity(object: &WikiObject) -> bool {
     })
 }
 
-/// Every source ref an object declares (its own and its provenance).
+/// Every source ref an object declares (its own and its provenance). Edges and
+/// spaces carry provenance as well, so a declared exclusion governing one of
+/// them withholds it exactly as directly as it withholds a node.
 fn object_source_refs(object: &WikiObject) -> Vec<String> {
-    match object {
+    let mut refs: Vec<String> = Vec::new();
+    let provenance = match object {
         WikiObject::Node(node) => {
-            let mut refs: Vec<String> = node
-                .source_refs
-                .iter()
-                .map(|source| source.as_str().to_owned())
-                .collect();
             refs.extend(
-                node.provenance
+                node.source_refs
                     .iter()
-                    .map(|entry| entry.source_ref.as_str().to_owned()),
+                    .map(|source| source.as_str().to_owned()),
             );
-            refs
+            &node.provenance
         }
-        _ => Vec::new(),
-    }
+        WikiObject::Edge(edge) => &edge.provenance,
+        WikiObject::Space(space) => &space.provenance,
+        _ => return refs,
+    };
+    refs.extend(
+        provenance
+            .iter()
+            .map(|entry| entry.source_ref.as_str().to_owned()),
+    );
+    refs
 }
 
 /// Record the binding on an entity: a derived extension naming the world,
