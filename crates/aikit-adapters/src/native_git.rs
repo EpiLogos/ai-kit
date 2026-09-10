@@ -9,7 +9,8 @@ use std::process::{Command, Output};
 
 use aikit_core::project::ProjectRef;
 use aikit_core::resource::{
-    CreateWorktreeRequest, GitRepositoryRelation, GitWorkingState, GitWorktreeRelation,
+    CreateWorktreeRequest, DevelopmentFieldCurrentDiff, DevelopmentFieldGitBasis,
+    GitRepositoryRelation, GitWorkingState, GitWorktreeRelation,
     ProviderRef, VersionDiff, VersionDiffRequest, VersionHistoryEntry, VersionHistoryRequest,
     VersionRevision, VersionedProjectWorld, VersionedWorldCapability, VersionedWorldProvider,
     VersionedWorldProviderDescriptor, VersionedWorldProviderStatus, VERSIONED_WORLD_VERSION,
@@ -118,6 +119,49 @@ impl NativeGitProvider {
     fn worktrees(&self, locator: &str) -> Result<Vec<GitWorktreeRelation>> {
         let raw = self.checked(locator, ["worktree", "list", "--porcelain"])?;
         parse_worktrees(&raw)
+    }
+
+    /// Build the exact Git/VersionedWorld portion of a Development Field reading.
+    ///
+    /// The optional base is caller-owned Run/plan evidence. `git diff <base> --`
+    /// compares that base against the current index + working tree, while untracked
+    /// paths remain separately disclosed rather than having their contents silently
+    /// promoted into tracked source.
+    pub fn development_field_basis(
+        &self,
+        project: &ProjectRef,
+        locator: &str,
+        base_revision: Option<VersionRevision>,
+        max_bytes: usize,
+    ) -> Result<DevelopmentFieldGitBasis> {
+        let world = self.inspect(project, locator)?;
+        let current_diff_from_base = match base_revision.as_ref() {
+            None => None,
+            Some(base) => {
+                let args = vec![
+                    "diff".to_string(),
+                    "--no-ext-diff".to_string(),
+                    "--binary".to_string(),
+                    base.as_str().to_string(),
+                    "--".to_string(),
+                ];
+                let output = self.output(locator, args)?;
+                if !output.status.success() {
+                    return Err(git_failure(output));
+                }
+                let max = max_bytes.max(1);
+                let truncated = output.stdout.len() > max;
+                let bytes = &output.stdout[..output.stdout.len().min(max)];
+                Some(DevelopmentFieldCurrentDiff {
+                    base_revision: base.clone(),
+                    observed_head: world.repository.head.clone(),
+                    patch: String::from_utf8_lossy(bytes).to_string(),
+                    truncated,
+                    untracked_paths: world.working.untracked.clone(),
+                })
+            }
+        };
+        DevelopmentFieldGitBasis::new(world, base_revision, current_diff_from_base)
     }
 }
 
@@ -454,6 +498,42 @@ mod tests {
             .remove_worktree(&project, &root_str, &request.path)
             .unwrap();
         assert!(!worktree.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn development_field_basis_includes_current_tracked_difference_and_names_untracked_paths() {
+        let provider = NativeGitProvider::new().unwrap();
+        if !matches!(provider.descriptor().status, VersionedWorldProviderStatus::Available) {
+            return;
+        }
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "aikit-development-field-git-{}-{unique}", std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        run(&root, ["init", "-q"]);
+        run(&root, ["config", "user.name", "AIKit Test"]);
+        run(&root, ["config", "user.email", "aikit@example.invalid"]);
+        fs::write(root.join("README.md"), "one\n").unwrap();
+        run(&root, ["add", "README.md"]);
+        run(&root, ["commit", "-qm", "initial"]);
+
+        let project = ProjectRef::parse("project:development-field").unwrap();
+        let locator = root.to_string_lossy().to_string();
+        let base = provider.inspect(&project, &locator).unwrap().repository.head;
+        fs::write(root.join("README.md"), "two\n").unwrap();
+        fs::write(root.join("untracked.txt"), "not source until Git says so\n").unwrap();
+
+        let basis = provider
+            .development_field_basis(&project, &locator, Some(base.clone()), 64 * 1024)
+            .unwrap();
+        let diff = basis.current_diff_from_base.unwrap();
+        assert_eq!(diff.base_revision, base);
+        assert_eq!(diff.observed_head, basis.world.repository.head);
+        assert!(diff.patch.contains("+two"), "{}", diff.patch);
+        assert_eq!(diff.untracked_paths, vec!["untracked.txt"]);
 
         let _ = fs::remove_dir_all(&root);
     }

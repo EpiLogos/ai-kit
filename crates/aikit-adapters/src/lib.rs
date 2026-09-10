@@ -19,6 +19,7 @@ pub mod authored_wiki_read;
 pub mod authored_wiki_source;
 pub mod bkmr;
 pub mod central_agent_profile;
+pub mod central_development_field;
 pub mod central_temporal;
 pub mod clients;
 pub mod composition_topology;

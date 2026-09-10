@@ -6,6 +6,7 @@
 //! conversion shim.
 
 mod action_search;
+mod development_field;
 mod factory;
 mod index;
 mod model;
@@ -24,6 +25,7 @@ mod search;
 mod versioned_world;
 
 pub use action_search::search_contextual_actions;
+pub use development_field::*;
 pub use factory::{FactoryInteropView, FactoryResourceImport};
 pub use index::{MemoryResourceIndex, ResolveRankingSignals, ResourceIndex};
 pub use model::{

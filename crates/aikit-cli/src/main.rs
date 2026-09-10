@@ -13,8 +13,8 @@ use clap::Parser;
 use serde_json::{json as jval, Value};
 
 use aikit_cli::app::{
-    AikitApplication, ApplyRequest, FlowContemplateBasis, PromoteRequest, RunRequest, Service,
-    SessionRequest,
+    AikitApplication, ApplyRequest, DevelopmentFieldApplicationRequest, FlowContemplateBasis,
+    PromoteRequest, RunRequest, Service, SessionRequest,
 };
 use aikit_cli::cli::*;
 use aikit_cli::json::{self, EnvelopeContext};
@@ -180,6 +180,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Ui(a)) => open_surface(cwd, a.query, a.fullscreen, a.tree),
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
+        Some(Command::DevelopmentField(a)) => cmd_development_field(cwd, a),
         Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
         Some(Command::Flow(c)) => cmd_flow(cwd, c),
         Some(Command::Method(a)) => cmd_method(cwd, a),
@@ -225,6 +226,51 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Shell(c)) => cmd_shell(c),
         Some(Command::Gateway(c)) => cmd_gateway(c),
     }
+}
+
+fn cmd_development_field(cwd: &std::path::Path, args: DevelopmentFieldArgs) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let subjects = args
+        .refs
+        .into_iter()
+        .map(aikit_core::resource::ResourceRef::parse)
+        .collect::<Result<Vec<_>>>()?;
+    let base_revision = parse_optional_development_field_revision(args.base, "--base")?;
+    let expected_aikit_revision = parse_optional_development_field_revision(
+        args.expect_aikit_revision,
+        "--expect-aikit-revision",
+    )?;
+    let reading = service.development_field_read(DevelopmentFieldApplicationRequest {
+        subjects,
+        limit: args.limit,
+        base_revision,
+        max_diff_bytes: args.max_diff_bytes,
+        expected_aikit_revision,
+    })?;
+    let data = serde_json::to_value(reading).map_err(|error| {
+        AikitError::new(
+            "cli.development_field_encode_failed",
+            format!("could not encode Development Field reading: {error}"),
+        )
+    })?;
+    Ok(reply(&service, data, diagnostic_warnings(&service)))
+}
+
+fn parse_optional_development_field_revision(
+    raw: Option<String>,
+    argument: &str,
+) -> Result<Option<aikit_core::resource::VersionRevision>> {
+    raw.map(|value| {
+        if value.trim().is_empty() {
+            Err(AikitError::new(
+                "cli.development_field_revision_empty",
+                format!("{argument} requires a non-empty revision"),
+            ))
+        } else {
+            Ok(aikit_core::resource::VersionRevision::new(value))
+        }
+    })
+    .transpose()
 }
 
 fn cmd_routine(command: RoutineCmd) -> Result<Reply> {

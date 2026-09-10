@@ -75,9 +75,11 @@ use crate::discover::{self, DiscoveredProject};
 use crate::run::{self, RunReport};
 use crate::temporal::process_central_root;
 
+mod development_field;
 mod flow_cognition;
 mod knowledge;
 
+pub use development_field::DevelopmentFieldApplicationRequest;
 pub use flow_cognition::{
     FlowChangedSinceReceipt, FlowContemplateBasis, FlowContemplateReceipt, FlowPreflightOutcome,
 };
