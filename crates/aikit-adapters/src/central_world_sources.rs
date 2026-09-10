@@ -36,9 +36,8 @@ pub const ROOT_WORLD_REF: &str = "control:root";
 pub const WORLD_DECLARATION_ABSENT: &str = "central.world_declaration_absent";
 
 /// The message Central uses for the absent case (`missing World <ref>`,
-/// ctrl/src/world.rs:583). Central's `ActionResult::failure` sets `code` to
-/// the result *status*, so `MissingWorld` and every other malformed input both
-/// arrive as `invalid_input` and the absence is named only in the message.
+/// ctrl/src/world.rs:583). Kept as a fallback only: Central now names absence
+/// in the error code, which is what a consumer should read.
 const MISSING_WORLD_MARKER: &str = "missing World ";
 
 /// The effective-source reading Central returned for one world.
@@ -94,7 +93,12 @@ pub fn read_world_binding<R: CommandRunner>(
     if envelope["ok"] != true {
         let code = envelope["error"]["code"].as_str().unwrap_or_default();
         let message = envelope["error"]["message"].as_str().unwrap_or("unknown");
-        let absent = code.ends_with("invalid_input") && message.contains(MISSING_WORLD_MARKER);
+        // Prefer the code: Central names absence explicitly. The marker check
+        // stays for a Central that has not yet been rebuilt with it, and the
+        // two must agree — a code that says absent on some other message would
+        // widen what a turn receives on a failure that is not absence.
+        let absent = code == WORLD_DECLARATION_ABSENT
+            || (code.ends_with("invalid_input") && message.contains(MISSING_WORLD_MARKER));
         return Err(AikitError::new(
             if absent {
                 WORLD_DECLARATION_ABSENT

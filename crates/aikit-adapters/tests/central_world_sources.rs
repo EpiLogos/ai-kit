@@ -63,6 +63,7 @@ struct WorldRunner {
     answers: BTreeMap<String, Value>,
     fail_on: BTreeMap<String, ()>,
     unreadable_on: BTreeMap<String, String>,
+    coded_absent: BTreeMap<String, ()>,
     seen: Mutex<Vec<Vec<String>>>,
 }
 
@@ -93,12 +94,27 @@ fn unreadable_envelope(message: &str) -> String {
     .to_string()
 }
 
+/// Central naming absence in the error code. The message is deliberately not
+/// the legacy prose, so nothing but the code can carry the distinction.
+fn coded_absent_envelope(world_ref: &str) -> String {
+    json!({
+        "ok": false,
+        "status": "invalid_input",
+        "error": {
+            "code": "central.world_declaration_absent",
+            "message": format!("no authored record for {world_ref}"),
+        }
+    })
+    .to_string()
+}
+
 impl WorldRunner {
     fn with_answer(world_ref: &str, sources: Value) -> Self {
         Self {
             answers: BTreeMap::from([(world_ref.to_owned(), sources)]),
             fail_on: BTreeMap::new(),
             unreadable_on: BTreeMap::new(),
+            coded_absent: BTreeMap::new(),
             seen: Mutex::new(Vec::new()),
         }
     }
@@ -112,6 +128,13 @@ impl WorldRunner {
     fn unreadable_on(mut self, world_ref: &str, message: &str) -> Self {
         self.unreadable_on
             .insert(world_ref.to_owned(), message.to_owned());
+        self
+    }
+
+    /// Central answers that the world ref has no authored record, naming it in
+    /// the error code rather than only in the message.
+    fn coded_absent_on(mut self, world_ref: &str) -> Self {
+        self.coded_absent.insert(world_ref.to_owned(), ());
         self
     }
 
@@ -130,6 +153,8 @@ impl CommandRunner for WorldRunner {
             .unwrap_or_default();
         let stdout = if let Some(message) = self.unreadable_on.get(&world_ref) {
             unreadable_envelope(message)
+        } else if self.coded_absent.contains_key(&world_ref) {
+            coded_absent_envelope(&world_ref)
         } else if self.fail_on.contains_key(&world_ref) {
             absent_envelope(&world_ref)
         } else {
@@ -354,6 +379,28 @@ fn an_unreadable_declaration_does_not_inherit_the_root_lineage() {
         1,
         "only the project declaration was read"
     );
+}
+
+#[test]
+fn absence_is_read_from_the_error_code_when_central_names_it() {
+    let runner = WorldRunner::with_answer(
+        "control:root",
+        json!([{"ref": "central:source:control:root:Control/user/identity",
+                "state": "available", "effective_revision": "1",
+                "propagation_path": ["control:root"]}]),
+    )
+    .coded_absent_on("project:Epsilon");
+    let mut absences = Vec::new();
+    let world = read_project_binding(
+        &runner,
+        Path::new("ctrl"),
+        &PathBuf::from("/tmp/central"),
+        "Epsilon",
+        &mut absences,
+    )
+    .expect("the code alone establishes absence");
+    assert!(world.inherited_root_lineage);
+    assert_eq!(world.sources[0].effective_revision, "1");
 }
 
 #[test]
