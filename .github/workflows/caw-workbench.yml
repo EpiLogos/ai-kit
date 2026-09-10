@@ -1,0 +1,41 @@
+name: CAW branch workbench
+on:
+  push:
+    branches: [agent/caw-274-277-native-continuation]
+permissions:
+  contents: read
+concurrency:
+  group: caw-branch-workbench
+  cancel-in-progress: true
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/Actuation
+          path: .caw-owners/Actuation
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/Central
+          path: .caw-owners/Central
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/Workcell
+          path: .caw-owners/Workcell
+      - name: Export exact public source cuts
+        run: |
+          mkdir -p /tmp/caw-source
+          git rev-parse HEAD > /tmp/caw-source/ai-kit.sha
+          git archive HEAD | gzip > /tmp/caw-source/ai-kit.tar.gz
+          for owner in Actuation Central Workcell; do
+            git -C ".caw-owners/$owner" rev-parse HEAD > "/tmp/caw-source/$owner.sha"
+            git -C ".caw-owners/$owner" archive HEAD | gzip > "/tmp/caw-source/$owner.tar.gz"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: caw-source-${{ github.sha }}
+          path: /tmp/caw-source
+          retention-days: 3
