@@ -22,6 +22,8 @@ jobs:
           ref: agent/261-development-field-s3
       - name: Apply the bounded S3 patch
         run: python3 .github/dev-field-s3-patch.py
+      - name: Apply generated-code correction
+        run: python3 .github/dev-field-s3-fix.py
       - name: Install Rust 1.98
         run: |
           rustup toolchain install 1.98.0 --profile minimal --component clippy
