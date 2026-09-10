@@ -1,5 +1,6 @@
 name: Development Field S3 QL parity patch v2
 
+# Manual retrigger after verifying the accepted QL-MEF S6 structural carrier contract.
 on:
   push:
     branches:
