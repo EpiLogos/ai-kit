@@ -204,10 +204,7 @@ fn walk(directory: &Path, depth: usize, state: &mut WalkState<'_>) -> Result<()>
             relation,
             state.limits.max_body_bytes,
         )?;
-        if relation.is_none()
-            && candidate.content_hints.is_empty()
-            && !strong_filename_hint(relative)
-        {
+        if relation.is_none() && candidate.content_hints.is_empty() && !strong_filename_hint(relative) {
             continue;
         }
         let classification = classify_local_source(&candidate);
@@ -228,45 +225,41 @@ fn candidate_for(
     relation: Option<&NativeSourceRelation>,
     max_body_bytes: usize,
 ) -> Result<(SourceRef, LocalSourceCandidate)> {
-    let relative = path.strip_prefix(root).map_err(|_| {
-        AikitError::new(
-            "local_source_discovery.path_escape",
-            "source escaped Project root",
-        )
-    })?;
-    let bytes =
-        fs::read(path).map_err(|error| io_error("local_source_discovery.read", path, error))?;
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| AikitError::new("local_source_discovery.path_escape", "source escaped Project root"))?;
+    let bytes = fs::read(path)
+        .map_err(|error| io_error("local_source_discovery.read", path, error))?;
     let body_excerpt = String::from_utf8(bytes.into_iter().take(max_body_bytes).collect())
         .ok()
         .filter(|body| !body.trim().is_empty());
     let generated = generated_hint(relative, body_excerpt.as_deref());
     let content_hints = content_hints(body_excerpt.as_deref());
 
-    let (source, declared_role, declared_authority, adopted_source) =
-        if let Some(relation) = relation {
+    let (source, declared_role, declared_authority, adopted_source) = if let Some(relation) = relation {
+        (
+            relation.source.clone(),
+            Some(relation.role),
+            Some(relation.authority),
+            Some(relation.source.clone()),
+        )
+    } else {
+        let source = SourceRef::parse(format!(
+            "source:project-local:{}:{}",
+            project.as_str(),
+            relative.to_string_lossy()
+        ))?;
+        if generated {
             (
-                relation.source.clone(),
-                Some(relation.role),
-                Some(relation.authority),
-                Some(relation.source.clone()),
+                source,
+                Some(LocalSourceRole::DerivedDocumentation),
+                Some(SourceAuthority::Generated),
+                None,
             )
         } else {
-            let source = SourceRef::parse(format!(
-                "source:project-local:{}:{}",
-                project.as_str(),
-                relative.to_string_lossy()
-            ))?;
-            if generated {
-                (
-                    source,
-                    Some(LocalSourceRole::DerivedDocumentation),
-                    Some(SourceAuthority::Generated),
-                    None,
-                )
-            } else {
-                (source, None, Some(SourceAuthority::Observed), None)
-            }
-        };
+            (source, None, Some(SourceAuthority::Observed), None)
+        }
+    };
 
     Ok((
         source,
@@ -288,26 +281,12 @@ fn candidate_path(path: &Path, relative: &Path) -> bool {
                 Some("docs" | "doc" | "adr" | "adrs" | "architecture")
             )
         })
-        || path
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|ext| {
-                matches!(
-                    ext.to_ascii_lowercase().as_str(),
-                    "rs" | "py"
-                        | "ts"
-                        | "tsx"
-                        | "js"
-                        | "jsx"
-                        | "go"
-                        | "c"
-                        | "h"
-                        | "hpp"
-                        | "java"
-                        | "kt"
-                        | "swift"
-                )
-            })
+        || path.extension().and_then(|value| value.to_str()).is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "c" | "h" | "hpp" | "java" | "kt" | "swift"
+            )
+        })
 }
 
 fn strong_filename_hint(relative: &Path) -> bool {
@@ -331,15 +310,9 @@ fn content_hints(body: Option<&str>) -> Vec<String> {
     let lower = body.unwrap_or_default().to_ascii_lowercase();
     let mut hints = Vec::new();
     for (needle, evidence) in [
-        (
-            "human-authored project ground",
-            "human-authored project ground",
-        ),
+        ("human-authored project ground", "human-authored project ground"),
         ("project purpose", "human-authored project ground candidate"),
-        (
-            "why this project exists",
-            "human-authored project ground candidate",
-        ),
+        ("why this project exists", "human-authored project ground candidate"),
         ("agent governance", "agent governance"),
         ("how agents should", "agent governance"),
         ("local structural description", "structural source"),
@@ -372,10 +345,7 @@ fn generated_hint(relative: &Path, body: Option<&str>) -> bool {
 }
 
 fn skip_directory(path: &Path, root: &Path) -> bool {
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
+    let name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
     if matches!(name, ".git" | "node_modules" | "target" | "dist" | "build") {
         return true;
     }
@@ -423,17 +393,11 @@ mod tests {
             LocalSourceClassification::Classified(evidence) => {
                 assert_eq!(evidence.role, LocalSourceRole::AgentGovernance);
                 assert!(!evidence.authoritative);
-                assert!(evidence
-                    .evidence
-                    .iter()
-                    .any(|item| item.contains("filename")));
+                assert!(evidence.evidence.iter().any(|item| item.contains("filename")));
             }
             other => panic!("unexpected filename-hint classification {other:?}"),
         }
-        assert_eq!(
-            source.candidate.declared_authority,
-            Some(SourceAuthority::Observed)
-        );
+        assert_eq!(source.candidate.declared_authority, Some(SourceAuthority::Observed));
     }
 
     #[test]
@@ -460,18 +424,9 @@ mod tests {
         assert_eq!(result.sources.len(), 1);
         let source = &result.sources[0];
         assert_eq!(source.relative_path, PathBuf::from("README.md"));
-        assert_eq!(
-            role(&source.classification),
-            Some(LocalSourceRole::HumanProjectGround)
-        );
-        assert_eq!(
-            source.source.as_str(),
-            "central:project-source:example/project:readme"
-        );
-        assert_eq!(
-            source.candidate.adopted_source.as_ref(),
-            Some(&source.source)
-        );
+        assert_eq!(role(&source.classification), Some(LocalSourceRole::HumanProjectGround));
+        assert_eq!(source.source.as_str(), "central:project-source:example/project:readme");
+        assert_eq!(source.candidate.adopted_source.as_ref(), Some(&source.source));
     }
 
     #[test]
@@ -491,10 +446,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.sources.len(), 1);
-        assert_eq!(
-            role(&result.sources[0].classification),
-            Some(LocalSourceRole::DerivedDocumentation)
-        );
+        assert_eq!(role(&result.sources[0].classification), Some(LocalSourceRole::DerivedDocumentation));
         match &result.sources[0].classification {
             LocalSourceClassification::Classified(evidence) => assert!(!evidence.authoritative),
             other => panic!("unexpected generated classification {other:?}"),

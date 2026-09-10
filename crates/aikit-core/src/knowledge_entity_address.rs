@@ -222,10 +222,7 @@ mod tests {
         );
         let both = resolve_deduped(&index, "@central-operators x @hermes").unwrap();
         assert_eq!(both.len(), 2);
-        assert_eq!(
-            both[0].as_str(),
-            "wiki:node:pasu:agent-set:central-operators"
-        );
+        assert_eq!(both[0].as_str(), "wiki:node:pasu:agent-set:central-operators");
         assert_eq!(both[1].as_str(), "wiki:node:pasu:agent:hermes");
 
         // The full subject ref also answers.
@@ -241,8 +238,6 @@ mod tests {
 
         // Non-address expressions resolve nothing here (lexical search stays
         // the search path).
-        assert!(resolve_participant_expression(&index, "hermes")
-            .unwrap()
-            .is_empty());
+        assert!(resolve_participant_expression(&index, "hermes").unwrap().is_empty());
     }
 }

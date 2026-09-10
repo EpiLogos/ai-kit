@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::{Capsule, Kind};
 use aikit_core::catalog::Catalog;
-use aikit_core::context::ContextDescriptor;
 use aikit_core::continuity::ContinuityTuning;
+use aikit_core::context::ContextDescriptor;
 use aikit_core::id::{CapsuleId, GenerationId, SessionId};
 use aikit_core::platform::TargetId;
 use aikit_core::policy::ManagedPolicy;
@@ -60,10 +60,10 @@ use aikit_adapters::clients::opencode::OpencodeAdapter;
 use aikit_adapters::clients::pi::PiAdapter;
 use aikit_adapters::clients::qwen::QwenAdapter;
 use aikit_adapters::clients::zcode::ZcodeAdapter;
+use aikit_adapters::runner::SystemRunner;
 use aikit_adapters::factory_developmental::{
     read_factory_developmental, start_factory_work, FactoryDevelopmentalBinding,
 };
-use aikit_adapters::runner::SystemRunner;
 
 use aikit_tui::backend::{
     ClientEffect, FactoryWorkEntry, FactoryWorkStartReceipt, JobOutput, PaletteBackend, Projected,
@@ -760,10 +760,7 @@ impl Service {
             })?;
             let capsule = Capsule::from_toml_str(&text)?;
             for (name, secret_ref) in &capsule.secrets {
-                items.push(ProjectionItem::secret_env(
-                    name.clone(),
-                    secret_ref.clone(),
-                )?);
+                items.push(ProjectionItem::secret_env(name.clone(), secret_ref.clone())?);
             }
         }
         items.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
@@ -818,19 +815,17 @@ impl Service {
                     source: document.source,
                     observed_at: document.observed_at,
                 };
-            observed
-                .extend(aikit_adapters::provider_catalog_source::observed_router_routes(&outcome));
+            observed.extend(
+                aikit_adapters::provider_catalog_source::observed_router_routes(&outcome),
+            );
         }
 
         // Harness workability: a harness that is actually installed here and
         // declares which provider it dispatches to is evidence that the
         // provider is reachable from this machine. It is the only evidence a
         // hosted provider can have short of calling its API with a key.
-        let capabilities =
-            aikit_adapters::actuation_harness_detection::intake_actuation_capabilities(
-                &SystemRunner::new(),
-                "actuation",
-            );
+        let capabilities = aikit_adapters::actuation_harness_detection
+            ::intake_actuation_capabilities(&SystemRunner::new(), "actuation");
         let (reachable, reach_notes) =
             aikit_adapters::actuation_model_routes::harness_provider_reachability(
                 detection,
@@ -850,24 +845,23 @@ impl Service {
 
         // Credentials qualify usability and nothing else. Only the fact that a
         // binding is recorded is read; no secret is materialised or carried.
-        let credentials =
-            match aikit_store::credentials::CredentialBindingStore::new(&self.home).list() {
-                Ok(bindings) => {
-                    aikit_adapters::actuation_model_routes::CredentialEvidence::from_binding_refs(
-                        bindings
-                            .into_iter()
-                            .filter(|binding| !binding.revoked)
-                            .map(|binding| binding.credential_ref.as_str().to_string()),
-                    )
-                }
-                Err(error) => {
-                    notes.push(format!(
-                        "credential bindings unreadable ({error}) — observed routes are reported \
+        let credentials = match aikit_store::credentials::CredentialBindingStore::new(&self.home)
+            .list()
+        {
+            Ok(bindings) => aikit_adapters::actuation_model_routes::CredentialEvidence::from_binding_refs(
+                bindings
+                    .into_iter()
+                    .filter(|binding| !binding.revoked)
+                    .map(|binding| binding.credential_ref.as_str().to_string()),
+            ),
+            Err(error) => {
+                notes.push(format!(
+                    "credential bindings unreadable ({error}) — observed routes are reported \
                      without their credential state, never as usable"
-                    ));
-                    aikit_adapters::actuation_model_routes::CredentialEvidence::default()
-                }
-            };
+                ));
+                aikit_adapters::actuation_model_routes::CredentialEvidence::default()
+            }
+        };
         if !credentials.is_empty() {
             notes.push(format!(
                 "credential bindings observed for: {}",
@@ -929,7 +923,7 @@ impl Service {
             RealisationRequest,
         };
         use aikit_core::resource::{
-            candidates_from_routes, canonical_model_ref, rank_model_roster, select_model,
+            canonical_model_ref, candidates_from_routes, rank_model_roster, select_model,
             ModelRankingPolicy, ModelRouteSet, ProviderRef,
         };
 
@@ -1075,8 +1069,7 @@ impl Service {
                     observed_at.clone(),
                     observations,
                 );
-                let path =
-                    aikit_store::model_catalogue::save_provider_catalog(&self.home, &document)?;
+                let path = aikit_store::model_catalogue::save_provider_catalog(&self.home, &document)?;
                 let folded =
                     aikit_core::resource::catalogue_from_observations(&document.observations)?;
                 Ok(serde_json::json!({
@@ -1176,31 +1169,20 @@ impl Service {
             };
 
             let resources = aikit_tui::project_world_service::resource_index_with_records(
-                self,
-                composed
-                    .as_ref()
-                    .map(|c| c.source_resources.clone())
-                    .unwrap_or_default(),
+                self, composed.as_ref().map(|c|c.source_resources.clone()).unwrap_or_default(),
             )?;
-            let mut resolution =
-                aikit_tui::project_world_service::context_resolution_from_resources(
-                    self,
-                    composed
-                        .as_ref()
-                        .map(|c| c.requested_actors.clone())
-                        .unwrap_or_default(),
-                    &resources,
-                )?;
+            let mut resolution = aikit_tui::project_world_service::context_resolution_from_resources(
+                self, composed.as_ref().map(|c|c.requested_actors.clone()).unwrap_or_default(), &resources,
+            )?;
             // Detection intake, same law as compose_plan: Actuation owns
             // what operative bodies exist; detected harnesses join the
             // candidates as ephemeral resources; a failed run is disclosed
             // unavailability riding on the resolution, never absence.
-            let detection = aikit_adapters::actuation_harness_detection::intake_actuation_detection(
-                &SystemRunner::new(),
-                "actuation",
+            let detection = aikit_adapters::actuation_harness_detection
+                ::intake_actuation_detection(&SystemRunner::new(), "actuation");
+            resolution.harness_detection = Some(
+                aikit_adapters::actuation_harness_detection::detection_summary(&detection),
             );
-            resolution.harness_detection =
-                Some(aikit_adapters::actuation_harness_detection::detection_summary(&detection));
             if let aikit_adapters::actuation_harness_detection::DetectionOutcome::Record(record) =
                 &detection
             {
@@ -1218,8 +1200,8 @@ impl Service {
                     if known.iter().any(|id| id == &entry.harness_ref) {
                         continue;
                     }
-                    if let Ok(resource) =
-                        aikit_adapters::actuation_harness_detection::detected_harness_resource(
+                    if let Ok(resource) = aikit_adapters::actuation_harness_detection
+                        ::detected_harness_resource(
                             &entry.slug,
                             &entry.harness_ref,
                             &record.detection_ref,
@@ -1295,19 +1277,10 @@ impl Service {
             .flatten();
 
         let resources = aikit_tui::project_world_service::resource_index_with_records(
-            self,
-            composed
-                .as_ref()
-                .map(|c| c.source_resources.clone())
-                .unwrap_or_default(),
+            self, composed.as_ref().map(|c|c.source_resources.clone()).unwrap_or_default(),
         )?;
         let mut resolution = aikit_tui::project_world_service::context_resolution_from_resources(
-            self,
-            composed
-                .as_ref()
-                .map(|c| c.requested_actors.clone())
-                .unwrap_or_default(),
-            &resources,
+            self, composed.as_ref().map(|c|c.requested_actors.clone()).unwrap_or_default(), &resources,
         )?;
         // Harness detection is owned by Actuation and consumed here — one
         // live `actuation harness detect` run discloses which operative
@@ -1315,13 +1288,12 @@ impl Service {
         // candidate set as ephemeral resources (never persisted to any
         // index); a failed run is disclosed unavailability, never an empty
         // set read as absence.
-        let detection = aikit_adapters::actuation_harness_detection::intake_actuation_detection(
-            &SystemRunner::new(),
-            "actuation",
-        );
+        let detection = aikit_adapters::actuation_harness_detection
+            ::intake_actuation_detection(&SystemRunner::new(), "actuation");
         let mut detection_notes: Vec<String> = Vec::new();
-        resolution.harness_detection =
-            Some(aikit_adapters::actuation_harness_detection::detection_summary(&detection));
+        resolution.harness_detection = Some(
+            aikit_adapters::actuation_harness_detection::detection_summary(&detection),
+        );
         match &detection {
             aikit_adapters::actuation_harness_detection::DetectionOutcome::Record(record) => {
                 let known: Vec<String> = resolution
@@ -1339,11 +1311,12 @@ impl Service {
                     if known.iter().any(|id| id == &entry.harness_ref) {
                         continue;
                     }
-                    match aikit_adapters::actuation_harness_detection::detected_harness_resource(
-                        &entry.slug,
-                        &entry.harness_ref,
-                        &record.detection_ref,
-                    ) {
+                    match aikit_adapters::actuation_harness_detection
+                        ::detected_harness_resource(
+                            &entry.slug,
+                            &entry.harness_ref,
+                            &record.detection_ref,
+                        ) {
                         Ok(resource) => {
                             resolution.harness_candidates.push(resource);
                             added.push(entry.slug.clone());
@@ -1381,10 +1354,8 @@ impl Service {
         // binding stays with the instantiation receipt. The matching
         // candidate carries a `self` annotation so surfaces can show it
         // without treating it as chosen.
-        let self_outcome = aikit_adapters::actuation_harness_detection::intake_actuation_self(
-            &SystemRunner::new(),
-            "actuation",
-        );
+        let self_outcome = aikit_adapters::actuation_harness_detection
+            ::intake_actuation_self(&SystemRunner::new(), "actuation");
         match &self_outcome {
             aikit_adapters::actuation_harness_detection::SelfOutcome::Resolved(record) => {
                 if let Some(matched) = &record.resolved {
@@ -1495,11 +1466,7 @@ impl Service {
             composition_notes.push(format!(
                 "no harness selected by an authored source — detected candidates: [{}]; \
                  selection happens via Central profile / Actuation instantiation receipt, not here",
-                plan.harness_candidates
-                    .iter()
-                    .map(|r| r.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                plan.harness_candidates.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ")
             ));
         }
         if plan.model.is_none() {
@@ -1514,7 +1481,10 @@ impl Service {
                     set.model,
                     set.viable()
                         .into_iter()
-                        .map(|route| format!("{} via {}", route.provider_native_id, route.provider))
+                        .map(|route| format!(
+                            "{} via {}",
+                            route.provider_native_id, route.provider
+                        ))
                         .collect::<Vec<_>>()
                         .join(" | ")
                 );
@@ -1745,13 +1715,11 @@ impl Service {
             && tuning.allows(aikit_core::continuity::ENTITY_DISCLOSURE)
         {
             match crate::continuity_disclosure::entity_disclosure(event) {
-                Ok(Some(block)) => {
-                    blocks.push(aikit_core::pressure::Block::ordinary(block, Vec::new()))
-                }
+                Ok(Some(block)) => blocks.push(aikit_core::pressure::Block::ordinary(block, Vec::new())),
                 Ok(None) => {}
-                Err(error) => decision
-                    .warnings
-                    .push(format!("continuity/entity-disclosure unavailable: {error}")),
+                Err(error) => decision.warnings.push(format!(
+                    "continuity/entity-disclosure unavailable: {error}"
+                )),
             }
         }
         if event.kind == aikit_core::hooks::HookEventKind::SessionStart
@@ -1761,13 +1729,15 @@ impl Service {
             // capsule, resolved from the view at event time — never ambient.
             // Closed by default: a missing config keeps the default bounds
             // and keeps the @1 human horizon shut.
-            let capsule_id = aikit_core::id::CapsuleId::parse("hook/continuity/orientation-packet")
-                .map_err(|error| {
-                    AikitError::new(
-                        "capabilities.invalid_id",
-                        format!("engine reaction id is malformed: {error}"),
-                    )
-                })?;
+            let capsule_id = aikit_core::id::CapsuleId::parse(
+                "hook/continuity/orientation-packet",
+            )
+            .map_err(|error| {
+                AikitError::new(
+                    "capabilities.invalid_id",
+                    format!("engine reaction id is malformed: {error}"),
+                )
+            })?;
             let tuned = match self.view.active.get(&capsule_id) {
                 Some(active) => {
                     crate::orientation_packet::OrientationConfig::from_config(Some(&active.config))
@@ -1775,9 +1745,7 @@ impl Service {
                 None => crate::orientation_packet::OrientationConfig::default(),
             };
             match crate::orientation_packet::orientation_packet(event, &tuned) {
-                Ok(Some(block)) => {
-                    blocks.push(aikit_core::pressure::Block::ordinary(block, Vec::new()))
-                }
+                Ok(Some(block)) => blocks.push(aikit_core::pressure::Block::ordinary(block, Vec::new())),
                 Ok(None) => {}
                 Err(error) => decision.warnings.push(error),
             }
@@ -1786,30 +1754,22 @@ impl Service {
             && self.descriptor.project_root.is_none()
             && tuning.allows(aikit_core::continuity::PROJECT_RECENCY)
         {
-            let capsule_id = aikit_core::id::CapsuleId::parse("hook/continuity/project-recency")?;
-            let config = self
-                .view
-                .active
-                .get(&capsule_id)
-                .map(|active| {
-                    crate::project_recency::ProjectRecencyConfig::from_config(Some(&active.config))
-                })
+            let capsule_id = aikit_core::id::CapsuleId::parse(
+                "hook/continuity/project-recency",
+            )?;
+            let config = self.view.active.get(&capsule_id)
+                .map(|active| crate::project_recency::ProjectRecencyConfig::from_config(Some(&active.config)))
                 .unwrap_or_default();
             match crate::projects::load_all(&self.home).and_then(|specs| {
                 crate::project_recency::classify_all(
-                    &self.index,
-                    &specs,
-                    aikit_store::Timestamp::now(),
-                    config,
-                )
+                    &self.index, &specs, aikit_store::Timestamp::now(), config)
             }) {
                 Ok(rows) => blocks.push(aikit_core::pressure::Block::ordinary(
                     crate::project_recency::render_session_start(&rows, config.max_projects),
                     Vec::new(),
                 )),
-                Err(error) => decision
-                    .warnings
-                    .push(format!("continuity/project-recency unavailable: {error}")),
+                Err(error) => decision.warnings.push(format!(
+                    "continuity/project-recency unavailable: {error}")),
             }
         }
         // Star prompt-commands come first and, when one matches, the domain
@@ -1819,13 +1779,15 @@ impl Service {
         if event.kind == aikit_core::hooks::HookEventKind::UserPromptSubmit
             && tuning.allows(aikit_core::continuity::STAR_COMMANDS)
         {
-            let capsule_id = aikit_core::id::CapsuleId::parse("hook/continuity/star-commands")
-                .map_err(|error| {
-                    AikitError::new(
-                        "capabilities.invalid_id",
-                        format!("engine reaction id is malformed: {error}"),
-                    )
-                })?;
+            let capsule_id =
+                aikit_core::id::CapsuleId::parse("hook/continuity/star-commands").map_err(
+                    |error| {
+                        AikitError::new(
+                            "capabilities.invalid_id",
+                            format!("engine reaction id is malformed: {error}"),
+                        )
+                    },
+                )?;
             let config = self
                 .view
                 .active
@@ -1858,17 +1820,17 @@ impl Service {
         {
             // Domains are declared data in the project layer; they load only
             // under this composition, never ambient.
-            if let Some(project_root) = self.descriptor.project_root.as_deref() {
-                let (domains, mut load_warnings) =
+            if let Some(project_root)=self.descriptor.project_root.as_deref() {
+                let (domains, mut load_warnings)=
                     crate::domain_activation::load_domains(project_root);
                 decision.warnings.append(&mut load_warnings);
-                let prompt = crate::domain_activation::prompt_of(event);
-                let scope = crate::domain_activation::dedup_scope(event, Some(project_root));
-                let Some(scope) = scope else {
+                let prompt=crate::domain_activation::prompt_of(event);
+                let scope=crate::domain_activation::dedup_scope(event, Some(project_root));
+                let Some(scope)=scope else {
                     return Ok(self.under_pressure(decision, &blocks, event));
                 };
-                let (domain_blocks, mut reaction_warnings) =
-                    crate::domain_activation::run(&self.index, &scope, &domains, prompt.as_deref());
+                let (domain_blocks, mut reaction_warnings)=crate::domain_activation::run(
+                    &self.index, &scope, &domains, prompt.as_deref());
                 blocks.extend(domain_blocks);
                 decision.warnings.append(&mut reaction_warnings);
             }
@@ -1879,26 +1841,20 @@ impl Service {
             // File context is project-layer knowledge too: the project's wiki
             // relations and path-addressed domains, loaded only under this
             // composition, in front of the operation — never after it.
-            if let Some(project_root) = self.descriptor.project_root.as_deref() {
-                if let Some(path) = crate::file_context::file_path_of(event) {
-                    let (domains, mut load_warnings) =
+            if let Some(project_root)=self.descriptor.project_root.as_deref() {
+                if let Some(path)=crate::file_context::file_path_of(event) {
+                    let (domains, mut load_warnings)=
                         crate::domain_activation::load_domains(project_root);
                     decision.warnings.append(&mut load_warnings);
-                    let (objects, mut wiki_warnings) =
+                    let (objects, mut wiki_warnings)=
                         crate::file_context::load_project_wiki(project_root);
                     decision.warnings.append(&mut wiki_warnings);
-                    let scope = crate::domain_activation::dedup_scope(event, Some(project_root));
-                    let Some(scope) = scope else {
+                    let scope=crate::domain_activation::dedup_scope(event, Some(project_root));
+                    let Some(scope)=scope else {
                         return Ok(self.under_pressure(decision, &blocks, event));
                     };
-                    let (file_blocks, mut reaction_warnings) = crate::file_context::run(
-                        &self.index,
-                        &scope,
-                        project_root,
-                        &path,
-                        &domains,
-                        objects,
-                    );
+                    let (file_blocks, mut reaction_warnings)=crate::file_context::run(
+                        &self.index, &scope, project_root, &path, &domains, objects);
                     blocks.extend(file_blocks);
                     decision.warnings.append(&mut reaction_warnings);
                 }
@@ -1907,16 +1863,12 @@ impl Service {
         if event.kind == aikit_core::hooks::HookEventKind::PostToolUse
             && tuning.allows(aikit_core::continuity::ACTIVITY_EVIDENCE)
         {
-            if let Some(project_root) = self.descriptor.project_root.as_deref() {
-                if let Err(error) = crate::activity_evidence::record(
-                    &self.index,
-                    &self.descriptor.context_id,
-                    project_root,
-                    event,
-                ) {
-                    decision
-                        .warnings
-                        .push(format!("continuity/activity-evidence unavailable: {error}"));
+            if let Some(project_root)=self.descriptor.project_root.as_deref() {
+                if let Err(error)=crate::activity_evidence::record(
+                    &self.index, &self.descriptor.context_id, project_root, event)
+                {
+                    decision.warnings.push(format!(
+                        "continuity/activity-evidence unavailable: {error}"));
                 }
             }
         }
@@ -2136,10 +2088,9 @@ impl Service {
                 TargetId::GOOSE => {
                     plan_effect(&GooseAdapter::new(ctx_dir.join("projections/goose")), &rc)
                 }
-                TargetId::OPENCODE => plan_effect(
-                    &OpencodeAdapter::new(ctx_dir.join("projections/opencode")),
-                    &rc,
-                ),
+                TargetId::OPENCODE => {
+                    plan_effect(&OpencodeAdapter::new(ctx_dir.join("projections/opencode")), &rc)
+                }
                 TargetId::QWEN_CODE => {
                     plan_effect(&QwenAdapter::new(ctx_dir.join("projections/qwen")), &rc)
                 }
@@ -2152,20 +2103,18 @@ impl Service {
                     &AntigravityAdapter::new(ctx_dir.join("projections/antigravity")),
                     &rc,
                 ),
-                TargetId::GROK_BOT => plan_effect(
-                    &GrokbotAdapter::new(ctx_dir.join("projections/grokbot")),
-                    &rc,
-                ),
+                TargetId::GROK_BOT => {
+                    plan_effect(&GrokbotAdapter::new(ctx_dir.join("projections/grokbot")), &rc)
+                }
                 TargetId::KIMI => {
                     plan_effect(&KimiAdapter::new(ctx_dir.join("projections/kimi")), &rc)
                 }
                 TargetId::OLLAMA => {
                     plan_effect(&OllamaAdapter::new(ctx_dir.join("projections/ollama")), &rc)
                 }
-                TargetId::OPENCLAW => plan_effect(
-                    &OpenclawAdapter::new(ctx_dir.join("projections/openclaw")),
-                    &rc,
-                ),
+                TargetId::OPENCLAW => {
+                    plan_effect(&OpenclawAdapter::new(ctx_dir.join("projections/openclaw")), &rc)
+                }
                 TargetId::PI => plan_effect(&PiAdapter::new(ctx_dir.join("projections/pi")), &rc),
                 _ => plan_effect(&BrokerAdapter::new(), &rc),
             };
@@ -2179,10 +2128,7 @@ impl Service {
     /// The shell projection: one `bin/` shim per exported command. This is the
     /// projection that makes the contextual PATH — and therefore `run` and the
     /// multicall shims — real.
-    fn shell_plan(
-        view: &ResolvedView,
-        secret_items: Vec<ProjectionItem>,
-    ) -> Result<ProjectionPlan> {
+    fn shell_plan(view: &ResolvedView, secret_items: Vec<ProjectionItem>) -> Result<ProjectionPlan> {
         let mut plan =
             ProjectionPlan::new(TargetId::shell(), ActivationEffect::immediate("shell bin/"));
         for (name, capsule) in view.exported_commands() {
@@ -2323,7 +2269,8 @@ impl ScopeWriter {
 impl AikitApplication for Service {
     fn search(&self, r: SearchRequest) -> Result<SearchResults> {
         let resolved = aikit_tui::application_service::ApplicationService::resolve_search_from(
-            self, &r.query,
+            self,
+            &r.query,
         )?;
         // This compatibility API returns packages only. Keep the canonical
         // relative order and apply its limit after narrowing the typed field.
@@ -2564,9 +2511,7 @@ fn create_directory_link(target: &Path, link: &Path) -> Result<()> {
 
 impl PaletteBackend for Service {
     fn context_resource_records(&self) -> Result<Vec<aikit_core::resource::ResourceRecord>> {
-        let Some(project) = self.descriptor.project_root.as_deref() else {
-            return Ok(Vec::new());
-        };
+        let Some(project) = self.descriptor.project_root.as_deref() else { return Ok(Vec::new()) };
         let mut records = if let Some(central) = process_central_root(Some(project)) {
             compose_live_actor_inputs(&SystemRunner::new(), &central, project)?
                 .map(|inputs| inputs.source_resources)
@@ -2669,18 +2614,11 @@ impl PaletteBackend for Service {
     }
 
     fn project_binding(&self) -> Result<Option<aikit_core::project::ProjectBinding>> {
-        let Some(root) = self.descriptor.project_root.as_ref() else {
-            return Ok(None);
-        };
+        let Some(root) = self.descriptor.project_root.as_ref() else { return Ok(None) };
         match std::fs::symlink_metadata(root.join("ProjectCentral/project.json")) {
-            Ok(_) => {}
+            Ok(_) => {},
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(AikitError::new(
-                    "projectcentral.manifest_read",
-                    error.to_string(),
-                ))
-            }
+            Err(error) => return Err(AikitError::new("projectcentral.manifest_read", error.to_string())),
         }
         let binding = aikit_adapters::ProjectCentralFilesystemBinding::inspect(root, None)?;
         Ok(Some(binding.project_binding()?))
@@ -2711,12 +2649,8 @@ impl PaletteBackend for Service {
     ///   run at all (`versioned_world.git_spawn_failed`). Sniffing git's
     ///   stderr text to separate them would be worse than the coarse split.
     fn versioned_world(&self) -> Result<Option<aikit_core::resource::VersionedProjectWorld>> {
-        let Some(root) = self.descriptor.project_root.as_deref() else {
-            return Ok(None);
-        };
-        let Some(binding) = self.project_binding()? else {
-            return Ok(None);
-        };
+        let Some(root) = self.descriptor.project_root.as_deref() else { return Ok(None) };
+        let Some(binding) = self.project_binding()? else { return Ok(None) };
         use aikit_core::resource::VersionedWorldProvider;
         let provider = aikit_adapters::native_git::NativeGitProvider::new()?;
         match provider.inspect(&binding.project, &root.to_string_lossy()) {
@@ -3138,9 +3072,7 @@ fn model_roster_candidate_for(
     }
 }
 
-fn body_reading(
-    outcome: &aikit_adapters::model_realisation::MaterialBodyOutcome,
-) -> serde_json::Value {
+fn body_reading(outcome: &aikit_adapters::model_realisation::MaterialBodyOutcome) -> serde_json::Value {
     use aikit_adapters::model_realisation::MaterialBodyOutcome;
     match outcome {
         MaterialBodyOutcome::NotRequired { reason } => {

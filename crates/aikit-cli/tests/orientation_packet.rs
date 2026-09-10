@@ -109,13 +109,7 @@ fn fixture() -> (PathBuf, PathBuf, PathBuf) {
 /// CASE-02-PROOF caught the live discrepancy) lies about the contract the
 /// renderer must actually handle.
 fn field_with() -> Value {
-    let question = handoff(
-        "h-q",
-        "is the aperture law testable?",
-        "yes, by composition",
-        150,
-        "question",
-    );
+    let question = handoff("h-q", "is the aperture law testable?", "yes, by composition", 150, "question");
     json!({
         "exists": true,
         "project_root": "/central/Work/A",
@@ -136,55 +130,30 @@ fn field_with() -> Value {
 fn a_fresh_session_is_met_by_the_projects_open_continuation_and_work() {
     let (root, a, _b) = fixture();
     let runner = NowRunner::with_field("A", field_with());
-    let packet = orientation_packet_in(
-        &runner,
-        Some(&root),
-        Some(&a),
-        &OrientationConfig::default(),
-    )
-    .unwrap()
-    .expect("the field is open, the packet must arrive");
+    let packet = orientation_packet_in(&runner, Some(&root), Some(&a), &OrientationConfig::default())
+        .unwrap()
+        .expect("the field is open, the packet must arrive");
 
-    assert!(
-        packet.starts_with("[continuity/orientation-packet] project A"),
-        "{packet}"
-    );
+    assert!(packet.starts_with("[continuity/orientation-packet] project A"), "{packet}");
     // `active_items` carries 3 distinct records (continuation, note,
     // question) under the real, overlapping ctrl contract — the header
     // count is the honest total, not a disjoint-sets count.
-    assert!(
-        packet.contains("3 open item(s), 1 open question(s)"),
-        "{packet}"
-    );
+    assert!(packet.contains("3 open item(s), 1 open question(s)"), "{packet}");
     // CASE 09: the newest handoff return is the continuation, in the packet.
-    assert!(
-        packet.contains("- continuation: the open continuation (actor: agent-session-test)"),
-        "{packet}"
-    );
-    assert!(
-        packet.contains("resume here: the engine awaits its packet"),
-        "{packet}"
-    );
+    assert!(packet.contains("- continuation: the open continuation (actor: agent-session-test)"), "{packet}");
+    assert!(packet.contains("resume here: the engine awaits its packet"), "{packet}");
     // Older work arrives as a subject, not a second continuation.
     assert!(packet.contains("- note: older note"), "{packet}");
-    assert!(
-        packet.contains("- question: is the aperture law testable?"),
-        "{packet}"
-    );
+    assert!(packet.contains("- question: is the aperture law testable?"), "{packet}");
     // The question record lives in both `active_items` and `open_questions`
     // (same record, two fields) but must render exactly once, never twice.
     assert_eq!(
-        packet
-            .matches("- question: is the aperture law testable?")
-            .count(),
+        packet.matches("- question: is the aperture law testable?").count(),
         1,
         "a question surfaced through two ctrl fields must render once: {packet}"
     );
     // Invalid records are disclosed, never dropped.
-    assert!(
-        packet.contains("- warning: invalid NOW record disclosed: now/agents/broken.json"),
-        "{packet}"
-    );
+    assert!(packet.contains("- warning: invalid NOW record disclosed: now/agents/broken.json"), "{packet}");
 }
 
 #[test]
@@ -197,13 +166,7 @@ fn an_open_question_renders_once_and_the_withheld_count_is_honest() {
     // question render twice and inflates the withheld count. Both assertions
     // below fail on the pre-fix renderer and pass on the fixed one.
     let (root, a, _b) = fixture();
-    let question = handoff(
-        "h-q",
-        "is the aperture law demonstrable?",
-        "yes",
-        150,
-        "question",
-    );
+    let question = handoff("h-q", "is the aperture law demonstrable?", "yes", 150, "question");
     let field = json!({
         "exists": true,
         "active_items": [
@@ -218,18 +181,11 @@ fn an_open_question_renders_once_and_the_withheld_count_is_honest() {
 
     // Default budget (max_items: 5, plenty of room): the question must
     // appear exactly once, not once per field.
-    let packet = orientation_packet_in(
-        &runner,
-        Some(&root),
-        Some(&a),
-        &OrientationConfig::default(),
-    )
-    .unwrap()
-    .unwrap();
+    let packet = orientation_packet_in(&runner, Some(&root), Some(&a), &OrientationConfig::default())
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        packet
-            .matches("- question: is the aperture law demonstrable?")
-            .count(),
+        packet.matches("- question: is the aperture law demonstrable?").count(),
         1,
         "old renderer double-renders a question surfaced through both ctrl fields: {packet}"
     );
@@ -257,22 +213,11 @@ fn the_human_horizon_stays_closed_until_the_composition_opens_it() {
     let (root, a, _b) = fixture();
     let runner = NowRunner::with_field("A", field_with());
 
-    let closed = orientation_packet_in(
-        &runner,
-        Some(&root),
-        Some(&a),
-        &OrientationConfig::default(),
-    )
-    .unwrap()
-    .unwrap();
-    assert!(
-        !closed.contains("human scratch"),
-        "@1 material leaked: {closed}"
-    );
-    assert!(
-        !closed.contains("my-own-notes.md"),
-        "@1 material leaked: {closed}"
-    );
+    let closed = orientation_packet_in(&runner, Some(&root), Some(&a), &OrientationConfig::default())
+        .unwrap()
+        .unwrap();
+    assert!(!closed.contains("human scratch"), "@1 material leaked: {closed}");
+    assert!(!closed.contains("my-own-notes.md"), "@1 material leaked: {closed}");
 
     let config = OrientationConfig {
         include_human_scratch: true,
@@ -281,10 +226,7 @@ fn the_human_horizon_stays_closed_until_the_composition_opens_it() {
     let open = orientation_packet_in(&runner, Some(&root), Some(&a), &config)
         .unwrap()
         .unwrap();
-    assert!(
-        open.contains("human scratch (aperture open by composition)"),
-        "{open}"
-    );
+    assert!(open.contains("human scratch (aperture open by composition)"), "{open}");
     assert!(open.contains("my-own-notes.md"), "{open}");
 }
 
@@ -292,93 +234,56 @@ fn the_human_horizon_stays_closed_until_the_composition_opens_it() {
 fn only_the_project_stood_in_is_ever_inspected() {
     let (root, a, b) = fixture();
     let mut runner = NowRunner::with_field("A", field_with());
-    runner.answers.insert(
-        "B".into(),
-        json!({"exists": true, "active_items": [
+    runner
+        .answers
+        .insert("B".into(), json!({"exists": true, "active_items": [
             handoff("h-b", "project B secret work", "never leaves B", 999, "handoff"),
-        ]}),
-    );
+        ]}));
 
-    let packet = orientation_packet_in(
-        &runner,
-        Some(&root),
-        Some(&a),
-        &OrientationConfig::default(),
-    )
-    .unwrap()
-    .unwrap();
+    let packet = orientation_packet_in(&runner, Some(&root), Some(&a), &OrientationConfig::default())
+        .unwrap()
+        .unwrap();
     assert_eq!(runner.requested_projects(), vec!["A".to_owned()]);
-    assert!(
-        !packet.contains("project B secret work"),
-        "B material leaked: {packet}"
-    );
+    assert!(!packet.contains("project B secret work"), "B material leaked: {packet}");
 
     // The same law from the cold project: B is inspected for B.
-    let cold = orientation_packet_in(
-        &runner,
-        Some(&root),
-        Some(&b),
-        &OrientationConfig::default(),
-    )
-    .unwrap();
+    let cold = orientation_packet_in(&runner, Some(&root), Some(&b), &OrientationConfig::default())
+        .unwrap();
     assert!(cold.is_none() || !cold.unwrap().contains("the open continuation"));
 }
 
 #[test]
 fn nothing_open_or_no_project_is_an_honest_absence() {
     let (root, a, _b) = fixture();
-    let empty = NowRunner::with_field(
-        "A",
-        json!({
-            "exists": true,
-            "active_items": [],
-            "open_questions": [],
-            "invalid_items": [],
-        }),
-    );
-    assert!(
-        orientation_packet_in(&empty, Some(&root), Some(&a), &OrientationConfig::default())
-            .unwrap()
-            .is_none()
-    );
+    let empty = NowRunner::with_field("A", json!({
+        "exists": true,
+        "active_items": [],
+        "open_questions": [],
+        "invalid_items": [],
+    }));
+    assert!(orientation_packet_in(&empty, Some(&root), Some(&a), &OrientationConfig::default())
+        .unwrap()
+        .is_none());
 
     let missing = NowRunner::with_field("A", json!({"exists": false}));
-    assert!(orientation_packet_in(
-        &missing,
-        Some(&root),
-        Some(&a),
-        &OrientationConfig::default()
-    )
-    .unwrap()
-    .is_none());
+    assert!(orientation_packet_in(&missing, Some(&root), Some(&a), &OrientationConfig::default())
+        .unwrap()
+        .is_none());
 
     // The Central root itself is not a project: nothing to inspect.
     let runner = NowRunner::with_field("A", field_with());
-    assert!(orientation_packet_in(
-        &runner,
-        Some(&root),
-        Some(&root),
-        &OrientationConfig::default()
-    )
-    .unwrap()
-    .is_none());
-    assert!(
-        runner.requested_projects().is_empty(),
-        "no ctrl call may fire without a project"
-    );
+    assert!(orientation_packet_in(&runner, Some(&root), Some(&root), &OrientationConfig::default())
+        .unwrap()
+        .is_none());
+    assert!(runner.requested_projects().is_empty(), "no ctrl call may fire without a project");
 }
 
 #[test]
 fn a_failed_ctrl_call_degrades_to_a_reportable_warning() {
     let (root, a, _b) = fixture();
     let runner = NowRunner::failing();
-    let error = orientation_packet_in(
-        &runner,
-        Some(&root),
-        Some(&a),
-        &OrientationConfig::default(),
-    )
-    .unwrap_err();
+    let error = orientation_packet_in(&runner, Some(&root), Some(&a), &OrientationConfig::default())
+        .unwrap_err();
     assert!(error.contains("continuity/orientation-packet"), "{error}");
     assert!(error.contains("ctrl"), "{error}");
 }
@@ -397,8 +302,7 @@ fn the_budget_bounds_the_packet() {
             )
         })
         .collect();
-    let field =
-        json!({"exists": true, "active_items": items, "open_questions": [], "invalid_items": []});
+    let field = json!({"exists": true, "active_items": items, "open_questions": [], "invalid_items": []});
     let runner = NowRunner::with_field("A", field);
 
     let config = OrientationConfig {
@@ -412,14 +316,8 @@ fn the_budget_bounds_the_packet() {
 
     let item_lines = packet.lines().filter(|l| l.starts_with("- ")).count();
     assert!(item_lines <= 4, "budget exceeded: {packet}");
-    assert!(
-        packet.contains("withheld by the orientation budget"),
-        "{packet}"
-    );
-    let newest = packet
-        .lines()
-        .find(|l| l.contains("open thread 7"))
-        .unwrap();
+    assert!(packet.contains("withheld by the orientation budget"), "{packet}");
+    let newest = packet.lines().find(|l| l.contains("open thread 7")).unwrap();
     assert!(newest.contains("continuation"), "{packet}");
     assert!(
         packet.matches("xxxxxxxxxx").count() <= 5,
@@ -430,18 +328,12 @@ fn the_budget_bounds_the_packet() {
 #[test]
 fn the_tunings_in_effect_are_the_compositions_not_ambient() {
     // Absent config keeps the closed, bounded defaults.
-    assert_eq!(
-        OrientationConfig::from_config(None),
-        OrientationConfig::default()
-    );
+    assert_eq!(OrientationConfig::from_config(None), OrientationConfig::default());
     // Wrong types keep the defaults rather than half-tuning.
     let mut wrong = toml::value::Table::new();
     wrong.insert("include_human_scratch".into(), "yes".into());
     wrong.insert("max_items".into(), "three".into());
-    assert_eq!(
-        OrientationConfig::from_config(Some(&wrong)),
-        OrientationConfig::default()
-    );
+    assert_eq!(OrientationConfig::from_config(Some(&wrong)), OrientationConfig::default());
 
     // The composition's values are the values in effect.
     let mut tuned = toml::value::Table::new();

@@ -4,10 +4,10 @@
 //! that are specific to Qwen Code — rather than re-testing the shared projection
 //! machinery already covered by the core harness-admission suite.
 
-use aikit_adapters::clients::qwen::{QwenAdapter, PRODUCT};
+use aikit_adapters::clients::qwen::{PRODUCT, QwenAdapter};
 use aikit_core::harness_admission::{
-    verify_activation_truth, FacultySupport, HarnessActivationObservation, HarnessActivationState,
-    HarnessAdmissionAdapter, HARNESS_ADAPTER_SDK_VERSION,
+    FacultySupport, HARNESS_ADAPTER_SDK_VERSION, HarnessActivationObservation,
+    HarnessActivationState, HarnessAdmissionAdapter, verify_activation_truth,
 };
 use aikit_core::platform::TargetId;
 use aikit_core::projection::{ActivationEffect, ProjectionPlan, TargetAdapter};

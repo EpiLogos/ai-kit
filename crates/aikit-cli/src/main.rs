@@ -235,9 +235,11 @@ fn cmd_development_field(cwd: &std::path::Path, args: DevelopmentFieldArgs) -> R
         .into_iter()
         .map(aikit_core::resource::ResourceRef::parse)
         .collect::<Result<Vec<_>>>()?;
-    let base_revision = parse_optional_revision(args.base, "--base")?;
-    let expected_aikit_revision =
-        parse_optional_revision(args.expect_aikit_revision, "--expect-aikit-revision")?;
+    let base_revision = parse_optional_development_field_revision(args.base, "--base")?;
+    let expected_aikit_revision = parse_optional_development_field_revision(
+        args.expect_aikit_revision,
+        "--expect-aikit-revision",
+    )?;
     let reading = service.development_field_read(DevelopmentFieldApplicationRequest {
         subjects,
         limit: args.limit,
@@ -254,7 +256,7 @@ fn cmd_development_field(cwd: &std::path::Path, args: DevelopmentFieldArgs) -> R
     Ok(reply(&service, data, diagnostic_warnings(&service)))
 }
 
-fn parse_optional_revision(
+fn parse_optional_development_field_revision(
     raw: Option<String>,
     argument: &str,
 ) -> Result<Option<aikit_core::resource::VersionRevision>> {
@@ -368,13 +370,14 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 .gateway_ref
                 .or_else(|| std::env::var("AIKIT_GATEWAY_REF").ok())
                 .unwrap_or_else(|| "agency-gateway/local".into());
-            let gateway_ref =
-                aikit_core::resource::ResourceRef::parse(&gateway_ref).map_err(|error| {
+            let gateway_ref = aikit_core::resource::ResourceRef::parse(&gateway_ref).map_err(
+                |error| {
                     AikitError::new(
                         "cli.gateway_ref_invalid",
                         format!("parse gateway ref {gateway_ref}: {error}"),
                     )
-                })?;
+                },
+            )?;
             aikit_adapters::run_gateway_service(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -623,14 +626,11 @@ fn cmd_project(cwd: &std::path::Path, command: ProjectCmd) -> Result<Reply> {
                 aikit_cli::project_recency::ProjectRecencyConfig::default(),
             )?;
             let needle = args.filter.as_deref().map(str::to_lowercase);
-            let rows = rows
-                .into_iter()
-                .filter(|row| {
-                    needle.as_ref().is_none_or(|needle| {
-                        row.project.to_lowercase().contains(needle)
-                            || row.root.to_lowercase().contains(needle)
-                    })
-                })
+            let rows = rows.into_iter()
+                .filter(|row| needle.as_ref().is_none_or(|needle| {
+                    row.project.to_lowercase().contains(needle)
+                        || row.root.to_lowercase().contains(needle)
+                }))
                 .map(|row| aikit_cli::project_recency::describe(&row))
                 .collect::<Vec<_>>();
             Ok(reply(&service, jval!({ "projects": rows }), vec![]))
@@ -1678,7 +1678,8 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         KnowledgeSub::Resolve(a) => {
             // One query path: a plain typed string is legitimate input and is
             // lowered into the Vāk resolver contract before resolution.
-            let expression = aikit_core::resource::parse_or_search_expression(&a.query)?;
+            let expression =
+                aikit_core::resource::parse_or_search_expression(&a.query)?;
             let resolution = service.knowledge_resolve(&expression, a.limit)?;
             warnings.extend(resolution.absences.clone());
             jval!(resolution)
@@ -1999,19 +2000,11 @@ fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
 fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
     let service = Service::discover(cwd)?;
     let (capability_text, requested_source, note) = match &a.command {
-        TrustSub::Record(args) => (
-            args.capability.clone(),
-            args.source.clone(),
-            args.note.clone(),
-        ),
+        TrustSub::Record(args) => (args.capability.clone(), args.source.clone(), args.note.clone()),
         TrustSub::Show(args) => (args.capability.clone(), None, None),
     };
-    let capability = CapsuleId::parse(&capability_text).map_err(|error| {
-        AikitError::new(
-            "trust.unknown_capsule",
-            format!("{capability_text}: {error}"),
-        )
-    })?;
+    let capability = CapsuleId::parse(&capability_text)
+        .map_err(|error| AikitError::new("trust.unknown_capsule", format!("{capability_text}: {error}")))?;
     let index = aikit_store::index::Index::open(&service.home().database())?;
     let store = aikit_store::trust::TrustStore::new(&index);
     let load = aikit_cli::app::load_catalog(service.home(), None)?;
@@ -2046,22 +2039,14 @@ fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
     let Some(revision) = revision else {
         return Err(AikitError::new(
             "trust.no_revision",
-            format!(
-                "{} has no content revision in source {}",
-                capability,
-                source.as_str()
-            ),
+            format!("{} has no content revision in source {}", capability, source.as_str()),
         )
         .with("capability", capability.to_string()));
     };
     match &a.command {
         TrustSub::Record(_) => {
             store.record(
-                &aikit_core::trust::TrustKey::new(
-                    source.clone(),
-                    capability.clone(),
-                    revision.clone(),
-                ),
+                &aikit_core::trust::TrustKey::new(source.clone(), capability.clone(), revision.clone()),
                 aikit_core::trust::TrustState::Trusted,
                 note.as_deref().or(Some("explicit registry review")),
             )?;
@@ -2498,9 +2483,8 @@ fn cmd_continuity(cwd: &std::path::Path, c: ContinuityCmd) -> Result<Reply> {
                 // exit zero just because the check ran.
                 Ok(Reply::Data {
                     context: EnvelopeContext::from_descriptor(service.descriptor()),
-                    data: serde_json::to_value(&verification).map_err(|error| {
-                        AikitError::new("continuity.closeout", error.to_string())
-                    })?,
+                    data: serde_json::to_value(&verification)
+                        .map_err(|error| AikitError::new("continuity.closeout", error.to_string()))?,
                     warnings: vec![],
                     exit_code,
                 })
@@ -2515,13 +2499,9 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
         ContextSub::Current(_) => {
             let d = service.descriptor();
             let tuning = service.continuity_tuning();
-            let last_active = d
-                .project_root
-                .as_deref()
+            let last_active=d.project_root.as_deref()
                 .map(|root| service.index().project_last_activity(root))
-                .transpose()?
-                .flatten()
-                .as_ref()
+                .transpose()?.flatten().as_ref()
                 .map(aikit_cli::activity_evidence::describe);
             let data = jval!({
                 "context_id": d.context_id.to_string(),
@@ -2943,7 +2923,9 @@ fn cmd_session_lifecycle(service: &Service, c: SessionLifecycleCmd) -> Result<Re
         SessionLifecycleSub::Cancel(a) => {
             let event = service.session_lifecycle_record(
                 a.session,
-                SessionLifecycleRecord::Cancel { reason: a.reason },
+                SessionLifecycleRecord::Cancel {
+                    reason: a.reason,
+                },
                 a.activity,
                 a.origin,
             )?;
@@ -2968,7 +2950,9 @@ fn cmd_session_lifecycle(service: &Service, c: SessionLifecycleCmd) -> Result<Re
             SessionLifecyclePermissionSub::Grant(a) => {
                 let event = service.session_lifecycle_record(
                     a.session,
-                    SessionLifecycleRecord::PermissionGrant { request: a.request },
+                    SessionLifecycleRecord::PermissionGrant {
+                        request: a.request,
+                    },
                     None,
                     a.origin,
                 )?;

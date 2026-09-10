@@ -373,7 +373,10 @@ pub type MethodResolvedRef = SkillPraxisResolvedRef;
 pub type MethodResolution = SkillPraxisMetadataResolution;
 
 /// Compatibility entry point for the superseded #108 API.
-pub fn resolve_method(method: &Method, resources: &dyn ResourceIndex) -> Result<MethodResolution> {
+pub fn resolve_method(
+    method: &Method,
+    resources: &dyn ResourceIndex,
+) -> Result<MethodResolution> {
     resolve_skill_praxis_metadata(method, resources)
 }
 

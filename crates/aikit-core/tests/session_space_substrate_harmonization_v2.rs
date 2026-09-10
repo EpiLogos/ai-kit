@@ -103,10 +103,7 @@ fn admitted_composition_project_provenance_never_authors_session_space_membershi
     runtime
         .admit_composition(
             &lease,
-            body(
-                "body/project-provenance",
-                vec![surface("surface/harmonization/main")],
-            ),
+            body("body/project-provenance", vec![surface("surface/harmonization/main")]),
         )
         .unwrap();
 
@@ -116,10 +113,8 @@ fn admitted_composition_project_provenance_never_authors_session_space_membershi
     );
 
     let explicit = SessionSpaceRuntime::open(
-        SessionSpaceDefinition::new(
-            SessionSpaceRef::parse("session-space/explicit-project").unwrap(),
-        )
-        .with_project(r("project/explicit")),
+        SessionSpaceDefinition::new(SessionSpaceRef::parse("session-space/explicit-project").unwrap())
+            .with_project(r("project/explicit")),
     )
     .unwrap();
     assert_eq!(explicit.read_model().projects, vec![r("project/explicit")]);
@@ -147,7 +142,11 @@ fn changed_composition_fingerprint_invalidates_live_evidence_and_exact_surface_m
 
     let mut driver = ObservingDriver;
     runtime
-        .activate_component(&lease, &r("component/harmonization/runtime"), &mut driver)
+        .activate_component(
+            &lease,
+            &r("component/harmonization/runtime"),
+            &mut driver,
+        )
         .unwrap();
     let active = runtime.read_model();
     let component = &active.components[0];

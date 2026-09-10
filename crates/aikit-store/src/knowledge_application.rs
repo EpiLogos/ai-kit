@@ -277,9 +277,7 @@ mod tests {
             ..native.clone()
         };
 
-        store
-            .remember_search_hits(std::slice::from_ref(&native))
-            .unwrap();
+        store.remember_search_hits(std::slice::from_ref(&native)).unwrap();
         store.remember_search_hits(&[projection]).unwrap();
         assert_eq!(store.address(&resource).unwrap(), Some(native.address));
 
@@ -295,9 +293,7 @@ mod tests {
             authority: SourceAuthority::Authored,
             ranking: None,
         };
-        store
-            .remember_search_hits(std::slice::from_ref(&fallback))
-            .unwrap();
+        store.remember_search_hits(std::slice::from_ref(&fallback)).unwrap();
         assert_eq!(store.address(&other).unwrap(), Some(fallback.address));
     }
 

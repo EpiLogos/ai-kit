@@ -1011,17 +1011,11 @@ pub fn plan_projection_cutover(
             target,
             inverse: Inverse::Remove,
         });
-        let identities: Vec<_> = resolved
-            .active
-            .iter()
+        let identities: Vec<_> = resolved.active.iter()
             .filter(|(_, capability)| capability.name == name.to_string_lossy())
-            .map(|(id, _)| id.clone())
-            .collect();
+            .map(|(id, _)| id.clone()).collect();
         if identities.len() != 1 {
-            return Err(refusal(format!(
-                "generation does not name one source identity for {}",
-                name.to_string_lossy()
-            )));
+            return Err(refusal(format!("generation does not name one source identity for {}", name.to_string_lossy())));
         }
         capsules.push(identities[0].clone());
     }

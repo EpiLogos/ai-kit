@@ -140,10 +140,7 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
 
     fn reference_from_object(&self, object: &Map<String, Value>) -> Option<CodeReference> {
         let path = string_field(object, &["filePath", "file_path", "path"])?;
-        let symbol = string_field(
-            object,
-            &["name", "symbol", "qualifiedName", "qualified_name"],
-        );
+        let symbol = string_field(object, &["name", "symbol", "qualifiedName", "qualified_name"]);
         let kind = string_field(object, &["kind", "type", "label"]);
         let line = integer_field(object, &["line", "startLine", "start_line"])
             .and_then(|line| u32::try_from(line).ok());
@@ -334,16 +331,10 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
         self.require_capability(self.cli.trace, "trace")?;
         self.require_indexed()?;
         let from_symbol = from.symbol.as_deref().ok_or_else(|| {
-            AikitError::new(
-                "knowledge.code_symbol_required",
-                "trace source requires a symbol",
-            )
+            AikitError::new("knowledge.code_symbol_required", "trace source requires a symbol")
         })?;
         let to_symbol = to.symbol.as_deref().ok_or_else(|| {
-            AikitError::new(
-                "knowledge.code_symbol_required",
-                "trace target requires a symbol",
-            )
+            AikitError::new("knowledge.code_symbol_required", "trace target requires a symbol")
         })?;
         let detail = self.run_json(
             &[
@@ -434,10 +425,7 @@ fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> GitNexusCliSurfac
     let impact_help = probe_help(runner, binary, &["impact", "--help"]);
     GitNexusCliSurface {
         available: true,
-        version: parse_version(&format!(
-            "{} {}",
-            version_output.stdout, version_output.stderr
-        )),
+        version: parse_version(&format!("{} {}", version_output.stdout, version_output.stderr)),
         index: help.contains("analyze"),
         search: help.contains("query"),
         context: help.contains("context"),
@@ -551,10 +539,7 @@ mod tests {
                 .on("context login", r#"{"symbol":{"name":"login"}}"#)
                 .on("impact login", r#"{"risk":"LOW"}"#)
                 .on("trace login validate", r#"{"status":"found","path":[]}"#)
-                .on(
-                    "detect-changes",
-                    "Changed symbols: 0\nAffected processes: 0\n",
-                )
+                .on("detect-changes", "Changed symbols: 0\nAffected processes: 0\n")
                 .on("check --cycles --json", r#"{"status":"clean","cycles":[]}"#),
         )
     }
@@ -632,9 +617,9 @@ mod tests {
         assert!(changes.detail.is_string());
         provider.structural_check().unwrap();
         let lines = observed.call_lines();
-        assert!(lines
-            .iter()
-            .any(|line| { line.contains("context login --file src/auth.rs --repo demo") }));
+        assert!(lines.iter().any(|line| {
+            line.contains("context login --file src/auth.rs --repo demo")
+        }));
         assert!(lines.iter().any(|line| {
             line.contains("impact login --file src/auth.rs --repo demo --direction upstream")
         }));
@@ -644,8 +629,8 @@ mod tests {
         assert!(lines.iter().any(|line| {
             line.contains("detect-changes --scope compare --repo demo --base-ref main")
         }));
-        assert!(lines
-            .iter()
-            .any(|line| { line.contains("check --cycles --json --repo demo") }));
+        assert!(lines.iter().any(|line| {
+            line.contains("check --cycles --json --repo demo")
+        }));
     }
 }

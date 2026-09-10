@@ -65,10 +65,7 @@ fn discovery_counts_skills_dead_symlinks_and_missing_frontmatter() {
         claude_root.skills, 3,
         "pdf, docx and the linked shared-skill are real skills"
     );
-    assert_eq!(
-        claude_root.dead_symlinks, 1,
-        "broken-link is a dead symlink"
-    );
+    assert_eq!(claude_root.dead_symlinks, 1, "broken-link is a dead symlink");
     assert_eq!(
         claude_root.missing_frontmatter, 1,
         "half-made has no usable frontmatter"
@@ -177,11 +174,7 @@ fn a_hook_script_nothing_dispatches_is_reported_as_wired_to_nothing() {
 
     let survey = foreign::default_hook_survey(home);
 
-    assert_eq!(
-        survey.hooks.len(),
-        3,
-        "the dotfile is not counted: {survey:?}"
-    );
+    assert_eq!(survey.hooks.len(), 3, "the dotfile is not counted: {survey:?}");
     assert_eq!(survey.wired(), 1);
 
     let orphans: Vec<&str> = survey.orphaned().iter().map(|h| h.name.as_str()).collect();

@@ -164,10 +164,7 @@ impl PressureBrackets {
         let read = |key: &str, current: f64, warnings: &mut Vec<String>| -> f64 {
             match config.get(key) {
                 None => current,
-                Some(value) => match value
-                    .as_float()
-                    .or_else(|| value.as_integer().map(|v| v as f64))
-                {
+                Some(value) => match value.as_float().or_else(|| value.as_integer().map(|v| v as f64)) {
                     Some(number) if number > 0.0 && number <= 1.0 => number,
                     Some(number) => {
                         warnings.push(format!(

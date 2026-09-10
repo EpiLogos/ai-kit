@@ -90,7 +90,9 @@ pub fn curate(
             if cap.successful_runs == 1 { "" } else { "s" }
         ));
     }
-    body.push_str("\nThe curator only proposes. Nothing is archived or disabled until you decide.");
+    body.push_str(
+        "\nThe curator only proposes. Nothing is archived or disabled until you decide.",
+    );
 
     // Dedup on the exact set + newest idle bucket, so re-running the curator over
     // an unchanged tree returns the existing item instead of filing another.

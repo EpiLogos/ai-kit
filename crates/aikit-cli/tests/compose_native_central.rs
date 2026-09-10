@@ -141,38 +141,12 @@ fn explicit_compose_discloses_authored_basis_and_refuses_broken_source() {
     let mut changed_bytes = old_bytes.clone();
     changed_bytes.push(b'\n');
     fs::write(&source, changed_bytes).unwrap();
-    let changed = aikit(
-        &root,
-        &home,
-        &project,
-        &[
-            "method",
-            "resolve",
-            "--source",
-            method_path.to_str().unwrap(),
-            "--focus",
-            "agent/compose-proof",
-        ],
-    );
-    assert!(
-        changed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&changed.stdout)
-    );
-    let changed: Value = serde_json::from_slice(&changed.stdout).unwrap();
-    assert_ne!(
-        method["data"]["context_resolution"]["reference"],
-        changed["data"]["context_resolution"]["reference"]
-    );
-    assert_eq!(
-        method["data"]["context_resolution"]["basis"]["resolver_hash"],
-        changed["data"]["context_resolution"]["basis"]["resolver_hash"]
-    );
-    assert_eq!(
-        changed["data"]["context_resolution"]["basis"]["observed_source_resources"][0]["sources"]
-            [0]["revision"],
-        "r1"
-    );
+    let changed = aikit(&root, &home, &project, &["method","resolve","--source",method_path.to_str().unwrap(),"--focus","agent/compose-proof"]);
+    assert!(changed.status.success(), "{}", String::from_utf8_lossy(&changed.stdout));
+    let changed:Value = serde_json::from_slice(&changed.stdout).unwrap();
+    assert_ne!(method["data"]["context_resolution"]["reference"],changed["data"]["context_resolution"]["reference"]);
+    assert_eq!(method["data"]["context_resolution"]["basis"]["resolver_hash"],changed["data"]["context_resolution"]["basis"]["resolver_hash"]);
+    assert_eq!(changed["data"]["context_resolution"]["basis"]["observed_source_resources"][0]["sources"][0]["revision"],"r1");
     fs::write(source, b"malformed owner profile").unwrap();
     let refused = aikit(&root, &home, &project, &["compose"]);
     assert!(

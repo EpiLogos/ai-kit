@@ -135,11 +135,7 @@ pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
         .map_err(db_error)?;
     let rows = stmt
         .query_map(
-            params![
-                FAMILIARITY_OBSERVATION_EVENT,
-                FAMILIARITY_RESET_EVENT,
-                RUN_EVENT
-            ],
+            params![FAMILIARITY_OBSERVATION_EVENT, FAMILIARITY_RESET_EVENT, RUN_EVENT],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -184,11 +180,7 @@ pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
 
         let arguments: BTreeMap<String, String> =
             serde_json::from_str(&arguments_json).map_err(|error| {
-                decode_error(
-                    &kind,
-                    &event_id,
-                    format!("invalid event arguments: {error}"),
-                )
+                decode_error(&kind, &event_id, format!("invalid event arguments: {error}"))
             })?;
         let payload = arguments.get(FAMILIARITY_PAYLOAD_KEY).ok_or_else(|| {
             decode_error(
@@ -286,10 +278,7 @@ fn encode<T: Serialize>(value: &T) -> Result<String> {
 fn decode_error(kind: &str, event_id: &str, detail: impl Into<String>) -> AikitError {
     AikitError::new(
         "familiarity.event_decode_failed",
-        format!(
-            "could not decode {kind} event {event_id}: {}",
-            detail.into()
-        ),
+        format!("could not decode {kind} event {event_id}: {}", detail.into()),
     )
     .with("event_kind", kind)
     .with("event_id", event_id)

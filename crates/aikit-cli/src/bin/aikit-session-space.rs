@@ -5,8 +5,7 @@ use aikit_cli::SessionSpaceServiceOps;
 use aikit_core::project::ProjectRef;
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
-    ContextResolutionEvidence, SessionSpaceMutation, SessionSpacePreview,
-    SessionSpaceProjectContextBinding,
+    ContextResolutionEvidence, SessionSpaceMutation, SessionSpacePreview, SessionSpaceProjectContextBinding,
 };
 use aikit_core::{AikitError, Result};
 use clap::{Parser, Subcommand};
@@ -34,23 +33,12 @@ enum Command {
     EncounterStart,
     /// Run the resident generic ACP owner. Client exit never stops providers.
     #[cfg(unix)]
-    EncounterServe {
-        #[arg(long)]
-        socket: Option<PathBuf>,
-    },
+    EncounterServe { #[arg(long)] socket: Option<PathBuf> },
     /// Configure a native ACP provider. This operation is not exposed over IPC.
-    EncounterConfigure {
-        #[arg(long)]
-        provider_json: String,
-    },
+    EncounterConfigure { #[arg(long)] provider_json: String },
     /// Apply a canonical encounter action to the resident owner.
     #[cfg(unix)]
-    Encounter {
-        #[arg(long)]
-        request_json: String,
-        #[arg(long)]
-        socket: Option<PathBuf>,
-    },
+    Encounter { #[arg(long)] request_json: String, #[arg(long)] socket: Option<PathBuf> },
     /// Read the current canonical Project + ContextResolution binding for typed stage intent.
     ProjectContext,
     /// List persisted SessionSpaces.
@@ -112,44 +100,26 @@ fn run() -> Result<()> {
     let cwd = match cli.cwd {
         Some(cwd) => cwd,
         None => std::env::current_dir().map_err(|error| {
-            AikitError::new(
-                "cli.cwd_unavailable",
-                format!("could not read cwd: {error}"),
-            )
+            AikitError::new("cli.cwd_unavailable", format!("could not read cwd: {error}"))
         })?,
     };
     let service = Service::discover(&cwd)?;
 
     match cli.command {
         #[cfg(unix)]
-        Command::EncounterStart => {
-            emit(&aikit_cli::encounter_service::start(service.home(), &cwd)?)
-        }
+        Command::EncounterStart => emit(&aikit_cli::encounter_service::start(service.home(),&cwd)?),
         #[cfg(unix)]
-        Command::EncounterServe { socket } => aikit_cli::encounter_service::serve(
-            service.home().clone(),
-            &socket.unwrap_or_else(|| aikit_cli::encounter_service::socket_path(service.home())),
-        ),
-        Command::EncounterConfigure { provider_json } => {
-            aikit_cli::encounter_service::EncounterService::configure(
-                service.home(),
-                parse_json_arg(&provider_json)?,
-            )?;
+        Command::EncounterServe{socket} => aikit_cli::encounter_service::serve(service.home().clone(),&socket.unwrap_or_else(||aikit_cli::encounter_service::socket_path(service.home()))),
+        Command::EncounterConfigure{provider_json} => {
+            aikit_cli::encounter_service::EncounterService::configure(service.home(),parse_json_arg(&provider_json)?)?;
             emit(&serde_json::json!({"configured":true}))
-        }
+        },
         #[cfg(unix)]
-        Command::Encounter {
-            request_json,
-            socket,
-        } => emit(&aikit_cli::encounter_service::request(
-            &socket.unwrap_or_else(|| aikit_cli::encounter_service::socket_path(service.home())),
-            &parse_json_arg(&request_json)?,
-        )?),
+        Command::Encounter{request_json,socket} => emit(&aikit_cli::encounter_service::request(&socket.unwrap_or_else(||aikit_cli::encounter_service::socket_path(service.home())),&parse_json_arg(&request_json)?)?),
         Command::ProjectContext => {
             let resolution = aikit_tui::project_world_service::context_resolution(&service)?;
             let context = ContextResolutionEvidence::from_resolution(&resolution)?;
-            let binding =
-                SessionSpaceProjectContextBinding::new(context.project().clone(), context)?;
+            let binding = SessionSpaceProjectContextBinding::new(context.project().clone(), context)?;
             emit(&binding)
         }
         Command::List => emit(&service.session_space_list()?),
@@ -191,12 +161,18 @@ fn run() -> Result<()> {
         Command::RestorePreview { space, sequence } => {
             emit(&service.session_space_stage_restore(&space_ref(&space)?, sequence)?)
         }
-        Command::Reconstruct { space } => {
-            emit(&service.session_space_reconstruct(&space_ref(&space)?, None, &[], &[])?)
-        }
-        Command::Reconcile { space } => {
-            emit(&service.session_space_reconcile(&space_ref(&space)?, None, &[], &[])?)
-        }
+        Command::Reconstruct { space } => emit(&service.session_space_reconstruct(
+            &space_ref(&space)?,
+            None,
+            &[],
+            &[],
+        )?),
+        Command::Reconcile { space } => emit(&service.session_space_reconcile(
+            &space_ref(&space)?,
+            None,
+            &[],
+            &[],
+        )?),
         Command::Explain { space } => {
             emit(&service.session_space_explain(&space_ref(&space)?, None)?)
         }

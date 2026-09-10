@@ -26,13 +26,7 @@ fn selection(component: &ResourceRef) -> ComponentSelection {
     }
 }
 
-fn catalog() -> (
-    CompositionCatalog,
-    ResourceRef,
-    ResourceRef,
-    ResourceRef,
-    ResourceRef,
-) {
+fn catalog() -> (CompositionCatalog, ResourceRef, ResourceRef, ResourceRef, ResourceRef) {
     let component = r("component/review-runtime");
     let action = r("action/review");
     let tui = r("surface/aikit/tui");
@@ -109,12 +103,7 @@ fn staged_component_change_previews_surfaces_and_human_agent_projections_before_
     assert_ne!(preview.projected.fingerprint, current.fingerprint);
     assert_eq!(preview.diff.mounted_components, vec![component.clone()]);
     assert_eq!(
-        preview
-            .diff
-            .added_surfaces
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>(),
+        preview.diff.added_surfaces.iter().cloned().collect::<BTreeSet<_>>(),
         BTreeSet::from([tui.clone(), agent.clone()])
     );
     assert_eq!(preview.diff.added_contributions.len(), 2);
@@ -167,12 +156,7 @@ fn retraction_uses_the_same_resolver_and_reports_surface_projection_removal() {
     assert_eq!(preview.diff.retracted_components, vec![component]);
     assert_eq!(preview.diff.removed_contributions.len(), 2);
     assert_eq!(
-        preview
-            .diff
-            .removed_surfaces
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>(),
+        preview.diff.removed_surfaces.iter().cloned().collect::<BTreeSet<_>>(),
         BTreeSet::from([tui, agent])
     );
     assert!(preview.projected.projections.is_empty());
@@ -198,10 +182,7 @@ fn repeated_staging_for_one_component_is_deterministic_and_last_intent_wins() {
     assert_eq!(second.len(), 1);
     let second_preview = preview_harness_composition_change(&catalog, &current, second).unwrap();
 
-    assert_eq!(
-        first_preview.projected.fingerprint,
-        second_preview.projected.fingerprint
-    );
+    assert_eq!(first_preview.projected.fingerprint, second_preview.projected.fingerprint);
     assert_eq!(first_preview.diff, second_preview.diff);
 }
 

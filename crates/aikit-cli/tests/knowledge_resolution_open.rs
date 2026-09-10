@@ -146,10 +146,7 @@ fn one_query_returns_a_real_file_and_a_real_flow_through_the_canonical_path() {
     // the Vāk contract and returns typed hits (PR #258 one-query-path law).
     let expression = parse_or_search_expression("test").unwrap();
     let result = service.knowledge_resolve(&expression, 50).unwrap();
-    assert!(
-        !result.hits.is_empty(),
-        "search returns the seeded material"
-    );
+    assert!(!result.hits.is_empty(), "search returns the seeded material");
     let resources: Vec<String> = result
         .hits
         .iter()

@@ -63,11 +63,7 @@ pub struct NameCluster {
 impl NameCluster {
     /// How many genuinely different contents wear this name.
     pub fn distinct_contents(&self) -> usize {
-        let mut hashes: Vec<&str> = self
-            .observations
-            .iter()
-            .map(|o| o.content.as_str())
-            .collect();
+        let mut hashes: Vec<&str> = self.observations.iter().map(|o| o.content.as_str()).collect();
         hashes.sort_unstable();
         hashes.dedup();
         hashes.len()
@@ -97,11 +93,7 @@ impl NameCluster {
 
     /// The roots this name appears in, in order.
     pub fn roots(&self) -> Vec<&str> {
-        let mut roots: Vec<&str> = self
-            .observations
-            .iter()
-            .map(|o| o.root_label.as_str())
-            .collect();
+        let mut roots: Vec<&str> = self.observations.iter().map(|o| o.root_label.as_str()).collect();
         roots.dedup();
         roots
     }
@@ -118,7 +110,9 @@ pub fn survey(roots: &[ForeignRootRef]) -> Vec<SkillObservation> {
         collect(&root.path, &root.label, 0, &mut out);
     }
     // Sorted so a report is stable between runs.
-    out.sort_by(|a, b| (&a.name, &a.root_label, &a.path).cmp(&(&b.name, &b.root_label, &b.path)));
+    out.sort_by(|a, b| {
+        (&a.name, &a.root_label, &a.path).cmp(&(&b.name, &b.root_label, &b.path))
+    });
     out
 }
 
@@ -240,17 +234,9 @@ pub fn report_conflicts(index: &Index, clusters: &[NameCluster]) -> Result<Vec<I
             "`{}` exists in {} place{} with {} different content{}.\n\n",
             cluster.name,
             cluster.observations.len(),
-            if cluster.observations.len() == 1 {
-                ""
-            } else {
-                "s"
-            },
+            if cluster.observations.len() == 1 { "" } else { "s" },
             cluster.distinct_contents(),
-            if cluster.distinct_contents() == 1 {
-                ""
-            } else {
-                "s"
-            },
+            if cluster.distinct_contents() == 1 { "" } else { "s" },
         );
         for observation in &cluster.observations {
             body.push_str(&format!(
@@ -272,11 +258,7 @@ pub fn report_conflicts(index: &Index, clusters: &[NameCluster]) -> Result<Vec<I
 
         // Dedup on the name plus the exact set of contents, so the item returns
         // unchanged until something on disk actually changes.
-        let mut contents: Vec<&str> = cluster
-            .observations
-            .iter()
-            .map(|o| o.content.as_str())
-            .collect();
+        let mut contents: Vec<&str> = cluster.observations.iter().map(|o| o.content.as_str()).collect();
         contents.sort_unstable();
         contents.dedup();
         let dedup = format!("collate:{}:{}", cluster.name, contents.join(","));
@@ -290,21 +272,15 @@ pub fn report_conflicts(index: &Index, clusters: &[NameCluster]) -> Result<Vec<I
             .collect();
 
         let title = match versions.len() {
-            0 => format!(
-                "{} differs across {} roots",
-                cluster.name,
-                cluster.roots().len()
-            ),
+            0 => format!("{} differs across {} roots", cluster.name, cluster.roots().len()),
             _ => format!("{} is live at {}", cluster.name, versions.join(" and ")),
         };
 
-        filed.push(
-            channel.publish(
-                NewItem::new(InboxKind::VersionConflict, title, body)
-                    .with_evidence(evidence)
-                    .deduped_by(dedup),
-            )?,
-        );
+        filed.push(channel.publish(
+            NewItem::new(InboxKind::VersionConflict, title, body)
+                .with_evidence(evidence)
+                .deduped_by(dedup),
+        )?);
     }
 
     Ok(filed)
@@ -321,10 +297,7 @@ pub struct CollateReport {
 }
 
 /// Survey, cluster and file — the whole read-only pass, summarised.
-pub fn collate(
-    index: &Index,
-    roots: &[ForeignRootRef],
-) -> Result<(CollateReport, Vec<NameCluster>)> {
+pub fn collate(index: &Index, roots: &[ForeignRootRef]) -> Result<(CollateReport, Vec<NameCluster>)> {
     let observations = survey(roots);
     let skills = observations.len();
     let clusters = cluster(observations);
@@ -434,8 +407,7 @@ pub fn survey_plugins(roots: &[PathBuf], max_depth: usize) -> Vec<PluginObservat
     }
 
     let mut observations: Vec<PluginObservation> = out.into_values().collect();
-    observations
-        .sort_by(|a, b| (&a.name, &a.version, &a.path).cmp(&(&b.name, &b.version, &b.path)));
+    observations.sort_by(|a, b| (&a.name, &a.version, &a.path).cmp(&(&b.name, &b.version, &b.path)));
     observations
 }
 
@@ -494,10 +466,7 @@ impl PluginVersionConflict {
 pub fn plugin_conflicts(observations: Vec<PluginObservation>) -> Vec<PluginVersionConflict> {
     let mut by_name: BTreeMap<String, Vec<PluginObservation>> = BTreeMap::new();
     for observation in observations {
-        by_name
-            .entry(observation.name.clone())
-            .or_default()
-            .push(observation);
+        by_name.entry(observation.name.clone()).or_default().push(observation);
     }
     by_name
         .into_iter()
@@ -508,10 +477,7 @@ pub fn plugin_conflicts(observations: Vec<PluginObservation>) -> Vec<PluginVersi
                 .collect();
             versions.sort_unstable();
             versions.dedup();
-            (versions.len() > 1).then_some(PluginVersionConflict {
-                name,
-                installations,
-            })
+            (versions.len() > 1).then_some(PluginVersionConflict { name, installations })
         })
         .collect()
 }
@@ -558,21 +524,15 @@ pub fn report_plugin_conflicts(
             })
             .collect();
 
-        filed.push(
-            channel.publish(
-                NewItem::new(
-                    InboxKind::VersionConflict,
-                    format!(
-                        "{} is installed at {}",
-                        conflict.name,
-                        versions.join(" and ")
-                    ),
-                    body,
-                )
-                .with_evidence(evidence)
-                .deduped_by(dedup),
-            )?,
-        );
+        filed.push(channel.publish(
+            NewItem::new(
+                InboxKind::VersionConflict,
+                format!("{} is installed at {}", conflict.name, versions.join(" and ")),
+                body,
+            )
+            .with_evidence(evidence)
+            .deduped_by(dedup),
+        )?);
     }
     Ok(filed)
 }

@@ -18,10 +18,7 @@ use std::{
 
 fn fixture_matrix(csv: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
         "aikit-capability-matrix-{}-{nonce}-{sequence}",
@@ -82,10 +79,7 @@ fn matrix_compiles_to_capability_objects_with_honest_verification() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        verification,
-        vec!["wiki:node:capability-matrix:matrix.test"]
-    );
+    assert_eq!(verification, vec!["wiki:node:capability-matrix:matrix.test"]);
 }
 
 #[test]
@@ -94,7 +88,10 @@ fn matrix_revision_change_raises_basis_changed_on_dependents() {
     let first = compile_capability_matrix(&dir, None);
     let index = SemanticWikiIndex::rebuild(first.objects).expect("rebuild");
     let node = index
-        .node(&aikit_core::ResourceRef::parse("wiki:node:capability:cap.test.root").unwrap())
+        .node(
+            &aikit_core::ResourceRef::parse("wiki:node:capability:cap.test.root")
+                .unwrap(),
+        )
         .unwrap();
     let semantic_revision = node.provenance[0]
         .source_revision
@@ -135,26 +132,28 @@ fn matrix_revision_change_raises_basis_changed_on_dependents() {
     // observes the matrix source now flags the dependent BasisChanged.
     fs::write(
         dir.join("capability-matrix.csv"),
-        CSV_V1.replace(
-            "A person needs a durable root.",
-            "A person needs a durable, inspectable root.",
-        ),
+        CSV_V1.replace("A person needs a durable root.", "A person needs a durable, inspectable root."),
     )
     .unwrap();
     let second = compile_capability_matrix(&dir, None);
     let second_index = SemanticWikiIndex::rebuild(second.objects).unwrap();
     let second_node = second_index
-        .node(&aikit_core::ResourceRef::parse("wiki:node:capability:cap.test.root").unwrap())
+        .node(
+            &aikit_core::ResourceRef::parse("wiki:node:capability:cap.test.root")
+                .unwrap(),
+        )
         .unwrap();
-    let second_semantic = second_node.provenance[0].source_revision.clone().unwrap();
-    assert_ne!(
-        second_semantic, semantic_revision,
-        "the compiled basis moved"
-    );
-    let second_revision = SourceRevision::parse(match &second_semantic {
-        aikit_core::SemanticRevision::Text(text) => text.clone(),
-        other => panic!("unexpected revision {other:?}"),
-    })
+    let second_semantic = second_node.provenance[0]
+        .source_revision
+        .clone()
+        .unwrap();
+    assert_ne!(second_semantic, semantic_revision, "the compiled basis moved");
+    let second_revision = SourceRevision::parse(
+        match &second_semantic {
+            aikit_core::SemanticRevision::Text(text) => text.clone(),
+            other => panic!("unexpected revision {other:?}"),
+        },
+    )
     .unwrap();
 
     let horizon = KnowledgeChangeHorizon {
@@ -167,8 +166,7 @@ fn matrix_revision_change_raises_basis_changed_on_dependents() {
         }],
         changes: Vec::new(),
     };
-    let impact =
-        deterministic_knowledge_impact(&horizon, std::slice::from_ref(&dependency)).unwrap();
+    let impact = deterministic_knowledge_impact(&horizon, std::slice::from_ref(&dependency)).unwrap();
     assert!(impact
         .affected
         .iter()
@@ -179,10 +177,7 @@ fn matrix_revision_change_raises_basis_changed_on_dependents() {
 #[test]
 fn world_discovery_compiles_project_matrices_in_their_project_space() {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
         "aikit-matrix-world-{}-{nonce}-{sequence}",
@@ -190,25 +185,24 @@ fn world_discovery_compiles_project_matrices_in_their_project_space() {
     ));
     let project_user = root.join("Work/garden/ProjectCentral/user");
     fs::create_dir_all(&project_user).unwrap();
-    fs::write(
-        project_user.join("capability-matrix.json"),
+    fs::write(project_user.join("capability-matrix.json"),
         json!({
             "protocol": "ql-capability-matrix/1",
             "matrix_id": "matrix.garden",
             "anchor_ref": "garden:doc:overview",
             "default_view": "product-field",
             "views": []
-        })
-        .to_string(),
-    )
-    .unwrap();
+        }).to_string()).unwrap();
     fs::write(project_user.join("capability-matrix.csv"), CSV_V1).unwrap();
 
     let reading = compile_world_matrices(&root);
     assert!(reading.absences.is_empty(), "{:?}", reading.absences);
     let index = SemanticWikiIndex::rebuild(reading.objects).expect("rebuild");
     let node = index
-        .node(&aikit_core::ResourceRef::parse("wiki:node:capability:cap.test.root").unwrap())
+        .node(
+            &aikit_core::ResourceRef::parse("wiki:node:capability:cap.test.root")
+                .unwrap(),
+        )
         .expect("project capability compiled");
     assert_eq!(
         node.space_refs[0].as_str(),

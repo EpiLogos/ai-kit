@@ -816,11 +816,7 @@ pub fn wiki_constellation_grain_public(
 /// not vouched for.
 pub fn structural_ref_parts(
     shape_ref: &str,
-) -> Option<(
-    WikiQlRelationFamily,
-    u8,
-    crate::knowledge_wiki_shape_v2::WikiQlCompletionDegree,
-)> {
+) -> Option<(WikiQlRelationFamily, u8, crate::knowledge_wiki_shape_v2::WikiQlCompletionDegree)> {
     use crate::knowledge_wiki_shape_v2::WikiQlCompletionDegree;
     let rest = shape_ref.strip_prefix("ql:structural:")?;
     let mut parts = rest.split(':');

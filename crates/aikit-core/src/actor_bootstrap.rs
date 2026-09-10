@@ -241,12 +241,7 @@ pub fn project_actor_bootstrap(
         )
     });
     let model = request.selected_model.as_ref().map(|selected| {
-        summarize_selected(
-            selected,
-            ResourceKind::Model,
-            &resolution.model_candidates,
-            None,
-        )
+        summarize_selected(selected, ResourceKind::Model, &resolution.model_candidates, None)
     });
 
     if let Some(body) = request.runtime_body {
@@ -344,9 +339,9 @@ fn missing_cause(
         return MissingCause::Unproven;
     };
     match ground {
-        HarnessDetectionGround::Unavailable { reason } => MissingCause::DetectionUnavailable {
-            reason: reason.clone(),
-        },
+        HarnessDetectionGround::Unavailable { reason } => {
+            MissingCause::DetectionUnavailable { reason: reason.clone() }
+        }
         HarnessDetectionGround::Observed {
             detection_ref,
             states,

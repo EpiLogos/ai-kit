@@ -132,10 +132,7 @@ fn a_more_specific_overlay_can_reset_inherited_orientation_without_forking_the_s
     let overlays = &view.skill_usage_overlays[&id];
     assert_eq!(overlays.len(), 1);
     assert_eq!(overlays[0].scope, ScopeKind::Project);
-    assert_eq!(
-        overlays[0].guidance.as_deref(),
-        Some("Shared project orientation.")
-    );
+    assert_eq!(overlays[0].guidance.as_deref(), Some("Shared project orientation."));
 }
 
 #[test]
@@ -158,14 +155,10 @@ fn an_overlay_reviewed_against_an_older_revision_is_retained_with_a_warning() {
         .resolve()
         .unwrap();
 
-    assert_eq!(
-        view.skill_usage_overlays[&id][0].reviewed_against,
-        Some(reviewed)
-    );
-    assert!(view
-        .warnings
-        .iter()
-        .any(|warning| { warning.contains("review the augmentation against the updated source") }));
+    assert_eq!(view.skill_usage_overlays[&id][0].reviewed_against, Some(reviewed));
+    assert!(view.warnings.iter().any(|warning| {
+        warning.contains("review the augmentation against the updated source")
+    }));
 }
 
 #[test]
@@ -260,11 +253,7 @@ fn nested_project_layers_apply_from_the_repository_root_towards_the_working_dire
 #[test]
 fn a_managed_denial_survives_an_explicit_session_enable() {
     let f = Fixture::new(vec![script("script/danger/rm-rf")])
-        .with_layers(vec![layer(
-            ScopeKind::Session,
-            &["script/danger/rm-rf"],
-            &[],
-        )])
+        .with_layers(vec![layer(ScopeKind::Session, &["script/danger/rm-rf"], &[])])
         .with_policy(ManagedPolicy {
             deny: vec![cid("script/danger/rm-rf")],
             source: "test-policy".into(),
@@ -273,9 +262,7 @@ fn a_managed_denial_survives_an_explicit_session_enable() {
 
     let view = f.resolve().unwrap();
     assert!(view.active.is_empty());
-    let reason = view
-        .unavailable_reason(&cid("script/danger/rm-rf"))
-        .unwrap();
+    let reason = view.unavailable_reason(&cid("script/danger/rm-rf")).unwrap();
     assert_eq!(reason, &UnavailableReason::DeniedByPolicy);
     // Declared state and effective state must differ visibly, not silently.
     assert!(view.is_declared_enabled(&cid("script/danger/rm-rf")));
@@ -313,11 +300,7 @@ fn managed_policy_can_deny_by_declared_effect_class() {
 network = true
 "#,
     )])
-    .with_layers(vec![layer(
-        ScopeKind::Session,
-        &["script/deploy/push"],
-        &[],
-    )])
+    .with_layers(vec![layer(ScopeKind::Session, &["script/deploy/push"], &[])])
     .with_policy(ManagedPolicy {
         deny_effects: vec![EffectClass::Network],
         source: "test-policy".into(),
@@ -339,13 +322,11 @@ network = true
 #[test]
 fn dependencies_are_expanded_transitively_and_marked_as_such() {
     let f = Fixture::new(vec![
-        requiring(
-            "skill",
+        requiring("skill", 
             "skill/rust/release-review",
             &["guidance/security/release-policy"],
         ),
-        requiring(
-            "guidance",
+        requiring("guidance", 
             "guidance/security/release-policy",
             &["guidance/code/review-standard"],
         ),
@@ -415,8 +396,7 @@ id = "script/env/venv-detect"
 #[test]
 fn an_explicitly_disabled_requirement_fails_rather_than_being_silently_re_enabled() {
     let f = Fixture::new(vec![
-        requiring(
-            "skill",
+        requiring("skill", 
             "skill/rust/release-review",
             &["guidance/security/release-policy"],
         ),
@@ -424,11 +404,7 @@ fn an_explicitly_disabled_requirement_fails_rather_than_being_silently_re_enable
     ])
     .with_layers(vec![
         layer(ScopeKind::Project, &["skill/rust/release-review"], &[]),
-        layer(
-            ScopeKind::Session,
-            &[],
-            &["guidance/security/release-policy"],
-        ),
+        layer(ScopeKind::Session, &[], &["guidance/security/release-policy"]),
     ]);
 
     let err = f.resolve().unwrap_err();
@@ -441,10 +417,7 @@ fn an_explicitly_disabled_requirement_fails_rather_than_being_silently_re_enable
         err.details().get("required_by").map(String::as_str),
         Some("skill/rust/release-review")
     );
-    assert_eq!(
-        err.details().get("scope").map(String::as_str),
-        Some("session")
-    );
+    assert_eq!(err.details().get("scope").map(String::as_str), Some("session"));
     assert!(
         err.details().contains_key("origin"),
         "the message must be able to name the file and line that disabled it"
@@ -525,10 +498,7 @@ fn a_dependency_cycle_is_reported_rather_than_looping_forever() {
     ])
     .with_layers(vec![layer(ScopeKind::Project, &["script/a/one"], &[])]);
 
-    assert_eq!(
-        f.resolve().unwrap_err().code(),
-        "resolution.dependency_cycle"
-    );
+    assert_eq!(f.resolve().unwrap_err().code(), "resolution.dependency_cycle");
 }
 
 // ---------------------------------------------------------------------------
@@ -563,11 +533,7 @@ fn sharing_a_tag_with_an_active_capsule_does_not_activate_anything() {
 #[test]
 fn every_active_capability_can_explain_why_it_is_active() {
     let f = Fixture::new(vec![
-        requiring(
-            "skill",
-            "skill/rust/review",
-            &["guidance/code/review-standard"],
-        ),
+        requiring("skill", "skill/rust/review", &["guidance/code/review-standard"]),
         guidance("guidance/code/review-standard"),
     ])
     .with_profiles(vec![profile(
@@ -575,18 +541,12 @@ fn every_active_capability_can_explain_why_it_is_active() {
         &["skill/rust/review"],
         &[],
     )])
-    .with_layers(vec![layer_using(
-        ScopeKind::Project,
-        &["profile/code/rust"],
-    )]);
+    .with_layers(vec![layer_using(ScopeKind::Project, &["profile/code/rust"])]);
 
     let view = f.resolve().unwrap();
     let explanation = view.explain(&cid("skill/rust/review")).unwrap();
 
-    assert!(explanation
-        .selected_by
-        .iter()
-        .any(|s| s.contains("profile/code/rust")));
+    assert!(explanation.selected_by.iter().any(|s| s.contains("profile/code/rust")));
     assert!(explanation
         .selected_by
         .iter()
@@ -651,18 +611,13 @@ fn an_unreviewed_hook_cannot_activate() {
 #[test]
 fn an_unreviewed_guidance_capsule_is_inspectable_but_not_injected() {
     let f = Fixture::new(vec![guidance("guidance/mode/research")])
-        .with_layers(vec![layer(
-            ScopeKind::Session,
-            &["guidance/mode/research"],
-            &[],
-        )])
+        .with_layers(vec![layer(ScopeKind::Session, &["guidance/mode/research"], &[])])
         .untrust("guidance/mode/research");
 
     let view = f.resolve().unwrap();
     assert!(view.active.is_empty());
     assert_eq!(
-        view.unavailable_reason(&cid("guidance/mode/research"))
-            .unwrap(),
+        view.unavailable_reason(&cid("guidance/mode/research")).unwrap(),
         &UnavailableReason::TrustRequired
     );
     // It is still catalogued and previewable — the palette must be able to show it.
@@ -775,21 +730,14 @@ fn profiles_compose_through_extends_depth_first() {
     ])
     .with_profiles(vec![
         profile("profile/base/safe", &["script/base/safe-thing"], &[]),
-        profile(
-            "profile/code/general",
-            &["script/general/general-thing"],
-            &[],
-        ),
+        profile("profile/code/general", &["script/general/general-thing"], &[]),
         {
             let mut p = profile("profile/code/rust", &["script/rust/rust-thing"], &[]);
             p.extends = vec![pid("profile/base/safe"), pid("profile/code/general")];
             p
         },
     ])
-    .with_layers(vec![layer_using(
-        ScopeKind::Project,
-        &["profile/code/rust"],
-    )]);
+    .with_layers(vec![layer_using(ScopeKind::Project, &["profile/code/rust"])]);
 
     let view = f.resolve().unwrap();
     assert_eq!(
@@ -847,10 +795,7 @@ fn an_unknown_profile_is_an_error_not_a_silent_no_op() {
         ScopeKind::Project,
         &["profile/does/not-exist"],
     )]);
-    assert_eq!(
-        f.resolve().unwrap_err().code(),
-        "resolution.unknown_profile"
-    );
+    assert_eq!(f.resolve().unwrap_err().code(), "resolution.unknown_profile");
 }
 
 #[test]
@@ -887,12 +832,13 @@ fn configuration_from_higher_layers_overrides_lower_layers_key_by_key() {
         toml_table(&[("mode", "changed-crates"), ("timeout", "90s")]),
     );
     let mut session = layer(ScopeKind::Session, &[], &[]);
-    session.patch.config.insert(
-        cid("hook/verify/cargo-check"),
-        toml_table(&[("mode", "full")]),
-    );
+    session
+        .patch
+        .config
+        .insert(cid("hook/verify/cargo-check"), toml_table(&[("mode", "full")]));
 
-    let f = Fixture::new(vec![hook("hook/verify/cargo-check")]).with_layers(vec![project, session]);
+    let f = Fixture::new(vec![hook("hook/verify/cargo-check")])
+        .with_layers(vec![project, session]);
 
     let view = f.resolve().unwrap();
     let config = &view.active[&cid("hook/verify/cargo-check")].config;
@@ -945,11 +891,8 @@ fn the_resolution_hash_changes_when_the_active_set_changes() {
 
 #[test]
 fn the_resolution_hash_changes_when_a_capsule_revision_changes() {
-    let base = Fixture::new(vec![script("script/test/a")]).with_layers(vec![layer(
-        ScopeKind::Project,
-        &["script/test/a"],
-        &[],
-    )]);
+    let base = Fixture::new(vec![script("script/test/a")])
+        .with_layers(vec![layer(ScopeKind::Project, &["script/test/a"], &[])]);
     let first = base.resolve().unwrap().hash;
 
     let mut bumped = base;
@@ -1063,11 +1006,8 @@ fn diagnostic_resolution_reports_every_problem_instead_of_stopping_at_the_first(
 
 #[test]
 fn a_healthy_context_diagnoses_cleanly() {
-    let f = Fixture::new(vec![script("script/test/a")]).with_layers(vec![layer(
-        ScopeKind::Project,
-        &["script/test/a"],
-        &[],
-    )]);
+    let f = Fixture::new(vec![script("script/test/a")])
+        .with_layers(vec![layer(ScopeKind::Project, &["script/test/a"], &[])]);
     let diagnosis = f.diagnose();
     assert!(diagnosis.problems.is_empty());
     assert!(diagnosis.view.is_some());

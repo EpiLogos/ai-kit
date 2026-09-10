@@ -22,8 +22,11 @@ fn r(raw: &str) -> ResourceRef {
 #[test]
 fn current_deepseek_adapter_resolves_proven_live_modes_into_the_canonical_fingerprint() {
     let baseline_specimen = deepseek_maximal_conformance(DeepSeekShellProvider::Local).specimen;
-    let baseline =
-        resolve_harness_composition(&baseline_specimen.catalog, baseline_specimen.request).unwrap();
+    let baseline = resolve_harness_composition(
+        &baseline_specimen.catalog,
+        baseline_specimen.request,
+    )
+    .unwrap();
 
     let live = deepseek_live_cordis_composition(DeepSeekShellProvider::Local).unwrap();
     let repeated = deepseek_live_cordis_composition(DeepSeekShellProvider::Local).unwrap();
@@ -37,10 +40,7 @@ fn current_deepseek_adapter_resolves_proven_live_modes_into_the_canonical_finger
         .collect();
     assert_eq!(observed, expected);
 
-    for next_session in [
-        "component/deepseek/tool-bash",
-        "component/deepseek/agent-loop",
-    ] {
+    for next_session in ["component/deepseek/tool-bash", "component/deepseek/agent-loop"] {
         assert!(live.composition.component_bindings.iter().any(|binding| {
             binding.component == r(next_session)
                 && binding.activation_mode == CompositionActivationMode::NextSession
@@ -86,10 +86,7 @@ fn acp_connection_requires_explicit_agent_session_binding_and_preserves_withheld
         SessionSpaceAuthorityState::default(),
     )
     .unwrap_err();
-    assert_eq!(
-        error.code(),
-        "session_space.connection_unbound_agent_session"
-    );
+    assert_eq!(error.code(), "session_space.connection_unbound_agent_session");
 
     let binding = unbound.bind_agent_session(r("agent-session/live"));
     let connection = connection_into_session_space(
@@ -203,8 +200,7 @@ fn session_space_active_transition_is_backed_by_a_real_authorised_provider_proce
     let space = SessionSpaceRef::parse("session-space/process-proof").unwrap();
     let agent_session = r("agent-session/process-proof");
     let harness = live.composition.harness.clone();
-    let mut runtime =
-        SessionSpaceRuntime::open(SessionSpaceDefinition::new(space.clone())).unwrap();
+    let mut runtime = SessionSpaceRuntime::open(SessionSpaceDefinition::new(space.clone())).unwrap();
     let lease = runtime
         .bind_agent_session(SessionSpaceAgentSession {
             agent_session: agent_session.clone(),
@@ -236,10 +232,7 @@ fn session_space_active_transition_is_backed_by_a_real_authorised_provider_proce
 
     for (operation, grant_ref) in [
         (CordisActivationOperation::Activate, "authority/activate"),
-        (
-            CordisActivationOperation::Deactivate,
-            "authority/deactivate",
-        ),
+        (CordisActivationOperation::Deactivate, "authority/deactivate"),
     ] {
         driver
             .register_activation_grant(CordisActivationGrant {

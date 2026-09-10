@@ -417,7 +417,9 @@ mod tests {
             .filter(|event| event.permission_request == Some(request("join-r1")))
             .collect();
         assert_eq!(pair.len(), 2);
-        assert!(pair.iter().all(|event| event.activity == activity("main")));
+        assert!(pair
+            .iter()
+            .all(|event| event.activity == activity("main")));
         assert!(final_store
             .read_model(&session)
             .unwrap()

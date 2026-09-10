@@ -17,7 +17,10 @@ fn runtime(id: &str) -> SessionSpaceRuntime {
     .unwrap()
 }
 
-fn bind(runtime: &mut SessionSpaceRuntime, agent_session: &str) -> aikit_core::SessionSpaceLease {
+fn bind(
+    runtime: &mut SessionSpaceRuntime,
+    agent_session: &str,
+) -> aikit_core::SessionSpaceLease {
     runtime
         .bind_agent_session(SessionSpaceAgentSession {
             agent_session: r(agent_session),

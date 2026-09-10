@@ -164,11 +164,7 @@ fn hooks_root(service: &Service) -> Node {
                     NodeKind::Group {
                         label: event.clone(),
                     },
-                    format!(
-                        "{} step{}",
-                        steps.len(),
-                        if steps.len() == 1 { "" } else { "s" }
-                    ),
+                    format!("{} step{}", steps.len(), if steps.len() == 1 { "" } else { "s" }),
                     steps,
                 )
             })
@@ -238,12 +234,10 @@ fn hooks_root(service: &Service) -> Node {
             if catalogued - wired == 1 { "s" } else { "" }
         )
     } else {
-        format!(
-            "{wired} step{} across {} event{}",
+        format!("{wired} step{} across {} event{}",
             if wired == 1 { "" } else { "s" },
             children.len(),
-            if children.len() == 1 { "" } else { "s" }
-        )
+            if children.len() == 1 { "" } else { "s" })
     };
 
     Node::branch(NodeKind::Root(Root::Hooks), summary, children)
@@ -265,11 +259,7 @@ fn contexts_root(service: &Service) -> Result<Node> {
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| c.context_id.to_string());
-            let here = if &c.context_id == current {
-                " · current"
-            } else {
-                ""
-            };
+            let here = if &c.context_id == current { " · current" } else { "" };
             Node::leaf(
                 NodeKind::Entry {
                     label: c.context_id.to_string(),
@@ -282,11 +272,7 @@ fn contexts_root(service: &Service) -> Result<Node> {
 
     Ok(Node::branch(
         NodeKind::Root(Root::Contexts),
-        format!(
-            "{} context{}",
-            children.len(),
-            if children.len() == 1 { "" } else { "s" }
-        ),
+        format!("{} context{}", children.len(), if children.len() == 1 { "" } else { "s" }),
         children,
     ))
 }
@@ -324,12 +310,8 @@ fn registries_root(service: &Service) -> Result<Node> {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     for root in foreign::discover(&foreign::roots_for(&home, service.invocation_cwd())) {
-        let canonical_root =
-            std::fs::canonicalize(&root.path).unwrap_or_else(|_| root.path.clone());
-        let mut summary = match (
-            foreign::projected_generation(service.home(), &root.path),
-            adopted.get(&canonical_root),
-        ) {
+        let canonical_root = std::fs::canonicalize(&root.path).unwrap_or_else(|_| root.path.clone());
+        let mut summary = match (foreign::projected_generation(service.home(), &root.path), adopted.get(&canonical_root)) {
             (Some(generation), _) => format!(
                 "generated · {} skills · generation {}",
                 root.skills, generation.generation_id
@@ -392,11 +374,7 @@ fn registries_root(service: &Service) -> Result<Node> {
 
     Ok(Node::branch(
         NodeKind::Root(Root::Registries),
-        format!(
-            "{} registr{}",
-            children.len(),
-            if children.len() == 1 { "y" } else { "ies" }
-        ),
+        format!("{} registr{}", children.len(), if children.len() == 1 { "y" } else { "ies" }),
         children,
     ))
 }

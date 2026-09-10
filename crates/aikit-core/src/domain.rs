@@ -139,7 +139,9 @@ impl KnowledgeDomain {
             }
         }
         if self.triggers.is_empty() && self.path_patterns.is_empty() {
-            return Err("a domain declares at least one trigger or path pattern".into());
+            return Err(
+                "a domain declares at least one trigger or path pattern".into(),
+            );
         }
         for trigger in &self.triggers {
             if trigger.trim().is_empty() {
@@ -148,7 +150,10 @@ impl KnowledgeDomain {
         }
         for pattern in &self.path_patterns {
             if pattern.trim().is_empty() {
-                return Err(format!("domain {} declares an empty path pattern", self.id));
+                return Err(format!(
+                    "domain {} declares an empty path pattern",
+                    self.id
+                ));
             }
         }
         for rule in &self.guidance {
@@ -355,11 +360,7 @@ pub fn render_header(
         activation.trigger,
         domain.source,
         domain.revision,
-        if deduped {
-            " ordinary payload deduped (unchanged rendered content);"
-        } else {
-            ""
-        },
+        if deduped { " ordinary payload deduped (unchanged rendered content);" } else { "" },
         if has_standing {
             " standing rules reasserted (dedup-exempt by classification)"
         } else {
@@ -421,10 +422,7 @@ mod tests {
         let header = render_header(activation, false, true);
         assert!(header.contains("trigger: \"release\""), "{header}");
         assert!(header.contains("horizon: @3–@5"), "{header}");
-        assert!(
-            header.contains("source: central:source:project:demo"),
-            "{header}"
-        );
+        assert!(header.contains("source: central:source:project:demo"), "{header}");
         assert!(header.contains("standing rules reasserted"), "{header}");
     }
 
@@ -536,24 +534,17 @@ classification = "standing"
         assert!(!fresh.deduped);
         assert!(fresh.record, "a fresh ordinary payload is recorded");
         for line in &standing {
-            assert!(
-                fresh.lines().contains(line),
-                "standing line missing: {line}"
-            );
+            assert!(fresh.lines().contains(line), "standing line missing: {line}");
         }
         assert_eq!(fresh.lines().len(), 4, "standing then ordinary");
         assert_eq!(&fresh.lines()[..2], &standing[..], "standing renders first");
 
         let repeat = decide_injection(lines("ordinary", 2), standing.clone(), true);
-        assert!(
-            !repeat.suppressed,
-            "standing guidance keeps the block alive"
-        );
+        assert!(!repeat.suppressed, "standing guidance keeps the block alive");
         assert!(repeat.deduped);
         assert!(!repeat.record);
         assert_eq!(
-            repeat.lines(),
-            standing,
+            repeat.lines(), standing,
             "deduped ordinary lines leave the block; standing lines never do"
         );
     }
@@ -568,9 +559,7 @@ classification = "standing"
         let (ordinary, standing) = render_guidance_lines(&domain);
         assert!(!standing.is_empty(), "fixture must declare a standing rule");
         assert!(
-            standing
-                .iter()
-                .all(|line| line.contains("[standing — dedup-exempt by classification]")),
+            standing.iter().all(|line| line.contains("[standing — dedup-exempt by classification]")),
             "the exemption is stated in the rendered line itself: {standing:?}"
         );
         assert!(
@@ -581,10 +570,7 @@ classification = "standing"
         for seen in [false, true] {
             let decision = decide_injection(ordinary.clone(), standing.clone(), seen);
             for line in &standing {
-                assert!(
-                    decision.lines().contains(line),
-                    "standing dropped when seen={seen}"
-                );
+                assert!(decision.lines().contains(line), "standing dropped when seen={seen}");
             }
         }
     }
@@ -595,10 +581,7 @@ classification = "standing"
     fn an_empty_ordinary_payload_is_not_treated_as_deduped() {
         let standing = lines("standing", 1);
         let decision = decide_injection(vec![], standing.clone(), true);
-        assert!(
-            !decision.deduped,
-            "nothing was injected, so nothing deduped"
-        );
+        assert!(!decision.deduped, "nothing was injected, so nothing deduped");
         assert!(!decision.suppressed);
         assert!(!decision.record, "there is no ordinary payload to record");
         assert_eq!(decision.lines(), standing);
@@ -608,4 +591,6 @@ classification = "standing"
         assert!(!nothing.suppressed, "an empty domain is not a dedup event");
         assert!(nothing.lines().is_empty());
     }
+
+
 }

@@ -180,11 +180,7 @@ fn classify_band(
 /// Band for one edge in the *full* retained edge list, classified directly
 /// against `focus` wherever the edge touches it (the common, depth-1 case),
 /// and falling back to an already-placed endpoint's band otherwise.
-fn edge_band(
-    edge: &RelationEdge,
-    focus: &ResourceRef,
-    node_band: &BTreeMap<ResourceRef, RelationBand>,
-) -> RelationBand {
+fn edge_band(edge: &RelationEdge, focus: &ResourceRef, node_band: &BTreeMap<ResourceRef, RelationBand>) -> RelationBand {
     if edge.from == edge.to {
         // Self-loop. A reflexive relation on the focus itself is surfaced as
         // Outgoing by the same Bidirectional-style convention; a reflexive
@@ -461,10 +457,7 @@ pub fn choose_label_rung(label: &str, kind: ResourceKind, available: u16) -> (La
 /// the canvas gutter entirely, never elided into a fragment of itself. `0`
 /// means omitted; the legend still names the relation in full regardless.
 fn lane_gutter_extent(band: RelationBand, relation: &str, available: u16) -> u16 {
-    let need = band.label().chars().count() as u16
-        + 1
-        + CONNECTOR_RESERVE
-        + relation.chars().count() as u16;
+    let need = band.label().chars().count() as u16 + 1 + CONNECTOR_RESERVE + relation.chars().count() as u16;
     if need <= available {
         need
     } else {
@@ -942,9 +935,7 @@ fn place_horizontal_band(
                 dropped.nodes_dropped += 1;
                 continue;
             }
-            let Some(node) = nodes_by_ref.get(&member) else {
-                continue;
-            };
+            let Some(node) = nodes_by_ref.get(&member) else { continue };
             let (_, extent) = choose_label_rung(&node.label, node.kind, remaining.max(0) as u16);
             rel_members.push((member.clone(), cursor, extent));
             cursor += extent as i32;
@@ -971,13 +962,7 @@ fn place_horizontal_band(
         });
     }
     for (resource, rel_x, extent) in rel_members {
-        positions.insert(
-            resource.clone(),
-            GraphPoint {
-                x: start_x + rel_x,
-                y,
-            },
-        );
+        positions.insert(resource.clone(), GraphPoint { x: start_x + rel_x, y });
         label_widths.insert(resource.clone(), extent);
         visible.insert(resource);
     }
@@ -1025,10 +1010,7 @@ pub fn grouped_projection(layout: &GraphLayout) -> Vec<GroupedRelationLine> {
                 band: edge.band,
                 relation: edge.relation.clone(),
                 target: other.clone(),
-                target_label: labels
-                    .get(other)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| other.to_string()),
+                target_label: labels.get(other).map(|s| s.to_string()).unwrap_or_else(|| other.to_string()),
                 direction: edge.direction,
                 origin: edge.origin.clone(),
             }
@@ -1130,7 +1112,9 @@ impl GraphGlyphs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aikit_core::{ProviderRef, RelationNode, RelationOrigin, RelationQuery, SourceAuthority};
+    use aikit_core::{
+        ProviderRef, RelationNode, RelationOrigin, RelationQuery, SourceAuthority,
+    };
 
     fn r(raw: &str) -> ResourceRef {
         ResourceRef::parse(raw).unwrap()
@@ -1923,7 +1907,11 @@ mod tests {
             .find(|n| n.resource == r("knowledge-node/a"))
             .unwrap();
         assert_eq!(a_node.band, Some(RelationBand::Incoming));
-        let outgoing_edge = result.edges.iter().find(|e| e.relation == "cites").unwrap();
+        let outgoing_edge = result
+            .edges
+            .iter()
+            .find(|e| e.relation == "cites")
+            .unwrap();
         assert_eq!(outgoing_edge.band, RelationBand::Outgoing);
         let closing_edge = result
             .edges

@@ -143,11 +143,7 @@ impl ModelCatalogueEntry {
         if !self.superseded_refs.is_empty() {
             descriptor.annotations.insert(
                 "superseded_refs".into(),
-                self.superseded_refs
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                self.superseded_refs.iter().cloned().collect::<Vec<_>>().join(", "),
             );
         }
         ResourceRecord::new(descriptor)
@@ -220,7 +216,9 @@ impl ModelCatalogue {
     pub fn first_party_seed() -> Self {
         let mut catalogue = Self::default();
         for entry in seed_entries() {
-            catalogue.entries.insert(entry.model.to_string(), entry);
+            catalogue
+                .entries
+                .insert(entry.model.to_string(), entry);
         }
         catalogue
     }
@@ -256,12 +254,7 @@ fn local(ids: &[&str]) -> DeclaredRoute {
     }
 }
 
-fn entry(
-    model: &str,
-    name: &str,
-    description: &str,
-    routes: Vec<DeclaredRoute>,
-) -> ModelCatalogueEntry {
+fn entry(model: &str, name: &str, description: &str, routes: Vec<DeclaredRoute>) -> ModelCatalogueEntry {
     ModelCatalogueEntry {
         model: canonical_model_ref(model).expect("seed model ref"),
         name: name.to_string(),
@@ -315,12 +308,7 @@ fn seed_entries() -> Vec<ModelCatalogueEntry> {
             "model:llama3.2",
             "Llama 3.2",
             "Meta Llama 3.2, locally served",
-            vec![local(&[
-                "llama3.2:latest",
-                "llama3.2",
-                "llama3.2:3b",
-                "llama3.2:1b",
-            ])],
+            vec![local(&["llama3.2:latest", "llama3.2", "llama3.2:3b", "llama3.2:1b"])],
         ),
         entry(
             "model:qwen2.5-coder",
@@ -505,9 +493,7 @@ mod tests {
     #[test]
     fn canonical_grammar_accepts_model_colon_and_refuses_the_stale_slash_form() {
         assert_eq!(
-            canonical_model_ref("model:deepseek-v4-flash")
-                .unwrap()
-                .as_str(),
+            canonical_model_ref("model:deepseek-v4-flash").unwrap().as_str(),
             "model:deepseek-v4-flash"
         );
         let error = canonical_model_ref("model/deepseek-v4-flash").unwrap_err();
@@ -540,9 +526,7 @@ mod tests {
     fn an_unknown_provider_native_id_is_claimed_by_nobody() {
         let catalogue = ModelCatalogue::first_party_seed();
         let ollama = ProviderRef::parse("provider:ollama").unwrap();
-        assert!(catalogue
-            .claiming(&ollama, "some-model-nobody-catalogued:7b")
-            .is_none());
+        assert!(catalogue.claiming(&ollama, "some-model-nobody-catalogued:7b").is_none());
     }
 
     #[test]
@@ -616,11 +600,7 @@ mod tests {
     fn the_seed_is_canonical_throughout() {
         for entry in ModelCatalogue::first_party_seed().entries() {
             canonical_model_ref(entry.model.as_str()).unwrap();
-            assert!(
-                !entry.routes.is_empty(),
-                "{} declares no route",
-                entry.model
-            );
+            assert!(!entry.routes.is_empty(), "{} declares no route", entry.model);
             for route in &entry.routes {
                 assert!(!route.provider_native_ids.is_empty());
                 for native in &route.provider_native_ids {

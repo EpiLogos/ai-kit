@@ -37,8 +37,7 @@ use aikit_core::Result;
 
 #[test]
 fn a_destination_that_climbs_out_of_the_projection_root_is_rejected() {
-    let error =
-        ProjectionItem::link("/registry/payload", "../../.ssh/authorized_keys").unwrap_err();
+    let error = ProjectionItem::link("/registry/payload", "../../.ssh/authorized_keys").unwrap_err();
     assert_eq!(error.code(), "projection.destination_escapes_root");
 }
 
@@ -145,12 +144,8 @@ fn the_digest_ignores_the_order_items_were_added_in() {
 
 #[test]
 fn the_digest_changes_when_written_contents_change() {
-    let a = plan_with(vec![
-        ProjectionItem::write("guidance.md", "read first").unwrap()
-    ]);
-    let b = plan_with(vec![
-        ProjectionItem::write("guidance.md", "write first").unwrap()
-    ]);
+    let a = plan_with(vec![ProjectionItem::write("guidance.md", "read first").unwrap()]);
+    let b = plan_with(vec![ProjectionItem::write("guidance.md", "write first").unwrap()]);
     assert_ne!(
         a.digest(),
         b.digest(),
@@ -170,7 +165,8 @@ fn the_digest_is_specific_to_the_target() {
     let items = vec![link("/reg/a", "skills/a")];
     let claude = ProjectionPlan::new(TargetId::claude_code(), ActivationEffect::live())
         .with_items(items.clone());
-    let codex = ProjectionPlan::new(TargetId::codex(), ActivationEffect::live()).with_items(items);
+    let codex =
+        ProjectionPlan::new(TargetId::codex(), ActivationEffect::live()).with_items(items);
     assert_ne!(claude.digest(), codex.digest());
 }
 
@@ -517,12 +513,7 @@ fn a_payload_path_is_only_offered_for_a_capsule_the_context_knows() {
     let context = skill_context(Isolation::Shared);
     assert_eq!(
         context.payload_path(&cid("skill/rust/review"), "SKILL.md"),
-        Some(PathBuf::from(
-            "/registry/personal/skill/rust/review/SKILL.md"
-        ))
+        Some(PathBuf::from("/registry/personal/skill/rust/review/SKILL.md"))
     );
-    assert_eq!(
-        context.payload_path(&cid("skill/rust/absent"), "SKILL.md"),
-        None
-    );
+    assert_eq!(context.payload_path(&cid("skill/rust/absent"), "SKILL.md"), None);
 }

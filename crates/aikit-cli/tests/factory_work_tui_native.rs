@@ -24,7 +24,11 @@ fn alt(code: KeyCode) -> PaletteEvent {
     PaletteEvent::Key(KeyEvent::new(code, KeyModifiers::ALT))
 }
 
-fn rendered(surface: &ApplicationSurfaceController, width: u16, height: u16) -> String {
+fn rendered(
+    surface: &ApplicationSurfaceController,
+    width: u16,
+    height: u16,
+) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     surface.draw_terminal(&mut terminal).unwrap();
     terminal
@@ -68,10 +72,7 @@ fn work_surface_commissions_through_the_real_factory_owner_and_renders_its_readb
         "AIKIT_CONTEXT_ID".to_string(),
         aikit_core::ContextId::generate().to_string(),
     );
-    env.insert(
-        "AIKIT_SESSION_ID".to_string(),
-        "ses_FACTORYTUI000000000000".into(),
-    );
+    env.insert("AIKIT_SESSION_ID".to_string(), "ses_FACTORYTUI000000000000".into());
     env.insert(
         "AIKIT_FACTORY_BIN".to_string(),
         factory.display().to_string(),
@@ -107,9 +108,7 @@ fn work_surface_commissions_through_the_real_factory_owner_and_renders_its_readb
     }
     assert_eq!(surface.semantic().selected.as_ref(), Some(&destination));
 
-    surface
-        .handle(&mut service, key(KeyCode::Char(':')))
-        .unwrap();
+    surface.handle(&mut service, key(KeyCode::Char(':'))).unwrap();
     for character in "start factory work".chars() {
         surface
             .handle(&mut service, key(KeyCode::Char(character)))
@@ -126,9 +125,7 @@ fn work_surface_commissions_through_the_real_factory_owner_and_renders_its_readb
     assert!(receipt.contains("\"standing\": \"commissioned-not-executed\""));
     assert!(state.is_file());
 
-    let world = surface
-        .project_world()
-        .expect("Project Work reading remains available");
+    let world = surface.project_world().expect("Project Work reading remains available");
     assert!(world
         .developmental_work
         .iter()
@@ -164,11 +161,7 @@ fn work_surface_renders_real_factory_owner_readings_wide_and_narrow() {
         ])
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let manifest: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         manifest["contract"],
@@ -207,15 +200,8 @@ fn work_surface_renders_real_factory_owner_readings_wide_and_narrow() {
     surface.handle(&mut service, alt(KeyCode::Right)).unwrap();
 
     let world = surface.project_world().unwrap();
-    for kind in [
-        ResourceKind::Journey,
-        ResourceKind::Run,
-        ResourceKind::WorkflowUnit,
-    ] {
-        assert!(world
-            .developmental_work
-            .iter()
-            .any(|resource| resource.kind == kind));
+    for kind in [ResourceKind::Journey, ResourceKind::Run, ResourceKind::WorkflowUnit] {
+        assert!(world.developmental_work.iter().any(|resource| resource.kind == kind));
     }
     for output in [rendered(&surface, 220, 72), rendered(&surface, 82, 110)] {
         assert!(output.contains("DIRECT"));

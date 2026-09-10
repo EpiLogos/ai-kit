@@ -110,12 +110,7 @@ fn ordinary_payload_becomes_increasingly_bounded_as_pressure_rises() {
         bound(&blocks, pressure)
             .blocks
             .iter()
-            .map(|block| {
-                block
-                    .lines()
-                    .filter(|l| l.contains("ordinary line"))
-                    .count()
-            })
+            .map(|block| block.lines().filter(|l| l.contains("ordinary line")).count())
             .sum::<usize>()
     };
     let fresh = kept(Pressure::Fresh);
@@ -143,11 +138,7 @@ fn standing_guidance_survives_every_bracket_including_critical() {
         Pressure::Critical,
     ] {
         let bounded = bound(std::slice::from_ref(&block), pressure);
-        assert_eq!(
-            bounded.blocks.len(),
-            1,
-            "{pressure} dropped a standing block"
-        );
+        assert_eq!(bounded.blocks.len(), 1, "{pressure} dropped a standing block");
         assert!(
             bounded.blocks[0].contains("never ship without the gate"),
             "{pressure} bounded standing guidance away"

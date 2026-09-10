@@ -38,6 +38,7 @@ pub enum Isolation {
     Worktree,
 }
 
+
 impl Isolation {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -241,10 +242,7 @@ mod tests {
             host: String::new(),
             ..ContextDescriptor::for_project("/tmp")
         };
-        assert_eq!(
-            outside.permitted_scopes(),
-            vec![crate::scope::ScopeKind::Global]
-        );
+        assert_eq!(outside.permitted_scopes(), vec![crate::scope::ScopeKind::Global]);
     }
 
     #[test]

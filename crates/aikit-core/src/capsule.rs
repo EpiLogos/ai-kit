@@ -141,6 +141,7 @@ pub enum Maturity {
     Blocked,
 }
 
+
 impl Maturity {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -356,14 +357,7 @@ impl ControlGround {
     /// its retirement record is a fault, because it would make the withholding
     /// undisclosable — the reason would be silently swallowed.
     fn validate(&self, id: &CapsuleId) -> Result<()> {
-        if self.is_retired()
-            && self
-                .retirement_reason
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .is_empty()
-        {
+        if self.is_retired() && self.retirement_reason.as_deref().unwrap_or("").trim().is_empty() {
             return Err(AikitError::new(
                 "manifest.invalid",
                 format!(
@@ -451,6 +445,7 @@ pub enum ExecMode {
     Replace,
 }
 
+
 impl ExecMode {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -485,6 +480,7 @@ pub enum WorkingDir {
     /// The capsule's own payload directory.
     Capsule,
 }
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -529,6 +525,7 @@ pub enum SkillFormat {
     Aikit,
 }
 
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[derive(Default)]
@@ -538,6 +535,7 @@ pub enum SkillActivation {
     #[default]
     ModelOrUser,
 }
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -571,6 +569,7 @@ pub enum HookPhase {
     Observe,
     Capture,
 }
+
 
 impl HookPhase {
     pub fn as_str(self) -> &'static str {
@@ -611,6 +610,7 @@ pub enum FailurePolicy {
     /// Allow, but record and surface a warning.
     Warn,
 }
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -870,10 +870,7 @@ pub struct Capsule {
 impl Capsule {
     pub fn from_toml_str(src: &str) -> Result<Self> {
         let raw: RawManifest = toml::from_str(src).map_err(|e| {
-            AikitError::new(
-                "manifest.parse_error",
-                format!("could not parse manifest: {e}"),
-            )
+            AikitError::new("manifest.parse_error", format!("could not parse manifest: {e}"))
         })?;
         Self::from_raw(raw)
     }
@@ -923,9 +920,7 @@ impl Capsule {
         if raw.description.trim().is_empty() {
             return err(
                 "manifest.invalid",
-                format!(
-                    "`{id}` has an empty description; the description is what makes it findable"
-                ),
+                format!("`{id}` has an empty description; the description is what makes it findable"),
             );
         }
 
@@ -1031,7 +1026,9 @@ impl Capsule {
         for (name, ref_string) in &raw.secrets {
             let exportable = !name.is_empty()
                 && !name.starts_with(|c: char| c.is_ascii_digit())
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
             if !exportable {
                 return Err(AikitError::new(
                     "manifest.invalid",
@@ -1039,13 +1036,17 @@ impl Capsule {
                 )
                 .with("id", id.to_string()));
             }
-            let secret_ref = crate::secret_ref::SecretRef::parse(ref_string)
-                .map_err(|e| e.with("id", id.to_string()).with("secret", name.clone()))?;
+            let secret_ref = crate::secret_ref::SecretRef::parse(ref_string).map_err(|e| {
+                e.with("id", id.to_string()).with("secret", name.clone())
+            })?;
             secrets.insert(name.clone(), secret_ref);
         }
         for req in &raw.requires {
             if req.id == id {
-                return err("manifest.invalid", format!("`{id}` requires itself"));
+                return err(
+                    "manifest.invalid",
+                    format!("`{id}` requires itself"),
+                );
             }
         }
         for con in &raw.conflicts {
@@ -1165,10 +1166,7 @@ mod tests {
     #[test]
     fn kinds_declare_what_activation_means_for_them() {
         for kind in Kind::ALL {
-            assert!(
-                !kind.activation_meaning().is_empty(),
-                "{kind} has no meaning"
-            );
+            assert!(!kind.activation_meaning().is_empty(), "{kind} has no meaning");
         }
     }
 
@@ -1251,10 +1249,7 @@ entry = "payload/run.sh"
 [[requires]]
 id = "script/test/thing"
 "#;
-        assert_eq!(
-            Capsule::from_toml_str(src).unwrap_err().code(),
-            "manifest.invalid"
-        );
+        assert_eq!(Capsule::from_toml_str(src).unwrap_err().code(), "manifest.invalid");
     }
 
     #[test]
@@ -1269,10 +1264,7 @@ description = "   "
 [script]
 entry = "payload/run.sh"
 "#;
-        assert_eq!(
-            Capsule::from_toml_str(src).unwrap_err().code(),
-            "manifest.invalid"
-        );
+        assert_eq!(Capsule::from_toml_str(src).unwrap_err().code(), "manifest.invalid");
     }
 
     #[test]
@@ -1295,10 +1287,7 @@ type = "path"
 name = "path"
 type = "string"
 "#;
-        assert_eq!(
-            Capsule::from_toml_str(src).unwrap_err().code(),
-            "manifest.invalid"
-        );
+        assert_eq!(Capsule::from_toml_str(src).unwrap_err().code(), "manifest.invalid");
     }
 
     #[test]

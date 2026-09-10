@@ -57,7 +57,8 @@ pub fn load_owner_catalogue(home: &AikitHome) -> OwnerCatalogueLoad {
         Ok(read) => read,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return load,
         Err(error) => {
-            load.problems.push(format!("{}: {error}", dir.display()));
+            load.problems
+                .push(format!("{}: {error}", dir.display()));
             return load;
         }
     };
@@ -172,10 +173,7 @@ pub fn resolved_catalogue(home: &AikitHome) -> (ModelCatalogue, Vec<String>) {
 pub const PROVIDER_CATALOG_DIR: &str = "state/provider-catalog";
 
 /// Persist one Provider Source reading, keyed by the listing provider.
-pub fn save_provider_catalog(
-    home: &AikitHome,
-    document: &ProviderCatalogDocument,
-) -> Result<PathBuf> {
+pub fn save_provider_catalog(home: &AikitHome, document: &ProviderCatalogDocument) -> Result<PathBuf> {
     let dir = home.root().join(PROVIDER_CATALOG_DIR);
     std::fs::create_dir_all(&dir).map_err(|error| {
         AikitError::new(
@@ -191,8 +189,9 @@ pub fn save_provider_catalog(
         .unwrap_or("provider")
         .replace(['/', '\\'], "-");
     let path = dir.join(format!("{slug}.json"));
-    let body = serde_json::to_string_pretty(document)
-        .map_err(|error| AikitError::new("provider_catalog.unserialisable", error.to_string()))?;
+    let body = serde_json::to_string_pretty(document).map_err(|error| {
+        AikitError::new("provider_catalog.unserialisable", error.to_string())
+    })?;
     std::fs::write(&path, body).map_err(|error| {
         AikitError::new(
             "provider_catalog.unwritable",
@@ -283,10 +282,7 @@ mod tests {
         assert!(catalogue.len() > 1, "the seed is still there");
         let ollama = ProviderRef::parse("provider:ollama").unwrap();
         let (entry, _) = catalogue.claiming(&ollama, "owner-pinned:7b").unwrap();
-        assert_eq!(
-            entry.model,
-            canonical_model_ref("model:owner-pinned").unwrap()
-        );
+        assert_eq!(entry.model, canonical_model_ref("model:owner-pinned").unwrap());
         assert!(notes.iter().any(|note| note.contains("owner-authored")));
     }
 

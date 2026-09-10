@@ -13,8 +13,8 @@ use aikit_core::session_space_application::{
 };
 use aikit_core::Result;
 use aikit_store::{
-    explain_session_space_with_receipts, SessionSpaceApplicationStore, SessionSpaceExplainEvidence,
-    SessionSpaceHistoryComparison, SessionSpaceReceipt,
+    explain_session_space_with_receipts, SessionSpaceApplicationStore,
+    SessionSpaceExplainEvidence, SessionSpaceHistoryComparison, SessionSpaceReceipt,
 };
 use serde_json::{to_value, Value};
 
@@ -65,8 +65,7 @@ impl<'a> SessionSpaceApplicationAdapter<'a> {
         from_sequence: u64,
         to_sequence: u64,
     ) -> Result<SessionSpaceHistoryComparison> {
-        self.store
-            .compare_history(space, from_sequence, to_sequence)
+        self.store.compare_history(space, from_sequence, to_sequence)
     }
 
     pub fn stage_restore(

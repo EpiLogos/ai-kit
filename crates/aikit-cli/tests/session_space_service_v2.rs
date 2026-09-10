@@ -42,10 +42,7 @@ fn canonical_service_stages_applies_reopens_and_explains_session_space() {
         )
         .unwrap();
     let focused = service.session_space_apply(&focus).unwrap();
-    assert_eq!(
-        focused.after.focus.as_ref().unwrap().region.as_deref(),
-        Some("primary")
-    );
+    assert_eq!(focused.after.focus.as_ref().unwrap().region.as_deref(), Some("primary"));
 
     drop(service);
     let reopened = open_service(&temp);

@@ -101,12 +101,13 @@ pub fn render_credential_setup_panel(view: &CredentialSetupView, glyphs: Glyphs)
 }
 
 pub fn credential_setup_widget(view: &CredentialSetupView, glyphs: Glyphs) -> Paragraph<'static> {
-    Paragraph::new(render_credential_setup_panel(view, glyphs)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_set(glyphs.border_set())
-            .title("Credentials"),
-    )
+    Paragraph::new(render_credential_setup_panel(view, glyphs))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_set(glyphs.border_set())
+                .title("Credentials"),
+        )
 }
 
 fn env_route_status(declared: bool) -> &'static str {

@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::project_map::{
-    ProjectLens, ProjectMap, ProjectMapEndpoint, ProjectMapStep, PROJECT_MAP_VERSION,
+    PROJECT_MAP_VERSION, ProjectLens, ProjectMap, ProjectMapEndpoint, ProjectMapStep,
 };
 use crate::resource::{ResourceRef, SourceAuthority, SourceRef};
 
@@ -336,10 +336,7 @@ pub fn verify_reflection_law(map: &ProjectMap, law: &ReflectionLaw) -> Reflectio
                     mapping.semantic, mapping.implementation
                 ),
             });
-        } else if !pair
-            .iter()
-            .any(|binding| binding.relation == mapping.relation)
-        {
+        } else if !pair.iter().any(|binding| binding.relation == mapping.relation) {
             issues.push(ReflectionIssue {
                 kind: ReflectionIssueKind::WrongRelation,
                 relation_ref: mapping.coordinate.clone(),
@@ -375,10 +372,7 @@ pub fn verify_reflection_law(map: &ProjectMap, law: &ReflectionLaw) -> Reflectio
             (None, _) => issues.push(ReflectionIssue {
                 kind: ReflectionIssueKind::Missing,
                 relation_ref: mapping.coordinate.clone(),
-                detail: format!(
-                    "implementation endpoint {} is absent",
-                    mapping.implementation
-                ),
+                detail: format!("implementation endpoint {} is absent", mapping.implementation),
             }),
             (Some(endpoint), Some(expected))
                 if endpoint.revision.as_deref() != Some(expected.as_str()) =>

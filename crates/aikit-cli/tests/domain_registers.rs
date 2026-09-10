@@ -45,11 +45,7 @@ fn a_personal_declaration_is_in_force_with_no_project_at_all() {
     declare(&home, "house-style", "the personal rule");
 
     let (domains, warnings) = load_domains_in(Some(&home), None);
-    assert_eq!(
-        domains.len(),
-        1,
-        "the root register is consulted on its own"
-    );
+    assert_eq!(domains.len(), 1, "the root register is consulted on its own");
     assert_eq!(domains[0].guidance[0].rule, "the personal rule");
     assert!(warnings.is_empty(), "{warnings:?}");
 }
@@ -60,11 +56,7 @@ fn both_registers_contribute_when_their_ids_differ() {
     let home = tmp.path().join("home/domains");
     let project = tmp.path().join("project");
     declare(&home, "house-style", "the personal rule");
-    declare(
-        &project.join(".aikit/domains"),
-        "release",
-        "the project rule",
-    );
+    declare(&project.join(".aikit/domains"), "release", "the project rule");
 
     let (domains, warnings) = load_domains_in(Some(&home), Some(&project));
     let mut ids: Vec<&str> = domains.iter().map(|d| d.id.as_str()).collect();
@@ -79,11 +71,7 @@ fn the_project_declaration_replaces_the_personal_one_and_says_so() {
     let home = tmp.path().join("home/domains");
     let project = tmp.path().join("project");
     declare(&home, "release", "the personal rule");
-    declare(
-        &project.join(".aikit/domains"),
-        "release",
-        "the project rule",
-    );
+    declare(&project.join(".aikit/domains"), "release", "the project rule");
 
     let (domains, warnings) = load_domains_in(Some(&home), Some(&project));
     assert_eq!(domains.len(), 1, "same id is one domain, not two");
@@ -94,9 +82,7 @@ fn the_project_declaration_replaces_the_personal_one_and_says_so() {
     // Replacement, not merge: guidance neither author wrote must not appear.
     assert_eq!(domains[0].guidance.len(), 1);
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("replaces the personal declaration")),
+        warnings.iter().any(|w| w.contains("replaces the personal declaration")),
         "shadowing must be visible to whoever is debugging what arrived: {warnings:?}"
     );
 }
@@ -105,11 +91,7 @@ fn the_project_declaration_replaces_the_personal_one_and_says_so() {
 fn the_project_only_load_still_behaves_exactly_as_it_did() {
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("project");
-    declare(
-        &project.join(".aikit/domains"),
-        "release",
-        "the project rule",
-    );
+    declare(&project.join(".aikit/domains"), "release", "the project rule");
 
     let (domains, warnings) = load_domains(&project);
     assert_eq!(domains.len(), 1);

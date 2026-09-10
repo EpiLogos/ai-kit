@@ -487,11 +487,7 @@ pub fn compare(
                 .is_exact_command_match(query)
                 .cmp(&left_doc.is_exact_command_match(query))
         })
-        .then_with(|| {
-            right_doc
-                .in_current_project
-                .cmp(&left_doc.in_current_project)
-        })
+        .then_with(|| right_doc.in_current_project.cmp(&left_doc.in_current_project))
         .then_with(|| right_doc.in_active_context.cmp(&left_doc.in_active_context))
         .then_with(|| {
             signals

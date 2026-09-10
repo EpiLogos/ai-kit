@@ -19,7 +19,10 @@ use crate::cli::{GatewayQueryArgs, GatewayServeArgs};
 /// named, so `serve` with no flags is same-host and discoverable. Naming
 /// `--ws` alone is a deliberate network-only posture and binds no socket.
 pub fn serve_config(home: &AikitHome, args: &GatewayServeArgs) -> Result<GatewayServiceConfig> {
-    let websocket_bearer_token = args.websocket_token.clone().or_else(gateway_token_from_env);
+    let websocket_bearer_token = args
+        .websocket_token
+        .clone()
+        .or_else(gateway_token_from_env);
     #[cfg(unix)]
     let unix_socket = args.unix_socket.clone().or(match &args.websocket_bind {
         Some(_) => None,

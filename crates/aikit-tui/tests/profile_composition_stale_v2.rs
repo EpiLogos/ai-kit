@@ -3,7 +3,9 @@ mod common;
 use common::*;
 
 use aikit_core::scope::ScopeKind;
-use aikit_tui::{ActivationIntent, ApplicationService, StagedChanges, TuiApplicationService};
+use aikit_tui::{
+    ActivationIntent, ApplicationService, StagedChanges, TuiApplicationService,
+};
 
 #[test]
 fn production_application_preview_reports_shared_changed_ground() {

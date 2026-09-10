@@ -6,7 +6,12 @@
 use aikit_adapters::runner::{CommandRunner, Output};
 use aikit_cli::continuity_disclosure::entity_disclosure_in;
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::PathBuf,
+    sync::Mutex,
+};
 
 /// Answers `central.world.effective-sources` per invoked world_ref.
 struct WorldRunner {
@@ -119,19 +124,11 @@ fn disclosure_names_the_participants_present_in_a_project_context() {
         entity_disclosure_in(&runner, Some(&root), Some(&project)).expect("fail-open disclosure");
     let disclosure = disclosure.expect("inhabited world discloses participants");
     assert!(disclosure.starts_with("[continuity/entity-disclosure]"));
-    assert!(
-        disclosure.contains("- nara: central:pasu:nara:local"),
-        "{disclosure}"
-    );
+    assert!(disclosure.contains("- nara: central:pasu:nara:local"), "{disclosure}");
     assert!(disclosure.contains("- agent: agent:x"), "{disclosure}");
+    assert!(disclosure.contains("- agent-set: central:pasu:agent-set:world-operators"), "{disclosure}");
     assert!(
-        disclosure.contains("- agent-set: central:pasu:agent-set:world-operators"),
-        "{disclosure}"
-    );
-    assert!(
-        disclosure.contains(
-            "context binding: control:root (1 source(s) effective, root lineage by convention)"
-        ),
+        disclosure.contains("context binding: control:root (1 source(s) effective, root lineage by convention)"),
         "{disclosure}"
     );
     // Durable facts only — no volatile availability claims.
@@ -143,17 +140,12 @@ fn disclosure_names_the_participants_present_in_a_project_context() {
 fn the_root_context_discloses_without_a_binding_line() {
     let root = fixture_root();
     let runner = WorldRunner::with_answer("control:root", json!([]));
-    let disclosure = entity_disclosure_in(&runner, Some(&root), Some(&root)).expect("fail-open");
+    let disclosure =
+        entity_disclosure_in(&runner, Some(&root), Some(&root)).expect("fail-open");
     let disclosure = disclosure.expect("root context still names its inhabitants");
-    assert!(
-        disclosure.contains("- nara: central:pasu:nara:local"),
-        "{disclosure}"
-    );
+    assert!(disclosure.contains("- nara: central:pasu:nara:local"), "{disclosure}");
     assert!(!disclosure.contains("context binding:"), "{disclosure}");
-    assert!(
-        runner.seen.lock().unwrap().is_empty(),
-        "the root is the source side; no binding call"
-    );
+    assert!(runner.seen.lock().unwrap().is_empty(), "the root is the source side; no binding call");
 }
 
 #[test]
@@ -167,12 +159,10 @@ fn an_excluded_identity_source_withholds_the_nara_from_the_disclosure() {
                 "state": "excluded", "effective_revision": "1",
                 "propagation_path": ["project:Sealed", "control:root"]}]),
     );
-    let disclosure = entity_disclosure_in(&runner, Some(&root), Some(&project)).expect("fail-open");
+    let disclosure =
+        entity_disclosure_in(&runner, Some(&root), Some(&project)).expect("fail-open");
     let disclosure = disclosure.expect("other participants remain");
-    assert!(
-        !disclosure.contains("- nara:"),
-        "excluded source withholds the nara: {disclosure}"
-    );
+    assert!(!disclosure.contains("- nara:"), "excluded source withholds the nara: {disclosure}");
     assert!(disclosure.contains("- agent: agent:x"), "{disclosure}");
 }
 
@@ -187,10 +177,7 @@ fn a_failed_binding_call_degrades_the_disclosure_fail_open() {
     let disclosure =
         entity_disclosure_in(&runner, Some(&root), Some(&project)).expect("fail-open, never error");
     let disclosure = disclosure.expect("uncontextualised disclosure still names participants");
-    assert!(
-        disclosure.contains("- nara: central:pasu:nara:local"),
-        "{disclosure}"
-    );
+    assert!(disclosure.contains("- nara: central:pasu:nara:local"), "{disclosure}");
     assert!(!disclosure.contains("context binding:"), "{disclosure}");
 }
 

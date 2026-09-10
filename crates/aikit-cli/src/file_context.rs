@@ -23,8 +23,8 @@
 use std::path::Path;
 
 use aikit_core::domain::{decide_injection, dedup_hash, render_guidance_lines, KnowledgeDomain};
-use aikit_core::hooks::HookEvent;
 use aikit_core::pressure::Block;
+use aikit_core::hooks::HookEvent;
 use aikit_core::skillset::glob_matches;
 use aikit_core::{parse_wiki_objects, SemanticWikiIndex, WikiObject};
 use aikit_store::index::Index;
@@ -116,16 +116,10 @@ fn wiki_lines(index: &SemanticWikiIndex, relative_path: &str) -> Vec<String> {
             .iter()
             .take(NEIGHBOUR_LIMIT)
         {
-            lines.push(format!(
-                "  links to: {} ({})",
-                neighbour.resource, neighbour.relation
-            ));
+            lines.push(format!("  links to: {} ({})", neighbour.resource, neighbour.relation));
         }
         for neighbour in index.backlinks(&node.ref_id).iter().take(NEIGHBOUR_LIMIT) {
-            lines.push(format!(
-                "  cited by: {} ({})",
-                neighbour.resource, neighbour.relation
-            ));
+            lines.push(format!("  cited by: {} ({})", neighbour.resource, neighbour.relation));
         }
     }
     if cited.len() > NODE_LIMIT {
@@ -158,10 +152,7 @@ pub fn run(
             Ok(wiki) => {
                 let lines = wiki_lines(&wiki, &relative_path);
                 if !lines.is_empty() {
-                    let hash = dedup_hash(
-                        "file-context:wiki",
-                        &[relative_path.clone(), lines.join("\n")],
-                    );
+                    let hash = dedup_hash("file-context:wiki", &[relative_path.clone(), lines.join("\n")]);
                     if seen(index, scope, &hash, &mut warnings) {
                         // Unchanged file, unchanged relations: nothing arrives.
                     } else {
@@ -179,18 +170,16 @@ pub fn run(
                     }
                 }
             }
-            Err(error) => warnings.push(format!(
-                "continuity/file-context wiki index unavailable: {error}"
-            )),
+            Err(error) => warnings
+                .push(format!("continuity/file-context wiki index unavailable: {error}")),
         }
     }
 
     // File-addressed domain guidance: per-domain blocks under the same laws.
     for domain in domains {
-        let matched = domain
-            .path_patterns
-            .iter()
-            .any(|pattern| glob_matches(pattern, &relative_path) || glob_matches(pattern, path));
+        let matched = domain.path_patterns.iter().any(|pattern| {
+            glob_matches(pattern, &relative_path) || glob_matches(pattern, path)
+        });
         if !matched {
             continue;
         }
@@ -198,8 +187,7 @@ pub fn run(
         let hash = dedup_hash(&format!("{}@{relative_path}", domain.id), &ordinary);
         // Same law as every other reaction; only the key and the header
         // differ here.
-        let decision =
-            decide_injection(ordinary, standing, seen(index, scope, &hash, &mut warnings));
+        let decision = decide_injection(ordinary, standing, seen(index, scope, &hash, &mut warnings));
         if decision.suppressed {
             continue;
         }

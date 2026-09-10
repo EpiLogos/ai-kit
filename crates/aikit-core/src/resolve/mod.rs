@@ -887,16 +887,17 @@ impl<'a> Resolver<'a> {
                 }
             }
             if overlay.has_content() {
-                skill_usage_overlays.entry(id.clone()).or_default().push(
-                    AppliedSkillUsageOverlay {
+                skill_usage_overlays
+                    .entry(id.clone())
+                    .or_default()
+                    .push(AppliedSkillUsageOverlay {
                         description: overlay.description.clone(),
                         guidance: overlay.guidance.clone(),
                         reviewed_against: overlay.reviewed_against.clone(),
                         scope: layer.kind,
                         origin: layer.origin.clone(),
                         via_profile: via_profile.cloned(),
-                    },
-                );
+                    });
             }
         }
     }
@@ -1142,7 +1143,10 @@ impl<'a> Resolver<'a> {
                 let mut error = AikitError::new(
                     "resolution.conflict",
                     match &conflict.reason {
-                        Some(reason) => format!("{} conflicts with {}: {reason}", pair.0, pair.1),
+                        Some(reason) => format!(
+                            "{} conflicts with {}: {reason}",
+                            pair.0, pair.1
+                        ),
                         None => format!("{} conflicts with {}", pair.0, pair.1),
                     },
                 )

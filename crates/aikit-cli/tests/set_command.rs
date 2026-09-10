@@ -194,11 +194,7 @@ fn removing_from_a_set_never_deletes_the_capability() {
         "schema = 1\nenable = [\"skill/rust/review\"]\n",
     );
 
-    aikit(
-        home.path(),
-        project.path(),
-        &["set", "create", "s", "skill/rust/review"],
-    );
+    aikit(home.path(), project.path(), &["set", "create", "s", "skill/rust/review"]);
     let (ok, envelope) = aikit(
         home.path(),
         project.path(),

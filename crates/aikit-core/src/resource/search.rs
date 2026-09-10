@@ -425,11 +425,7 @@ impl ResourceSearchIndex {
 
             for annotation in ["aikit.search-exports", "aikit.search-tags"] {
                 if let Some(handles) = descriptor.annotations.get(annotation) {
-                    for handle in handles
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                    {
+                    for handle in handles.split(',').map(str::trim).filter(|value| !value.is_empty()) {
                         score = score.max(fuzzy_score(query, handle));
                     }
                 }
@@ -588,18 +584,8 @@ fn compare_hits(left: &ResourceSearchHit, right: &ResourceSearchHit) -> std::cmp
                 .unwrap_or_default()
                 .cmp(&left.ranking.authored_preference_rank.unwrap_or_default())
         })
-        .then_with(|| {
-            right
-                .ranking
-                .current_project
-                .cmp(&left.ranking.current_project)
-        })
-        .then_with(|| {
-            right
-                .ranking
-                .active_in_context
-                .cmp(&left.ranking.active_in_context)
-        })
+        .then_with(|| right.ranking.current_project.cmp(&left.ranking.current_project))
+        .then_with(|| right.ranking.active_in_context.cmp(&left.ranking.active_in_context))
         .then_with(|| {
             right
                 .ranking
@@ -709,17 +695,13 @@ mod tests {
         for (id, evidence) in [
             (
                 project.clone(),
-                vec![
-                    NavigationEvidence::new(NavigationEvidenceClass::CurrentProject)
-                        .with_detail("declared by the current Project scope"),
-                ],
+                vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentProject)
+                    .with_detail("declared by the current Project scope")],
             ),
             (
                 active.clone(),
-                vec![
-                    NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
-                        .with_detail("active in the resolved context"),
-                ],
+                vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                    .with_detail("active in the resolved context")],
             ),
             (plain, Vec::new()),
         ] {

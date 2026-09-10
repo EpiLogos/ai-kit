@@ -66,12 +66,14 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use crate::knowledge_source_pool::{SourceBinding, SourceMaterial, SourceVisibility};
+use crate::knowledge_source_pool::{
+    SourceBinding, SourceMaterial, SourceVisibility,
+};
 use crate::knowledge_wiki::{
     WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject, WikiProvenanceRef, WikiSpace, OKF_WIKI_PROFILE,
 };
 use crate::resource::{ResourceLocator, SourceRevision};
-use crate::{AikitError, ResourceRef, Result, SemanticRevision, SourceRef};
+use crate::{AikitError, ResourceRef, Result, SourceRef, SemanticRevision};
 
 pub const INGEST_VERSION: &str = "aikit.knowledge-ingest/v1";
 pub const INGEST_EXTENSION: &str = "aikit.ingest/v1";
@@ -92,8 +94,9 @@ pub const CORPUS_SOURCE_PREFIX: &str = "central:source:corpus:";
 
 /// The stable `SourceRef` for one corpus id.
 pub fn corpus_source_ref(id: &str) -> Result<SourceRef> {
-    SourceRef::parse(format!("{CORPUS_SOURCE_PREFIX}{id}"))
-        .map_err(|error| AikitError::new("knowledge.ingest_invalid_record", error.to_string()))
+    SourceRef::parse(format!("{CORPUS_SOURCE_PREFIX}{id}")).map_err(|error| {
+        AikitError::new("knowledge.ingest_invalid_record", error.to_string())
+    })
 }
 
 /// One ingestable authored source: a bibliography page declaring `source_id`.
@@ -204,10 +207,7 @@ pub fn strip_frontmatter(text: &str) -> (BTreeMap<String, String>, Vec<String>, 
         }
         if let Some(item) = line.trim().strip_prefix("- ") {
             if in_list {
-                lists
-                    .entry(current_key.clone())
-                    .or_default()
-                    .push(unquote(item));
+                lists.entry(current_key.clone()).or_default().push(unquote(item));
                 continue;
             }
         }
@@ -317,7 +317,10 @@ pub fn parse_markdown_links(text: &str) -> Vec<String> {
         // A title suffix (`path "Title"`) is not part of the address.
         let target = target.split_whitespace().next().unwrap_or(target);
         let target = target.split('#').next().unwrap_or(target);
-        if target.ends_with(".md") && !target.contains("://") && !target.starts_with("mailto:") {
+        if target.ends_with(".md")
+            && !target.contains("://")
+            && !target.starts_with("mailto:")
+        {
             links.push(target.to_owned());
         }
         rest = &rest[paren_start + paren_len + 1..];
@@ -375,12 +378,15 @@ fn title_from_body(body: &str) -> Option<String> {
 /// corpus root.
 pub fn parse_ingestable_record(relative: &str, text: &str) -> Result<IngestedRecord> {
     let (front, _list, body) = strip_frontmatter(text);
-    let record_id = front.get("record_id").cloned().unwrap_or_else(|| {
-        std::path::Path::new(relative)
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().to_string())
-            .unwrap_or_default()
-    });
+    let record_id = front
+        .get("record_id")
+        .cloned()
+        .unwrap_or_else(|| {
+            std::path::Path::new(relative)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_default()
+        });
     if record_id.is_empty() {
         return Err(AikitError::new(
             "knowledge.ingest_invalid_record",
@@ -401,9 +407,8 @@ pub fn parse_ingestable_record(relative: &str, text: &str) -> Result<IngestedRec
         .filter(|segment| !segment.is_empty())
         .map(str::to_owned);
     Ok(IngestedRecord {
-        record_ref: ResourceRef::parse(format!("wiki:node:record/{record_id}")).map_err(
-            |error| AikitError::new("knowledge.ingest_invalid_record", error.to_string()),
-        )?,
+        record_ref: ResourceRef::parse(format!("wiki:node:record/{record_id}"))
+            .map_err(|error| AikitError::new("knowledge.ingest_invalid_record", error.to_string()))?,
         record_id,
         record_type,
         register: front.get("register").cloned(),
@@ -526,7 +531,10 @@ fn record_binding(
         ("corpus_kind".to_owned(), json!("record")),
         ("record_type".to_owned(), json!(record.record_type)),
         ("relative_path".to_owned(), json!(record.relative)),
-        ("declared_tags".to_owned(), json!(record.tags)),
+        (
+            "declared_tags".to_owned(),
+            json!(record.tags),
+        ),
     ]);
     if let Some(register) = &record.register {
         metadata.insert("register".to_owned(), json!(register));
@@ -607,7 +615,9 @@ fn ingest_provenance(record: &IngestedRecord) -> WikiProvenanceRef {
         source_ref: SourceRef::parse(format!("central:source:corpus:{}", record.record_id))
             .expect("record source refs are valid"),
         source_revision: Some(SemanticRevision::Text(record.content_revision.clone())),
-        producer_ref: Some(ResourceRef::parse(INGEST_PRODUCER_REF).expect("producer ref is valid")),
+        producer_ref: Some(
+            ResourceRef::parse(INGEST_PRODUCER_REF).expect("producer ref is valid"),
+        ),
         generation_ref: None,
         extensions: BTreeMap::new(),
     }
@@ -631,15 +641,20 @@ fn ingest_extension(record: &IngestedRecord) -> BTreeMap<String, Value> {
 fn authored_edge(from: &ResourceRef, to: ResourceRef, relation: &str) -> WikiObject {
     WikiObject::Edge(WikiEdge {
         profile: OKF_WIKI_PROFILE.into(),
-        ref_id: ResourceRef::parse(format!("wiki:edge:{}->{to}:{relation}", from.as_str()))
-            .expect("ingest edge refs are valid"),
+        ref_id: ResourceRef::parse(format!(
+            "wiki:edge:{}->{to}:{relation}",
+            from.as_str()
+        ))
+        .expect("ingest edge refs are valid"),
         revision: 1,
         provenance: Vec::new(),
         from_ref: from.clone(),
         to_ref: to,
         relation: relation.to_owned(),
         origin: WikiEdgeOrigin::Authored,
-        origin_ref: Some(ResourceRef::parse(INGEST_PRODUCER_REF).expect("producer ref is valid")),
+        origin_ref: Some(
+            ResourceRef::parse(INGEST_PRODUCER_REF).expect("producer ref is valid"),
+        ),
         extensions: BTreeMap::new(),
     })
 }
@@ -875,9 +890,8 @@ pub fn ingest_corpus(
     for (room, members) in rooms {
         objects.push(WikiObject::Space(WikiSpace {
             profile: OKF_WIKI_PROFILE.into(),
-            ref_id: ResourceRef::parse(format!("wiki:space:room/{room}")).map_err(|error| {
-                AikitError::new("knowledge.ingest_invalid_record", error.to_string())
-            })?,
+            ref_id: ResourceRef::parse(format!("wiki:space:room/{room}"))
+                .map_err(|error| AikitError::new("knowledge.ingest_invalid_record", error.to_string()))?,
             revision: 1,
             provenance: Vec::new(),
             title: Some(format!("Room: {room}")),
@@ -1127,10 +1141,13 @@ mod tests {
         let absences = compiled.absences;
         assert_eq!(absences.len(), 1, "{absences:?}");
         assert!(absences[0].contains("A24p"));
-        let index = SemanticWikiIndex::rebuild(compiled.objects).expect("ingested corpus rebuilds");
+        let index =
+            SemanticWikiIndex::rebuild(compiled.objects).expect("ingested corpus rebuilds");
 
         let a24 = index
-            .node(&ResourceRef::parse("wiki:node:record/A24").unwrap())
+            .node(
+                &ResourceRef::parse("wiki:node:record/A24").unwrap(),
+            )
             .expect("A24 record");
         assert_eq!(a24.node_type, "argument");
         let extension = &a24.extensions[INGEST_EXTENSION];
@@ -1142,7 +1159,9 @@ mod tests {
 
         // Room structure compiles: both arbitration records share a room.
         let room = index
-            .space(&ResourceRef::parse("wiki:space:room/etymologies").unwrap())
+            .space(
+                &ResourceRef::parse("wiki:space:room/etymologies").unwrap(),
+            )
             .expect("room space");
         assert_eq!(room.node_refs.len(), 2);
     }
@@ -1209,9 +1228,7 @@ mod tests {
             "the cited work is findable as an authored source"
         );
         assert!(
-            !index.contains(
-                &ResourceRef::parse("central:source:corpus:bratton-2026-agentworld-brief").unwrap()
-            ),
+            !index.contains(&ResourceRef::parse("central:source:corpus:bratton-2026-agentworld-brief").unwrap()),
             "citing a work never makes it a curated node"
         );
     }
@@ -1263,9 +1280,13 @@ mod tests {
             .map(|item| item.binding.clone())
             .collect();
         let pool = crate::knowledge_source_pool::SourcePool::new("pool:test", bindings).unwrap();
-        let visible =
-            crate::knowledge_source_pool::material_for_actor(&pool, &compiled.material, None, true)
-                .expect("project-horizon material is eligible without a named owner");
+        let visible = crate::knowledge_source_pool::material_for_actor(
+            &pool,
+            &compiled.material,
+            None,
+            true,
+        )
+        .expect("project-horizon material is eligible without a named owner");
         assert_eq!(
             visible.len(),
             compiled.material.len(),
@@ -1414,10 +1435,7 @@ mod tests {
         let selection = select_ingestable_records(&corpus);
         assert_eq!(selection.records.len(), 1);
         assert_eq!(selection.sources.len(), 1, "a source_id is an identity too");
-        assert_eq!(
-            selection.skipped_inert, 1,
-            "ordinary prose is still counted"
-        );
+        assert_eq!(selection.skipped_inert, 1, "ordinary prose is still counted");
         assert_eq!(selection.skipped_unaddressable.len(), 1);
         let disclosed = &selection.skipped_unaddressable[0];
         assert!(disclosed.contains("blind-spot.md"), "{disclosed}");
@@ -1484,8 +1502,7 @@ mod tests {
     fn unresolved_links_are_disclosed_never_silently_dropped() {
         let corpus = vec![(
             "arguments/A24.md".to_owned(),
-            "---\nrecord_id: A24\nrecord_type: argument\n---\n\n# A24\n\nSee [[t09-history]].\n"
-                .to_owned(),
+            "---\nrecord_id: A24\nrecord_type: argument\n---\n\n# A24\n\nSee [[t09-history]].\n".to_owned(),
         )];
         let absences = ingest_corpus(&corpus, &[], 1).unwrap().absences;
         assert!(absences.iter().any(|a| a.contains("t09-history")));
@@ -1599,8 +1616,7 @@ mod tests {
         let backlinks = index.backlinks(&ResourceRef::parse("wiki:node:record/A31").unwrap());
         assert!(backlinks
             .iter()
-            .any(|n| n.resource.as_str()
-                == "wiki:node:record/etymology-arbitration-historical-branches"));
+            .any(|n| n.resource.as_str() == "wiki:node:record/etymology-arbitration-historical-branches"));
     }
 
     // -----------------------------------------------------------------
@@ -1622,10 +1638,7 @@ mod tests {
         ];
         let selection = select_ingestable_records(&corpus);
         assert_eq!(selection.records.len(), 1);
-        assert_eq!(
-            selection.records[0].0,
-            "symbolon/episteme/arguments/A24-Arbitration.md"
-        );
+        assert_eq!(selection.records[0].0, "symbolon/episteme/arguments/A24-Arbitration.md");
         // The README carries nothing to place; the movement carries
         // `node_type:` and `claim_status:` and so is named, not counted.
         assert_eq!(selection.skipped_inert, 1);
@@ -1662,8 +1675,7 @@ mod tests {
             "the first-claimed (canonical, lexicographically-first) path wins"
         );
         assert_eq!(selection.duplicate_record_id.len(), 1);
-        assert!(selection.duplicate_record_id[0]
-            .contains("etymology-arbitration-hybris-regard-anamnesis"));
+        assert!(selection.duplicate_record_id[0].contains("etymology-arbitration-hybris-regard-anamnesis"));
         assert!(selection.duplicate_record_id[0].contains("before/expanded-E2.md"));
     }
 }

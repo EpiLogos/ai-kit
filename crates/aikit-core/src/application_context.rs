@@ -36,14 +36,7 @@ pub fn application_context_resolution(
     let project_ref = project_ref(context)?;
     let constituent = ProjectConstituentRef::parse("source:working-tree")?;
     let binding = ProjectBinding::from_legacy_context(project_ref, constituent, context)?;
-    application_context_resolution_with_binding(
-        context,
-        view,
-        scope_layers,
-        resources,
-        actors,
-        binding,
-    )
+    application_context_resolution_with_binding(context, view, scope_layers, resources, actors, binding)
 }
 
 /// Compose with a native owner's already validated Project binding. Preserve its
@@ -128,14 +121,8 @@ mod tests {
             vec![],
         );
 
-        let resolution = application_context_resolution(
-            &context,
-            &view,
-            &[],
-            &resources,
-            RequestedActors::default(),
-        )
-        .unwrap();
+        let resolution =
+            application_context_resolution(&context, &view, &[], &resources, RequestedActors::default()).unwrap();
 
         assert!(matches!(
             resolution.host,
@@ -155,14 +142,8 @@ mod tests {
         let view = resolved(&context, vec![layer.clone()]);
         let resources = ResourceSearchIndex::default();
 
-        let resolution = application_context_resolution(
-            &context,
-            &view,
-            &[layer],
-            &resources,
-            RequestedActors::default(),
-        )
-        .unwrap();
+        let resolution = application_context_resolution(&context, &view, &[layer], &resources, RequestedActors::default())
+            .unwrap();
 
         assert_eq!(resolution.scopes.len(), 1);
         assert_eq!(resolution.scopes[0].kind, ScopeKind::Project);
@@ -179,11 +160,7 @@ mod tests {
         let mut resources = ResourceSearchIndex::default();
         for (ref_, kind, name) in [
             ("agent/mahamaya", ResourceKind::Agent, "mahamaya"),
-            (
-                "agency/mahamaya-build",
-                ResourceKind::Agency,
-                "mahamaya build",
-            ),
+            ("agency/mahamaya-build", ResourceKind::Agency, "mahamaya build"),
             ("host/central", ResourceKind::Host, "central"),
         ] {
             resources.insert_resource(

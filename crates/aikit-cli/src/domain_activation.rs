@@ -17,8 +17,8 @@ use std::path::Path;
 use aikit_core::domain::{
     activate, decide_injection, dedup_hash, render_header, render_rules, KnowledgeDomain,
 };
-use aikit_core::hooks::HookEvent;
 use aikit_core::pressure::Block;
+use aikit_core::hooks::HookEvent;
 use aikit_store::index::Index;
 
 /// Load the domain declarations in force, personal register first, then the

@@ -30,10 +30,8 @@ fn the_service_reads_back_channel_items_the_system_published() {
 
     // A fresh Service on the same home sees it — the broker's read path.
     let env: BTreeMap<String, String> = BTreeMap::new();
-    let service = Service::open(AikitHome::at(home.path()), project.path(), |k| {
-        env.get(k).cloned()
-    })
-    .unwrap();
+    let service =
+        Service::open(AikitHome::at(home.path()), project.path(), |k| env.get(k).cloned()).unwrap();
     let items = service.inbox_items(false).unwrap();
 
     assert_eq!(items.len(), 1);

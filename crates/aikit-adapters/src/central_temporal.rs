@@ -53,15 +53,8 @@ impl CentralTemporalGround {
             "standing: current orientation only; this does not grant authority, invoke an Agent/model, or activate a capability.".to_owned(),
         ];
 
-        let exists = self
-            .now
-            .get("exists")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        lines.push(format!(
-            "NOW: {}",
-            if exists { "present" } else { "not initialized" }
-        ));
+        let exists = self.now.get("exists").and_then(Value::as_bool).unwrap_or(false);
+        lines.push(format!("NOW: {}", if exists { "present" } else { "not initialized" }));
 
         if let Some(refs) = self.now.get("human_scratch").and_then(Value::as_array) {
             let refs = refs
@@ -78,14 +71,8 @@ impl CentralTemporalGround {
             for item in items.iter().take(MAX_ACTIVE_ITEMS) {
                 let id = item.get("id").and_then(Value::as_str).unwrap_or("unknown");
                 let kind = item.get("kind").and_then(Value::as_str).unwrap_or("item");
-                let actor = item
-                    .get("actor")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                let status = item
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
+                let actor = item.get("actor").and_then(Value::as_str).unwrap_or("unknown");
+                let status = item.get("status").and_then(Value::as_str).unwrap_or("unknown");
                 let subject = item.get("subject").and_then(Value::as_str).unwrap_or("");
                 let result = item
                     .get("result")
@@ -94,11 +81,7 @@ impl CentralTemporalGround {
                     .unwrap_or_default();
                 lines.push(format!(
                     "NOW {kind} {id} [{status}] by {actor}: {subject}{}",
-                    if result.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" — {result}")
-                    }
+                    if result.is_empty() { String::new() } else { format!(" — {result}") }
                 ));
             }
         }
@@ -139,25 +122,13 @@ pub fn read_central_temporal_ground<R: CommandRunner>(
         return Ok(None);
     };
 
-    let now = action(
-        runner,
-        central_root,
-        NOW_INSPECT_ACTION,
-        json!({"project": project}),
-    )?;
-    let flow_list = action(
-        runner,
-        central_root,
-        FLOW_LIST_ACTION,
-        json!({"project": project}),
-    )?;
+    let now = action(runner, central_root, NOW_INSPECT_ACTION, json!({"project": project}))?;
+    let flow_list = action(runner, central_root, FLOW_LIST_ACTION, json!({"project": project}))?;
     let mut flows = Vec::new();
     if let Some(records) = flow_list.get("flows").and_then(Value::as_array) {
-        for record in records
-            .iter()
-            .filter(|record| record.get("lifecycle").and_then(Value::as_str) == Some("active"))
-            .take(MAX_ACTIVE_FLOWS)
-        {
+        for record in records.iter().filter(|record| {
+            record.get("lifecycle").and_then(Value::as_str) == Some("active")
+        }).take(MAX_ACTIVE_FLOWS) {
             let Some(flow_ref) = record.get("flow_ref").and_then(Value::as_str) else {
                 continue;
             };
@@ -167,53 +138,22 @@ pub fn read_central_temporal_ground<R: CommandRunner>(
                 FLOW_READ_ACTION,
                 json!({"project": project, "flow_ref": flow_ref}),
             )?;
-            let Some(flow) = reading.get("flow") else {
-                continue;
-            };
+            let Some(flow) = reading.get("flow") else { continue };
             flows.push(CentralFlowGround {
-                flow_ref: flow
-                    .get("flow_ref")
-                    .and_then(Value::as_str)
-                    .unwrap_or(flow_ref)
-                    .to_owned(),
-                revision: flow
-                    .get("current_revision")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_owned(),
-                lifecycle: flow
-                    .get("lifecycle")
-                    .and_then(Value::as_str)
-                    .unwrap_or("active")
-                    .to_owned(),
-                privacy: flow
-                    .get("privacy")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_owned(),
+                flow_ref: flow.get("flow_ref").and_then(Value::as_str).unwrap_or(flow_ref).to_owned(),
+                revision: flow.get("current_revision").and_then(Value::as_str).unwrap_or("unknown").to_owned(),
+                lifecycle: flow.get("lifecycle").and_then(Value::as_str).unwrap_or("active").to_owned(),
+                privacy: flow.get("privacy").and_then(Value::as_str).unwrap_or("unknown").to_owned(),
                 title: flow.get("title").and_then(Value::as_str).map(str::to_owned),
-                content: reading
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
+                content: reading.get("content").and_then(Value::as_str).unwrap_or("").to_owned(),
             });
         }
     }
 
-    Ok(Some(CentralTemporalGround {
-        project,
-        now,
-        flows,
-    }))
+    Ok(Some(CentralTemporalGround { project, now, flows }))
 }
 
-fn action<R: CommandRunner>(
-    runner: &R,
-    central_root: &Path,
-    id: &str,
-    input: Value,
-) -> Result<Value> {
+fn action<R: CommandRunner>(runner: &R, central_root: &Path, id: &str, input: Value) -> Result<Value> {
     let argv = vec![
         "ctrl".to_owned(),
         "--json".to_owned(),
@@ -252,13 +192,7 @@ fn decode_action(output: Output, argv: &[String], id: &str) -> Result<Value> {
             .unwrap_or("Central Action failed");
         return Err(AikitError::new("central.action_failed", message)
             .with("action", id)
-            .with(
-                "status",
-                result
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown"),
-            ));
+            .with("status", result.get("status").and_then(Value::as_str).unwrap_or("unknown")));
     }
     result.get("data").cloned().ok_or_else(|| {
         AikitError::new(
@@ -272,9 +206,7 @@ fn decode_action(output: Output, argv: &[String], id: &str) -> Result<Value> {
 fn project_member(central_root: &Path, project_root: &Path) -> Option<String> {
     let relative = project_root.strip_prefix(central_root.join("Work")).ok()?;
     if relative.as_os_str().is_empty()
-        || !relative
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
+        || !relative.components().all(|component| matches!(component, Component::Normal(_)))
     {
         return None;
     }
@@ -285,10 +217,7 @@ fn bounded(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_owned();
     }
-    let mut out = text
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>();
+    let mut out = text.chars().take(max_chars.saturating_sub(1)).collect::<String>();
     out.push('…');
     out
 }
@@ -309,8 +238,7 @@ mod tests {
             &runner,
             Path::new("/home/me/Central"),
             Path::new("/tmp/project"),
-        )
-        .unwrap();
+        ).unwrap();
         assert!(value.is_none());
         assert!(runner.calls().is_empty());
     }
@@ -344,22 +272,14 @@ mod tests {
             &runner,
             Path::new("/home/me/Central"),
             Path::new("/home/me/Central/Work/example"),
-        )
-        .unwrap()
-        .unwrap();
+        ).unwrap().unwrap();
 
         assert_eq!(ground.project, "example");
         assert_eq!(ground.flows.len(), 1);
         assert_eq!(ground.flows[0].revision, "rev-b");
         assert!(ground.render().contains("state B"));
-        assert!(runner
-            .call_lines()
-            .iter()
-            .all(|line| line.contains("--json --root /home/me/Central action run")));
-        assert!(!runner
-            .call_lines()
-            .iter()
-            .any(|line| line.contains("central:flow:dormant") && line.contains(FLOW_READ_ACTION)));
+        assert!(runner.call_lines().iter().all(|line| line.contains("--json --root /home/me/Central action run")));
+        assert!(!runner.call_lines().iter().any(|line| line.contains("central:flow:dormant") && line.contains(FLOW_READ_ACTION)));
     }
 
     #[test]

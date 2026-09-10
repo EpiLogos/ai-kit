@@ -175,10 +175,7 @@ fn reference_label(reference: &BootstrapReference) -> String {
             reference,
             expected,
             cause,
-        } => format!(
-            "`{reference}` (missing {expected:?}; {})",
-            cause.explanation()
-        ),
+        } => format!("`{reference}` (missing {expected:?}; {})", cause.explanation()),
         BootstrapReference::WrongKind {
             reference,
             expected,

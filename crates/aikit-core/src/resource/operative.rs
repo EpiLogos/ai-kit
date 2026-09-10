@@ -912,7 +912,9 @@ pub fn horizons_for_kind(kind: ResourceKind) -> BTreeSet<AddressHorizon> {
         ResourceKind::Project | ResourceKind::Journey | ResourceKind::Run => {
             BTreeSet::from([AddressHorizon::H4])
         }
-        ResourceKind::WorkflowUnit => BTreeSet::from([AddressHorizon::H4, AddressHorizon::H5]),
+        ResourceKind::WorkflowUnit => {
+            BTreeSet::from([AddressHorizon::H4, AddressHorizon::H5])
+        }
         ResourceKind::Agent | ResourceKind::Agency => {
             BTreeSet::from([AddressHorizon::H2, AddressHorizon::H4, AddressHorizon::H5])
         }

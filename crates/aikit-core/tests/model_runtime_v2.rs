@@ -151,24 +151,14 @@ fn three_access_axes_are_independent_and_absence_is_explained() {
     };
     let reading = disclose_model_runtime(&composition(&model), relation).unwrap();
 
-    assert!(reading
-        .relation
-        .model_surface
-        .access
-        .inference
-        .is_available());
+    assert!(reading.relation.model_surface.access.inference.is_available());
     assert!(!reading
         .relation
         .model_surface
         .access
         .material_control
         .is_available());
-    assert!(reading
-        .relation
-        .model_surface
-        .access
-        .interior
-        .is_available());
+    assert!(reading.relation.model_surface.access.interior.is_available());
     assert!(reading
         .unavailable
         .iter()
@@ -293,10 +283,7 @@ fn semantic_model_mismatch_is_rejected_and_provider_matrix_is_not_daemon_normali
 
     let fixtures = model_provider_conformance_fixtures();
     assert_eq!(fixtures[0].upstream_revision, OLLAMA_CONFORMANCE_REVISION);
-    assert_eq!(
-        fixtures[1].upstream_revision,
-        LLAMA_CPP_CONFORMANCE_REVISION
-    );
+    assert_eq!(fixtures[1].upstream_revision, LLAMA_CPP_CONFORMANCE_REVISION);
     assert_eq!(fixtures[2].upstream_revision, VLLM_CONFORMANCE_REVISION);
     assert!(fixtures[0].daemon_required);
     assert!(!fixtures[1].daemon_required);

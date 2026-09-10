@@ -610,10 +610,7 @@ fn a_stale_aikit_entry_is_replaced_rather_than_joined_by_a_second_one() {
         .flat_map(|m| m["hooks"].as_array().unwrap())
         .map(|h| h["command"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        session_start,
-        vec!["aikit hook dispatch codex SessionStart"]
-    );
+    assert_eq!(session_start, vec!["aikit hook dispatch codex SessionStart"]);
     // The typo'd stale entry was on Stop; the sweep removed it, and Stop is not
     // an event this descriptor dispatches, so its key is pruned.
     assert!(document["hooks"].get("Stop").is_none());
@@ -747,9 +744,7 @@ fn a_shared_task_with_no_project_root_above_it_falls_back_to_the_cwd_honestly() 
 fn codex_admits_through_the_harness_adapter_contract_with_a_full_census() {
     use aikit_adapters::clients::codex::{ADAPTER_REF, PRODUCT};
     use aikit_core::harness_admission::HarnessAdmissionAdapter;
-    use aikit_core::harness_admission::{
-        FacultySupport, HarnessFaculty, HARNESS_ADAPTER_SDK_VERSION,
-    };
+    use aikit_core::harness_admission::{FacultySupport, HarnessFaculty, HARNESS_ADAPTER_SDK_VERSION};
 
     let tree = tempfile::tempdir().unwrap();
     let admission = CodexAdapter::new(tree.path())
@@ -793,7 +788,7 @@ fn codex_admits_through_the_harness_adapter_contract_with_a_full_census() {
 #[test]
 fn codex_activation_truth_rejects_an_overclaiming_observation() {
     use aikit_core::harness_admission::{
-        verify_activation_truth, HarnessActivationObservation, HarnessActivationState,
+        HarnessActivationObservation, HarnessActivationState, verify_activation_truth,
         HARNESS_ADAPTER_SDK_VERSION,
     };
     use aikit_core::projection::{ProjectionPlan, TargetAdapter};

@@ -108,10 +108,7 @@ failure = "closed""#,
     assert!(!decision.allowed);
 
     let denial: &Denial = decision.denial.as_ref().expect("the gate denied");
-    assert!(
-        !denial.from_system_failure,
-        "this was a decision, not a crash"
-    );
+    assert!(!denial.from_system_failure, "this was a decision, not a crash");
     assert!(denial.describe().contains("denied this event"));
 
     let record = decision
@@ -381,19 +378,13 @@ fn a_shared_task_gets_an_honest_fallback_and_an_isolated_one_gets_a_real_project
     let shared = ResolvedContext::new(view.clone())
         .with_root(cid("skill/rust/review"), "/registry/skill/rust/review");
     let shared_plan = adapter.plan(&shared).unwrap();
-    assert!(
-        shared_plan.is_empty(),
-        "nothing is written into a shared tree"
-    );
+    assert!(shared_plan.is_empty(), "nothing is written into a shared tree");
     assert_eq!(
         shared_plan.effect.describe_for(&adapter.target()),
         "Codex: brokered — this task uses the session's shared working tree (shared), and this \
          client's skill directory lives in the tree, so a sibling task would see the same files"
     );
-    assert!(
-        !shared_plan.notes.is_empty(),
-        "the reason is stated, not implied"
-    );
+    assert!(!shared_plan.notes.is_empty(), "the reason is stated, not implied");
 
     // Opt in to a worktree and the same adapter can project natively.
     let mut isolated_view = view.clone();

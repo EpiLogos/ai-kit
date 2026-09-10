@@ -13,7 +13,9 @@ use aikit_store::index::Index;
 /// The reactions hand back classified blocks now, so the pressure stage can
 /// bound ordinary payload without touching standing guidance. These tests
 /// assert on what a session actually sees, which is the rendered block.
-fn rendered(result: (Vec<aikit_core::pressure::Block>, Vec<String>)) -> (Vec<String>, Vec<String>) {
+fn rendered(
+    result: (Vec<aikit_core::pressure::Block>, Vec<String>),
+) -> (Vec<String>, Vec<String>) {
     (
         result
             .0
@@ -23,6 +25,7 @@ fn rendered(result: (Vec<aikit_core::pressure::Block>, Vec<String>)) -> (Vec<Str
         result.1,
     )
 }
+
 
 fn node(ref_id: &str, node_type: &str, title: &str, source_refs: &[&str]) -> String {
     let sources: Vec<String> = source_refs.iter().map(|s| format!("\"{s}\"")).collect();
@@ -116,9 +119,7 @@ fn scope() -> String {
 }
 
 fn lib_path(root: &std::path::Path) -> String {
-    root.join("crates/demo/src/lib.rs")
-        .to_string_lossy()
-        .into_owned()
+    root.join("crates/demo/src/lib.rs").to_string_lossy().into_owned()
 }
 
 #[test]
@@ -129,31 +130,18 @@ fn a_file_operation_arrives_with_its_wiki_relations_and_domain_guidance() {
     assert!(warnings.is_empty());
     let (objects, warnings) = load_project_wiki(&tmp);
     assert!(warnings.is_empty(), "wiki warnings: {:?}", warnings);
-    let (blocks, warnings) = rendered(run(
-        &index,
-        &scope(),
-        &tmp,
-        &lib_path(&tmp),
-        &domains,
-        objects,
-    ));
+    let (blocks, warnings) =
+        rendered(run(&index, &scope(), &tmp, &lib_path(&tmp), &domains, objects));
     assert!(warnings.is_empty(), "warnings: {:?}", warnings);
     assert_eq!(blocks.len(), 2, "{blocks:?}");
 
     let wiki_block = &blocks[0];
     assert!(
-        wiki_block
-            .starts_with("[continuity/file-context] wiki relations for crates/demo/src/lib.rs"),
+        wiki_block.starts_with("[continuity/file-context] wiki relations for crates/demo/src/lib.rs"),
         "{wiki_block}"
     );
-    assert!(
-        wiki_block.contains("wiki:node:demo-lib — Demo library"),
-        "{wiki_block}"
-    );
-    assert!(
-        wiki_block.contains("cited by: wiki:node:demo-usage (documents)"),
-        "{wiki_block}"
-    );
+    assert!(wiki_block.contains("wiki:node:demo-lib — Demo library"), "{wiki_block}");
+    assert!(wiki_block.contains("cited by: wiki:node:demo-usage (documents)"), "{wiki_block}");
     assert!(
         !wiki_block.contains("unrelated"),
         "unrelated wiki material must not arrive: {wiki_block}"
@@ -161,21 +149,13 @@ fn a_file_operation_arrives_with_its_wiki_relations_and_domain_guidance() {
 
     let domain_block = &blocks[1];
     assert!(
-        domain_block.starts_with(
-            "[continuity/file-context] domain domain/demo-crate armed for crates/demo/src/lib.rs"
-        ),
+        domain_block.starts_with("[continuity/file-context] domain domain/demo-crate armed for crates/demo/src/lib.rs"),
         "{domain_block}"
     );
     assert!(domain_block.contains("horizon: @2–@4"), "{domain_block}");
-    assert!(
-        domain_block.contains("source: central:source:project:demo"),
-        "{domain_block}"
-    );
+    assert!(domain_block.contains("source: central:source:project:demo"), "{domain_block}");
     assert!(domain_block.contains("[ordinary]"), "{domain_block}");
-    assert!(
-        domain_block.contains("[standing — dedup-exempt by classification]"),
-        "{domain_block}"
-    );
+    assert!(domain_block.contains("[standing — dedup-exempt by classification]"), "{domain_block}");
 }
 
 #[test]
@@ -186,42 +166,16 @@ fn an_unchanged_file_reinjects_nothing_but_standing_rules_reassert() {
     let (domains, _) = load_domains(&tmp);
     let path = lib_path(&tmp);
 
-    let (first, _) = rendered(run(
-        &index,
-        &ctx,
-        &tmp,
-        &path,
-        &domains,
-        load_project_wiki(&tmp).0,
-    ));
+    let (first, _) = rendered(run(&index, &ctx, &tmp, &path, &domains, load_project_wiki(&tmp).0));
     assert_eq!(first.len(), 2);
 
     // Same file, same relations: the ordinary payload dedups and the wiki
     // block stays out entirely; the standing rule reasserts, visibly exempt.
-    let (second, _) = rendered(run(
-        &index,
-        &ctx,
-        &tmp,
-        &path,
-        &domains,
-        load_project_wiki(&tmp).0,
-    ));
+    let (second, _) = rendered(run(&index, &ctx, &tmp, &path, &domains, load_project_wiki(&tmp).0));
     assert_eq!(second.len(), 1, "{second:?}");
-    assert!(
-        second[0].contains("domain/demo-crate armed"),
-        "{:?}",
-        second[0]
-    );
-    assert!(
-        second[0].contains("ordinary payload deduped"),
-        "{:?}",
-        second[0]
-    );
-    assert!(
-        second[0].contains("standing rules reasserted"),
-        "{:?}",
-        second[0]
-    );
+    assert!(second[0].contains("domain/demo-crate armed"), "{:?}", second[0]);
+    assert!(second[0].contains("ordinary payload deduped"), "{:?}", second[0]);
+    assert!(second[0].contains("standing rules reasserted"), "{:?}", second[0]);
     assert!(!second[0].contains("[ordinary]"), "{:?}", second[0]);
     assert!(!second[0].contains("wiki relations for"), "{:?}", second[0]);
 }
@@ -233,14 +187,7 @@ fn changed_wiki_relations_re_arm_injection() {
     let ctx = scope();
     let (domains, _) = load_domains(&tmp);
     let path = lib_path(&tmp);
-    let (first, _) = rendered(run(
-        &index,
-        &ctx,
-        &tmp,
-        &path,
-        &domains,
-        load_project_wiki(&tmp).0,
-    ));
+    let (first, _) = rendered(run(&index, &ctx, &tmp, &path, &domains, load_project_wiki(&tmp).0));
     assert_eq!(first.len(), 2);
 
     // The wiki learns a new relation for the file: the rendered content
@@ -250,20 +197,9 @@ fn changed_wiki_relations_re_arm_injection() {
         .unwrap()
         .replace("Demo library", "Demo library, revised");
     fs::write(&wiki_file, updated).unwrap();
-    let (second, _) = rendered(run(
-        &index,
-        &ctx,
-        &tmp,
-        &path,
-        &domains,
-        load_project_wiki(&tmp).0,
-    ));
+    let (second, _) = rendered(run(&index, &ctx, &tmp, &path, &domains, load_project_wiki(&tmp).0));
     assert_eq!(second.len(), 2, "{second:?}");
-    assert!(
-        second[0].contains("Demo library, revised"),
-        "{:?}",
-        second[0]
-    );
+    assert!(second[0].contains("Demo library, revised"), "{:?}", second[0]);
 }
 
 #[test]
@@ -273,14 +209,7 @@ fn an_unrelated_file_gets_nothing() {
     let (domains, _) = load_domains(&tmp);
     // A file the wiki holds nothing about: no relations may arrive.
     let stranger = tmp.join("docs/untracked.md").to_string_lossy().into_owned();
-    let (blocks, warnings) = rendered(run(
-        &index,
-        &scope(),
-        &tmp,
-        &stranger,
-        &domains,
-        load_project_wiki(&tmp).0,
-    ));
+    let (blocks, warnings) = rendered(run(&index, &scope(), &tmp, &stranger, &domains, load_project_wiki(&tmp).0));
     assert!(blocks.is_empty(), "{blocks:?}");
     assert!(warnings.is_empty());
 }
@@ -319,9 +248,6 @@ provenance = "central:source:project:demo:ProjectCentral/user/release.md"
     assert!(domain.triggers.is_empty());
     assert_eq!(domain.path_patterns, vec!["**/release/**"]);
 
-    let bad = text.replace(
-        "path_patterns = [\"**/release/**\"]",
-        "path_patterns = [\"\"]",
-    );
+    let bad = text.replace("path_patterns = [\"**/release/**\"]", "path_patterns = [\"\"]");
     assert!(aikit_core::domain::KnowledgeDomain::from_toml_str(&bad).is_err());
 }

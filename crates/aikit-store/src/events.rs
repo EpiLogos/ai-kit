@@ -55,16 +55,17 @@ impl Timestamp {
     }
 
     pub fn from_nanos(nanos: i64) -> Self {
-        Self(jiff::Timestamp::from_nanosecond(nanos as i128).unwrap_or(jiff::Timestamp::UNIX_EPOCH))
+        Self(
+            jiff::Timestamp::from_nanosecond(nanos as i128)
+                .unwrap_or(jiff::Timestamp::UNIX_EPOCH),
+        )
     }
 
     /// Nanoseconds since the Unix epoch, saturated into an `i64` so it can be a
     /// SQLite INTEGER. The saturation point is the year 2262; AIKit will have
     /// other problems by then.
     pub fn as_nanos(&self) -> i64 {
-        self.0
-            .as_nanosecond()
-            .clamp(i64::MIN as i128, i64::MAX as i128) as i64
+        self.0.as_nanosecond().clamp(i64::MIN as i128, i64::MAX as i128) as i64
     }
 
     /// How long ago this was, or zero if it is somehow in the future.
@@ -83,12 +84,9 @@ impl fmt::Display for Timestamp {
 impl FromStr for Timestamp {
     type Err = AikitError;
     fn from_str(s: &str) -> Result<Self> {
-        s.parse::<jiff::Timestamp>().map(Self).map_err(|e| {
-            AikitError::new(
-                "event.bad_timestamp",
-                format!("`{s}` is not a timestamp: {e}"),
-            )
-        })
+        s.parse::<jiff::Timestamp>()
+            .map(Self)
+            .map_err(|e| AikitError::new("event.bad_timestamp", format!("`{s}` is not a timestamp: {e}")))
     }
 }
 
@@ -176,12 +174,7 @@ impl FromStr for EventAction {
             "resource-use" => EventAction::ResourceUse,
             "familiarity-reset" => EventAction::FamiliarityReset,
             "gc" => EventAction::Gc,
-            other => {
-                return err(
-                    "event.unknown_action",
-                    format!("`{other}` is not an action"),
-                )
-            }
+            other => return err("event.unknown_action", format!("`{other}` is not an action")),
         })
     }
 }
@@ -407,10 +400,7 @@ impl Event {
     /// The JSONL line this event contributes to `logs/events.jsonl`.
     pub fn to_json_line(&self) -> Result<String> {
         serde_json::to_string(self).map_err(|e| {
-            AikitError::new(
-                "event.serialize_failed",
-                format!("could not encode event: {e}"),
-            )
+            AikitError::new("event.serialize_failed", format!("could not encode event: {e}"))
         })
     }
 }

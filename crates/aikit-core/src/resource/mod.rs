@@ -39,21 +39,23 @@ pub use model_catalogue::{
     FIRST_PARTY_CATALOGUE_SOURCE, MODEL_CATALOGUE_VERSION, MODEL_REF_PREFIX,
     PROVIDER_CATALOG_OBSERVATION_SCHEMA, PROVIDER_CATALOG_SOURCE,
 };
-pub use model_roster::{
-    candidates_from_routes, rank_model_roster, select_model, ExactSpendObservation,
-    FitnessObservation, FitnessScope, ModelAccessProfileView, ModelPriceObservation,
-    ModelRankingExplanation, ModelRankingPolicy, ModelRoster, ModelRosterCandidate,
-    ModelRosterDemand, ModelRosterEntry, ModelSelection, RankingComponent, MODEL_ROSTER_VERSION,
-};
 pub use model_route::{
     CredentialCondition, ModelRoute, ModelRouteKind, ModelRouteSet, RouteAvailability,
     RouteUsability, UnmatchedModelOffer, MODEL_ROUTE_VERSION,
+};
+pub use model_roster::{
+    candidates_from_routes, rank_model_roster, select_model, ExactSpendObservation,
+    FitnessObservation, FitnessScope,
+    ModelAccessProfileView, ModelPriceObservation, ModelRankingExplanation, ModelRankingPolicy,
+    ModelRoster, ModelRosterCandidate, ModelRosterDemand, ModelRosterEntry, ModelSelection,
+    RankingComponent, MODEL_ROSTER_VERSION,
 };
 pub use operative::{
     action_semantic_profile, horizons_for_kind, horizons_for_resource, parse_or_search_expression,
     parse_resolve_expression, resolve_action_candidates, resolve_expression, resolve_path_identity,
     resolve_search, resolve_subjects, six_horizon_disclosure, ActionRef, ActionSemanticProfile,
-    AddressHorizon, RelationOp, ResolveCandidate, ResolveExpression, ResolvePath, ResolvePathStep,
+    AddressHorizon,
+    RelationOp, ResolveCandidate, ResolveExpression, ResolvePath, ResolvePathStep,
     ResolvedActionCandidate, OPERATIVE_SYNTAX_VERSION,
 };
 pub use operative_provider::{
@@ -64,10 +66,11 @@ pub use operative_provider::{
 pub use refs::{OwnerRef, ProviderRef, ResourceRef, SourceRef, SourceRevision};
 pub use routine::{
     prove_method, MethodProofInput, ProvenMethodBasis, Routine, RoutineAuthority,
-    RoutineAuthorityStanding, RoutineAuthorityValidation, RoutineExplanation, RoutineInvocation,
+    RoutineAuthorityValidation, RoutineExplanation, RoutineInvocation,
     RoutineInvocationAuthorisationRequest, RoutineInvocationEvidence, RoutineInvocationOccurrence,
-    RoutineProofStanding, RoutineProviderDelivery, RoutineSchedulerBinding, RoutineSchedulerState,
-    RoutineState, RoutineTrigger, RoutineTriggerObservation, METHOD_PROOF_VERSION,
+    RoutineAuthorityStanding, RoutineProofStanding, RoutineProviderDelivery,
+    RoutineSchedulerBinding, RoutineSchedulerState, RoutineState, RoutineTrigger,
+    RoutineTriggerObservation, METHOD_PROOF_VERSION,
     ROUTINE_INVOCATION_EVIDENCE_VERSION, ROUTINE_VERSION,
 };
 pub use search::{

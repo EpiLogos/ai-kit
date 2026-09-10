@@ -979,7 +979,9 @@ impl QlAlignment {
                 if value > 5 {
                     return Err(AikitError::new(
                         "knowledge.wiki_stage_alignment",
-                        format!("position {value} is out of range; a unit's positions run 0–5"),
+                        format!(
+                            "position {value} is out of range; a unit's positions run 0–5"
+                        ),
                     ));
                 }
                 Some(value)
@@ -987,12 +989,7 @@ impl QlAlignment {
             None => None,
         };
         let unit = labels.remove("unit");
-        if position.is_some()
-            && unit
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .is_none()
+        if position.is_some() && unit.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none()
         {
             return Err(AikitError::new(
                 "knowledge.wiki_stage_alignment",
@@ -1291,7 +1288,8 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
     let (raw_corpus, io_skipped) = (walked.files, walked.skipped);
     let selection = select_ingestable_records(&raw_corpus);
     let compiled = ingest_corpus(&selection.records, &selection.sources, args.room_depth)?;
-    let (objects, material, absences) = (compiled.objects, compiled.material, compiled.absences);
+    let (objects, material, absences) =
+        (compiled.objects, compiled.material, compiled.absences);
     let pool_dir = source_pool_dir(args);
 
     let mut warnings: Vec<String> = Vec::new();

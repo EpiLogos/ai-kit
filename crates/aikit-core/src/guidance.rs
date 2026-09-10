@@ -134,15 +134,9 @@ pub enum FragmentStatus {
     Included,
     /// Included, but larger than the budget its own manifest declared. Reported
     /// so the capsule's author finds out, not so the operator's budget changes.
-    IncludedOverFragmentBudget {
-        budget: u32,
-    },
-    SkippedDuplicate {
-        winner: CapsuleId,
-    },
-    SkippedOverTotalBudget {
-        remaining: u32,
-    },
+    IncludedOverFragmentBudget { budget: u32 },
+    SkippedDuplicate { winner: CapsuleId },
+    SkippedOverTotalBudget { remaining: u32 },
     SkippedEmpty,
 }
 
@@ -199,10 +193,7 @@ impl Composition {
     }
 
     pub fn included(&self) -> Vec<&CompositionEntry> {
-        self.entries
-            .iter()
-            .filter(|e| e.status.is_included())
-            .collect()
+        self.entries.iter().filter(|e| e.status.is_included()).collect()
     }
 
     pub fn skipped(&self) -> Vec<&CompositionEntry> {
@@ -282,7 +273,10 @@ impl Composition {
 /// deserve losing its place to a long one that happened to precede it.
 pub fn compose(fragments: Vec<GuidanceFragment>, request: &CompositionRequest) -> Composition {
     let mut ordered = fragments;
-    ordered.sort_by(|a, b| (a.order, &a.capsule).cmp(&(b.order, &b.capsule)));
+    ordered.sort_by(|a, b| {
+        (a.order, &a.capsule)
+            .cmp(&(b.order, &b.capsule))
+    });
 
     // Resolve dedup contests up front, so the winner is chosen by precedence and
     // not by whichever copy the budget happened to reach first.
@@ -429,7 +423,11 @@ dedup_key = "research-mode"
 
     #[test]
     fn a_composition_reports_the_budget_it_did_not_spend() {
-        let request = CompositionRequest::new(HookEventKind::SessionStart, TargetId::codex(), 100);
+        let request = CompositionRequest::new(
+            HookEventKind::SessionStart,
+            TargetId::codex(),
+            100,
+        );
         let composition = compose(
             vec![GuidanceFragment::new(
                 CapsuleId::parse("guidance/a/one").unwrap(),

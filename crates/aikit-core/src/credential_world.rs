@@ -198,9 +198,7 @@ impl CredentialStatusKnowledge {
     pub fn requirement_ref(&self) -> &SecretRequirementRef {
         match self {
             Self::Resolved(resolution) => &resolution.requirement_ref,
-            Self::Unresolved {
-                requirement_ref, ..
-            } => requirement_ref,
+            Self::Unresolved { requirement_ref, .. } => requirement_ref,
         }
     }
 
@@ -250,10 +248,7 @@ impl CredentialWorldDisclosure {
         }
     }
 
-    pub fn status(
-        &self,
-        requirement_ref: &SecretRequirementRef,
-    ) -> Option<&CredentialStatusKnowledge> {
+    pub fn status(&self, requirement_ref: &SecretRequirementRef) -> Option<&CredentialStatusKnowledge> {
         self.credentials.get(requirement_ref)
     }
 
@@ -300,9 +295,9 @@ pub fn disclose_credential_world(
                     headless,
                     allow_from_env,
                 }) {
-                    Ok(resolution) => CredentialStatusKnowledge::Resolved(
-                        CredentialResolutionDisclosure::from(&resolution),
-                    ),
+                    Ok(resolution) => {
+                        CredentialStatusKnowledge::Resolved(CredentialResolutionDisclosure::from(&resolution))
+                    }
                     Err(error) => CredentialStatusKnowledge::Unresolved {
                         requirement_ref: requirement.requirement_ref.clone(),
                         credential_ref: requirement.credential_ref.clone(),
@@ -404,10 +399,7 @@ mod tests {
         let status = disclosure
             .status(&SecretRequirementRef::new("secret-requirement:openai").unwrap())
             .unwrap();
-        assert!(matches!(
-            status,
-            CredentialStatusKnowledge::Unresolved { .. }
-        ));
+        assert!(matches!(status, CredentialStatusKnowledge::Unresolved { .. }));
         assert!(!status.is_selected());
         assert!(!disclosure.fully_observed());
     }
@@ -503,10 +495,7 @@ mod tests {
         let status = disclosure
             .status(&SecretRequirementRef::new("secret-requirement:openai").unwrap())
             .unwrap();
-        assert!(matches!(
-            status,
-            CredentialStatusKnowledge::Unresolved { .. }
-        ));
+        assert!(matches!(status, CredentialStatusKnowledge::Unresolved { .. }));
     }
 
     #[test]
@@ -539,11 +528,7 @@ mod tests {
     fn credentials_are_ordered_deterministically_by_requirement_ref() {
         let disclosure = disclose_credential_world(
             ProviderRosterKnowledge::Observed { providers: vec![] },
-            &[
-                requirement("zeta"),
-                requirement("alpha"),
-                requirement("mid"),
-            ],
+            &[requirement("zeta"), requirement("alpha"), requirement("mid")],
             false,
             false,
         );

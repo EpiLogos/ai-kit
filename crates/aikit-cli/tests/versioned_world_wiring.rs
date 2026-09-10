@@ -69,10 +69,7 @@ fn the_cli_backend_observes_real_git_material_for_a_real_project() {
     let versioned = observed.expect("a real git worktree is observed, not reported absent");
     assert_eq!(versioned.repository.branch.as_deref(), Some("trunk"));
     assert!(!versioned.repository.head.as_str().is_empty());
-    assert!(
-        versioned.working.is_clean(),
-        "a fresh commit leaves a clean tree"
-    );
+    assert!(versioned.working.is_clean(), "a fresh commit leaves a clean tree");
     // The observation names the Project it was made for; it cannot rebind it.
     assert_eq!(versioned.project.as_str(), "project:probe");
 }

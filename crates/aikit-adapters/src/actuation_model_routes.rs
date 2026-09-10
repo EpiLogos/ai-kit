@@ -172,21 +172,18 @@ impl CredentialEvidence {
     }
 
     /// Resolve a declared credential condition against what is actually bound.
-    fn resolve(
-        &self,
-        provider: &ProviderRef,
-        declared: &CredentialCondition,
-    ) -> CredentialCondition {
+    fn resolve(&self, provider: &ProviderRef, declared: &CredentialCondition) -> CredentialCondition {
         match declared {
             CredentialCondition::NotRequired => CredentialCondition::NotRequired,
-            CredentialCondition::Required { hint }
-            | CredentialCondition::Satisfied { hint, .. } => match self.binding_for(provider) {
-                Some(binding_ref) => CredentialCondition::Satisfied {
-                    hint: hint.clone(),
-                    binding_ref: binding_ref.to_string(),
-                },
-                None => CredentialCondition::Required { hint: hint.clone() },
-            },
+            CredentialCondition::Required { hint } | CredentialCondition::Satisfied { hint, .. } => {
+                match self.binding_for(provider) {
+                    Some(binding_ref) => CredentialCondition::Satisfied {
+                        hint: hint.clone(),
+                        binding_ref: binding_ref.to_string(),
+                    },
+                    None => CredentialCondition::Required { hint: hint.clone() },
+                }
+            }
         }
     }
 }
@@ -453,7 +450,10 @@ pub fn join_model_routes_with_reach(
                 continue;
             }
             for item in matches {
-                claimed.insert((item.provider.to_string(), item.provider_native_id.clone()));
+                claimed.insert((
+                    item.provider.to_string(),
+                    item.provider_native_id.clone(),
+                ));
                 let mut provenance = vec![entry.source.to_string(), item.detection_ref.clone()];
                 if let Some(source) = &item.inventory_source {
                     provenance.push(source.clone());
@@ -674,11 +674,7 @@ mod tests {
             ],
             &CredentialEvidence::default(),
         );
-        assert_eq!(
-            join.models.len(),
-            1,
-            "one Model candidate, not one per route"
-        );
+        assert_eq!(join.models.len(), 1, "one Model candidate, not one per route");
         assert_eq!(join.route_sets.len(), 1);
         assert_eq!(join.route_sets[0].viable().len(), 2, "two routes");
         assert_eq!(join.models[0].availability, Availability::Available);
@@ -688,11 +684,7 @@ mod tests {
     #[test]
     fn losing_one_route_keeps_the_same_model_ref_and_the_other_route() {
         let catalogue = catalogue(&[("model:llama3.2", "provider:ollama", &["llama3.2:latest"])]);
-        let before = join_model_routes(
-            &catalogue,
-            &[seen("provider:ollama", "llama3.2:latest")],
-            &CredentialEvidence::default(),
-        );
+        let before = join_model_routes(&catalogue, &[seen("provider:ollama", "llama3.2:latest")], &CredentialEvidence::default());
         let after = join_model_routes(&catalogue, &[], &CredentialEvidence::default());
         assert_eq!(before.route_sets[0].model, after.route_sets[0].model);
         assert!(before.route_sets[0].is_available());
@@ -708,11 +700,7 @@ mod tests {
     #[test]
     fn a_discovered_model_with_no_catalogue_map_is_an_offer_not_an_invented_ref() {
         let catalogue = catalogue(&[("model:llama3.2", "provider:ollama", &["llama3.2:latest"])]);
-        let join = join_model_routes(
-            &catalogue,
-            &[seen("provider:ollama", "mystery-model:7b")],
-            &CredentialEvidence::default(),
-        );
+        let join = join_model_routes(&catalogue, &[seen("provider:ollama", "mystery-model:7b")], &CredentialEvidence::default());
         assert_eq!(join.unmatched.len(), 1);
         assert_eq!(join.unmatched[0].provider_native_id, "mystery-model:7b");
         // No Model was invented for it.
@@ -720,10 +708,12 @@ mod tests {
             .route_sets
             .iter()
             .all(|set| set.model.as_str() == "model:llama3.2"));
-        assert!(join
-            .models
-            .iter()
-            .all(|model| model.resource.descriptor.id.as_str() != "mystery-model:7b"));
+        assert!(join.models.iter().all(|model| model
+            .resource
+            .descriptor
+            .id
+            .as_str()
+            != "mystery-model:7b"));
     }
 
     #[test]
@@ -733,10 +723,7 @@ mod tests {
         observed.also_known_as = vec!["llama3.2:latest".into()];
         let join = join_model_routes(&catalogue, &[observed], &CredentialEvidence::default());
         assert!(join.unmatched.is_empty());
-        assert_eq!(
-            join.route_sets[0].viable()[0].provider_native_id,
-            "llama3.2"
-        );
+        assert_eq!(join.route_sets[0].viable()[0].provider_native_id, "llama3.2");
     }
 
     struct StubRunner(String);
@@ -789,9 +776,7 @@ mod tests {
         );
         let (observed, notes) = observed_provider_models(&detection);
         assert!(observed.is_empty());
-        assert!(notes
-            .iter()
-            .any(|note| note.contains("a count is not an identity")));
+        assert!(notes.iter().any(|note| note.contains("a count is not an identity")));
     }
 
     #[test]

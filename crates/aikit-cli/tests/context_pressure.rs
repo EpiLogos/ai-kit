@@ -18,9 +18,7 @@ fn write(path: &std::path::Path, body: &str) {
 }
 
 fn capsule(home: &std::path::Path, name: &str, event: &str) {
-    let root = home.join(format!(
-        "registries/personal/capsules/hook/continuity/{name}"
-    ));
+    let root = home.join(format!("registries/personal/capsules/hook/continuity/{name}"));
     write(
         &root.join("manifest.toml"),
         &format!(
@@ -160,10 +158,7 @@ fn ordinary_payload_becomes_increasingly_bounded_as_the_window_fills() {
     let depleted = ordinary_lines(&turn_at(&service, "depleted-scope", 2));
     let critical = ordinary_lines(&turn_at(&service, "critical-scope", 3));
 
-    assert_eq!(
-        fresh, 36,
-        "three domains of twelve ordinary rules arrive whole"
-    );
+    assert_eq!(fresh, 36, "three domains of twelve ordinary rules arrive whole");
     assert!(
         fresh > moderate && moderate > depleted && depleted > critical,
         "strictly increasing bound: {fresh} {moderate} {depleted} {critical}"

@@ -162,11 +162,7 @@ mod tests {
     #[test]
     fn an_internal_facing_capability_is_never_surfaced() {
         assert_eq!(
-            plan_surfacing(
-                Facing::Internal,
-                None,
-                &DisplayContext::interactive_terminal()
-            ),
+            plan_surfacing(Facing::Internal, None, &DisplayContext::interactive_terminal()),
             SurfacingPlan::NotShown
         );
         // Even one that mistakenly carries a surface preference.
@@ -198,10 +194,7 @@ mod tests {
         );
         match &plan {
             SurfacingPlan::Artifact { reason } => {
-                assert!(
-                    reason.contains("no display"),
-                    "the reason is stated: {reason}"
-                );
+                assert!(reason.contains("no display"), "the reason is stated: {reason}");
             }
             other => panic!("a headless context must not claim to show anything: {other:?}"),
         }
@@ -236,28 +229,17 @@ mod tests {
     fn ci_is_headless_even_with_a_terminal_attached() {
         let ci = DisplayContext::detect(true, true, true);
         assert!(ci.headless, "nobody is watching a CI run");
-        assert!(
-            !ci.notebook,
-            "a notebook marker in CI is not a live session"
-        );
+        assert!(!ci.notebook, "a notebook marker in CI is not a live session");
     }
 
     #[test]
     fn an_undeclared_surface_takes_the_best_the_surroundings_offer() {
         assert_eq!(
-            plan_surfacing(
-                Facing::External,
-                None,
-                &DisplayContext::detect(true, true, false)
-            ),
+            plan_surfacing(Facing::External, None, &DisplayContext::detect(true, true, false)),
             SurfacingPlan::Notebook
         );
         assert_eq!(
-            plan_surfacing(
-                Facing::External,
-                None,
-                &DisplayContext::interactive_terminal()
-            ),
+            plan_surfacing(Facing::External, None, &DisplayContext::interactive_terminal()),
             SurfacingPlan::Browser
         );
         assert!(matches!(

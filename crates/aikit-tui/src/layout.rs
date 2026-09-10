@@ -26,8 +26,8 @@
 
 use aikit_core::resolve::UnavailableReason;
 use aikit_core::scope::ScopeKind;
-use aikit_core::search::DocStatus;
 use aikit_core::RelationDirection;
+use aikit_core::search::DocStatus;
 use ratatui::layout::Rect;
 use ratatui::symbols::border;
 
@@ -245,10 +245,7 @@ impl Glyphs {
         }
         let utf8 = ["LC_ALL", "LC_CTYPE", "LANG"].iter().any(|key| {
             std::env::var(key)
-                .map(|v| {
-                    v.to_ascii_lowercase().contains("utf-8")
-                        || v.to_ascii_lowercase().contains("utf8")
-                })
+                .map(|v| v.to_ascii_lowercase().contains("utf-8") || v.to_ascii_lowercase().contains("utf8"))
                 .unwrap_or(false)
         });
         if utf8 {
@@ -547,7 +544,11 @@ impl Glyphs {
 /// The unavailable case borrows core's own wording rather than paraphrasing it,
 /// so the palette and `aikit explain` cannot drift into describing the same
 /// refusal two different ways.
-pub fn state_note(status: DocStatus, reason: Option<&UnavailableReason>, glyphs: Glyphs) -> String {
+pub fn state_note(
+    status: DocStatus,
+    reason: Option<&UnavailableReason>,
+    glyphs: Glyphs,
+) -> String {
     let dash = glyphs.dash();
     match (status, reason) {
         (DocStatus::Active, _) => "active".to_string(),

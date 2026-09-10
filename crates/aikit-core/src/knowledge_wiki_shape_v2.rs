@@ -122,12 +122,14 @@ pub fn wiki_node_stance(node: &WikiNode) -> Result<Option<WikiQlNodeStance>> {
                 "node stance declaration carries no stance",
             )
         })?;
-    WikiQlNodeStance::parse(raw).map(Some).ok_or_else(|| {
-        AikitError::new(
-            "knowledge.wiki_invalid_stance",
-            format!("node stance `{raw}` is neither `1` nor `0/1`"),
-        )
-    })
+    WikiQlNodeStance::parse(raw)
+        .map(Some)
+        .ok_or_else(|| {
+            AikitError::new(
+                "knowledge.wiki_invalid_stance",
+                format!("node stance `{raw}` is neither `1` nor `0/1`"),
+            )
+        })
 }
 
 /// The structural floor for a constellation that *declares* its shape.
@@ -326,12 +328,7 @@ mod tests {
     /// generated `Xi-through-Xi′` relations, anchor as the whole.
     fn arbitration_constellation() -> WikiConstellation {
         let direct = [
-            "continuity",
-            "criterion",
-            "delineation",
-            "arbitration",
-            "con-text",
-            "resolution",
+            "continuity", "criterion", "delineation", "arbitration", "con-text", "resolution",
         ];
         let conjugate = [
             "indeterminacy",
@@ -532,7 +529,10 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            generated.insert(position as u8, reference(&format!("wiki:node:t09:{name}")));
+            generated.insert(
+                position as u8,
+                reference(&format!("wiki:node:t09:{name}")),
+            );
         }
         let compression = compress_six_plus_six_prime(&constellation, &generated).unwrap();
         assert_eq!(compression.composites.len(), 6);
@@ -540,14 +540,8 @@ mod tests {
         assert_eq!(compression.trinity.slash, "6+6′");
         assert_eq!(compression.trinity.one, "6′");
         // #3 is exact: arbitration-in-crisis sits at position 3.
-        assert_eq!(
-            compression.composites[3].direct_ref.as_str(),
-            "wiki:node:t09:arbitration"
-        );
-        assert_eq!(
-            compression.composites[3].conjugate_ref.as_str(),
-            "wiki:node:t09:crisis"
-        );
+        assert_eq!(compression.composites[3].direct_ref.as_str(), "wiki:node:t09:arbitration");
+        assert_eq!(compression.composites[3].conjugate_ref.as_str(), "wiki:node:t09:crisis");
         assert_eq!(
             compression.composites[3].generated_ref.as_str(),
             "wiki:node:t09:arbitration-in-crisis"

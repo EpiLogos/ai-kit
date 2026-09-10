@@ -92,9 +92,8 @@ fn one_action_can_project_through_multiple_surfaces_without_identity_multiplicat
     }
     catalog.insert_component(component);
 
-    let composition =
-        resolve_harness_composition(&catalog, request(vec![selection("component/actions")]))
-            .unwrap();
+    let composition = resolve_harness_composition(&catalog, request(vec![selection("component/actions")]))
+        .unwrap();
 
     assert_eq!(composition.projections.len(), 2);
     assert!(composition
@@ -145,9 +144,11 @@ fn non_action_reading_projects_to_a_surface_without_becoming_an_action() {
     });
     catalog.insert_component(component);
 
-    let composition =
-        resolve_harness_composition(&catalog, request(vec![selection("component/trajectory")]))
-            .unwrap();
+    let composition = resolve_harness_composition(
+        &catalog,
+        request(vec![selection("component/trajectory")]),
+    )
+    .unwrap();
 
     assert_eq!(composition.projections.len(), 1);
     assert_eq!(composition.projections[0].canonical_ref, reading_ref);
@@ -171,12 +172,15 @@ fn required_and_optional_requirements_bind_or_degrade_explicitly() {
         .push(ComponentRequirement::optional(telemetry.clone()));
     catalog.insert_component(consumer);
     catalog.add_provider(
-        ContractProvider::available(filesystem.clone(), r("provider/fs/native")).with_priority(10),
+        ContractProvider::available(filesystem.clone(), r("provider/fs/native"))
+            .with_priority(10),
     );
 
-    let composition =
-        resolve_harness_composition(&catalog, request(vec![selection("component/agent-loop")]))
-            .unwrap();
+    let composition = resolve_harness_composition(
+        &catalog,
+        request(vec![selection("component/agent-loop")]),
+    )
+    .unwrap();
 
     assert_eq!(composition.contract_bindings.len(), 1);
     assert_eq!(composition.contract_bindings[0].contract, filesystem);
@@ -219,9 +223,9 @@ fn provider_substitution_is_deterministic_and_preserves_contract_identity() {
     let mut catalog = CompositionCatalog::default();
     let contract = r("contract/session-store");
     let mut component = live_component("component/session");
-    component
-        .requirements
-        .push(ComponentRequirement::required(contract.clone()).with_compatibility("append-log"));
+    component.requirements.push(
+        ComponentRequirement::required(contract.clone()).with_compatibility("append-log"),
+    );
     catalog.insert_component(component);
     catalog.add_provider(
         ContractProvider::available(contract.clone(), r("provider/z-secondary"))
@@ -234,9 +238,11 @@ fn provider_substitution_is_deterministic_and_preserves_contract_identity() {
             .with_compatibility("append-log"),
     );
 
-    let composition =
-        resolve_harness_composition(&catalog, request(vec![selection("component/session")]))
-            .unwrap();
+    let composition = resolve_harness_composition(
+        &catalog,
+        request(vec![selection("component/session")]),
+    )
+    .unwrap();
 
     assert_eq!(composition.contract_bindings[0].contract, contract);
     assert_eq!(
@@ -263,18 +269,9 @@ fn resolution_activation_and_lifetime_scopes_remain_independent() {
     let binding = &composition.component_bindings[0];
 
     assert_eq!(binding.resolution_scope.scope, ScopeKind::Project);
-    assert_eq!(
-        binding.activation_scope.kind,
-        ActivationScopeKind::AgentSession
-    );
-    assert_eq!(
-        binding.lifetime_owner.kind,
-        LifetimeOwnerKind::ComponentContext
-    );
-    assert_eq!(
-        binding.activation_mode,
-        CompositionActivationMode::LiveMounted
-    );
+    assert_eq!(binding.activation_scope.kind, ActivationScopeKind::AgentSession);
+    assert_eq!(binding.lifetime_owner.kind, LifetimeOwnerKind::ComponentContext);
+    assert_eq!(binding.activation_mode, CompositionActivationMode::LiveMounted);
 }
 
 #[test]
@@ -283,14 +280,14 @@ fn body_can_change_without_project_agent_or_harness_identity_drift() {
     catalog.insert_component(live_component("component/tools"));
     catalog.insert_component(live_component("component/ui"));
 
-    let body_zero =
-        resolve_harness_composition(&catalog, request(vec![selection("component/tools")])).unwrap();
+    let body_zero = resolve_harness_composition(
+        &catalog,
+        request(vec![selection("component/tools")]),
+    )
+    .unwrap();
     let body_one = resolve_harness_composition(
         &catalog,
-        request(vec![
-            selection("component/tools"),
-            selection("component/ui"),
-        ]),
+        request(vec![selection("component/tools"), selection("component/ui")]),
     )
     .unwrap();
 
@@ -303,8 +300,8 @@ fn body_can_change_without_project_agent_or_harness_identity_drift() {
 
 #[test]
 fn thin_static_harness_is_a_valid_empty_composition() {
-    let composition =
-        resolve_harness_composition(&CompositionCatalog::default(), request(vec![])).unwrap();
+    let composition = resolve_harness_composition(&CompositionCatalog::default(), request(vec![]))
+        .unwrap();
 
     assert!(composition.component_bindings.is_empty());
     assert!(composition.contract_bindings.is_empty());

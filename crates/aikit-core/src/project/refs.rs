@@ -11,17 +11,12 @@ pub struct ProjectRef(String);
 impl ProjectRef {
     pub fn parse(raw: &str) -> Result<Self> {
         if raw.is_empty() || raw != raw.trim() || raw.contains('\0') {
-            return Err(AikitError::new(
-                "project.invalid_ref",
-                "invalid Project reference",
-            ));
+            return Err(AikitError::new("project.invalid_ref", "invalid Project reference"));
         }
         Ok(Self(raw.to_string()))
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+    pub fn as_str(&self) -> &str { &self.0 }
 }
 
 impl fmt::Display for ProjectRef {
@@ -45,9 +40,7 @@ impl ProjectConstituentRef {
         Ok(Self(raw.to_string()))
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+    pub fn as_str(&self) -> &str { &self.0 }
 }
 
 impl fmt::Display for ProjectConstituentRef {

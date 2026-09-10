@@ -7,8 +7,8 @@
 
 use aikit_adapters::clients::cursor::{CursorAdapter, PRODUCT, RULE_PATH};
 use aikit_core::harness_admission::{
-    verify_activation_truth, FacultySupport, HarnessActivationObservation, HarnessActivationState,
-    HarnessAdmissionAdapter, HARNESS_ADAPTER_SDK_VERSION,
+    FacultySupport, HARNESS_ADAPTER_SDK_VERSION, HarnessActivationObservation,
+    HarnessActivationState, HarnessAdmissionAdapter, verify_activation_truth,
 };
 use aikit_core::platform::TargetId;
 use aikit_core::projection::{ActivationEffect, ProjectionItem, ProjectionPlan, TargetAdapter};

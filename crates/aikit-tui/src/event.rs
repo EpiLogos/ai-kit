@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use crossterm::event::{poll, read, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, poll, read};
 
 use aikit_core::error::AikitError;
 use aikit_core::Result;
@@ -40,10 +40,7 @@ impl Default for CrosstermEvents {
 impl EventSource for CrosstermEvents {
     fn next(&mut self) -> Result<Option<PaletteEvent>> {
         let io = |e: std::io::Error| {
-            AikitError::new(
-                "tui.terminal_read_failed",
-                format!("could not read a key: {e}"),
-            )
+            AikitError::new("tui.terminal_read_failed", format!("could not read a key: {e}"))
         };
         if !poll(self.poll_interval).map_err(io)? {
             return Ok(Some(PaletteEvent::Idle));
@@ -70,11 +67,9 @@ impl ScriptedEvents {
     }
 
     pub fn keys(codes: impl IntoIterator<Item = KeyCode>) -> Self {
-        Self::new(
-            codes
-                .into_iter()
-                .map(|code| PaletteEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))),
-        )
+        Self::new(codes.into_iter().map(|code| {
+            PaletteEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+        }))
     }
 
     pub fn push(&mut self, event: PaletteEvent) {

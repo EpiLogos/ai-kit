@@ -27,8 +27,8 @@
 //! failure is propagated instead of swallowed.
 
 pub mod admission;
-pub mod agent_skills;
 pub mod aider;
+pub mod agent_skills;
 pub mod antigravity;
 pub mod bootstrap;
 pub mod broker;

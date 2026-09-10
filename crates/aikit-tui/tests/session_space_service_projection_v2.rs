@@ -78,10 +78,7 @@ fn canonical_application_service_projects_session_space_preview_apply_history_an
     let home = AikitHome::at(temp.path().join("aikit-home"));
     home.ensure_layout().unwrap();
     let fixture = Fixture::new(temp.path(), vec![]);
-    let mut backend = HomeBackend {
-        inner: fixture,
-        home,
-    };
+    let mut backend = HomeBackend { inner: fixture, home };
     let mut service = ApplicationService::new(&mut backend);
     let space = SessionSpaceRef::parse("session-space/tui-service").unwrap();
 

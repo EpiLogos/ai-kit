@@ -17,9 +17,7 @@ fn write(path: &std::path::Path, body: &str) {
 
 fn root_service(home_path: &std::path::Path, cwd: &std::path::Path, selected: bool) -> Service {
     let root = home_path.join("registries/personal/capsules/hook/continuity/project-recency");
-    write(
-        &root.join("manifest.toml"),
-        r#"schema = 1
+    write(&root.join("manifest.toml"), r#"schema = 1
 id = "hook/continuity/project-recency"
 kind = "hook"
 name = "Project recency"
@@ -27,8 +25,7 @@ description = "Bounds the automatic root project horizon."
 [hook]
 entry = "payload/project-recency"
 events = ["SessionStart"]
-"#,
-    );
+"#);
     let payload = root.join("payload/project-recency");
     write(&payload, "#!/bin/sh\nexit 0\n");
     let mut permissions = std::fs::metadata(&payload).unwrap().permissions();
@@ -77,60 +74,36 @@ fn root_session_horizon_is_opt_in_and_reacts_to_new_activity_without_reregistrat
         let home = AikitHome::at(&home_path);
         home.ensure_layout().unwrap();
         let project = projects::bind(
-            &home,
-            "project-a",
-            std::slice::from_ref(&project),
-            &[],
-            &[],
-            true,
-        )
-        .unwrap()
-        .directories[0]
-            .clone();
+            &home, "project-a", std::slice::from_ref(&project), &[], &[], true,
+        ).unwrap().directories[0].clone();
 
         let service = root_service(&home_path, &root_cwd, selected);
         let start = HookEvent::new("claude", HookEventKind::SessionStart, json!({}));
         let before = service.dispatch_hook(&start).unwrap();
         assert_eq!(
-            before
-                .injected
-                .iter()
-                .any(|block| block.contains("project-recency")),
+            before.injected.iter().any(|block| block.contains("project-recency")),
             selected,
             "selection alone determines whether the root recency horizon runs"
         );
         if selected {
-            assert!(before
-                .injected
-                .iter()
-                .any(|block| block.contains("unknown=1")));
+            assert!(before.injected.iter().any(|block| block.contains("unknown=1")));
         }
 
-        service
-            .index()
-            .record_project_activity(&ProjectActivityEvidence::new(
-                &project,
-                Timestamp::now(),
-                ContextId::generate(),
-                Some("Edit".into()),
-                Some("src/lib.rs".into()),
-            ))
-            .unwrap();
+        service.index().record_project_activity(&ProjectActivityEvidence::new(
+            &project,
+            Timestamp::now(),
+            ContextId::generate(),
+            Some("Edit".into()),
+            Some("src/lib.rs".into()),
+        )).unwrap();
         let after = service.dispatch_hook(&start).unwrap();
         if selected {
-            let horizon = after
-                .injected
-                .iter()
-                .find(|block| block.contains("project-recency"))
-                .unwrap();
+            let horizon = after.injected.iter().find(|block| block.contains("project-recency")).unwrap();
             assert!(horizon.contains("project-a"));
             assert!(horizon.contains(&project.display().to_string()));
             assert!(horizon.contains("unknown=0"));
-            assert_eq!(
-                projects::load_all(service.home()).unwrap().len(),
-                1,
-                "reactivation used the receipt, not a registration rewrite"
-            );
+            assert_eq!(projects::load_all(service.home()).unwrap().len(), 1,
+                "reactivation used the receipt, not a registration rewrite");
         }
     }
 }

@@ -60,11 +60,7 @@ pub fn plan_script(
     let script = capsule.script().ok_or_else(|| {
         AikitError::new(
             "run.not_runnable",
-            format!(
-                "{} is a {} and cannot be run",
-                capsule.id,
-                capsule.kind.as_str()
-            ),
+            format!("{} is a {} and cannot be run", capsule.id, capsule.kind.as_str()),
         )
         .with("capability", capsule.id.to_string())
         .with("kind", capsule.kind.as_str())

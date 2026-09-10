@@ -13,11 +13,10 @@ fn native_registration_readback_and_remove_preserve_session_space_identity() {
     let runtime = SessionSpaceRuntime::open(SessionSpaceDefinition::new(space.clone())).unwrap();
     let contribution_ref =
         SessionSpaceContributionRef::parse("session-space-contribution/factory-build").unwrap();
-    let definition =
-        SessionSpaceContributionDefinition::new(contribution_ref.clone(), space.clone())
-            .with_provider(ResourceRef::parse("provider/factory-build").unwrap())
-            .with_surface(ResourceRef::parse("surface/factory-build").unwrap())
-            .with_provenance("package lifecycle conformance");
+    let definition = SessionSpaceContributionDefinition::new(contribution_ref.clone(), space.clone())
+        .with_provider(ResourceRef::parse("provider/factory-build").unwrap())
+        .with_surface(ResourceRef::parse("surface/factory-build").unwrap())
+        .with_provenance("package lifecycle conformance");
 
     let mut registry = SessionSpaceContributionRegistry::default();
     let registration = registry.register(definition.clone()).unwrap();

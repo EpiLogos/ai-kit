@@ -8,9 +8,7 @@ use aikit_adapters::central_world_sources::{
     BINDING_EXTENSION,
 };
 use aikit_adapters::runner::{CommandRunner, Output};
-use aikit_core::{
-    ResourceRef, SemanticRevision, SourceRef, WikiNode, WikiObject, WikiProvenanceRef,
-};
+use aikit_core::{ResourceRef, SemanticRevision, SourceRef, WikiNode, WikiObject, WikiProvenanceRef};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -139,11 +137,7 @@ fn binding_annotates_entities_with_propagation_and_keeps_refs() {
     let mut absences = Vec::new();
     bind_project_context(&mut objects, &binding(), &mut absences);
     assert_eq!(objects.len(), 1, "the entity binds, it is not replaced");
-    assert_eq!(
-        objects[0].ref_id().as_str(),
-        "wiki:node:identity",
-        "same ref — no second human"
-    );
+    assert_eq!(objects[0].ref_id().as_str(), "wiki:node:identity", "same ref — no second human");
     let WikiObject::Node(node) = &objects[0] else {
         panic!("entity node");
     };
@@ -176,18 +170,10 @@ fn excluded_source_withholds_the_entity_from_the_context_and_discloses() {
     let mut absences = Vec::new();
     bind_project_context(&mut objects, &world, &mut absences);
     let refs: Vec<_> = objects.iter().map(|o| o.ref_id().as_str()).collect();
+    assert!(!refs.contains(&"wiki:node:identity"), "excluded source withholds the entity in this context");
+    assert!(refs.contains(&"wiki:node:pasu:agent:agent/x"), "unrelated entities still bind");
     assert!(
-        !refs.contains(&"wiki:node:identity"),
-        "excluded source withholds the entity in this context"
-    );
-    assert!(
-        refs.contains(&"wiki:node:pasu:agent:agent/x"),
-        "unrelated entities still bind"
-    );
-    assert!(
-        absences
-            .iter()
-            .any(|a| a.contains("withheld") && a.contains("excluded")),
+        absences.iter().any(|a| a.contains("withheld") && a.contains("excluded")),
         "{absences:?}"
     );
 }
@@ -210,15 +196,9 @@ fn project_stand_in_redeclaring_a_subject_is_refused() {
     let mut absences = Vec::new();
     bind_project_context(&mut objects, &binding(), &mut absences);
     let refs: Vec<_> = objects.iter().map(|o| o.ref_id().as_str()).collect();
-    assert_eq!(
-        refs,
-        vec!["wiki:node:identity"],
-        "the materialised entity keeps the subject"
-    );
+    assert_eq!(refs, vec!["wiki:node:identity"], "the materialised entity keeps the subject");
     assert!(
-        absences
-            .iter()
-            .any(|a| a.contains("re-declares") && a.contains("kept the materialised entity")),
+        absences.iter().any(|a| a.contains("re-declares") && a.contains("kept the materialised entity")),
         "{absences:?}"
     );
 }
@@ -234,11 +214,7 @@ fn empty_binding_leaves_objects_untouched() {
     let mut absences = Vec::new();
     bind_project_context(
         &mut objects,
-        &WorldBinding {
-            world_ref: "project:alpha".into(),
-            inherited_root_lineage: true,
-            sources: Vec::new(),
-        },
+        &WorldBinding { world_ref: "project:alpha".into(), inherited_root_lineage: true, sources: Vec::new() },
         &mut absences,
     );
     assert_eq!(objects.len(), 1);
@@ -264,9 +240,7 @@ fn effective_sources_action_contract_is_pinned_and_parsed() {
     let seen = runner.seen.lock().unwrap();
     let argv = &seen[0];
     assert_eq!(argv[0], "ctrl");
-    assert!(argv
-        .windows(2)
-        .any(|pair| pair[0] == "--root" && pair[1] == "/tmp/central"));
+    assert!(argv.windows(2).any(|pair| pair[0] == "--root" && pair[1] == "/tmp/central"));
     assert!(argv.windows(3).any(|pair| pair[0] == "action"
         && pair[1] == "run"
         && pair[2] == "central.world.effective-sources"));
@@ -286,23 +260,11 @@ fn project_without_world_relations_falls_back_to_the_root_lineage() {
     )
     .failing_on("project:beta");
     let mut absences = Vec::new();
-    let world = read_project_binding(
-        &runner,
-        Path::new("ctrl"),
-        &PathBuf::from("/tmp/central"),
-        "Beta",
-        &mut absences,
-    )
-    .expect("root lineage applies when the project declares no world");
-    assert!(
-        world.inherited_root_lineage,
-        "the convention is disclosed, never silent"
-    );
+    let world = read_project_binding(&runner, Path::new("ctrl"), &PathBuf::from("/tmp/central"), "Beta", &mut absences)
+        .expect("root lineage applies when the project declares no world");
+    assert!(world.inherited_root_lineage, "the convention is disclosed, never silent");
     assert_eq!(world.sources[0].effective_revision, "1");
-    assert!(
-        absences.iter().any(|a| a.contains("root lineage applies")),
-        "{absences:?}"
-    );
+    assert!(absences.iter().any(|a| a.contains("root lineage applies")), "{absences:?}");
 }
 
 #[test]
@@ -316,10 +278,7 @@ fn world_relations_unavailable_degrades_to_uncontextualised() {
         "Gamma",
         &mut absences,
     );
-    assert!(
-        world.is_none(),
-        "fail-open: no binding, composition proceeds"
-    );
+    assert!(world.is_none(), "fail-open: no binding, composition proceeds");
     assert!(
         absences.iter().any(|a| a.contains("uncontextualised")),
         "{absences:?}"

@@ -6,8 +6,8 @@
 
 use aikit_adapters::clients::dsh::{DshAdapter, PRODUCT};
 use aikit_core::harness_admission::{
-    verify_activation_truth, FacultySupport, HarnessActivationObservation, HarnessActivationState,
-    HarnessAdmissionAdapter, HARNESS_ADAPTER_SDK_VERSION,
+    verify_activation_truth, FacultySupport, HarnessActivationObservation,
+    HarnessActivationState, HarnessAdmissionAdapter, HARNESS_ADAPTER_SDK_VERSION,
 };
 use aikit_core::platform::TargetId;
 use aikit_core::projection::{ActivationEffect, ProjectionPlan, TargetAdapter};
@@ -36,10 +36,7 @@ fn admission_is_evidence_backed_and_validates() {
     let admission = adapter.admission();
     assert_eq!(admission.schema, HARNESS_ADAPTER_SDK_VERSION);
     assert_eq!(admission.product, PRODUCT);
-    assert_eq!(
-        admission.edition,
-        aikit_core::harness_admission::HarnessEditionKind::Custom
-    );
+    assert_eq!(admission.edition, aikit_core::harness_admission::HarnessEditionKind::Custom);
     // A model running in DSH is not the Agent identity; no actuation is claimed.
     assert!(admission.realised_actuation_ref.is_none());
 

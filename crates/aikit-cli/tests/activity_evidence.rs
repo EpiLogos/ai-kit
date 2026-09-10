@@ -22,9 +22,7 @@ fn service_with_selection(
     selected: bool,
 ) -> Service {
     let root = home.join("registries/personal/capsules/hook/continuity/activity-evidence");
-    write(
-        &root.join("manifest.toml"),
-        r#"schema = 1
+    write(&root.join("manifest.toml"), r#"schema = 1
 id = "hook/continuity/activity-evidence"
 kind = "hook"
 name = "Activity evidence"
@@ -32,8 +30,7 @@ description = "Records attributed project activity."
 [hook]
 entry = "payload/activity-evidence"
 events = ["PostToolUse"]
-"#,
-    );
+"#);
     let payload = root.join("payload/activity-evidence");
     write(&payload, "#!/bin/sh\nexit 0\n");
     let mut permissions = std::fs::metadata(&payload).unwrap().permissions();
@@ -50,21 +47,16 @@ events = ["PostToolUse"]
     let context = ContextId::generate();
     let mut env = BTreeMap::new();
     env.insert("AIKIT_CONTEXT_ID".to_owned(), context.to_string());
-    let mut service =
-        Service::open(AikitHome::at(home), project, |key| env.get(key).cloned()).unwrap();
+    let mut service = Service::open(AikitHome::at(home), project, |key| env.get(key).cloned()).unwrap();
 
     // The real personal-source trust gate must be crossed before a hook can
     // become operative. Tests record the same explicit review production uses.
     let id = CapsuleId::parse("hook/continuity/activity-evidence").unwrap();
     let capsule = service.snapshot().get(&id).unwrap();
     let key = TrustKey::new(
-        capsule.source.clone().unwrap(),
-        id,
-        capsule.revision.clone().unwrap(),
-    );
-    TrustStore::new(service.index())
-        .record(&key, TrustState::Trusted, Some("test review"))
-        .unwrap();
+        capsule.source.clone().unwrap(), id,
+        capsule.revision.clone().unwrap());
+    TrustStore::new(service.index()).record(&key, TrustState::Trusted, Some("test review")).unwrap();
     service.refresh().unwrap();
     service
 }
@@ -140,21 +132,15 @@ fn service_dispatch_records_only_when_the_capability_is_composed() {
         let project = tmp.path().join("project");
         let service = service_with_selection(&home, &project, selected);
         let event = HookEvent::new(
-            "claude",
-            HookEventKind::PostToolUse,
+            "claude", HookEventKind::PostToolUse,
             json!({"tool_input": {"file_path": project.join("src/lib.rs")}}),
-        )
-        .with_tool_name("Edit")
-        .in_cwd(&project);
+        ).with_tool_name("Edit").in_cwd(&project);
 
         let decision = service.dispatch_hook(&event).unwrap();
         assert!(decision.allowed);
         assert!(decision.warnings.is_empty(), "{:?}", decision.warnings);
         let stored = service.index().project_last_activity(&project).unwrap();
-        assert_eq!(
-            stored.is_some(),
-            selected,
-            "selection alone determines whether PostToolUse leaves activity evidence"
-        );
+        assert_eq!(stored.is_some(), selected,
+            "selection alone determines whether PostToolUse leaves activity evidence");
     }
 }

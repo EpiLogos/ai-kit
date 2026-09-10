@@ -419,10 +419,7 @@ impl ClientAdapter for ClaudeAdapter {
 ///
 /// Delegates to the shared Claude-grammar merge with claude-code's matcher
 /// policy: tool names match against a glob, and `*` is its match-all.
-pub fn merge_dispatcher_entries(
-    existing: Option<&str>,
-    events: &DescriptorEvents,
-) -> Result<String> {
+pub fn merge_dispatcher_entries(existing: Option<&str>, events: &DescriptorEvents) -> Result<String> {
     super::hook_map::merge_hook_map_entries(
         existing,
         events,

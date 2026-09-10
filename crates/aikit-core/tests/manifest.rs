@@ -67,10 +67,7 @@ source_event = "repeated-successful-command"
 fn parses_a_full_script_manifest() {
     let capsule = Capsule::from_toml_str(SCRIPT_MANIFEST).expect("manifest should parse");
 
-    assert_eq!(
-        capsule.id,
-        CapsuleId::parse("script/test/pytest-gate").unwrap()
-    );
+    assert_eq!(capsule.id, CapsuleId::parse("script/test/pytest-gate").unwrap());
     assert_eq!(capsule.kind, Kind::Script);
     assert_eq!(capsule.maturity, Maturity::Candidate);
     assert_eq!(capsule.tags, vec!["python", "test", "verification"]);
@@ -308,11 +305,9 @@ fn capsule_id_round_trips_and_rejects_malformed_input() {
 
 #[test]
 fn capsule_ids_order_deterministically_for_stable_hashing() {
-    let mut ids = [
-        CapsuleId::parse("script/test/b").unwrap(),
+    let mut ids = [CapsuleId::parse("script/test/b").unwrap(),
         CapsuleId::parse("skill/rust/a").unwrap(),
-        CapsuleId::parse("script/test/a").unwrap(),
-    ];
+        CapsuleId::parse("script/test/a").unwrap()];
     ids.sort();
     let rendered: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
     assert_eq!(

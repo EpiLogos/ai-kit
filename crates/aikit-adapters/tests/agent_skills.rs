@@ -96,10 +96,7 @@ fn a_directory_without_a_skill_md_is_refused_by_name() {
 fn a_skill_md_with_no_frontmatter_at_all_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("bare");
-    write(
-        &root.join("SKILL.md"),
-        "# Just a heading\n\nNo frontmatter.\n",
-    );
+    write(&root.join("SKILL.md"), "# Just a heading\n\nNo frontmatter.\n");
 
     let error = agent_skills::validate(&root).unwrap_err();
     assert_eq!(error.code(), "skill.invalid");
@@ -117,11 +114,7 @@ fn an_unterminated_frontmatter_block_is_refused_rather_than_read_as_a_body() {
 
     let error = agent_skills::validate(&root).unwrap_err();
     assert_eq!(error.code(), "skill.invalid");
-    assert!(
-        error.message().contains("closed"),
-        "got: {}",
-        error.message()
-    );
+    assert!(error.message().contains("closed"), "got: {}", error.message());
 }
 
 #[test]
@@ -129,10 +122,7 @@ fn a_missing_name_and_a_missing_description_are_each_named_specifically() {
     let dir = tempfile::tempdir().unwrap();
 
     let no_name = dir.path().join("no-name");
-    write(
-        &no_name.join("SKILL.md"),
-        "---\ndescription: Does a thing.\n---\n",
-    );
+    write(&no_name.join("SKILL.md"), "---\ndescription: Does a thing.\n---\n");
     let error = agent_skills::validate(&no_name).unwrap_err();
     assert_eq!(error.code(), "skill.invalid");
     assert!(error.message().contains("name"), "got: {}", error.message());
@@ -152,10 +142,7 @@ fn a_missing_name_and_a_missing_description_are_each_named_specifically() {
 fn an_empty_description_is_as_bad_as_a_missing_one() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("blank");
-    write(
-        &root.join("SKILL.md"),
-        "---\nname: blank\ndescription: \"  \"\n---\n",
-    );
+    write(&root.join("SKILL.md"), "---\nname: blank\ndescription: \"  \"\n---\n");
 
     assert_eq!(
         agent_skills::validate(&root).unwrap_err().code(),
@@ -246,14 +233,13 @@ fn an_effective_skill_adds_framed_orientation_without_mutating_source_or_policy(
         .unwrap();
     materialize(&items, target.path());
 
-    let rendered =
-        std::fs::read_to_string(target.path().join(".claude/skills/wayfinder/SKILL.md")).unwrap();
+    let rendered = std::fs::read_to_string(
+        target.path().join(".claude/skills/wayfinder/SKILL.md"),
+    )
+    .unwrap();
     let frontmatter: serde_yaml::Value =
         serde_yaml::from_str(rendered.split("---").nth(1).unwrap()).unwrap();
-    assert_eq!(
-        frontmatter["disable-model-invocation"].as_bool(),
-        Some(true)
-    );
+    assert_eq!(frontmatter["disable-model-invocation"].as_bool(), Some(true));
     assert_eq!(frontmatter["allowed-tools"][0].as_str(), Some("Read"));
     assert_eq!(frontmatter["allowed-tools"][1].as_str(), Some("Grep"));
     assert!(frontmatter["description"]
@@ -275,10 +261,7 @@ fn an_effective_skill_adds_framed_orientation_without_mutating_source_or_policy(
         .unwrap(),
         "Tracker operations.\n"
     );
-    assert_eq!(
-        std::fs::read_to_string(root.join("SKILL.md")).unwrap(),
-        upstream
-    );
+    assert_eq!(std::fs::read_to_string(root.join("SKILL.md")).unwrap(), upstream);
 }
 
 #[test]
@@ -329,8 +312,10 @@ fn a_projected_copy_really_reproduces_the_tree_on_disk() {
             "scripts/check.sh".to_string(),
         ]
     );
-    let projected =
-        std::fs::read_to_string(target.path().join(".claude/skills/code-review/SKILL.md")).unwrap();
+    let projected = std::fs::read_to_string(
+        target.path().join(".claude/skills/code-review/SKILL.md"),
+    )
+    .unwrap();
     assert!(
         projected.contains("name: code-review"),
         "the frontmatter has to survive the trip"

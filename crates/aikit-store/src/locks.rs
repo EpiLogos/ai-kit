@@ -144,11 +144,7 @@ impl ContextLock {
     }
 
     /// Take the lock guarding one context.
-    pub fn for_context(
-        home: &AikitHome,
-        context: &ContextId,
-        options: LockOptions,
-    ) -> Result<Self> {
+    pub fn for_context(home: &AikitHome, context: &ContextId, options: LockOptions) -> Result<Self> {
         Self::acquire(home, context.as_str(), options)
     }
 

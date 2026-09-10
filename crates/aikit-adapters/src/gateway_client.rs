@@ -18,8 +18,8 @@ use std::{
 
 use aikit_core::{AikitError, Result};
 
-use crate::gateway_runtime::GatewayResponseEnvelope;
 use crate::gateway_runtime::{GatewayCommand, GatewayRequestEnvelope, GatewayResponse};
+use crate::gateway_runtime::GatewayResponseEnvelope;
 use crate::gateway_service::{base64_encode, sha1, WEBSOCKET_GUID};
 
 pub const GATEWAY_CLIENT_VERSION: &str = "aikit.gateway-client/v1";
@@ -69,7 +69,9 @@ pub fn gateway_request(
     })?;
     match target {
         #[cfg(unix)]
-        GatewayCarrierTarget::UnixSocket(path) => unix_line_request(path, &encoded),
+        GatewayCarrierTarget::UnixSocket(path) => {
+            unix_line_request(path, &encoded)
+        }
         GatewayCarrierTarget::WebSocket {
             bind,
             path,
@@ -113,10 +115,7 @@ pub fn gateway_command(
 }
 
 #[cfg(unix)]
-fn unix_line_request(
-    path: &std::path::Path,
-    encoded_request: &str,
-) -> Result<GatewayResponseEnvelope> {
+fn unix_line_request(path: &std::path::Path, encoded_request: &str) -> Result<GatewayResponseEnvelope> {
     use std::os::unix::net::UnixStream;
 
     let mut stream = UnixStream::connect(path).map_err(|error| {
@@ -253,12 +252,14 @@ fn websocket_handshake<R: BufRead, W: Write>(
         })?;
 
     let mut status = String::new();
-    reader.read_line(&mut status).map_err(|error| {
-        AikitError::new(
-            "agency_gateway_client.handshake_read",
-            format!("read gateway upgrade status: {error}"),
-        )
-    })?;
+    reader
+        .read_line(&mut status)
+        .map_err(|error| {
+            AikitError::new(
+                "agency_gateway_client.handshake_read",
+                format!("read gateway upgrade status: {error}"),
+            )
+        })?;
     if !status.starts_with("HTTP/1.1 101") {
         return Err(AikitError::new(
             "agency_gateway_client.handshake_refused",
@@ -272,12 +273,14 @@ fn websocket_handshake<R: BufRead, W: Write>(
     let mut accept = None;
     loop {
         let mut line = String::new();
-        let bytes = reader.read_line(&mut line).map_err(|error| {
-            AikitError::new(
-                "agency_gateway_client.handshake_read",
-                format!("read gateway upgrade header: {error}"),
-            )
-        })?;
+        let bytes = reader
+            .read_line(&mut line)
+            .map_err(|error| {
+                AikitError::new(
+                    "agency_gateway_client.handshake_read",
+                    format!("read gateway upgrade header: {error}"),
+                )
+            })?;
         if bytes == 0 {
             return Err(AikitError::new(
                 "agency_gateway_client.handshake_eof",
@@ -385,12 +388,14 @@ fn write_masked_text_frame<W: Write>(writer: &mut W, payload: &[u8]) -> Result<(
 
 fn read_server_text_frame<R: io::Read>(reader: &mut R) -> Result<Vec<u8>> {
     let mut head = [0u8; 2];
-    reader.read_exact(&mut head).map_err(|error| {
-        AikitError::new(
-            "agency_gateway_client.frame_read",
-            format!("read gateway frame: {error}"),
-        )
-    })?;
+    reader
+        .read_exact(&mut head)
+        .map_err(|error| {
+            AikitError::new(
+                "agency_gateway_client.frame_read",
+                format!("read gateway frame: {error}"),
+            )
+        })?;
     let opcode = head[0] & 0x0f;
     if head[1] & 0x80 != 0 {
         return Err(AikitError::new(
@@ -458,10 +463,7 @@ mod tests {
         while !condition() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(
-            condition(),
-            "condition not reached within {deadline_seconds}s"
-        );
+        assert!(condition(), "condition not reached within {deadline_seconds}s");
     }
 
     fn descriptor() -> ConnectorDescriptor {
@@ -503,18 +505,16 @@ mod tests {
         wait_until(3, || socket.exists());
         let target = GatewayCarrierTarget::UnixSocket(socket.clone());
 
-        let protocol =
-            gateway_command(&target, GatewayCommand::Protocol, Some("protocol-1".into())).unwrap();
-        let GatewayResponse::Protocol {
-            gateway_version, ..
-        } = protocol
-        else {
+        let protocol = gateway_command(
+            &target,
+            GatewayCommand::Protocol,
+            Some("protocol-1".into()),
+        )
+        .unwrap();
+        let GatewayResponse::Protocol { gateway_version, .. } = protocol else {
             panic!("protocol command should answer with versions");
         };
-        assert_eq!(
-            gateway_version,
-            crate::gateway_runtime::AGENCY_GATEWAY_VERSION
-        );
+        assert_eq!(gateway_version, crate::gateway_runtime::AGENCY_GATEWAY_VERSION);
 
         gateway_command(
             &target,
@@ -563,8 +563,8 @@ mod tests {
             gateway_request(&reachable, GatewayCommand::Protocol, None).is_ok()
         });
 
-        let ecology =
-            gateway_command(&target, GatewayCommand::Ecology, Some("eco-1".into())).unwrap();
+        let ecology = gateway_command(&target, GatewayCommand::Ecology, Some("eco-1".into()))
+            .unwrap();
         let GatewayResponse::Ecology { ecology } = ecology else {
             panic!("expected ecology");
         };

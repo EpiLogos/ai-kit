@@ -910,21 +910,9 @@ fn control_cutover_uses_a_real_generation_and_undo_restores_the_original_tree() 
                     .unwrap()
             )
     );
-    let tree = successful(
-        home.path(),
-        project.path(),
-        &["tree", "--expand", "registries"],
-    );
-    let agents = tree["data"]["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["path"] == "registries/@agents")
-        .unwrap();
-    assert!(agents["summary"]
-        .as_str()
-        .unwrap()
-        .starts_with("generated ·"));
+    let tree = successful(home.path(), project.path(), &["tree", "--expand", "registries"]);
+    let agents = tree["data"]["rows"].as_array().unwrap().iter().find(|row| row["path"] == "registries/@agents").unwrap();
+    assert!(agents["summary"].as_str().unwrap().starts_with("generated ·"));
     assert!(!foreign.as_path().join("retired/SKILL.md").exists());
     assert!(ground.join("retired/SKILL.md").is_file());
     let procedure = confirmed["data"]["procedure"].as_str().unwrap();
@@ -956,141 +944,54 @@ fn control_cutover_uses_a_real_generation_and_undo_restores_the_original_tree() 
 #[test]
 fn mixed_harness_cutover_recovers_links_preserves_host_files_and_undoes() {
     let (home, project, authored) = fixture();
-    write(
-        &authored.path().join("recovered/SKILL.md"),
-        "---\nname: recovered\ndescription: Recovered local skill.\n---\nLocal content.\n",
-    );
+    write(&authored.path().join("recovered/SKILL.md"), "---\nname: recovered\ndescription: Recovered local skill.\n---\nLocal content.\n");
     let root = home.path().join("harness/skills");
     fs::create_dir_all(&root).unwrap();
-    std::os::unix::fs::symlink(
-        authored.path().join("deep-review"),
-        root.join("deep-review"),
-    )
-    .unwrap();
+    std::os::unix::fs::symlink(authored.path().join("deep-review"), root.join("deep-review")).unwrap();
     std::os::unix::fs::symlink("/old/moved/recovered", root.join("recovered")).unwrap();
     write(&root.join(".system/owner.txt"), "Harness-owned content");
     write(&root.join("notes.md"), "Human note");
-    write(
-        &root.join("unselected/SKILL.md"),
-        "---\nname: unselected\ndescription: Harness-local skill.\n---\nKeep me.\n",
-    );
-    successful(
-        home.path(),
-        project.path(),
-        &[
-            "source",
-            "add-directory",
-            "local",
-            authored.path().to_str().unwrap(),
-        ],
-    );
+    write(&root.join("unselected/SKILL.md"), "---\nname: unselected\ndescription: Harness-local skill.\n---\nKeep me.\n");
+    successful(home.path(), project.path(), &["source", "add-directory", "local", authored.path().to_str().unwrap()]);
     successful(home.path(), project.path(), &["source", "sync", "local"]);
     successful(home.path(), project.path(), &["source", "promote", "local"]);
     for id in ["skill/local/deep-review", "skill/local/recovered"] {
-        successful(
-            home.path(),
-            project.path(),
-            &["enable", id, "--scope", "user"],
-        );
+        successful(home.path(), project.path(), &["enable", id, "--scope", "user"]);
     }
     let applied = successful(home.path(), project.path(), &["apply"]);
-    let projection = home
-        .path()
-        .join("state/contexts")
-        .join(applied["context"]["context_id"].as_str().unwrap())
-        .join("current/projections/codex/.agents/skills");
+    let projection = home.path().join("state/contexts").join(applied["context"]["context_id"].as_str().unwrap()).join("current/projections/codex/.agents/skills");
     let pure = home.path().join(".agents/skills");
     fs::create_dir_all(&pure).unwrap();
-    let pure_args = [
-        "adopt",
-        pure.to_str().unwrap(),
-        "--projection",
-        projection.to_str().unwrap(),
-    ];
+    let pure_args = ["adopt", pure.to_str().unwrap(), "--projection", projection.to_str().unwrap()];
     let preview_pure = successful(home.path(), project.path(), &pure_args);
     let mut confirm_pure = pure_args.to_vec();
-    confirm_pure.extend([
-        "--yes",
-        "--expect-digest",
-        preview_pure["data"]["review_digest"].as_str().unwrap(),
-    ]);
+    confirm_pure.extend(["--yes", "--expect-digest", preview_pure["data"]["review_digest"].as_str().unwrap()]);
     successful(home.path(), project.path(), &confirm_pure);
-    let tree = successful(
-        home.path(),
-        project.path(),
-        &["tree", "--expand", "registries"],
-    );
-    let pure_row = tree["data"]["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["path"] == "registries/@agents")
-        .unwrap();
-    assert!(pure_row["summary"]
-        .as_str()
-        .unwrap()
-        .starts_with("generated ·"));
-    let args = [
-        "adopt",
-        root.to_str().unwrap(),
-        "--projection",
-        projection.to_str().unwrap(),
-    ];
+    let tree = successful(home.path(), project.path(), &["tree", "--expand", "registries"]);
+    let pure_row = tree["data"]["rows"].as_array().unwrap().iter().find(|r| r["path"] == "registries/@agents").unwrap();
+    assert!(pure_row["summary"].as_str().unwrap().starts_with("generated ·"));
+    let args = ["adopt", root.to_str().unwrap(), "--projection", projection.to_str().unwrap()];
     let preview = successful(home.path(), project.path(), &args);
     assert!(!root.join("recovered").exists());
     let ids = preview["data"]["capsules"].as_array().unwrap();
     assert!(ids.contains(&serde_json::json!("skill/local/deep-review")));
     assert!(ids.contains(&serde_json::json!("skill/local/recovered")));
     let mut confirm = args.to_vec();
-    confirm.extend([
-        "--yes",
-        "--expect-digest",
-        preview["data"]["review_digest"].as_str().unwrap(),
-    ]);
+    confirm.extend(["--yes", "--expect-digest", preview["data"]["review_digest"].as_str().unwrap()]);
     // Actual edits to a symlink's authored target invalidate the old review.
     let original = fs::read(authored.path().join("deep-review/SKILL.md")).unwrap();
-    fs::write(
-        authored.path().join("deep-review/SKILL.md"),
-        "Changed human content",
-    )
-    .unwrap();
+    fs::write(authored.path().join("deep-review/SKILL.md"), "Changed human content").unwrap();
     assert!(!run(home.path(), project.path(), &confirm).status.success());
     fs::write(authored.path().join("deep-review/SKILL.md"), &original).unwrap();
     let accepted = successful(home.path(), project.path(), &confirm);
     assert_eq!(accepted["data"]["ownership"], "generation-projected");
-    assert_eq!(
-        fs::read(root.join("deep-review/SKILL.md")).unwrap(),
-        original
-    );
+    assert_eq!(fs::read(root.join("deep-review/SKILL.md")).unwrap(), original);
     assert!(root.join("recovered/SKILL.md").is_file());
-    assert_eq!(
-        fs::read_to_string(root.join(".system/owner.txt")).unwrap(),
-        "Harness-owned content"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("notes.md")).unwrap(),
-        "Human note"
-    );
+    assert_eq!(fs::read_to_string(root.join(".system/owner.txt")).unwrap(), "Harness-owned content");
+    assert_eq!(fs::read_to_string(root.join("notes.md")).unwrap(), "Human note");
     assert!(root.join("unselected/SKILL.md").is_file());
-    assert_eq!(
-        successful(home.path(), project.path(), &args)["data"]["skills"],
-        0
-    );
-    successful(
-        home.path(),
-        project.path(),
-        &[
-            "procedure",
-            "undo",
-            accepted["data"]["procedure"].as_str().unwrap(),
-        ],
-    );
-    assert_eq!(
-        fs::read_link(root.join("recovered")).unwrap(),
-        Path::new("/old/moved/recovered")
-    );
-    assert_eq!(
-        fs::read_link(root.join("deep-review")).unwrap(),
-        authored.path().join("deep-review")
-    );
+    assert_eq!(successful(home.path(), project.path(), &args)["data"]["skills"], 0);
+    successful(home.path(), project.path(), &["procedure", "undo", accepted["data"]["procedure"].as_str().unwrap()]);
+    assert_eq!(fs::read_link(root.join("recovered")).unwrap(), Path::new("/old/moved/recovered"));
+    assert_eq!(fs::read_link(root.join("deep-review")).unwrap(), authored.path().join("deep-review"));
 }

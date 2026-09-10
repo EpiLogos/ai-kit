@@ -46,10 +46,7 @@ fn run() -> Result<()> {
     let cwd = match cli.cwd {
         Some(cwd) => cwd,
         None => std::env::current_dir().map_err(|error| {
-            AikitError::new(
-                "cli.cwd_unavailable",
-                format!("could not read cwd: {error}"),
-            )
+            AikitError::new("cli.cwd_unavailable", format!("could not read cwd: {error}"))
         })?,
     };
     let mut service = Service::discover(&cwd)?;
@@ -63,12 +60,12 @@ fn run() -> Result<()> {
             let resource = resource.as_deref().map(ResourceRef::parse).transpose()?;
             emit(&application.history_evidence(resource.as_ref())?)
         }
-        Command::CompareGenerations { before, after } => {
-            emit(&application.compare_generation_evidence(
+        Command::CompareGenerations { before, after } => emit(
+            &application.compare_generation_evidence(
                 &GenerationId::parse(&before)?,
                 &GenerationId::parse(&after)?,
-            )?)
-        }
+            )?,
+        ),
     }
 }
 

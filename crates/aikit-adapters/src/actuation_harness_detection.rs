@@ -248,10 +248,9 @@ impl SelfOutcome {
     /// The resolved harness ref, when exactly one marker set matched.
     pub fn resolved_harness_ref(&self) -> Option<&str> {
         match self {
-            SelfOutcome::Resolved(record) => record
-                .resolved
-                .as_ref()
-                .map(|match_| match_.harness_ref.as_str()),
+            SelfOutcome::Resolved(record) => {
+                record.resolved.as_ref().map(|match_| match_.harness_ref.as_str())
+            }
             _ => None,
         }
     }
@@ -358,10 +357,7 @@ pub fn detected_harness_resource(
     detection_ref: &str,
 ) -> Result<aikit_core::context_resolution::ResolvedResource> {
     use aikit_core::context_resolution::{Availability, ResolvedResource};
-    use aikit_core::resource::{
-        ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef, ResourceSource, SourceRef,
-        SourceState,
-    };
+    use aikit_core::resource::{ResourceDescriptor, ResourceKind, ResourceRef, ResourceRecord, ResourceSource, SourceRef, SourceState};
 
     let mut descriptor = ResourceDescriptor::new(
         ResourceRef::parse(harness_ref)?,
@@ -384,6 +380,7 @@ pub fn detected_harness_resource(
         availability: Availability::Available,
     })
 }
+
 
 // ---------------------------------------------------------------------------
 // Harness capability: what a detected harness can actually dispatch to
@@ -580,14 +577,8 @@ mod tests {
         assert_eq!(record.harnesses.len(), 3);
         assert_eq!(record.absent, vec!["aider".to_string()]);
         let pairs = outcome.detected_pairs();
-        assert_eq!(
-            pairs,
-            vec![("claude-code".to_string(), "harness/claude-code".to_string())]
-        );
-        assert_eq!(
-            outcome.detection_ref(),
-            Some("detection:2026-09-05T00:00:00Z")
-        );
+        assert_eq!(pairs, vec![("claude-code".to_string(), "harness/claude-code".to_string())]);
+        assert_eq!(outcome.detection_ref(), Some("detection:2026-09-05T00:00:00Z"));
     }
 
     #[test]

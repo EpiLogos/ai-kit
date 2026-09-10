@@ -956,8 +956,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             }
         }
         UiAction::GraphSetDepth(depth) => {
-            state.graph.depth =
-                depth.clamp(GraphPresentation::MIN_DEPTH, GraphPresentation::MAX_DEPTH);
+            state.graph.depth = depth.clamp(GraphPresentation::MIN_DEPTH, GraphPresentation::MAX_DEPTH);
         }
         UiAction::GraphIncreaseDepth => {
             state.graph.depth = state

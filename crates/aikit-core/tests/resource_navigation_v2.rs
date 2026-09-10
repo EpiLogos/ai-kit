@@ -56,23 +56,15 @@ fn zero_query_results_are_evidence_bearing_not_implicit_recommendations() {
     assert!(learned.preference.is_none());
     index.insert_resource(
         learned,
-        vec![
-            NavigationEvidence::new(NavigationEvidenceClass::LearnedUsage)
-                .with_detail("opened 7 times in this project scope"),
-        ],
+        vec![NavigationEvidence::new(NavigationEvidenceClass::LearnedUsage)
+            .with_detail("opened 7 times in this project scope")],
     );
     index.insert_resource(
         record("project/current", ResourceKind::Project, "Current project"),
-        vec![NavigationEvidence::new(
-            NavigationEvidenceClass::CurrentContext,
-        )],
+        vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)],
     );
     index.insert_resource(
-        record(
-            "project/unseen",
-            ResourceKind::Project,
-            "No navigation evidence",
-        ),
+        record("project/unseen", ResourceKind::Project, "No navigation evidence"),
         Vec::new(),
     );
 
@@ -84,9 +76,7 @@ fn zero_query_results_are_evidence_bearing_not_implicit_recommendations() {
         hits[1].navigation_evidence[0].class,
         NavigationEvidenceClass::LearnedUsage
     );
-    assert!(hits
-        .iter()
-        .all(|hit| hit.resource != rref("project/unseen")));
+    assert!(hits.iter().all(|hit| hit.resource != rref("project/unseen")));
 }
 
 #[test]
@@ -191,10 +181,7 @@ fn contextual_action_requires_canonical_action_and_subject_resources() {
         "not indexed",
         ActionStageability::NotStageable,
     ));
-    assert_eq!(
-        missing.unwrap_err().code(),
-        "resource.search_unknown_action"
-    );
+    assert_eq!(missing.unwrap_err().code(), "resource.search_unknown_action");
 }
 
 #[test]

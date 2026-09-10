@@ -152,8 +152,9 @@ pub fn parse_openrouter_catalog(
     body: &str,
     observed_at: &str,
 ) -> Result<Vec<ProviderCatalogObservation>> {
-    let value: serde_json::Value = serde_json::from_str(body)
-        .map_err(|error| AikitError::new("provider_catalog.unparsable", error.to_string()))?;
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|error| {
+        AikitError::new("provider_catalog.unparsable", error.to_string())
+    })?;
     let listed_by = ProviderRef::parse(OPENROUTER_PROVIDER)?;
     let entries = value
         .get("data")
@@ -276,7 +277,11 @@ pub fn observed_router_routes(outcome: &ProviderCatalogOutcome) -> Vec<ObservedP
             provider: observation.listed_by.clone(),
             kind: ModelRouteKind::RouterRoute,
             provider_native_id: observation.listed_variant.clone(),
-            also_known_as: observation.canonical_variant.clone().into_iter().collect(),
+            also_known_as: observation
+                .canonical_variant
+                .clone()
+                .into_iter()
+                .collect(),
             endpoint: Some(OPENROUTER_ENDPOINT.to_string()),
             detection_ref: catalog_ref.clone(),
             inventory_source: Some(source.clone()),
@@ -411,24 +416,19 @@ mod tests {
     fn a_failed_read_is_disclosed_never_an_empty_catalogue() {
         let outcome = fetch_openrouter_catalog(&Broken, "2026-09-09T00:00:00Z");
         match outcome {
-            ProviderCatalogOutcome::Unavailable { reason } => {
-                assert!(reason.contains("no network"))
-            }
+            ProviderCatalogOutcome::Unavailable { reason } => assert!(reason.contains("no network")),
             ProviderCatalogOutcome::Observed { .. } => panic!("a failed read must not observe"),
         }
-        assert!(
-            observed_router_routes(&ProviderCatalogOutcome::Unavailable { reason: "x".into() })
-                .is_empty()
-        );
+        assert!(observed_router_routes(&ProviderCatalogOutcome::Unavailable {
+            reason: "x".into()
+        })
+        .is_empty());
     }
 
     #[test]
     fn observations_carry_the_schema_this_product_already_defines() {
         for observation in observations() {
-            assert_eq!(
-                observation.schema_version,
-                PROVIDER_CATALOG_OBSERVATION_SCHEMA
-            );
+            assert_eq!(observation.schema_version, PROVIDER_CATALOG_OBSERVATION_SCHEMA);
             assert_eq!(observation.observation_kind, "provider_catalog");
             assert!(observation.source.starts_with("https://"));
             assert!(!observation.freshness.is_empty());

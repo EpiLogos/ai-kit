@@ -17,7 +17,6 @@ use std::path::Path;
 
 use aikit_cli::app::{AikitApplication, ApplyRequest, Service};
 use aikit_core::resource::{ResourceKind, ResourceRef, SourceRef, SourceRevision};
-use aikit_core::scope::ScopeKind;
 use aikit_core::{
     apply_confirmed_harness_composition, diff_harness_compositions,
     preview_harness_composition_change, resolve_harness_composition, ActivationScope,
@@ -29,6 +28,7 @@ use aikit_core::{
     SourceMaterial, SourcePoolProvider, SourceVisibility, StagedHarnessComposition,
     SurfaceDescriptor, SurfaceKind, DEFAULT_FAMILIARITY_HALF_LIFE_MS,
 };
+use aikit_core::scope::ScopeKind;
 use aikit_store::home::AikitHome;
 use aikit_tui::PaletteBackend;
 use tempfile::TempDir;
@@ -71,10 +71,7 @@ exports = ["greet"]
 
     let mut env = BTreeMap::new();
     env.insert("AIKIT_CONTEXT_ID".to_string(), CONTEXT_ID.to_string());
-    Service::open(AikitHome::at(home), project, move |key| {
-        env.get(key).cloned()
-    })
-    .unwrap()
+    Service::open(AikitHome::at(home), project, move |key| env.get(key).cloned()).unwrap()
 }
 
 fn knowledge_fixture() -> (
@@ -132,13 +129,7 @@ fn selection(component: &ResourceRef) -> ComponentSelection {
     }
 }
 
-fn composition_catalog() -> (
-    CompositionCatalog,
-    ResourceRef,
-    ResourceRef,
-    ResourceRef,
-    ResourceRef,
-) {
+fn composition_catalog() -> (CompositionCatalog, ResourceRef, ResourceRef, ResourceRef, ResourceRef) {
     let component = r("component/review-runtime");
     let action = r("action/review");
     let tui = r("surface/aikit/tui");
@@ -197,12 +188,7 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
     assert!(hits
         .iter()
         .any(|hit| hit.resource.as_str() == "script/demo/greet"));
-    assert_eq!(
-        <Service as PaletteBackend>::context(&service)
-            .context_id
-            .to_string(),
-        CONTEXT_ID
-    );
+    assert_eq!(<Service as PaletteBackend>::context(&service).context_id.to_string(), CONTEXT_ID);
 
     // SemanticWiki Node -> Explain -> real Wiki->Source relation traversal -> route.
     let (wiki, sources, material, familiarity_context) = knowledge_fixture();
@@ -211,21 +197,12 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
         .with_source_pool(&sources, &material);
     let node = KnowledgeAddress::Wiki(r("wiki:node:auth"));
     let source = KnowledgeAddress::Source(SourceRef::parse("source:spec").unwrap());
-    assert!(knowledge
-        .search("Authentication", 10)
-        .hits
-        .iter()
-        .any(|hit| hit.resource == r("wiki:node:auth")));
+    assert!(knowledge.search("Authentication", 10).hits.iter().any(|hit| hit.resource == r("wiki:node:auth")));
     let explanation = knowledge.explain(&node).unwrap();
     assert!(explanation.summary.starts_with("node r1;"));
-    assert!(explanation
-        .sources
-        .contains(&SourceRef::parse("source:spec").unwrap()));
+    assert!(explanation.sources.contains(&SourceRef::parse("source:spec").unwrap()));
     let relations = knowledge.relations(&node, 1, 16, 16).unwrap();
-    assert!(relations
-        .nodes
-        .iter()
-        .any(|related| related.resource == r("source:spec")));
+    assert!(relations.nodes.iter().any(|related| related.resource == r("source:spec")));
     let route = knowledge
         .route(Some("authentication"), &[node.clone(), source.clone()])
         .unwrap();
@@ -261,10 +238,7 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
     )
     .unwrap();
     assert_eq!(
-        service
-            .current_generation_properties()
-            .get("label")
-            .map(String::as_str),
+        service.current_generation_properties().get("label").map(String::as_str),
         Some("prelocal-product-route")
     );
 
@@ -288,20 +262,12 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
     let preview = preview_harness_composition_change(&catalog, &before, staged).unwrap();
     assert_eq!(preview.diff.mounted_components, vec![component.clone()]);
     assert_eq!(
-        preview
-            .diff
-            .added_surfaces
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>(),
+        preview.diff.added_surfaces.iter().cloned().collect::<BTreeSet<_>>(),
         BTreeSet::from([tui.clone(), agent_tool.clone()])
     );
     let desired = apply_confirmed_harness_composition(preview.confirm());
     assert_eq!(desired.state, CompositionState::Resolved);
-    assert_eq!(
-        desired.generation.as_deref(),
-        Some(generation.id.to_string().as_str())
-    );
+    assert_eq!(desired.generation.as_deref(), Some(generation.id.to_string().as_str()));
 
     // Human and agent-facing projections are the same canonical Action identity,
     // not target-native replacements.
@@ -328,9 +294,5 @@ fn project_knowledge_familiarity_composition_generation_and_agent_projection_for
     let restore = preview_harness_composition_change(&catalog, &desired, retract).unwrap();
     assert!(restore.projected.component_bindings.is_empty());
     assert_eq!(restore.projected.generation, before.generation);
-    assert_eq!(
-        route.destination(),
-        Some(&r("source:spec")),
-        "the prior KnowledgeRoute remains reusable and identity-stable"
-    );
+    assert_eq!(route.destination(), Some(&r("source:spec")), "the prior KnowledgeRoute remains reusable and identity-stable");
 }

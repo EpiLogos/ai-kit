@@ -147,7 +147,9 @@ mod tests {
     use aikit_core::{resource::ResourceRef, AikitError};
     use serde_json::{json, Value};
 
-    use crate::gateway_connector::{ConversationAddress, OutboundOperation, OutboundOperationKind};
+    use crate::gateway_connector::{
+        ConversationAddress, OutboundOperation, OutboundOperationKind,
+    };
 
     #[derive(Debug, Default)]
     struct FakeTransport {

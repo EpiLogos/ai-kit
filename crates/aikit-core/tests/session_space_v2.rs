@@ -159,9 +159,7 @@ fn two_spaces_with_the_same_component_identity_remain_isolated() {
 #[test]
 fn one_component_can_contribute_multiple_surfaces_and_surface_identity_survives_recomposition() {
     let mut runtime = space("session-space/surfaces");
-    let lease = runtime
-        .bind_agent_session(binding("native-surface"))
-        .unwrap();
+    let lease = runtime.bind_agent_session(binding("native-surface")).unwrap();
     runtime
         .admit_composition(
             &lease,
@@ -178,7 +176,10 @@ fn one_component_can_contribute_multiple_surfaces_and_surface_identity_survives_
     assert_eq!(before.len(), 2);
 
     runtime
-        .admit_composition(&lease, composition("native-surface", &["component/ui"]))
+        .admit_composition(
+            &lease,
+            composition("native-surface", &["component/ui"]),
+        )
         .unwrap();
     let after: Vec<_> = runtime
         .read_model()
@@ -286,10 +287,7 @@ fn provider_disappearance_degrades_active_component_and_surface_without_fake_con
         .unwrap();
 
     let model = runtime.read_model();
-    assert_eq!(
-        model.components[0].state,
-        SessionSpaceActivationState::Degraded
-    );
+    assert_eq!(model.components[0].state, SessionSpaceActivationState::Degraded);
     assert!(model
         .surfaces
         .iter()

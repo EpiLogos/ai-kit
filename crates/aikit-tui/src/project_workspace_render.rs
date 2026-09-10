@@ -18,10 +18,10 @@
 use std::collections::BTreeSet;
 
 use aikit_core::context_resolution::Availability;
-use aikit_core::credential_world::{CredentialStatusKnowledge, ProviderRosterKnowledge};
-use aikit_core::explain_history::{HistoryEvidence, HistoryReadModel, HistoryRecoverability};
 use aikit_core::project::ProjectBindingLocator;
+use aikit_core::credential_world::{CredentialStatusKnowledge, ProviderRosterKnowledge};
 use aikit_core::resource::{Eligibility, ResourceKind, SourceAuthority};
+use aikit_core::explain_history::{HistoryEvidence, HistoryReadModel, HistoryRecoverability};
 use aikit_core::session_space_application::SessionSpaceAuthoredState;
 use aikit_core::{ContextSourceHit, ProjectWorldReadModel, ProjectWorldResource};
 
@@ -288,10 +288,7 @@ fn compose_lines(state: &TuiState, reading: WorkspaceReading<'_>, glyphs: Glyphs
 fn work_lines(state: &TuiState, reading: WorkspaceReading<'_>, glyphs: Glyphs) -> Vec<String> {
     let world = reading.world;
     let sep = glyphs.separator();
-    let mut lines = vec![
-        format!("Work {sep} direct and developmental activity"),
-        String::new(),
-    ];
+    let mut lines = vec![format!("Work {sep} direct and developmental activity"), String::new()];
 
     lines.push("DIRECT".into());
     let mut any_runtime = false;
@@ -544,11 +541,7 @@ fn credential_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String
 /// module's own doc comment) — `crate::v2_render`'s `Overlay::Explain` branch
 /// calls this directly, alongside the provider Explain evidence, when a
 /// Project world is available.
-pub fn explain_lines(
-    state: &TuiState,
-    world: &ProjectWorldReadModel,
-    glyphs: Glyphs,
-) -> Vec<String> {
+pub fn explain_lines(state: &TuiState, world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
     let sep = glyphs.separator();
     let mut lines = vec![
         format!("Explain {sep} authored intent and effective state"),
@@ -556,10 +549,7 @@ pub fn explain_lines(
     ];
     let Some(selected) = state.selected.as_ref() else {
         lines.push("Select a Resource to inspect its resolved intent/effective state.".into());
-        lines.push(format!(
-            "Resolution {}",
-            world.effective_revision.resolution_hash
-        ));
+        lines.push(format!("Resolution {}", world.effective_revision.resolution_hash));
         return lines;
     };
 
@@ -574,21 +564,13 @@ pub fn explain_lines(
     {
         lines.extend(context_source_lines(source, glyphs));
     } else {
-        lines.push(
-            "No Project-world resolution record for this shallow navigation Resource.".into(),
-        );
+        lines.push("No Project-world resolution record for this shallow navigation Resource.".into());
         lines.push("Use the contextual Explain Action for provider-specific detail.".into());
     }
 
     lines.push(String::new());
-    lines.push(format!(
-        "Catalog        {}",
-        world.effective_revision.catalog_revision
-    ));
-    lines.push(format!(
-        "Resolution     {}",
-        world.effective_revision.resolution_hash
-    ));
+    lines.push(format!("Catalog        {}", world.effective_revision.catalog_revision));
+    lines.push(format!("Resolution     {}", world.effective_revision.resolution_hash));
     lines.push(format!(
         "Generation     {}",
         world
@@ -618,14 +600,8 @@ fn history_lines(reading: WorkspaceReading<'_>, glyphs: Glyphs) -> Vec<String> {
     let mut lines = vec![
         format!("History {sep} effective world lineage"),
         String::new(),
-        format!(
-            "Catalog revision  {}",
-            world.effective_revision.catalog_revision
-        ),
-        format!(
-            "Resolution hash   {}",
-            world.effective_revision.resolution_hash
-        ),
+        format!("Catalog revision  {}", world.effective_revision.catalog_revision),
+        format!("Resolution hash   {}", world.effective_revision.resolution_hash),
         format!(
             "Generation        {}",
             world
@@ -635,10 +611,7 @@ fn history_lines(reading: WorkspaceReading<'_>, glyphs: Glyphs) -> Vec<String> {
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "none in this read model".into()),
         ),
-        format!(
-            "Active projection {} capabilities",
-            world.projection.active_capabilities.len()
-        ),
+        format!("Active projection {} capabilities", world.projection.active_capabilities.len()),
     ];
     if world.warnings.is_empty() {
         lines.push("Boundary          no degraded context disclosures".into());
@@ -698,11 +671,7 @@ fn history_evidence_lines(reading: WorkspaceReading<'_>, glyphs: Glyphs) -> Vec<
     let mut lines = vec![format!(
         "Evidence          {} entr{} {sep} {recoverable} with a recovery path",
         history.entries.len(),
-        if history.entries.len() == 1 {
-            "y"
-        } else {
-            "ies"
-        },
+        if history.entries.len() == 1 { "y" } else { "ies" },
     )];
 
     // Grouped by kind so a person reads what *sort* of thing changed before
@@ -812,12 +781,7 @@ fn resource_lines(resource: &ProjectWorldResource, glyphs: Glyphs) -> Vec<String
         .intent
         .preference
         .as_ref()
-        .map(|preference| {
-            format!(
-                "preferred rank {} via {}",
-                preference.rank, preference.source
-            )
-        })
+        .map(|preference| format!("preferred rank {} via {}", preference.rank, preference.source))
         .unwrap_or_else(|| "no authored preference".into());
     let authorities = resource
         .intent
@@ -843,11 +807,7 @@ fn resource_lines(resource: &ProjectWorldResource, glyphs: Glyphs) -> Vec<String
             "Effective     {} {sep} {} provider{}",
             availability_label(&resource.effective.availability),
             resource.effective.providers.len(),
-            if resource.effective.providers.len() == 1 {
-                ""
-            } else {
-                "s"
-            },
+            if resource.effective.providers.len() == 1 { "" } else { "s" },
         ),
     ]
 }
@@ -914,8 +874,8 @@ mod credential_disclosure_tests {
         CredentialRef, SecretMaterialisationClass, SecretProviderDescriptor, SecretProviderRef,
         SecretProviderTier,
     };
-    use aikit_core::credential_world::CredentialWorldDisclosure;
     use aikit_core::project::{ProjectBinding, ProjectConstituentRef, ProjectRef};
+    use aikit_core::credential_world::CredentialWorldDisclosure;
 
     use super::*;
 
@@ -959,9 +919,7 @@ mod credential_disclosure_tests {
     #[test]
     fn an_unread_roster_and_a_confirmed_empty_roster_do_not_render_alike() {
         let unknown = credential_lines(
-            &world_with(CredentialWorldDisclosure::not_attempted(
-                "no roster gathered",
-            )),
+            &world_with(CredentialWorldDisclosure::not_attempted("no roster gathered")),
             Glyphs::unicode(),
         );
         let observed_empty = credential_lines(
@@ -975,9 +933,7 @@ mod credential_disclosure_tests {
 
         assert_ne!(unknown, observed_empty);
         assert!(unknown.iter().any(|line| line.contains("not observed")));
-        assert!(unknown
-            .iter()
-            .any(|line| line.contains("not attempted for this world")));
+        assert!(unknown.iter().any(|line| line.contains("not attempted for this world")));
         assert!(observed_empty
             .iter()
             .any(|line| line.contains("none on this machine (roster observed)")));
@@ -1097,14 +1053,12 @@ mod history_evidence_tests {
     /// collapsing to the first would misreport what kind of fact it is.
     #[test]
     fn every_authority_that_applies_is_shown_not_just_the_first() {
-        let rendered = lines(&HistoryReading::Observed(HistoryReadModel::new(vec![
-            entry(
-                "receipt",
-                HistoryKind::SessionSpace,
-                vec![SourceAuthority::Generated, SourceAuthority::Authored],
-                HistoryRecoverability::RestageThroughCurrentAuthority,
-            ),
-        ])))
+        let rendered = lines(&HistoryReading::Observed(HistoryReadModel::new(vec![entry(
+            "receipt",
+            HistoryKind::SessionSpace,
+            vec![SourceAuthority::Generated, SourceAuthority::Authored],
+            HistoryRecoverability::RestageThroughCurrentAuthority,
+        )])))
         .join("\n");
 
         assert!(rendered.contains("generated+authored"), "got:\n{rendered}");
@@ -1143,10 +1097,7 @@ mod history_evidence_tests {
         .join("\n");
 
         assert!(rendered.contains("4 entries"), "got:\n{rendered}");
-        assert!(
-            rendered.contains("2 with a recovery path"),
-            "got:\n{rendered}"
-        );
+        assert!(rendered.contains("2 with a recovery path"), "got:\n{rendered}");
         assert!(rendered.contains("not recoverable"));
         assert!(rendered.contains("inspect only"));
     }
@@ -1155,14 +1106,12 @@ mod history_evidence_tests {
     /// It must never render as trust or preference.
     #[test]
     fn familiarity_is_one_evidence_kind_and_not_a_preference() {
-        let rendered = lines(&HistoryReading::Observed(HistoryReadModel::new(vec![
-            entry(
-                "familiar",
-                HistoryKind::Familiarity,
-                vec![SourceAuthority::Learned],
-                HistoryRecoverability::InspectOnly,
-            ),
-        ])))
+        let rendered = lines(&HistoryReading::Observed(HistoryReadModel::new(vec![entry(
+            "familiar",
+            HistoryKind::Familiarity,
+            vec![SourceAuthority::Learned],
+            HistoryRecoverability::InspectOnly,
+        )])))
         .join("\n");
 
         assert!(rendered.contains("Familiarity"));
@@ -1176,37 +1125,16 @@ mod history_evidence_tests {
     #[test]
     fn entries_group_under_their_kind() {
         let rendered = lines(&HistoryReading::Observed(HistoryReadModel::new(vec![
-            entry(
-                "g1",
-                HistoryKind::Generation,
-                vec![],
-                HistoryRecoverability::InspectOnly,
-            ),
-            entry(
-                "r1",
-                HistoryKind::Recent,
-                vec![],
-                HistoryRecoverability::InspectOnly,
-            ),
-            entry(
-                "g2",
-                HistoryKind::Generation,
-                vec![],
-                HistoryRecoverability::InspectOnly,
-            ),
+            entry("g1", HistoryKind::Generation, vec![], HistoryRecoverability::InspectOnly),
+            entry("r1", HistoryKind::Recent, vec![], HistoryRecoverability::InspectOnly),
+            entry("g2", HistoryKind::Generation, vec![], HistoryRecoverability::InspectOnly),
         ])))
         .join("\n");
 
         let generation = rendered.find("Generation").unwrap();
         let recent = rendered.find("Recent").unwrap();
-        assert!(
-            generation < recent,
-            "kinds keep first-seen order:\n{rendered}"
-        );
-        assert!(
-            rendered.find("g2 happened").unwrap() < recent,
-            "g2 belongs under Generation"
-        );
+        assert!(generation < recent, "kinds keep first-seen order:\n{rendered}");
+        assert!(rendered.find("g2 happened").unwrap() < recent, "g2 belongs under Generation");
         assert!(rendered.contains("no authority declared"));
     }
 
@@ -1214,14 +1142,12 @@ mod history_evidence_tests {
     /// evidence block.
     #[test]
     fn the_effective_revision_lineage_survives_beside_the_evidence() {
-        let rendered = lines(&HistoryReading::Observed(HistoryReadModel::new(vec![
-            entry(
-                "one",
-                HistoryKind::Recent,
-                vec![],
-                HistoryRecoverability::InspectOnly,
-            ),
-        ])))
+        let rendered = lines(&HistoryReading::Observed(HistoryReadModel::new(vec![entry(
+            "one",
+            HistoryKind::Recent,
+            vec![],
+            HistoryRecoverability::InspectOnly,
+        )])))
         .join("\n");
 
         assert!(rendered.contains("Catalog revision"));

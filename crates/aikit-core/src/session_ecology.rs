@@ -242,19 +242,10 @@ pub fn disclose_session_ecology(
         }
     }
 
-    let authored_sessions = authored
-        .agent_sessions
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let authored_sessions = authored.agent_sessions.keys().cloned().collect::<BTreeSet<_>>();
     let runtime_sessions = runtime
         .into_iter()
-        .flat_map(|runtime| {
-            runtime
-                .agent_sessions
-                .iter()
-                .map(|binding| binding.agent_session.clone())
-        })
+        .flat_map(|runtime| runtime.agent_sessions.iter().map(|binding| binding.agent_session.clone()))
         .collect::<BTreeSet<_>>();
     let known_sessions = authored_sessions
         .union(&runtime_sessions)
@@ -445,7 +436,9 @@ fn require_known_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_space::{SessionSpaceLifecycle, SessionSpaceReadModel};
+    use crate::session_space::{
+        SessionSpaceLifecycle, SessionSpaceReadModel,
+    };
     use crate::session_space_application::SessionSpaceAgentAttachmentIntent;
 
     fn r(value: &str) -> ResourceRef {
@@ -453,8 +446,7 @@ mod tests {
     }
 
     fn authored() -> SessionSpaceAuthoredState {
-        let mut state =
-            SessionSpaceAuthoredState::new(SessionSpaceRef::parse("session-space/main").unwrap());
+        let mut state = SessionSpaceAuthoredState::new(SessionSpaceRef::parse("session-space/main").unwrap());
         state.revision = 7;
         state.agent_sessions.insert(
             r("agent-session/a"),
@@ -511,9 +503,15 @@ mod tests {
 
     #[test]
     fn ecology_unions_authored_and_runtime_sessions_without_collapsing_native_identity() {
-        let reading =
-            disclose_session_ecology(&authored(), Some(&runtime()), &semantics(), &[], &[], &[])
-                .unwrap();
+        let reading = disclose_session_ecology(
+            &authored(),
+            Some(&runtime()),
+            &semantics(),
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
         assert_eq!(reading.version, SESSION_ECOLOGY_VERSION);
         assert_eq!(reading.sessions.len(), 2);
         let a = &reading.sessions[0];
@@ -521,11 +519,7 @@ mod tests {
         assert_eq!(a.presence, SessionEcologyPresence::RuntimeObserved);
         assert_eq!(a.purpose.as_deref(), Some("develop gateway"));
         assert_eq!(
-            a.runtime_binding
-                .as_ref()
-                .unwrap()
-                .native_session_id
-                .as_deref(),
+            a.runtime_binding.as_ref().unwrap().native_session_id.as_deref(),
             Some("provider-session-a")
         );
         assert_eq!(
@@ -553,9 +547,15 @@ mod tests {
             },
             provenance: vec!["explicit relation".into()],
         };
-        let reading =
-            disclose_session_ecology(&authored(), Some(&runtime()), &[], &[], &[], &[denied])
-                .unwrap();
+        let reading = disclose_session_ecology(
+            &authored(),
+            Some(&runtime()),
+            &[],
+            &[],
+            &[],
+            &[denied],
+        )
+        .unwrap();
         assert_eq!(reading.sessions[0].invocations.len(), 1);
         assert!(!reading.sessions[0].invocations[0].invocable);
     }
@@ -576,9 +576,15 @@ mod tests {
             },
             provenance: Vec::new(),
         };
-        let reading =
-            disclose_session_ecology(&authored(), Some(&runtime()), &[], &[], &[], &[granted])
-                .unwrap();
+        let reading = disclose_session_ecology(
+            &authored(),
+            Some(&runtime()),
+            &[],
+            &[],
+            &[],
+            &[granted],
+        )
+        .unwrap();
         assert!(reading.sessions[0].invocations[0].invocable);
         assert_eq!(
             reading.sessions[0].invocations[0].mode,
@@ -599,9 +605,15 @@ mod tests {
             provider_continuation_refs: vec![r("provider-continuation/cache-prefix-7")],
             provenance: vec!["explicit human refinement".into()],
         }];
-        let reading =
-            disclose_session_ecology(&authored(), Some(&runtime()), &[], &lineages, &[], &[])
-                .unwrap();
+        let reading = disclose_session_ecology(
+            &authored(),
+            Some(&runtime()),
+            &[],
+            &lineages,
+            &[],
+            &[],
+        )
+        .unwrap();
         let b = reading
             .sessions
             .iter()
@@ -627,9 +639,15 @@ mod tests {
             provider_continuation_refs: Vec::new(),
             provenance: Vec::new(),
         };
-        let error =
-            disclose_session_ecology(&authored(), Some(&runtime()), &[], &[invalid], &[], &[])
-                .unwrap_err();
+        let error = disclose_session_ecology(
+            &authored(),
+            Some(&runtime()),
+            &[],
+            &[invalid],
+            &[],
+            &[],
+        )
+        .unwrap_err();
         assert_eq!(error.code(), "session_ecology.sequence_without_stream");
     }
 
@@ -644,9 +662,15 @@ mod tests {
             focus: None,
             provenance: Vec::new(),
         };
-        let error =
-            disclose_session_ecology(&authored(), Some(&runtime()), &[unknown], &[], &[], &[])
-                .unwrap_err();
+        let error = disclose_session_ecology(
+            &authored(),
+            Some(&runtime()),
+            &[unknown],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap_err();
         assert_eq!(error.code(), "session_ecology.unknown_agent_session");
     }
 }

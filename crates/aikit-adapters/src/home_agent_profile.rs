@@ -63,21 +63,11 @@ pub fn discover_home_agent_profiles(home: &Path) -> HomeAgentProfileDiscovery {
         let path = entry.path();
         if path.is_dir() {
             if let Ok(children) = fs::read_dir(&path) {
-                files.extend(
-                    children
-                        .flatten()
-                        .map(|child| child.path())
-                        .filter(|child| {
-                            child
-                                .extension()
-                                .is_some_and(|extension| extension == "toml")
-                        }),
-                );
+                files.extend(children.flatten().map(|child| child.path()).filter(|child| {
+                    child.extension().is_some_and(|extension| extension == "toml")
+                }));
             }
-        } else if path
-            .extension()
-            .is_some_and(|extension| extension == "toml")
-        {
+        } else if path.extension().is_some_and(|extension| extension == "toml") {
             files.push(path);
         }
     }
@@ -91,9 +81,7 @@ pub fn discover_home_agent_profiles(home: &Path) -> HomeAgentProfileDiscovery {
                 discovery.profiles.push(profile);
                 discovery.sources.push(file);
             }
-            Err(error) => discovery
-                .problems
-                .push(format!("{}: {error}", file.display())),
+            Err(error) => discovery.problems.push(format!("{}: {error}", file.display())),
         }
     }
     discovery
@@ -153,15 +141,8 @@ guidance = []
 
         let discovery = discover_home_agent_profiles(&home);
         assert_eq!(discovery.profiles.len(), 1);
-        assert_eq!(
-            discovery.exactly_one().unwrap().id,
-            "agent/epilogos/test-seed"
-        );
-        assert_eq!(
-            discovery.problems.len(),
-            1,
-            "the broken file is disclosed, not swallowed"
-        );
+        assert_eq!(discovery.exactly_one().unwrap().id, "agent/epilogos/test-seed");
+        assert_eq!(discovery.problems.len(), 1, "the broken file is disclosed, not swallowed");
 
         fs::remove_dir_all(&home).ok();
     }

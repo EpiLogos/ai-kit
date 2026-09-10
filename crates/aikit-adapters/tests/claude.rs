@@ -538,13 +538,11 @@ fn the_settings_file_name_comes_from_the_descriptor_seam() {
 
 #[test]
 fn claude_admits_through_the_harness_adapter_contract_with_a_full_census() {
+    use aikit_core::harness_admission::{FacultySupport, HarnessFaculty, HARNESS_ADAPTER_SDK_VERSION};
     use aikit_adapters::clients::claude::{ADAPTER_REF, PRODUCT};
     use aikit_adapters::clients::codex::CodexAdapter;
     use aikit_adapters::clients::zcode::ZcodeAdapter;
     use aikit_core::harness_admission::HarnessAdmissionAdapter;
-    use aikit_core::harness_admission::{
-        FacultySupport, HarnessFaculty, HARNESS_ADAPTER_SDK_VERSION,
-    };
 
     let generation = tempfile::tempdir().unwrap();
     let claude = adapter(generation.path());
@@ -583,10 +581,7 @@ fn claude_admits_through_the_harness_adapter_contract_with_a_full_census() {
         HarnessFaculty::Surfaces,
         HarnessFaculty::LiveRetraction,
     ] {
-        assert!(
-            admission.faculty(variant).is_some(),
-            "{variant:?} must be censused"
-        );
+        assert!(admission.faculty(variant).is_some(), "{variant:?} must be censused");
     }
     admission.validate().expect("admission must validate");
     for faculty in &admission.faculties {
@@ -624,7 +619,7 @@ fn claude_hook_faculty_stays_unknown_without_a_descriptor_intake() {
 #[test]
 fn claude_activation_truth_rejects_an_overclaiming_observation() {
     use aikit_core::harness_admission::{
-        verify_activation_truth, HarnessActivationObservation, HarnessActivationState,
+        HarnessActivationObservation, HarnessActivationState, verify_activation_truth,
         HARNESS_ADAPTER_SDK_VERSION,
     };
     use aikit_core::projection::{ProjectionPlan, TargetAdapter};

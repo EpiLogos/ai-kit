@@ -666,24 +666,12 @@ fn stage_records_the_authored_alignment_and_leaves_the_prose_alone() {
 
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "stage",
-            source.to_str().unwrap(),
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "stage", source.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
-    assert_eq!(
-        envelope["data"]["ref"],
-        Value::from("wiki:node:staged/propose-not-write")
-    );
+    assert_eq!(envelope["data"]["ref"], Value::from("wiki:node:staged/propose-not-write"));
     assert_eq!(envelope["data"]["alignment"]["position"], Value::from(3));
-    assert_eq!(
-        envelope["data"]["alignment"]["unit"],
-        Value::from("documentation")
-    );
+    assert_eq!(envelope["data"]["alignment"]["unit"], Value::from("documentation"));
     assert_eq!(envelope["data"]["alignment"]["face"], Value::from("direct"));
 
     // The written node: alignment rides as the `ql` extension, the title from
@@ -721,24 +709,14 @@ fn stage_without_an_authored_alignment_is_a_refusal_not_a_guess() {
 
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "stage",
-            source.to_str().unwrap(),
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "stage", source.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
     );
     assert_ne!(code, 0);
     assert!(envelope["error"]["message"]
         .as_str()
         .unwrap()
         .contains("declares no `ql:` frontmatter"));
-    assert_eq!(
-        read(&wiki_json),
-        before,
-        "a refusal leaves the file byte-identical"
-    );
+    assert_eq!(read(&wiki_json), before, "a refusal leaves the file byte-identical");
 }
 
 #[test]
@@ -746,37 +724,19 @@ fn stage_refuses_positions_outside_the_local_sixfold_and_units_absent() {
     let (work, scratch) = fixture();
     let wiki_json = work.path().join("wiki.json");
     let beyond = work.path().join("beyond.md");
-    write(
-        &beyond,
-        "---\nql:\n  position: 7\n  unit: documentation\n---\n# Beyond\n",
-    );
+    write(&beyond, "---\nql:\n  position: 7\n  unit: documentation\n---\n# Beyond\n");
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "stage",
-            beyond.to_str().unwrap(),
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "stage", beyond.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
     );
     assert_ne!(code, 0);
-    assert!(envelope["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("0–5"));
+    assert!(envelope["error"]["message"].as_str().unwrap().contains("0–5"));
 
     let orphan = work.path().join("orphan.md");
     write(&orphan, "---\nql:\n  position: 2\n---\n# Orphan\n");
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "stage",
-            orphan.to_str().unwrap(),
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "stage", orphan.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
     );
     assert_ne!(code, 0);
     assert!(envelope["error"]["message"]
@@ -809,10 +769,7 @@ fn stage_replaces_only_when_told_and_advances_the_revision() {
     let before = read(&wiki_json);
     let (code, envelope) = wiki(scratch.path(), &args);
     assert_ne!(code, 0);
-    assert!(envelope["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("--update"));
+    assert!(envelope["error"]["message"].as_str().unwrap().contains("--update"));
     assert_eq!(read(&wiki_json), before);
 
     // With --update: the revision advances, the type label rides through.
@@ -853,10 +810,7 @@ fn stage_replaces_only_when_told_and_advances_the_revision() {
 fn the_root_anchor_cites_the_live_identity_manifest_over_the_folded_stub() {
     let (work, scratch) = fixture();
     let central = work.path().join("Central");
-    write(
-        &central.join("Control/agents/wiki/wiki.json"),
-        &root_document(&[]),
-    );
+    write(&central.join("Control/agents/wiki/wiki.json"), &root_document(&[]));
     write(
         &central.join("Control/user/identity.md"),
         "# Identity\n\n**Status:** folded into `identity/`\n",
@@ -868,18 +822,11 @@ fn the_root_anchor_cites_the_live_identity_manifest_over_the_folded_stub() {
 
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "root",
-            "anchor",
-            "--root",
-            central.to_str().unwrap(),
-        ],
+        &["wiki", "root", "anchor", "--root", central.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
 
-    let held: Value =
-        serde_json::from_str(&read(&central.join("Control/agents/wiki/wiki.json"))).unwrap();
+    let held: Value = serde_json::from_str(&read(&central.join("Control/agents/wiki/wiki.json"))).unwrap();
     let identity = held["objects"]
         .as_array()
         .unwrap()
@@ -902,29 +849,16 @@ fn the_root_anchor_cites_the_live_identity_manifest_over_the_folded_stub() {
 fn a_world_without_the_manifest_still_anchors_on_the_stub() {
     let (work, scratch) = fixture();
     let central = work.path().join("Central");
-    write(
-        &central.join("Control/agents/wiki/wiki.json"),
-        &root_document(&[]),
-    );
-    write(
-        &central.join("Control/user/identity.md"),
-        "# Identity\n\nthe short seed\n",
-    );
+    write(&central.join("Control/agents/wiki/wiki.json"), &root_document(&[]));
+    write(&central.join("Control/user/identity.md"), "# Identity\n\nthe short seed\n");
 
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "root",
-            "anchor",
-            "--root",
-            central.to_str().unwrap(),
-        ],
+        &["wiki", "root", "anchor", "--root", central.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
 
-    let held: Value =
-        serde_json::from_str(&read(&central.join("Control/agents/wiki/wiki.json"))).unwrap();
+    let held: Value = serde_json::from_str(&read(&central.join("Control/agents/wiki/wiki.json"))).unwrap();
     let identity = held["objects"]
         .as_array()
         .unwrap()
@@ -932,12 +866,11 @@ fn a_world_without_the_manifest_still_anchors_on_the_stub() {
         .find(|object| object["ref"] == "wiki:node:identity")
         .unwrap();
     assert!(
-        serde_json::to_string(&identity["source_refs"])
-            .unwrap()
-            .contains("user/identity.md"),
+        serde_json::to_string(&identity["source_refs"]).unwrap().contains("user/identity.md"),
         "the stub remains the fallback where nothing has been folded"
     );
 }
+
 
 #[test]
 fn anchor_root_creates_a_minimal_identity_node_and_is_idempotent() {
@@ -948,19 +881,10 @@ fn anchor_root_creates_a_minimal_identity_node_and_is_idempotent() {
 
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "root",
-            "anchor",
-            "--root",
-            central.to_str().unwrap(),
-        ],
+        &["wiki", "root", "anchor", "--root", central.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
-    assert_eq!(
-        envelope["data"]["anchor"],
-        Value::from("wiki:node:identity")
-    );
+    assert_eq!(envelope["data"]["anchor"], Value::from("wiki:node:identity"));
     assert_eq!(envelope["data"]["title"], Value::from("User identity"));
 
     let held: Value = serde_json::from_str(&read(&root_wiki)).unwrap();
@@ -982,13 +906,7 @@ fn anchor_root_creates_a_minimal_identity_node_and_is_idempotent() {
     // Second run: nothing changes, the anchored Space reports as such.
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "root",
-            "anchor",
-            "--root",
-            central.to_str().unwrap(),
-        ],
+        &["wiki", "root", "anchor", "--root", central.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
     assert_eq!(envelope["data"]["outcome"]["changed"], Value::Bool(false));
@@ -996,27 +914,12 @@ fn anchor_root_creates_a_minimal_identity_node_and_is_idempotent() {
     // An authored identity node is never rewritten to become an anchor.
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "node",
-            "update",
-            "wiki:node:identity",
-            "--file",
-            root_wiki.to_str().unwrap(),
-            "--title",
-            "Mine",
-        ],
+        &["wiki", "node", "update", "wiki:node:identity", "--file", root_wiki.to_str().unwrap(), "--title", "Mine"],
     );
     assert_eq!(code, 0, "{envelope}");
     wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "root",
-            "anchor",
-            "--root",
-            central.to_str().unwrap(),
-        ],
+        &["wiki", "root", "anchor", "--root", central.to_str().unwrap()],
     );
     let held: Value = serde_json::from_str(&read(&root_wiki)).unwrap();
     let identity = held["objects"]
@@ -1040,11 +943,7 @@ fn anchor_project_names_the_root_node_from_the_project() {
         &project.join("ProjectCentral/agents/wiki/wiki.json"),
         &format!(
             "{{\n  \"objects\": [\n    {}\n  ]\n}}\n",
-            project_space(
-                "central:wiki:project:project:my-project",
-                1,
-                "central:wiki:root"
-            ),
+            project_space("central:wiki:project:project:my-project", 1, "central:wiki:root"),
         ),
     );
 
@@ -1066,7 +965,8 @@ fn anchor_project_names_the_root_node_from_the_project() {
     assert_eq!(envelope["data"]["title"], Value::from("My-Project"));
 
     let held: Value =
-        serde_json::from_str(&read(&project.join("ProjectCentral/agents/wiki/wiki.json"))).unwrap();
+        serde_json::from_str(&read(&project.join("ProjectCentral/agents/wiki/wiki.json")))
+            .unwrap();
     let space = held["objects"]
         .as_array()
         .unwrap()
@@ -1097,10 +997,7 @@ fn anchor_project_names_the_root_node_from_the_project() {
 // ---------------------------------------------------------------------------
 
 fn ingest_corpus_fixture(root: &Path) {
-    write(
-        &root.join("README.md"),
-        "# Not a record\n\nNo frontmatter, no record_id.\n",
-    );
+    write(&root.join("README.md"), "# Not a record\n\nNo frontmatter, no record_id.\n");
     write(
         &root.join("symbolon/episteme/etymologies/arbitration/WHOLE-FIELD.md"),
         "---\nrecord_id: etymology-arbitration\nrecord_type: etymology-whole\nregister: episteme\n---\n\n# Whole Field\n\nSee [A24](../../arguments/A24-Arbitration.md) for the consequential development.\n",
@@ -1143,28 +1040,14 @@ fn cited_bibliography_is_findable_and_an_empty_traversal_says_why() {
     write(&wiki_json, "{\n  \"objects\": []\n}\n");
     let (code, _) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "ingest",
-            corpus.to_str().unwrap(),
-            "--file",
-            wiki_json.to_str().unwrap(),
-            "--apply",
-        ],
+        &["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply"],
     );
     assert_eq!(code, 0);
 
     // The work A24 stands on is findable, as a source and not as a node.
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "query",
-            "search",
-            "ostrom",
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "query", "search", "ostrom", "--file", wiki_json.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
     let hits = envelope["data"]["hits"].as_array().unwrap();
@@ -1182,23 +1065,15 @@ fn cited_bibliography_is_findable_and_an_empty_traversal_says_why() {
     // pointing elsewhere was a lecture where an answer belonged.
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "query",
-            "neighbours",
-            "central:source:corpus:ostrom-1990-governing-commons",
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "query", "neighbours", "central:source:corpus:ostrom-1990-governing-commons",
+          "--file", wiki_json.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
     let neighbours = envelope["data"]["neighbours"].as_array().unwrap();
     assert!(
-        neighbours
-            .iter()
-            .any(|n| n["resource"] == "wiki:node:record/A24"
-                && n["relation"] == "cites"
-                && n["direction"] == "incoming"),
+        neighbours.iter().any(|n| n["resource"] == "wiki:node:record/A24"
+            && n["relation"] == "cites"
+            && n["direction"] == "incoming"),
         "the citing node is the source's neighbourhood: {envelope}"
     );
     assert!(
@@ -1209,35 +1084,18 @@ fn cited_bibliography_is_findable_and_an_empty_traversal_says_why() {
     // A ref the field does not hold at all is a different answer again.
     let (_, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "query",
-            "neighbours",
-            "wiki:node:record/absent",
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "query", "neighbours", "wiki:node:record/absent", "--file", wiki_json.to_str().unwrap()],
     );
     let warnings = envelope["warnings"].as_array().unwrap();
     assert!(
-        warnings.iter().any(|w| w
-            .as_str()
-            .unwrap_or_default()
-            .contains("not in this Wiki file")),
+        warnings.iter().any(|w| w.as_str().unwrap_or_default().contains("not in this Wiki file")),
         "an unknown ref says it is absent, not unrelated: {warnings:?}"
     );
 
     // A real curated node stays quiet.
     let (_, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "query",
-            "neighbours",
-            "wiki:node:record/A24",
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "query", "neighbours", "wiki:node:record/A24", "--file", wiki_json.to_str().unwrap()],
     );
     assert!(envelope["warnings"].as_array().unwrap().is_empty());
 }
@@ -1268,13 +1126,7 @@ fn same_named_source_files_do_not_collide_and_the_dry_run_predicts_the_apply() {
 
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "ingest",
-            corpus.to_str().unwrap(),
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
     assert_eq!(
@@ -1284,31 +1136,14 @@ fn same_named_source_files_do_not_collide_and_the_dry_run_predicts_the_apply() {
 
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "ingest",
-            corpus.to_str().unwrap(),
-            "--file",
-            wiki_json.to_str().unwrap(),
-            "--apply",
-        ],
+        &["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply"],
     );
-    assert_eq!(
-        code, 0,
-        "the apply the dry run promised must succeed: {envelope}"
-    );
+    assert_eq!(code, 0, "the apply the dry run promised must succeed: {envelope}");
 
     // The record's cited bibliography is reachable from the record.
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "query",
-            "neighbours",
-            "wiki:node:record/A24",
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "query", "neighbours", "wiki:node:record/A24", "--file", wiki_json.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
 }
@@ -1324,13 +1159,7 @@ fn ingest_dry_run_reports_the_real_mixed_tree_and_writes_nothing() {
 
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "ingest",
-            corpus.to_str().unwrap(),
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
     let data = &envelope["data"];
@@ -1355,26 +1184,27 @@ fn ingest_dry_run_reports_the_real_mixed_tree_and_writes_nothing() {
     assert_eq!(data["source_bindings"], Value::from(3));
     assert_eq!(data["tag_vocabulary"], Value::from(4));
     assert_eq!(data["tagged_bindings"], Value::from(2));
-    assert_eq!(
-        data["source_pool_files"],
-        Value::from(0),
-        "a dry run writes no pool"
-    );
+    assert_eq!(data["source_pool_files"], Value::from(0), "a dry run writes no pool");
 
     assert!(
-        envelope["warnings"].as_array().unwrap().iter().any(|w| {
-            let w = w.as_str().unwrap_or_default();
-            w.contains("reference-notes/measure.md") && w.contains("`tags:`")
-        }),
+        envelope["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| {
+                let w = w.as_str().unwrap_or_default();
+                w.contains("reference-notes/measure.md") && w.contains("`tags:`")
+            }),
         "a file carrying corpus metadata is named, not counted: {:?}",
         envelope["warnings"]
     );
 
-    assert!(envelope["warnings"].as_array().unwrap().iter().any(|w| w
-        .as_str()
+    assert!(envelope["warnings"]
+        .as_array()
         .unwrap()
-        .contains("etymology-arbitration")
-        && w.as_str().unwrap().contains("expanded-E2.md")));
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("etymology-arbitration")
+            && w.as_str().unwrap().contains("expanded-E2.md")));
     assert_eq!(read(&wiki_json), before, "a dry run writes nothing");
 }
 
@@ -1409,10 +1239,9 @@ fn ingest_apply_writes_objects_then_refuses_a_rerun_without_update() {
         .iter()
         .any(|o| o["ref"] == "wiki:node:record/etymology-arbitration"));
     assert!(
-        !objects.iter().any(|o| o["ref"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with("wiki:node:tag/")),
+        !objects
+            .iter()
+            .any(|o| o["ref"].as_str().unwrap_or_default().starts_with("wiki:node:tag/")),
         "a tag is not curated Wiki identity"
     );
 
@@ -1462,10 +1291,7 @@ fn ingest_apply_writes_objects_then_refuses_a_rerun_without_update() {
         ],
     );
     assert_ne!(code, 0);
-    assert!(envelope["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("--update"));
+    assert!(envelope["error"]["message"].as_str().unwrap().contains("--update"));
     assert_eq!(read(&wiki_json), before);
 
     // With --update the rerun succeeds and advances every touched revision.
@@ -1521,42 +1347,28 @@ fn query_backlinks_and_search_see_the_ingested_field_as_first_class_results() {
     // A24's backlinks include the whole-field's markdown-link citation.
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "query",
-            "backlinks",
-            "wiki:node:record/A24",
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "query", "backlinks", "wiki:node:record/A24", "--file", wiki_json.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
     let backlinks = envelope["data"]["backlinks"].as_array().unwrap();
-    assert!(backlinks.iter().any(
-        |n| n["resource"] == "wiki:node:record/etymology-arbitration"
-            && n["relation"] == "references"
-    ));
+    assert!(backlinks
+        .iter()
+        .any(|n| n["resource"] == "wiki:node:record/etymology-arbitration" && n["relation"] == "references"));
 
     // A tag ref is not in the Wiki field at all, and asking says so rather
     // than answering an empty list.
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "query",
-            "backlinks",
-            "wiki:node:tag/arbitration",
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "query", "backlinks", "wiki:node:tag/arbitration", "--file", wiki_json.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
     assert!(envelope["data"]["backlinks"].as_array().unwrap().is_empty());
     assert!(
-        envelope["warnings"].as_array().unwrap().iter().any(|w| w
-            .as_str()
-            .unwrap_or_default()
-            .contains("not in this Wiki file")),
+        envelope["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains("not in this Wiki file")),
         "{:?}",
         envelope["warnings"]
     );
@@ -1564,21 +1376,12 @@ fn query_backlinks_and_search_see_the_ingested_field_as_first_class_results() {
     // Search finds the ingested record by its title.
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "query",
-            "search",
-            "Usurpation of Measure",
-            "--file",
-            wiki_json.to_str().unwrap(),
-        ],
+        &["wiki", "query", "search", "Usurpation of Measure", "--file", wiki_json.to_str().unwrap()],
     );
     assert_eq!(code, 0, "{envelope}");
     let hits = envelope["data"]["hits"].as_array().unwrap();
-    assert!(hits
-        .iter()
-        .any(|h| h["address"]["kind"] == "curated"
-            && h["address"]["resource"] == "wiki:node:record/A24"));
+    assert!(hits.iter().any(|h| h["address"]["kind"] == "curated"
+        && h["address"]["resource"] == "wiki:node:record/A24"));
 
     // Neighbours from the whole-field show its outgoing reference to A24.
     let (code, envelope) = wiki(
@@ -1605,17 +1408,8 @@ fn ingest_refuses_a_corpus_path_that_is_not_a_directory() {
     let not_a_dir = work.path().join("wiki.json");
     let (code, envelope) = wiki(
         scratch.path(),
-        &[
-            "wiki",
-            "ingest",
-            not_a_dir.to_str().unwrap(),
-            "--file",
-            not_a_dir.to_str().unwrap(),
-        ],
+        &["wiki", "ingest", not_a_dir.to_str().unwrap(), "--file", not_a_dir.to_str().unwrap()],
     );
     assert_ne!(code, 0);
-    assert!(envelope["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("not a directory"));
+    assert!(envelope["error"]["message"].as_str().unwrap().contains("not a directory"));
 }

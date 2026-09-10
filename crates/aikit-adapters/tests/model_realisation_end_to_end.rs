@@ -32,7 +32,7 @@ use aikit_adapters::provider_catalog_source::{
 };
 use aikit_adapters::runner::{CommandRunner, Output};
 use aikit_core::resource::{
-    candidates_from_routes, canonical_model_ref, catalogue_from_observations, rank_model_roster,
+    canonical_model_ref, candidates_from_routes, catalogue_from_observations, rank_model_roster,
     select_model, CredentialCondition, DeclaredRoute, ModelCatalogue, ModelCatalogueEntry,
     ModelRankingPolicy, ModelRosterCandidate, ModelRosterDemand, ModelRouteKind, ModelRouteSet,
     ProviderRef, ResourceRef, SourceRef,
@@ -123,10 +123,9 @@ fn catalogue() -> ModelCatalogue {
             freshness: None,
         })
         .unwrap();
-    let published = catalogue_from_observations(
-        &parse_openrouter_catalog(LISTING, "2026-09-09T12:00:00Z").unwrap(),
-    )
-    .unwrap();
+    let published =
+        catalogue_from_observations(&parse_openrouter_catalog(LISTING, "2026-09-09T12:00:00Z").unwrap())
+            .unwrap();
     let mut layered = published;
     layered.extend(catalogue);
     layered
@@ -239,18 +238,11 @@ fn agent_to_model_to_route_to_actuation_to_body_to_usage() {
         1,
         "a provider model no entry claims stays an offer"
     );
-    assert_eq!(
-        join.unmatched[0].provider_native_id,
-        "unclaimed-by-anyone:7b"
-    );
+    assert_eq!(join.unmatched[0].provider_native_id, "unclaimed-by-anyone:7b");
 
     let routes = set_for(&join.route_sets, "model:smollm2-135m");
     assert_eq!(routes.routes.len(), 2, "both declared routes are described");
-    assert_eq!(
-        routes.viable().len(),
-        1,
-        "one of them was actually observed"
-    );
+    assert_eq!(routes.viable().len(), 1, "one of them was actually observed");
 
     // 3. Selection. One Model; its viable routes survive intact.
     let roster = rank_model_roster(
@@ -269,10 +261,7 @@ fn agent_to_model_to_route_to_actuation_to_body_to_usage() {
     let runner = Replies(
         vec![
             ("instantiation record".into(), ok(&bound_receipt())),
-            (
-                "workcell".into(),
-                ok(r#"{"status":"satisfiable","plan_ref":"plan:x"}"#),
-            ),
+            ("workcell".into(), ok(r#"{"status":"satisfiable","plan_ref":"plan:x"}"#)),
         ],
         calls.clone(),
     );
@@ -327,10 +316,7 @@ fn agent_to_model_to_route_to_actuation_to_body_to_usage() {
     let usage = model_usage_observation(&receipt);
     assert_eq!(usage["actuation_ref"], receipt["actuation_ref"]);
     assert_eq!(usage["model"]["ref"], "model:smollm2-135m");
-    assert_eq!(
-        usage["provenance"]["raw_evidence_refs"][0],
-        "detection:2026-09-09T12:00:00Z"
-    );
+    assert_eq!(usage["provenance"]["raw_evidence_refs"][0], "detection:2026-09-09T12:00:00Z");
 }
 
 /// One `actuation.model-usage/v1`-shaped observation, as a caller composes it
@@ -388,25 +374,19 @@ fn usage_is_the_bottom_of_the_chain_and_can_never_feed_availability() {
 fn provider_a_disappears_while_provider_b_remains() {
     // Both local providers are serving this model.
     let mut both = observed();
-    both.push(
-        aikit_adapters::actuation_model_routes::ObservedProviderModel {
-            provider: ProviderRef::parse("provider:llama-cpp").unwrap(),
-            kind: ModelRouteKind::LocalServing,
-            provider_native_id: "smollm2-135m.gguf".into(),
-            also_known_as: Vec::new(),
-            endpoint: Some("http://127.0.0.1:8080".into()),
-            detection_ref: "detection:2026-09-09T12:00:00Z".into(),
-            inventory_source: None,
-        },
-    );
+    both.push(aikit_adapters::actuation_model_routes::ObservedProviderModel {
+        provider: ProviderRef::parse("provider:llama-cpp").unwrap(),
+        kind: ModelRouteKind::LocalServing,
+        provider_native_id: "smollm2-135m.gguf".into(),
+        also_known_as: Vec::new(),
+        endpoint: Some("http://127.0.0.1:8080".into()),
+        detection_ref: "detection:2026-09-09T12:00:00Z".into(),
+        inventory_source: None,
+    });
     let catalogue = catalogue();
     let before = join_model_routes(&catalogue, &both, &CredentialEvidence::default());
     let before_set = set_for(&before.route_sets, "model:smollm2-135m");
-    assert_eq!(
-        before_set.viable().len(),
-        2,
-        "one Model, two verified routes"
-    );
+    assert_eq!(before_set.viable().len(), 2, "one Model, two verified routes");
 
     let selection_before = {
         let roster = rank_model_roster(
@@ -538,10 +518,7 @@ fn a_router_route_reaches_actuation_as_a_remote_relation_without_becoming_the_mo
     })
     .unwrap();
     // The router id rides as route metadata; identity stays canonical.
-    assert_eq!(
-        receipt["model_relation"]["model_ref"],
-        "model:claude-sonnet-5"
-    );
+    assert_eq!(receipt["model_relation"]["model_ref"], "model:claude-sonnet-5");
     assert_eq!(
         receipt["model_relation"]["variant_ref"],
         "anthropic/claude-sonnet-5"

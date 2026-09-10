@@ -6,7 +6,9 @@ use aikit_core::session_space_application::{
     SessionSpaceNativeReferenceBinding, SessionSpaceNativeReferenceKind,
     SessionSpaceSurfaceAttachmentIntent,
 };
-use aikit_store::{explain_session_space_with_receipts, AikitHome, SessionSpaceApplicationStore};
+use aikit_store::{
+    explain_session_space_with_receipts, AikitHome, SessionSpaceApplicationStore,
+};
 
 #[test]
 fn durable_mutations_history_and_provider_loss_share_one_authority() {
@@ -154,11 +156,16 @@ fn durable_mutations_history_and_provider_loss_share_one_authority() {
     assert!(!broad_comparison.focus_changed);
 
     let surface_comparison = store
-        .compare_history(&space, surface_receipt.sequence, detached_surface.sequence)
+        .compare_history(
+            &space,
+            surface_receipt.sequence,
+            detached_surface.sequence,
+        )
         .unwrap();
     assert!(surface_comparison.surface_intent_changed);
 
-    let explanation = explain_session_space_with_receipts(&store, &space, Some(returned)).unwrap();
+    let explanation =
+        explain_session_space_with_receipts(&store, &space, Some(returned)).unwrap();
     assert_eq!(
         explanation.latest_receipt.as_ref().unwrap().sequence,
         detached_agent.sequence

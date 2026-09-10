@@ -126,14 +126,11 @@ fn effective(world: &ProjectWorldReadModel, sep: &str) -> String {
         .count();
     let unresolved = resources
         .iter()
-        .filter(|resource| {
-            matches!(
-                resource.effective.availability,
-                Availability::Unresolved { .. }
-            )
-        })
+        .filter(|resource| matches!(resource.effective.availability, Availability::Unresolved { .. }))
         .count();
-    format!("Effective      {available} of {total} available {sep} {unresolved} unresolved",)
+    format!(
+        "Effective      {available} of {total} available {sep} {unresolved} unresolved",
+    )
 }
 
 /// Q4 — what is withheld or unavailable, and why. Reasons are the point of
@@ -143,18 +140,10 @@ fn withheld(world: &ProjectWorldReadModel, sep: &str) -> Vec<String> {
     let mut reasons: Vec<String> = Vec::new();
     for resource in &resources {
         if let Eligibility::Ineligible { reasons: why } = &resource.intent.eligibility {
-            reasons.push(format!(
-                "{} ineligible: {}",
-                resource.resource,
-                join_reasons(why)
-            ));
+            reasons.push(format!("{} ineligible: {}", resource.resource, join_reasons(why)));
         }
         if let Availability::Unavailable { reasons: why } = &resource.effective.availability {
-            reasons.push(format!(
-                "{} unavailable: {}",
-                resource.resource,
-                join_reasons(why)
-            ));
+            reasons.push(format!("{} unavailable: {}", resource.resource, join_reasons(why)));
         }
     }
     let unaskable = world
@@ -192,22 +181,13 @@ fn carried_by(world: &ProjectWorldReadModel, sep: &str) -> Vec<String> {
     let mut lines = vec![format!(
         "Carried by     {} harness{} {sep} {} model{} {sep} {} execution offer{}",
         runtime.harnesses.len(),
-        if runtime.harnesses.len() == 1 {
-            ""
-        } else {
-            "es"
-        },
+        if runtime.harnesses.len() == 1 { "" } else { "es" },
         runtime.models.len(),
         plural(runtime.models.len()),
         runtime.execution_offers.len(),
         plural(runtime.execution_offers.len()),
     )];
-    for resource in runtime
-        .harnesses
-        .iter()
-        .chain(runtime.models.iter())
-        .take(NAMED_EXAMPLES)
-    {
+    for resource in runtime.harnesses.iter().chain(runtime.models.iter()).take(NAMED_EXAMPLES) {
         lines.push(format!(
             "               {} {sep} {}",
             resource.resource,
@@ -221,11 +201,7 @@ fn carried_by(world: &ProjectWorldReadModel, sep: &str) -> Vec<String> {
             "credential world not observed for this body".to_string()
         }
         ProviderRosterKnowledge::Observed { providers } if credentials.credentials.is_empty() => {
-            format!(
-                "{} provider{} observed {sep} no credential required",
-                providers.len(),
-                plural(providers.len())
-            )
+            format!("{} provider{} observed {sep} no credential required", providers.len(), plural(providers.len()))
         }
         ProviderRosterKnowledge::Observed { providers } => {
             let selected = credentials
@@ -263,10 +239,7 @@ fn information(world: &ProjectWorldReadModel, sep: &str) -> String {
         .iter()
         .filter(|source| source.eligibility.is_eligible())
         .count();
-    let retrieved = sources
-        .iter()
-        .filter(|source| source.disclosure.retrieved)
-        .count();
+    let retrieved = sources.iter().filter(|source| source.disclosure.retrieved).count();
     format!(
         "Information    {eligible} eligible {sep} {retrieved} retrieved {sep} {} planned retrieval{}",
         world.information_horizon.planned_retrieval.len(),
@@ -278,19 +251,13 @@ fn information(world: &ProjectWorldReadModel, sep: &str) -> String {
 /// unread material world, not a clean one.
 fn material(world: &ProjectWorldReadModel, sep: &str) -> String {
     let Some(versioned) = world.versioned_world.as_ref() else {
-        return "Material       no versioned material provider attached to this reading"
-            .to_string();
+        return "Material       no versioned material provider attached to this reading".to_string();
     };
-    let branch =
-        versioned
-            .repository
-            .branch
-            .as_deref()
-            .unwrap_or(if versioned.repository.detached {
-                "detached"
-            } else {
-                "unnamed"
-            });
+    let branch = versioned
+        .repository
+        .branch
+        .as_deref()
+        .unwrap_or(if versioned.repository.detached { "detached" } else { "unnamed" });
     let cleanliness = if versioned.working.is_clean() {
         "clean".to_string()
     } else {
@@ -321,11 +288,7 @@ fn activates(state: &TuiState, world: &ProjectWorldReadModel, sep: &str) -> Stri
         world.projection.targets.len(),
         plural(world.projection.targets.len()),
         world.projection.active_capabilities.len(),
-        if world.projection.active_capabilities.len() == 1 {
-            "y"
-        } else {
-            "ies"
-        },
+        if world.projection.active_capabilities.len() == 1 { "y" } else { "ies" },
     )
 }
 
@@ -447,16 +410,8 @@ mod tests {
     fn every_section_5_question_gets_a_row_even_when_unanswerable() {
         let lines = compose_preview_lines(&TuiState::default(), &world(), Glyphs::unicode());
         for label in [
-            "Resolved to",
-            "Authored",
-            "Effective",
-            "Withheld",
-            "Carried by",
-            "Information",
-            "Material",
-            "Environment",
-            "Activates",
-            "Reprojection",
+            "Resolved to", "Authored", "Effective", "Withheld", "Carried by",
+            "Information", "Material", "Environment", "Activates", "Reprojection",
         ] {
             find(&lines, label);
         }
@@ -469,24 +424,9 @@ mod tests {
     fn resolving_does_not_make_a_resource_authored() {
         let mut world = world();
         world.capability_horizon.capabilities = vec![
-            resource(
-                "capability:a",
-                Some(SourceAuthority::Authored),
-                Eligibility::Eligible,
-                Availability::Available,
-            ),
-            resource(
-                "capability:b",
-                Some(SourceAuthority::Generated),
-                Eligibility::Eligible,
-                Availability::Available,
-            ),
-            resource(
-                "capability:c",
-                None,
-                Eligibility::Eligible,
-                Availability::Available,
-            ),
+            resource("capability:a", Some(SourceAuthority::Authored), Eligibility::Eligible, Availability::Available),
+            resource("capability:b", Some(SourceAuthority::Generated), Eligibility::Eligible, Availability::Available),
+            resource("capability:c", None, Eligibility::Eligible, Availability::Available),
         ];
 
         let lines = compose_preview_lines(&TuiState::default(), &world, Glyphs::unicode());
@@ -500,28 +440,9 @@ mod tests {
     fn unresolved_is_counted_apart_from_unavailable() {
         let mut world = world();
         world.capability_horizon.capabilities = vec![
-            resource(
-                "capability:a",
-                None,
-                Eligibility::Eligible,
-                Availability::Available,
-            ),
-            resource(
-                "capability:b",
-                None,
-                Eligibility::Eligible,
-                Availability::Unresolved {
-                    reasons: vec!["no provider yet".into()],
-                },
-            ),
-            resource(
-                "capability:c",
-                None,
-                Eligibility::Eligible,
-                Availability::Unavailable {
-                    reasons: vec!["host offline".into()],
-                },
-            ),
+            resource("capability:a", None, Eligibility::Eligible, Availability::Available),
+            resource("capability:b", None, Eligibility::Eligible, Availability::Unresolved { reasons: vec!["no provider yet".into()] }),
+            resource("capability:c", None, Eligibility::Eligible, Availability::Unavailable { reasons: vec!["host offline".into()] }),
         ];
 
         let lines = compose_preview_lines(&TuiState::default(), &world, Glyphs::unicode());
@@ -542,16 +463,13 @@ mod tests {
         world.capability_horizon.capabilities = vec![resource(
             "capability:secret",
             None,
-            Eligibility::Ineligible {
-                reasons: vec!["scope forbids it".into()],
-            },
+            Eligibility::Ineligible { reasons: vec!["scope forbids it".into()] },
             Availability::Available,
         )];
 
         let lines = compose_preview_lines(&TuiState::default(), &world, Glyphs::unicode());
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("capability:secret") && line.contains("scope forbids it")));
+        assert!(lines.iter().any(|line| line.contains("capability:secret")
+            && line.contains("scope forbids it")));
     }
 
     /// An unread material world is not a clean one.

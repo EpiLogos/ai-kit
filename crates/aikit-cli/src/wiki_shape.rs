@@ -31,11 +31,11 @@ use aikit_core::knowledge_wiki_write::{
     apply_wiki_mutation, WikiDocument, WikiMutationLedger, WikiMutationOutcome,
 };
 use aikit_core::resource::ResourceRef;
-use aikit_core::{wiki_constellation_grain, AikitError, Result, WikiObject};
-
-use crate::cli::{
-    WikiShapeCmd, WikiShapeCompressArgs, WikiShapeDeclareArgs, WikiShapeSub, WikiShapeValidateArgs,
+use aikit_core::{
+    wiki_constellation_grain, AikitError, Result, WikiObject,
 };
+
+use crate::cli::{WikiShapeCmd, WikiShapeCompressArgs, WikiShapeDeclareArgs, WikiShapeSub, WikiShapeValidateArgs};
 use crate::json;
 
 /// What a `wiki-shape` command did, before the envelope is wrapped around it.
@@ -97,7 +97,10 @@ pub fn run(command: WikiShapeCmd) -> Result<WikiShapeOutcome> {
 fn declare(args: &WikiShapeDeclareArgs) -> Result<WikiShapeOutcome> {
     let body = read_stdin()?;
     let value: Value = serde_json::from_str(&body).map_err(|error| {
-        AikitError::new("cli.usage", format!("invalid frame JSON on stdin: {error}"))
+        AikitError::new(
+            "cli.usage",
+            format!("invalid frame JSON on stdin: {error}"),
+        )
     })?;
     let object = WikiObject::parse(&value)?;
     let kind = kind_of(&object);
@@ -313,10 +316,7 @@ fn compress(args: &WikiShapeCompressArgs) -> Result<WikiShapeOutcome> {
         .ok_or_else(|| {
             AikitError::new(
                 "knowledge.wiki_shape_anchor_not_found",
-                format!(
-                    "{} declares no constellation with this whole-anchor in this file",
-                    anchor
-                ),
+                format!("{} declares no constellation with this whole-anchor in this file", anchor),
             )
             .with("anchor", anchor.to_string())
         })?;
@@ -363,7 +363,11 @@ fn compress(args: &WikiShapeCompressArgs) -> Result<WikiShapeOutcome> {
             format!("failed to serialize the compression: {error}"),
         )
     })?;
-    Ok(WikiShapeOutcome::reported(data, Vec::new(), json::EXIT_OK))
+    Ok(WikiShapeOutcome::reported(
+        data,
+        Vec::new(),
+        json::EXIT_OK,
+    ))
 }
 
 // ---------------------------------------------------------------------------

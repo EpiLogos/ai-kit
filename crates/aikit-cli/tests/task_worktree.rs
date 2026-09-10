@@ -45,10 +45,7 @@ fn spawning_a_shared_task_creates_no_worktree() {
         outcome.worktree.is_none(),
         "a shared task must not cut a worktree"
     );
-    assert!(
-        outcome.note.is_some(),
-        "the shared fallback is stated, not hidden"
-    );
+    assert!(outcome.note.is_some(), "the shared fallback is stated, not hidden");
 }
 
 #[test]
@@ -57,10 +54,7 @@ fn spawning_a_worktree_task_creates_a_real_worktree_on_its_own_branch() {
     let outcome = task::spawn(tmp.path(), "migration", Isolation::Worktree).unwrap();
     let wt = outcome.worktree.expect("a worktree task cuts a worktree");
     assert!(wt.path.exists(), "the worktree directory should exist");
-    assert!(
-        wt.path.join(".git").exists(),
-        "it should be a real git worktree"
-    );
+    assert!(wt.path.join(".git").exists(), "it should be a real git worktree");
 
     // git knows about it.
     let list = Command::new("git")
@@ -195,8 +189,5 @@ fn closing_a_dirty_worktree_task_is_still_refused_without_force() {
 
     let err = task::close_task(tmp.path(), "wip", false).unwrap_err();
     assert_eq!(err.code(), "task.worktree_dirty");
-    assert!(
-        wt.path.exists(),
-        "the dirty worktree must survive the refusal"
-    );
+    assert!(wt.path.exists(), "the dirty worktree must survive the refusal");
 }
