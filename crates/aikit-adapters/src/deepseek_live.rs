@@ -66,12 +66,17 @@ pub fn deepseek_live_cordis_composition(
     // owns the resulting body. Advertise LiveMounted on descriptors/contributions
     // and select that mode before resolution; never post-mutate a resolved body.
     for component in &live_components {
-        let mut descriptor = specimen.catalog.component(component).cloned().ok_or_else(|| {
-            AikitError::new(
+        let mut descriptor =
+            specimen
+                .catalog
+                .component(component)
+                .cloned()
+                .ok_or_else(|| {
+                    AikitError::new(
                 "cordis.composition.component_absent",
                 format!("live Cordis component {component} is absent from the conformance catalog"),
             )
-        })?;
+                })?;
         descriptor
             .activation_modes
             .insert(CompositionActivationMode::LiveMounted);
@@ -234,7 +239,8 @@ impl CordisProcessActivationDriver {
                 "cordis.activation.authority_already_registered",
                 format!(
                     "authority for {} {} is already registered",
-                    grant.operation.as_str(), grant.component
+                    grant.operation.as_str(),
+                    grant.component
                 ),
             ));
         }
@@ -361,7 +367,10 @@ impl CordisProcessActivationDriver {
         let Some(implementation) = &request.component.implementation else {
             return Err(AikitError::new(
                 "cordis.activation.missing_target_binding",
-                format!("{} has no target-native binding", request.component.component),
+                format!(
+                    "{} has no target-native binding",
+                    request.component.component
+                ),
             ));
         };
         if implementation.implementation_target != "deepseek-ai/deepseek-harness" {
@@ -403,13 +412,19 @@ impl CordisProcessActivationDriver {
         if stored.revoked {
             return Err(AikitError::new(
                 "cordis.activation.authority_revoked",
-                format!("Cordis activation grant `{}` is revoked", stored.grant.grant_ref),
+                format!(
+                    "Cordis activation grant `{}` is revoked",
+                    stored.grant.grant_ref
+                ),
             ));
         }
         if now_unix_ms()? >= stored.grant.expires_at_unix_ms {
             return Err(AikitError::new(
                 "cordis.activation.authority_expired",
-                format!("Cordis activation grant `{}` is expired", stored.grant.grant_ref),
+                format!(
+                    "Cordis activation grant `{}` is expired",
+                    stored.grant.grant_ref
+                ),
             ));
         }
         let implementation_revision = request
@@ -432,7 +447,10 @@ impl CordisProcessActivationDriver {
         if stored.uses >= stored.grant.max_uses {
             return Err(AikitError::new(
                 "cordis.activation.authority_exhausted",
-                format!("Cordis activation grant `{}` is exhausted", stored.grant.grant_ref),
+                format!(
+                    "Cordis activation grant `{}` is exhausted",
+                    stored.grant.grant_ref
+                ),
             ));
         }
         stored.uses += 1;
@@ -446,7 +464,8 @@ impl SessionSpaceActivationDriver for CordisProcessActivationDriver {
         request: &SessionSpaceActivationRequest,
     ) -> Result<SessionSpaceActivationObservation> {
         Self::validate_target(request)?;
-        let authority_ref = self.consume_activation_grant(CordisActivationOperation::Activate, request)?;
+        let authority_ref =
+            self.consume_activation_grant(CordisActivationOperation::Activate, request)?;
         self.ensure_started()?;
         self.active_components
             .insert(request.component.component.clone());
@@ -466,7 +485,10 @@ impl SessionSpaceActivationDriver for CordisProcessActivationDriver {
         request: &SessionSpaceActivationRequest,
     ) -> Result<SessionSpaceActivationObservation> {
         Self::validate_target(request)?;
-        if !self.active_components.contains(&request.component.component) {
+        if !self
+            .active_components
+            .contains(&request.component.component)
+        {
             return Ok(SessionSpaceActivationObservation::Deactivated {
                 provider: self.spec.provider.clone(),
                 provenance: self.spec.provenance.clone(),
@@ -512,9 +534,14 @@ fn activation_grant_key(operation: CordisActivationOperation, component: &Resour
 }
 
 fn now_unix_ms() -> Result<u64> {
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| {
-        AikitError::new("cordis.activation.clock", format!("system clock error: {error}"))
-    })?;
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            AikitError::new(
+                "cordis.activation.clock",
+                format!("system clock error: {error}"),
+            )
+        })?;
     u64::try_from(duration.as_millis()).map_err(|_| {
         AikitError::new(
             "cordis.activation.clock",

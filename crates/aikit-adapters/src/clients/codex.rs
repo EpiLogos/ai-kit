@@ -310,11 +310,7 @@ impl CodexAdapter {
                 .get(&capability.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            items.extend(exported.project_effective(
-                Path::new(SKILLS_PREFIX),
-                mode,
-                overlays,
-            )?);
+            items.extend(exported.project_effective(Path::new(SKILLS_PREFIX), mode, overlays)?);
         }
         Ok(items)
     }
@@ -326,7 +322,10 @@ impl CodexAdapter {
         items: &mut Vec<ProjectionItem>,
     ) -> Result<()> {
         if let Some(actor) = context.actor_bootstrap.as_ref() {
-            items.push(bootstrap::managed_bootstrap_item(Path::new(SKILLS_PREFIX), actor)?);
+            items.push(bootstrap::managed_bootstrap_item(
+                Path::new(SKILLS_PREFIX),
+                actor,
+            )?);
             plan.notes.push(
                 "the managed `aikit-context` Agent Skill is private to this task worktree; richer AIKit state remains on-demand"
                     .to_string(),
@@ -532,7 +531,8 @@ impl HarnessAdmissionAdapter for CodexAdapter {
         // next-session, and a restart lifecycle does not exist.
         let hook = descriptor_session_start_hook(&self.capability);
         let projection_lifecycle = "aikit:clients/codex (projection lifecycle, test-covered)";
-        let module_census = "aikit:clients/codex module census (authored from primary sources, 2026-09-06)";
+        let module_census =
+            "aikit:clients/codex module census (authored from primary sources, 2026-09-06)";
 
         let faculties = vec![
             HarnessFacultyObservation {

@@ -59,9 +59,9 @@ fn stable_acp_wrapper_preserves_string_permission_ids_and_exact_selected_outcome
     };
     assert_eq!(request.native_request_id, "s:permission-7");
     assert_eq!(request.native_session_id, "native-session");
-    assert_eq!(request.tool_call,request.raw["toolCall"]);
-    assert_eq!(request.tool_call["rawInput"]["path"],"/tmp/∆");
-    assert_eq!(request.choices[0].kind.as_deref(),Some("allow_once"));
+    assert_eq!(request.tool_call, request.raw["toolCall"]);
+    assert_eq!(request.tool_call["rawInput"]["path"], "/tmp/∆");
+    assert_eq!(request.choices[0].kind.as_deref(), Some("allow_once"));
 
     let response = adapter
         .respond_permission(
@@ -72,14 +72,8 @@ fn stable_acp_wrapper_preserves_string_permission_ids_and_exact_selected_outcome
         )
         .unwrap();
     assert_eq!(response.payload["id"], "permission-7");
-    assert_eq!(
-        response.payload["result"]["outcome"]["outcome"],
-        "selected"
-    );
-    assert_eq!(
-        response.payload["result"]["outcome"]["optionId"],
-        "allow"
-    );
+    assert_eq!(response.payload["result"]["outcome"]["outcome"], "selected");
+    assert_eq!(response.payload["result"]["outcome"]["optionId"], "allow");
 }
 
 #[test]
@@ -126,10 +120,7 @@ fn invalid_permission_choice_does_not_consume_the_pending_request() {
         )
         .unwrap();
     assert_eq!(response.payload["id"], "permission-retry");
-    assert_eq!(
-        response.payload["result"]["outcome"]["optionId"],
-        "allow"
-    );
+    assert_eq!(response.payload["result"]["outcome"]["optionId"], "allow");
 }
 
 #[test]

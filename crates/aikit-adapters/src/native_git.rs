@@ -9,9 +9,10 @@ use std::process::{Command, Output};
 
 use aikit_core::project::ProjectRef;
 use aikit_core::resource::{
-    CreateWorktreeRequest, GitRepositoryRelation, GitWorkingState, GitWorktreeRelation,
-    ProviderRef, VersionDiff, VersionDiffRequest, VersionHistoryEntry, VersionHistoryRequest,
-    VersionRevision, VersionedProjectWorld, VersionedWorldCapability, VersionedWorldProvider,
+    CreateWorktreeRequest, DevelopmentFieldCurrentDiff, DevelopmentFieldGitBasis,
+    GitRepositoryRelation, GitWorkingState, GitWorktreeRelation, ProviderRef, VersionDiff,
+    VersionDiffRequest, VersionHistoryEntry, VersionHistoryRequest, VersionRevision,
+    VersionedProjectWorld, VersionedWorldCapability, VersionedWorldProvider,
     VersionedWorldProviderDescriptor, VersionedWorldProviderStatus, VERSIONED_WORLD_VERSION,
 };
 use aikit_core::{AikitError, Result};
@@ -119,6 +120,49 @@ impl NativeGitProvider {
         let raw = self.checked(locator, ["worktree", "list", "--porcelain"])?;
         parse_worktrees(&raw)
     }
+
+    /// Build the exact Git/VersionedWorld portion of a Development Field reading.
+    ///
+    /// The optional base is caller-owned Run/plan evidence. `git diff <base> --`
+    /// compares that base against the current index + working tree, while untracked
+    /// paths remain separately disclosed rather than having their contents silently
+    /// promoted into tracked source.
+    pub fn development_field_basis(
+        &self,
+        project: &ProjectRef,
+        locator: &str,
+        base_revision: Option<VersionRevision>,
+        max_bytes: usize,
+    ) -> Result<DevelopmentFieldGitBasis> {
+        let world = self.inspect(project, locator)?;
+        let current_diff_from_base = match base_revision.as_ref() {
+            None => None,
+            Some(base) => {
+                let args = vec![
+                    "diff".to_string(),
+                    "--no-ext-diff".to_string(),
+                    "--binary".to_string(),
+                    base.as_str().to_string(),
+                    "--".to_string(),
+                ];
+                let output = self.output(locator, args)?;
+                if !output.status.success() {
+                    return Err(git_failure(output));
+                }
+                let max = max_bytes.max(1);
+                let truncated = output.stdout.len() > max;
+                let bytes = &output.stdout[..output.stdout.len().min(max)];
+                Some(DevelopmentFieldCurrentDiff {
+                    base_revision: base.clone(),
+                    observed_head: world.repository.head.clone(),
+                    patch: String::from_utf8_lossy(bytes).to_string(),
+                    truncated,
+                    untracked_paths: world.working.untracked.clone(),
+                })
+            }
+        };
+        DevelopmentFieldGitBasis::new(world, base_revision, current_diff_from_base)
+    }
 }
 
 impl VersionedWorldProvider for NativeGitProvider {
@@ -154,12 +198,20 @@ impl VersionedWorldProvider for NativeGitProvider {
         let detached = branch.is_none();
         let upstream = self.optional(
             locator,
-            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            [
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ],
         )?;
         let (ahead, behind) = if upstream.is_some() {
-            self.optional(locator, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])?
-                .and_then(|value| parse_ahead_behind(&value))
-                .unwrap_or((0, 0))
+            self.optional(
+                locator,
+                ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+            )?
+            .and_then(|value| parse_ahead_behind(&value))
+            .unwrap_or((0, 0))
         } else {
             (0, 0)
         };
@@ -290,7 +342,9 @@ fn parse_ahead_behind(value: &str) -> Option<(u64, u64)> {
 
 fn parse_porcelain_v1_z(raw: &[u8]) -> GitWorkingState {
     let mut state = GitWorkingState::default();
-    let mut records = raw.split(|byte| *byte == 0).filter(|record| !record.is_empty());
+    let mut records = raw
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty());
     while let Some(record) = records.next() {
         if record.len() < 3 {
             continue;
@@ -302,9 +356,7 @@ fn parse_porcelain_v1_z(raw: &[u8]) -> GitWorkingState {
             state.untracked.push(path);
             continue;
         }
-        let conflicted = x == 'U'
-            || y == 'U'
-            || matches!((x, y), ('A', 'A') | ('D', 'D'));
+        let conflicted = x == 'U' || y == 'U' || matches!((x, y), ('A', 'A') | ('D', 'D'));
         if conflicted {
             state.conflicted.push(path.clone());
         } else {
@@ -337,7 +389,12 @@ fn parse_worktrees(raw: &str) -> Result<Vec<GitWorktreeRelation>> {
             } else if let Some(value) = line.strip_prefix("HEAD ") {
                 head = Some(VersionRevision::new(value));
             } else if let Some(value) = line.strip_prefix("branch ") {
-                branch = Some(value.strip_prefix("refs/heads/").unwrap_or(value).to_string());
+                branch = Some(
+                    value
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(value)
+                        .to_string(),
+                );
             } else if line == "detached" {
                 detached = true;
             } else if line.starts_with("locked") {
@@ -380,8 +437,14 @@ fn parse_history(raw: &str) -> Vec<VersionHistoryEntry> {
                 .map(VersionRevision::new)
                 .collect();
             let subject = fields.next().unwrap_or_default().to_string();
-            let author = fields.next().filter(|value| !value.is_empty()).map(str::to_string);
-            let authored_at = fields.next().filter(|value| !value.is_empty()).map(str::to_string);
+            let author = fields
+                .next()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let authored_at = fields
+                .next()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
             Some(VersionHistoryEntry {
                 revision,
                 parents,
@@ -401,7 +464,8 @@ mod tests {
 
     #[test]
     fn porcelain_parser_separates_working_states() {
-        let state = parse_porcelain_v1_z(b"M  staged.rs\0 M unstaged.rs\0?? new.rs\0UU conflict.rs\0");
+        let state =
+            parse_porcelain_v1_z(b"M  staged.rs\0 M unstaged.rs\0?? new.rs\0UU conflict.rs\0");
         assert_eq!(state.staged, vec!["staged.rs"]);
         assert_eq!(state.unstaged, vec!["unstaged.rs"]);
         assert_eq!(state.untracked, vec!["new.rs"]);
@@ -411,11 +475,18 @@ mod tests {
     #[test]
     fn native_git_reconciles_external_cli_and_manages_isolated_worktree() {
         let provider = NativeGitProvider::new().unwrap();
-        if !matches!(provider.descriptor().status, VersionedWorldProviderStatus::Available) {
+        if !matches!(
+            provider.descriptor().status,
+            VersionedWorldProviderStatus::Available
+        ) {
             return;
         }
-        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("aikit-native-git-{}-{unique}", std::process::id()));
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("aikit-native-git-{}-{unique}", std::process::id()));
         let worktree = root.with_extension("worktree");
         fs::create_dir_all(&root).unwrap();
         run(&root, ["init", "-q"]);
@@ -447,8 +518,13 @@ mod tests {
             base: reconciled.repository.head.clone(),
             branch: Some("agent/test-worktree".into()),
         };
-        let isolated = provider.create_worktree(&project, &root_str, &request).unwrap();
-        assert_eq!(isolated.repository.branch.as_deref(), Some("agent/test-worktree"));
+        let isolated = provider
+            .create_worktree(&project, &root_str, &request)
+            .unwrap();
+        assert_eq!(
+            isolated.repository.branch.as_deref(),
+            Some("agent/test-worktree")
+        );
         assert_eq!(isolated.project, project);
         provider
             .remove_worktree(&project, &root_str, &request.path)
@@ -459,7 +535,59 @@ mod tests {
     }
 
     fn run<const N: usize>(cwd: &Path, args: [&str; N]) {
-        let status = Command::new("git").arg("-C").arg(cwd).args(args).status().unwrap();
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .status()
+            .unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn development_field_basis_includes_current_tracked_difference_and_names_untracked_paths() {
+        let provider = NativeGitProvider::new().unwrap();
+        if !matches!(
+            provider.descriptor().status,
+            VersionedWorldProviderStatus::Available
+        ) {
+            return;
+        }
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "aikit-development-field-git-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        run(&root, ["init", "-q"]);
+        run(&root, ["config", "user.name", "AIKit Test"]);
+        run(&root, ["config", "user.email", "aikit@example.invalid"]);
+        fs::write(root.join("README.md"), "one\n").unwrap();
+        run(&root, ["add", "README.md"]);
+        run(&root, ["commit", "-qm", "initial"]);
+
+        let project = ProjectRef::parse("project:development-field").unwrap();
+        let locator = root.to_string_lossy().to_string();
+        let base = provider
+            .inspect(&project, &locator)
+            .unwrap()
+            .repository
+            .head;
+        fs::write(root.join("README.md"), "two\n").unwrap();
+        fs::write(root.join("untracked.txt"), "not source until Git says so\n").unwrap();
+
+        let basis = provider
+            .development_field_basis(&project, &locator, Some(base.clone()), 64 * 1024)
+            .unwrap();
+        let diff = basis.current_diff_from_base.unwrap();
+        assert_eq!(diff.base_revision, base);
+        assert_eq!(diff.observed_head, basis.world.repository.head);
+        assert!(diff.patch.contains("+two"), "{}", diff.patch);
+        assert_eq!(diff.untracked_paths, vec!["untracked.txt"]);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

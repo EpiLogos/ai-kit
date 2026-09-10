@@ -128,10 +128,8 @@ mod tests {
 
     #[test]
     fn unknown_transport_version_fails_closed() {
-        let error = parse_contemplate_generated(
-            r#"{"version":"desktop.contemplate/v99"}"#,
-        )
-        .unwrap_err();
+        let error =
+            parse_contemplate_generated(r#"{"version":"desktop.contemplate/v99"}"#).unwrap_err();
         assert_eq!(
             error.code(),
             "knowledge.contemplate_return_version_unsupported"

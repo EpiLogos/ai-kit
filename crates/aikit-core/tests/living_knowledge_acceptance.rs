@@ -12,8 +12,8 @@ use aikit_core::{
     ContemplateRequest, KnowledgeChangeHorizon, KnowledgeChangeKind, KnowledgeFreshness,
     KnowledgeObservedSource, KnowledgeSourceChange, ProjectRef, ProviderRef, ResourceRef,
     RetractionMode, SemanticRevision, SemanticWikiIndex, SemanticWikiReading as WikiReading,
-    SourceRef, SourceRevision, WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject,
-    WikiProvenanceRef, INTEGRATIVE_READING_EXTENSION,
+    SourceRef, SourceRevision, WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject, WikiProvenanceRef,
+    INTEGRATIVE_READING_EXTENSION,
 };
 
 fn resource(value: &str) -> ResourceRef {
@@ -271,14 +271,9 @@ fn public_living_knowledge_path_is_deterministic_until_explicit_contemplate() {
     let mut executor = TransportExecutor { calls: 0 };
     assert_eq!(executor.calls, 0);
 
-    let outcome = explicit_bounded_contemplate(
-        &request,
-        &resource_dependencies,
-        32,
-        2,
-        &mut executor,
-    )
-    .unwrap();
+    let outcome =
+        explicit_bounded_contemplate(&request, &resource_dependencies, 32, 2, &mut executor)
+            .unwrap();
 
     assert_eq!(executor.calls, 1);
     assert_eq!(outcome.outcome.candidates, vec!["candidate:relation"]);

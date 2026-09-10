@@ -116,13 +116,23 @@ impl TargetCapabilities {
 pub enum ActivationEffect {
     /// In effect now. `via` names the mechanism, so the palette can print
     /// something specific ("task worktree") rather than a generic "immediate".
-    Immediate { via: String },
+    Immediate {
+        via: String,
+    },
     /// Written; the client is expected to pick it up on its own.
     LiveReloadExpected,
-    RestartClient { client: String },
-    NextSessionOnly { reason: String },
-    Brokered { reason: String },
-    Unsupported { reason: String },
+    RestartClient {
+        client: String,
+    },
+    NextSessionOnly {
+        reason: String,
+    },
+    Brokered {
+        reason: String,
+    },
+    Unsupported {
+        reason: String,
+    },
 }
 
 impl ActivationEffect {
@@ -260,7 +270,10 @@ pub enum ProjectionItem {
     /// value: the digest, the artifacts and every log line stay value-free, and
     /// a rotated secret changes nothing about the projection's identity
     /// (central.security/v1).
-    SecretEnv { name: String, secret_ref: crate::secret_ref::SecretRef },
+    SecretEnv {
+        name: String,
+        secret_ref: crate::secret_ref::SecretRef,
+    },
 }
 
 impl ProjectionItem {
@@ -322,9 +335,7 @@ impl ProjectionItem {
         let name = name.into();
         let invalid = name.is_empty()
             || name.starts_with(|c: char| c.is_ascii_digit())
-            || !name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_');
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
         if invalid {
             return Err(AikitError::new(
                 "projection.invalid_env_name",
@@ -348,9 +359,7 @@ impl ProjectionItem {
         let name = name.into();
         let invalid = name.is_empty()
             || name.starts_with(|c: char| c.is_ascii_digit())
-            || !name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_');
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
         if invalid {
             return Err(AikitError::new(
                 "projection.invalid_env_name",
@@ -390,7 +399,11 @@ impl ProjectionItem {
                 path.display(),
                 blake3::hash(contents.as_bytes()).to_hex()
             ),
-            ProjectionItem::Shim { name, capsule, export } => {
+            ProjectionItem::Shim {
+                name,
+                capsule,
+                export,
+            } => {
                 format!("shim|{name}|{capsule}|{export}")
             }
             // The VALUE is part of the identity: pointing a context at a different

@@ -226,7 +226,12 @@ fn withheld_reason(view: &ResolvedView, capsule: &CapsuleId) -> WithheldReason {
             // scope did enable it. This reads the resolver's own ground metadata
             // (the view's catalogue index); it forms no second availability
             // opinion of its own.
-            if view.catalog_index.get(capsule).and_then(|e| e.control.as_ref()).is_some_and(|c| c.is_unresolved()) {
+            if view
+                .catalog_index
+                .get(capsule)
+                .and_then(|e| e.control.as_ref())
+                .is_some_and(|c| c.is_unresolved())
+            {
                 return WithheldReason::Unavailable(UnavailableReason::UnresolvedControlStanding);
             }
             if let Some(control) = view
@@ -399,7 +404,11 @@ pub fn glob_matches(pattern: &str, value: &str) -> bool {
         if pattern[0] == b'*' {
             // `**` crosses `/`; a single `*` does not.
             let crosses = pattern.len() > 1 && pattern[1] == b'*';
-            let rest = if crosses { &pattern[2..] } else { &pattern[1..] };
+            let rest = if crosses {
+                &pattern[2..]
+            } else {
+                &pattern[1..]
+            };
             let mut index = 0;
             loop {
                 if matches(rest, &value[index..]) {

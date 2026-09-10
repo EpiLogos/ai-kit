@@ -185,10 +185,7 @@ fn cmux_refuses_duplicate_command_authorities_instead_of_verifying_the_wrong_one
     let refused = install(home.path(), &[]);
     assert!(!refused.status.success());
     assert_eq!(json(&refused)["error"]["code"], "mux.cmux_config_invalid");
-    assert_eq!(
-        fs::read_to_string(&path).unwrap(),
-        duplicate_inner_command
-    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), duplicate_inner_command);
 }
 
 #[test]

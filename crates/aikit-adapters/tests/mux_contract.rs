@@ -197,7 +197,10 @@ fn a_status_update_is_a_set_of_named_values_not_a_rendered_string() {
         .with("profile", "rust-review")
         .with("generation", "gen_ab12");
     assert_eq!(update.session.as_deref(), Some("payments"));
-    assert_eq!(update.values.get("profile").map(String::as_str), Some("rust-review"));
+    assert_eq!(
+        update.values.get("profile").map(String::as_str),
+        Some("rust-review")
+    );
     assert_eq!(update.values.len(), 2);
 }
 

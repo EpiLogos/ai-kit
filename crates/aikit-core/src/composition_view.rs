@@ -25,7 +25,9 @@ pub enum RequirementResolution {
         target_native_provider: Option<String>,
     },
     DirectResource,
-    Absent { reason: String },
+    Absent {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,8 +81,7 @@ pub fn explain_composed_component(
                 .contract_bindings
                 .iter()
                 .find(|bound| {
-                    &bound.consumer_component == component
-                        && bound.contract == requirement.resource
+                    &bound.consumer_component == component && bound.contract == requirement.resource
                 })
                 .map(|bound| RequirementResolution::Provider {
                     provider: bound.provider.clone(),
@@ -270,7 +271,13 @@ pub fn diff_harness_compositions(
             .difference(&after_contributions)
             .cloned()
             .collect(),
-        added_surfaces: after_surfaces.difference(&before_surfaces).cloned().collect(),
-        removed_surfaces: before_surfaces.difference(&after_surfaces).cloned().collect(),
+        added_surfaces: after_surfaces
+            .difference(&before_surfaces)
+            .cloned()
+            .collect(),
+        removed_surfaces: before_surfaces
+            .difference(&after_surfaces)
+            .cloned()
+            .collect(),
     })
 }

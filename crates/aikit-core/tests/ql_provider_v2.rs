@@ -27,10 +27,9 @@ fn context() -> aikit_core::ContextResolution {
         )])
         .with_layers(layers.clone());
     let deterministic = fixture.resolve().expect("deterministic resolution");
-    let factory = FactoryInteropView::from_fixture_json(include_str!(
-        "fixtures/factory-interop-v1.json"
-    ))
-    .expect("Factory CR-001 fixture");
+    let factory =
+        FactoryInteropView::from_fixture_json(include_str!("fixtures/factory-interop-v1.json"))
+            .expect("Factory CR-001 fixture");
     let binding = ProjectBinding::new(
         factory.project_ref().expect("Factory ProjectRef"),
         ProjectConstituentRef::parse("constituent:source").unwrap(),
@@ -204,8 +203,9 @@ impl QlProviderClient for FixtureQl {
 fn disabled_ql_is_exact_noql_parity_and_never_calls_provider() {
     let context = context();
     let provider = FixtureQl::new(QlProviderState::Available);
-    let projected = project_context_with_ql(&context, Some(&provider), projection(QlMode::Disabled))
-        .expect("disabled QL");
+    let projected =
+        project_context_with_ql(&context, Some(&provider), projection(QlMode::Disabled))
+            .expect("disabled QL");
 
     assert_eq!(projected.context, context);
     assert_eq!(provider.calls(), 0);
@@ -238,8 +238,9 @@ fn optional_no_provider_preserves_context_and_reports_absence() {
 fn degraded_provider_can_enrich_and_exposes_provider_version_and_exact_identity_provenance() {
     let context = context();
     let provider = FixtureQl::new(QlProviderState::Degraded);
-    let projected = project_context_with_ql(&context, Some(&provider), projection(QlMode::Optional))
-        .expect("degraded provider remains usable");
+    let projected =
+        project_context_with_ql(&context, Some(&provider), projection(QlMode::Optional))
+            .expect("degraded provider remains usable");
 
     assert_eq!(projected.context, context);
     assert_eq!(provider.calls(), 1);
@@ -270,9 +271,16 @@ fn degraded_provider_can_enrich_and_exposes_provider_version_and_exact_identity_
                 reading.provenance.result_class,
                 QlResultClass::SemanticStochastic
             );
-            assert_eq!(reading.provenance.model.as_deref(), Some("fixture-semantic-model"));
             assert_eq!(
-                reading.provenance.config_ref.as_ref().map(|value| value.as_str()),
+                reading.provenance.model.as_deref(),
+                Some("fixture-semantic-model")
+            );
+            assert_eq!(
+                reading
+                    .provenance
+                    .config_ref
+                    .as_ref()
+                    .map(|value| value.as_str()),
                 Some("fixture:config:q4")
             );
         }
@@ -284,12 +292,16 @@ fn degraded_provider_can_enrich_and_exposes_provider_version_and_exact_identity_
 fn incompatible_provider_is_non_fatal_in_optional_mode_and_is_not_called() {
     let context = context();
     let provider = FixtureQl::new(QlProviderState::Incompatible);
-    let projected = project_context_with_ql(&context, Some(&provider), projection(QlMode::Optional))
-        .expect("optional incompatible provider");
+    let projected =
+        project_context_with_ql(&context, Some(&provider), projection(QlMode::Optional))
+            .expect("optional incompatible provider");
 
     assert_eq!(projected.context, context);
     assert_eq!(provider.calls(), 0);
-    assert_eq!(projected.discovery.health.state, QlProviderState::Incompatible);
+    assert_eq!(
+        projected.discovery.health.state,
+        QlProviderState::Incompatible
+    );
     assert!(matches!(
         projected.refractions[0].attachment,
         QlAttachment::Unavailable { .. }
@@ -314,12 +326,9 @@ fn required_mode_fails_when_provider_is_absent_or_execution_fails() {
 fn provider_target_or_revision_drift_is_rejected_instead_of_translated() {
     let context = context();
     for provider in [FixtureQl::drift_target(), FixtureQl::drift_revision()] {
-        let projected = project_context_with_ql(
-            &context,
-            Some(&provider),
-            projection(QlMode::Optional),
-        )
-        .expect("optional provider contract failure is an attachment");
+        let projected =
+            project_context_with_ql(&context, Some(&provider), projection(QlMode::Optional))
+                .expect("optional provider contract failure is an attachment");
         assert_eq!(projected.context, context);
         assert!(matches!(
             projected.refractions[0].attachment,

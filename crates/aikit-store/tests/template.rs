@@ -53,7 +53,10 @@ default = 7687
                 "payload/{{service_name}}.toml",
                 "name = \"{{service_name}}\"\nport = {{port}}\n",
             ),
-            ("payload/README.md", "# {{service_name}}\n\nA neo4j client.\n"),
+            (
+                "payload/README.md",
+                "# {{service_name}}\n\nA neo4j client.\n",
+            ),
         ],
     );
 }
@@ -72,8 +75,9 @@ fn instantiating_a_template_plans_a_procedure_rather_than_writing_directly() {
         aikit_core::RegistrySource::personal(),
     )
     .unwrap();
-    let capsule = aikit_core::catalog::Catalog::get(&load.catalog, &cid("template/service/neo4j-client"))
-        .unwrap();
+    let capsule =
+        aikit_core::catalog::Catalog::get(&load.catalog, &cid("template/service/neo4j-client"))
+            .unwrap();
 
     let mut values = BTreeMap::new();
     values.insert("service_name".to_string(), "graph".to_string());
@@ -108,7 +112,8 @@ fn instantiation_substitutes_parameters_in_both_paths_and_contents() {
     )
     .unwrap();
     let capsule =
-        aikit_core::catalog::Catalog::get(&load.catalog, &cid("template/service/neo4j-client")).unwrap();
+        aikit_core::catalog::Catalog::get(&load.catalog, &cid("template/service/neo4j-client"))
+            .unwrap();
 
     let mut values = BTreeMap::new();
     values.insert("service_name".to_string(), "graph".to_string());
@@ -122,7 +127,10 @@ fn instantiation_substitutes_parameters_in_both_paths_and_contents() {
     assert!(config.is_file(), "the file name was substituted: {root:?}");
 
     let text = fs::read_to_string(&config).unwrap();
-    assert!(text.contains("name = \"graph\""), "contents substituted: {text}");
+    assert!(
+        text.contains("name = \"graph\""),
+        "contents substituted: {text}"
+    );
     assert!(
         text.contains("port = 7687"),
         "an omitted parameter takes its declared default: {text}"
@@ -147,7 +155,8 @@ fn an_instantiation_is_undoable_like_any_other_procedure() {
     )
     .unwrap();
     let capsule =
-        aikit_core::catalog::Catalog::get(&load.catalog, &cid("template/service/neo4j-client")).unwrap();
+        aikit_core::catalog::Catalog::get(&load.catalog, &cid("template/service/neo4j-client"))
+            .unwrap();
     let mut values = BTreeMap::new();
     values.insert("service_name".to_string(), "graph".to_string());
 
@@ -178,7 +187,8 @@ fn a_missing_required_parameter_is_refused_before_anything_is_planned() {
     )
     .unwrap();
     let capsule =
-        aikit_core::catalog::Catalog::get(&load.catalog, &cid("template/service/neo4j-client")).unwrap();
+        aikit_core::catalog::Catalog::get(&load.catalog, &cid("template/service/neo4j-client"))
+            .unwrap();
 
     let error =
         template::plan_instantiation(&home, capsule, &project, &BTreeMap::new()).unwrap_err();
@@ -209,7 +219,8 @@ fn instantiating_over_an_existing_file_is_refused_rather_than_clobbering() {
     )
     .unwrap();
     let capsule =
-        aikit_core::catalog::Catalog::get(&load.catalog, &cid("template/service/neo4j-client")).unwrap();
+        aikit_core::catalog::Catalog::get(&load.catalog, &cid("template/service/neo4j-client"))
+            .unwrap();
     let mut values = BTreeMap::new();
     values.insert("service_name".to_string(), "graph".to_string());
 
@@ -239,7 +250,8 @@ fn instantiation_into_a_repository_stages_on_a_branch() {
     )
     .unwrap();
     let capsule =
-        aikit_core::catalog::Catalog::get(&load.catalog, &cid("template/service/neo4j-client")).unwrap();
+        aikit_core::catalog::Catalog::get(&load.catalog, &cid("template/service/neo4j-client"))
+            .unwrap();
     let mut values = BTreeMap::new();
     values.insert("service_name".to_string(), "graph".to_string());
 

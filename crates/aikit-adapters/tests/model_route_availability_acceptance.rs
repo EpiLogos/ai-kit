@@ -21,7 +21,7 @@ use aikit_adapters::actuation_model_routes::{
 use aikit_adapters::runner::{CommandRunner, Output};
 use aikit_core::context_resolution::Availability;
 use aikit_core::resource::{
-    canonical_model_ref, candidates_from_routes, rank_model_roster, select_model,
+    candidates_from_routes, canonical_model_ref, rank_model_roster, select_model,
     CredentialCondition, DeclaredRoute, ModelAccessProfileView, ModelCatalogue,
     ModelCatalogueEntry, ModelRankingPolicy, ModelRosterCandidate, ModelRosterDemand,
     ModelRouteKind, ModelRouteSet, ProviderRef, ResourceKind, ResourceRef, RouteUsability,
@@ -109,7 +109,10 @@ fn catalogue(entries: Vec<ModelCatalogueEntry>) -> ModelCatalogue {
     catalogue
 }
 
-fn joined(catalogue: &ModelCatalogue, inventory: &[&str]) -> aikit_adapters::actuation_model_routes::ModelRouteJoin {
+fn joined(
+    catalogue: &ModelCatalogue,
+    inventory: &[&str],
+) -> aikit_adapters::actuation_model_routes::ModelRouteJoin {
     joined_with(catalogue, inventory, &CredentialEvidence::default())
 }
 
@@ -142,13 +145,25 @@ fn one_model_with_two_verified_routes_is_one_candidate_carrying_both() {
     let catalogue = catalogue(vec![entry(
         "model:llama3.2",
         vec![
-            declared("provider:ollama", ModelRouteKind::LocalServing, &["llama3.2:latest"]),
-            declared("provider:ollama", ModelRouteKind::LocalServing, &["llama3.2:3b"]),
+            declared(
+                "provider:ollama",
+                ModelRouteKind::LocalServing,
+                &["llama3.2:latest"],
+            ),
+            declared(
+                "provider:ollama",
+                ModelRouteKind::LocalServing,
+                &["llama3.2:3b"],
+            ),
         ],
     )]);
     let join = joined(&catalogue, &["llama3.2:latest", "llama3.2:3b"]);
 
-    assert_eq!(join.models.len(), 1, "one Model candidate, never one per route");
+    assert_eq!(
+        join.models.len(),
+        1,
+        "one Model candidate, never one per route"
+    );
     assert_eq!(join.models[0].resource.descriptor.kind, ResourceKind::Model);
     assert_eq!(join.models[0].availability, Availability::Available);
 
@@ -175,8 +190,16 @@ fn losing_one_route_leaves_the_same_model_ref_and_re_resolves_to_the_survivor() 
     let catalogue = catalogue(vec![entry(
         "model:llama3.2",
         vec![
-            declared("provider:ollama", ModelRouteKind::LocalServing, &["llama3.2:latest"]),
-            declared("provider:ninerouter", ModelRouteKind::RouterRoute, &["meta/llama-3.2"]),
+            declared(
+                "provider:ollama",
+                ModelRouteKind::LocalServing,
+                &["llama3.2:latest"],
+            ),
+            declared(
+                "provider:ninerouter",
+                ModelRouteKind::RouterRoute,
+                &["meta/llama-3.2"],
+            ),
         ],
     )]);
 
@@ -188,10 +211,16 @@ fn losing_one_route_leaves_the_same_model_ref_and_re_resolves_to_the_survivor() 
     // The local copy is removed. Nothing else about the world changes.
     let after = joined(&catalogue, &[]);
     let after_set = set_for(&after, "model:llama3.2");
-    assert_eq!(before_set.model, after_set.model, "the ModelRef is untouched");
+    assert_eq!(
+        before_set.model, after_set.model,
+        "the ModelRef is untouched"
+    );
     assert!(!after_set.is_available());
     assert!(
-        matches!(after.models[0].availability, Availability::Unavailable { .. }),
+        matches!(
+            after.models[0].availability,
+            Availability::Unavailable { .. }
+        ),
         "no route proven means unavailable, never quietly available"
     );
 
@@ -226,7 +255,11 @@ fn a_model_provider_yields_concrete_identities_rather_than_a_directory_count() {
         other => panic!("expected a record, got {other:?}"),
     };
     let facet = record.harnesses[0].facets.as_ref().unwrap()[0].clone();
-    assert_eq!(facet.count, Some(3), "the directory count stays a presence signal");
+    assert_eq!(
+        facet.count,
+        Some(3),
+        "the directory count stays a presence signal"
+    );
 
     let (observed, _) = observed_provider_models(&outcome);
     assert_eq!(observed.len(), 3);
@@ -236,17 +269,22 @@ fn a_model_provider_yields_concrete_identities_rather_than_a_directory_count() {
         .collect();
     assert_eq!(ids, ["smollm2:135m", "llama3.2:latest", "qwen2.5-coder:7b"]);
     assert!(
-        observed.iter().all(|item| item.provider.as_str() == "provider:ollama"),
+        observed
+            .iter()
+            .all(|item| item.provider.as_str() == "provider:ollama"),
         "identities are attributed to the provider that named them"
     );
 }
 
 #[test]
 fn an_agent_harness_with_a_facet_contributes_no_model_routes() {
-    let outcome = intake_actuation_detection(&StubActuation(detection(&["smollm2:135m"])), "actuation");
+    let outcome =
+        intake_actuation_detection(&StubActuation(detection(&["smollm2:135m"])), "actuation");
     let (observed, _) = observed_provider_models(&outcome);
     assert!(
-        observed.iter().all(|item| item.provider.as_str() != "provider:claude-code"),
+        observed
+            .iter()
+            .all(|item| item.provider.as_str() != "provider:claude-code"),
         "a detected agent harness is not a model provider, whatever facets it discloses"
     );
 }
@@ -259,11 +297,19 @@ fn an_agent_harness_with_a_facet_contributes_no_model_routes() {
 fn a_catalogued_model_with_no_proven_route_is_known_but_never_falsely_available() {
     let catalogue = catalogue(vec![entry(
         "model:gpt-5.4",
-        vec![declared("provider:openai", ModelRouteKind::ProviderNative, &["gpt-5.4"])],
+        vec![declared(
+            "provider:openai",
+            ModelRouteKind::ProviderNative,
+            &["gpt-5.4"],
+        )],
     )]);
     let join = joined(&catalogue, &["smollm2:135m"]);
 
-    assert_eq!(join.models.len(), 1, "it stays known — absence is a different fact");
+    assert_eq!(
+        join.models.len(),
+        1,
+        "it stays known — absence is a different fact"
+    );
     let set = set_for(&join, "model:gpt-5.4");
     assert!(!set.is_available());
     assert!(set.viable().is_empty());
@@ -285,28 +331,38 @@ fn a_catalogued_model_with_no_proven_route_is_known_but_never_falsely_available(
 fn a_discovered_model_no_entry_claims_is_an_offer_and_never_an_invented_model_ref() {
     let catalogue = catalogue(vec![entry(
         "model:smollm2-135m",
-        vec![declared("provider:ollama", ModelRouteKind::LocalServing, &["smollm2:135m"])],
+        vec![declared(
+            "provider:ollama",
+            ModelRouteKind::LocalServing,
+            &["smollm2:135m"],
+        )],
     )]);
     let join = joined(&catalogue, &["smollm2:135m", "mystery-model:7b"]);
 
     assert_eq!(join.unmatched.len(), 1);
     assert_eq!(join.unmatched[0].provider_native_id, "mystery-model:7b");
     assert_eq!(join.unmatched[0].provider.as_str(), "provider:ollama");
-    assert!(join.unmatched[0].reason.contains("stays an offer, not a Model"));
+    assert!(join.unmatched[0]
+        .reason
+        .contains("stays an offer, not a Model"));
 
     // Nothing anywhere in the join turned that name into an identity.
     assert_eq!(join.models.len(), 1);
-    assert_eq!(join.models[0].resource.descriptor.id.as_str(), "model:smollm2-135m");
+    assert_eq!(
+        join.models[0].resource.descriptor.id.as_str(),
+        "model:smollm2-135m"
+    );
     assert!(join
         .route_sets
         .iter()
         .flat_map(|set| set.routes.iter())
         .all(|route| route.model.as_str() == "model:smollm2-135m"));
-    assert!(ResourceRef::parse("mystery-model:7b")
-        .is_ok_and(|reference| !join
+    assert!(
+        ResourceRef::parse("mystery-model:7b").is_ok_and(|reference| !join
             .models
             .iter()
-            .any(|model| model.resource.descriptor.id == reference)));
+            .any(|model| model.resource.descriptor.id == reference))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -371,15 +427,27 @@ fn selecting_a_joined_model_leaves_every_viable_route_for_actuation_to_resolve()
     let catalogue = catalogue(vec![entry(
         "model:llama3.2",
         vec![
-            declared("provider:ollama", ModelRouteKind::LocalServing, &["llama3.2:latest"]),
-            declared("provider:ollama", ModelRouteKind::LocalServing, &["llama3.2:3b"]),
+            declared(
+                "provider:ollama",
+                ModelRouteKind::LocalServing,
+                &["llama3.2:latest"],
+            ),
+            declared(
+                "provider:ollama",
+                ModelRouteKind::LocalServing,
+                &["llama3.2:3b"],
+            ),
         ],
     )]);
     let join = joined(&catalogue, &["llama3.2:latest", "llama3.2:3b"]);
     let set = set_for(&join, "model:llama3.2");
 
     let candidates = candidates_from_routes(set, &base_candidate("model:llama3.2"));
-    assert_eq!(candidates.len(), 2, "the roster evaluates (model, route) pairs");
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the roster evaluates (model, route) pairs"
+    );
     let roster = rank_model_roster(demand(), ModelRankingPolicy::TaskFit, candidates);
 
     let selection = select_model(&roster, set, None).expect("an available model selects");
@@ -397,8 +465,16 @@ fn a_provider_pin_narrows_the_route_and_leaves_the_model_ref_alone() {
     let catalogue = catalogue(vec![entry(
         "model:llama3.2",
         vec![
-            declared("provider:ollama", ModelRouteKind::LocalServing, &["llama3.2:latest"]),
-            declared("provider:ninerouter", ModelRouteKind::RouterRoute, &["meta/llama-3.2"]),
+            declared(
+                "provider:ollama",
+                ModelRouteKind::LocalServing,
+                &["llama3.2:latest"],
+            ),
+            declared(
+                "provider:ninerouter",
+                ModelRouteKind::RouterRoute,
+                &["meta/llama-3.2"],
+            ),
         ],
     )]);
     let join = joined(&catalogue, &["llama3.2:latest"]);
@@ -428,8 +504,16 @@ fn router_catalogue() -> ModelCatalogue {
     catalogue(vec![entry(
         "model:smollm2-135m",
         vec![
-            declared("provider:ollama", ModelRouteKind::LocalServing, &["smollm2:135m"]),
-            declared("provider:openrouter", ModelRouteKind::RouterRoute, &["hf/smollm2-135m"]),
+            declared(
+                "provider:ollama",
+                ModelRouteKind::LocalServing,
+                &["smollm2:135m"],
+            ),
+            declared(
+                "provider:openrouter",
+                ModelRouteKind::RouterRoute,
+                &["hf/smollm2-135m"],
+            ),
         ],
     )])
 }
@@ -455,7 +539,10 @@ fn an_observed_route_without_its_credential_is_viable_but_not_presently_usable()
         .find(|route| route.provider.as_str() == "provider:openrouter")
         .unwrap();
     assert!(!router.is_viable());
-    assert!(matches!(router.usability(), RouteUsability::NotObserved { .. }));
+    assert!(matches!(
+        router.usability(),
+        RouteUsability::NotObserved { .. }
+    ));
 }
 
 #[test]
@@ -480,7 +567,11 @@ fn a_credentialled_route_becomes_usable_without_the_model_or_the_route_changing(
         freshness: None,
     }]);
 
-    let without = joined_with(&catalogue, &["smollm2:135m"], &CredentialEvidence::default());
+    let without = joined_with(
+        &catalogue,
+        &["smollm2:135m"],
+        &CredentialEvidence::default(),
+    );
     let set = set_for(&without, "model:smollm2-135m");
     assert!(set.is_available(), "the route is observed");
     assert!(!set.is_usable(), "but it cannot be taken without the key");
@@ -508,7 +599,10 @@ fn credential_evidence_records_a_binding_and_never_a_secret() {
         "credential:anthropic".to_string(),
         "not-a-credential-ref".to_string(),
     ]);
-    assert_eq!(evidence.providers(), ["provider:anthropic", "provider:openai"]);
+    assert_eq!(
+        evidence.providers(),
+        ["provider:anthropic", "provider:openai"]
+    );
     assert_eq!(
         evidence.binding_for(&provider("provider:openai")),
         Some("credential:openai/research")
@@ -544,8 +638,10 @@ fn reachability(
     Vec<aikit_adapters::actuation_model_routes::ProviderReachability>,
     Vec<String>,
 ) {
-    let detection = intake_actuation_detection(&StubActuation(detection(&["smollm2:135m"])), "actuation");
-    let capabilities = intake_actuation_capabilities(&StubActuation(capability_json.into()), "actuation");
+    let detection =
+        intake_actuation_detection(&StubActuation(detection(&["smollm2:135m"])), "actuation");
+    let capabilities =
+        intake_actuation_capabilities(&StubActuation(capability_json.into()), "actuation");
     harness_provider_reachability(&detection, &capabilities)
 }
 
@@ -572,7 +668,10 @@ fn a_detected_harness_that_declares_its_provider_makes_that_provider_reachable()
     assert_eq!(route.model.as_str(), "model:claude-opus-5");
     assert_eq!(route.provider.as_str(), "provider:anthropic");
     // Observed, but not usable until the key it declares is bound.
-    assert!(matches!(route.usability(), RouteUsability::NeedsCredential { .. }));
+    assert!(matches!(
+        route.usability(),
+        RouteUsability::NeedsCredential { .. }
+    ));
     assert!(route
         .provenance
         .iter()
@@ -582,7 +681,9 @@ fn a_detected_harness_that_declares_its_provider_makes_that_provider_reachable()
 #[test]
 fn a_harness_that_declares_no_binding_supplies_no_route_and_says_so() {
     let (reachable, notes) = reachability(CAPABILITIES);
-    assert!(reachable.iter().all(|reach| reach.through != "harness/zcode"));
+    assert!(reachable
+        .iter()
+        .all(|reach| reach.through != "harness/zcode"));
     assert!(notes
         .iter()
         .any(|note| note.contains("zcode") && note.contains("no model dispatch binding")));

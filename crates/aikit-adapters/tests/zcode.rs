@@ -116,7 +116,11 @@ fn the_custom_events_are_disclosed_but_never_installed() {
     let outcome = CapabilityOutcome::Descriptor(Box::new(zcode_capability()));
     let (mapped, unrouted) = outcome.dispatch_events();
 
-    assert_eq!(mapped.len(), 5, "five native events map onto AIKit boundaries");
+    assert_eq!(
+        mapped.len(),
+        5,
+        "five native events map onto AIKit boundaries"
+    );
     assert!(
         unrouted.iter().any(|u| u.contains("PermissionRequest")),
         "the customs stay disclosed beside the mapped events: {unrouted:?}"
@@ -240,8 +244,7 @@ fn installing_merges_into_an_existing_config_without_destroying_anything() {
         "unrelated top-level keys are untouched"
     );
     assert_eq!(
-        config_json["mcp"]["servers"]["bimba"]["command"],
-        "node",
+        config_json["mcp"]["servers"]["bimba"]["command"], "node",
         "unrelated top-level keys are untouched"
     );
     let stop: Vec<&str> = config_json["hooks"]["events"]["Stop"]
@@ -328,9 +331,11 @@ fn the_config_file_name_comes_from_the_descriptor_seam() {
 
 #[test]
 fn zcode_admits_through_the_harness_adapter_contract_with_a_full_census() {
-    use aikit_core::harness_admission::HarnessAdmissionAdapter;
     use aikit_adapters::clients::zcode::{ADAPTER_REF, PRODUCT};
-    use aikit_core::harness_admission::{FacultySupport, HarnessFaculty, HARNESS_ADAPTER_SDK_VERSION};
+    use aikit_core::harness_admission::HarnessAdmissionAdapter;
+    use aikit_core::harness_admission::{
+        FacultySupport, HarnessFaculty, HARNESS_ADAPTER_SDK_VERSION,
+    };
     use aikit_core::platform::TargetId;
 
     let admission = adapter().admission();
@@ -356,11 +361,17 @@ fn zcode_admits_through_the_harness_adapter_contract_with_a_full_census() {
 
     // Reload truth: config read at session start; no live reload, no restart.
     assert_eq!(
-        admission.faculty(HarnessFaculty::LiveReload).unwrap().support,
+        admission
+            .faculty(HarnessFaculty::LiveReload)
+            .unwrap()
+            .support,
         FacultySupport::Unsupported
     );
     assert_eq!(
-        admission.faculty(HarnessFaculty::NextSessionReload).unwrap().support,
+        admission
+            .faculty(HarnessFaculty::NextSessionReload)
+            .unwrap()
+            .support,
         FacultySupport::Supported
     );
 
@@ -378,7 +389,7 @@ fn zcode_admits_through_the_harness_adapter_contract_with_a_full_census() {
 #[test]
 fn zcode_activation_truth_rejects_an_overclaiming_observation() {
     use aikit_core::harness_admission::{
-        HarnessActivationObservation, HarnessActivationState, verify_activation_truth,
+        verify_activation_truth, HarnessActivationObservation, HarnessActivationState,
         HARNESS_ADAPTER_SDK_VERSION,
     };
     use aikit_core::projection::{ActivationEffect, ProjectionPlan, TargetAdapter};

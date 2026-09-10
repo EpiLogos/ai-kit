@@ -3,9 +3,9 @@ mod common;
 use common::*;
 
 use aikit_tui::application::Overlay;
-use aikit_tui::compose_spine::ComposeStep;
-use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
 use aikit_tui::application_service::ApplicationService;
+use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
+use aikit_tui::compose_spine::ComposeStep;
 use aikit_tui::event::PaletteEvent;
 use aikit_tui::host::UiHost;
 use aikit_tui::layout::Glyphs;
@@ -14,7 +14,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
-use aikit_core::resource::{Eligibility, OwnerRef, ProviderOffer, ProviderRef, ProviderState, ResourceDescriptor, ResourceKind, ResourceRecord, ResourceSource, SourceAuthority, SourceRef, SourceRevision, SourceState};
+use aikit_core::resource::{
+    Eligibility, OwnerRef, ProviderOffer, ProviderRef, ProviderState, ResourceDescriptor,
+    ResourceKind, ResourceRecord, ResourceSource, SourceAuthority, SourceRef, SourceRevision,
+    SourceState,
+};
 
 fn fixture() -> (tempfile::TempDir, Fixture) {
     let dir = tempfile::tempdir().unwrap();
@@ -180,17 +184,31 @@ fn wide_workspace_renders_context_compose_and_explain_from_one_world() {
     assert!(context.contains("Scopes   not exposed by application boundary"));
 
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap();
-    assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Compose");
+    assert_eq!(
+        workspace_section_label(surface.semantic().workspace_section),
+        "Compose"
+    );
     let compose = rendered(&draw_width(&surface, 220, 30));
     assert!(compose.contains("Compose · intention to operative world"));
     // §5.1's spine, not the four read-model horizon counts it replaced: a
     // person reads their own progress off the steps, and each step carries
     // strictly more than the count row it retired.
     for step in [
-        "Intention", "Identity", "Governance", "Praxis", "Information",
-        "Worlds/bounds", "Runtime", "Continuity", "Preview", "Enter work",
+        "Intention",
+        "Identity",
+        "Governance",
+        "Praxis",
+        "Information",
+        "Worlds/bounds",
+        "Runtime",
+        "Continuity",
+        "Preview",
+        "Enter work",
     ] {
-        assert!(compose.contains(step), "Compose must carry the §5.1 step `{step}`");
+        assert!(
+            compose.contains(step),
+            "Compose must carry the §5.1 step `{step}`"
+        );
     }
     // Step *content* — including Praxis's "no Profile/SkillSet/Skill/Method
     // contract here" — is pinned by `compose_spine`'s unit tests. The pane is
@@ -253,7 +271,10 @@ fn work_and_system_sections_disclose_real_facts_without_fabricating_factory_or_c
 
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Compose
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Work
-    assert_eq!(workspace_section_label(surface.semantic().workspace_section), "Work");
+    assert_eq!(
+        workspace_section_label(surface.semantic().workspace_section),
+        "Work"
+    );
     let work = rendered(&draw_width(&surface, 300, 50));
     assert!(work.contains("Work · direct and developmental activity"));
     assert!(work.contains("DIRECT"));
@@ -268,7 +289,10 @@ fn work_and_system_sections_disclose_real_facts_without_fabricating_factory_or_c
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Knowledge
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // History
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // System
-    assert_eq!(workspace_section_label(surface.semantic().workspace_section), "System");
+    assert_eq!(
+        workspace_section_label(surface.semantic().workspace_section),
+        "System"
+    );
     let system = rendered(&draw_width(&surface, 220, 30));
     assert!(system.contains("System · installation and provider disclosure"));
     // The fixture composes no credential input, so the read model carries a
@@ -346,17 +370,34 @@ fn factory_record(reference: &str, kind: ResourceKind, description: &str) -> Res
 fn owner_observed_factory_resources_enter_navigator_and_replace_only_the_unexposed_work_state() {
     let dir = tempfile::tempdir().unwrap();
     let records = vec![
-        factory_record("journey:01ARZ3NDEKTSV4RRFFQ69G5FAD", ResourceKind::Journey, "active · publish the vertical"),
-        factory_record("run:01ARZ3NDEKTSV4RRFFQ69G5FAA", ResourceKind::Run, "active · main"),
-        factory_record("workflow-unit:01ARZ3NDEKTSV4RRFFQ69G5FAB", ResourceKind::WorkflowUnit, "verify the accepted change"),
+        factory_record(
+            "journey:01ARZ3NDEKTSV4RRFFQ69G5FAD",
+            ResourceKind::Journey,
+            "active · publish the vertical",
+        ),
+        factory_record(
+            "run:01ARZ3NDEKTSV4RRFFQ69G5FAA",
+            ResourceKind::Run,
+            "active · main",
+        ),
+        factory_record(
+            "workflow-unit:01ARZ3NDEKTSV4RRFFQ69G5FAB",
+            ResourceKind::WorkflowUnit,
+            "verify the accepted change",
+        ),
     ];
     let mut backend = Fixture::new(dir.path(), vec![]).with_context_records(records);
     let search = ApplicationService::resolve_search_from(&backend, "verify").unwrap();
-    assert!(search.resources.resources.iter().any(|row| row.kind == ResourceKind::WorkflowUnit));
+    assert!(search
+        .resources
+        .resources
+        .iter()
+        .any(|row| row.kind == ResourceKind::WorkflowUnit));
     let mut surface = ApplicationSurfaceController::new(
         &mut backend,
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_glyphs(Glyphs::unicode()),
-    ).unwrap();
+    )
+    .unwrap();
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Compose
     surface.handle(&mut backend, alt(KeyCode::Right)).unwrap(); // Work
     let work = rendered(&draw_width(&surface, 300, 50));
@@ -379,7 +420,10 @@ fn owner_observed_factory_resources_enter_navigator_and_replace_only_the_unexpos
 
     let world = surface.project_world().unwrap();
     assert_eq!(world.developmental_work.len(), 3);
-    assert!(world.developmental_work.iter().all(|resource| matches!(resource.kind, ResourceKind::Journey | ResourceKind::Run | ResourceKind::WorkflowUnit)));
+    assert!(world.developmental_work.iter().all(|resource| matches!(
+        resource.kind,
+        ResourceKind::Journey | ResourceKind::Run | ResourceKind::WorkflowUnit
+    )));
 }
 
 #[test]
@@ -390,7 +434,10 @@ fn ctrl_k_navigator_finds_and_opens_a_workspace_destination() {
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_glyphs(Glyphs::unicode()),
     )
     .unwrap();
-    assert_eq!(surface.semantic().presentation, aikit_tui::PresentationMode::Workspace);
+    assert_eq!(
+        surface.semantic().presentation,
+        aikit_tui::PresentationMode::Workspace
+    );
     let before_section = surface.semantic().workspace_section;
 
     surface
@@ -399,7 +446,10 @@ fn ctrl_k_navigator_finds_and_opens_a_workspace_destination() {
             PaletteEvent::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
         )
         .unwrap();
-    assert_eq!(surface.semantic().presentation, aikit_tui::PresentationMode::Quick);
+    assert_eq!(
+        surface.semantic().presentation,
+        aikit_tui::PresentationMode::Quick
+    );
 
     for character in "system".chars() {
         surface
@@ -443,7 +493,10 @@ fn ctrl_k_navigator_finds_and_opens_a_workspace_destination() {
     }
     surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
 
-    assert_eq!(surface.semantic().presentation, aikit_tui::PresentationMode::Workspace);
+    assert_eq!(
+        surface.semantic().presentation,
+        aikit_tui::PresentationMode::Workspace
+    );
     assert_eq!(
         workspace_section_label(surface.semantic().workspace_section),
         "System"
@@ -473,7 +526,9 @@ fn staged_composition_survives_field_navigation() {
         .clone()
         .expect("explicit selection should choose the review capability");
 
-    surface.handle(&mut backend, ctrl(KeyCode::Char(' '))).unwrap();
+    surface
+        .handle(&mut backend, ctrl(KeyCode::Char(' ')))
+        .unwrap();
     assert_eq!(surface.semantic().staged.len(), 1);
     assert!(surface.semantic().staged.get(&selected).is_some());
 
@@ -542,8 +597,13 @@ fn compose_preview_answers_every_section_5_question_on_the_existing_preview_rout
         .unwrap();
     assert_eq!(surface.semantic().staged.len(), 1);
 
-    surface.handle(&mut backend, ctrl(KeyCode::Char('s'))).unwrap();
-    assert_eq!(surface.semantic().overlay, Some(Overlay::CompositionPreview));
+    surface
+        .handle(&mut backend, ctrl(KeyCode::Char('s')))
+        .unwrap();
+    assert_eq!(
+        surface.semantic().overlay,
+        Some(Overlay::CompositionPreview)
+    );
 
     let preview = rendered(&draw_width(&surface, 220, 40));
 

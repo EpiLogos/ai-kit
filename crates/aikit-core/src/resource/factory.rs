@@ -37,10 +37,7 @@ impl FactoryInteropView {
         })?;
         let view = Self { document };
         view.require_eq(&["fixtureVersion"], "factory.interop-fixtures/v1")?;
-        view.require_eq(
-            &["contract", "contractVersion"],
-            "factory.interop/v1",
-        )?;
+        view.require_eq(&["contract", "contractVersion"], "factory.interop/v1")?;
         Ok(view)
     }
 
@@ -52,9 +49,16 @@ impl FactoryInteropView {
             self.str_field(descriptor, "name")?,
             self.str_field(descriptor, "description")?,
         );
-        resource.owner = Some(OwnerRef::parse(self.str_field(descriptor, "ownerProjectRef")?)?);
+        resource.owner = Some(OwnerRef::parse(
+            self.str_field(descriptor, "ownerProjectRef")?,
+        )?);
         resource.sources.push(self.provenance_source(descriptor)?);
-        self.annotate_if_string(&mut resource, descriptor, "catalogRef", "factory.catalog-ref");
+        self.annotate_if_string(
+            &mut resource,
+            descriptor,
+            "catalogRef",
+            "factory.catalog-ref",
+        );
         self.annotate_if_string(
             &mut resource,
             descriptor,
@@ -87,12 +91,7 @@ impl FactoryInteropView {
         );
         resource.owner = Some(OwnerRef::parse(self.str_field(descriptor, "ownerRef")?)?);
         resource.sources.push(self.provenance_source(descriptor)?);
-        self.annotate_if_string(
-            &mut resource,
-            descriptor,
-            "kind",
-            "factory.capability-kind",
-        );
+        self.annotate_if_string(&mut resource, descriptor, "kind", "factory.capability-kind");
         self.annotate_revision(&mut resource, descriptor, "definitionRevision");
 
         let provider = descriptor
@@ -118,7 +117,7 @@ impl FactoryInteropView {
     /// the Factory ProjectBinding envelope into an operational AIKit binding until
     /// it separately has a real constituent and locator.
     pub fn project_ref(&self) -> Result<ProjectRef> {
-        ProjectRef::parse(self.required_str(&["contract", "projectBinding", "projectRef"])? )
+        ProjectRef::parse(self.required_str(&["contract", "projectBinding", "projectRef"])?)
     }
 
     pub fn project_source(&self) -> Result<ResourceSource> {
@@ -134,7 +133,10 @@ impl FactoryInteropView {
         })
     }
 
-    fn provenance_source(&self, descriptor: &serde_json::Map<String, Value>) -> Result<ResourceSource> {
+    fn provenance_source(
+        &self,
+        descriptor: &serde_json::Map<String, Value>,
+    ) -> Result<ResourceSource> {
         let provenance = descriptor
             .get("provenance")
             .and_then(Value::as_object)
@@ -216,9 +218,9 @@ impl FactoryInteropView {
     fn path(&self, path: &[&str]) -> Result<&Value> {
         let mut value = &self.document;
         for segment in path {
-            value = value
-                .get(*segment)
-                .ok_or_else(|| self.invalid(&format!("missing Factory field `{}`", path.join("."))))?;
+            value = value.get(*segment).ok_or_else(|| {
+                self.invalid(&format!("missing Factory field `{}`", path.join(".")))
+            })?;
         }
         Ok(value)
     }

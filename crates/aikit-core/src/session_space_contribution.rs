@@ -134,18 +134,21 @@ impl SessionSpaceContributionRegistry {
         if self.registrations.contains_key(&definition.id) {
             return Err(AikitError::new(
                 "session_space_contribution.already_registered",
-                format!("SessionSpace contribution {} is already registered", definition.id),
+                format!(
+                    "SessionSpace contribution {} is already registered",
+                    definition.id
+                ),
             ));
         }
 
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| AikitError::new("session_space_contribution.revision_overflow", "registry revision overflow"))?;
-        let native_registration_ref = ResourceRef::parse(&format!(
-            "aikit-registration/{}",
-            definition.id
-        ))?;
+        self.revision = self.revision.checked_add(1).ok_or_else(|| {
+            AikitError::new(
+                "session_space_contribution.revision_overflow",
+                "registry revision overflow",
+            )
+        })?;
+        let native_registration_ref =
+            ResourceRef::parse(&format!("aikit-registration/{}", definition.id))?;
         let registration = SessionSpaceContributionRegistration {
             contribution: definition.clone(),
             native_registration_ref,
@@ -175,10 +178,12 @@ impl SessionSpaceContributionRegistry {
                 format!("SessionSpace contribution {contribution_ref} is not registered"),
             )
         })?;
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| AikitError::new("session_space_contribution.revision_overflow", "registry revision overflow"))?;
+        self.revision = self.revision.checked_add(1).ok_or_else(|| {
+            AikitError::new(
+                "session_space_contribution.revision_overflow",
+                "registry revision overflow",
+            )
+        })?;
         Ok(SessionSpaceContributionRemoval {
             contribution_ref: contribution_ref.clone(),
             native_registration_ref: registration.native_registration_ref,
@@ -209,7 +214,10 @@ impl SessionSpaceContributionRegistry {
         if read_model.version != SESSION_SPACE_VERSION {
             return Err(AikitError::new(
                 "session_space_contribution.unsupported_read_model",
-                format!("unsupported SessionSpace read-model version {}", read_model.version),
+                format!(
+                    "unsupported SessionSpace read-model version {}",
+                    read_model.version
+                ),
             ));
         }
         if read_model.id != registration.contribution.session_space {
@@ -235,7 +243,11 @@ fn validate_definition(definition: &SessionSpaceContributionDefinition) -> Resul
             ),
         ));
     }
-    if definition.provenance.iter().any(|entry| entry.trim().is_empty()) {
+    if definition
+        .provenance
+        .iter()
+        .any(|entry| entry.trim().is_empty())
+    {
         return Err(AikitError::new(
             "session_space_contribution.invalid_provenance",
             "SessionSpace contribution provenance entries must not be empty",

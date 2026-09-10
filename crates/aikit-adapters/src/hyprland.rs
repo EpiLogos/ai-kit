@@ -65,24 +65,42 @@ pub fn parse_hyprland_clients(raw: &str) -> Result<Vec<HyprlandWindowObservation
                     )
                 })?
                 .to_string();
-            let workspace = client
-                .get("workspace")
-                .and_then(|workspace| {
-                    workspace
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                        .or_else(|| workspace.get("id").and_then(Value::as_i64).map(|id| id.to_string()))
-                });
+            let workspace = client.get("workspace").and_then(|workspace| {
+                workspace
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        workspace
+                            .get("id")
+                            .and_then(Value::as_i64)
+                            .map(|id| id.to_string())
+                    })
+            });
             Ok(HyprlandWindowObservation {
                 address,
-                class: client.get("class").and_then(Value::as_str).map(str::to_owned),
-                title: client.get("title").and_then(Value::as_str).map(str::to_owned),
+                class: client
+                    .get("class")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                title: client
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 workspace,
                 monitor: client.get("monitor").and_then(Value::as_i64),
-                floating: client.get("floating").and_then(Value::as_bool).unwrap_or(false),
-                mapped: client.get("mapped").and_then(Value::as_bool).unwrap_or(true),
-                hidden: client.get("hidden").and_then(Value::as_bool).unwrap_or(false),
+                floating: client
+                    .get("floating")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                mapped: client
+                    .get("mapped")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                hidden: client
+                    .get("hidden")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             })
         })
         .collect()
@@ -120,7 +138,7 @@ impl<R: CommandRunner> HyprlandWorkingEnvironment<R> {
     }
 
     pub fn clients(&self) -> Result<Vec<HyprlandWindowObservation>> {
-        parse_hyprland_clients(&self.run(&["-j", "clients"])? )
+        parse_hyprland_clients(&self.run(&["-j", "clients"])?)
     }
 
     fn dispatch_window(&self, dispatcher: &str, address: &str) -> Result<()> {
@@ -139,7 +157,11 @@ impl<R: CommandRunner> HyprlandWorkingEnvironment<R> {
         let target = format!("{workspace},address:{address}");
         self.run(&[
             "dispatch",
-            if silent { "movetoworkspacesilent" } else { "movetoworkspace" },
+            if silent {
+                "movetoworkspacesilent"
+            } else {
+                "movetoworkspace"
+            },
             &target,
         ])?;
         Ok(())
@@ -155,7 +177,10 @@ impl<R: CommandRunner> HyprlandWorkingEnvironment<R> {
         self.dispatch_window(if floating { "setfloating" } else { "settiled" }, address)
     }
 
-    fn observation(&self, clients: Vec<HyprlandWindowObservation>) -> WorkingEnvironmentObservation {
+    fn observation(
+        &self,
+        clients: Vec<HyprlandWindowObservation>,
+    ) -> WorkingEnvironmentObservation {
         let present = self
             .surface_bindings
             .values()

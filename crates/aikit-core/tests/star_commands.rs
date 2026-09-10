@@ -46,7 +46,10 @@ fn a_declared_pack_arms_its_commands_and_an_unknown_pack_is_reported_not_ignored
 
 #[test]
 fn an_armed_command_is_recognised_with_the_rest_of_its_line_as_its_argument() {
-    let found = recognise("*fork extract the pressure brackets\nand carry on", &closeout());
+    let found = recognise(
+        "*fork extract the pressure brackets\nand carry on",
+        &closeout(),
+    );
     assert_eq!(
         found,
         vec![Invocation {
@@ -58,7 +61,10 @@ fn an_armed_command_is_recognised_with_the_rest_of_its_line_as_its_argument() {
 
 #[test]
 fn commands_stack_in_the_order_they_appear_and_a_repeat_is_one_invocation() {
-    let found = recognise("*fork check the ledger *end wrap up *end again", &closeout());
+    let found = recognise(
+        "*fork check the ledger *end wrap up *end again",
+        &closeout(),
+    );
     let commands: Vec<StarCommand> = found.iter().map(|item| item.command).collect();
     assert_eq!(commands, vec![StarCommand::Fork, StarCommand::End]);
     // A stacked argument stops at the next star token rather than swallowing it.

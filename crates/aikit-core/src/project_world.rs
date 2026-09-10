@@ -11,11 +11,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::context::ContextDescriptor;
-use crate::credential_world::CredentialWorldDisclosure;
 use crate::context_resolution::{
     Availability, ContextResolution, ReferenceResolution, ResolvedResource, ScopeResolution,
 };
 use crate::context_source::{ContextSourceHit, ContextSourceIndex, HorizonRequest};
+use crate::credential_world::CredentialWorldDisclosure;
 use crate::id::{GenerationId, ProfileId};
 use crate::platform::TargetId;
 use crate::project::ProjectBinding;
@@ -346,8 +346,8 @@ mod tests {
     use crate::project::{ProjectBindingLocator, ProjectConstituentRef, ProjectRef};
     use crate::resource::{
         GitRepositoryRelation, GitWorkingState, ProviderOffer, ProviderRef, ProviderState,
-        ResourceDescriptor, ResourceRecord, ResourceSource, SourceAuthority, SourceRef, SourceState,
-        VersionRevision, VersionedWorldCapability, VersionedWorldProviderDescriptor,
+        ResourceDescriptor, ResourceRecord, ResourceSource, SourceAuthority, SourceRef,
+        SourceState, VersionRevision, VersionedWorldCapability, VersionedWorldProviderDescriptor,
         VersionedWorldProviderStatus, VERSIONED_WORLD_VERSION,
     };
 
@@ -394,15 +394,23 @@ mod tests {
             project: ProjectBinding::new(
                 project,
                 ProjectConstituentRef::parse("source:working-tree").unwrap(),
-                ProjectBindingLocator::LocalDirectory { path: "/tmp/example".into() },
+                ProjectBindingLocator::LocalDirectory {
+                    path: "/tmp/example".into(),
+                },
             ),
             context: ContextDescriptor::for_project("/tmp/example"),
-            resolution_basis: ResolutionBasisDisclosure { profiles: vec![], scopes: vec![] },
+            resolution_basis: ResolutionBasisDisclosure {
+                profiles: vec![],
+                scopes: vec![],
+            },
             capability_horizon: CapabilityHorizonDisclosure::default(),
             information_horizon: InformationHorizonDisclosure::default(),
             actor_runtime: ActorRuntimeDisclosure::default(),
             developmental_work: Vec::new(),
-            projection: ProjectionDisclosure { targets: vec![], active_capabilities: vec![] },
+            projection: ProjectionDisclosure {
+                targets: vec![],
+                active_capabilities: vec![],
+            },
             effective_revision: EffectiveRevisionDisclosure {
                 generation: None,
                 catalog_revision: "catalog@1".into(),
@@ -423,7 +431,10 @@ mod tests {
             provider: VersionedWorldProviderDescriptor {
                 provider: ProviderRef::parse("native-git").unwrap(),
                 status: VersionedWorldProviderStatus::Available,
-                capabilities: vec![VersionedWorldCapability::Inspect, VersionedWorldCapability::History],
+                capabilities: vec![
+                    VersionedWorldCapability::Inspect,
+                    VersionedWorldCapability::History,
+                ],
                 implementation_version: Some("git test".into()),
             },
             repository: GitRepositoryRelation {
@@ -509,9 +520,18 @@ mod tests {
             .with_versioned_world(versioned_world("project:alpha"))
             .unwrap();
         assert_eq!(reading.project.project.as_str(), "project:alpha");
-        assert_eq!(reading.versioned_world.as_ref().unwrap().project.as_str(), "project:alpha");
         assert_eq!(
-            reading.versioned_world.as_ref().unwrap().repository.branch.as_deref(),
+            reading.versioned_world.as_ref().unwrap().project.as_str(),
+            "project:alpha"
+        );
+        assert_eq!(
+            reading
+                .versioned_world
+                .as_ref()
+                .unwrap()
+                .repository
+                .branch
+                .as_deref(),
             Some("main")
         );
     }
@@ -523,7 +543,11 @@ mod tests {
     fn a_reading_without_a_credential_field_loads_as_not_attempted() {
         let world = project_world("project:alpha");
         let mut payload: serde_json::Value = serde_json::to_value(&world).unwrap();
-        payload.as_object_mut().unwrap().remove("credential_world").unwrap();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("credential_world")
+            .unwrap();
 
         let restored: ProjectWorldReadModel = serde_json::from_value(payload).unwrap();
         assert!(!restored.credential_world.fully_observed());

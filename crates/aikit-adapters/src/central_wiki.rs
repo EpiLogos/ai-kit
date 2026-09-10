@@ -100,7 +100,9 @@ pub fn read_central_wiki<R: CommandRunner>(
         let register = match ResourceRef::parse(register) {
             Ok(register) => register,
             Err(error) => {
-                absences.push(format!("Central wiki declaration has invalid space_ref: {error}"));
+                absences.push(format!(
+                    "Central wiki declaration has invalid space_ref: {error}"
+                ));
                 continue;
             }
         };
@@ -134,13 +136,12 @@ pub fn read_central_wiki<R: CommandRunner>(
             }
             let bytes = fs::read(&path)
                 .map_err(|e| AikitError::new("central.wiki_source_unavailable", e.to_string()))?;
-            let text = std::str::from_utf8(&bytes).map_err(|e| {
-                AikitError::new("central.wiki_source_unavailable", e.to_string())
-            })?;
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|e| AikitError::new("central.wiki_source_unavailable", e.to_string()))?;
             let objects = parse_wiki_objects(text)?;
-            if !objects.iter().any(|object| {
-                matches!(object, WikiObject::Space(space) if space.ref_id == register)
-            }) {
+            if !objects.iter().any(
+                |object| matches!(object, WikiObject::Space(space) if space.ref_id == register),
+            ) {
                 return Err(AikitError::new(
                     "central.wiki_register_identity_mismatch",
                     "Central's declared register is not the canonical Wiki space in that source",

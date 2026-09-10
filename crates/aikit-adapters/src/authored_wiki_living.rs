@@ -10,9 +10,7 @@ use aikit_core::knowledge_living::{
 };
 use aikit_core::Result;
 
-use crate::authored_wiki_source::{
-    authored_relation_dependencies, AuthoredWikiSourceProjection,
-};
+use crate::authored_wiki_source::{authored_relation_dependencies, AuthoredWikiSourceProjection};
 
 pub const AUTHORED_WIKI_LIVING_VERSION: &str = "aikit.authored-wiki-living/v1";
 
@@ -83,7 +81,10 @@ Flow body.
         assert_eq!(impact.affected.len(), 1);
         assert_eq!(impact.affected[0].resource.as_str(), "wiki:concept:flow");
         assert_eq!(impact.affected[0].relation, "authored-source:develops");
-        assert_eq!(impact.affected[0].freshness, KnowledgeFreshness::BasisChanged);
+        assert_eq!(
+            impact.affected[0].freshness,
+            KnowledgeFreshness::BasisChanged
+        );
         assert!(!impact.automatic_agent_or_model_invocation);
     }
 

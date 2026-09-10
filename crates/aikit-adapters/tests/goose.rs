@@ -6,8 +6,8 @@
 
 use aikit_adapters::clients::goose::{GooseAdapter, PRODUCT};
 use aikit_core::harness_admission::{
-    FacultySupport, HARNESS_ADAPTER_SDK_VERSION, HarnessActivationObservation,
-    HarnessActivationState, HarnessAdmissionAdapter, verify_activation_truth,
+    verify_activation_truth, FacultySupport, HarnessActivationObservation, HarnessActivationState,
+    HarnessAdmissionAdapter, HARNESS_ADAPTER_SDK_VERSION,
 };
 use aikit_core::platform::TargetId;
 use aikit_core::projection::{ActivationEffect, ProjectionPlan, TargetAdapter};

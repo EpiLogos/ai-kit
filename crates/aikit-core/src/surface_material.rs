@@ -26,10 +26,8 @@ pub const WORKCELL_COLLAPSED_LOCAL_CONFORMANCE_REVISION: &str =
 
 /// Current upstream source pins inspected for target-native persistent-host
 /// management semantics. They are evidence, never semantic identities.
-pub const HERMES_GATEWAY_CONFORMANCE_REVISION: &str =
-    "41a80d52518c1c391d62c8d1852bdce83593b751";
-pub const OPENCLAW_GATEWAY_CONFORMANCE_REVISION: &str =
-    "49cdd54259291ae466244a110c3c39eb12b47568";
+pub const HERMES_GATEWAY_CONFORMANCE_REVISION: &str = "41a80d52518c1c391d62c8d1852bdce83593b751";
+pub const OPENCLAW_GATEWAY_CONFORMANCE_REVISION: &str = "49cdd54259291ae466244a110c3c39eb12b47568";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -157,7 +155,10 @@ pub fn disclose_surface_material(
         if observation.logical_service_ref.trim().is_empty() {
             return Err(AikitError::new(
                 "surface_material.empty_logical_service",
-                format!("Surface {} has an empty logical service ref", observation.surface),
+                format!(
+                    "Surface {} has an empty logical service ref",
+                    observation.surface
+                ),
             ));
         }
         if observation.material_ref.trim().is_empty() {
@@ -212,9 +213,7 @@ pub fn disclose_surface_material(
                     surface: descriptor.resource.clone(),
                     reason: "no current material binding observation was supplied".into(),
                 }),
-                Some(observation)
-                    if observation.health == SurfaceMaterialHealth::Unavailable =>
-                {
+                Some(observation) if observation.health == SurfaceMaterialHealth::Unavailable => {
                     unavailable.push(SurfaceMaterialAbsence {
                         surface: descriptor.resource.clone(),
                         reason: observation

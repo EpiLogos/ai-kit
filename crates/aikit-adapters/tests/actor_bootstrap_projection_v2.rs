@@ -49,8 +49,8 @@ fn actor_bootstrap() -> ActorBootstrap {
         host: None,
         harness: None,
         model: None,
-    harness_candidates: Vec::new(),
-    model_candidates: Vec::new(),
+        harness_candidates: Vec::new(),
+        model_candidates: Vec::new(),
         agent_session: Some("session/alpha".into()),
         session_space: Some(SessionSpaceRef::parse("session-space/test").unwrap()),
         capabilities: empty_summary(),
@@ -99,14 +99,8 @@ fn the_same_exact_project_and_run_seed_projects_through_claude_and_isolated_code
     let codex = CodexAdapter::new(dir.path().join("task-tree"));
     let codex_plan = codex.plan(&context).unwrap();
 
-    let claude_seed = bootstrap_write(
-        &claude_plan,
-        ".claude/skills/aikit-context/SKILL.md",
-    );
-    let codex_seed = bootstrap_write(
-        &codex_plan,
-        ".agents/skills/aikit-context/SKILL.md",
-    );
+    let claude_seed = bootstrap_write(&claude_plan, ".claude/skills/aikit-context/SKILL.md");
+    let codex_seed = bootstrap_write(&codex_plan, ".agents/skills/aikit-context/SKILL.md");
 
     for seed in [claude_seed, codex_seed] {
         assert!(seed.contains("Project: `project/test`"));

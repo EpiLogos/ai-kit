@@ -107,7 +107,9 @@ pub fn inspector_lines(
                 lines.push(format!(
                     "  {} ({}): {}",
                     fact.relation,
-                    fact.authority.map(authority_label).unwrap_or("not supplied"),
+                    fact.authority
+                        .map(authority_label)
+                        .unwrap_or("not supplied"),
                     fact.summary,
                 ));
                 if !fact.canonical_refs.is_empty() {
@@ -283,17 +285,23 @@ mod tests {
         let state = TuiState::default();
         let lines = inspector_lines(&state, None, None, &Glyphs::unicode());
         assert!(lines.iter().any(|line| line == "nothing selected"));
-        assert!(lines.len() > 2, "the empty state must say something, not just the heading");
+        assert!(
+            lines.len() > 2,
+            "the empty state must say something, not just the heading"
+        );
     }
 
     #[test]
     fn a_selection_outside_every_evidence_source_discloses_absence_not_a_guess() {
         let state = state_with_selection("skill/alpha", ResourceKind::Capability);
         let lines = inspector_lines(&state, None, None, &Glyphs::unicode());
-        assert!(lines.iter().any(|line| line.contains("subject   skill/alpha")));
         assert!(lines
             .iter()
-            .any(|line| line.contains("not exposed - this selection is outside the navigation index")));
+            .any(|line| line.contains("subject   skill/alpha")));
+        assert!(lines
+            .iter()
+            .any(|line| line
+                .contains("not exposed - this selection is outside the navigation index")));
         assert!(lines
             .iter()
             .any(|line| line.contains("not exposed - no Project world resolved for this session")));
@@ -348,8 +356,12 @@ mod tests {
             }),
         };
         let lines = inspector_lines(&state, None, Some(&present), &Glyphs::unicode());
-        assert!(lines.iter().any(|line| line.contains("active yes - declared yes - runnable no")));
-        assert!(lines.iter().any(|line| line.contains("unavailable: trust required")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("active yes - declared yes - runnable no")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("unavailable: trust required")));
         assert!(lines.iter().any(|line| line.contains("related: cap/beta")));
 
         let absent = InspectorSnapshot {
@@ -371,7 +383,7 @@ mod tests {
     #[test]
     fn nothing_in_an_ascii_rendering_is_non_ascii() {
         use aikit_core::resource::{ActionStageability, ContextualActionDescriptor};
-        use aikit_core::{ExplainEvidence, ExplainFact, EvidenceProvenance, SourceAuthority};
+        use aikit_core::{EvidenceProvenance, ExplainEvidence, ExplainFact, SourceAuthority};
         let mut state = state_with_selection("skill/alpha", ResourceKind::Capability);
         let subject = ResourceRef::parse("skill/alpha").unwrap();
         // Exercise the Actions line's glyph marker too, not just the text
@@ -403,10 +415,14 @@ mod tests {
                     relation: "source".into(),
                     authority: Some(SourceAuthority::Observed),
                     summary: "source config/skill.toml is Available".into(),
-                    canonical_refs: vec![ResourceRef::parse("source/aikit/resolved-catalogue").unwrap()],
+                    canonical_refs: vec![
+                        ResourceRef::parse("source/aikit/resolved-catalogue").unwrap()
+                    ],
                     provenance: vec![EvidenceProvenance {
                         provider: Some(ResourceRef::parse("provider/aikit/catalog").unwrap()),
-                        source: Some(ResourceRef::parse("source/aikit/resolved-catalogue").unwrap()),
+                        source: Some(
+                            ResourceRef::parse("source/aikit/resolved-catalogue").unwrap(),
+                        ),
                         lens: Some("catalog".into()),
                         revision: Some("3".into()),
                         native_id: None,

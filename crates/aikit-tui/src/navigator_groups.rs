@@ -57,8 +57,7 @@ pub enum NavigatorGroup {
 
 impl NavigatorGroup {
     /// Presentation order, matching §3.3's own example exactly.
-    pub const ALL: [NavigatorGroup; 3] =
-        [Self::Destinations, Self::Resources, Self::RecentRoutes];
+    pub const ALL: [NavigatorGroup; 3] = [Self::Destinations, Self::Resources, Self::RecentRoutes];
 
     /// The header text §3.3 uses verbatim. Plain ASCII words — a Navigator
     /// group header carries no glyph of its own to swap between character
@@ -349,7 +348,10 @@ mod tests {
             .iter()
             .filter(|row| matches!(row, NavigatorRow::Spacer))
             .count();
-        assert_eq!(spacers, 2, "one spacer between each of the three present groups");
+        assert_eq!(
+            spacers, 2,
+            "one spacer between each of the three present groups"
+        );
     }
 
     #[test]
@@ -388,7 +390,11 @@ mod tests {
         state.presentation = PresentationMode::Workspace;
 
         let rows = resource_pane_rows(&state);
-        assert_eq!(rows.len(), 2, "no header/spacer rows in Workspace's flat list");
+        assert_eq!(
+            rows.len(),
+            2,
+            "no header/spacer rows in Workspace's flat list"
+        );
         assert!(rows
             .iter()
             .all(|row| matches!(row, NavigatorRow::Item { .. })));

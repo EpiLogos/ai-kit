@@ -78,7 +78,10 @@ fn an_external_style_adapter_uses_existing_target_projection_plus_public_admissi
     admission.validate().unwrap();
     assert_eq!(admission.target.as_str(), "fixture-harness");
     assert_eq!(
-        admission.faculty(HarnessFaculty::LiveReload).unwrap().support,
+        admission
+            .faculty(HarnessFaculty::LiveReload)
+            .unwrap()
+            .support,
         FacultySupport::Unsupported
     );
 }
@@ -92,10 +95,7 @@ fn supported_faculties_require_evidence() {
 
 #[test]
 fn generated_material_cannot_be_called_loaded_without_target_evidence() {
-    let plan = ProjectionPlan::new(
-        TargetId::new("fixture-harness"),
-        ActivationEffect::live(),
-    );
+    let plan = ProjectionPlan::new(TargetId::new("fixture-harness"), ActivationEffect::live());
     let observation = HarnessActivationObservation {
         schema: HARNESS_ADAPTER_SDK_VERSION.to_string(),
         target: plan.target.clone(),
@@ -162,6 +162,11 @@ fn unsupported_targets_return_an_actionable_public_extension_path() {
 
     assert_eq!(gap.missing_contract, HARNESS_ADAPTER_SDK_VERSION);
     assert_eq!(gap.sdk_ref, "aikit:harness-adapter-sdk/v1");
-    assert_eq!(gap.authoring_skill_ref, "skill/aikit/harness-adapter-authoring");
-    assert!(gap.required_conformance.contains(&"activation-reload-truth".to_string()));
+    assert_eq!(
+        gap.authoring_skill_ref,
+        "skill/aikit/harness-adapter-authoring"
+    );
+    assert!(gap
+        .required_conformance
+        .contains(&"activation-reload-truth".to_string()));
 }

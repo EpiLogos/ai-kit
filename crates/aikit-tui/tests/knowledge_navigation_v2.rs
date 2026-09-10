@@ -24,9 +24,12 @@ fn capability_relation_read_model_uses_canonical_contextual_actions() {
         "action/aikit/explain",
         "action/aikit/history",
     ] {
-        assert!(actions.iter().any(|action| {
-            action.get("action").and_then(|value| value.as_str()) == Some(expected)
-        }), "missing canonical contextual Action {expected}");
+        assert!(
+            actions.iter().any(|action| {
+                action.get("action").and_then(|value| value.as_str()) == Some(expected)
+            }),
+            "missing canonical contextual Action {expected}"
+        );
     }
 }
 
@@ -49,9 +52,7 @@ fn resource_without_typed_relations_does_not_invent_edges() {
     assert!(actions.iter().any(|action| {
         action.get("action").and_then(|value| value.as_str()) == Some("action/aikit/history")
     }));
-    assert!(view.value["related"]
-        .as_array()
-        .is_some_and(Vec::is_empty));
+    assert!(view.value["related"].as_array().is_some_and(Vec::is_empty));
     assert!(view.value["resolverRelated"]
         .as_array()
         .is_some_and(Vec::is_empty));

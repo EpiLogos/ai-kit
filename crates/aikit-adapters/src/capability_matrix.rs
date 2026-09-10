@@ -15,11 +15,7 @@ use aikit_core::{
     WikiProvenanceRef,
 };
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::Path,
-};
+use std::{collections::BTreeMap, fs, path::Path};
 
 pub const MATRIX_PROTOCOL: &str = "ql-capability-matrix/1";
 pub const MATRIX_PRODUCER_REF: &str = "aikit/capability-matrix-compiler/v1";
@@ -76,8 +72,10 @@ pub fn compile_capability_matrix(matrix_dir: &Path, space_ref: Option<String>) -
     let Ok(csv_text) = fs::read_to_string(matrix_dir.join(csv_relative)) else {
         return MatrixReading {
             objects: Vec::new(),
-            absences: vec![format!("capability matrix records unavailable: {csv_relative}")],
-        }
+            absences: vec![format!(
+                "capability matrix records unavailable: {csv_relative}"
+            )],
+        };
     };
     let csv_bytes = csv_text.as_bytes();
     let csv_revision = content_revision(csv_bytes);
@@ -130,7 +128,10 @@ pub fn compile_capability_matrix(matrix_dir: &Path, space_ref: Option<String>) -
 
     for record in records.iter().skip(1) {
         let field = |name: &str| {
-            column(name).and_then(|index| record.get(index)).map(|value| value.as_str()).unwrap_or("")
+            column(name)
+                .and_then(|index| record.get(index))
+                .map(|value| value.as_str())
+                .unwrap_or("")
         };
         let record_type = field("record_type");
         let id = field("id");
@@ -147,10 +148,7 @@ pub fn compile_capability_matrix(matrix_dir: &Path, space_ref: Option<String>) -
                     revision: 1,
                     provenance: vec![matrix_provenance(csv_relative, &csv_revision)],
                     node_type: "capability".into(),
-                    title: Some(format!(
-                        "Capability {id}: {}",
-                        first_clause(need)
-                    )),
+                    title: Some(format!("Capability {id}: {}", first_clause(need))),
                     space_refs: space_refs(&space_ref),
                     source_refs: vec![source_ref_of(matrix_dir, csv_relative)],
                     local_space_ref: None,
@@ -266,15 +264,17 @@ pub fn compile_world_matrices(central_root: &Path) -> MatrixReading {
         for project in names {
             homes.push((
                 project.join("ProjectCentral/user"),
-                Some(aikit_core::project_wiki_space_ref(
-                    project
-                        .file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                        .as_str(),
-                )
-                .map(|reference| reference.as_str().to_owned())
-                .unwrap_or_default()),
+                Some(
+                    aikit_core::project_wiki_space_ref(
+                        project
+                            .file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                            .as_str(),
+                    )
+                    .map(|reference| reference.as_str().to_owned())
+                    .unwrap_or_default(),
+                ),
             ));
         }
     }
@@ -316,12 +316,8 @@ fn matrix_provenance(carrier: &str, revision: &str) -> WikiProvenanceRef {
 }
 
 fn source_ref_of(dir: &Path, carrier: &str) -> SourceRef {
-    SourceRef::parse(
-        dir.join(carrier)
-            .to_string_lossy()
-            .replace('\\', "/"),
-    )
-    .expect("matrix paths are valid source refs")
+    SourceRef::parse(dir.join(carrier).to_string_lossy().replace('\\', "/"))
+        .expect("matrix paths are valid source refs")
 }
 
 fn matrix_extension(matrix_id: &str, extra: Value) -> BTreeMap<String, Value> {

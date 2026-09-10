@@ -9,23 +9,23 @@ use aikit_adapters::runner::SystemRunner;
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
 use aikit_core::knowledge_code::CodeIndexProvider;
 use aikit_core::knowledge_source_pool::{
-    NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider, material_for_actor,
+    material_for_actor, NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider,
 };
-use aikit_core::knowledge_wiki::{OkfWikiBundle, WikiObject, parse_wiki_objects};
+use aikit_core::knowledge_wiki::{parse_wiki_objects, OkfWikiBundle, WikiObject};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
 use aikit_core::resource::{
-    parse_or_search_expression, resolve_subjects, ProviderRef, ResolveExpression,
-    ResourceIndex, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
+    parse_or_search_expression, resolve_subjects, ProviderRef, ResolveExpression, ResourceIndex,
+    ResourceKind, ResourceRef, SourceAuthority, SourceRef,
 };
 use aikit_core::{
-    DEFAULT_FAMILIARITY_HALF_LIFE_MS, FamiliarityContext, ForgetScope, KnowledgeAddress,
-    KnowledgeApplication, KnowledgeExplanation, KnowledgeOpenReceipt, KnowledgeProviderStatus,
-    KnowledgeRankingEvidence, KnowledgeSearchResult, KnowledgeSources, Result,
+    FamiliarityContext, ForgetScope, KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation,
+    KnowledgeOpenReceipt, KnowledgeProviderStatus, KnowledgeRankingEvidence, KnowledgeSearchResult,
+    KnowledgeSources, Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS,
 };
 use aikit_store::{
-    KnowledgeApplicationReceipt, KnowledgeApplicationStore, SqliteWikiProvider,
-    append_familiarity_observation, append_familiarity_reset,
+    append_familiarity_observation, append_familiarity_reset, KnowledgeApplicationReceipt,
+    KnowledgeApplicationStore, SqliteWikiProvider,
 };
 use aikit_tui::backend::PaletteBackend;
 

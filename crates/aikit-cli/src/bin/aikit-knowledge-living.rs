@@ -11,11 +11,11 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use aikit_core::{
-    KnowledgeImpactRequest, PortableContemplatePreflightRequest, portable_contemplate_preflight,
+    portable_contemplate_preflight, KnowledgeImpactRequest, PortableContemplatePreflightRequest,
 };
 use clap::{Parser, Subcommand};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 type BoxError = Box<dyn Error>;
 

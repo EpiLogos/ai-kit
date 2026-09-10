@@ -5,8 +5,8 @@ use aikit_adapters::{
 use aikit_core::resource::ResourceRef;
 use aikit_core::{
     apply_confirmed_harness_composition, preview_harness_composition_change,
-    resolve_harness_composition, ActivationScopeKind, CompositionActivationMode,
-    ContributionKind, LifetimeOwnerKind, RetractionMode, StagedHarnessComposition,
+    resolve_harness_composition, ActivationScopeKind, CompositionActivationMode, ContributionKind,
+    LifetimeOwnerKind, RetractionMode, StagedHarnessComposition,
 };
 
 fn r(raw: &str) -> ResourceRef {
@@ -122,20 +122,24 @@ fn staged_dsh_mutation_changes_desired_body_without_claiming_live_cordis_activat
         .component_bindings
         .iter()
         .all(|binding| binding.component != r("component/deepseek/client-ui-commands")));
-    assert!(preview
-        .projected
-        .contributions
-        .iter()
-        .all(|contribution| contribution.activation_mode == CompositionActivationMode::NextSession));
+    assert!(
+        preview
+            .projected
+            .contributions
+            .iter()
+            .all(|contribution| contribution.activation_mode
+                == CompositionActivationMode::NextSession)
+    );
 
     let desired = apply_confirmed_harness_composition(preview.confirm());
     assert!(desired
         .component_bindings
         .iter()
         .all(|binding| binding.component != r("component/deepseek/client-ui-commands")));
-    assert!(desired.component_bindings.iter().all(|binding| {
-        binding.activation_mode == CompositionActivationMode::NextSession
-    }));
+    assert!(desired
+        .component_bindings
+        .iter()
+        .all(|binding| { binding.activation_mode == CompositionActivationMode::NextSession }));
 }
 
 #[test]
@@ -154,10 +158,7 @@ fn containment_is_semantic_and_rejects_unmounted_or_cyclic_target_trees() {
         )],
     )
     .unwrap_err();
-    assert_eq!(
-        error.code(),
-        "composition.containment_unmounted_component"
-    );
+    assert_eq!(error.code(), "composition.containment_unmounted_component");
 
     let error = resolve_component_topology(
         &body,

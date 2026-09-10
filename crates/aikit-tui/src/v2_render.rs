@@ -15,10 +15,10 @@ use crate::application::{
     visible_contextual_actions, ActionOutcome, Overlay, PresentationMode, ResourceListItem,
     TuiState, WorkspaceSection,
 };
+use crate::compose_preview::compose_preview_lines;
 use crate::layout::{Glyphs, Layout};
 use crate::navigation::AmbientContext;
 use crate::navigator_groups::{self, NavigatorRow};
-use crate::compose_preview::compose_preview_lines;
 use crate::project_workspace_render::{
     explain_lines, project_world_lines, workspace_section_label, WorkspaceReading,
 };
@@ -96,15 +96,14 @@ fn draw_shell(
     let panes = layout.split(inner);
     frame.render_widget(query_line(state, &theme, glyphs), panes.query);
 
-    let compact_world_lines = if panes.preview.is_none()
-        && state.presentation == PresentationMode::Workspace
-    {
-        reading
-            .map(|reading| project_world_lines(state, reading, glyphs))
-            .filter(|lines| !lines.is_empty())
-    } else {
-        None
-    };
+    let compact_world_lines =
+        if panes.preview.is_none() && state.presentation == PresentationMode::Workspace {
+            reading
+                .map(|reading| project_world_lines(state, reading, glyphs))
+                .filter(|lines| !lines.is_empty())
+        } else {
+            None
+        };
     if let Some(lines) = compact_world_lines {
         frame.render_widget(project_world_pane(lines, &theme), panes.list);
     } else {
@@ -141,7 +140,10 @@ fn query_line<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragra
         spans.push(Span::raw("   "));
         spans.push(Span::styled("Search", theme.accent()));
         for section in WorkspaceSection::ALL.iter() {
-            spans.push(Span::styled(format!(" {} ", glyphs.separator()), theme.dim()));
+            spans.push(Span::styled(
+                format!(" {} ", glyphs.separator()),
+                theme.dim(),
+            ));
             spans.push(Span::styled(
                 workspace_section_label(*section),
                 if *section == state.workspace_section {
@@ -221,9 +223,7 @@ fn pane_row_line<'a>(
     width: u16,
 ) -> Line<'a> {
     match row {
-        NavigatorRow::Header(group) => {
-            Line::from(Span::styled(group.label(), theme.heading()))
-        }
+        NavigatorRow::Header(group) => Line::from(Span::styled(group.label(), theme.heading())),
         NavigatorRow::Spacer => Line::raw(""),
         NavigatorRow::Item { item, .. } => {
             let indent = if grouped { 2 } else { 0 };
@@ -253,15 +253,26 @@ fn resource_line<'a>(
     let mut spans = vec![Span::raw(" ".repeat(indent))];
     spans.push(Span::styled(
         format!("{cursor}{staged_mark} "),
-        if staged { theme.staged() } else { theme.accent() },
+        if staged {
+            theme.staged()
+        } else {
+            theme.accent()
+        },
     ));
     spans.push(Span::styled(
-        format!("{} ", pad(&kind, 20.min(kind.chars().count().max(8)), glyphs)),
+        format!(
+            "{} ",
+            pad(&kind, 20.min(kind.chars().count().max(8)), glyphs)
+        ),
         theme.dim(),
     ));
     spans.push(Span::styled(
         pad(&item.label, label_width, glyphs),
-        if selected { theme.selected() } else { theme.base() },
+        if selected {
+            theme.selected()
+        } else {
+            theme.base()
+        },
     ));
     if summary_width > 3 {
         spans.push(Span::styled(
@@ -385,7 +396,10 @@ fn preview_pane<'a>(
         Line::from(""),
         Line::from(Span::raw(item.summary.clone())),
         Line::from(""),
-        Line::from(Span::styled(item.resource.as_str().to_string(), theme.dim())),
+        Line::from(Span::styled(
+            item.resource.as_str().to_string(),
+            theme.dim(),
+        )),
     ];
     if state.contextual_actions_for.as_ref() == Some(&item.resource)
         && !state.contextual_actions.is_empty()
@@ -460,7 +474,10 @@ fn project_world_pane(lines: Vec<String>, theme: &Theme) -> Paragraph<'static> {
 
 fn footer<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragraph<'a> {
     if let Some(status) = &state.status {
-        return Paragraph::new(Line::from(Span::styled(status.message.clone(), theme.dim())));
+        return Paragraph::new(Line::from(Span::styled(
+            status.message.clone(),
+            theme.dim(),
+        )));
     }
     let scope = state
         .mutation_scope

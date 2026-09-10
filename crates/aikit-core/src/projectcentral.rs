@@ -340,9 +340,10 @@ impl ProjectCentralBinding {
                     | ProjectCentralSourceKind::GovernanceMaterial
             ) && source.exists
         });
-        let canonical_wiki_exists = self.sources.iter().any(|source| {
-            source.kind == ProjectCentralSourceKind::CanonicalWiki && source.exists
-        });
+        let canonical_wiki_exists = self
+            .sources
+            .iter()
+            .any(|source| source.kind == ProjectCentralSourceKind::CanonicalWiki && source.exists);
         Ok(ProjectCentralOrientation {
             project: self.project.clone(),
             project_id: self.project_id.clone(),
@@ -596,8 +597,10 @@ fn provenance(object: &WikiObject) -> &[WikiProvenanceRef] {
 }
 
 fn require_maintenance_provenance(object: &WikiObject) -> Result<()> {
-    if matches!(object, WikiObject::Node(_) | WikiObject::Edge(_) | WikiObject::Reading(_))
-        && provenance(object).is_empty()
+    if matches!(
+        object,
+        WikiObject::Node(_) | WikiObject::Edge(_) | WikiObject::Reading(_)
+    ) && provenance(object).is_empty()
     {
         return Err(AikitError::new(
             "projectcentral.wiki_provenance_required",
@@ -668,7 +671,10 @@ mod tests {
             context.preferred_human_sources[0].truth_standing,
             ProjectCentralTruthStanding::AuthoredHumanPosition
         );
-        assert_eq!(context.agent_wiki.as_str(), "source:central:test:agent-wiki");
+        assert_eq!(
+            context.agent_wiki.as_str(),
+            "source:central:test:agent-wiki"
+        );
         assert!(context
             .capabilities
             .iter()
@@ -686,7 +692,9 @@ mod tests {
         assert!(context.preferred_human_sources.is_empty());
         assert_eq!(context.other_source_relations.len(), 1);
         let entries = value.context_sources().unwrap();
-        assert!(entries[0].resource.descriptor.sources[0].authority.is_none());
+        assert!(entries[0].resource.descriptor.sources[0]
+            .authority
+            .is_none());
     }
 
     #[test]

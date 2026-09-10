@@ -137,9 +137,7 @@ fn adapter_for(
         "broker" => Ok((Box::new(BrokerAdapter::new()), None, home.join(".aikit"))),
         other => Err(AikitError::new(
             "client.unknown",
-            format!(
-                "`{other}` is not a client AIKit knows; try claude, codex, zcode or broker"
-            ),
+            format!("`{other}` is not a client AIKit knows; try claude, codex, zcode or broker"),
         )
         .with("client", other.to_string())),
     }
@@ -185,12 +183,12 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
                 });
             }
             // An install emits configuration, never payload links.
-            other => {
-                return Err(AikitError::new(
-                    "client.unexpected_install_item",
-                    format!("the {client} adapter asked for an install item AIKit cannot stage: {other:?}"),
-                ))
-            }
+            other => return Err(AikitError::new(
+                "client.unexpected_install_item",
+                format!(
+                    "the {client} adapter asked for an install item AIKit cannot stage: {other:?}"
+                ),
+            )),
         }
     }
 

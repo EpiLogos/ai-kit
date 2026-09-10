@@ -9,9 +9,7 @@ use std::collections::BTreeMap;
 use std::io;
 
 use aikit_core::resource::ActionStageability;
-use aikit_core::{
-    AikitError, KnowledgeRelationView, ProjectWorldReadModel, ResourceRef, Result,
-};
+use aikit_core::{AikitError, KnowledgeRelationView, ProjectWorldReadModel, ResourceRef, Result};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
     MouseEventKind,
@@ -28,6 +26,7 @@ use crate::application::{
     WorkspaceSection,
 };
 use crate::application_service::ApplicationService;
+use crate::backend::FactoryWorkEntry;
 use crate::backend::PaletteBackend;
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::explain_history_service::ExplainHistoryApplicationService;
@@ -41,7 +40,6 @@ use crate::navigator_groups::{self, NavigatorRow};
 use crate::project_workspace_render::{
     workspace_section_label, BoundaryReading, HistoryReading, SessionSpaceRoster, WorkspaceReading,
 };
-use crate::backend::FactoryWorkEntry;
 use crate::project_world_api::ProjectWorldApplicationService;
 use crate::session_space_service::SessionSpaceApplicationProjection;
 use crate::theme::Theme;
@@ -309,12 +307,7 @@ impl ApplicationSurfaceController {
                 self.shell_glyphs,
             );
         } else {
-            v2_render::draw_with_context(
-                frame,
-                &self.semantic,
-                &self.ambient,
-                self.shell_glyphs,
-            );
+            v2_render::draw_with_context(frame, &self.semantic, &self.ambient, self.shell_glyphs);
         }
         if self.semantic.presentation == PresentationMode::Workspace
             && self.semantic.workspace_section == WorkspaceSection::Knowledge
@@ -464,7 +457,10 @@ impl ApplicationSurfaceController {
                 RelationView::Graph => RelationView::List,
             };
             self.dispatch(backend, UiAction::SetRelationView(view))?;
-            self.dispatch(backend, UiAction::SetPresentation(PresentationMode::Workspace))?;
+            self.dispatch(
+                backend,
+                UiAction::SetPresentation(PresentationMode::Workspace),
+            )?;
             return self.dispatch(
                 backend,
                 UiAction::SetWorkspaceSection(WorkspaceSection::Knowledge),
@@ -530,7 +526,11 @@ impl ApplicationSurfaceController {
     /// it immediately), because a stray keystroke silently mutating a query
     /// the viewer cannot even see — the list pane is showing the graph, not
     /// search results — would be worse than that keystroke doing nothing.
-    fn handle_graph_key<B: PaletteBackend>(&mut self, backend: &mut B, code: KeyCode) -> Result<()> {
+    fn handle_graph_key<B: PaletteBackend>(
+        &mut self,
+        backend: &mut B,
+        code: KeyCode,
+    ) -> Result<()> {
         let direction = match code {
             KeyCode::Up | KeyCode::Char('k') => Some((0, -1)),
             KeyCode::Down | KeyCode::Char('j') => Some((0, 1)),
@@ -764,7 +764,8 @@ impl ApplicationSurfaceController {
             }
             _ => {
                 self.semantic.status = Some(crate::application::UiStatus {
-                    message: "multiple stageable actions are available; press : and choose one".into(),
+                    message: "multiple stageable actions are available; press : and choose one"
+                        .into(),
                 });
                 Ok(())
             }
@@ -808,10 +809,11 @@ impl ApplicationSurfaceController {
     fn dispatch<B: PaletteBackend>(&mut self, backend: &mut B, action: UiAction) -> Result<()> {
         {
             let mut service = ApplicationService::new(backend);
-            self.semantic = self.runtime.step(&mut service, self.semantic.clone(), action)?;
+            self.semantic = self
+                .runtime
+                .step(&mut service, self.semantic.clone(), action)?;
             self.project_world = service.project_world().ok();
-            self.session_spaces =
-                discover_session_spaces(&service, self.project_world.as_ref());
+            self.session_spaces = discover_session_spaces(&service, self.project_world.as_ref());
             self.history = BoundaryReading::from_result(service.history_evidence(None));
             self.factory_work_entry = service.factory_work_entry();
         }
@@ -1031,7 +1033,9 @@ impl ApplicationSurfaceController {
             )
         };
         frame.render_widget(
-            Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false }),
             panes.list,
         );
     }
@@ -1189,33 +1193,38 @@ fn tree_relation_lines<'a>(
         .iter()
         .map(|node| (&node.resource, node.label.as_str()))
         .collect();
-    let render_group = |title: &str, members: &[&graph_layout::LaidOutEdge], lines: &mut Vec<Line<'a>>| {
-        if members.is_empty() {
-            return;
-        }
-        lines.push(Line::from(Span::styled(title.to_string(), theme.dim())));
-        let count = members.len();
-        for (index, edge) in members.iter().enumerate() {
-            let other = if edge.from == relation.subject {
-                &edge.to
-            } else {
-                &edge.from
-            };
-            let label = labels.get(other).copied().unwrap_or_else(|| other.as_str());
-            lines.push(Line::from(Span::raw(format!(
-                "{}{} {label} ({})",
-                if index + 1 == count {
-                    glyphs.branch_last()
+    let render_group =
+        |title: &str, members: &[&graph_layout::LaidOutEdge], lines: &mut Vec<Line<'a>>| {
+            if members.is_empty() {
+                return;
+            }
+            lines.push(Line::from(Span::styled(title.to_string(), theme.dim())));
+            let count = members.len();
+            for (index, edge) in members.iter().enumerate() {
+                let other = if edge.from == relation.subject {
+                    &edge.to
                 } else {
-                    glyphs.branch_tee()
-                },
-                glyphs.branch_stem(),
-                edge.relation
-            ))));
-        }
-    };
+                    &edge.from
+                };
+                let label = labels.get(other).copied().unwrap_or_else(|| other.as_str());
+                lines.push(Line::from(Span::raw(format!(
+                    "{}{} {label} ({})",
+                    if index + 1 == count {
+                        glyphs.branch_last()
+                    } else {
+                        glyphs.branch_tee()
+                    },
+                    glyphs.branch_stem(),
+                    edge.relation
+                ))));
+            }
+        };
     render_group("Context (contains this subject)", &context, &mut lines);
-    render_group("Contained (members of this subject)", &contained, &mut lines);
+    render_group(
+        "Contained (members of this subject)",
+        &contained,
+        &mut lines,
+    );
     lines
 }
 

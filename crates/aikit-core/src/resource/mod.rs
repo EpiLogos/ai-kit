@@ -39,15 +39,15 @@ pub use model_catalogue::{
     FIRST_PARTY_CATALOGUE_SOURCE, MODEL_CATALOGUE_VERSION, MODEL_REF_PREFIX,
     PROVIDER_CATALOG_OBSERVATION_SCHEMA, PROVIDER_CATALOG_SOURCE,
 };
-pub use model_route::{
-    CredentialCondition, ModelRoute, ModelRouteKind, ModelRouteSet, RouteAvailability,
-    RouteUsability, UnmatchedModelOffer, MODEL_ROUTE_VERSION,
-};
 pub use model_roster::{
     candidates_from_routes, rank_model_roster, select_model, ExactSpendObservation,
     FitnessObservation, FitnessScope, ModelAccessProfileView, ModelPriceObservation,
     ModelRankingExplanation, ModelRankingPolicy, ModelRoster, ModelRosterCandidate,
     ModelRosterDemand, ModelRosterEntry, ModelSelection, RankingComponent, MODEL_ROSTER_VERSION,
+};
+pub use model_route::{
+    CredentialCondition, ModelRoute, ModelRouteKind, ModelRouteSet, RouteAvailability,
+    RouteUsability, UnmatchedModelOffer, MODEL_ROUTE_VERSION,
 };
 pub use operative::{
     action_semantic_profile, horizons_for_kind, horizons_for_resource, parse_or_search_expression,

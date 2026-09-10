@@ -57,7 +57,10 @@ pub fn read(
     brackets: &PressureBrackets,
 ) -> (Reading, Vec<String>) {
     if let Some((fraction, detail)) = reported_consumption(event) {
-        return (Reading::from_reported(brackets, fraction, detail), Vec::new());
+        return (
+            Reading::from_reported(brackets, fraction, detail),
+            Vec::new(),
+        );
     }
     match index.prompt_count(scope) {
         Ok(prompts) => (Reading::from_prompt_count(brackets, prompts), Vec::new()),

@@ -22,8 +22,7 @@ use aikit_core::{
 };
 
 /// `deepseek-ai/deepseek-harness` revision used for current conformance.
-pub const DEEPSEEK_HARNESS_UPSTREAM_REVISION: &str =
-    "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca";
+pub const DEEPSEEK_HARNESS_UPSTREAM_REVISION: &str = "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca";
 pub const DEEPSEEK_HARNESS_RELEASE: &str = "0.1.0-rc.7";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,9 +40,7 @@ pub struct DeepSeekHarnessConformance {
     pub request: HarnessCompositionRequest,
 }
 
-pub fn deepseek_harness_conformance(
-    shell: DeepSeekShellProvider,
-) -> DeepSeekHarnessConformance {
+pub fn deepseek_harness_conformance(shell: DeepSeekShellProvider) -> DeepSeekHarnessConformance {
     let mut catalog = CompositionCatalog::default();
 
     let tool_surface = r("surface/deepseek/model-tools");
@@ -135,12 +132,7 @@ pub fn deepseek_harness_conformance(
                 "contract/deepseek/bash",
                 "ctx.shell",
             );
-            insert_provider_component(
-                &mut catalog,
-                shell,
-                "contract/deepseek/bash",
-                "ctx.shell",
-            );
+            insert_provider_component(&mut catalog, shell, "contract/deepseek/bash", "ctx.shell");
             selections.push(selection("component/deepseek/bash-local"));
         }
         DeepSeekShellProvider::Sandbox => {
@@ -182,12 +174,7 @@ pub fn deepseek_harness_conformance(
                 ComponentRequirement::required(r("contract/deepseek/sandbox")),
                 ComponentRequirement::required(r("contract/deepseek/sandbox-policy")),
             ];
-            insert_provider_component(
-                &mut catalog,
-                bash,
-                "contract/deepseek/bash",
-                "ctx.shell",
-            );
+            insert_provider_component(&mut catalog, bash, "contract/deepseek/bash", "ctx.shell");
             selections.extend([
                 selection("component/deepseek/sandbox-local"),
                 selection("component/deepseek/sandbox-policy"),
@@ -222,11 +209,8 @@ fn tool_bash_component(
     web_surface: &ResourceRef,
 ) -> ComponentDescriptor {
     let component = r("component/deepseek/tool-bash");
-    let mut descriptor = component_descriptor(
-        component.clone(),
-        "tool-bash",
-        "@deepseek-ai/dsh-tool-bash",
-    );
+    let mut descriptor =
+        component_descriptor(component.clone(), "tool-bash", "@deepseek-ai/dsh-tool-bash");
     // Current upstream package contract: inject
     // ['tools', 'bash', 'systemPrompt', 'bashEnv'].
     descriptor.requirements = vec![
@@ -275,13 +259,12 @@ fn tool_bash_component(
 
 fn session_component(trajectory_surface: &ResourceRef) -> ComponentDescriptor {
     let component = r("component/deepseek/session");
-    let mut descriptor = component_descriptor(
-        component.clone(),
-        "session",
-        "@deepseek-ai/dsh-session",
-    );
+    let mut descriptor =
+        component_descriptor(component.clone(), "session", "@deepseek-ai/dsh-session");
     descriptor.provisions.push(r("contract/deepseek/session"));
-    descriptor.supported_surfaces.push(trajectory_surface.clone());
+    descriptor
+        .supported_surfaces
+        .push(trajectory_surface.clone());
     descriptor.contributions.push(contribution(
         "contribution/deepseek/session/trajectory",
         &component,
@@ -328,11 +311,7 @@ fn insert_provider_component(
     catalog.insert_component(component);
 }
 
-fn component_descriptor(
-    resource: ResourceRef,
-    row_id: &str,
-    package: &str,
-) -> ComponentDescriptor {
+fn component_descriptor(resource: ResourceRef, row_id: &str, package: &str) -> ComponentDescriptor {
     let mut descriptor = ComponentDescriptor::new(resource);
     descriptor.implementation = Some(TargetNativeComponentBinding {
         implementation_target: "deepseek-ai/deepseek-harness".into(),

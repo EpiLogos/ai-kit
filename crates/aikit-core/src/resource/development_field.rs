@@ -198,7 +198,9 @@ pub fn attach_development_field_binding(
     Ok(())
 }
 
-pub fn development_field_binding(record: &ResourceRecord) -> Result<Option<DevelopmentFieldBinding>> {
+pub fn development_field_binding(
+    record: &ResourceRecord,
+) -> Result<Option<DevelopmentFieldBinding>> {
     let Some(raw) = record
         .descriptor
         .annotations
@@ -346,6 +348,11 @@ pub struct DevelopmentFieldExecutableBasis {
     pub modality: DevelopmentFieldExecutableModality,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<VersionRevision>,
+    /// True when this executable was built from a checkout whose tracked source
+    /// differed from the named revision. A dirty build may disclose its base
+    /// revision but may not masquerade as that exact revision.
+    #[serde(default)]
+    pub source_dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -490,7 +497,10 @@ pub fn read_development_field(
     }
 }
 
-fn subject_reading(index: &dyn ResourceIndex, subject: ResourceRef) -> DevelopmentFieldSubjectReading {
+fn subject_reading(
+    index: &dyn ResourceIndex,
+    subject: ResourceRef,
+) -> DevelopmentFieldSubjectReading {
     let Some(record) = index.resource(&subject) else {
         return DevelopmentFieldSubjectReading {
             subject,
@@ -510,7 +520,13 @@ fn subject_reading(index: &dyn ResourceIndex, subject: ResourceRef) -> Developme
     match development_field_binding(record) {
         Ok(binding) => DevelopmentFieldSubjectReading {
             subject,
-            availability: DevelopmentFieldAvailability::available(),
+            availability: if binding.is_some() {
+                DevelopmentFieldAvailability::available()
+            } else {
+                DevelopmentFieldAvailability::unknown(
+                    "ResourceRef is present, but no Development Field carrier binding was supplied by its native owner",
+                )
+            },
             resource_kind: Some(record.descriptor.kind),
             owner: record.descriptor.owner.clone(),
             sources: record.descriptor.sources.clone(),
@@ -582,16 +598,93 @@ mod tests {
             package_version: "0.1.0".into(),
             modality: DevelopmentFieldExecutableModality::Developer,
             source_revision: Some(VersionRevision::new("abc123")),
+            source_dirty: false,
+        }
+    }
+
+    #[test]
+    fn a_present_resource_without_an_owner_binding_is_unknown_not_a_fabricated_carrier() {
+        let mut index = MemoryResourceIndex::default();
+        index.insert(ResourceRecord::new(ResourceDescriptor::new(
+            ResourceRef::parse("source:ordinary").unwrap(),
+            ResourceKind::KnowledgeSource,
+            "ordinary source",
+            "present in the Resource field without a Development Field declaration",
+        )));
+
+        let reading = read_development_field(
+            &index,
+            &DevelopmentFieldReadRequest {
+                subjects: vec![ResourceRef::parse("source:ordinary").unwrap()],
+                limit: 8,
+            },
+            executable(),
+            Ok(None),
+        );
+        assert_eq!(reading.subjects.len(), 1);
+        assert_eq!(
+            reading.subjects[0].availability.state,
+            DevelopmentFieldAvailabilityState::Unknown
+        );
+        assert!(reading.subjects[0].carrier_kind.is_none());
+    }
+
+    #[test]
+    fn every_development_field_carrier_kind_remains_addressable_through_the_existing_resolver() {
+        let cases = [
+            (
+                DevelopmentFieldCarrierKind::SelfDescription,
+                "central:self:probe",
+            ),
+            (
+                DevelopmentFieldCarrierKind::TierBinding,
+                "central:tier:probe",
+            ),
+            (
+                DevelopmentFieldCarrierKind::UserExperience,
+                "central:ux:probe",
+            ),
+            (
+                DevelopmentFieldCarrierKind::ExperienceMetadata,
+                "central:ex:probe",
+            ),
+            (DevelopmentFieldCarrierKind::Evidence, "evidence:probe"),
+            (DevelopmentFieldCarrierKind::Capability, "capability:probe"),
+            (DevelopmentFieldCarrierKind::Plan, "factory:plan:probe"),
+        ];
+        let mut index = MemoryResourceIndex::default();
+        for (kind, reference) in cases {
+            index.insert(carrier(reference, kind));
+        }
+
+        for (_, reference) in cases {
+            let expression = crate::resource::ResolveExpression::ordinary_search(reference);
+            let path = crate::resource::resolve_expression(&expression, &index, 8);
+            assert!(
+                path.candidates
+                    .iter()
+                    .any(|candidate| candidate.resource.as_str() == reference),
+                "{reference} must stay in the one ResourceRef-native Search/Resolve field"
+            );
         }
     }
 
     #[test]
     fn carrier_projection_retains_native_owner_source_and_revision() {
-        let record = carrier("central:self:aikit", DevelopmentFieldCarrierKind::SelfDescription);
+        let record = carrier(
+            "central:self:aikit",
+            DevelopmentFieldCarrierKind::SelfDescription,
+        );
         let binding = development_field_binding(&record).unwrap().unwrap();
-        assert_eq!(record.descriptor.owner.unwrap().as_str(), "central:project:aikit");
+        assert_eq!(
+            record.descriptor.owner.unwrap().as_str(),
+            "central:project:aikit"
+        );
         assert_eq!(record.descriptor.sources, vec![source()]);
-        assert_eq!(binding.carrier_kind, DevelopmentFieldCarrierKind::SelfDescription);
+        assert_eq!(
+            binding.carrier_kind,
+            DevelopmentFieldCarrierKind::SelfDescription
+        );
     }
 
     #[test]
@@ -617,7 +710,10 @@ mod tests {
         attach_development_field_binding(&mut record, &binding).unwrap();
         let restored = development_field_binding(&record).unwrap().unwrap();
         assert!(restored.shape_binding.is_some());
-        assert!(restored.relations.is_empty(), "a shape address is not a semantic relation");
+        assert!(
+            restored.relations.is_empty(),
+            "a shape address is not a semantic relation"
+        );
     }
 
     #[test]
@@ -658,7 +754,10 @@ mod tests {
             .iter()
             .find(|read| read.subject.as_str() == "central:missing")
             .unwrap();
-        assert_eq!(missing.availability.state, DevelopmentFieldAvailabilityState::Unknown);
+        assert_eq!(
+            missing.availability.state,
+            DevelopmentFieldAvailabilityState::Unknown
+        );
         assert_eq!(
             reading.central_self_description.availability.state,
             DevelopmentFieldAvailabilityState::Available
@@ -703,7 +802,10 @@ mod tests {
         attach_development_field_binding(&mut record, &binding).unwrap();
         assert_eq!(record.descriptor.id.as_str(), "factory:plan:42");
         assert_eq!(
-            development_field_binding(&record).unwrap().unwrap().material_refs[0]
+            development_field_binding(&record)
+                .unwrap()
+                .unwrap()
+                .material_refs[0]
                 .material_ref
                 .as_str(),
             "instance:claude:abcd"

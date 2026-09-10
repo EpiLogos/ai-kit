@@ -114,10 +114,15 @@ fn selecting_a_different_resource_updates_the_column_to_match() {
     // the assertion about exactly one thing — does the column follow
     // selection — deterministic.
     surface
-        .handle(&mut backend, PaletteEvent::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)))
+        .handle(
+            &mut backend,
+            PaletteEvent::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+        )
         .unwrap();
     for character in "deploy".chars() {
-        surface.handle(&mut backend, key(KeyCode::Char(character))).unwrap();
+        surface
+            .handle(&mut backend, key(KeyCode::Char(character)))
+            .unwrap();
     }
     surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
     let second_subject = surface
@@ -126,7 +131,10 @@ fn selecting_a_different_resource_updates_the_column_to_match() {
         .clone()
         .expect("Down must select the deploy script");
     assert_eq!(second_subject.as_str(), "script/ops/deploy");
-    assert_ne!(first_subject, second_subject, "the fixture must offer two distinct resources");
+    assert_ne!(
+        first_subject, second_subject,
+        "the fixture must offer two distinct resources"
+    );
     let second_rendered = rendered_inspector(&draw_width(&surface, WIDTH, HEIGHT), WIDTH, HEIGHT);
     assert!(
         second_rendered.contains(&format!("subject   {second_subject}")),
@@ -183,7 +191,10 @@ fn the_column_carries_every_field_the_modal_explain_action_would_have_shown() {
         .evidence
         .as_ref()
         .expect("`EXPLAIN_ACTION_REF`'s own read must have succeeded for a Capability");
-    assert!(!evidence.facts.is_empty(), "a resolved Capability must carry at least one fact");
+    assert!(
+        !evidence.facts.is_empty(),
+        "a resolved Capability must carry at least one fact"
+    );
 
     // A generous height, not `HEIGHT`: the Inspector column is deliberately
     // narrow (`INSPECTOR_COLUMNS` in `layout.rs`), so a Capability's full

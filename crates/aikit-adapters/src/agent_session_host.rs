@@ -38,11 +38,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::session_event_queue::EventQueue;
 use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use serde::{Serialize,Deserialize};
-use crate::session_event_queue::EventQueue;
 
 use crate::agent_connection::{
     CancelRequest, ConnectionCommand, ConnectionDescriptor, ConnectionSignal, ConnectionSignalKind,
@@ -197,7 +197,7 @@ pub struct TurnHandle {
 /// encounter services supply this sink; the host orders writes before delivery.
 /// A failed append is a resource failure, never a provider cancellation.
 pub trait SessionEventJournal: Send + Sync {
-    fn append(&self, agent_session:&ResourceRef, event:&HostEvent) -> Result<()>;
+    fn append(&self, agent_session: &ResourceRef, event: &HostEvent) -> Result<()>;
 }
 
 pub struct AgentSessionHost {
@@ -227,11 +227,17 @@ struct LaneCore {
     journal: Option<Arc<dyn SessionEventJournal>>,
 }
 impl LaneCore {
-    fn deliver(&self,event:HostEvent) -> std::io::Result<()> {
-        if let Some(journal)=&self.journal {journal.append(&self.agent_session,&event).map_err(|e|std::io::Error::other(e.to_string()))?;}
+    fn deliver(&self, event: HostEvent) -> std::io::Result<()> {
+        if let Some(journal) = &self.journal {
+            journal
+                .append(&self.agent_session, &event)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
         self.queue.send(event)
     }
-    fn close(&self) { self.queue.close(); }
+    fn close(&self) {
+        self.queue.close();
+    }
 }
 
 #[derive(Default)]
@@ -307,11 +313,19 @@ impl AgentSessionHost {
     where
         A: InteractiveAgentConnectionAdapter + Send + 'static,
     {
-        Self::launch_with_journal(adapter,argv,cwd,limits,None)
+        Self::launch_with_journal(adapter, argv, cwd, limits, None)
     }
 
-    pub fn launch_with_journal<A>(adapter:A,argv:&[String],cwd:Option<&Path>,limits:AgentSessionHostLimits,journal:Option<Arc<dyn SessionEventJournal>>) -> Result<Self>
-    where A: InteractiveAgentConnectionAdapter + Send + 'static {
+    pub fn launch_with_journal<A>(
+        adapter: A,
+        argv: &[String],
+        cwd: Option<&Path>,
+        limits: AgentSessionHostLimits,
+        journal: Option<Arc<dyn SessionEventJournal>>,
+    ) -> Result<Self>
+    where
+        A: InteractiveAgentConnectionAdapter + Send + 'static,
+    {
         let (writer, reader, control) = ConnectionProcess::spawn_split(argv, cwd)?;
         let shared = Arc::new(HostShared {
             adapter: Mutex::new(Box::new(adapter)),
@@ -388,12 +402,13 @@ impl AgentSessionHost {
                 ));
             }
         }
-        let queue = EventQueue::new().map_err(|e|AikitError::new("agent_session_host.event_storage",e.to_string()))?;
+        let queue = EventQueue::new()
+            .map_err(|e| AikitError::new("agent_session_host.event_storage", e.to_string()))?;
         let lane = Arc::new(LaneCore {
             agent_session: canonical.clone(),
             events: Mutex::new(queue.clone()),
             queue,
-            journal:self.shared.journal.clone(),
+            journal: self.shared.journal.clone(),
         });
         let command = {
             let mut adapter = self.shared.adapter()?;
@@ -494,7 +509,11 @@ impl AgentSessionHost {
     /// owner journal retains the complete history beyond this memory window.
     pub fn interruptions(&self, agent_session: &ResourceRef) -> Result<Vec<TurnInterruption>> {
         let state = self.shared.state()?;
-        Ok(state.trail.get(agent_session).map(|trail|trail.iter().cloned().collect()).unwrap_or_default())
+        Ok(state
+            .trail
+            .get(agent_session)
+            .map(|trail| trail.iter().cloned().collect())
+            .unwrap_or_default())
     }
 
     /// The last finished turn of one session, if any.
@@ -680,9 +699,16 @@ impl SessionLane {
             .shared
             .lane_events(&self.lane)
             .expect("session lane event lock poisoned");
-        let result=read(&mut events);
+        let result = read(&mut events);
         drop(events);
-        if let Some(error)=self.lane.queue.error() {state_stop_bridge(&self.shared.state,&format!("agent_session_host.event_storage: {error}"),false);let _=self.shared.control.terminate();}
+        if let Some(error) = self.lane.queue.error() {
+            state_stop_bridge(
+                &self.shared.state,
+                &format!("agent_session_host.event_storage: {error}"),
+                false,
+            );
+            let _ = self.shared.control.terminate();
+        }
         result
     }
 }
@@ -760,9 +786,16 @@ impl TurnHandle {
             .shared
             .lane_events(&self.lane)
             .expect("session lane event lock poisoned");
-        let result=read(&mut events);
+        let result = read(&mut events);
         drop(events);
-        if let Some(error)=self.lane.queue.error() {state_stop_bridge(&self.shared.state,&format!("agent_session_host.event_storage: {error}"),false);let _=self.shared.control.terminate();}
+        if let Some(error) = self.lane.queue.error() {
+            state_stop_bridge(
+                &self.shared.state,
+                &format!("agent_session_host.event_storage: {error}"),
+                false,
+            );
+            let _ = self.shared.control.terminate();
+        }
         result
     }
 }
@@ -844,7 +877,7 @@ impl HostShared {
     /// Route interpreted signals to their lanes and turn bookkeeping.
     fn route(self: &Arc<Self>, signals: Vec<ConnectionSignal>) {
         let mut deliveries: Vec<(Arc<LaneCore>, HostEvent)> = Vec::new();
-        let mut limited=Vec::new();
+        let mut limited = Vec::new();
         {
             let Ok(mut state) = self.state.lock() else {
                 return;
@@ -868,7 +901,9 @@ impl HostShared {
                 }
                 let terminal = matches!(
                     signal.kind,
-                    ConnectionSignalKind::Completed { .. } | ConnectionSignalKind::Cancelled | ConnectionSignalKind::Failed { .. }
+                    ConnectionSignalKind::Completed { .. }
+                        | ConnectionSignalKind::Cancelled
+                        | ConnectionSignalKind::Failed { .. }
                 );
                 deliveries.push((Arc::clone(&lane), HostEvent::Signal(signal.clone())));
                 if terminal {
@@ -876,17 +911,30 @@ impl HostShared {
                         state.record_turn(&record);
                         deliveries.push((lane, HostEvent::TurnEnded(record)));
                     }
-                } else if state.reached_limit(&native_session_id,self.limits.max_signals_per_turn) {
+                } else if state.reached_limit(&native_session_id, self.limits.max_signals_per_turn)
+                {
                     limited.push(native_session_id);
                 }
             }
         }
         self.deliver(deliveries);
         for native_session_id in limited {
-            let commands=self.adapter().and_then(|mut adapter|adapter.coordinated_cancel(CancelRequest{native_session_id}));
+            let commands = self.adapter().and_then(|mut adapter| {
+                adapter.coordinated_cancel(CancelRequest { native_session_id })
+            });
             match commands {
-                Ok(commands)=>for command in commands {if let Err(error)=self.dispatch(&command){self.record_transport_failure(error);return;}},
-                Err(error)=>{self.record_transport_failure(error);return;}
+                Ok(commands) => {
+                    for command in commands {
+                        if let Err(error) = self.dispatch(&command) {
+                            self.record_transport_failure(error);
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.record_transport_failure(error);
+                    return;
+                }
             }
         }
     }
@@ -897,9 +945,15 @@ impl HostShared {
 
     fn deliver(&self, deliveries: Vec<(Arc<LaneCore>, HostEvent)>) {
         for (lane, event) in deliveries {
-            if let Err(error)=lane.deliver(event) {
-                state_stop_bridge(&self.state,&format!("agent_session_host.event_storage: owner event storage failed: {error}"),false);
-                let _=self.control.terminate();
+            if let Err(error) = lane.deliver(event) {
+                state_stop_bridge(
+                    &self.state,
+                    &format!(
+                        "agent_session_host.event_storage: owner event storage failed: {error}"
+                    ),
+                    false,
+                );
+                let _ = self.control.terminate();
                 return;
             }
         }
@@ -1220,8 +1274,10 @@ impl HostState {
 
     fn record_turn(&mut self, record: &TurnRecord) {
         if let Some(interruption) = &record.interruption {
-            let trail=self.trail.entry(record.agent_session.clone()).or_default();
-            if trail.len()==128 {trail.pop_front();}
+            let trail = self.trail.entry(record.agent_session.clone()).or_default();
+            if trail.len() == 128 {
+                trail.pop_front();
+            }
             trail.push_back(interruption.clone());
         }
         self.last_turn
@@ -1235,13 +1291,19 @@ impl HostState {
         signal: &ConnectionSignal,
     ) -> Option<TurnRecord> {
         let turn = self.turns.remove(native_session_id)?;
-        let stop = if let Some(max_signals)=turn.operational_limit {TurnStop::OperationalLimit{max_signals}} else {match &signal.kind {
-            ConnectionSignalKind::Completed { stop_reason } => TurnStop::Completed {
-                stop_reason: stop_reason.clone(),
-            },
-            ConnectionSignalKind::Failed { reason } => TurnStop::Failed { reason: reason.clone() },
-            _ => TurnStop::Cancelled,
-        }};
+        let stop = if let Some(max_signals) = turn.operational_limit {
+            TurnStop::OperationalLimit { max_signals }
+        } else {
+            match &signal.kind {
+                ConnectionSignalKind::Completed { stop_reason } => TurnStop::Completed {
+                    stop_reason: stop_reason.clone(),
+                },
+                ConnectionSignalKind::Failed { reason } => TurnStop::Failed {
+                    reason: reason.clone(),
+                },
+                _ => TurnStop::Cancelled,
+            }
+        };
         let interruption = match (&turn.interrupt, &stop) {
             // A cancel was asked for and the provider stopped the turn: a human
             // interruption, however the stop was carried on the wire.
@@ -1312,10 +1374,15 @@ impl HostState {
 
     /// An explicit operational ceiling requests cancellation and leaves the
     /// turn in flight until a native terminal event is observed.
-    fn reached_limit(&mut self,native_session_id:&str,limit:usize)->bool {
-        let Some(turn)=self.turns.get_mut(native_session_id) else {return false;};
-        if limit==0 || turn.signals<=limit || turn.operational_limit.is_some(){return false;}
-        turn.operational_limit=Some(limit);true
+    fn reached_limit(&mut self, native_session_id: &str, limit: usize) -> bool {
+        let Some(turn) = self.turns.get_mut(native_session_id) else {
+            return false;
+        };
+        if limit == 0 || turn.signals <= limit || turn.operational_limit.is_some() {
+            return false;
+        }
+        turn.operational_limit = Some(limit);
+        true
     }
 
     fn binding_for(&self, native_session_id: &str) -> NativeSessionBinding {

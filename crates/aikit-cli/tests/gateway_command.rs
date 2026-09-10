@@ -65,7 +65,10 @@ fn shutdown(home: &std::path::Path) -> Value {
 fn a_bare_query_without_a_gateway_fails_honestly_and_names_the_start_command() {
     let home = TempDir::new().unwrap();
     let (ok, envelope, _) = run(home.path(), &["gateway", "status"]);
-    assert!(!ok, "a query with no gateway must fail, not pretend: {envelope}");
+    assert!(
+        !ok,
+        "a query with no gateway must fail, not pretend: {envelope}"
+    );
     assert_eq!(envelope["ok"], Value::Bool(false));
     let error = &envelope["error"];
     assert_eq!(error["code"], Value::from("cli.gateway_unreachable"));

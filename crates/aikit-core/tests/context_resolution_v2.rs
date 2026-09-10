@@ -140,15 +140,27 @@ fn extended_resolution_preserves_deterministic_resolver_and_composes_full_v2_fie
     );
 
     assert_eq!(result.version, CONTEXT_RESOLUTION_VERSION);
-    assert_eq!(result.project_binding.project.as_str(), "factory:project:factory");
+    assert_eq!(
+        result.project_binding.project.as_str(),
+        "factory:project:factory"
+    );
     assert_eq!(result.deterministic, deterministic);
     assert_eq!(result.profiles.len(), 1);
     assert_eq!(result.profiles[0].to_string(), "profile/code/base");
     assert_eq!(result.scopes.len(), 1);
     assert_eq!(result.scopes[0].kind, ScopeKind::Project);
-    assert!(matches!(result.agent, Some(ReferenceResolution::Resolved { .. })));
-    assert!(matches!(result.agency, Some(ReferenceResolution::Resolved { .. })));
-    assert!(matches!(result.host, Some(ReferenceResolution::Resolved { .. })));
+    assert!(matches!(
+        result.agent,
+        Some(ReferenceResolution::Resolved { .. })
+    ));
+    assert!(matches!(
+        result.agency,
+        Some(ReferenceResolution::Resolved { .. })
+    ));
+    assert!(matches!(
+        result.host,
+        Some(ReferenceResolution::Resolved { .. })
+    ));
 
     assert_eq!(result.actions.len(), 1);
     assert_eq!(
@@ -241,7 +253,10 @@ fn unavailable_resources_remain_visible_and_external_identity_survives_reresolut
     );
 
     assert_eq!(second.capabilities[0].resource.descriptor.id, canonical);
-    assert_eq!(first.project_binding.project, second.project_binding.project);
+    assert_eq!(
+        first.project_binding.project,
+        second.project_binding.project
+    );
     assert_eq!(first.deterministic, second.deterministic);
     assert_eq!(second.capabilities[0].availability, Availability::Available);
 }
@@ -282,10 +297,16 @@ fn missing_and_wrong_kind_actor_relations_remain_explicit_and_explainable() {
         result.host,
         Some(ReferenceResolution::Missing { .. })
     ));
-    assert!(result.warnings.iter().any(|warning| warning.contains("requested agent")));
+    assert!(result
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("requested agent")));
     assert!(result
         .warnings
         .iter()
         .any(|warning| warning.contains("requested agency")));
-    assert!(result.warnings.iter().any(|warning| warning.contains("requested host")));
+    assert!(result
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("requested host")));
 }

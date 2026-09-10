@@ -118,7 +118,9 @@ fn authored_markdown_wikilinks_reach_the_knowledge_surface() {
     let edge_hit = hits
         .iter()
         .find(|hit| match &hit.address {
-            KnowledgeAddress::Wiki(resource) => resource.as_str().starts_with("wiki:edge:authored:"),
+            KnowledgeAddress::Wiki(resource) => {
+                resource.as_str().starts_with("wiki:edge:authored:")
+            }
             _ => false,
         })
         .unwrap_or_else(|| panic!("expected an authored edge hit for 'beta', got {hits:?}"));
@@ -138,7 +140,9 @@ fn authored_markdown_wikilinks_reach_the_knowledge_surface() {
         .map(|node| node.resource.as_str().to_owned())
         .collect();
     assert!(
-        node_refs.iter().any(|reference| reference == "source:demo:alpha"),
+        node_refs
+            .iter()
+            .any(|reference| reference == "source:demo:alpha"),
         "expected the authored subject among relation nodes, got {node_refs:?}"
     );
     assert!(

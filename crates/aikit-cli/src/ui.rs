@@ -20,8 +20,7 @@ use aikit_core::search::SearchDoc;
 use aikit_core::{FamiliarityObservation, FamiliarityStore, Result};
 
 use aikit_store::{
-    familiarity_observation_event, replay_familiarity, AikitHome, EventRecorder,
-    FamiliarityReplay,
+    familiarity_observation_event, replay_familiarity, AikitHome, EventRecorder, FamiliarityReplay,
 };
 
 use aikit_tui::application::RelationView;
@@ -71,8 +70,10 @@ impl<'a> V2SurfaceService<'a> {
                 ));
                 index.insert_resource(
                     record,
-                    vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
-                        .with_detail("profile selected by the active scope stack")],
+                    vec![
+                        NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                            .with_detail("profile selected by the active scope stack"),
+                    ],
                 );
             }
         }
@@ -92,8 +93,10 @@ impl<'a> V2SurfaceService<'a> {
             ));
             index.insert_resource(
                 record,
-                vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
-                    .with_detail("skill set selected by the current Project")],
+                vec![
+                    NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                        .with_detail("skill set selected by the current Project"),
+                ],
             );
         }
 

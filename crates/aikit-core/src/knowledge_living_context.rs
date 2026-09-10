@@ -140,7 +140,10 @@ fn object_kind(object: &WikiObject) -> &'static str {
 fn object_label(object: &WikiObject) -> Option<String> {
     match object {
         WikiObject::Space(value) => value.title.clone(),
-        WikiObject::Node(value) => value.title.clone().or_else(|| Some(value.node_type.clone())),
+        WikiObject::Node(value) => value
+            .title
+            .clone()
+            .or_else(|| Some(value.node_type.clone())),
         WikiObject::Edge(value) => Some(value.relation.clone()),
         WikiObject::Frame(value) => value
             .inquiry_ref
@@ -232,9 +235,8 @@ pub fn wiki_living_dependencies(
             .cmp(&right.basis)
             .then(left.dependent.cmp(&right.dependent))
     });
-    resource_dependencies.dedup_by(|left, right| {
-        left.basis == right.basis && left.dependent == right.dependent
-    });
+    resource_dependencies
+        .dedup_by(|left, right| left.basis == right.basis && left.dependent == right.dependent);
     Ok((source_dependencies, resource_dependencies))
 }
 
@@ -351,12 +353,7 @@ pub fn assemble_contemplate_context(
             .iter()
             .map(|value| value.resource.clone()),
     );
-    relevant.extend(
-        impact
-            .transitive
-            .iter()
-            .map(|value| value.resource.clone()),
-    );
+    relevant.extend(impact.transitive.iter().map(|value| value.resource.clone()));
     let mut truncated = expand_basis_neighbourhood(
         &mut relevant,
         resource_dependencies,
@@ -472,7 +469,11 @@ pub fn assemble_contemplate_context(
 
     let relevant_sources = selected_objects
         .iter()
-        .flat_map(|object| provenance(object).iter().map(|entry| entry.source_ref.clone()))
+        .flat_map(|object| {
+            provenance(object)
+                .iter()
+                .map(|entry| entry.source_ref.clone())
+        })
         .chain(impact.paths.iter().map(|path| path.root_source.clone()))
         .collect::<BTreeSet<_>>();
     let visibility = request
@@ -542,12 +543,8 @@ pub fn bounded_contemplate_preflight(
     relation_depth: usize,
 ) -> Result<BoundedContemplatePreflight> {
     let base = contemplate_preflight(request)?;
-    let field = assemble_contemplate_context(
-        request,
-        resource_dependencies,
-        max_objects,
-        relation_depth,
-    )?;
+    let field =
+        assemble_contemplate_context(request, resource_dependencies, max_objects, relation_depth)?;
     Ok(BoundedContemplatePreflight {
         version: CONTEMPLATE_FIELD_VERSION.into(),
         base,
@@ -591,12 +588,8 @@ pub fn explicit_bounded_contemplate(
     relation_depth: usize,
     executor: &mut dyn BoundedContemplateExecutor,
 ) -> Result<BoundedContemplateOutcome> {
-    let preflight = bounded_contemplate_preflight(
-        request,
-        resource_dependencies,
-        max_objects,
-        relation_depth,
-    )?;
+    let preflight =
+        bounded_contemplate_preflight(request, resource_dependencies, max_objects, relation_depth)?;
     let mut adapter = BoundedExecutorAdapter {
         bounded: &preflight,
         executor,
@@ -791,34 +784,26 @@ mod tests {
         };
         let preflight =
             bounded_contemplate_preflight(&request, &resource_dependencies, 16, 2).unwrap();
-        assert!(
-            preflight
-                .field
-                .objects
-                .iter()
-                .any(|value| value.resource == resource("wiki:node:part"))
-        );
-        assert!(
-            preflight
-                .field
-                .objects
-                .iter()
-                .any(|value| value.resource == resource("wiki:reading:whole"))
-        );
-        assert!(
-            preflight
-                .field
-                .relations
-                .iter()
-                .any(|value| value.relation == "contributes-to")
-        );
-        assert!(
-            preflight
-                .field
-                .returns
-                .iter()
-                .any(|value| value.to_whole == resource("wiki:reading:whole"))
-        );
+        assert!(preflight
+            .field
+            .objects
+            .iter()
+            .any(|value| value.resource == resource("wiki:node:part")));
+        assert!(preflight
+            .field
+            .objects
+            .iter()
+            .any(|value| value.resource == resource("wiki:reading:whole")));
+        assert!(preflight
+            .field
+            .relations
+            .iter()
+            .any(|value| value.relation == "contributes-to"));
+        assert!(preflight
+            .field
+            .returns
+            .iter()
+            .any(|value| value.to_whole == resource("wiki:reading:whole")));
         assert_eq!(preflight.field.changes[0].roles, vec!["purpose"]);
         assert_eq!(
             preflight.field.sources[0].agent_retrieval_allowed,
@@ -881,14 +866,9 @@ mod tests {
             calls: 0,
             saw_whole: false,
         };
-        let outcome = explicit_bounded_contemplate(
-            &request,
-            &resource_dependencies,
-            16,
-            2,
-            &mut executor,
-        )
-        .unwrap();
+        let outcome =
+            explicit_bounded_contemplate(&request, &resource_dependencies, 16, 2, &mut executor)
+                .unwrap();
         assert_eq!(executor.calls, 1);
         assert!(executor.saw_whole);
         assert_eq!(outcome.outcome.agent_wiki.human_source_proposals.len(), 1);

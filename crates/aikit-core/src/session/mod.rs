@@ -449,14 +449,12 @@ fn parse_backend_name(name: &str) -> Result<Option<MuxKind>> {
     if name == "auto" {
         return Ok(None);
     }
-    name.parse::<MuxKind>()
-        .map(Some)
-        .map_err(|_| {
-            AikitError::new(
-                "session.invalid",
-                format!("`{name}` is not a backend (auto, tmux, cmux, plain)"),
-            )
-        })
+    name.parse::<MuxKind>().map(Some).map_err(|_| {
+        AikitError::new(
+            "session.invalid",
+            format!("`{name}` is not a backend (auto, tmux, cmux, plain)"),
+        )
+    })
 }
 
 /// Reconcile `isolation` with the legacy `worktree` flag.
@@ -598,7 +596,10 @@ pub fn compile(spec: &SessionSpec) -> Result<SessionPlan> {
         if !seen_views.insert(view.id.as_str()) {
             return Err(AikitError::new(
                 "session.duplicate_view",
-                format!("session `{}` declares the view `{}` twice", spec.id, view.id),
+                format!(
+                    "session `{}` declares the view `{}` twice",
+                    spec.id, view.id
+                ),
             )
             .with("session", spec.id.clone())
             .with("view", view.id.clone()));
@@ -625,7 +626,10 @@ fn compile_view(spec: &SessionSpec, view: &ViewSpec) -> Result<ViewPlan> {
     if view.panes.is_empty() {
         return Err(AikitError::new(
             "session.empty_view",
-            format!("view `{}` has no panes; there would be nothing to create", view.id),
+            format!(
+                "view `{}` has no panes; there would be nothing to create",
+                view.id
+            ),
         )
         .with("session", spec.id.clone())
         .with("view", view.id.clone()));
@@ -696,7 +700,11 @@ fn compile_view(spec: &SessionSpec, view: &ViewSpec) -> Result<ViewPlan> {
         }
     }
 
-    let roots: Vec<&PaneSpec> = view.panes.iter().filter(|p| p.split_from.is_none()).collect();
+    let roots: Vec<&PaneSpec> = view
+        .panes
+        .iter()
+        .filter(|p| p.split_from.is_none())
+        .collect();
     if roots.len() > 1 {
         return Err(AikitError::new(
             "session.multiple_root_panes",

@@ -6,16 +6,15 @@
 
 mod common;
 
-use common::plan_from;
 use aikit_adapters::mux::cmux::Cmux;
 use aikit_adapters::mux::SessionIdentity;
 use aikit_adapters::runner::SystemRunner;
 use aikit_adapters::{
-    MuxWorkingEnvironment, NativeBindingKind, WorkingEnvironmentHealth,
-    WorkingEnvironmentProvider,
+    MuxWorkingEnvironment, NativeBindingKind, WorkingEnvironmentHealth, WorkingEnvironmentProvider,
 };
 use aikit_core::id::SessionId;
 use aikit_core::resource::ResourceRef;
+use common::plan_from;
 
 fn r(raw: &str) -> ResourceRef {
     ResourceRef::parse(raw).unwrap()
@@ -74,17 +73,13 @@ command = ["sh", "-c", "sleep 120"]
 "#,
         temp.path().display()
     ));
-    let mut environment = MuxWorkingEnvironment::new(
-        cmux,
-        plan,
-        r("provider/cmux/current"),
-    )
-    .bind_surface(r("surface/cmux/agent"), "main/agent")
-    .bind_surface(r("surface/cmux/shell"), "main/shell")
-    .bind_project(r("project/alpha"), "workspace-provenance:alpha")
-    .bind_project(r("project/beta"), "workspace-provenance:beta")
-    .bind_agent_session(r("agent-session/cmux-a"), "surface-host:agent")
-    .bind_agent_session(r("agent-session/cmux-b"), "surface-host:shell");
+    let mut environment = MuxWorkingEnvironment::new(cmux, plan, r("provider/cmux/current"))
+        .bind_surface(r("surface/cmux/agent"), "main/agent")
+        .bind_surface(r("surface/cmux/shell"), "main/shell")
+        .bind_project(r("project/alpha"), "workspace-provenance:alpha")
+        .bind_project(r("project/beta"), "workspace-provenance:beta")
+        .bind_agent_session(r("agent-session/cmux-a"), "surface-host:agent")
+        .bind_agent_session(r("agent-session/cmux-b"), "surface-host:shell");
 
     let opened = environment.open().unwrap();
     assert_eq!(opened.health, WorkingEnvironmentHealth::Healthy);
@@ -118,9 +113,7 @@ command = ["sh", "-c", "sleep 120"]
         2
     );
 
-    environment
-        .focus_surface(&r("surface/cmux/shell"))
-        .unwrap();
+    environment.focus_surface(&r("surface/cmux/shell")).unwrap();
     let observed = environment.observe().unwrap();
     assert!(observed
         .canonical_native_id(&r("surface/cmux/shell"))

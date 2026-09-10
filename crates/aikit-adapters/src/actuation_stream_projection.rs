@@ -14,8 +14,7 @@ use serde_json::{json, Map, Value};
 use crate::agent_connection::{ConnectionSignal, ConnectionSignalKind};
 
 pub const ACTUATION_STREAM_SCHEMA: &str = "actuation.stream/v1";
-pub const ACTUATION_STREAM_OWNER_REVISION: &str =
-    "bece3da0da0369c8f7495d443944e60f849a3f8d";
+pub const ACTUATION_STREAM_OWNER_REVISION: &str = "bece3da0da0369c8f7495d443944e60f849a3f8d";
 pub const CONNECTION_SIGNAL_STREAM_PROJECTION_VERSION: &str =
     "aikit.connection-signal-actuation-stream/v1";
 
@@ -105,7 +104,10 @@ pub fn project_connection_signal_to_actuation_stream(
         "projection_schema".into(),
         json!(CONNECTION_SIGNAL_STREAM_PROJECTION_VERSION),
     );
-    metadata.insert("connection_ref".into(), json!(context.connection_ref.to_string()));
+    metadata.insert(
+        "connection_ref".into(),
+        json!(context.connection_ref.to_string()),
+    );
     metadata.insert("connection_signal_sequence".into(), json!(signal.sequence));
     if let Some(native_session_id) = &signal.native_session_id {
         metadata.insert("native_session_id".into(), json!(native_session_id));
@@ -164,7 +166,9 @@ fn portable_signal(signal: &ConnectionSignal) -> (&'static str, Option<String>, 
             ("model-delta", Some(text.clone()), None)
         }
         ConnectionSignalKind::AgentThoughtChunk { text, content } => (
-            "harness-event", Some(text.clone()), Some(json!({"event":"agent-thought-chunk","content":content})),
+            "harness-event",
+            Some(text.clone()),
+            Some(json!({"event":"agent-thought-chunk","content":content})),
         ),
         ConnectionSignalKind::ToolCall { payload } => (
             "tool-request",
@@ -194,12 +198,16 @@ fn portable_signal(signal: &ConnectionSignal) -> (&'static str, Option<String>, 
             Some(json!({ "event": "completed", "stop_reason": stop_reason })),
         ),
         ConnectionSignalKind::Failed { reason } => (
-            "model-result", None, Some(json!({"event":"failed","reason":reason})),
+            "model-result",
+            None,
+            Some(json!({"event":"failed","reason":reason})),
         ),
         ConnectionSignalKind::Cancelled => ("cancellation", None, None),
-        ConnectionSignalKind::Status { message } => {
-            ("harness-event", Some(message.clone()), Some(json!({ "event": "status" })))
-        }
+        ConnectionSignalKind::Status { message } => (
+            "harness-event",
+            Some(message.clone()),
+            Some(json!({ "event": "status" })),
+        ),
         ConnectionSignalKind::Degraded { degradation } => (
             "harness-event",
             None,
@@ -215,9 +223,7 @@ fn portable_signal(signal: &ConnectionSignal) -> (&'static str, Option<String>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_connection::{
-        ConnectionDegradation, NativeSessionBinding, SessionOpenMode,
-    };
+    use crate::agent_connection::{ConnectionDegradation, NativeSessionBinding, SessionOpenMode};
 
     fn r(value: &str) -> ResourceRef {
         ResourceRef::parse(value).unwrap()
@@ -245,13 +251,17 @@ mod tests {
             },
             provenance: vec!["ACP session/update".into()],
         };
-        let projected = project_connection_signal_to_actuation_stream(&context(), &signal, 9).unwrap();
+        let projected =
+            project_connection_signal_to_actuation_stream(&context(), &signal, 9).unwrap();
         assert_eq!(projected.schema, ACTUATION_STREAM_SCHEMA);
         assert_eq!(projected.event["sequence"], 9);
         assert_eq!(projected.event["kind"], "model-delta");
         assert_eq!(projected.event["content"], "hello");
         assert_eq!(projected.event["surface_ref"], "surface/cradle");
-        assert_eq!(projected.event["metadata"]["connection_signal_sequence"], 41);
+        assert_eq!(
+            projected.event["metadata"]["connection_signal_sequence"],
+            41
+        );
         assert_eq!(projected.event["metadata"]["native_session_id"], "native-7");
     }
 
@@ -265,9 +275,13 @@ mod tests {
             },
             provenance: Vec::new(),
         };
-        let projected = project_connection_signal_to_actuation_stream(&context(), &signal, 3).unwrap();
+        let projected =
+            project_connection_signal_to_actuation_stream(&context(), &signal, 3).unwrap();
         assert_eq!(projected.event["sequence"], 3);
-        assert_eq!(projected.event["metadata"]["connection_signal_sequence"], 900);
+        assert_eq!(
+            projected.event["metadata"]["connection_signal_sequence"],
+            900
+        );
     }
 
     #[test]
@@ -280,7 +294,8 @@ mod tests {
             },
             provenance: Vec::new(),
         };
-        let projected = project_connection_signal_to_actuation_stream(&context(), &signal, 1).unwrap();
+        let projected =
+            project_connection_signal_to_actuation_stream(&context(), &signal, 1).unwrap();
         assert_eq!(projected.agent_session_ref, r("agent-session/root"));
         assert_eq!(
             projected.event["metadata"]["native"]["native_session_id"],
@@ -299,7 +314,8 @@ mod tests {
             },
             provenance: Vec::new(),
         };
-        let projected = project_connection_signal_to_actuation_stream(&context(), &signal, 5).unwrap();
+        let projected =
+            project_connection_signal_to_actuation_stream(&context(), &signal, 5).unwrap();
         assert_eq!(projected.event["kind"], "tool-request");
         assert_eq!(
             projected.event["metadata"]["native"]["payload"]["name"],
@@ -315,7 +331,8 @@ mod tests {
             kind: ConnectionSignalKind::Cancelled,
             provenance: Vec::new(),
         };
-        let projected = project_connection_signal_to_actuation_stream(&context(), &cancelled, 2).unwrap();
+        let projected =
+            project_connection_signal_to_actuation_stream(&context(), &cancelled, 2).unwrap();
         assert_eq!(projected.event["kind"], "cancellation");
         assert!(projected.event.get("content").is_none());
 
@@ -330,7 +347,8 @@ mod tests {
             },
             provenance: Vec::new(),
         };
-        let projected = project_connection_signal_to_actuation_stream(&context(), &degraded, 3).unwrap();
+        let projected =
+            project_connection_signal_to_actuation_stream(&context(), &degraded, 3).unwrap();
         assert_eq!(projected.event["kind"], "harness-event");
         assert_eq!(
             projected.event["metadata"]["native"]["reason"],

@@ -6,13 +6,9 @@
 //! can participate in SessionSpace reconstruction. In particular this adapter
 //! never emits AgentSession continuity evidence.
 
-use aikit_core::session_space_application::{
-    ObservedRelationState, SessionSpaceNativeObservation,
-};
+use aikit_core::session_space_application::{ObservedRelationState, SessionSpaceNativeObservation};
 
-use crate::working_environment::{
-    WorkingEnvironmentHealth, WorkingEnvironmentObservation,
-};
+use crate::working_environment::{WorkingEnvironmentHealth, WorkingEnvironmentObservation};
 
 pub fn session_space_native_observations(
     observation: &WorkingEnvironmentObservation,
@@ -51,11 +47,11 @@ pub fn session_space_native_observations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aikit_core::resource::ResourceRef;
     use crate::working_environment::{
         NativeBindingKind, ProviderNativeBinding, WorkingEnvironmentCapabilities,
         WORKING_ENVIRONMENT_PROVIDER_VERSION,
     };
+    use aikit_core::resource::ResourceRef;
 
     #[test]
     fn native_id_without_explicit_canonical_ref_is_not_promoted_to_identity() {

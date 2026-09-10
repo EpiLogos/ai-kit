@@ -204,10 +204,8 @@ pub fn deterministic_transitive_knowledge_impact(
     }
     validate_resource_dependency_dag(resource_dependencies)?;
 
-    let mut direct = crate::knowledge_living::deterministic_knowledge_impact(
-        horizon,
-        source_dependencies,
-    )?;
+    let mut direct =
+        crate::knowledge_living::deterministic_knowledge_impact(horizon, source_dependencies)?;
     let mut truncated = direct.affected.len() > max_affected;
     direct.affected.truncate(max_affected);
 
@@ -253,12 +251,7 @@ pub fn deterministic_transitive_knowledge_impact(
             freshness: affected.freshness,
             steps: steps.clone(),
         });
-        queue.push_back((
-            affected.resource.clone(),
-            affected.source.clone(),
-            steps,
-            0,
-        ));
+        queue.push_back((affected.resource.clone(), affected.source.clone(), steps, 0));
     }
 
     let mut transitive = Vec::new();
@@ -561,8 +554,7 @@ mod tests {
 
     use crate::composition::RetractionMode;
     use crate::knowledge_living::{
-        living_wiki_provenance, KnowledgeChangeKind, KnowledgeObservedSource,
-        KnowledgeSourceChange,
+        living_wiki_provenance, KnowledgeChangeKind, KnowledgeObservedSource, KnowledgeSourceChange,
     };
     use crate::model_runtime::{
         AccessFieldReading, InferenceEngineForm, InferenceEngineReading, MaterialResourceReading,
@@ -670,13 +662,13 @@ mod tests {
             .find(|path| path.resource == resource("wiki:reading:essay"))
             .unwrap();
         assert_eq!(essay.steps.len(), 3);
-        assert_eq!(
-            essay.steps.last().unwrap().relation,
-            "integrates-reading"
-        );
+        assert_eq!(essay.steps.last().unwrap().relation, "integrates-reading");
         assert_eq!(
             impact.pending_integration,
-            vec![resource("wiki:reading:essay"), resource("wiki:reading:section")]
+            vec![
+                resource("wiki:reading:essay"),
+                resource("wiki:reading:section")
+            ]
         );
         assert!(!impact.automatic_agent_or_model_invocation);
     }
@@ -693,7 +685,10 @@ mod tests {
         .unwrap();
         assert_eq!(impact.direct.affected.len(), 1);
         assert!(impact.direct.changed_sources.is_empty());
-        assert_eq!(impact.direct.affected[0].freshness, KnowledgeFreshness::BasisChanged);
+        assert_eq!(
+            impact.direct.affected[0].freshness,
+            KnowledgeFreshness::BasisChanged
+        );
     }
 
     #[test]
@@ -725,10 +720,7 @@ mod tests {
         assert_eq!(error.code(), "knowledge.living_resource_dependency_cycle");
     }
 
-    fn revisioned_reading(
-        revision_number: u64,
-        cursor: u64,
-    ) -> IntegrativeWikiReading {
+    fn revisioned_reading(revision_number: u64, cursor: u64) -> IntegrativeWikiReading {
         let source_ref = source("source:project:position");
         let source_revision = revision("r2");
         let basis_ref = resource("wiki:node:purpose");
@@ -805,7 +797,10 @@ mod tests {
                 profile: "okf-wiki/v1".into(),
                 ref_id: whole.clone(),
                 revision: 1,
-                provenance: vec![living_wiki_provenance(source_ref.clone(), source_revision.clone())],
+                provenance: vec![living_wiki_provenance(
+                    source_ref.clone(),
+                    source_revision.clone(),
+                )],
                 frame_ref: resource("wiki:frame"),
                 reading_type: "integrative".into(),
                 artifact_ref: None,

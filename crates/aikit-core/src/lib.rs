@@ -22,8 +22,6 @@ pub mod actor_bootstrap;
 pub mod application_context;
 pub mod arg;
 pub mod capsule;
-pub mod continuity;
-pub mod domain;
 pub mod catalog;
 pub mod composition;
 pub mod composition_explain_history;
@@ -34,9 +32,10 @@ pub mod context;
 pub mod context_activation;
 pub mod context_resolution;
 pub mod context_source;
+pub mod continuity;
 pub mod credential;
 pub mod credential_world;
-pub mod secret_ref;
+pub mod domain;
 pub mod duration;
 pub mod effects;
 pub mod error;
@@ -54,7 +53,6 @@ pub mod knowledge;
 pub mod knowledge_code;
 pub mod knowledge_entity_address;
 pub mod knowledge_ingest;
-pub mod knowledge_wiki_shape_v2;
 pub mod knowledge_living;
 pub mod knowledge_living_context;
 pub mod knowledge_living_relations;
@@ -68,6 +66,7 @@ pub mod knowledge_wiki;
 pub mod knowledge_wiki_index;
 pub mod knowledge_wiki_provider;
 pub mod knowledge_wiki_shape;
+pub mod knowledge_wiki_shape_v2;
 pub mod knowledge_wiki_write;
 pub mod lifecycle;
 pub mod live_activation_history;
@@ -91,6 +90,7 @@ pub mod resolve;
 pub mod resource;
 pub mod scope;
 pub mod search;
+pub mod secret_ref;
 pub mod session;
 pub mod session_ecology;
 pub mod session_lifecycle;
@@ -110,14 +110,12 @@ pub use actor_bootstrap::{
     HarnessCompositionPointer, ResourceSetSummary, RuntimeBodyInspection, ACTOR_BOOTSTRAP_VERSION,
     BOOTSTRAP_RESOURCE_SAMPLE_LIMIT,
 };
-pub use application_context::{application_context_resolution, application_context_resolution_with_binding};
-pub use capsule::{
-    BypassPolicy, Capsule, ControlGround, ControlStanding, Facets, Facing, FailurePolicy, HookPhase,
-    Kind, LanguageFacet, Maturity, Payload, Requirement, Surface,
+pub use application_context::{
+    application_context_resolution, application_context_resolution_with_binding,
 };
-pub use continuity::{
-    CapabilityTuning, ContinuityTuning, ACTIVITY_EVIDENCE, CONTINUITY_NAMESPACE,
-    FLOOR_CAPABILITY, TURN_LEDGER,
+pub use capsule::{
+    BypassPolicy, Capsule, ControlGround, ControlStanding, Facets, Facing, FailurePolicy,
+    HookPhase, Kind, LanguageFacet, Maturity, Payload, Requirement, Surface,
 };
 pub use catalog::{Catalog, MemoryCatalog};
 pub use composition::{
@@ -162,6 +160,10 @@ pub use context_source::{
     ExternalEgress, Freshness, HorizonRequest, ProviderReadResult, RetrievalTarget, SearchAudience,
     StructuredAbsence, CONTEXT_SOURCE_INDEX_VERSION,
 };
+pub use continuity::{
+    CapabilityTuning, ContinuityTuning, ACTIVITY_EVIDENCE, CONTINUITY_NAMESPACE, FLOOR_CAPABILITY,
+    TURN_LEDGER,
+};
 pub use credential::{
     resolve_credential, resolve_registered_credential, CredentialBindingState,
     CredentialProviderRejection, CredentialRef, CredentialResolution, CredentialResolutionRequest,
@@ -174,7 +176,6 @@ pub use credential_world::{
     CredentialWorldDisclosure, ProviderResolutionDisclosure, ProviderRosterKnowledge,
     CREDENTIAL_WORLD_VERSION,
 };
-pub use secret_ref::{SecretRef, SecretResolver};
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
 pub use explain_history::{
@@ -293,19 +294,18 @@ pub use knowledge_wiki::{
     WikiNode, WikiObject, WikiProvenanceRef, WikiReading as SemanticWikiReading, WikiSpace,
     WikiSurfaceKind, OKF_WIKI_PROFILE,
 };
+pub use knowledge_wiki::{
+    project_id_from_space_ref, project_wiki_space_ref, PROJECT_WIKI_SPACE_REF_PREFIX,
+    ROOT_WIKI_SPACE_REF,
+};
 pub use knowledge_wiki_index::{
     SemanticWikiIndex, WikiIndexStatus, WikiLocalWhole, WikiMutationProposal, WikiNeighbour,
-    WikiObjectEnvelope, WikiRelationDirection, WikiSearchAddress, WikiSearchHit,
-    WikiSearchHitKind, DEFAULT_WIKI_NEIGHBOUR_LIMIT, DEFAULT_WIKI_SEARCH_LIMIT,
-    SEMANTIC_WIKI_INDEX_VERSION,
+    WikiObjectEnvelope, WikiRelationDirection, WikiSearchAddress, WikiSearchHit, WikiSearchHitKind,
+    DEFAULT_WIKI_NEIGHBOUR_LIMIT, DEFAULT_WIKI_SEARCH_LIMIT, SEMANTIC_WIKI_INDEX_VERSION,
 };
 pub use knowledge_wiki_provider::{
     SemanticWikiProvider, SemanticWikiProviderStatus, WikiExplanation,
     NATIVE_SEMANTIC_WIKI_PROVIDER,
-};
-pub use knowledge_wiki::{
-    project_id_from_space_ref, project_wiki_space_ref, PROJECT_WIKI_SPACE_REF_PREFIX,
-    ROOT_WIKI_SPACE_REF,
 };
 pub use knowledge_wiki_shape::{
     attribute_ql_relational_generation, attribute_ql_relational_generation_from_resolve,
@@ -330,9 +330,9 @@ pub use knowledge_wiki_write::{
 pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
 pub use live_activation_history::live_activation_history_evidence;
 pub use method::{
-    resolve_method, resolve_skill_praxis_metadata, Method, MethodResolution,
-    MethodResolvedRef, MethodSkillRef, SituatedSkillRef, SkillPraxisMetadata,
-    SkillPraxisMetadataResolution, SkillPraxisResolvedRef, UsageOverlayRef, METHOD_VERSION,
+    resolve_method, resolve_skill_praxis_metadata, Method, MethodResolution, MethodResolvedRef,
+    MethodSkillRef, SituatedSkillRef, SkillPraxisMetadata, SkillPraxisMetadataResolution,
+    SkillPraxisResolvedRef, UsageOverlayRef, METHOD_VERSION,
 };
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;
@@ -394,15 +394,25 @@ pub use resolve::{
     ResolvedView, UnavailableReason,
 };
 pub use resource::{
-    Eligibility, OwnerRef, PreferenceIntent, ProviderOffer, ProviderRef, ProviderState,
-    ResourceDescriptor, ResourceExplanation, ResourceKind, ResourceLocator, ResourceRecord,
-    ResourceRef, ResourceSource, SourceAuthority, SourceRef, SourceRevision, SourceState,
+    attach_development_field_binding, development_field_binding, read_development_field,
+    DevelopmentFieldAvailability, DevelopmentFieldAvailabilityState, DevelopmentFieldBinding,
+    DevelopmentFieldCarrierKind, DevelopmentFieldCarrierProjection, DevelopmentFieldCurrentDiff,
+    DevelopmentFieldExecutableBasis, DevelopmentFieldExecutableModality, DevelopmentFieldGitBasis,
+    DevelopmentFieldReadRequest, DevelopmentFieldReading, DevelopmentFieldRelation,
+    DevelopmentFieldSelfDescriptionAperture, DevelopmentFieldSubjectReading, Eligibility, OwnerRef,
+    PreferenceIntent, ProviderOffer, ProviderRef, ProviderState, QlShapeBindingCarrier,
+    QlShapeMemberBinding, ResourceDescriptor, ResourceExplanation, ResourceKind, ResourceLocator,
+    ResourceRecord, ResourceRef, ResourceSource, SourceAuthority, SourceRef, SourceRevision,
+    SourceState, WorkcellMaterialRef, DEFAULT_DEVELOPMENT_FIELD_READ_LIMIT,
+    DEVELOPMENT_FIELD_BINDING_ANNOTATION, DEVELOPMENT_FIELD_BINDING_VERSION,
+    DEVELOPMENT_FIELD_READING_VERSION, MAX_DEVELOPMENT_FIELD_READ_LIMIT,
 };
 pub use scope::{LayerOrigin, ScopeKind, ScopeLayer};
 pub use search::{
     parse_query, score, DocStatus, FastPrefix, Query, RankingSignals, SearchDoc, StatusFilter,
     UsageStats,
 };
+pub use secret_ref::{SecretRef, SecretResolver};
 pub use session::{
     compile as compile_session, Attach, BackendSpec, Direction, Lifecycle, PaneSpec, PaneStep,
     Placement, Restart, SessionPlan, SessionSpec, Split, TaskSpec, ViewPlan, ViewSpec,

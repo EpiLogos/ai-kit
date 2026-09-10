@@ -106,10 +106,7 @@ fn a_default_and_an_explicit_binding_resolve_to_explicit_capsule_ids() {
     let default = run(home.path(), default_project.path(), &["status"]);
     assert!(default.status.success(), "{:?}", envelope(&default));
     let default_body = envelope(&default);
-    assert_eq!(
-        active_ids(&default_body),
-        vec!["script/test/cargo-nextest"]
-    );
+    assert_eq!(active_ids(&default_body), vec!["script/test/cargo-nextest"]);
 
     let bound = run(home.path(), bound_project.path(), &["status"]);
     assert!(bound.status.success(), "{:?}", envelope(&bound));

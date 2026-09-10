@@ -49,11 +49,15 @@ impl ExternalFixtureProvider {
                     kind: NativeBindingKind::AgentSession,
                     native_id: "provider-session-42".into(),
                     canonical_ref: Some(r("agent-session/reference-world")),
-                    provenance: vec!["caller supplied explicit canonical AgentSession binding".into()],
+                    provenance: vec![
+                        "caller supplied explicit canonical AgentSession binding".into()
+                    ],
                 },
             ],
             focused_native_id: Some("native-view-7".into()),
-            provenance: vec!["external-style provider fixture using only public AIKit exports".into()],
+            provenance: vec![
+                "external-style provider fixture using only public AIKit exports".into(),
+            ],
         }
     }
 }

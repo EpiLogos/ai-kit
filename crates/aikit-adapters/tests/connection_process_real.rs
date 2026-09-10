@@ -5,9 +5,8 @@
 //! always-on real non-ACP process test on Unix.
 
 use aikit_adapters::{
-    AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest,
-    ClassicProcessConnectionAdapter, ConnectionProcess, ConnectionSignalKind,
-    PromptRequest, SessionOpenMode, SessionOpenRequest,
+    AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest, ClassicProcessConnectionAdapter,
+    ConnectionProcess, ConnectionSignalKind, PromptRequest, SessionOpenMode, SessionOpenRequest,
 };
 use aikit_core::resource::ResourceRef;
 use serde_json::json;
@@ -29,7 +28,9 @@ fn open_request(agent_session: Option<ResourceRef>) -> SessionOpenRequest {
 
 fn require_real_acp_command() -> Option<Vec<String>> {
     match std::env::var("AIKIT_ACP_REAL_COMMAND") {
-        Ok(raw) => Some(shell_words::split(&raw).expect("AIKIT_ACP_REAL_COMMAND must be shell words")),
+        Ok(raw) => {
+            Some(shell_words::split(&raw).expect("AIKIT_ACP_REAL_COMMAND must be shell words"))
+        }
         Err(_) if std::env::var_os("AIKIT_REQUIRE_ACP_REAL").is_some() => {
             panic!("AIKIT_REQUIRE_ACP_REAL is set but AIKIT_ACP_REAL_COMMAND is absent")
         }
@@ -54,14 +55,19 @@ fn real_acp_sdk_target_streams_and_preserves_identity_boundary() {
 
     process.send_json(&adapter.initialize().unwrap()).unwrap();
     let init_signals = adapter.ingest(process.read_json().unwrap()).unwrap();
-    assert!(init_signals.iter().any(|signal| matches!(
-        signal.kind,
-        ConnectionSignalKind::Status { .. }
-    )));
-    assert!(adapter.negotiated_capabilities().supports(SessionOpenMode::Create));
+    assert!(init_signals
+        .iter()
+        .any(|signal| matches!(signal.kind, ConnectionSignalKind::Status { .. })));
+    assert!(adapter
+        .negotiated_capabilities()
+        .supports(SessionOpenMode::Create));
 
     process
-        .send_json(&adapter.open_session(open_request(Some(canonical.clone()))).unwrap())
+        .send_json(
+            &adapter
+                .open_session(open_request(Some(canonical.clone())))
+                .unwrap(),
+        )
         .unwrap();
     let opened = adapter.ingest(process.read_json().unwrap()).unwrap();
     let binding = opened
@@ -107,7 +113,10 @@ fn real_acp_sdk_target_streams_and_preserves_identity_boundary() {
             break;
         }
     }
-    assert!(saw_chunk, "real ACP target must emit session/update streaming");
+    assert!(
+        saw_chunk,
+        "real ACP target must emit session/update streaming"
+    );
     assert!(saw_completed, "real ACP target must complete the prompt");
 
     // The stable protocol carries cancel as a notification. The official echo
@@ -191,7 +200,10 @@ for line in sys.stdin:
     assert!(!descriptor.capabilities.supports(SessionOpenMode::Resume));
     assert_eq!(adapter.initialize().unwrap().operation, "launch");
     assert_eq!(
-        adapter.open_session(open_request(Some(r("agent-session/classic-real")))).unwrap().operation,
+        adapter
+            .open_session(open_request(Some(r("agent-session/classic-real"))))
+            .unwrap()
+            .operation,
         "create"
     );
 
@@ -228,7 +240,10 @@ for line in sys.stdin:
             ..open_request(Some(r("agent-session/classic-real")))
         })
         .unwrap_err();
-    assert_eq!(resume_error.code(), "connection.session_operation_unsupported");
+    assert_eq!(
+        resume_error.code(),
+        "connection.session_operation_unsupported"
+    );
 
     // A new process can be launched, but that is process replacement, not a
     // protocol reconnect and not evidence that the prior native session exists.

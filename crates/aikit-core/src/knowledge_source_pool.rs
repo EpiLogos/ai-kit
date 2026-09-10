@@ -47,8 +47,9 @@ impl SourceBinding {
         match self.visibility {
             SourceVisibility::Public => true,
             SourceVisibility::Team => allow_team,
-            SourceVisibility::Personal => actor
-                .is_some_and(|actor| self.owners.iter().any(|owner| owner == actor)),
+            SourceVisibility::Personal => {
+                actor.is_some_and(|actor| self.owners.iter().any(|owner| owner == actor))
+            }
         }
     }
 }

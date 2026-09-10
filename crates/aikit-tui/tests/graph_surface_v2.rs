@@ -28,7 +28,10 @@ fn fixture() -> (tempfile::TempDir, Fixture) {
         "skill/alpha",
         "related_skills = [\"skill/beta\", \"skill/gamma\"]\n",
     );
-    let backend = Fixture::new(dir.path(), vec![alpha, skill("skill/beta"), skill("skill/gamma")]);
+    let backend = Fixture::new(
+        dir.path(),
+        vec![alpha, skill("skill/beta"), skill("skill/gamma")],
+    );
     (dir, backend)
 }
 
@@ -73,11 +76,17 @@ fn enter_graph(
         .handle(backend, PaletteEvent::Resize(width, height))
         .unwrap();
     surface
-        .handle(backend, PaletteEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)))
+        .handle(
+            backend,
+            PaletteEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        )
         .unwrap();
     for _ in 0..2 {
         surface
-            .handle(backend, PaletteEvent::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)))
+            .handle(
+                backend,
+                PaletteEvent::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            )
             .unwrap();
     }
     assert_eq!(surface.semantic().relation_view, RelationView::Graph);
@@ -93,7 +102,9 @@ fn ctrl_t_rotates_into_graph_and_lays_out_the_resolver_neighbourhood() {
     .unwrap();
     enter_graph(&mut surface, &mut backend, 120, 30);
 
-    let relation = surface.relation().expect("alpha has a relation neighbourhood");
+    let relation = surface
+        .relation()
+        .expect("alpha has a relation neighbourhood");
     assert_eq!(relation.subject.as_str(), "skill/alpha");
     assert!(relation
         .view
@@ -108,8 +119,14 @@ fn ctrl_t_rotates_into_graph_and_lays_out_the_resolver_neighbourhood() {
 
     let terminal = draw(&surface, 120, 30);
     let text = rendered(&terminal);
-    assert!(text.contains("Outgoing"), "spatial legend must label the Outgoing band:\n{text}");
-    assert!(text.contains("Inspector"), "spatial rendering must show the Inspector section:\n{text}");
+    assert!(
+        text.contains("Outgoing"),
+        "spatial legend must label the Outgoing band:\n{text}"
+    );
+    assert!(
+        text.contains("Inspector"),
+        "spatial rendering must show the Inspector section:\n{text}"
+    );
 }
 
 #[test]
@@ -220,7 +237,11 @@ fn depth_control_reaches_the_application_service() {
     surface
         .handle(&mut backend, key(KeyCode::Char('-')))
         .unwrap();
-    assert_eq!(surface.semantic().graph.depth, 1, "depth is bounded at MIN_DEPTH");
+    assert_eq!(
+        surface.semantic().graph.depth,
+        1,
+        "depth is bounded at MIN_DEPTH"
+    );
 }
 
 #[test]
@@ -236,7 +257,10 @@ fn narrow_geometry_falls_back_to_the_grouped_projection_while_staying_semantical
     assert_eq!(surface.semantic().relation_view, RelationView::Graph);
     let terminal = draw(&surface, 40, 20);
     let text = rendered(&terminal);
-    assert!(text.contains("alpha"), "narrow fallback still names the focus:\n{text}");
+    assert!(
+        text.contains("alpha"),
+        "narrow fallback still names the focus:\n{text}"
+    );
     assert!(
         text.contains("Outgoing"),
         "narrow fallback still bands relations, just without a spatial canvas:\n{text}"
@@ -274,7 +298,8 @@ fn mouse_click_and_shift_click_resolve_to_the_same_actions_as_keyboard_navigatio
         (content.height * 3 / 5).max(MIN_CANVAS_HEIGHT)
     };
     let relation = surface.relation().unwrap().clone();
-    let request = GraphLayoutRequest::for_viewport(GraphViewport::new(content.width, canvas_height));
+    let request =
+        GraphLayoutRequest::for_viewport(GraphViewport::new(content.width, canvas_height));
     let laid = graph_layout(&relation.view, &request);
     let beta = laid
         .nodes

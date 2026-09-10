@@ -7,10 +7,8 @@ extern crate self as aikit_adapters;
 pub mod actor_composition;
 pub mod actuation_harness_capability;
 pub mod actuation_harness_detection;
-pub mod actuation_model_routes;
-pub mod model_realisation;
-pub mod provider_catalog_source;
 pub mod actuation_instantiation;
+pub mod actuation_model_routes;
 pub mod actuation_stream_projection;
 pub mod agent_connection;
 pub mod agent_session_host;
@@ -24,12 +22,11 @@ pub mod clients;
 pub mod composition_topology;
 pub mod connection_process;
 pub mod credential_provider;
-pub mod secret_resolver;
 pub mod deepseek_harness;
 pub mod deepseek_live;
 pub mod deepseek_maximal;
-pub mod factory_run_thought_authored_wiki;
 pub mod factory_developmental;
+pub mod factory_run_thought_authored_wiki;
 pub mod flow_authored_wiki;
 pub mod gateway_client;
 pub mod gateway_connector;
@@ -42,21 +39,24 @@ pub mod home_agent_profile;
 pub mod hyprland;
 pub mod interactive_connection;
 pub mod local_source_discovery;
+pub mod model_realisation;
 pub mod mux;
 pub mod native_git;
 pub mod okf;
 pub mod projectcentral;
 pub mod projectcentral_authored_wiki;
+pub mod provider_catalog_source;
 pub mod runner;
+pub mod secret_resolver;
 pub mod session_space_connection;
 pub mod session_space_observation;
 pub mod session_space_reconstruction;
 pub mod shells;
 mod telegram_bot_api;
 pub mod telegram_gateway;
+pub mod workcell_instance_intake;
 pub mod working_environment;
 pub mod working_environment_control;
-pub mod workcell_instance_intake;
 
 pub use actuation_stream_projection::{
     project_connection_signal_to_actuation_stream, ActuationStreamAppendProjection,
@@ -131,13 +131,13 @@ pub use gateway_connector::{
 pub use gateway_runtime::{
     connector_descriptor, execute_gateway_command, text_send, AgencyGateway,
     GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayBinding,
-    GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency,
-    GatewayEcologySession, GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope,
-    GatewayForkOrigin, GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult,
-    GatewayInvocationMode, GatewayReplay, GatewayRequestEnvelope, GatewayResponse,
-    GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
-    GatewayStreamJournal, GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_INVOCATION_MODES,
+    GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency, GatewayEcologySession,
+    GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope, GatewayForkOrigin,
+    GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult, GatewayInvocationMode,
+    GatewayReplay, GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope,
+    GatewaySnapshot, GatewayStatus, GatewayStreamEvent, GatewayStreamJournal,
     ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA, AGENCY_GATEWAY_VERSION,
+    GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_INVOCATION_MODES,
 };
 pub use gateway_service::{
     persist_gateway_state, restore_gateway_state, run_gateway_service, GatewayServiceConfig,

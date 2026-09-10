@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agent_connection::{
-    AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest,
-    ClassicProcessConnectionAdapter, ConnectionCommand, ConnectionDegradation,
-    ConnectionDescriptor, ConnectionSignal, ConnectionSignalKind, NativePermissionChoice,
-    NativePermissionRequest, PromptRequest, SessionOpenRequest,
+    AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest, ClassicProcessConnectionAdapter,
+    ConnectionCommand, ConnectionDegradation, ConnectionDescriptor, ConnectionSignal,
+    ConnectionSignalKind, NativePermissionChoice, NativePermissionRequest, PromptRequest,
+    SessionOpenRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,7 +168,10 @@ impl AcpStableConnectionAdapter {
             .filter_map(|option| {
                 Some(NativePermissionChoice {
                     option_id: option.get("optionId")?.as_str()?.to_string(),
-                    kind: option.get("kind").and_then(Value::as_str).map(ToOwned::to_owned),
+                    kind: option
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
                     label: option.get("name")?.as_str()?.to_string(),
                 })
             })

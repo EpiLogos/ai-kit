@@ -16,7 +16,11 @@ fn capsule() -> CapsuleId {
 }
 
 fn key(rev: &str) -> TrustKey {
-    TrustKey::new(RegistrySource::personal(), capsule(), Revision::from_raw(rev))
+    TrustKey::new(
+        RegistrySource::personal(),
+        capsule(),
+        Revision::from_raw(rev),
+    )
 }
 
 #[test]

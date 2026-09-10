@@ -8,9 +8,7 @@ use common::*;
 
 use std::time::Duration;
 
-use aikit_core::frecency::{
-    self, Candidate, Jump, Tiebreak, DEFAULT_HALF_LIFE,
-};
+use aikit_core::frecency::{self, Candidate, Jump, Tiebreak, DEFAULT_HALF_LIFE};
 use aikit_core::search::UsageStats;
 
 fn used(runs: u32, days_ago: u64) -> UsageStats {
@@ -99,7 +97,11 @@ fn the_order_is_total_so_results_never_jitter() {
     frecency::rank(&mut second, DEFAULT_HALF_LIFE);
 
     let ids = |c: &[Candidate]| c.iter().map(|x| x.id.to_string()).collect::<Vec<_>>();
-    assert_eq!(ids(&first), ids(&second), "input order must not affect output");
+    assert_eq!(
+        ids(&first),
+        ids(&second),
+        "input order must not affect output"
+    );
     assert_eq!(
         ids(&first),
         vec!["script/test/a", "script/test/b", "script/test/c"],
@@ -128,7 +130,10 @@ fn matching_prefers_the_tail_of_the_id() {
         "a tail match ({suffix}) must beat a mid-leaf match ({middle})"
     );
 
-    assert_eq!(frecency::match_quality("nextest", &cid("script/test/nextest")), 1.0);
+    assert_eq!(
+        frecency::match_quality("nextest", &cid("script/test/nextest")),
+        1.0
+    );
     assert!(frecency::match_quality("next", &cid("script/test/nextest")) > 0.0);
     assert_eq!(
         frecency::match_quality("nothing-like-it", &cid("script/test/nextest")),
@@ -165,7 +170,11 @@ fn z_disambiguates_rather_than_guessing_when_the_top_is_contested() {
 
     match frecency::decide(&candidates) {
         Jump::Disambiguate { candidates } => {
-            assert_eq!(candidates.len(), 2, "the palette opens pre-filtered to both");
+            assert_eq!(
+                candidates.len(),
+                2,
+                "the palette opens pre-filtered to both"
+            );
         }
         other => panic!("a contested top must not be acted on: {other:?}"),
     }

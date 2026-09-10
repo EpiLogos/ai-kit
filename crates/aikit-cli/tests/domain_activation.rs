@@ -12,9 +12,7 @@ use aikit_store::index::Index;
 /// The reactions hand back classified blocks now, so the pressure stage can
 /// bound ordinary payload without touching standing guidance. These tests
 /// assert on what a session actually sees, which is the rendered block.
-fn rendered(
-    result: (Vec<aikit_core::pressure::Block>, Vec<String>),
-) -> (Vec<String>, Vec<String>) {
+fn rendered(result: (Vec<aikit_core::pressure::Block>, Vec<String>)) -> (Vec<String>, Vec<String>) {
     (
         result
             .0
@@ -24,7 +22,6 @@ fn rendered(
         result.1,
     )
 }
-
 
 fn fixture() -> (PathBuf, PathBuf) {
     let root = tempfile::tempdir().unwrap().keep();
@@ -82,7 +79,9 @@ fn declared_domains_load_from_the_project_layer_and_invalid_ones_are_disclosed()
     assert_eq!(domains.len(), 1, "the valid declaration loads");
     assert_eq!(domains[0].id, "domain/release");
     assert!(
-        warnings.iter().any(|w| w.contains("broken.toml") && w.contains("refused")),
+        warnings
+            .iter()
+            .any(|w| w.contains("broken.toml") && w.contains("refused")),
         "{warnings:?}"
     );
 }
@@ -93,16 +92,27 @@ fn a_matching_prompt_activates_and_the_explanation_names_trigger_horizon_source(
     let index = index(&db);
     let (domains, warnings) = load_domains(&tmp);
     assert!(warnings.is_empty());
-    let (blocks, warnings) = rendered(run(&index, &scope(), &domains, Some("please prepare this RELEASE")));
+    let (blocks, warnings) = rendered(run(
+        &index,
+        &scope(),
+        &domains,
+        Some("please prepare this RELEASE"),
+    ));
     assert!(warnings.is_empty());
     assert_eq!(blocks.len(), 1);
     let block = &blocks[0];
     assert!(block.starts_with("[continuity/domain-activation] domain domain/release activated"));
     assert!(block.contains("trigger: \"release\""), "{block}");
     assert!(block.contains("horizon: @3–@5"), "{block}");
-    assert!(block.contains("source: central:source:project:demo"), "{block}");
+    assert!(
+        block.contains("source: central:source:project:demo"),
+        "{block}"
+    );
     assert!(block.contains("[ordinary]"), "{block}");
-    assert!(block.contains("[standing — dedup-exempt by classification]"), "{block}");
+    assert!(
+        block.contains("[standing — dedup-exempt by classification]"),
+        "{block}"
+    );
 }
 
 #[test]
@@ -120,10 +130,26 @@ fn unchanged_ordinary_payload_dedups_but_standing_rules_reassert() {
     // is exempt by classification and reasserts with its exemption visible.
     let (second, _) = rendered(run(&index, &ctx, &domains, Some("prepare this release")));
     assert_eq!(second.len(), 1, "only the standing rule reasserts");
-    assert!(second[0].contains("ordinary payload deduped"), "{:?}", second[0]);
-    assert!(second[0].contains("standing rules reasserted"), "{:?}", second[0]);
-    assert!(second[0].contains("[standing — dedup-exempt by classification]"), "{:?}", second[0]);
-    assert!(!second[0].contains("[ordinary]"), "the ordinary line does not re-inject: {:?}", second[0]);
+    assert!(
+        second[0].contains("ordinary payload deduped"),
+        "{:?}",
+        second[0]
+    );
+    assert!(
+        second[0].contains("standing rules reasserted"),
+        "{:?}",
+        second[0]
+    );
+    assert!(
+        second[0].contains("[standing — dedup-exempt by classification]"),
+        "{:?}",
+        second[0]
+    );
+    assert!(
+        !second[0].contains("[ordinary]"),
+        "the ordinary line does not re-inject: {:?}",
+        second[0]
+    );
 
     // A third ask changes nothing about the verdict.
     let (third, _) = rendered(run(&index, &ctx, &domains, Some("prepare this release")));
@@ -149,7 +175,11 @@ fn changed_guidance_content_re_arms_injection() {
     let (domains, _) = load_domains(&tmp);
     let (second, _) = rendered(run(&index, &ctx, &domains, Some("prepare this release")));
     assert_eq!(second.len(), 1);
-    assert!(!second[0].contains("deduped"), "changed content re-arms: {:?}", second[0]);
+    assert!(
+        !second[0].contains("deduped"),
+        "changed content re-arms: {:?}",
+        second[0]
+    );
 }
 
 #[test]
@@ -170,6 +200,10 @@ fn the_prompt_is_read_from_the_submit_payload() {
         serde_json::json!({"prompt": "prepare this release"}),
     );
     assert_eq!(prompt_of(&event).as_deref(), Some("prepare this release"));
-    let empty = HookEvent::new("zcode", HookEventKind::UserPromptSubmit, serde_json::json!({}));
+    let empty = HookEvent::new(
+        "zcode",
+        HookEventKind::UserPromptSubmit,
+        serde_json::json!({}),
+    );
     assert!(prompt_of(&empty).is_none());
 }

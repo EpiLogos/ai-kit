@@ -394,8 +394,9 @@ impl<'a> KnowledgeApplication<'a> {
                         if self.source_material(source).is_none() {
                             unreadable.push(source.clone());
                         }
-                        let resource = ResourceRef::parse(source.as_str())
-                            .expect("SourceRef validation is compatible with ResourceRef validation");
+                        let resource = ResourceRef::parse(source.as_str()).expect(
+                            "SourceRef validation is compatible with ResourceRef validation",
+                        );
                         KnowledgeSearchHit {
                             address: KnowledgeAddress::Source(source.clone()),
                             resource,
@@ -688,7 +689,10 @@ impl<'a> KnowledgeApplication<'a> {
                             format!("Source {source} is absent"),
                         ));
                     }
-                    let wiki = self.wiki.as_ref().expect("a citation implies a Wiki provider");
+                    let wiki = self
+                        .wiki
+                        .as_ref()
+                        .expect("a citation implies a Wiki provider");
                     return Ok(KnowledgeExplanation {
                         address: address.clone(),
                         provider: Some(wiki.status().provider),
@@ -1327,8 +1331,15 @@ impl<'a> KnowledgeApplication<'a> {
                             format!("Source {source} is absent"),
                         ));
                     }
-                    let wiki = self.wiki.as_ref().expect("a citation implies a Wiki provider");
-                    return Ok((Some(wiki.status().provider), SourceAuthority::Authored, None));
+                    let wiki = self
+                        .wiki
+                        .as_ref()
+                        .expect("a citation implies a Wiki provider");
+                    return Ok((
+                        Some(wiki.status().provider),
+                        SourceAuthority::Authored,
+                        None,
+                    ));
                 };
                 Ok((
                     Some(binding.provider.status().provider),
@@ -1485,7 +1496,10 @@ mod tests {
     fn a_tag_term_narrows_the_source_pool_rather_than_being_matched_as_text() {
         assert_eq!(
             split_tag_filters("rotate tag:auth tag:spec tokens"),
-            ("rotate tokens".to_owned(), vec!["auth".to_owned(), "spec".to_owned()])
+            (
+                "rotate tokens".to_owned(),
+                vec!["auth".to_owned(), "spec".to_owned()]
+            )
         );
         // `#word` is ordinary prose in a markdown corpus and is left alone.
         assert_eq!(
@@ -1603,7 +1617,10 @@ mod tests {
         );
 
         // The front adds nothing the canonical entry does not do.
-        let canonical = app.resolve(&parse_or_search_expression("@2 Authentication").unwrap(), 10);
+        let canonical = app.resolve(
+            &parse_or_search_expression("@2 Authentication").unwrap(),
+            10,
+        );
         assert_eq!(canonical.hits, narrowed.hits);
         assert_eq!(canonical.path_identity, narrowed.path_identity);
     }

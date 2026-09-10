@@ -103,7 +103,8 @@ mod tests {
 
     #[test]
     fn next_prompt_reads_changed_flow_revision_instead_of_reusing_session_start() {
-        let now = success(json!({"exists":true,"active_items":[],"human_scratch":[],"day_records":[]}));
+        let now =
+            success(json!({"exists":true,"active_items":[],"human_scratch":[],"day_records":[]}));
         let list = success(json!({
             "flows":[{"flow_ref":"central:flow:work","lifecycle":"active"}],
             "automatic_agent_or_model_invocation":false
@@ -141,7 +142,8 @@ mod tests {
 
     #[test]
     fn central_failure_is_visible_but_never_becomes_hook_denial() {
-        let runner = ScriptedRunner::new().failing("projectcentral.now.inspect", 9, "owner unavailable");
+        let runner =
+            ScriptedRunner::new().failing("projectcentral.now.inspect", 9, "owner unavailable");
         let event = HookEvent::new("codex", HookEventKind::PreCompact, json!({}));
         let mut result = decision(HookEventKind::PreCompact);
         reground(
@@ -153,6 +155,9 @@ mod tests {
         );
         assert!(result.allowed);
         assert!(result.injected.is_empty());
-        assert!(result.warnings.iter().any(|warning| warning.contains("Central temporal")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Central temporal")));
     }
 }

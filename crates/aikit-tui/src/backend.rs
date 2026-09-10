@@ -290,7 +290,9 @@ pub trait PaletteBackend {
 
     /// Optional native owner identity. An invalid present binding is an error,
     /// never permission to derive a replacement identity from presentation.
-    fn project_binding(&self) -> Result<Option<aikit_core::project::ProjectBinding>> { Ok(None) }
+    fn project_binding(&self) -> Result<Option<aikit_core::project::ProjectBinding>> {
+        Ok(None)
+    }
 
     /// Optional already-observed versioned material World for this Project.
     ///
@@ -304,9 +306,7 @@ pub trait PaletteBackend {
     /// `None` is a real answer with two distinct meanings the reading keeps
     /// apart: no provider was attached at all, versus a provider that looked
     /// and found the Project is not under version control.
-    fn versioned_world(
-        &self,
-    ) -> Result<Option<aikit_core::resource::VersionedProjectWorld>> {
+    fn versioned_world(&self) -> Result<Option<aikit_core::resource::VersionedProjectWorld>> {
         Ok(None)
     }
 
@@ -374,10 +374,11 @@ pub trait PaletteBackend {
             .map(|intent| intent.capsule)
             .collect();
         let mut index = ResourceSearchIndex::default();
-        let current_context = vec![
-            NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
-                .with_detail("part of the resolved operating context"),
-        ];
+        let current_context =
+            vec![
+                NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                    .with_detail("part of the resolved operating context"),
+            ];
         let current_project = vec![
             NavigationEvidence::new(NavigationEvidenceClass::CurrentProject)
                 .with_detail("the Project currently being inhabited"),
@@ -437,12 +438,9 @@ pub trait PaletteBackend {
                 continue;
             };
             let mut evidence = Vec::new();
-            if self
-                .view()
-                .declared
-                .get(id)
-                .is_some_and(|declared| matches!(declared.scope, ScopeKind::Project | ScopeKind::ProjectLocal))
-            {
+            if self.view().declared.get(id).is_some_and(|declared| {
+                matches!(declared.scope, ScopeKind::Project | ScopeKind::ProjectLocal)
+            }) {
                 evidence.push(
                     NavigationEvidence::new(NavigationEvidenceClass::CurrentProject)
                         .with_detail("declared by the current Project scope"),

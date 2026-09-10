@@ -1,6 +1,6 @@
 use aikit_core::resource::{
-    NavigationEvidence, NavigationEvidenceClass, PreferenceIntent, ResourceDescriptor, ResourceKind,
-    ResourceRecord, ResourceRef, ResourceSearchIndex, SourceRef,
+    NavigationEvidence, NavigationEvidenceClass, PreferenceIntent, ResourceDescriptor,
+    ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex, SourceRef,
 };
 use aikit_core::{FamiliarityContext, FamiliarityObservation, FamiliarityStore};
 
@@ -34,7 +34,10 @@ fn learned(store: &mut FamiliarityStore, id: &str, destination: &str, count: usi
 fn text_match_quality_remains_above_learned_familiarity() {
     let mut index = ResourceSearchIndex::default();
     index.insert_resource(record("capability/exact", "deploy"), vec![]);
-    index.insert_resource(record("capability/familiar", "deep deployment helper"), vec![]);
+    index.insert_resource(
+        record("capability/familiar", "deep deployment helper"),
+        vec![],
+    );
     let mut familiarity = FamiliarityStore::new();
     learned(&mut familiarity, "evt/familiar", "capability/familiar", 100);
     index.apply_familiarity(
@@ -99,11 +102,13 @@ fn learned_accessibility_breaks_otherwise_equal_search_ties_and_explains_itself(
     assert!(hits[0]
         .navigation_evidence
         .iter()
-        .any(|evidence| evidence.class == NavigationEvidenceClass::LearnedUsage
-            && evidence
-                .detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("4 observed uses"))));
+        .any(
+            |evidence| evidence.class == NavigationEvidenceClass::LearnedUsage
+                && evidence
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("4 observed uses"))
+        ));
 }
 
 #[test]

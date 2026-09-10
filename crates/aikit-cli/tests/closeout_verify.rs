@@ -139,7 +139,9 @@ fn a_complete_close_out_verifies_against_the_owners_own_records() {
     );
     // It asked both owners, in their own commands — not the filesystem.
     let asked = owners.asked();
-    assert!(asked.iter().any(|call| call.contains("projectcentral.now.inspect")));
+    assert!(asked
+        .iter()
+        .any(|call| call.contains("projectcentral.now.inspect")));
     assert!(asked
         .iter()
         .any(|call| call.contains("factory development observations /tmp/ledger")));
@@ -235,7 +237,11 @@ fn a_factory_that_cannot_answer_fails_the_clause_rather_than_passing_it_quietly(
         .find(|clause| clause.clause == "deferred-work-registered")
         .unwrap();
     assert_eq!(clause.state, ClauseState::Fail);
-    assert!(clause.detail.contains("no such ledger root"), "{}", clause.detail);
+    assert!(
+        clause.detail.contains("no such ledger root"),
+        "{}",
+        clause.detail
+    );
 }
 
 #[test]

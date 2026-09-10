@@ -63,6 +63,8 @@ pub enum Command {
     /// Resolve typed resources and operative expressions through the shared search field.
     #[command(visible_alias = "resolve")]
     Search(SearchArgs),
+    /// Read the bounded Development Field carrier/provenance/Git substrate.
+    DevelopmentField(DevelopmentFieldArgs),
     /// Navigate provider-neutral project knowledge through the shared application faculty.
     Knowledge(KnowledgeCmd),
     /// Owner-side Flow cognition: explicit Contemplate(FlowRef) with
@@ -155,6 +157,26 @@ pub enum Command {
     Bypasses(BypassesArgs),
     /// Run, inspect and query the Agency Gateway service.
     Gateway(GatewayCmd),
+}
+
+/// `aikit development-field` — bounded owner-native carrier reading.
+#[derive(Debug, Args)]
+pub struct DevelopmentFieldArgs {
+    /// Stable ResourceRefs to read. Omit to read the bounded carrier set already present.
+    #[arg(long = "ref", value_name = "RESOURCE_REF")]
+    pub refs: Vec<String>,
+    /// Maximum subjects returned (hard-capped by the core contract).
+    #[arg(long, default_value_t = 16)]
+    pub limit: usize,
+    /// Exact caller-supplied Run/plan Git base revision for current-difference disclosure.
+    #[arg(long, value_name = "REVISION")]
+    pub base: Option<String>,
+    /// Maximum tracked diff bytes returned when --base is supplied.
+    #[arg(long = "max-diff-bytes", default_value_t = 262144)]
+    pub max_diff_bytes: usize,
+    /// Refuse this executable unless it exactly represents this clean source revision.
+    #[arg(long = "expect-aikit-revision", value_name = "REVISION")]
+    pub expect_aikit_revision: Option<String>,
 }
 
 /// `aikit gateway serve` — the persistent service carriers.

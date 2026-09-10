@@ -134,7 +134,10 @@ fn reflection_survives_round_trip_with_authority_provenance_and_reverse_route() 
     }));
 
     let outward = project_reflection(&rebuilt, &semantic, 3, 16);
-    assert!(outward.code.iter().any(|item| item.endpoint.resource == code));
+    assert!(outward
+        .code
+        .iter()
+        .any(|item| item.endpoint.resource == code));
     assert!(outward
         .descriptions
         .iter()

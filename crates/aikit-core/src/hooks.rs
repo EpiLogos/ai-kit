@@ -492,7 +492,10 @@ pub fn build_chains(
             if let Err(e) = regex::Regex::new(pattern) {
                 return Err(AikitError::new(
                     "hook.invalid_matcher",
-                    format!("{}'s matcher `{pattern}` is not a valid regex: {e}", active.id),
+                    format!(
+                        "{}'s matcher `{pattern}` is not a valid regex: {e}",
+                        active.id
+                    ),
                 )
                 .with("capability", active.id.to_string())
                 .with("matcher", pattern.clone()));
@@ -645,13 +648,21 @@ enum BypassRuling {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StepVerdict {
     Allow,
-    Deny { reason: String },
+    Deny {
+        reason: String,
+    },
     /// Replace the event payload every later step sees.
-    Transform { payload: serde_json::Value },
-    Inject { text: String },
+    Transform {
+        payload: serde_json::Value,
+    },
+    Inject {
+        text: String,
+    },
     /// The capsule crashed, timed out, or could not be executed at all. This is
     /// *not* a decision, and is never reported as one.
-    SystemFailure { error: String },
+    SystemFailure {
+        error: String,
+    },
 }
 
 /// A verdict plus how long the step took.
@@ -719,7 +730,9 @@ pub enum StepOutcome {
     Transformed,
     Injected,
     /// The capsule could not run. The failure policy decides what that means.
-    SystemFailure { policy: FailurePolicy },
+    SystemFailure {
+        policy: FailurePolicy,
+    },
     /// Covered by a bypass token; never executed.
     Bypassed,
     /// The matcher did not select this step for this event.

@@ -287,23 +287,18 @@ mod tests {
             "something wholly unexpected".into(),
         ]);
         assert_eq!(resolution.unavailable.len(), 3);
-        assert!(
-            resolution.unavailable.iter().any(
-                |entry| entry.provider == "code-index/gitnexus" && entry.state == "unavailable"
-            )
-        );
-        assert!(
-            resolution
-                .unavailable
-                .iter()
-                .any(|entry| entry.provider == "source-pool/bkmr")
-        );
-        assert!(
-            resolution
-                .unavailable
-                .iter()
-                .any(|entry| entry.provider == "environment")
-        );
+        assert!(resolution
+            .unavailable
+            .iter()
+            .any(|entry| entry.provider == "code-index/gitnexus" && entry.state == "unavailable"));
+        assert!(resolution
+            .unavailable
+            .iter()
+            .any(|entry| entry.provider == "source-pool/bkmr"));
+        assert!(resolution
+            .unavailable
+            .iter()
+            .any(|entry| entry.provider == "environment"));
         assert_eq!(resolution.absences.len(), 3);
     }
 
