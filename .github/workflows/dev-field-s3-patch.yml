@@ -26,7 +26,7 @@ jobs:
         run: python3 .github/dev-field-s3-fix.py
       - name: Install Rust 1.98
         run: |
-          rustup toolchain install 1.98.0 --profile minimal --component clippy
+          rustup toolchain install 1.98.0 --profile minimal --component clippy --component rustfmt
           rustup default 1.98.0
       - name: Install tmux
         run: brew install tmux
