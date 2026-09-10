@@ -1,0 +1,53 @@
+name: Development Field S3 QL parity patch
+
+on:
+  push:
+    branches:
+      - agent/261-development-field-s3
+
+permissions:
+  contents: write
+
+jobs:
+  patch-verify-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: agent/261-development-field-s3
+          fetch-depth: 0
+
+      - name: Install Rust 1.98
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Apply QL S6 carrier parity
+        run: |
+          python3 .github/dev-field-s3-ql-parity.py
+          rustfmt --edition 2024 crates/aikit-core/src/resource/development_field.rs
+
+      - name: Verify repository-owned gate
+        run: |
+          cargo fmt --all -- --check
+          bash scripts/verify
+          git diff --check
+
+      - name: Commit verified parity correction
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rm .github/dev-field-s3-ql-parity.py
+          rm .github/workflows/dev-field-s3-ql-parity.yml
+          git diff --check
+          unexpected="$(git diff --name-only origin/main...HEAD; git diff --name-only)"
+          printf '%s\n' "$unexpected" | sort -u | sed '/^$/d'
+          git config user.name Epii
+          git config user.email EpiLogos@users.noreply.github.com
+          git add -A
+          git commit -m 'development-field: align QL S6 carrier parity (#261)'
+          git push origin HEAD:agent/261-development-field-s3
