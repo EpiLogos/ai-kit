@@ -23,7 +23,7 @@ fn fixture_central() -> PathBuf {
     let central = root.join("Central");
     fs::create_dir_all(central.join("Control/user/identity/sources")).unwrap();
     fs::create_dir_all(central.join("Control/agents/profiles")).unwrap();
-    fs::create_dir_all(central.join("Control/relations/agent-sets")).unwrap();
+    fs::create_dir_all(central.join("Control/agents/agent-sets")).unwrap();
     fs::write(
         central.join("Control/user/identity/present.md"),
         "who I am now\n",
@@ -59,7 +59,7 @@ fn fixture_central() -> PathBuf {
     )
     .unwrap();
     fs::write(
-        central.join("Control/relations/agent-sets/agent-set-operators.json"),
+        central.join("Control/agents/agent-sets/agent-set-operators.json"),
         json!({
             "schema": "central.agent-set/v1",
             "ref": "central-operators",

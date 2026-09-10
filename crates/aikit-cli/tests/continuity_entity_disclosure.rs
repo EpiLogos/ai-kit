@@ -94,9 +94,9 @@ fn fixture_root() -> PathBuf {
         .to_string(),
     )
     .unwrap();
-    fs::create_dir_all(root.join("Control/relations/agent-sets")).unwrap();
+    fs::create_dir_all(root.join("Control/agents/agent-sets")).unwrap();
     fs::write(
-        root.join("Control/relations/agent-sets/agent-set-operators.json"),
+        root.join("Control/agents/agent-sets/agent-set-operators.json"),
         json!({
             "schema": "central.agent-set/v1", "ref": "world-operators", "revision": "r1",
             "members": [{"kind": "agent", "agent_ref": "agent:x"}]
