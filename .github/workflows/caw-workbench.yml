@@ -22,7 +22,10 @@ jobs:
           python3 - <<'PY'
           import base64, hashlib, json, lzma, pathlib, subprocess
           packet = json.loads(pathlib.Path('.caw-apply.json').read_text())
-          encoded = packet['patch']
+          count = packet['parts']
+          if type(count) is not int or not 1 <= count <= 12:
+              raise SystemExit('Invalid source part count')
+          encoded = ''.join(pathlib.Path(f'.caw-part-{i}.txt').read_text() for i in range(count))
           if len(encoded) > 200000:
               raise SystemExit('Oversized source transfer')
           dec = lzma.LZMADecompressor()
@@ -42,7 +45,7 @@ jobs:
           subprocess.run(['git','apply','--index',str(path)], check=True)
           PY
           git diff --cached --check
-          git rm .caw-apply.json
+          git rm .caw-apply.json .caw-part-*.txt
           git config user.name 'CAW implementation'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'feat(caw): execute admitted Agent turns; add receipt, placement and recurrence cores'
