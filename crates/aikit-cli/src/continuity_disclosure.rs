@@ -20,12 +20,12 @@ use aikit_adapters::{central_entities, central_world_sources::WorldBinding};
 use aikit_core::hooks::HookEvent;
 use aikit_core::WikiObject;
 
-use crate::temporal::process_central_root;
+use crate::temporal::central_root_enclosing;
 
 /// The disclosure block for this event's context, or `None` when there is
 /// nothing to disclose (not a Central world, no entities).
 pub fn entity_disclosure(event: &HookEvent) -> Result<Option<String>, String> {
-    let central_root = process_central_root(event.cwd.as_deref());
+    let central_root = central_root_enclosing(event.cwd.as_deref());
     entity_disclosure_in(
         &SystemRunner::new(),
         central_root.as_deref(),
@@ -33,12 +33,12 @@ pub fn entity_disclosure(event: &HookEvent) -> Result<Option<String>, String> {
     )
 }
 
-/// The env-resolved form (test seam over [`process_central_root`]).
+/// The env-resolved form (test seam over [`central_root_enclosing`]).
 pub fn entity_disclosure_with<R: CommandRunner>(
     runner: &R,
     cwd: Option<&Path>,
 ) -> Result<Option<String>, String> {
-    let central_root = process_central_root(cwd);
+    let central_root = central_root_enclosing(cwd);
     entity_disclosure_in(runner, central_root.as_deref(), cwd)
 }
 
@@ -52,20 +52,27 @@ pub fn entity_disclosure_in<R: CommandRunner>(
     let (Some(central_root), Some(cwd)) = (central_root, cwd) else {
         return Ok(None);
     };
-    if !central_root.join("Control/user/identity/manifest.json").is_file() {
-        // No identity manifest: not an inhabited Central world.
-        return Ok(None);
-    }
 
-    let mut objects = central_entities::materialise_central_entities(central_root).objects;
-    let binding = project_binding(runner, central_root, cwd);
+    // The human identity manifest is NOT a precondition for disclosing.
+    // `read_agent_entities` and `read_agent_set_entities` materialise Agents and
+    // AgentSets from their own carriers without it, so gating the whole
+    // disclosure on `Control/user/identity/manifest.json` suppressed unrelated,
+    // perfectly valid entities whenever the human source was absent or
+    // unreadable. An absent human source means "no human entity is established
+    // here" — never "this World contains no Agents".
+    let reading = central_entities::materialise_central_entities(central_root);
+    let mut objects = reading.objects;
+    let mut absences = reading.absences;
+    let binding = project_binding(runner, central_root, cwd, &mut absences);
     if let Some(binding) = &binding {
-        // Exclusions withhold; annotations ride along (same refs).
-        let mut sink = Vec::new();
-        bind_project_context(&mut objects, binding, &mut sink);
+        // Exclusions withhold; annotations ride along (same refs). The
+        // withholding and coherence disclosures go into the same absence set
+        // the renderer surfaces, so nothing is discarded silently.
+        bind_project_context(&mut objects, binding, &mut absences);
     }
 
     let mut lines = Vec::new();
+    let mut has_nara = false;
     for object in &objects {
         let WikiObject::Node(node) = object else {
             continue;
@@ -80,13 +87,35 @@ pub fn entity_disclosure_in<R: CommandRunner>(
             "nara" => {
                 let revision = extra["manifest_revision"].as_str().unwrap_or("unversioned");
                 let sourced = extra["sourced"].as_array().map(Vec::len).unwrap_or(0);
+                has_nara = true;
                 lines.push(format!(
                     "- nara: {subject} — identity manifest revision {revision}, {sourced} sourced files"
                 ));
             }
             "agent" => {
-                let profiles = extra["profiles"].as_array().map(Vec::len).unwrap_or(0);
-                lines.push(format!("- agent: {subject} — {profiles} profile(s)"));
+                // Participant orientation names the Agent and the profile
+                // relations it holds — not its first-person identity text. The
+                // verbatim identity expression belongs to the selected-actor
+                // projection, where exactly one Agent is being enacted; putting
+                // every discovered Agent's intent into a shared inventory would
+                // be a different act.
+                let profile_refs: Vec<&str> = extra["profiles"]
+                    .as_array()
+                    .map(|profiles| {
+                        profiles
+                            .iter()
+                            .filter_map(|profile| profile["profile_ref"].as_str())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if profile_refs.is_empty() {
+                    lines.push(format!("- agent: {subject} — no AgentProfile record"));
+                } else {
+                    lines.push(format!(
+                        "- agent: {subject} — profile {}",
+                        profile_refs.join(", ")
+                    ));
+                }
             }
             "agent-set" => {
                 let members = extra["members"].as_array().map(Vec::len).unwrap_or(0);
@@ -101,6 +130,25 @@ pub fn entity_disclosure_in<R: CommandRunner>(
     }
     if lines.is_empty() {
         return Ok(None);
+    }
+    // A World can hold Agents and AgentSets with no human entity established.
+    // Say so truthfully — but only when the human source is genuinely absent.
+    // A nara withheld by a context exclusion is NOT an absent human, and
+    // reporting it as one would be a false claim about the World.
+    let human_source_present = central_root
+        .join("Control/user/identity/manifest.json")
+        .is_file();
+    if !has_nara && !human_source_present {
+        lines.insert(
+            0,
+            "- nara: no human entity established from this source".into(),
+        );
+    }
+    // Surface what the materialisation and the binding could not read (bounded):
+    // an unreadable declaration must not be silently indistinguishable from an
+    // absent one.
+    for absence in absences.iter().take(4) {
+        lines.push(format!("- absent: {absence}"));
     }
     if let Some(binding) = binding {
         lines.push(format!(
@@ -126,6 +174,7 @@ fn project_binding<R: CommandRunner>(
     runner: &R,
     central_root: &Path,
     cwd: &Path,
+    absences: &mut Vec<String>,
 ) -> Option<WorldBinding> {
     let project = cwd.strip_prefix(central_root).ok().and_then(|relative| {
         let mut parts = relative.components();
@@ -138,6 +187,5 @@ fn project_binding<R: CommandRunner>(
         .or_else(|| std::env::var_os("OI_CENTRAL_CTRL_BIN"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("ctrl"));
-    let mut absences = Vec::new();
-    read_project_binding(runner, &executable, central_root, &project, &mut absences)
+    read_project_binding(runner, &executable, central_root, &project, absences)
 }

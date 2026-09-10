@@ -68,6 +68,29 @@ pub fn process_central_root(project_root: Option<&Path>) -> Option<PathBuf> {
     project_root.starts_with(root.join("Work")).then_some(root)
 }
 
+/// The Central root enclosing `path`, when `path` is the root itself or
+/// anywhere beneath it — the `Control` register and the `Work` tree alike.
+///
+/// This is a *recognition* rule, not a project claim: it answers "is this path
+/// inside a Central world?". The entity disclosure needs exactly that, because
+/// the entities it names are materialised from the world root and the root
+/// register is where they live. Project-scoped consumers keep
+/// [`process_central_root`], which additionally requires the path to be a
+/// Project beneath `Work` — so `compose` and temporal re-grounding are
+/// unaffected by this widening.
+pub fn central_root_enclosing(path: Option<&Path>) -> Option<PathBuf> {
+    let path = path?;
+    if let Some(root) = std::env::var_os("CENTRAL_ROOT").filter(|value| !value.is_empty()) {
+        let root = PathBuf::from(root);
+        return path.starts_with(&root).then_some(root);
+    }
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))?;
+    let root = PathBuf::from(home).join("Central");
+    path.starts_with(&root).then_some(root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

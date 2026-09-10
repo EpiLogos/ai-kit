@@ -84,12 +84,19 @@ pub fn materialise_central_entities(root: &Path) -> CentralEntityReading {
     // membership, so `local_space_ref` resolves at rebuild and navigation
     // traverses the whole through the bounded relation faculty.
     for node in &mut set_nodes {
+        // The whole set ref must survive the derivation. Central permits
+        // colon-bearing set refs (`validate_ref` rejects only empty, untrimmed
+        // and NUL values — ctrl/src/agent_set_store.rs:533), so taking the
+        // final colon-separated fragment would map two distinct permitted sets
+        // such as `team:review` and `other:review` onto one local space. The
+        // form prefix is stripped instead, leaving the full ref (and, for
+        // colon-free refs, the identical ref this produced before).
         let set_ref = node
             .extensions
             .get(PASU_EXTENSION)
             .and_then(|form| form.get("subject_ref"))
             .and_then(|value| value.as_str())
-            .and_then(|subject| subject.rsplit(':').next())
+            .and_then(|subject| subject.strip_prefix("central:pasu:agent-set:"))
             .unwrap_or_default()
             .to_owned();
         if set_ref.is_empty() {
@@ -153,6 +160,21 @@ fn pasu_extension(form: &str, subject_ref: &str, extra: Value) -> BTreeMap<Strin
 
 fn entity_ref(form: &str, subject: &str) -> String {
     format!("wiki:node:pasu:{form}:{subject}")
+}
+
+/// The canonical paśu subject of the agent form for an existing agent ref:
+/// `central:pasu:agent:<agent_ref>`, the subject id being the opaque agent
+/// ref itself. Mirrors `ctrl::pasu::PasuRef::for_agent` (ctrl/src/pasu.rs:121)
+/// — AIKit consumes Central's grammar, it does not mint a parallel one. The
+/// raw `agent_ref` rides alongside in the extension so both addresses answer.
+fn pasu_agent_ref(agent_ref: &str) -> String {
+    format!("central:pasu:agent:{agent_ref}")
+}
+
+/// The canonical paśu subject of the agent-set form for an existing set ref.
+/// Mirrors `ctrl::pasu::PasuRef::for_agent_set`.
+fn pasu_agent_set_ref(set_ref: &str) -> String {
+    format!("central:pasu:agent-set:{set_ref}")
 }
 
 /// Deterministic edge ref: endpoints + relation (never content, never order
@@ -333,13 +355,23 @@ fn read_agent_entities(root: &Path, absences: &mut Vec<String>) -> Result<Vec<Wi
             absences.push(format!("AgentProfile {} names no agent_ref", path.display()));
             continue;
         };
-        let profile_ref = record["profile_ref"].as_str().unwrap_or("unprofiled");
+        // Central serialises the profile identifier as `ref` — ctrl's
+        // `AgentProfile` carries `#[serde(rename = "ref")]` on `profile_ref`
+        // (ctrl/src/agent_profile.rs:113). The legacy `profile_ref` spelling is
+        // still accepted so older generated records keep reading, but the
+        // identifier is never substituted while a real one is present: the
+        // placeholder only marks a record that genuinely names no profile.
+        let profile_ref = record["ref"]
+            .as_str()
+            .or_else(|| record["profile_ref"].as_str())
+            .unwrap_or("unprofiled");
         let revision = record["revision"].as_str().unwrap_or("unversioned");
         let relative = path
             .strip_prefix(root)
             .map(|value| value.to_string_lossy().replace('\\', "/"))
             .unwrap_or_default();
         let scope = record["scope"].as_str().unwrap_or("unspecified");
+        let agent_subject = pasu_agent_ref(&agent_ref);
         let node = nodes.entry(agent_ref.clone()).or_insert_with(|| WikiNode {
             profile: "okf-wiki/v1".into(),
             ref_id: resource_ref(&entity_ref("agent", &agent_ref)),
@@ -350,7 +382,11 @@ fn read_agent_entities(root: &Path, absences: &mut Vec<String>) -> Result<Vec<Wi
             space_refs: Vec::new(),
             source_refs: Vec::new(),
             local_space_ref: None,
-            extensions: pasu_extension("agent", &agent_ref, json!({"profiles": []})),
+            extensions: pasu_extension(
+                "agent",
+                &agent_subject,
+                json!({"agent_ref": agent_ref.clone(), "profiles": []}),
+            ),
         });
         node.provenance.push(WikiProvenanceRef {
             source_ref: source_ref(central_source_ref(&relative)),
@@ -367,12 +403,22 @@ fn read_agent_entities(root: &Path, absences: &mut Vec<String>) -> Result<Vec<Wi
             .and_then(|value| value.get_mut("profiles"))
             .and_then(|value| value.as_array_mut())
         {
-            profiles.push(json!({
+            // Faithful intake: the profile relation carries the identifier,
+            // residence and revision, and the generated-proposal provenance
+            // block verbatim when the record has one. The intent is retained
+            // with its standing (authorship + recognition) — an unrecognised
+            // proposal must never become an adopted default merely by being
+            // discovered, so the standing travels with the text.
+            let mut entry = json!({
                 "profile_ref": profile_ref,
                 "scope": scope,
                 "revision": revision,
                 "source": central_source_ref(&relative),
-            }));
+            });
+            if let Some(provenance) = record.get("intent_provenance") {
+                entry["intent_provenance"] = provenance.clone();
+            }
+            profiles.push(entry);
         }
     }
     Ok(nodes.into_values().collect())
@@ -450,8 +496,8 @@ fn read_agent_set_entities(
             local_space_ref: None,
             extensions: pasu_extension(
                 "agent-set",
-                &format!("central:pasu:agent-set:{set_ref}"),
-                json!({"members": record["members"].clone()}),
+                &pasu_agent_set_ref(&set_ref),
+                json!({"set_ref": set_ref, "members": record["members"].clone()}),
             ),
         };
         if let Some(members) = record["members"].as_array() {

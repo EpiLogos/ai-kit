@@ -15,6 +15,40 @@ use serde_json::Value;
 use crate::actuation_instantiation::CentralAuthoredProjection;
 
 pub const CENTRAL_AGENT_PROFILE_SCHEMA: &str = "central.agent-profile/v1";
+/// The provenance block Central stamps when a profile is authored from an
+/// expressed intent (`ctrl/src/agent_profile.rs:34`).
+pub const CENTRAL_AGENT_PROFILE_PROVENANCE_SCHEMA: &str = "central.agent-profile-provenance/v1";
+
+/// Authorship of an Agent profile. Central represents exactly one state: an
+/// Action can only ever author a generated proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CentralAgentProfileAuthorship {
+    GeneratedProposal,
+}
+
+/// Recognition standing of an authored AgentProfile record. The recognition
+/// act is the human owner's and no Central Action performs it, so
+/// `Unrecognised` is the only representable state — a record claiming
+/// otherwise fails to parse rather than silently becoming an adopted default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CentralAgentProfileRecognition {
+    Unrecognised,
+}
+
+/// Generated-proposal provenance retained verbatim through intake. The intent
+/// expression is what the author expressed, never rewritten and never
+/// summarised, and its standing travels with it: text without standing would
+/// let an unrecognised proposal be read as an adopted default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CentralAgentProfileIntentProvenance {
+    pub schema: String,
+    pub intent_expression: String,
+    pub origin_action: String,
+    pub authorship: CentralAgentProfileAuthorship,
+    pub recognition: CentralAgentProfileRecognition,
+}
 
 /// Authored residence scope: a source relation, not a runtime identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +94,12 @@ pub struct CentralAgentProfileProjection {
     pub placement_intent_refs: Vec<ResourceRef>,
     #[serde(default)]
     pub provenance_refs: Vec<ResourceRef>,
+    /// Present exactly when Central authored this profile from an expressed
+    /// intent. Directly owner-authored profiles carry no block. Retaining it
+    /// is what lets a later renderer reach the intent — rendering at the end
+    /// cannot recover a field lost here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_provenance: Option<CentralAgentProfileIntentProvenance>,
 }
 
 impl CentralAgentProfileProjection {
@@ -108,6 +148,30 @@ impl CentralAgentProfileProjection {
                 "central_agent_profile.identity_collapse",
                 "agent_ref and profile ref must remain distinct",
             ));
+        }
+        if let Some(provenance) = &self.intent_provenance {
+            if provenance.schema != CENTRAL_AGENT_PROFILE_PROVENANCE_SCHEMA {
+                return Err(AikitError::new(
+                    "central_agent_profile.invalid_provenance",
+                    format!(
+                        "expected `{CENTRAL_AGENT_PROFILE_PROVENANCE_SCHEMA}`, got `{}`",
+                        provenance.schema
+                    ),
+                ));
+            }
+            // Verbatim retention: the intent is carried exactly as Central
+            // stored it. Central trims at `agent-profile.propose` time (a raw
+            // `.md` trailing newline is refused), so the recorded expression is
+            // already trimmed — anything else is not Central's own record, and
+            // carrying it would smuggle a second normalisation into intake.
+            if provenance.intent_expression.trim().is_empty()
+                || provenance.intent_expression != provenance.intent_expression.trim()
+            {
+                return Err(AikitError::new(
+                    "central_agent_profile.invalid_intent_expression",
+                    "the recorded intent expression must be non-empty and trimmed, as Central stores it",
+                ));
+            }
         }
         Ok(())
     }
@@ -209,6 +273,53 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "central_agent_profile.identity_collapse"
+        );
+    }
+
+    /// The generated-proposal block — verbatim intent plus its standing —
+    /// survives intake, and the standing is not forgeable.
+    #[test]
+    fn retains_intent_provenance_verbatim_and_refuses_recognition_overclaims() {
+        // As Central stores it: `agent-profile.propose` trims the expression,
+        // so the recorded value keeps its internal newlines and no outer
+        // whitespace.
+        let intent = "# Oh, I!\n\nA Central needs a basic default agent.";
+        let mut value = profile_value();
+        value["intent_provenance"] = serde_json::json!({
+            "schema": "central.agent-profile-provenance/v1",
+            "intent_expression": intent,
+            "origin_action": "agent-profile.propose",
+            "authorship": "generated-proposal",
+            "recognition": "unrecognised",
+        });
+        let projection = CentralAgentProfileProjection::parse(&value).unwrap();
+        let provenance = projection.intent_provenance.expect("retained");
+        assert_eq!(provenance.intent_expression, intent);
+        assert_eq!(
+            provenance.recognition,
+            CentralAgentProfileRecognition::Unrecognised
+        );
+
+        // A record claiming recognition the human has not performed is
+        // unparseable rather than silently adopted.
+        let mut overclaim = value.clone();
+        overclaim["intent_provenance"]["recognition"] = serde_json::json!("recognised");
+        assert_eq!(
+            CentralAgentProfileProjection::parse(&overclaim)
+                .unwrap_err()
+                .code(),
+            "central_agent_profile.parse"
+        );
+
+        // Retention is byte-for-byte: a whitespace-mangled expression is not
+        // the record Central authored and is refused, never quietly trimmed.
+        let mut mangled = value;
+        mangled["intent_provenance"]["intent_expression"] = serde_json::json!("trailing space ");
+        assert_eq!(
+            CentralAgentProfileProjection::parse(&mangled)
+                .unwrap_err()
+                .code(),
+            "central_agent_profile.invalid_intent_expression"
         );
     }
 }

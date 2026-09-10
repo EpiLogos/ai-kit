@@ -1,0 +1,36 @@
+{
+  "schema": "central.agent-profile/v1",
+  "ref": "profile/factory-bounded-acceptance",
+  "revision": "commission-v1",
+  "agent_ref": "agent/factory-bounded-acceptance",
+  "scope": "personal",
+  "world_ref": "control:root",
+  "source_profile_ref": null,
+  "role": "bounded-acceptance-commission",
+  "purpose": "Temporary user-authorised acceptance commission. Propose a repair to pricing.py: inclusive_total must apply tax to the sum of prices. Preserve its two-argument API. One model proposal; no model tools, delegation, external posts or autonomous retries. The native Workcell proof may validate and apply this candidate once in this disposable fixture. Return evidence; neither a model statement nor this temporary seed is adopted human law.",
+  "governance_refs": [
+    "central:source:project:factory-bounded-acceptance:ProjectCentral/user/commission.md"
+  ],
+  "skill_refs": [
+    "skill/factory-native/factory-development",
+    "skill/factory-native/factory-operation",
+    "skill/factory-native/factory-bounded-work"
+  ],
+  "skill_set_refs": [
+    "skill-set/factory-bounded-development"
+  ],
+  "method_refs": [
+    "method/factory/bounded-work"
+  ],
+  "routine_refs": [],
+  "ratified_world_refs": [
+    "control:root"
+  ],
+  "knowledge_source_refs": [],
+  "computer_access_intent_refs": [],
+  "placement_intent_refs": [],
+  "provenance_refs": [
+    "central:source:project:factory-bounded-acceptance:ProjectCentral/user/commission.md",
+    "central:source:control:root:Control/agents/now/agents/experience-law-pstack/acp-native-setup-final/composition.json"
+  ]
+}

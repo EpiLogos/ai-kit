@@ -62,7 +62,35 @@ fn materialised(mut node: WikiNode) -> WikiNode {
 struct WorldRunner {
     answers: BTreeMap<String, Value>,
     fail_on: BTreeMap<String, ()>,
+    unreadable_on: BTreeMap<String, String>,
     seen: Mutex<Vec<Vec<String>>>,
+}
+
+/// Central's real answer for a world ref with no authored record. The result
+/// status IS the code (`ctrl/src/result.rs:81`) and the absence is named only
+/// in the message (`missing World <ref>`, `ctrl/src/world.rs:583`).
+fn absent_envelope(world_ref: &str) -> String {
+    json!({
+        "ok": false,
+        "status": "invalid_input",
+        "error": {
+            "code": "invalid_input",
+            "message": format!("missing World {world_ref}"),
+        }
+    })
+    .to_string()
+}
+
+/// A declaration that exists but cannot be read or validated. Same status and
+/// code as the absent case — deliberately, so this pins that the consumer
+/// separates them by the message and not by the code alone.
+fn unreadable_envelope(message: &str) -> String {
+    json!({
+        "ok": false,
+        "status": "invalid_input",
+        "error": {"code": "invalid_input", "message": message}
+    })
+    .to_string()
 }
 
 impl WorldRunner {
@@ -70,12 +98,20 @@ impl WorldRunner {
         Self {
             answers: BTreeMap::from([(world_ref.to_owned(), sources)]),
             fail_on: BTreeMap::new(),
+            unreadable_on: BTreeMap::new(),
             seen: Mutex::new(Vec::new()),
         }
     }
 
     fn failing_on(mut self, world_ref: &str) -> Self {
         self.fail_on.insert(world_ref.to_owned(), ());
+        self
+    }
+
+    /// The world declares relations, but the declaration cannot be read.
+    fn unreadable_on(mut self, world_ref: &str, message: &str) -> Self {
+        self.unreadable_on
+            .insert(world_ref.to_owned(), message.to_owned());
         self
     }
 
@@ -92,23 +128,19 @@ impl CommandRunner for WorldRunner {
             .and_then(|input| serde_json::from_str::<Value>(input).ok())
             .and_then(|input| input["world_ref"].as_str().map(str::to_owned))
             .unwrap_or_default();
-        if self.fail_on.contains_key(&world_ref) {
-            return Ok(Output {
-                status: 0,
-                stdout: json!({"ok": false, "error": {"message": format!("no world {world_ref}")}})
-                    .to_string(),
-                stderr: String::new(),
-            });
-        }
-        Ok(Output {
-            status: 0,
-            stdout: self
-                .answers
+        let stdout = if let Some(message) = self.unreadable_on.get(&world_ref) {
+            unreadable_envelope(message)
+        } else if self.fail_on.contains_key(&world_ref) {
+            absent_envelope(&world_ref)
+        } else {
+            self.answers
                 .get(&world_ref)
                 .map(|sources| self.envelope(&world_ref, sources.clone()))
-                .unwrap_or_else(|| {
-                    json!({"ok": false, "error": {"message": "missing world"}}).to_string()
-                }),
+                .unwrap_or_else(|| absent_envelope(&world_ref))
+        };
+        Ok(Output {
+            status: 0,
+            stdout,
             stderr: String::new(),
         })
     }
@@ -269,7 +301,8 @@ fn project_without_world_relations_falls_back_to_the_root_lineage() {
 
 #[test]
 fn world_relations_unavailable_degrades_to_uncontextualised() {
-    let runner = WorldRunner::with_answer("nothing", json!([])).failing_on("project:gamma");
+    let runner = WorldRunner::with_answer("nothing", json!([]))
+        .unreadable_on("project:gamma", "world relation record is malformed");
     let mut absences = Vec::new();
     let world = read_project_binding(
         &runner,
@@ -282,6 +315,44 @@ fn world_relations_unavailable_degrades_to_uncontextualised() {
     assert!(
         absences.iter().any(|a| a.contains("uncontextualised")),
         "{absences:?}"
+    );
+}
+
+/// The distinction the failure policy turns on: a declaration that exists but
+/// cannot be read is NOT an undeclared world. It must not inherit the root
+/// lineage, and the root must not even be consulted — an unreadable exclusion
+/// must never broaden what a turn receives.
+#[test]
+fn an_unreadable_declaration_does_not_inherit_the_root_lineage() {
+    let runner = WorldRunner::with_answer(
+        "control:root",
+        json!([{"ref": "central:source:control:root:Control/user/identity",
+                "state": "available", "effective_revision": "1",
+                "propagation_path": ["control:root"]}]),
+    )
+    .unreadable_on("project:Delta", "world relation record is malformed");
+    let mut absences = Vec::new();
+    let world = read_project_binding(
+        &runner,
+        Path::new("ctrl"),
+        &PathBuf::from("/tmp/central"),
+        "Delta",
+        &mut absences,
+    );
+    assert!(world.is_none(), "no binding rather than a widened one");
+    assert!(
+        absences.iter().any(|a| a.contains("could not be read or validated")),
+        "{absences:?}"
+    );
+    assert!(
+        !absences.iter().any(|a| a.contains("root lineage applies")),
+        "the root lineage is not assumed: {absences:?}"
+    );
+    // The root was never asked — the inheritance path was not entered at all.
+    assert_eq!(
+        runner.seen.lock().unwrap().len(),
+        1,
+        "only the project declaration was read"
     );
 }
 
