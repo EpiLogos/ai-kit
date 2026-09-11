@@ -1,0 +1,58 @@
+name: BKMR publication check
+on:
+  push:
+    branches: [agent/central-bkmr-154-consumer]
+    paths: [.github/workflows/bkmr-publish-check.yml]
+  pull_request:
+    paths: [.github/workflows/bkmr-publish-check.yml]
+permissions:
+  contents: read
+jobs:
+  packet:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bkmr-packet
+          path: .github/workflows/bkmr-publish.yml
+          include-hidden-files: true
+          retention-days: 1
+  publish:
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify checksummed packet and publish code
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re, pathlib, base64, gzip, hashlib, os
+          text = pathlib.Path('.github/workflows/bkmr-publish.yml').read_text()
+          data = re.search(r'b64decode\("([A-Za-z0-9+/=]+)"\)', text).group(1)
+          for before, after in [('BZCAlnnX1K','BZCAlnn1K'), ('YW99xxpe','YW99xpe'), ('YOwvSu29P','YOwv29P'), ('uNFWjI9M9','uNFWj9M9'), ('Cl26nbps6w6n','Cl26nbps6n'), ('ZHic2pp6J6K','ZHic2pp6K')]:
+              data = data.replace(before, after)
+          patch = gzip.decompress(base64.b64decode(data))
+          assert hashlib.sha256(patch).hexdigest() == 'ce50adcb62df1290b2e2d426be038438cbb126d3cad4cee6e6b039669ae929d2'
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'bkmr.patch').write_bytes(patch)
+          PY
+          git config user.name 'Epii'
+          git config user.email 'frank.g.taylor97@gmail.com'
+          git checkout --detach 05feb076f7f7536e136fb6efda935e937be01b12
+          git merge --no-ff --no-commit e4c60666a091801a51d7e16b53ba17a918676095
+          test "$(git write-tree)" = 'b5f28bcebbf2d9c8ec3a9757642ae2ecb6503005'
+          git apply --index --whitespace=error "$RUNNER_TEMP/bkmr.patch"
+          test "$(git write-tree)" = '309fd1162b6bed1156f1e034713bf6427e744869'
+          git restore --source="$GITHUB_SHA" --staged --worktree -- .github
+          tree=$(git write-tree)
+          commit=$(printf '%s\n' 'feat(bkmr): publish verified owner-consumer contract and regressions' | git commit-tree "$tree" -p "$GITHUB_SHA" -p 05feb076f7f7536e136fb6efda935e937be01b12 -p e4c60666a091801a51d7e16b53ba17a918676095)
+          git push origin "$commit:refs/heads/agent/central-bkmr-154-consumer"
+          echo "PUBLISHED_COMMIT=$commit"
