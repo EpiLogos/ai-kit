@@ -668,6 +668,10 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
         exit_code: json::EXIT_OK,
     };
     match command.command {
+        SourceSub::BindCentral(args) => {
+            let spec=skill_sources::bind_central(home,&args.id,&args.root,&args.source_ref)?;
+            Ok(source_reply(jval!({"id":spec.id,"kind":"central","source_ref":args.source_ref,"next":"sync and promote"}),vec![]))
+        }
         SourceSub::AddDirectory(args) => {
             let spec =
                 skill_sources::add_directory(home, &args.id, &args.directory, args.control_ground)?;
@@ -702,7 +706,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
             let spec = skill_sources::set_revision(home, &args.id, &args.revision)?;
             let revision = match spec.kind {
                 skill_sources::SourceKind::Git { revision, .. } => revision,
-                skill_sources::SourceKind::Directory { .. } => unreachable!(),
+                skill_sources::SourceKind::Directory { .. } | skill_sources::SourceKind::Central { .. } => unreachable!(),
             };
             Ok(source_reply(
                 jval!({
@@ -722,6 +726,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     "candidate_snapshot": snapshot.digest,
                     "active_snapshot": status.state.active_snapshot,
                     "git_commit": snapshot.git_commit,
+                    "owner_revision": snapshot.owner_revision,
                     "skills": snapshot.skills.len(),
                 }),
                 vec![],

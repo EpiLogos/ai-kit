@@ -454,3 +454,12 @@ tmux have identical UI primitives.
     overwriting newer work.
 17. Every writable skill-set mutation, including rename and recoverable delete,
     has a durable Procedure id and a working undo path.
+
+## Central-backed file maps and skill sources
+
+Inside a Central World, durable file/source/link meaning and bkmr database lifecycle
+belong to Central. AIKit's native consumer resolves current owner sources, fetches
+payloads on demand, and uses owner-grounded skill snapshots for contextual and
+harness projection. It does not rebuild the owner's map. See
+[integrations/bkmr.md](integrations/bkmr.md) for the implemented Actions,
+`source bind-central` path, degraded behaviour and joined acceptance.

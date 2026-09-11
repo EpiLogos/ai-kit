@@ -556,20 +556,6 @@ impl<'a> KnowledgeApplication<'a> {
                 .ok_or_else(|| provider_absent("SemanticWiki"))?
                 .read(resource),
             KnowledgeAddress::Source(source) => {
-                // An attached owner is authoritative even when unavailable. A
-                // failed/revoked owner read never falls back to a stale body.
-                if let Some(binding) = self.sources.iter().find(|b| b.provider.owns_source(source)) {
-                    let material = binding.provider.read_owned_source(source)?;
-                    return Ok(KnowledgeReading {
-                        resource: ResourceRef::parse(source.as_str())?,
-                        provider: Some(binding.provider.status().provider),
-                        lens: Some("source-pool".into()),
-                        revision: Some(material.binding.revision.to_string()),
-                        freshness: None, authority: SourceAuthority::Observed,
-                        content: Some(material.body), evidence: vec![source.clone()],
-                        why_selected: "read through the live source owner with current retrieval policy".into(),
-                    });
-                }
                 let (binding, material) = self.source_material(source).ok_or_else(|| {
                     // Search can hand back a source a curated node cites. If
                     // this horizon cannot materialise it, say which citation
@@ -584,6 +570,8 @@ impl<'a> KnowledgeApplication<'a> {
                         Self::unmaterialised_cited_source(source, &citing)
                     }
                 })?;
+                let live = binding.provider.read(source)?;
+                let material = live.as_ref().unwrap_or(material);
                 Ok(KnowledgeReading {
                     resource: ResourceRef::parse(source.as_str())?,
                     provider: Some(binding.provider.status().provider),

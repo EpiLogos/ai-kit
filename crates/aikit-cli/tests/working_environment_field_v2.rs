@@ -1,6 +1,8 @@
 //! W6 at the production seam: one plan, one set of canonical Surface Refs, and
 //! every installed mux observed as a projection of the same subjects.
 
+mod common;
+
 use aikit_cli::working_environment_field::{
     act, observe, plan_surfaces, provider_ref, surface_ref,
 };
@@ -189,9 +191,7 @@ struct SocketGuard(String);
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("tmux")
-            .args(["-L", &self.0, "kill-server"])
-            .output();
+        common::end_tmux_server(&self.0);
     }
 }
 
