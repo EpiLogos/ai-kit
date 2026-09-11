@@ -81,6 +81,7 @@ mod development_field;
 mod flow_cognition;
 mod knowledge;
 mod model_resident;
+mod root_context;
 
 pub use development_field::DevelopmentFieldApplicationRequest;
 pub use flow_cognition::{
@@ -249,6 +250,7 @@ pub struct Service {
     problems: Vec<RegistryProblem>,
     descriptor: ContextDescriptor,
     project: Option<DiscoveredProject>,
+    central_meta_root: Option<PathBuf>,
     layers: Vec<ScopeLayer>,
     trust: TrustSnapshot,
     policy: ManagedPolicy,
@@ -380,6 +382,7 @@ impl Service {
         let additional_stores: Vec<&Path> = default_store.as_deref().into_iter().collect();
         let project =
             discover::discover_project_with_home_excluding(&home, cwd, &additional_stores)?;
+        let (project, central_meta_root) = root_context::discover(cwd, &env, project)?;
         let project_root = project.as_ref().map(|p| p.root.clone());
 
         let descriptor = match &project_root {
@@ -411,6 +414,7 @@ impl Service {
             problems,
             descriptor,
             project,
+            central_meta_root,
             layers,
             trust,
             policy,
@@ -1067,7 +1071,7 @@ impl Service {
             // projections resolve to defaults — never guessed; a fetch failure
             // is fail-soft (no projection), never a resolution failure.
             let composed = match self.descriptor.project_root.as_deref() {
-                Some(root) => process_central_root(Some(root)).and_then(|central| {
+                Some(root) => self.central_meta_root.clone().or_else(|| process_central_root(Some(root))).and_then(|central| {
                     let runner = SystemRunner::new();
                     compose_live_actor_inputs(&runner, &central, root)
                         .ok()
@@ -1191,7 +1195,19 @@ impl Service {
             .project_root
             .as_deref()
             .unwrap_or(&self.invocation_cwd);
-        let central_root = process_central_root(Some(project_root));
+        let central_root = self.central_meta_root.clone()
+            .or_else(|| process_central_root(Some(project_root)));
+        let native_binding = if self.descriptor.project_root.is_none() {
+            admission.map(|a| a.context_binding()).transpose()?
+        } else { None };
+        if admission.is_some_and(|a| a.scope_ref.as_str() == "scope:root")
+            && self.descriptor.project_root.is_some() && self.central_meta_root.is_none()
+        {
+            return Err(AikitError::new(
+                "compose.root_world_child_context",
+                "Root agency cannot inherit an unrelated child Project's scopes; compose from Central root or an explicitly unbound working directory",
+            ));
+        }
         // Explicit composition must report a broken source as a failure, not
         // present a successful plan silently stripped of its authored basis.
         // A missing optional Central root/profile remains an honest absence.
@@ -1282,14 +1298,18 @@ impl Service {
                 .map(|c| c.source_resources.clone())
                 .unwrap_or_default(),
         )?;
-        let mut resolution = aikit_tui::project_world_service::context_resolution_from_resources(
-            self,
-            composed
-                .as_ref()
-                .map(|c| c.requested_actors.clone())
-                .unwrap_or_default(),
-            &resources,
-        )?;
+        let actors = composed.as_ref().map(|c| c.requested_actors.clone()).unwrap_or_default();
+        let mut resolution = if self.descriptor.project_root.is_none() {
+            if let Some(binding) = native_binding {
+                aikit_core::application_context_resolution_with_binding(
+                    &self.descriptor, &self.view, &self.layers, &resources, actors, binding,
+                )?
+            } else {
+                aikit_tui::project_world_service::context_resolution_from_resources(self, actors, &resources)?
+            }
+        } else {
+            aikit_tui::project_world_service::context_resolution_from_resources(self, actors, &resources)?
+        };
         // Harness detection is owned by Actuation and consumed here — one
         // live `actuation harness detect` run discloses which operative
         // bodies exist on this machine. Detected harnesses join the
@@ -1520,7 +1540,11 @@ impl Service {
         Ok(serde_json::json!({
             "project_root": self.descriptor.project_root.as_ref().map(|p|p.display().to_string()),
             "working_directory": project_root,
-            "project_present": self.descriptor.project_root.is_some(),
+            "project_present": true,
+            "local_project_directory_present": self.descriptor.project_root.is_some(),
+            "root_meta_project": self.central_meta_root.is_some()
+                || admission.is_some_and(|a| a.scope_ref.as_str() == "scope:root"),
+            "project_binding": resolution.project_binding,
             "agency_admission": admission,
             "model_candidates": resolution.model_candidates,
             "central_root": central_root.as_ref().map(|p| p.display().to_string()),
@@ -2603,7 +2627,7 @@ impl PaletteBackend for Service {
         let Some(project) = self.descriptor.project_root.as_deref() else {
             return Ok(Vec::new());
         };
-        let mut records = if let Some(central) = process_central_root(Some(project)) {
+        let mut records = if let Some(central) = self.central_meta_root.clone().or_else(|| process_central_root(Some(project))) {
             compose_live_actor_inputs(&SystemRunner::new(), &central, project)?
                 .map(|inputs| inputs.source_resources)
                 .unwrap_or_default()
@@ -2705,6 +2729,9 @@ impl PaletteBackend for Service {
     }
 
     fn project_binding(&self) -> Result<Option<aikit_core::project::ProjectBinding>> {
+        if let Some(root) = &self.central_meta_root {
+            return root_context::binding(root).map(Some);
+        }
         let Some(root) = self.descriptor.project_root.as_ref() else {
             return Ok(None);
         };
@@ -2924,15 +2951,17 @@ impl PaletteBackend for Service {
     /// Reuses the compose path's resolved `model_routes` (catalogue joined
     /// against live route observation) — the same route sets `realise_model`
     /// selects from — and ranks their viable `(model, route)` candidates through
-    /// the shared `rank_model_roster`. A context with no Project has nothing to
-    /// compose over, so it answers `None` rather than an empty roster that would
-    /// read as "no models". Cached per session.
+    /// the shared `rank_model_roster`. Central root is already a meta-project;
+    /// it needs neither a child Project nor a Profile to expose this roster.
+    /// Only absence of both a native binding and local ground yields `None`.
+    /// Source-only explicitly admitted Worlds use `compose_selected_plan`.
+    /// Cached per session.
     fn model_roster(&self) -> Result<Option<aikit_core::resource::ModelRoster>> {
         use aikit_core::resource::{
             candidates_from_routes, rank_model_roster, ModelRankingPolicy, ModelRouteSet,
         };
 
-        if self.descriptor.project_root.is_none() {
+        if self.project_binding()?.is_none() && self.descriptor.project_root.is_none() {
             return Ok(None);
         }
         if let Some(cached) = self.model_roster_reading.borrow().as_ref() {

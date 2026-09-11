@@ -1179,6 +1179,9 @@ fn locator_label(locator: &ProjectBindingLocator) -> String {
         ProjectBindingLocator::LocalDirectory { path } => format!("local {}", path.display()),
         ProjectBindingLocator::Repository { repository } => format!("repository {repository}"),
         ProjectBindingLocator::Remote { locator } => format!("remote {locator}"),
+        ProjectBindingLocator::NativeWorld { world, binding, scope, .. } => {
+            format!("native World {world} via {binding} ({scope}; no local directory grant)")
+        }
     }
 }
 

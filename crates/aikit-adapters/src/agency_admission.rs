@@ -82,6 +82,58 @@ pub struct AdmittedAgency {
     pub receipt: Value,
 }
 impl AdmittedAgency {
+    /// Preserve an explicitly admitted World's identity as the operative ground
+    /// when there is no narrower local Project. In particular, Central root
+    /// agency is not a binding-free or synthetic child-Project context.
+    ///
+    /// Revalidate the source/receipt correlation, including deserialized fields.
+    /// This is context evidence, not a new admission or a filesystem grant;
+    /// dispatch still invokes the native owner's current authority checks.
+    pub fn context_binding(&self) -> Result<aikit_core::project::ProjectBinding> {
+        use aikit_core::project::{
+            ProjectBinding, ProjectBindingLocator, ProjectConstituentRef, ProjectRef,
+        };
+        use aikit_core::resource::{ProviderRef, SourceRef};
+
+        let bytes = self.basis.read()?;
+        let request: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
+        if request["schema"] != AGENCY_ACTUALISATION_SCHEMA {
+            return Err(invalid("Expected an Actuation agency actualisation request source"));
+        }
+        validate_receipt(&request, &self.receipt)?;
+        for (field, expected) in [
+            ("agent_ref", &self.agent_ref),
+            ("agency_ref", &self.agency_ref),
+            ("world_ref", &self.world_ref),
+            ("binding_ref", &self.world_binding_ref),
+            ("scope_ref", &self.scope_ref),
+        ] {
+            if request["differentiated_binding"][field].as_str() != Some(expected.as_str()) {
+                return Err(invalid(format!("Admitted {field} differs from its native source")));
+            }
+        }
+        if self.scope_ref.as_str() != "scope:root" {
+            return Err(AikitError::new(
+                "agency_admission.project_binding_required",
+                "Only declared root scope is a meta-project; a child World requires its native Project binding",
+            ));
+        }
+        let mut binding = ProjectBinding::new(
+            ProjectRef::parse(self.world_ref.as_str())?,
+            ProjectConstituentRef::parse(self.world_binding_ref.as_str())?,
+            ProjectBindingLocator::NativeWorld {
+                world: self.world_ref.clone(),
+                binding: self.world_binding_ref.clone(),
+                scope: self.scope_ref.clone(),
+                source_revision: self.basis.revision.clone(),
+                content_digest: self.basis.content_digest.clone(),
+            },
+        );
+        binding.provider = Some(ProviderRef::parse("provider/actuation")?);
+        binding.source = Some(SourceRef::parse(self.basis.source_ref.as_str())?);
+        Ok(binding)
+    }
+
     pub fn authorises(&self, action: &ResourceRef) -> bool {
         let autonomy = &self.receipt["determination"]["delegated_autonomy"];
         let has = |field| {
