@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, path::PathBuf};
 
+#[path = "encounter_task.rs"]
+mod task;
+
 pub const SEND_ACTION: &str = "action/aikit/encounter-send";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,6 +188,7 @@ impl EncounterService {
         &self,
         session: &ResourceRef,
     ) -> Result<Option<(EncounterAgencyBinding, AdmittedAgency)>> {
+        task::check(&self.home, session)?;
         read_binding(&self.home, session)?
             .map(|binding| {
                 let admitted = native_admission(&binding)?;
@@ -196,6 +200,7 @@ impl EncounterService {
     /// it is not merely named in an orientation receipt. Source text remains
     /// attributed material and cannot configure tools, consent or other Agents.
     pub(super) fn prepare_agency_text(&self, session: &ResourceRef, text: &str) -> Result<String> {
+        let task_context = task::prompt(self, session)?;
         let Some((binding, admitted)) = self.check_agency(session)? else {
             return Ok(text.to_owned());
         };
@@ -221,6 +226,7 @@ impl EncounterService {
                 }
             }
         }
+        prompt.push_str(&task_context);
         prompt.push_str("\n<explicit-request>\n");
         prompt.push_str(text);
         prompt.push_str("\n</explicit-request>\n");

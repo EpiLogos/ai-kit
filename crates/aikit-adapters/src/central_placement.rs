@@ -224,7 +224,7 @@ fn text<'a>(value: &'a Value, pointer: &str) -> Result<&'a str> {
         .ok_or_else(|| failure("owner_response", &format!("Native receipt lacks {pointer}")))
 }
 fn failure(kind: &str, message: &str) -> AikitError {
-    AikitError::new(format!("placement.central_{kind}"), message)
+    AikitError::new(&format!("placement.central_{kind}"), message)
 }
 fn io_error(error: impl std::fmt::Display) -> AikitError {
     failure("io", &error.to_string())

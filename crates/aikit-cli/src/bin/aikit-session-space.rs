@@ -28,6 +28,19 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Prepare a Central task and an exact Workcell boundary for this session.
+    EncounterTaskConfigure {
+        #[arg(long)] agent_session: String,
+        #[arg(long)] request_json: String,
+        #[arg(long)] expected_revision: Option<String>,
+    },
+    /// Read task preparation, including pending effects and native source bases.
+    EncounterTaskRead { #[arg(long)] agent_session: String },
+    /// Internal native protocol launch; emits no wrapper bytes to stdout.
+    EncounterTaskExec {
+        #[arg(long)] agent_session: String,
+        #[arg(long)] expected_revision: String,
+    },
     /// Start the native resident owner once, independently of this CLI client.
     #[cfg(unix)]
     EncounterStart,
@@ -130,6 +143,16 @@ fn run() -> Result<()> {
     let service = Service::discover(&cwd)?;
 
     match cli.command {
+        Command::EncounterTaskConfigure { agent_session, request_json, expected_revision } => {
+            let expected = expected_revision.as_deref().map(aikit_core::SourceRevision::parse).transpose()?;
+            emit(&aikit_cli::encounter_service::EncounterService::configure_task(service.home(),
+                &aikit_core::ResourceRef::parse(agent_session)?, parse_json_arg(&request_json)?, expected.as_ref())?)
+        }
+        Command::EncounterTaskRead { agent_session } => emit(
+            &aikit_cli::encounter_service::EncounterService::read_task(service.home(), &aikit_core::ResourceRef::parse(agent_session)?)?),
+        Command::EncounterTaskExec { agent_session, expected_revision } =>
+            aikit_cli::encounter_service::EncounterService::exec_task(service.home(),
+                &aikit_core::ResourceRef::parse(agent_session)?, &aikit_core::SourceRevision::parse(expected_revision)?),
         #[cfg(unix)]
         Command::EncounterStart => {
             emit(&aikit_cli::encounter_service::start(service.home(), &cwd)?)
