@@ -194,6 +194,7 @@ pub(super) fn prompt(service: &EncounterService, session: &ResourceRef) -> Resul
         return Ok(String::new());
     };
     validate(&service.home, session, &record)?;
+    if let Some(material) = &record.material { material.check_encounter_owner()?; }
     let resident = service.resident(session)?;
     if resident.cwd != record.request.cwd || resident.argv != record.launcher.argv
         || resident.provider != record.launcher.id {
@@ -269,6 +270,7 @@ impl EncounterService {
     pub(crate) fn check_task_launch(&self, session: &ResourceRef, provider: &EncounterProvider, cwd: &std::path::Path) -> Result<()> {
         let Some(record) = read(&self.home, session)? else { return Ok(()); };
         validate(&self.home, session, &record)?;
+        if let Some(material) = &record.material { material.check_encounter_owner()?; }
         if provider.id != record.launcher.id || provider.argv != record.launcher.argv
             || provider.protocol != record.launcher.protocol || provider.required_context != record.launcher.required_context
             || cwd != record.request.cwd {

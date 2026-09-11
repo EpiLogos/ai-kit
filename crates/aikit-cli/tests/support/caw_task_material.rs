@@ -58,7 +58,8 @@ impl NativeHost {
         let mut input=w.prepare_input();
         input["material_host"]=json!({"workcell_bin":std::env::var("AIKIT_CAW_WORKCELL_BIN").expect("native workcell CLI required"),
             "endpoint":self.endpoint,"workcell_ref":"workcell:caw-task-material","demand_ref":"demand:caw-task-material-attempt-1",
-            "required_services":if managed { vec!["service:caw-native-encounter"] } else { vec![] }});
+            "required_services":if managed { vec!["service:caw-native-encounter"] } else { vec![] },
+            "encounter_service":if managed { Some("service:caw-native-encounter") } else { None }});
         input
     }
     fn prepare(&mut self,w:&World,managed:bool)->Value {
@@ -163,4 +164,23 @@ fn absent_attachment_foreign_host_and_dropped_requirement_cannot_start_work() {
     assert!(!out.status.success());
     let current=w.cli(&["encounter-task-read".into(),"--agent-session".into(),"agent-session/task".into()]);
     assert_eq!(current,prepared); assert!(!w.root.join("Work/demo/src/protocol.log").exists());
+}
+
+#[test]
+#[ignore="requires exact native owners; mandatory CAW lane"]
+fn a_healthy_unrelated_process_cannot_satisfy_encounter_hosting() {
+    let mut w=World::new(true); let mut host=NativeHost::new(&w,true,true);
+    host.stop();
+    let path=host.state.join("services.json");
+    let mut declaration:Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    declaration["services"][0]["program"]=json!("/bin/sleep");
+    declaration["services"][0]["args"]=json!(["60"]);
+    fs::write(&path,declaration.to_string()).unwrap(); host.start();
+    let prepared=host.prepare(&w,true);
+    w.start();
+    assert_ne!(host.managed_pid,Some(w.child.as_ref().unwrap().id()));
+    assert_eq!(w.open(&prepared,&w.root.join("Work/demo/src"))["ok"],false);
+    assert!(!w.root.join("Work/demo/src/protocol.log").exists());
+    // The fake service is only a negative witness; do not send it an owner shutdown.
+    host.managed_pid=None;
 }

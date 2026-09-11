@@ -19,6 +19,9 @@ pub(super) struct MaterialHost {
     pub demand_ref: ResourceRef,
     #[serde(default)]
     pub required_services: Vec<ResourceRef>,
+    /// When supplied, this service must be the actual encounter owner process.
+    #[serde(default)]
+    pub encounter_service: Option<ResourceRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +46,9 @@ impl MaterialHost {
         let mut services = std::collections::BTreeSet::new();
         if self.required_services.iter().any(|r| !services.insert(r)) {
             return Err(error("Duplicate required material service"));
+        }
+        if self.encounter_service.as_ref().is_some_and(|r| !self.required_services.contains(r)) {
+            return Err(error("Encounter owner service must be an explicit required service"));
         }
         Ok(())
     }
@@ -111,6 +117,20 @@ impl MaterialHost {
 }
 
 impl MaterialBinding {
+    /// Called in the resident owner, not in its protocol child or a configure
+    /// client. Fresh validate() must precede this process correlation.
+    pub fn check_encounter_owner(&self) -> Result<()> {
+        let Some(service) = &self.host.encounter_service else { return Ok(()); };
+        let bindings = self.world["binding_graph"]["bindings"].as_array()
+            .ok_or_else(|| error("Missing owner material bindings"))?;
+        let binding = bindings.iter().find(|b| b["port"] == "service" && b["properties"]["logical_ref"] == json!(service))
+            .ok_or_else(|| error("Required encounter owner service is absent"))?;
+        if binding["properties"]["pid"].as_str().and_then(|p| p.parse::<u32>().ok()) != Some(std::process::id()) {
+            return Err(error("The current encounter owner is not the process hosted by the selected Workcell binding"));
+        }
+        Ok(())
+    }
+
     fn check_world(&self, task: &AllocatedCentralTask, world: &Value) -> Result<()> {
         if world["version"] != "workcell.material-world/v1"
             || world["workcell_ref"] != json!(self.host.workcell_ref)
@@ -140,8 +160,7 @@ impl MaterialBinding {
             return Err(error("Native storage is not the exact admitted NOW directory and required attachment"));
         }
         for service in &self.host.required_services {
-            // Workcell's binding role is connectivity:<service>; the native
-            // requested logical service is retained separately in properties.
+            // A connectivity binding role is not the native service identity.
             if bindings.iter().filter(|b| b["port"] == "service" && b["properties"]["logical_ref"] == json!(service)
                 && b["necessity"] == "required" && b["presence"] == "present" && b["health"] == "healthy").count() != 1 {
                 return Err(error("Required native service was not actually prepared"));
