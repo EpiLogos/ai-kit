@@ -387,6 +387,21 @@ pub trait PaletteBackend {
         Ok(None)
     }
 
+    /// Optional already-observed Workcell (body materialisation) reading.
+    ///
+    /// Same seam, same reason as the others: observing Workcell runs its
+    /// external binary (`workcell instances list`), which lives behind the CLI
+    /// crate `aikit-tui` cannot depend on. The caller that *can* observe does,
+    /// and hands the composed disclosure over.
+    ///
+    /// `None` is "nobody looked", and the reading keeps its `not_attempted`
+    /// default. A `Some(disclosure)` then keeps the finer split: the `workcell`
+    /// binary that could not be read (`Unavailable`) versus a registry observed
+    /// to hold nothing (`Observed` empty).
+    fn workcell_world(&self) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
+        Ok(None)
+    }
+
     /// The canonical subjects this world can project into a working
     /// environment — the panes the current session plan defines, whether or
     /// not any of them is live yet.

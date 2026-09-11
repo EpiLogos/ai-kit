@@ -276,6 +276,10 @@ pub struct Service {
     /// every world-changing action. Health does not shift under ordinary
     /// navigation, so it is observed once per session and reused.
     doctor_report: std::cell::RefCell<Option<aikit_core::doctor_world::DoctorDisclosure>>,
+    /// Cached Workcell reading. Observing it spawns the external `workcell`
+    /// binary; like the health reading, it does not shift under ordinary
+    /// navigation, so it is observed once per session and reused.
+    workcell_reading: std::cell::RefCell<Option<aikit_core::workcell_world::WorkcellDisclosure>>,
 }
 
 impl Service {
@@ -415,6 +419,7 @@ impl Service {
             factory_started_resources: None,
             working_environments: std::cell::RefCell::new(None),
             doctor_report: std::cell::RefCell::new(None),
+            workcell_reading: std::cell::RefCell::new(None),
         })
     }
 
@@ -2836,6 +2841,46 @@ impl PaletteBackend for Service {
 
         let disclosure = DoctorDisclosure::observed(findings);
         *self.doctor_report.borrow_mut() = Some(disclosure.clone());
+        Ok(Some(disclosure))
+    }
+
+    /// Observe Workcell over its external binary and project the registry as an
+    /// owned disclosure.
+    ///
+    /// Reuses `intake_workcell_instances` — the observer that already runs
+    /// `workcell instances list --json` and keeps "no registry readable"
+    /// (`Unavailable`) apart from "registry read, nothing in it" (`Records`
+    /// empty) — which had no production caller until now. Its `Records` /
+    /// `Unavailable` split maps straight onto the disclosure's `Observed` /
+    /// `Unavailable` arms; only identity and observed liveness cross the
+    /// boundary. Cached per session for the same reason as the health reading.
+    fn workcell_world(&self) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
+        use aikit_adapters::workcell_instance_intake::{intake_workcell_instances, InstancesOutcome};
+        use aikit_core::workcell_world::{WorkcellDisclosure, WorkcellInstanceDisclosure};
+
+        if let Some(cached) = self.workcell_reading.borrow().as_ref() {
+            return Ok(Some(cached.clone()));
+        }
+
+        let disclosure = match intake_workcell_instances(&SystemRunner::new(), "workcell", None) {
+            InstancesOutcome::Records(records) => WorkcellDisclosure::observed(
+                records
+                    .into_iter()
+                    .map(|record| WorkcellInstanceDisclosure {
+                        detected: record.evidence_grade.is_detected(),
+                        live: matches!(
+                            record.liveness,
+                            aikit_adapters::workcell_instance_intake::InstanceLiveness::Live
+                        ),
+                        instance_ref: record.instance_ref,
+                        harness_ref: record.harness_ref,
+                    })
+                    .collect(),
+            ),
+            InstancesOutcome::Unavailable { reason } => WorkcellDisclosure::unavailable(reason),
+        };
+
+        *self.workcell_reading.borrow_mut() = Some(disclosure.clone());
         Ok(Some(disclosure))
     }
 

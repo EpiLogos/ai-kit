@@ -156,6 +156,19 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
         )),
     }
 
+    // The Workcell reading, when the backend can observe it. Same shape once
+    // more: a producer hands the observation over; a backend with none answers
+    // `None` and the reading keeps its `not_attempted` default; a producer that
+    // failed becomes a warning rather than a clean-looking absence.
+    match backend.workcell_world() {
+        Ok(Some(disclosure)) => world = world.with_workcell(disclosure),
+        Ok(None) => {}
+        Err(error) => world.warnings.push(format!(
+            "Workcell status could not be observed for this world: {}",
+            error.message()
+        )),
+    }
+
     if backend.scope_layers().is_none() {
         world.warnings.push(
             "Project-world basis does not include the ordered scope-layer stack because this application-service boundary does not expose it; scope provenance is not reconstructed from partial evidence"
@@ -190,6 +203,8 @@ mod tests {
         /// What this backend can run for health: nothing, an observation, or a
         /// check run that fell over.
         doctor: DoctorAnswer,
+        /// What this backend can observe about Workcell.
+        workcell: WorkcellAnswer,
     }
 
     #[derive(Default)]
@@ -216,6 +231,14 @@ mod tests {
         Failed,
     }
 
+    #[derive(Default)]
+    enum WorkcellAnswer {
+        #[default]
+        Nothing,
+        Observed(Box<aikit_core::workcell_world::WorkcellDisclosure>),
+        Failed,
+    }
+
     impl PaletteBackend for Backend {
         fn versioned_world(
             &self,
@@ -239,6 +262,19 @@ mod tests {
                 DoctorAnswer::Failed => Err(aikit_core::AikitError::new(
                     "doctor.checks_failed",
                     "failed to run the installation health checks",
+                )),
+            }
+        }
+
+        fn workcell_world(
+            &self,
+        ) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
+            match &self.workcell {
+                WorkcellAnswer::Nothing => Ok(None),
+                WorkcellAnswer::Observed(disclosure) => Ok(Some(disclosure.as_ref().clone())),
+                WorkcellAnswer::Failed => Err(aikit_core::AikitError::new(
+                    "workcell.probe_failed",
+                    "failed to observe Workcell",
                 )),
             }
         }
@@ -327,6 +363,7 @@ mod tests {
             versioned: VersionedAnswer::Nothing,
             credential: CredentialAnswer::Nothing,
             doctor: DoctorAnswer::Nothing,
+            workcell: WorkcellAnswer::Nothing,
         };
 
         let resolution = context_resolution(&backend).unwrap();
@@ -349,6 +386,7 @@ mod tests {
             versioned: VersionedAnswer::Nothing,
             credential: CredentialAnswer::Nothing,
             doctor: DoctorAnswer::Nothing,
+            workcell: WorkcellAnswer::Nothing,
         };
 
         let world = project_world(&backend).unwrap();
@@ -377,6 +415,7 @@ mod tests {
             versioned: VersionedAnswer::Nothing,
             credential: CredentialAnswer::Nothing,
             doctor: DoctorAnswer::Nothing,
+            workcell: WorkcellAnswer::Nothing,
         };
 
         let world = project_world(&backend).unwrap();
@@ -434,6 +473,7 @@ mod tests {
             versioned,
             credential: CredentialAnswer::Nothing,
             doctor: DoctorAnswer::Nothing,
+            workcell: WorkcellAnswer::Nothing,
         })
         .unwrap()
     }
@@ -510,6 +550,7 @@ mod tests {
             versioned: VersionedAnswer::Nothing,
             credential,
             doctor: DoctorAnswer::Nothing,
+            workcell: WorkcellAnswer::Nothing,
         })
         .unwrap()
     }
@@ -525,6 +566,7 @@ mod tests {
             versioned: VersionedAnswer::Nothing,
             credential: CredentialAnswer::Nothing,
             doctor,
+            workcell: WorkcellAnswer::Nothing,
         })
         .unwrap()
     }
@@ -612,6 +654,56 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| w.contains("installation health could not be observed")),
+            "{:?}",
+            world.warnings
+        );
+    }
+
+    fn workcell_world_from(workcell: WorkcellAnswer) -> aikit_core::ProjectWorldReadModel {
+        let mut context = ContextDescriptor::for_project("/work/aikit");
+        context.host = "test-host".into();
+        let view = resolved(&context, Vec::new());
+        project_world(&Backend {
+            context,
+            view,
+            layers: Some(Vec::new()),
+            versioned: VersionedAnswer::Nothing,
+            credential: CredentialAnswer::Nothing,
+            doctor: DoctorAnswer::Nothing,
+            workcell,
+        })
+        .unwrap()
+    }
+
+    /// A Workcell reading the backend observes reaches the reading. Before this
+    /// wiring the observer existed in `aikit-adapters` but had no caller.
+    #[test]
+    fn a_workcell_reading_reaches_the_reading() {
+        let disclosure = aikit_core::workcell_world::WorkcellDisclosure::observed(Vec::new());
+        let world = workcell_world_from(WorkcellAnswer::Observed(Box::new(disclosure)));
+        assert!(world.workcell.was_observed());
+        assert!(world.warnings.iter().all(|w| !w.contains("Workcell")));
+    }
+
+    /// No producer leaves the honest `not_attempted` default — distinct from an
+    /// observed-but-empty registry and from an unavailable binary.
+    #[test]
+    fn no_workcell_producer_leaves_the_not_attempted_default() {
+        let world = workcell_world_from(WorkcellAnswer::Nothing);
+        assert!(!world.workcell.was_observed());
+        assert!(world.warnings.iter().all(|w| !w.contains("Workcell")));
+    }
+
+    /// A Workcell observation that failed is disclosed as a warning.
+    #[test]
+    fn a_workcell_probe_that_failed_is_disclosed_rather_than_read_as_absence() {
+        let world = workcell_world_from(WorkcellAnswer::Failed);
+        assert!(!world.workcell.was_observed());
+        assert!(
+            world
+                .warnings
+                .iter()
+                .any(|w| w.contains("Workcell status could not be observed")),
             "{:?}",
             world.warnings
         );

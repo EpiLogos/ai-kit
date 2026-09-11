@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::context::ContextDescriptor;
 use crate::credential_world::CredentialWorldDisclosure;
 use crate::doctor_world::DoctorDisclosure;
+use crate::workcell_world::WorkcellDisclosure;
 use crate::context_resolution::{
     Availability, ContextResolution, ReferenceResolution, ResolvedResource, ScopeResolution,
 };
@@ -184,6 +185,13 @@ pub struct ProjectWorldReadModel {
     /// `None` would collapse "unknown" back into "healthy".
     #[serde(default)]
     pub doctor: DoctorDisclosure,
+    /// Workcell (body materialisation) status for this world. Not an `Option`
+    /// for the same reason as the disclosures above: an absent producer is a
+    /// `WorkcellDisclosure::not_attempted(..)` reading, distinct from an
+    /// observed-but-empty registry and from a `workcell` binary that could not
+    /// be read.
+    #[serde(default)]
+    pub workcell: WorkcellDisclosure,
     pub warnings: Vec<String>,
 }
 
@@ -220,6 +228,14 @@ impl ProjectWorldReadModel {
     /// `doctor` (which is I/O) and hands over the composed findings.
     pub fn with_doctor(mut self, doctor: DoctorDisclosure) -> Self {
         self.doctor = doctor;
+        self
+    }
+
+    /// Attach an already-observed Workcell reading, mirroring `with_doctor`.
+    /// `aikit-core` observes nothing: the caller runs the `workcell` observer
+    /// and hands the composed disclosure over.
+    pub fn with_workcell(mut self, workcell: WorkcellDisclosure) -> Self {
+        self.workcell = workcell;
         self
     }
 
@@ -261,6 +277,9 @@ impl ProjectWorldReadModel {
             doctor: DoctorDisclosure::not_attempted(
                 "this reading was built as a shell; no health checks were run for it",
             ),
+            workcell: WorkcellDisclosure::not_attempted(
+                "this reading was built as a shell; Workcell was not observed for it",
+            ),
             warnings: Vec::new(),
         }
     }
@@ -284,6 +303,10 @@ const CREDENTIAL_WORLD_NOT_CHECKED_REASON: &str =
 /// running the checks. The same discipline as the credential reason above:
 /// "not run" is unknown, never a clean bill of health.
 const DOCTOR_NOT_CHECKED_REASON: &str = "no health checks have been run for this reading yet";
+
+/// What the System pane's Workcell row says when a reading was produced without
+/// observing Workcell. "Not observed" is unknown, never "no Workcell here".
+const WORKCELL_NOT_OBSERVED_REASON: &str = "Workcell has not been observed for this reading yet";
 
 pub fn disclose_project_world(
     resolution: &ContextResolution,
@@ -333,6 +356,7 @@ pub fn disclose_project_world(
             CREDENTIAL_WORLD_NOT_CHECKED_REASON,
         ),
         doctor: DoctorDisclosure::not_attempted(DOCTOR_NOT_CHECKED_REASON),
+        workcell: WorkcellDisclosure::not_attempted(WORKCELL_NOT_OBSERVED_REASON),
         warnings: resolution.warnings.clone(),
     }
 }
@@ -452,6 +476,7 @@ mod tests {
                 "test fixture composed no credential input",
             ),
             doctor: DoctorDisclosure::not_attempted("test fixture ran no health checks"),
+            workcell: WorkcellDisclosure::not_attempted("test fixture observed no Workcell"),
             warnings: vec![],
         }
     }
