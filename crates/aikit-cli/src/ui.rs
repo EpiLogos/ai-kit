@@ -151,6 +151,13 @@ impl PaletteBackend for V2SurfaceService<'_> {
         <Service as PaletteBackend>::doctor_world(self.service)
     }
 
+    /// Forwarded for the same reason as `doctor_world`: the Workcell
+    /// observation runs on `Service`, and the System pane sees it only if the
+    /// decorator carries it through.
+    fn workcell_world(&self) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
+        <Service as PaletteBackend>::workcell_world(self.service)
+    }
+
     fn scope_layers(&self) -> Option<&[ScopeLayer]> {
         <Service as PaletteBackend>::scope_layers(self.service)
     }
@@ -457,6 +464,29 @@ mod tests {
         assert!(
             disclosure.was_attempted(),
             "the decorator carries an observed health reading, not not-attempted"
+        );
+    }
+
+    /// The Workcell forward, same failure mode as the others.
+    #[test]
+    fn the_surface_decorator_forwards_the_real_workcell_reading_not_the_trait_default() {
+        use aikit_core::workcell_world::WorkcellKnowledge;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("probe");
+        std::fs::create_dir_all(&root).unwrap();
+        project(&root);
+
+        let mut svc = service(tmp.path(), &root);
+        let backend = V2SurfaceService::new(&mut svc);
+
+        let disclosure = backend
+            .workcell_world()
+            .expect("observing does not fail")
+            .expect("the decorator must forward Service's real reading, not None");
+        // A real observation, not the not-attempted default.
+        assert!(
+            !matches!(disclosure.knowledge, WorkcellKnowledge::NotAttempted { .. }),
+            "the decorator carries a real observation"
         );
     }
 }
