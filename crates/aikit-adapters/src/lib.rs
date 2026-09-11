@@ -21,6 +21,7 @@ pub mod bkmr;
 pub mod central_agent_profile;
 pub mod central_development_field;
 pub mod central_temporal;
+pub mod central_work;
 pub mod clients;
 pub mod composition_topology;
 pub mod connection_process;
@@ -112,7 +113,7 @@ pub use deepseek_maximal::{
 pub use factory_run_thought_authored_wiki::{
     factory_run_thought_authored_wiki, FactoryBuildCognitiveProvenance,
     FactoryBuildCognitiveSnapshot, FactoryBuildCognitiveView, FactoryRunThought,
-    FactoryRunThoughtAuthoredWiki, FactoryRunThoughtAuthoredWikiStatus, FactoryRunThoughtPassage,
+    FactoryRunThoughtAuthoredWiki, FactoryRunThoughtPassage,
     FactoryRunThoughtProducer, FactoryRunThoughtProjection, FactoryRunThoughtSourceDisclosure,
     FACTORY_BUILD_COGNITIVE_PROVIDER_CONTRACT, FACTORY_BUILD_COGNITIVE_VIEW_CONTRACT,
     FACTORY_RUN_THOUGHT_AUTHORED_WIKI_VERSION,
