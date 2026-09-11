@@ -5,7 +5,7 @@ on:
       - 'crates/**'
       - '.github/workflows/caw-native-delivery.yml'
   push:
-    branches: [main, agent/caw-274-277-native-continuation, agent/caw-native-owner-joins]
+    branches: [main, agent/caw-274-277-native-continuation, agent/caw-connected-integration]
     paths:
       - 'crates/**'
       - '.github/workflows/caw-native-delivery.yml'
@@ -22,25 +22,8 @@ jobs:
     timeout-minutes: 30
     env:
       ACTUATION_SHA: 0ac4bbb47cc37a7ac3c1db42b88a39ffd6bb5b30
-      CENTRAL_SHA: 5d1b8bf6692f9aca45b2fe39db54cbc378dda70e
-      WORKCELL_SHA: 0187b0d76e8f27632d127d54ef2441310b073108
     steps:
       - uses: actions/checkout@v4
-      - name: Retain exact source under test
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/caw-source"
-          git archive --format=tar --prefix=ai-kit/ HEAD | gzip > "$RUNNER_TEMP/caw-source/ai-kit.tar.gz"
-          git rev-parse HEAD > "$RUNNER_TEMP/caw-source/revision.txt"
-          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/caw-source/tree.txt"
-          sha256sum "$RUNNER_TEMP/caw-source/ai-kit.tar.gz" > "$RUNNER_TEMP/caw-source/SHA256SUMS"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: caw-native-source-${{ github.sha }}
-          path: ${{ runner.temp }}/caw-source
-          if-no-files-found: error
-          retention-days: 7
       - uses: dtolnay/rust-toolchain@1.98.0
       - uses: actions/setup-node@v4
         with:
@@ -50,56 +33,26 @@ jobs:
           repository: EpiLogos/Actuation
           ref: 0ac4bbb47cc37a7ac3c1db42b88a39ffd6bb5b30
           path: .caw-native/Actuation
-      - uses: actions/checkout@v4
-        with:
-          repository: EpiLogos/Central
-          ref: 5d1b8bf6692f9aca45b2fe39db54cbc378dda70e
-          path: .caw-native/Central
-      - uses: actions/checkout@v4
-        with:
-          repository: EpiLogos/Workcell
-          ref: 0187b0d76e8f27632d127d54ef2441310b073108
-          path: .caw-native/Workcell
       - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          workspaces: |
-            . -> target
-            .caw-native/Central -> target
-            .caw-native/Workcell -> target
       - name: Record exact native basis
         shell: bash
         run: |
           set -euo pipefail
           test "$(git -C .caw-native/Actuation rev-parse HEAD)" = "$ACTUATION_SHA"
-          test "$(git -C .caw-native/Central rev-parse HEAD)" = "$CENTRAL_SHA"
-          test "$(git -C .caw-native/Workcell rev-parse HEAD)" = "$WORKCELL_SHA"
           test -x "$GITHUB_WORKSPACE/.caw-native/Actuation/bin/actuation"
-          {
-            echo "AIKIT_CAW_ACTUATION_BIN=$GITHUB_WORKSPACE/.caw-native/Actuation/bin/actuation"
-            echo "AIKIT_CAW_CENTRAL_BIN=$GITHUB_WORKSPACE/.caw-native/Central/target/debug/ctrl"
-            echo "AIKIT_CAW_WORKCELL_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-write-boundary"
-          } >> "$GITHUB_ENV"
+          echo "AIKIT_CAW_ACTUATION_BIN=$GITHUB_WORKSPACE/.caw-native/Actuation/bin/actuation" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/caw-evidence"
           {
             echo "AIKit=$(git rev-parse HEAD)"
             echo "Actuation=$ACTUATION_SHA"
-            echo "Central=$CENTRAL_SHA"
-            echo "Workcell=$WORKCELL_SHA"
             rustc -Vv
             node --version
             python3 --version
-            echo 'Standing=explicitly pinned unmerged candidate dependencies; not accepted main.'
-            echo 'Source-built native binaries with controlled ACP/Pi process fixtures.'
+            echo 'Standing=source-built native binaries with controlled ACP/Pi process fixtures.'
             echo 'FIXTURE_REPLY is not a real model response or installed-harness proof.'
           } > "$RUNNER_TEMP/caw-evidence/basis.txt"
-      - name: Build native owner dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            cargo build --locked --manifest-path .caw-native/Central/Cargo.toml -p ctrl
-            cargo build --locked --manifest-path .caw-native/Workcell/Cargo.toml --workspace
-          } 2>&1 | tee "$RUNNER_TEMP/caw-evidence/owners-build.log"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/caw-evidence/aikit-source.tar.gz"
+          git -C .caw-native/Actuation archive --format=tar.gz HEAD > "$RUNNER_TEMP/caw-evidence/actuation-source.tar.gz"
       - name: Actual binaries through native Actuation and controlled provider processes
         shell: bash
         run: |
@@ -114,6 +67,16 @@ jobs:
             cargo test --locked -p aikit-core --test caw_recurrence --test caw_route_eligibility
             cargo test --locked -p aikit-store --test caw_delivery
           } 2>&1 | tee "$RUNNER_TEMP/caw-evidence/focused.log"
+      - name: Build and retain the exact product binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked -p aikit-cli --bins 2>&1 | tee "$RUNNER_TEMP/caw-evidence/build.log"
+          for product in aikit aikit-session-space aikit-gateway; do
+            test -x "target/debug/$product"
+            install -m 755 "target/debug/$product" "$RUNNER_TEMP/caw-evidence/$product"
+          done
+          (cd "$RUNNER_TEMP/caw-evidence" && sha256sum aikit aikit-session-space aikit-gateway > binaries.sha256)
       - uses: actions/upload-artifact@v4
         if: always()
         with:
