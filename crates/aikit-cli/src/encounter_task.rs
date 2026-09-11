@@ -220,6 +220,16 @@ impl EncounterService {
         publish(home, session, &record)?;
         serde_json::to_value(record).map_err(error)
     }
+    pub(crate) fn check_task_launch(&self, session: &ResourceRef, provider: &EncounterProvider, cwd: &std::path::Path) -> Result<()> {
+        let Some(record) = read(&self.home, session)? else { return Ok(()); };
+        validate(&self.home, session, &record)?;
+        if provider.id != record.launcher.id || provider.argv != record.launcher.argv
+            || provider.protocol != record.launcher.protocol || provider.required_context != record.launcher.required_context
+            || cwd != record.request.cwd {
+            return Err(error("Task-bound session must use its prepared native launcher and exact working directory; another provider is not a permitted fallback"));
+        }
+        Ok(())
+    }
     pub fn read_task(home: &AikitHome, session: &ResourceRef) -> Result<Value> {
         serde_json::to_value(read(home, session)?).map_err(error)
     }

@@ -224,7 +224,19 @@ fn text<'a>(value: &'a Value, pointer: &str) -> Result<&'a str> {
         .ok_or_else(|| failure("owner_response", &format!("Native receipt lacks {pointer}")))
 }
 fn failure(kind: &str, message: &str) -> AikitError {
-    AikitError::new(&format!("placement.central_{kind}"), message)
+    let code = match kind {
+        "configuration" => "placement.central_configuration",
+        "owner_response" => "placement.central_owner_response",
+        "owner_refused" => "placement.central_owner_refused",
+        "allocation_mismatch" => "placement.central_allocation_mismatch",
+        "policy_changed" => "placement.central_policy_changed",
+        "now_changed" => "placement.central_now_changed",
+        "validation_mismatch" => "placement.central_validation_mismatch",
+        "material_bounds" => "placement.central_material_bounds",
+        "policy_unavailable" => "placement.central_policy_unavailable",
+        _ => "placement.central_io",
+    };
+    AikitError::new(code, message)
 }
 fn io_error(error: impl std::fmt::Display) -> AikitError {
     failure("io", &error.to_string())

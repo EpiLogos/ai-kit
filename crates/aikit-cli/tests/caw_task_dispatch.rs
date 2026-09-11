@@ -83,13 +83,30 @@ impl World {
             assert!(Instant::now()<end,"{v}"); std::thread::sleep(Duration::from_millis(20)); }
     }
 }
-impl Drop for World { fn drop(&mut self) { if let Some(mut child)=self.child.take() { let _=child.kill(); let _=child.wait(); } } }
+impl Drop for World {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            // Shut down via the native owner so it stops its protocol children.
+            let _ = self.command(&["encounter".into(), "--socket".into(), self.socket.display().to_string(),
+                "--request-json".into(), json!({"action":"shutdown","expected_pid":child.id()}).to_string()]);
+            let end = Instant::now() + Duration::from_secs(5);
+            while matches!(child.try_wait(), Ok(None)) && Instant::now() < end { std::thread::sleep(Duration::from_millis(20)); }
+            let _ = child.kill(); let _ = child.wait();
+        }
+    }
+}
 
 #[test]
 #[ignore="requires source-built Central, Workcell with Landlock and Actuation; mandatory CAW lane"]
 fn real_task_dispatch_confines_protocol_and_rechecks_source_without_duplicate_work() {
     let mut w=World::new(true); let prepared=w.prepare(); assert_eq!(prepared["ready"],true);
-    w.start(); assert_eq!(w.open(&prepared,&w.root.join("Work/demo/src"))["ok"],true);
+    w.cli(&["encounter-configure".into(), "--provider-json".into(), w.prepare_input()["provider"].to_string()]);
+    w.start();
+    let alternate = w.request(json!({"action":"open","space":"session-space/task","agent_session":"agent-session/task",
+        "provider":"controlled-task","cwd":w.root.join("Work/demo/src")}));
+    assert_eq!(alternate["ok"],false);
+    assert!(!w.root.join("Work/demo/src/protocol.log").exists());
+    assert_eq!(w.open(&prepared,&w.root.join("Work/demo/src"))["ok"],true);
     assert_eq!(w.send("one")["ok"],true); let returned=w.returned();
     let evidence:Value=serde_json::from_slice(&fs::read(w.root.join("Work/demo/src/result.json")).unwrap()).unwrap();
     assert_eq!(evidence["denied"],json!([true,true])); assert_eq!(evidence["selected_context"],true);

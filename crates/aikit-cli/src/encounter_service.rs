@@ -595,6 +595,7 @@ impl EncounterService {
             "before-provider-start",
             configured.required_context.as_ref(),
         )?;
+        self.check_task_launch(&agent_session, &configured, &cwd)?;
         let connection = ResourceRef::parse(format!(
             "connection/encounter-{}",
             blake3::hash(agent_session.as_str().as_bytes()).to_hex()
