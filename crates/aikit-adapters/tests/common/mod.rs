@@ -388,3 +388,73 @@ pub fn tree_of(root: &Path) -> Vec<String> {
     entries.sort();
     entries
 }
+
+/// End a private tmux server and remove the socket file it leaves behind.
+///
+/// `kill-server` stops the server but does not unlink its socket, so every run
+/// of every tmux test used to leave one inode in the shared tmux directory
+/// forever. On a machine that has run these suites for a while that is
+/// thousands of files, and the pile is not merely untidy: tmux scans that
+/// directory, and the tests themselves grow slower and flakier as it fills.
+///
+/// The path comes from the running server rather than from reconstructing
+/// `$TMUX_TMPDIR/tmux-$(id -u)/<socket>` by hand, because a reconstruction that
+/// drifts from what tmux actually chose fails silently — which is precisely how
+/// a cleanup stops cleaning without anyone noticing.
+pub fn end_tmux_server(socket: &str) {
+    // Ask the live server where its socket is. This is exact when it answers.
+    let reported = std::process::Command::new("tmux")
+        .args(["-L", socket, "display-message", "-p", "#{socket_path}"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|path| !path.is_empty());
+
+    let _ = std::process::Command::new("tmux")
+        .args(["-L", socket, "kill-server"])
+        .output();
+
+    // The server may already have been gone — which is exactly what happens on
+    // the failure paths this cleanup most needs to cover — and a dead server
+    // cannot tell us anything. Fall back to the layout tmux documents, so a
+    // test that died still takes its socket with it.
+    let path = reported.map(std::path::PathBuf::from).or_else(|| {
+        let base = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+        let uid = String::from_utf8(
+            std::process::Command::new("id").arg("-u").output().ok()?.stdout,
+        )
+        .ok()?;
+        Some(
+            std::path::PathBuf::from(base)
+                .join(format!("tmux-{}", uid.trim()))
+                .join(socket),
+        )
+    });
+
+    if let Some(path) = path {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Wait until a private tmux socket has no server behind it.
+///
+/// tmux ends a server when its last session goes, and that shutdown is not
+/// instantaneous. A session created on a socket whose old server is still
+/// exiting lands on a server that is about to die, and the next command on it
+/// fails with `no server running` — an intermittent failure that looks like a
+/// product bug and is not one. Settle first, then reconstruct.
+pub fn wait_for_tmux_server_gone(socket: &str) {
+    for _ in 0..100 {
+        let alive = std::process::Command::new("tmux")
+            .args(["-L", socket, "list-sessions"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("tmux server on socket {socket} was still running 5s after its last session closed");
+}

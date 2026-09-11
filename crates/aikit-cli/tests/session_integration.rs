@@ -1,6 +1,8 @@
 //! Session commands must drive the installed multiplexer, not return a plausible
 //! no-op. These tests use a private real tmux server and the real AIKit binary.
 
+mod common;
+
 use std::fs;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -139,7 +141,7 @@ impl PrivateTmux {
 
 impl Drop for PrivateTmux {
     fn drop(&mut self) {
-        let _ = self.command(&["kill-server"]);
+        common::end_tmux_server(&self.0);
     }
 }
 
