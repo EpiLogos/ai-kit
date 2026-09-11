@@ -1,5 +1,7 @@
 //! The real `mux install` command owns the binding all the way to live tmux.
 
+mod common;
+
 use std::fs;
 #[cfg(target_os = "macos")]
 use std::io::{Read, Write};
@@ -141,9 +143,7 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .args(["-L", &self.socket, "kill-server"])
-            .output();
+        common::end_tmux_server(&self.socket);
     }
 }
 

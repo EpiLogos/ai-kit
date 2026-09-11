@@ -22,8 +22,8 @@ jobs:
     timeout-minutes: 30
     env:
       ACTUATION_SHA: 0ac4bbb47cc37a7ac3c1db42b88a39ffd6bb5b30
-      CENTRAL_SHA: b3837ee55d95037016cfb873713cbb7c644d6b27
-      WORKCELL_SHA: 844d17282524d75d153f3704d088d121dc32b814
+      CENTRAL_SHA: 5d1b8bf6692f9aca45b2fe39db54cbc378dda70e
+      WORKCELL_SHA: 0187b0d76e8f27632d127d54ef2441310b073108
     steps:
       - uses: actions/checkout@v4
       - name: Retain exact source under test

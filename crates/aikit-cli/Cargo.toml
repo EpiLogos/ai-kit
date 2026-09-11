@@ -12,6 +12,7 @@ name = "aikit"
 path = "src/main.rs"
 
 [dependencies]
+base64 = { workspace = true }
 aikit-core = { workspace = true }
 aikit-store = { workspace = true }
 aikit-adapters = { workspace = true }

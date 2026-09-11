@@ -570,6 +570,8 @@ impl<'a> KnowledgeApplication<'a> {
                         Self::unmaterialised_cited_source(source, &citing)
                     }
                 })?;
+                let live = binding.provider.read(source)?;
+                let material = live.as_ref().unwrap_or(material);
                 Ok(KnowledgeReading {
                     resource: ResourceRef::parse(source.as_str())?,
                     provider: Some(binding.provider.status().provider),

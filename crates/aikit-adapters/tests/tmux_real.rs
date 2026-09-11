@@ -99,37 +99,12 @@ impl Drop for PrivateServer {
     fn drop(&mut self) {
         // Runs during unwind too, which is the point: a failing test must not
         // leave a tmux server and a pile of `sleep`s running.
-        let _ = std::process::Command::new("tmux")
-            .args(["-L", &self.socket, "kill-server"])
-            .output();
-        // tmux leaves the socket inode behind after the server exits. The names
-        // are unique per run, so a stale one is harmless — but a few dozen of
-        // them per test run is litter in somebody's /tmp.
-        if let Some(path) = socket_path(&self.socket) {
-            let _ = std::fs::remove_file(path);
-        }
+        common::end_tmux_server(&self.socket);
     }
 }
 
 /// Where tmux puts a named socket, which is `$TMUX_TMPDIR` or `/tmp` plus
 /// `tmux-<uid>`.
-fn socket_path(socket: &str) -> Option<PathBuf> {
-    let base = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
-    let uid = String::from_utf8(
-        std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .ok()?
-            .stdout,
-    )
-    .ok()?;
-    Some(
-        PathBuf::from(base)
-            .join(format!("tmux-{}", uid.trim()))
-            .join(socket),
-    )
-}
-
 fn identity() -> SessionIdentity {
     SessionIdentity {
         session_id: Some(SessionId::parse("ses_REALTMUX00000000000000").unwrap()),

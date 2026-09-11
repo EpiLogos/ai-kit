@@ -65,6 +65,8 @@ use aikit_adapters::factory_developmental::{
 };
 use aikit_adapters::runner::SystemRunner;
 
+use aikit_core::working_environment::WorkingEnvironmentObservation;
+use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
 use aikit_tui::backend::{
     ClientEffect, FactoryWorkEntry, FactoryWorkStartReceipt, JobOutput, PaletteBackend, Projected,
     PromotionDraft, RunIntent, Toggle,
@@ -260,6 +262,28 @@ pub struct Service {
     /// application. This is an ephemeral read cache, not an AIKit Factory
     /// store; restarting re-observes through the configured owner binding.
     factory_started_resources: Option<Vec<aikit_core::resource::ResourceRecord>>,
+    /// Working-environment observation cache.
+    ///
+    /// Observing a mux runs real subprocesses. Contextual Actions are loaded on
+    /// every selection change, so an un-cached observation here would put a
+    /// `tmux list-sessions` behind every arrow key — the exact shape of the
+    /// input-responsiveness defect. Observe once, and re-observe only after an
+    /// operation this application performed changed the host.
+    working_environments: std::cell::RefCell<Option<Vec<WorkingEnvironmentObservation>>>,
+    /// Cached installation-health reading. `doctor::run` spawns `actuation`
+    /// several times (detection plus a capability probe per harness) and asks
+    /// the gateway socket, so an un-cached run would put all of that behind
+    /// every world-changing action. Health does not shift under ordinary
+    /// navigation, so it is observed once per session and reused.
+    doctor_report: std::cell::RefCell<Option<aikit_core::doctor_world::DoctorDisclosure>>,
+    /// Cached Workcell reading. Observing it spawns the external `workcell`
+    /// binary; like the health reading, it does not shift under ordinary
+    /// navigation, so it is observed once per session and reused.
+    workcell_reading: std::cell::RefCell<Option<aikit_core::workcell_world::WorkcellDisclosure>>,
+    /// Cached Model roster. Composing it runs the same detection+join the
+    /// compose path does; it is fetched on demand (roster overlay open), so one
+    /// composition per session is reused rather than recomputed on each open.
+    model_roster_reading: std::cell::RefCell<Option<aikit_core::resource::ModelRoster>>,
 }
 
 impl Service {
@@ -397,6 +421,10 @@ impl Service {
             factory_project_ref,
             factory_request_file,
             factory_started_resources: None,
+            working_environments: std::cell::RefCell::new(None),
+            doctor_report: std::cell::RefCell::new(None),
+            workcell_reading: std::cell::RefCell::new(None),
+            model_roster_reading: std::cell::RefCell::new(None),
         })
     }
 
@@ -2448,6 +2476,7 @@ impl AikitApplication for Service {
     }
 
     fn apply(&mut self, r: ApplyRequest) -> Result<AppliedGeneration> {
+        crate::skill_sources::validate_central_generations(&self.home)?;
         // 1. Persist the declaration to the scope's file, so the change survives
         //    the process and a later resolve reads it back.
         if !r.toggles.is_empty() {
@@ -2499,13 +2528,17 @@ impl AikitApplication for Service {
             ))
             .build(&context_dir, &view, &plans)?;
         self.prepare_codex_project_link(&context_dir)?;
+        crate::skill_sources::validate_central_generations(&self.home)?;
         let committed = staged.commit(base.as_ref())?;
+        let mut warnings = self.view.warnings.clone();
+        warnings.extend(crate::skill_sources::report_central_generation(
+            &self.home, &committed.id.to_string(), &committed.path));
         let effects = self.client_effects(&self.view);
 
         Ok(AppliedGeneration {
             id: committed.id,
             replaced: committed.replaced,
-            warnings: self.view.warnings.clone(),
+            warnings,
             effects,
         })
     }
@@ -2647,6 +2680,50 @@ fn create_directory_link(target: &Path, link: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 impl PaletteBackend for Service {
+    /// The host's terminal working environments, observed over this Service's
+    /// own session plan.
+    ///
+    /// `Some` because this boundary *did* look — an empty vector is the
+    /// truthful "no mux is installed here", not "nobody checked". A plan that
+    /// cannot be compiled is the one case that answers `None`: without a plan
+    /// there is nothing to observe over, and claiming an empty host would be a
+    /// second lie on top of the first.
+    fn working_environments(&self) -> Result<Option<Vec<WorkingEnvironmentObservation>>> {
+        if let Some(cached) = self.working_environments.borrow().as_ref() {
+            return Ok(Some(cached.clone()));
+        }
+        let Ok(plan) = self.session_plan(None) else {
+            return Ok(None);
+        };
+        let observed = crate::working_environment_field::observe(&plan)?;
+        *self.working_environments.borrow_mut() = Some(observed.clone());
+        Ok(Some(observed))
+    }
+
+    fn working_environment_subjects(&self) -> Result<Vec<aikit_core::resource::ResourceRef>> {
+        let Ok(plan) = self.session_plan(None) else {
+            return Ok(Vec::new());
+        };
+        Ok(crate::working_environment_field::plan_surfaces(&plan)
+            .into_iter()
+            .map(|(surface, _)| surface)
+            .collect())
+    }
+
+    fn act_in_working_environment(
+        &mut self,
+        provider: &aikit_core::resource::ResourceRef,
+        subject: &aikit_core::resource::ResourceRef,
+        operation: WorkingEnvironmentOperation,
+    ) -> Result<WorkingEnvironmentOutcome> {
+        let plan = self.session_plan(None)?;
+        let outcome = crate::working_environment_field::act(&plan, provider, subject, operation)?;
+        // The host may have changed under us; the next reading must come from
+        // the machine rather than from what it looked like before we acted.
+        *self.working_environments.borrow_mut() = None;
+        Ok(outcome)
+    }
+
     fn context_resource_records(&self) -> Result<Vec<aikit_core::resource::ResourceRecord>> {
         let Some(project) = self.descriptor.project_root.as_deref() else {
             return Ok(Vec::new());
@@ -2808,6 +2885,205 @@ impl PaletteBackend for Service {
             Err(error) if error.code() == "versioned_world.git_failed" => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// Compose the credential/provider reading for this world.
+    ///
+    /// This is the layer that *can* look, and it is the producer #239 shipped
+    /// the surface for without ever wiring: `aikit-core` is I/O-free and
+    /// `aikit-tui` does not depend on the crates that reach the OS secure store,
+    /// so the disclosure has to be composed here and handed over.
+    ///
+    /// Requirements come straight from the world's resolved Model routes — the
+    /// credentials those routes declare a need for. A route's credential
+    /// condition is fixed by the catalogue's declared need joined against
+    /// recorded bindings; it does not depend on whether the route was observed
+    /// on this machine, so this reuses the exact catalogue↔binding join the
+    /// compose path uses, with no observed or reachable evidence, rather than
+    /// spawning live detection just to read what a credential is *for*.
+    ///
+    /// The roster is observed against the same OS secure store the CLI's own
+    /// `credential setup` uses. The three absences the disclosure exists to
+    /// keep apart stay apart: an unreadable binding store is a `Unknown` roster
+    /// carrying its reason; a readable store with no matching binding is an
+    /// `Observed` roster whose credential resolves to no provider (a real "no");
+    /// and a world whose routes declare no credential need yields an observed,
+    /// empty requirement set (`none required`), never a fabricated one.
+    fn credential_world(
+        &self,
+    ) -> Result<Option<aikit_core::credential_world::CredentialWorldDisclosure>> {
+        use aikit_core::credential_world::{
+            credential_requirements_for_model_routes, disclose_credential_world,
+            ProviderRosterKnowledge,
+        };
+
+        let (catalogue, _notes) = aikit_store::model_catalogue::resolved_catalogue(&self.home);
+        let bindings = aikit_store::credentials::CredentialBindingStore::new(&self.home).list();
+        let (credentials, roster_unreadable) = match &bindings {
+            Ok(list) => (
+                aikit_adapters::actuation_model_routes::CredentialEvidence::from_binding_refs(
+                    list.iter()
+                        .filter(|binding| !binding.revoked)
+                        .map(|binding| binding.credential_ref.as_str().to_string()),
+                ),
+                None,
+            ),
+            // The binding store could not be read at all: the roster is
+            // genuinely unknown, not empty. Requirements are still derived (they
+            // come from the catalogue, not the store) so the world can say what
+            // it needs while honestly reporting that nothing was resolved.
+            Err(error) => (
+                aikit_adapters::actuation_model_routes::CredentialEvidence::default(),
+                Some(format!("credential binding store is unreadable: {error}")),
+            ),
+        };
+
+        let join = aikit_adapters::actuation_model_routes::join_model_routes_with_reach(
+            &catalogue,
+            &[],
+            &[],
+            &credentials,
+        );
+        let requirements = credential_requirements_for_model_routes(&join.route_sets);
+
+        let roster = match roster_unreadable {
+            Some(reason) => ProviderRosterKnowledge::Unknown { reason },
+            None => observe_credential_roster(&self.home, &requirements)?,
+        };
+
+        // Headless and no env import: a world reading observes bound state, it
+        // never prompts and never imports a secret from the ambient environment
+        // just because a matching variable happens to exist.
+        Ok(Some(disclose_credential_world(
+            roster,
+            &requirements,
+            true,
+            false,
+        )))
+    }
+
+    /// Run the installation-health checks and project them as an owned
+    /// disclosure the TUI can render.
+    ///
+    /// `doctor::run` is the same health surface `aikit doctor` prints; it is the
+    /// layer that *can* look (probing the OS secure store, harness config, the
+    /// gateway socket and the registries), and this is where its findings are
+    /// turned into the I/O-free read model the System pane consumes. Findings
+    /// are mapped one-for-one; the fix a finding might carry is reduced to a
+    /// `fixable` flag, because a Procedure is a CLI-owned mutation that has no
+    /// place in a read model.
+    ///
+    /// Cached per session: the checks spawn `actuation` several times and ask
+    /// the gateway socket, and health does not shift under ordinary navigation,
+    /// so running them behind every world-changing action would be the
+    /// input-responsiveness defect all over again.
+    fn doctor_world(&self) -> Result<Option<aikit_core::doctor_world::DoctorDisclosure>> {
+        use aikit_core::doctor_world::{DoctorDisclosure, DoctorFinding, DoctorSeverity};
+
+        if let Some(cached) = self.doctor_report.borrow().as_ref() {
+            return Ok(Some(cached.clone()));
+        }
+
+        let findings = crate::doctor::run(self)?
+            .into_iter()
+            .map(|finding| DoctorFinding {
+                check: finding.check.to_string(),
+                severity: match finding.severity {
+                    crate::doctor::Severity::Error => DoctorSeverity::Error,
+                    crate::doctor::Severity::Warning => DoctorSeverity::Warning,
+                    crate::doctor::Severity::Note => DoctorSeverity::Note,
+                },
+                summary: finding.summary,
+                detail: finding.detail,
+                fixable: finding.fix.is_some(),
+            })
+            .collect();
+
+        let disclosure = DoctorDisclosure::observed(findings);
+        *self.doctor_report.borrow_mut() = Some(disclosure.clone());
+        Ok(Some(disclosure))
+    }
+
+    /// Observe Workcell over its external binary and project the registry as an
+    /// owned disclosure.
+    ///
+    /// Reuses `intake_workcell_instances` — the observer that already runs
+    /// `workcell instances list --json` and keeps "no registry readable"
+    /// (`Unavailable`) apart from "registry read, nothing in it" (`Records`
+    /// empty) — which had no production caller until now. Its `Records` /
+    /// `Unavailable` split maps straight onto the disclosure's `Observed` /
+    /// `Unavailable` arms; only identity and observed liveness cross the
+    /// boundary. Cached per session for the same reason as the health reading.
+    fn workcell_world(&self) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
+        use aikit_adapters::workcell_instance_intake::{intake_workcell_instances, InstancesOutcome};
+        use aikit_core::workcell_world::{WorkcellDisclosure, WorkcellInstanceDisclosure};
+
+        if let Some(cached) = self.workcell_reading.borrow().as_ref() {
+            return Ok(Some(cached.clone()));
+        }
+
+        let disclosure = match intake_workcell_instances(&SystemRunner::new(), "workcell", None) {
+            InstancesOutcome::Records(records) => WorkcellDisclosure::observed(
+                records
+                    .into_iter()
+                    .map(|record| WorkcellInstanceDisclosure {
+                        detected: record.evidence_grade.is_detected(),
+                        live: matches!(
+                            record.liveness,
+                            aikit_adapters::workcell_instance_intake::InstanceLiveness::Live
+                        ),
+                        instance_ref: record.instance_ref,
+                        harness_ref: record.harness_ref,
+                    })
+                    .collect(),
+            ),
+            InstancesOutcome::Unavailable { reason } => WorkcellDisclosure::unavailable(reason),
+        };
+
+        *self.workcell_reading.borrow_mut() = Some(disclosure.clone());
+        Ok(Some(disclosure))
+    }
+
+    /// Compose the ranked Model roster the palette's roster overlay renders.
+    ///
+    /// Reuses the compose path's resolved `model_routes` (catalogue joined
+    /// against live route observation) — the same route sets `realise_model`
+    /// selects from — and ranks their viable `(model, route)` candidates through
+    /// the shared `rank_model_roster`. A context with no Project has nothing to
+    /// compose over, so it answers `None` rather than an empty roster that would
+    /// read as "no models". Cached per session.
+    fn model_roster(&self) -> Result<Option<aikit_core::resource::ModelRoster>> {
+        use aikit_core::resource::{
+            candidates_from_routes, rank_model_roster, ModelRankingPolicy, ModelRouteSet,
+        };
+
+        if self.descriptor.project_root.is_none() {
+            return Ok(None);
+        }
+        if let Some(cached) = self.model_roster_reading.borrow().as_ref() {
+            return Ok(Some(cached.clone()));
+        }
+
+        let composed = self.compose_plan()?;
+        let route_sets: Vec<ModelRouteSet> =
+            serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
+                .map_err(|error| {
+                    AikitError::new("model_roster.route_sets_unreadable", error.to_string())
+                })?;
+
+        let mut candidates = Vec::new();
+        for set in &route_sets {
+            let base = model_roster_candidate_for(&set.model);
+            candidates.extend(candidates_from_routes(set, &base));
+        }
+        let roster = rank_model_roster(
+            model_roster_demand(),
+            ModelRankingPolicy::Balanced,
+            candidates,
+        );
+
+        *self.model_roster_reading.borrow_mut() = Some(roster.clone());
+        Ok(Some(roster))
     }
 
     fn context(&self) -> &ContextDescriptor {
@@ -3013,6 +3289,52 @@ impl PaletteBackend for Service {
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
+
+/// Observe the world-level secret-provider roster over the OS secure store,
+/// reusing the same provider the CLI's `credential setup` uses.
+///
+/// This is the I/O half of the credential world. The native store's descriptor
+/// is per-credential — it advertises support for a credential only when a
+/// binding for that exact credential is recorded — so the roster is observed by
+/// probing each required credential's binding and merging the results into one
+/// descriptor whose `supported_credentials` is the set actually bound. That one
+/// descriptor is what `resolve_credential` then checks each requirement against:
+/// a requirement finds it eligible exactly when its credential is bound.
+///
+/// A world whose routes declare no credential need probes nothing and reports an
+/// observed, empty roster — a confirmed "this world needs none", never the
+/// "nobody looked" the disclosure's own `not_attempted` default carries.
+fn observe_credential_roster(
+    home: &AikitHome,
+    requirements: &[aikit_core::credential::SecretRequirement],
+) -> Result<aikit_core::credential_world::ProviderRosterKnowledge> {
+    use aikit_adapters::NativeSecureStoreProvider;
+    use aikit_core::credential::{SecretProvider, SecretProviderDescriptor};
+    use aikit_core::credential_world::ProviderRosterKnowledge;
+    use std::collections::BTreeSet;
+
+    let store = aikit_store::credentials::CredentialBindingStore::new(home);
+    let mut supported = BTreeSet::new();
+    let mut descriptor: Option<SecretProviderDescriptor> = None;
+
+    for requirement in requirements {
+        let binding = store.load(&requirement.credential_ref)?;
+        let native = NativeSecureStoreProvider::with_binding(binding.as_ref());
+        let observed = native.descriptor(&requirement.credential_ref);
+        supported.extend(observed.supported_credentials.iter().cloned());
+        descriptor.get_or_insert(observed);
+    }
+
+    let providers = match descriptor {
+        Some(mut native) => {
+            native.supported_credentials = supported;
+            vec![native]
+        }
+        None => Vec::new(),
+    };
+
+    Ok(ProviderRosterKnowledge::Observed { providers })
+}
 
 /// Load every registry under the home plus the project-local `.aikit/` registry,
 /// project-local last so it shadows the personal registries — which is exactly
