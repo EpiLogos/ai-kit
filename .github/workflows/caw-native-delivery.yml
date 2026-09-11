@@ -88,6 +88,9 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked -p aikit-cli --test caw_native_delivery -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/native.log"
+          grep -q MODEL_SELECTED_NATIVE_RESPONSE_EXECUTED "$RUNNER_TEMP/caw-evidence/native.log"
+          grep -q MODEL_APPLICATION_NATIVE_CONNECTION_EXECUTED "$RUNNER_TEMP/caw-evidence/native.log"
+          grep -q MODEL_COMPOSE_NATIVE_CONNECTION_EXECUTED "$RUNNER_TEMP/caw-evidence/native.log"
       - name: Native Central allocation to Workcell protection preparation
         shell: bash
         run: |
