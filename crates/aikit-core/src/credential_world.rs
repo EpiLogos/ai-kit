@@ -56,6 +56,7 @@ use crate::credential::{
     SecretProviderDescriptor, SecretProviderRef, SecretProviderTier, SecretRequirement,
     SecretRequirementRef,
 };
+use crate::resource::{CredentialCondition, ModelRouteSet};
 
 pub const CREDENTIAL_WORLD_VERSION: &str = "aikit.credential-world/v1";
 
@@ -321,6 +322,104 @@ pub fn disclose_credential_world(
     }
 }
 
+/// The consumer identity recorded on a requirement derived from Model routes:
+/// the world's model-routing consumer, not any one Model or provider.
+const MODEL_ROUTE_CREDENTIAL_CONSUMER: &str = "aikit:model-routes";
+
+/// Derive the credential requirements a world declares, read straight from its
+/// resolved Model routes.
+///
+/// This is the requirements half of the credential world and it invents
+/// nothing. A requirement exists for exactly those providers whose resolved
+/// routes declare a credential need (`Required` or `Satisfied`); a route that
+/// needs none (`NotRequired`, e.g. a local Ollama serving) contributes
+/// nothing. The credential's identity is read from the route itself — the
+/// actual bound `binding_ref` when one is recorded, or the provider it belongs
+/// to when no binding names it yet.
+///
+/// One requirement per provider: several catalogued Models reaching the same
+/// provider share one credential, so they collapse to one requirement rather
+/// than multiplying it. A `Satisfied` route's real bound identity is preferred
+/// over the synthesized one if both are seen for a provider. Ordering is
+/// deterministic, keyed by provider.
+///
+/// A route's credential condition is fixed by the catalogue's declared need
+/// joined against recorded bindings; it does not depend on whether the route
+/// was observed on this machine. So this derivation is a pure read over
+/// already-resolved routes — the same property that lets `disclose_project_world`
+/// stay I/O-free.
+pub fn credential_requirements_for_model_routes(
+    routes: &[ModelRouteSet],
+) -> Vec<SecretRequirement> {
+    // provider ref -> (credential_ref, purpose hint, identity is a real binding).
+    let mut by_provider: BTreeMap<String, (CredentialRef, String, bool)> = BTreeMap::new();
+
+    for set in routes {
+        for route in &set.routes {
+            let (hint, binding_ref) = match &route.credential {
+                CredentialCondition::NotRequired => continue,
+                CredentialCondition::Required { hint } => (hint, None),
+                CredentialCondition::Satisfied { hint, binding_ref } => (hint, Some(binding_ref)),
+            };
+            let provider = route.provider.as_str();
+            let bound = binding_ref.is_some();
+            let credential_ref = match binding_ref {
+                Some(binding_ref) => CredentialRef::new(binding_ref.clone()),
+                None => CredentialRef::new(derived_credential_ref(provider)),
+            };
+            let Ok(credential_ref) = credential_ref else {
+                continue;
+            };
+
+            match by_provider.get_mut(provider) {
+                // A real bound identity supersedes a synthesized one; nothing
+                // else about an already-seen provider changes.
+                Some(existing) if bound && !existing.2 => {
+                    existing.0 = credential_ref;
+                    existing.2 = true;
+                }
+                Some(_) => {}
+                None => {
+                    by_provider
+                        .insert(provider.to_string(), (credential_ref, hint.clone(), bound));
+                }
+            }
+        }
+    }
+
+    by_provider
+        .into_iter()
+        .filter_map(|(_provider, (credential_ref, hint, _))| {
+            let requirement_ref = SecretRequirementRef::new(format!(
+                "secret-requirement:{}",
+                credential_ref.as_str()
+            ))
+            .ok()?;
+            Some(SecretRequirement {
+                requirement_ref,
+                credential_ref,
+                consumer_ref: MODEL_ROUTE_CREDENTIAL_CONSUMER.to_string(),
+                purpose: hint,
+                permitted_materialisation: [
+                    SecretMaterialisationClass::ProviderNativeLease,
+                    SecretMaterialisationClass::ProcessEnv,
+                ]
+                .into_iter()
+                .collect(),
+            })
+        })
+        .collect()
+}
+
+/// The credential identity to use for a route whose provider needs a credential
+/// but has no binding naming one yet. Keyed to the provider so it stays stable
+/// and readable (`provider:openai` -> `credential:openai`); the exact ref does
+/// not affect the outcome, which is a genuine "no binding" either way.
+fn derived_credential_ref(provider: &str) -> String {
+    let vendor = provider.strip_prefix("provider:").unwrap_or(provider);
+    format!("credential:{vendor}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,5 +671,156 @@ mod tests {
         assert!(!json.contains(raw_secret));
         assert!(json.contains("credential:openai"));
         assert!(json.contains("provider:keychain"));
+    }
+
+    use crate::resource::{
+        ModelRoute, ModelRouteKind, ProviderRef, ResourceRef, RouteAvailability,
+    };
+
+    fn route(model: &str, provider: &str, credential: CredentialCondition) -> ModelRoute {
+        ModelRoute {
+            model: ResourceRef::parse(model).unwrap(),
+            provider: ProviderRef::parse(provider).unwrap(),
+            kind: ModelRouteKind::ProviderNative,
+            provider_native_id: "native-id".into(),
+            endpoint: None,
+            availability: RouteAvailability::Unobserved {
+                reason: "declared by the catalogue; no provider observed it".into(),
+            },
+            credential,
+            provenance: Vec::new(),
+        }
+    }
+
+    fn set_with(model: &str, routes: Vec<ModelRoute>) -> ModelRouteSet {
+        let mut set = ModelRouteSet::new(ResourceRef::parse(model).unwrap());
+        set.routes = routes;
+        set
+    }
+
+    #[test]
+    fn a_route_that_needs_no_credential_declares_no_requirement() {
+        let routes = vec![set_with(
+            "model:local",
+            vec![route("model:local", "provider:ollama", CredentialCondition::NotRequired)],
+        )];
+        assert!(credential_requirements_for_model_routes(&routes).is_empty());
+    }
+
+    #[test]
+    fn a_required_route_declares_a_requirement_keyed_to_its_provider() {
+        let routes = vec![set_with(
+            "model:hosted",
+            vec![route(
+                "model:hosted",
+                "provider:openai",
+                CredentialCondition::Required {
+                    hint: "provider:openai inference credential".into(),
+                },
+            )],
+        )];
+        let requirements = credential_requirements_for_model_routes(&routes);
+        assert_eq!(requirements.len(), 1);
+        assert_eq!(requirements[0].credential_ref.as_str(), "credential:openai");
+        assert_eq!(
+            requirements[0].requirement_ref.as_str(),
+            "secret-requirement:credential:openai"
+        );
+        assert_eq!(requirements[0].purpose, "provider:openai inference credential");
+    }
+
+    #[test]
+    fn a_satisfied_route_carries_the_real_bound_credential_identity() {
+        let routes = vec![set_with(
+            "model:hosted",
+            vec![route(
+                "model:hosted",
+                "provider:openai",
+                CredentialCondition::Satisfied {
+                    hint: "provider:openai inference credential".into(),
+                    binding_ref: "credential:openai/api-key".into(),
+                },
+            )],
+        )];
+        let requirements = credential_requirements_for_model_routes(&routes);
+        assert_eq!(requirements.len(), 1);
+        // The real bound ref, not a synthesized `credential:openai` — a
+        // requirement resolved against the roster must match what is actually
+        // bound in the store, and only the binding_ref names that.
+        assert_eq!(
+            requirements[0].credential_ref.as_str(),
+            "credential:openai/api-key"
+        );
+    }
+
+    #[test]
+    fn many_models_sharing_a_provider_collapse_to_one_requirement() {
+        let routes = vec![
+            set_with(
+                "model:a",
+                vec![route(
+                    "model:a",
+                    "provider:openai",
+                    CredentialCondition::Required { hint: "openai".into() },
+                )],
+            ),
+            set_with(
+                "model:b",
+                vec![route(
+                    "model:b",
+                    "provider:openai",
+                    CredentialCondition::Required { hint: "openai".into() },
+                )],
+            ),
+            set_with(
+                "model:c",
+                vec![route(
+                    "model:c",
+                    "provider:anthropic",
+                    CredentialCondition::Required { hint: "anthropic".into() },
+                )],
+            ),
+        ];
+        let requirements = credential_requirements_for_model_routes(&routes);
+        // openai and anthropic — one each, not one per model.
+        assert_eq!(requirements.len(), 2);
+        let refs: Vec<&str> = requirements
+            .iter()
+            .map(|r| r.credential_ref.as_str())
+            .collect();
+        assert_eq!(refs, vec!["credential:anthropic", "credential:openai"]);
+    }
+
+    #[test]
+    fn a_bound_route_upgrades_a_providers_synthesized_identity() {
+        // The same provider seen first as Required (synthesized ref) then as
+        // Satisfied (real bound ref): the requirement carries the real one.
+        let routes = vec![
+            set_with(
+                "model:a",
+                vec![route(
+                    "model:a",
+                    "provider:openai",
+                    CredentialCondition::Required { hint: "openai".into() },
+                )],
+            ),
+            set_with(
+                "model:b",
+                vec![route(
+                    "model:b",
+                    "provider:openai",
+                    CredentialCondition::Satisfied {
+                        hint: "openai".into(),
+                        binding_ref: "credential:openai/api-key".into(),
+                    },
+                )],
+            ),
+        ];
+        let requirements = credential_requirements_for_model_routes(&routes);
+        assert_eq!(requirements.len(), 1);
+        assert_eq!(
+            requirements[0].credential_ref.as_str(),
+            "credential:openai/api-key"
+        );
     }
 }

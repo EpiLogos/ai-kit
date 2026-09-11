@@ -125,6 +125,22 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
         )),
     }
 
+    // The credential/provider reading, when the backend can compose one. Same
+    // shape as versioned material: a producer that *can* observe the OS secure
+    // store and the world's bindings hands a composed disclosure over; a
+    // backend with none attached answers `None` and the reading keeps its
+    // honest `not_attempted` default. A producer that ran but failed becomes a
+    // warning rather than a clean-looking absence, because "we could not read
+    // credentials" is a different fact from "this world needs none".
+    match backend.credential_world() {
+        Ok(Some(disclosure)) => world = world.with_credential_world(disclosure),
+        Ok(None) => {}
+        Err(error) => world.warnings.push(format!(
+            "credential/provider status could not be observed for this world: {}",
+            error.message()
+        )),
+    }
+
     if backend.scope_layers().is_none() {
         world.warnings.push(
             "Project-world basis does not include the ordered scope-layer stack because this application-service boundary does not expose it; scope provenance is not reconstructed from partial evidence"
@@ -153,6 +169,9 @@ mod tests {
         /// What this backend can observe about versioned material: nothing,
         /// an observation, or a provider that fell over.
         versioned: VersionedAnswer,
+        /// What this backend can compose about credentials: nothing, an
+        /// observation, or a producer that fell over.
+        credential: CredentialAnswer,
     }
 
     #[derive(Default)]
@@ -160,6 +179,14 @@ mod tests {
         #[default]
         Nothing,
         Observed(Box<aikit_core::resource::VersionedProjectWorld>),
+        Failed,
+    }
+
+    #[derive(Default)]
+    enum CredentialAnswer {
+        #[default]
+        Nothing,
+        Observed(Box<aikit_core::credential_world::CredentialWorldDisclosure>),
         Failed,
     }
 
@@ -173,6 +200,19 @@ mod tests {
                 VersionedAnswer::Failed => Err(aikit_core::AikitError::new(
                     "versioned_world.git_spawn_failed",
                     "failed to invoke git",
+                )),
+            }
+        }
+
+        fn credential_world(
+            &self,
+        ) -> Result<Option<aikit_core::credential_world::CredentialWorldDisclosure>> {
+            match &self.credential {
+                CredentialAnswer::Nothing => Ok(None),
+                CredentialAnswer::Observed(disclosure) => Ok(Some(disclosure.as_ref().clone())),
+                CredentialAnswer::Failed => Err(aikit_core::AikitError::new(
+                    "credential_world.probe_failed",
+                    "failed to observe the secret provider roster",
                 )),
             }
         }
@@ -246,6 +286,7 @@ mod tests {
             view,
             layers: Some(Vec::new()),
             versioned: VersionedAnswer::Nothing,
+            credential: CredentialAnswer::Nothing,
         };
 
         let resolution = context_resolution(&backend).unwrap();
@@ -266,6 +307,7 @@ mod tests {
             view,
             layers: None,
             versioned: VersionedAnswer::Nothing,
+            credential: CredentialAnswer::Nothing,
         };
 
         let world = project_world(&backend).unwrap();
@@ -292,6 +334,7 @@ mod tests {
             view,
             layers: Some(layers),
             versioned: VersionedAnswer::Nothing,
+            credential: CredentialAnswer::Nothing,
         };
 
         let world = project_world(&backend).unwrap();
@@ -347,6 +390,7 @@ mod tests {
             view,
             layers: Some(Vec::new()),
             versioned,
+            credential: CredentialAnswer::Nothing,
         })
         .unwrap()
     }
@@ -405,6 +449,67 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| w.contains("does not belong to this Project")),
+            "{:?}",
+            world.warnings
+        );
+    }
+
+    fn credential_world_from(
+        credential: CredentialAnswer,
+    ) -> aikit_core::ProjectWorldReadModel {
+        let mut context = ContextDescriptor::for_project("/work/aikit");
+        context.host = "test-host".into();
+        let view = resolved(&context, Vec::new());
+        project_world(&Backend {
+            context,
+            view,
+            layers: Some(Vec::new()),
+            versioned: VersionedAnswer::Nothing,
+            credential,
+        })
+        .unwrap()
+    }
+
+    /// A disclosure the backend composes reaches the reading the System pane
+    /// renders. Before this wiring nobody attached a producer, so the reading
+    /// carried the `not_attempted` default no matter what was bound.
+    #[test]
+    fn a_composed_credential_reading_reaches_the_reading() {
+        use aikit_core::credential_world::{
+            disclose_credential_world, ProviderRosterKnowledge,
+        };
+        let disclosure = disclose_credential_world(
+            ProviderRosterKnowledge::Observed { providers: vec![] },
+            &[],
+            true,
+            false,
+        );
+        let world = credential_world_from(CredentialAnswer::Observed(Box::new(disclosure)));
+        // Observed roster, not the `Unknown` the default carries.
+        assert!(world.credential_world.providers.is_known());
+        assert!(world.warnings.iter().all(|w| !w.contains("credential")));
+    }
+
+    /// A backend with no credential producer leaves the honest `not_attempted`
+    /// default in place — "nobody looked", distinct from any observed state.
+    #[test]
+    fn no_credential_producer_leaves_the_not_attempted_default() {
+        let world = credential_world_from(CredentialAnswer::Nothing);
+        assert!(!world.credential_world.providers.is_known());
+        assert!(world.warnings.iter().all(|w| !w.contains("credential")));
+    }
+
+    /// A producer that ran and failed is disclosed as a warning, never folded
+    /// into the same absence as "this world needs no credentials".
+    #[test]
+    fn a_credential_producer_that_failed_is_disclosed_rather_than_read_as_absence() {
+        let world = credential_world_from(CredentialAnswer::Failed);
+        assert!(!world.credential_world.providers.is_known());
+        assert!(
+            world
+                .warnings
+                .iter()
+                .any(|w| w.contains("credential/provider status could not be observed")),
             "{:?}",
             world.warnings
         );
