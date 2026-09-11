@@ -140,7 +140,9 @@ impl MaterialBinding {
             return Err(error("Native storage is not the exact admitted NOW directory and required attachment"));
         }
         for service in &self.host.required_services {
-            if bindings.iter().filter(|b| b["port"] == "service" && b["logical_ref"] == json!(service)
+            // Workcell's binding role is connectivity:<service>; the native
+            // requested logical service is retained separately in properties.
+            if bindings.iter().filter(|b| b["port"] == "service" && b["properties"]["logical_ref"] == json!(service)
                 && b["necessity"] == "required" && b["presence"] == "present" && b["health"] == "healthy").count() != 1 {
                 return Err(error("Required native service was not actually prepared"));
             }
