@@ -75,7 +75,21 @@ impl World {
         while !self.socket.exists() { assert!(Instant::now()<deadline); std::thread::sleep(Duration::from_millis(20)); }
     }
     fn open(&self,record:&Value,cwd:&Path)->Value { self.request(json!({"action":"open","space":"session-space/task","agent_session":"agent-session/task","provider":record["launcher"]["id"],"cwd":cwd})) }
-    fn send(&self,id:&str)->Value { self.request(json!({"action":"send","agent_session":"agent-session/task","turn":{"delivery_ref":format!("delivery/{id}"),"sender":"agent:sender","expected_binding_revision":"rev/1","packet":{"text":"Do the bounded native test","source_refs":["source/shared"],"audience":["agent:existing-1"]}}})) }
+    fn expected_task(&self)->Value {
+        let record=self.cli(&["encounter-task-read".into(),"--agent-session".into(),"agent-session/task".into()]);
+        let source=fs::read(self.root.join("agency.json")).unwrap();
+        json!({"revision":record["revision"],"task_ref":record["request"]["central"]["task_ref"],
+            "now_ref":record["allocation"]["allocation"]["now_ref"],"now_revision":record["allocation"]["allocation"]["revision"]["revision"],
+            "policy_revision":record["allocation"]["allocation"]["policy"]["revision"],"cwd":record["request"]["cwd"],
+            "agent_ref":"agent:existing-1","agency_ref":"agency:project:delegation","world_binding_ref":"binding:project:delegation",
+            "source_ref":"source/agency","source_revision":"source/1","source_digest":format!("blake3:{}",blake3::hash(&source).to_hex())})
+    }
+    fn send_expected(&self,id:&str,expected:Value)->Value {
+        self.request(json!({"action":"send","agent_session":"agent-session/task","turn":{
+            "delivery_ref":format!("delivery/{id}"),"sender":"agent:sender","expected_binding_revision":"rev/1",
+            "expected_task":expected,"packet":{"text":"Do the bounded native test","source_refs":["source/shared"],"audience":["agent:existing-1"]}}}))
+    }
+    fn send(&self,id:&str)->Value { self.send_expected(id,self.expected_task()) }
     fn returned(&self)->Value {
         let end=Instant::now()+Duration::from_secs(15);
         loop { let v=self.request(json!({"action":"delivery","agent_session":"agent-session/task","delivery_ref":"delivery/one"}));
@@ -107,7 +121,14 @@ fn real_task_dispatch_confines_protocol_and_rechecks_source_without_duplicate_wo
     assert_eq!(alternate["ok"],false);
     assert!(!w.root.join("Work/demo/src/protocol.log").exists());
     assert_eq!(w.open(&prepared,&w.root.join("Work/demo/src"))["ok"],true);
+    let before=fs::read(w.root.join("Work/demo/src/protocol.log")).unwrap();
+    for field in ["revision","task_ref","now_ref","now_revision","policy_revision","cwd","agent_ref","agency_ref","world_binding_ref","source_ref","source_revision","source_digest"] {
+        let mut wrong=w.expected_task(); wrong[field]=json!("different/basis");
+        assert_eq!(w.send_expected("one",wrong)["ok"],false,"{field}");
+        assert_eq!(fs::read(w.root.join("Work/demo/src/protocol.log")).unwrap(),before);
+    }
     assert_eq!(w.send("one")["ok"],true); let returned=w.returned();
+    assert_eq!(returned["data"]["request"]["submission"]["turn"]["expected_task"],w.expected_task());
     let evidence:Value=serde_json::from_slice(&fs::read(w.root.join("Work/demo/src/result.json")).unwrap()).unwrap();
     assert_eq!(evidence["denied"],json!([true,true])); assert_eq!(evidence["selected_context"],true);
     assert_eq!(evidence["central_token_present"],false); assert_eq!(evidence["cwd"],json!(w.root.join("Work/demo/src")));
