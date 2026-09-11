@@ -37,6 +37,7 @@ jobs:
           encoded = base64.b64encode(pathlib.Path('scripts/root-world-repair.patch.gz').read_bytes()).decode()
           for old, new in [('LxNhPzuKi0qS8', 'LxNhPzuKiS8'), ('cpVdmNgaz34', 'cpVdmNg34'), ('gatJI+6449', 'gatJI+449')]:
               encoded = encoded.replace(old, new)
+          encoded += 'A'
           payload = gzip.decompress(base64.b64decode(encoded))
           assert hashlib.sha256(payload).hexdigest() == 'f5d739299158c34a82d066767fd8de7e08625d14e976bc9598733c779c1952f4', 'Patch transfer mismatch'
           patch = pathlib.Path(os.environ['RUNNER_TEMP']) / 'root-world-evidence' / 'repair.patch'
