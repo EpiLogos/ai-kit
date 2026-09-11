@@ -403,6 +403,12 @@ pub trait TuiApplicationService {
         Ok(None)
     }
 
+    /// The ranked Model roster, fetched on demand for the roster overlay.
+    /// Navigation-only services that cannot compose one answer `None`.
+    fn model_roster(&mut self) -> Result<Option<aikit_core::resource::ModelRoster>> {
+        Ok(None)
+    }
+
     /// Ask one provider to open the canonical subject in a pane/window of its
     /// own choosing, or to focus the pane it is already bound to.
     ///
@@ -433,6 +439,8 @@ pub enum Overlay {
     Explain,
     CompositionPreview,
     ConfirmApply,
+    /// The ranked Model roster, fetched on demand and shown read-only.
+    ModelRoster,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -511,7 +519,7 @@ impl Default for GraphPresentation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TuiState {
     pub query: String,
     pub read_model: ResourceListReadModel,
@@ -559,6 +567,11 @@ pub struct TuiState {
     /// apart.
     #[serde(default)]
     pub live_field: Option<LiveWorkingField>,
+    /// The ranked Model roster, as last fetched for the roster overlay. `None`
+    /// until the overlay is opened (it is fetched on demand, not on every world
+    /// read).
+    #[serde(default)]
+    pub model_roster: Option<aikit_core::resource::ModelRoster>,
     pub exit_requested: bool,
 }
 
@@ -587,12 +600,13 @@ impl Default for TuiState {
             status: None,
             area: (80, 24),
             live_field: None,
+            model_roster: None,
             exit_requested: false,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
     SetQuery(String),
     SearchFinished(ResourceListReadModel),
@@ -659,6 +673,12 @@ pub enum UiAction {
     /// the honest "nobody looked" state through to presentation rather than
     /// being flattened into an empty field.
     LiveWorkingFieldObserved(Option<LiveWorkingField>),
+    /// Open the Model roster overlay — fetch the ranked roster, then show it.
+    RequestModelRoster,
+    /// The roster was fetched. `None` means the backend could compose none
+    /// (e.g. no Project here); the overlay then says so rather than showing an
+    /// empty roster as if no Models existed.
+    ModelRosterLoaded(Option<Box<aikit_core::resource::ModelRoster>>),
     /// Ask a named provider to open or focus the canonical subject. The
     /// reducer guards the request against the current reading before it
     /// becomes an effect, so a withheld capability never reaches a provider.
@@ -699,9 +719,10 @@ pub enum UiEffect {
         subject: ResourceRef,
         operation: WorkingEnvironmentOperation,
     },
+    LoadModelRoster,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TuiReduction {
     pub state: TuiState,
     pub effects: Vec<UiEffect>,
@@ -751,6 +772,9 @@ impl TuiRuntime {
                 operation,
             } => Ok(UiAction::WorkingEnvironmentActed(
                 service.act_in_working_environment(&provider, &subject, operation)?,
+            )),
+            UiEffect::LoadModelRoster => Ok(UiAction::ModelRosterLoaded(
+                service.model_roster()?.map(Box::new),
             )),
         }
     }
@@ -1131,6 +1155,13 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         }
         UiAction::LiveWorkingFieldObserved(field) => {
             state.live_field = field;
+        }
+        UiAction::RequestModelRoster => {
+            effects.push(UiEffect::LoadModelRoster);
+        }
+        UiAction::ModelRosterLoaded(roster) => {
+            state.model_roster = roster.map(|roster| *roster);
+            state.overlay = Some(Overlay::ModelRoster);
         }
         UiAction::ActInWorkingEnvironment {
             provider,

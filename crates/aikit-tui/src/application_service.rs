@@ -555,6 +555,10 @@ impl TuiApplicationService for ApplicationService<'_> {
             .map(|observations| live_working_field(&observations, &projectable)))
     }
 
+    fn model_roster(&mut self) -> Result<Option<aikit_core::resource::ModelRoster>> {
+        self.backend.model_roster()
+    }
+
     fn act_in_working_environment(
         &mut self,
         provider: &ResourceRef,

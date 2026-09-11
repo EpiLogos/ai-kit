@@ -402,6 +402,16 @@ pub trait PaletteBackend {
         Ok(None)
     }
 
+    /// The ranked Model roster for this world, when the backend can compose one.
+    ///
+    /// Fetched on demand (when the roster overlay is opened), not on every world
+    /// read: building it composes the resolution and joins the catalogue against
+    /// live route observation, which is real work the operator asked for by
+    /// opening the panel. A backend that cannot compose one answers `None`.
+    fn model_roster(&self) -> Result<Option<aikit_core::resource::ModelRoster>> {
+        Ok(None)
+    }
+
     /// The canonical subjects this world can project into a working
     /// environment — the panes the current session plan defines, whether or
     /// not any of them is live yet.

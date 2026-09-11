@@ -305,6 +305,25 @@ fn preview_pane<'a>(
 ) -> Paragraph<'a> {
     let world = reading.map(|reading| reading.world);
     let sep = glyphs.separator();
+    if state.overlay == Some(Overlay::ModelRoster) {
+        let mut lines: Vec<Line> = vec![
+            Line::from(Span::styled("Model roster", theme.heading())),
+            Line::from(""),
+        ];
+        match state.model_roster.as_ref() {
+            Some(roster) => lines.extend(
+                crate::model_roster_matrix(roster, glyphs)
+                    .into_iter()
+                    .map(|line| Line::from(Span::raw(line))),
+            ),
+            None => lines.push(Line::from(Span::raw(
+                "no Model roster is available here (no Project bound)".to_string(),
+            ))),
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Esc returns", theme.staged())));
+        return Paragraph::new(lines).wrap(Wrap { trim: false });
+    }
     if state.overlay == Some(Overlay::ConfirmApply) {
         let summary = state
             .preview

@@ -530,6 +530,9 @@ impl ApplicationSurfaceController {
             };
             return self.dispatch(backend, action);
         }
+        if ctrl && matches!(code, KeyCode::Char('r') | KeyCode::Char('R')) {
+            return self.dispatch(backend, UiAction::RequestModelRoster);
+        }
         if code == KeyCode::Insert || (ctrl && code == KeyCode::Char(' ')) {
             return self.stage_selected(backend);
         }
