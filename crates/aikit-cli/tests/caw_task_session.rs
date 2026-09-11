@@ -130,24 +130,61 @@ fn task_admission_reaches_resident_response_and_reconnect_without_touching_human
     fs::write(&policy_path,changed.to_string()).unwrap();
     assert!(service.apply(serde_json::from_value(later.clone()).unwrap()).is_err());
     assert_eq!(prompts(&log).len(),1);
+    // A still-authorised policy revision invalidates the old resident grant.
+    // Reconnect must replace that one body and run the real admission path,
+    // rather than looping on validation of the stale resident forever.
+    let mut renewed:Value=serde_json::from_slice(&original_policy).unwrap();
+    renewed["lease_seconds"]=json!(601);
+    fs::write(&policy_path,renewed.to_string()).unwrap();
+    assert!(service.apply(serde_json::from_value(later.clone()).unwrap()).is_err());
+    assert!(service.apply(serde_json::from_value(json!({"action":"reconnect","space":space,
+        "agent_session":session,"provider":"joined","cwd":other})).unwrap()).is_err());
+    let readmitted=apply(&service,json!({"action":"reconnect","space":space,"agent_session":session,"provider":"joined","cwd":cwd}));
+    assert_eq!(readmitted["native_session_id"],opened["native_session_id"]);
+    let renewed_binding=durable.last_native_binding(&session).unwrap().unwrap();
+    assert_ne!(renewed_binding["task"]["allocation"]["basis"]["policy_revision"],before["task"]["allocation"]["basis"]["policy_revision"]);
+    assert_eq!(renewed_binding["task"]["allocation"]["basis"]["allocation_ref"],before["task"]["allocation"]["basis"]["allocation_ref"]);
+    assert_eq!(renewed_binding["task"]["binding"]["return_ref"],before["task"]["binding"]["return_ref"]);
+    assert_eq!(apply(&service,turn())["duplicate"],true);
+    assert_eq!(prompts(&log).len(),1);
+    let protocol:Vec<Value>=fs::read_to_string(&log).unwrap().lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(protocol.iter().filter(|row|row["method"]=="initialize").count(),2);
+    assert_eq!(protocol.iter().filter(|row|row["method"]=="session/new").count(),1);
+    assert_eq!(protocol.iter().filter(|row|row["method"]=="session/load").count(),1);
+    apply(&service,later.clone());
+    assert_eq!(returned(&service,"delivery/later")["phase"],"returned");
+    assert_eq!(prompts(&log).len(),2);
+    later["turn"]["delivery_ref"]=json!("delivery/after-owner-restart");
     fs::write(&policy_path,&original_policy).unwrap();
     apply(&service,json!({"action":"shutdown","expected_pid":std::process::id()}));drop(service);
     let restarted=EncounterService::new(home.clone()).unwrap();
     let reopened=apply(&restarted,json!({"action":"reconnect","space":space,"agent_session":session,"provider":"joined","cwd":cwd}));
     assert_eq!(reopened["native_session_id"],opened["native_session_id"]);
     assert_eq!(apply(&restarted,turn())["duplicate"],true);
-    apply(&restarted,later);assert_eq!(returned(&restarted,"delivery/later")["phase"],"returned");
+    apply(&restarted,later);assert_eq!(returned(&restarted,"delivery/after-owner-restart")["phase"],"returned");
     let after=durable.last_native_binding(&session).unwrap().unwrap();
     assert_eq!(after["task"]["binding"]["return_ref"],before["task"]["binding"]["return_ref"]);
     assert_eq!(after["task"]["storage"]["receipt_world"]["world_ref"],before["task"]["storage"]["receipt_world"]["world_ref"]);
-    assert_eq!(prompts(&log).len(),2);
+    assert_eq!(prompts(&log).len(),3);
     // Removing the actual owner binding cannot convert historical task work to Direct.
     let config=home.state().join("encounter-tasks").join(format!("{}.json",blake3::hash(session.as_str().as_bytes()).to_hex()));
     fs::remove_file(config).unwrap();
     let mut refused=turn();refused["turn"]["delivery_ref"]=json!("delivery/missing-task");
     assert!(restarted.apply(serde_json::from_value(refused).unwrap()).is_err());
+    let mut cursor=0;
+    let mut events=Vec::new();
+    loop {
+        let page=durable.events(&session,cursor,256).unwrap();
+        cursor=page.next_cursor;
+        events.extend(page.events.into_iter().map(|row|row.event));
+        if !page.more {break;}
+    }
+    assert!(events.iter().any(|event|event["kind"]=="task-admission-refused"
+        && event["task_ref"]=="task:joined" && event["effect_admitted"]==false));
+    assert_eq!(events.iter().filter(|event|event["kind"]=="resident-readmission-stopped"
+        && event["process_stopped"]==true && event["replacement_started"]==false).count(),1);
     apply(&restarted,json!({"action":"shutdown","expected_pid":std::process::id()}));
     assert_eq!(fs::read(&policy_path).unwrap(),original_policy);
     assert_eq!(fs::read(human.join("tracked.txt")).unwrap(),dirty);
-    println!("CAW_TASK_RESIDENT_EXECUTED: native owners, selected Agency, real worktree/NOW/storage, confined provider turn, dedup, source/policy refusal and native reconnect");
+    println!("CAW_TASK_RESIDENT_EXECUTED: native owners, selected Agency, real worktree/NOW/storage, confined provider turn, dedup, source/policy refusal, explicit resident readmission and native reconnect");
 }

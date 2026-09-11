@@ -727,7 +727,12 @@ impl EncounterService {
                 agent_session,
                 provider,
                 cwd,
-            } => self.open_native(space, agent_session, provider, cwd, true),
+            } => {
+                // Readmission replaces one material process, so release the
+                // shared operation lease before acquiring its exclusive lease.
+                drop(lifecycle);
+                self.reconnect_native(space, agent_session, provider, cwd)
+            }
             EncounterRequest::Shutdown { .. } => {
                 unreachable!("handled before acquiring read lease")
             }

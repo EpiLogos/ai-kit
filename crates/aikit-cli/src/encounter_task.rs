@@ -71,6 +71,90 @@ fn stopped(message: &str) -> AikitError {
     AikitError::new("encounter.task_readmission_required",message)
 }
 impl EncounterService {
+    /// Explicit readmission replaces only the selected resident. A normal open
+    /// or turn never renews its material grant or changes its native body.
+    pub(super) fn reconnect_native(
+        &self,
+        space: aikit_core::session_space::SessionSpaceRef,
+        session: ResourceRef,
+        provider: String,
+        cwd: PathBuf,
+    ) -> Result<Value> {
+        use super::{EncounterProtocol, Lifecycle};
+        use std::sync::{atomic::Ordering, Arc};
+
+        // All public operations hold a shared lease. Exclusive ownership makes
+        // process replacement atomic with prompts, consent and owner shutdown.
+        let mut lifecycle = self.lifecycle.write().map_err(error)?;
+        if self.shutdown_requested.load(Ordering::SeqCst)
+            || !matches!(*lifecycle, Lifecycle::Running)
+        {
+            return Err(AikitError::new(
+                "encounter.owner_stopped",
+                "The encounter owner is shutting down or stopped",
+            ));
+        }
+        let cwd = cwd.canonicalize().map_err(error)?;
+        let mut residents = self.residents.lock().map_err(error)?;
+        if let Some(held) = residents.get(&session) {
+            if held.space != space || held.provider != provider || held.cwd != cwd {
+                return Err(stopped("Readmission must retain the recorded space, provider and cwd"));
+            }
+            if held.protocol != EncounterProtocol::Acp {
+                return Err(AikitError::new(
+                    "encounter.reconnect_unsupported",
+                    "This provider has no native load operation; the existing resident was not stopped",
+                ));
+            }
+            if format!("{:?}", held.host.identity(&session)?.state) == "TurnInFlight" {
+                return Err(AikitError::new(
+                    "encounter.readmission_busy",
+                    "Finish or explicitly cancel the active turn before replacing its material body",
+                ));
+            }
+            self.store.append(&session, &json!({
+                "kind":"resident-readmission-requested",
+                "native_session_id":held.lane.binding().native_session_id,
+                "connection_generation":held.generation,
+                "reason":"explicit reconnect; no automatic grant renewal",
+            }))?;
+            let held = residents.remove(&session).expect("resident checked under exclusive lease");
+            let resident = match Arc::try_unwrap(held) {
+                Ok(resident) => resident,
+                Err(held) => {
+                    residents.insert(session.clone(), held);
+                    return Err(stopped("Resident is still borrowed; no replacement process was started"));
+                }
+            };
+            let native = resident.lane.binding().native_session_id.clone();
+            let generation = resident.generation.clone();
+            let status = match resident.host.shutdown() {
+                Ok(status) => status,
+                Err(failure) => {
+                    // Never start a second body when stopping the first one is
+                    // uncertain. Preserve the failed owner state for diagnosis.
+                    let reason = format!("{session}: readmission cleanup failed: {failure}");
+                    *lifecycle = Lifecycle::Failed(reason.clone());
+                    return Err(AikitError::new("encounter.shutdown_failed", reason));
+                }
+            };
+            self.permissions.lock().map_err(error)?.remove(&session);
+            self.store.append(&session, &json!({
+                "kind":"resident-readmission-stopped",
+                "native_session_id":native,
+                "connection_generation":generation,
+                "process_status":status.map(|s|s.to_string()),
+                "process_stopped":true,
+                "replacement_started":false,
+            }))?;
+        }
+        drop(residents);
+        // This is the existing launch path, including current Agency, Central
+        // policy/NOW, Workcell storage and protocol-preserving confinement.
+        // A refusal leaves the old body stopped; there is no Direct fallback.
+        self.open_native(space, session, provider, cwd, true)
+    }
+
     pub fn configure_task(home:&AikitHome, session:&ResourceRef, binding:&EncounterTaskBinding,
         expected_revision:Option<&SourceRevision>) -> Result<Value> {
         let service=Self::new(home.clone())?;
@@ -165,6 +249,19 @@ impl EncounterService {
     }
 
     pub(super) fn check_resident_task(&self,session:&ResourceRef,resident:&Resident,phase:&str)->Result<()> {
+        let result = self.validate_resident_task(session, resident, phase);
+        if let Err(failure) = &result {
+            self.store.append(session, &json!({
+                "kind":"task-admission-refused", "phase":phase,
+                "code":failure.code(), "reason":failure.to_string(),
+                "task_ref":resident.task.as_ref().map(|task|&task.binding.task.task_ref),
+                "connection_generation":resident.generation, "effect_admitted":false,
+            }))?;
+        }
+        result
+    }
+
+    fn validate_resident_task(&self,session:&ResourceRef,resident:&Resident,phase:&str)->Result<()> {
         let current=read_binding(&self.home,session)?;
         match (&resident.task,current) {
             (None,None)=>Ok(()),
