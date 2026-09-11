@@ -53,12 +53,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Central
-          ref: b3837ee55d95037016cfb873713cbb7c644d6b27
+          ref: 5d1b8bf6692f9aca45b2fe39db54cbc378dda70e
           path: .caw-native/Central
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Workcell
-          ref: 844d17282524d75d153f3704d088d121dc32b814
+          ref: 0187b0d76e8f27632d127d54ef2441310b073108
           path: .caw-native/Workcell
       - uses: Swatinem/rust-cache@v2.9.2
         with:
