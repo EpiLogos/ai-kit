@@ -20,7 +20,7 @@ pub use aikit_core::context::Isolation;
 
 /// `aikit` — a context-scoped capability router for agentic terminal work.
 #[derive(Debug, Parser)]
-#[command(name = "aikit", version, about, disable_help_subcommand = true)]
+#[command(name = "aikit", version = version_line(), about, disable_help_subcommand = true)]
 pub struct Cli {
     /// Emit machine-readable JSON on stdout instead of human text.
     #[arg(long, global = true)]
@@ -2238,4 +2238,17 @@ pub struct ShellInitArgs {
     /// The shell: `bash`, `zsh`, or `fish`.
     #[arg(value_name = "SHELL")]
     pub shell: String,
+}
+
+/// The suite-wide version contract: the package version plus, when the build
+/// stamped one, the exact source revision the binary was compiled from — so
+/// any installed aikit answers what it is without its build tree.
+pub fn version_line() -> &'static str {
+    static LINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LINE.get_or_init(|| match option_env!("SUITE_BUILD_REVISION") {
+        Some(revision) if !revision.is_empty() => {
+            format!("{} ({revision})", env!("CARGO_PKG_VERSION"))
+        }
+        _ => env!("CARGO_PKG_VERSION").to_owned(),
+    })
 }
