@@ -32,6 +32,7 @@ for line in sys.stdin:
                    if line.startswith('Task output directory: '))
         evidence = {'standing': 'CONTROLLED_NATIVE', 'denied': denied,
                     'cwd': os.getcwd(), 'central_token_present': 'CENTRAL_NATIVE_TOKEN' in os.environ,
+                    'workcell_token_present': 'WORKCELL_CONTROL_TOKEN' in os.environ,
                     'selected_context': 'SELECTED_CONTEXT' in text}
         (log.parent / 'result.json').write_text(json.dumps(evidence))
         (Path(now) / 'return.txt').write_text('ACTUAL_TASK_RETURN')

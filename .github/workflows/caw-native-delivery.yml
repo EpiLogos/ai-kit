@@ -80,6 +80,8 @@ jobs:
           cargo build --locked --manifest-path .caw-native/Central/Cargo.toml -p ctrl
           cargo build --locked --manifest-path .caw-native/Workcell/Cargo.toml -p epilogos-workcell-cli --bins
           echo "AIKIT_CAW_CTRL_BIN=$GITHUB_WORKSPACE/.caw-native/Central/target/debug/ctrl" >> "$GITHUB_ENV"
+          echo "AIKIT_CAW_WORKCELL_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell" >> "$GITHUB_ENV"
+          echo "AIKIT_CAW_WORKCELL_SERVICE_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-control-service" >> "$GITHUB_ENV"
           echo "AIKIT_CAW_WORKCELL_BOUNDARY_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-write-boundary" >> "$GITHUB_ENV"
       - name: Actual binaries through native Actuation and controlled provider processes
         shell: bash
@@ -97,6 +99,8 @@ jobs:
           set -euo pipefail
           cargo test --locked -p aikit-cli --test caw_task_dispatch -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_PROTECTED_DISPATCH_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
+          grep -q TASK_NATIVE_PERSISTENT_STORAGE_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
+          grep -q TASK_NATIVE_WORKCELL_HOSTED_ENCOUNTER_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
       - name: Receipt, admission, ACP, placement, recurrence and duplicate regressions
         shell: bash
         run: |

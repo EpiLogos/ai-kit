@@ -51,7 +51,7 @@ impl World {
         world
     }
     fn command(&self, args: &[String]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_aikit-session-space")).env("AIKIT_HOME",self.home.root())
+        Command::new(env!("CARGO_BIN_EXE_aikit-session-space")).env("AIKIT_HOME",self.home.root()).env("WORKCELL_CONTROL_TOKEN","controlled-caw-material-token")
             .arg("-C").arg(&self.root).args(args).output().unwrap()
     }
     fn cli(&self, args: &[String]) -> Value {
@@ -67,7 +67,7 @@ impl World {
     }
     fn prepare(&self)->Value { self.cli(&["encounter-task-configure".into(),"--agent-session".into(),"agent-session/task".into(),"--request-json".into(),self.prepare_input().to_string()]) }
     fn start(&mut self) {
-        self.child=Some(Command::new(env!("CARGO_BIN_EXE_aikit-session-space")).env("AIKIT_HOME",self.home.root())
+        self.child=Some(Command::new(env!("CARGO_BIN_EXE_aikit-session-space")).env("AIKIT_HOME",self.home.root()).env("WORKCELL_CONTROL_TOKEN","controlled-caw-material-token")
             .env("CENTRAL_NATIVE_TOKEN","CONTROLLED_MUST_NOT_REACH_PROVIDER")
             .arg("-C").arg(&self.root).args(["encounter-serve","--socket"]).arg(&self.socket)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap());
@@ -138,3 +138,6 @@ fn missing_task_authority_refuses_before_now_allocation() {
     let w=World::new(false); let result=w.command(&["encounter-task-configure".into(),"--agent-session".into(),"agent-session/task".into(),"--request-json".into(),w.prepare_input().to_string()]);
     assert!(!result.status.success()); assert!(!w.root.join("Control/agents/now").exists());
 }
+
+#[path = "support/caw_task_material.rs"]
+mod material;
