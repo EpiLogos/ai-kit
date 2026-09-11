@@ -52,7 +52,7 @@ fn native_policy_now_validation_and_workcell_prepare_are_connected() {
     assert_eq!(result["allowed"], true);
     assert!(owner.validate_write(&task, &request.central_root.join("Work/loose.txt")).is_err());
     let authority = ResourceRef::parse("authority:controlled-native-test").unwrap();
-    let requirements = owner.write_boundary_requirements(&task, &authority, &[source.clone()]).unwrap();
+    let requirements = owner.write_boundary_requirements(&task, &authority, std::slice::from_ref(&source)).unwrap();
     assert_eq!(requirements["protected_paths"], task.allocation["policy"]["protected_paths"]);
     assert_eq!(requirements["required_coverage"], task.allocation["policy"]["required_coverage"]);
     assert_eq!(requirements["writable_paths"], json!([task.now_directory().unwrap(), source]));
