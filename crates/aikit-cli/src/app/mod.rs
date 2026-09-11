@@ -2715,6 +2715,81 @@ impl PaletteBackend for Service {
         }
     }
 
+    /// Compose the credential/provider reading for this world.
+    ///
+    /// This is the layer that *can* look, and it is the producer #239 shipped
+    /// the surface for without ever wiring: `aikit-core` is I/O-free and
+    /// `aikit-tui` does not depend on the crates that reach the OS secure store,
+    /// so the disclosure has to be composed here and handed over.
+    ///
+    /// Requirements come straight from the world's resolved Model routes — the
+    /// credentials those routes declare a need for. A route's credential
+    /// condition is fixed by the catalogue's declared need joined against
+    /// recorded bindings; it does not depend on whether the route was observed
+    /// on this machine, so this reuses the exact catalogue↔binding join the
+    /// compose path uses, with no observed or reachable evidence, rather than
+    /// spawning live detection just to read what a credential is *for*.
+    ///
+    /// The roster is observed against the same OS secure store the CLI's own
+    /// `credential setup` uses. The three absences the disclosure exists to
+    /// keep apart stay apart: an unreadable binding store is a `Unknown` roster
+    /// carrying its reason; a readable store with no matching binding is an
+    /// `Observed` roster whose credential resolves to no provider (a real "no");
+    /// and a world whose routes declare no credential need yields an observed,
+    /// empty requirement set (`none required`), never a fabricated one.
+    fn credential_world(
+        &self,
+    ) -> Result<Option<aikit_core::credential_world::CredentialWorldDisclosure>> {
+        use aikit_core::credential_world::{
+            credential_requirements_for_model_routes, disclose_credential_world,
+            ProviderRosterKnowledge,
+        };
+
+        let (catalogue, _notes) = aikit_store::model_catalogue::resolved_catalogue(&self.home);
+        let bindings = aikit_store::credentials::CredentialBindingStore::new(&self.home).list();
+        let (credentials, roster_unreadable) = match &bindings {
+            Ok(list) => (
+                aikit_adapters::actuation_model_routes::CredentialEvidence::from_binding_refs(
+                    list.iter()
+                        .filter(|binding| !binding.revoked)
+                        .map(|binding| binding.credential_ref.as_str().to_string()),
+                ),
+                None,
+            ),
+            // The binding store could not be read at all: the roster is
+            // genuinely unknown, not empty. Requirements are still derived (they
+            // come from the catalogue, not the store) so the world can say what
+            // it needs while honestly reporting that nothing was resolved.
+            Err(error) => (
+                aikit_adapters::actuation_model_routes::CredentialEvidence::default(),
+                Some(format!("credential binding store is unreadable: {error}")),
+            ),
+        };
+
+        let join = aikit_adapters::actuation_model_routes::join_model_routes_with_reach(
+            &catalogue,
+            &[],
+            &[],
+            &credentials,
+        );
+        let requirements = credential_requirements_for_model_routes(&join.route_sets);
+
+        let roster = match roster_unreadable {
+            Some(reason) => ProviderRosterKnowledge::Unknown { reason },
+            None => observe_credential_roster(&self.home, &requirements)?,
+        };
+
+        // Headless and no env import: a world reading observes bound state, it
+        // never prompts and never imports a secret from the ambient environment
+        // just because a matching variable happens to exist.
+        Ok(Some(disclose_credential_world(
+            roster,
+            &requirements,
+            true,
+            false,
+        )))
+    }
+
     fn context(&self) -> &ContextDescriptor {
         &self.descriptor
     }
@@ -2918,6 +2993,52 @@ impl PaletteBackend for Service {
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
+
+/// Observe the world-level secret-provider roster over the OS secure store,
+/// reusing the same provider the CLI's `credential setup` uses.
+///
+/// This is the I/O half of the credential world. The native store's descriptor
+/// is per-credential — it advertises support for a credential only when a
+/// binding for that exact credential is recorded — so the roster is observed by
+/// probing each required credential's binding and merging the results into one
+/// descriptor whose `supported_credentials` is the set actually bound. That one
+/// descriptor is what `resolve_credential` then checks each requirement against:
+/// a requirement finds it eligible exactly when its credential is bound.
+///
+/// A world whose routes declare no credential need probes nothing and reports an
+/// observed, empty roster — a confirmed "this world needs none", never the
+/// "nobody looked" the disclosure's own `not_attempted` default carries.
+fn observe_credential_roster(
+    home: &AikitHome,
+    requirements: &[aikit_core::credential::SecretRequirement],
+) -> Result<aikit_core::credential_world::ProviderRosterKnowledge> {
+    use aikit_adapters::NativeSecureStoreProvider;
+    use aikit_core::credential::{SecretProvider, SecretProviderDescriptor};
+    use aikit_core::credential_world::ProviderRosterKnowledge;
+    use std::collections::BTreeSet;
+
+    let store = aikit_store::credentials::CredentialBindingStore::new(home);
+    let mut supported = BTreeSet::new();
+    let mut descriptor: Option<SecretProviderDescriptor> = None;
+
+    for requirement in requirements {
+        let binding = store.load(&requirement.credential_ref)?;
+        let native = NativeSecureStoreProvider::with_binding(binding.as_ref());
+        let observed = native.descriptor(&requirement.credential_ref);
+        supported.extend(observed.supported_credentials.iter().cloned());
+        descriptor.get_or_insert(observed);
+    }
+
+    let providers = match descriptor {
+        Some(mut native) => {
+            native.supported_credentials = supported;
+            vec![native]
+        }
+        None => Vec::new(),
+    };
+
+    Ok(ProviderRosterKnowledge::Observed { providers })
+}
 
 /// Load every registry under the home plus the project-local `.aikit/` registry,
 /// project-local last so it shadows the personal registries — which is exactly

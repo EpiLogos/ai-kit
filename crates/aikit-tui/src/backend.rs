@@ -349,6 +349,28 @@ pub trait PaletteBackend {
         })
     }
 
+    /// Optional already-composed credential/provider reading for this world.
+    ///
+    /// Same seam, same reason as [`PaletteBackend::versioned_world`]: resolving
+    /// what secret providers reach this machine, and which of the world's
+    /// declared credentials are bound, is I/O over the OS secure store and the
+    /// binding record. `aikit-core` is I/O-free and `aikit-tui` does not depend
+    /// on the crates that do it, so the caller that *can* observe composes the
+    /// disclosure through `disclose_credential_world` and hands it over.
+    ///
+    /// The two meanings of an absent answer stay apart, on two levels. `None`
+    /// here is "no producer is attached at all — nobody looked", and the
+    /// reading keeps its honest `not_attempted` default. A `Some(disclosure)`
+    /// then carries the finer distinctions the disclosure itself exists to
+    /// keep: a roster genuinely observed empty versus one that could not be
+    /// enumerated, and a credential resolved to no provider versus one never
+    /// resolved at all.
+    fn credential_world(
+        &self,
+    ) -> Result<Option<aikit_core::credential_world::CredentialWorldDisclosure>> {
+        Ok(None)
+    }
+
     /// The canonical subjects this world can project into a working
     /// environment — the panes the current session plan defines, whether or
     /// not any of them is live yet.

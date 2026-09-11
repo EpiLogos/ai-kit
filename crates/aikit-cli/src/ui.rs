@@ -132,6 +132,17 @@ impl PaletteBackend for V2SurfaceService<'_> {
         <Service as PaletteBackend>::versioned_world(self.service)
     }
 
+    /// Forwarded for the same reason as `versioned_world`: `Service` is the
+    /// layer that can observe the OS secure store and the world's bindings, and
+    /// this decorator must carry that observation through unchanged. Leaving it
+    /// on the trait default (`Ok(None)`) is exactly the wiring gap that made the
+    /// System pane's Credentials/Providers rows permanently "not attempted".
+    fn credential_world(
+        &self,
+    ) -> Result<Option<aikit_core::credential_world::CredentialWorldDisclosure>> {
+        <Service as PaletteBackend>::credential_world(self.service)
+    }
+
     fn scope_layers(&self) -> Option<&[ScopeLayer]> {
         <Service as PaletteBackend>::scope_layers(self.service)
     }
@@ -376,5 +387,41 @@ mod tests {
                  PaletteBackend trait default of None",
             );
         assert_eq!(binding.project.as_str(), "project:surface-probe");
+    }
+
+    /// The credential-world forward has the same failure mode as the git one:
+    /// the TUI opens through `V2SurfaceService`, so a producer that exists only
+    /// on `Service` never reaches the System pane unless the decorator forwards
+    /// it. Left on the trait default (`Ok(None)`) the pane would read
+    /// `not attempted` forever — the exact defect W7 fixes. This drives the
+    /// decorator itself and asserts it carries `Service`'s real reading through.
+    #[test]
+    fn the_surface_decorator_forwards_the_real_credential_reading_not_the_trait_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("probe");
+        std::fs::create_dir_all(&root).unwrap();
+        project(&root);
+
+        let mut svc = service(tmp.path(), &root);
+        let backend = V2SurfaceService::new(&mut svc);
+
+        let disclosure = backend
+            .credential_world()
+            .expect("composing the credential world does not fail")
+            .expect(
+                "the decorator must forward Service's real reading, not the \
+                 PaletteBackend trait default of None",
+            );
+        // Observed, not the `Unknown` roster the `not_attempted` default carries.
+        assert!(
+            disclosure.providers.is_known(),
+            "the decorator carries a real observed roster: {:?}",
+            disclosure.providers
+        );
+        assert!(
+            !disclosure.credentials.is_empty(),
+            "the seed catalogue's hosted Models declare credential needs the \
+             decorator's reading must carry"
+        );
     }
 }
