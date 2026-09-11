@@ -36,7 +36,19 @@ pub fn compose_live_actor_inputs<R: CommandRunner>(
     central_root: &Path,
     project_root: &Path,
 ) -> Result<Option<ComposedActorInputs>> {
-    let profile = read_project_agent_profile(runner, central_root, project_root)?;
+    compose_selected_actor_inputs(runner, central_root, project_root, None)
+}
+
+/// Compose the explicitly selected Agent's optional authored profile, never a
+/// different Agent's first-person context. Native Agency admission is a separate
+/// input; no matching profile is a legitimate profile-less composition.
+pub fn compose_selected_actor_inputs<R: CommandRunner>(
+    runner: &R,
+    central_root: &Path,
+    project_root: &Path,
+    selected_agent: Option<&aikit_core::ResourceRef>,
+) -> Result<Option<ComposedActorInputs>> {
+    let profile = read_project_agent_profile(runner, central_root, project_root, selected_agent)?;
     let central = profile
         .as_ref()
         .map(|(profile, _)| profile.authored_projection())
@@ -64,6 +76,8 @@ pub fn compose_live_actor_inputs<R: CommandRunner>(
                 selected_harness: None,
                 selected_model: None,
                 agent_session: None,
+                actuation_ref: None,
+                world_binding_ref: None,
             }))
         }
         None => Ok(None),
@@ -77,19 +91,38 @@ fn read_project_agent_profile<R: CommandRunner>(
     runner: &R,
     central_root: &Path,
     project_root: &Path,
+    selected_agent: Option<&aikit_core::ResourceRef>,
 ) -> Result<Option<(CentralAgentProfileProjection, ResourceRecord)>> {
-    let Some(member) = project_member(central_root, project_root) else {
+    let member = project_member(central_root, project_root);
+    let at_root =
+        project_root == central_root || project_root.starts_with(central_root.join("Control"));
+    if !at_root && (member.is_none() || !project_root.join("ProjectCentral/project.json").is_file())
+    {
+        // A native/external workspace remains valid without Central residence.
         return Ok(None);
-    };
+    }
+    let source_root = if at_root { central_root } else { project_root };
     let list = central_action(
         runner,
         central_root,
         AGENT_PROFILE_LIST,
-        json!({ "scope": "project", "project": member }),
+        if at_root {
+            json!({"scope":"root"})
+        } else {
+            json!({ "scope": "project", "project": member })
+        },
     )?;
     let Some(profiles) = list.get("profiles").and_then(Value::as_array) else {
         return Ok(None);
     };
+    let profiles: Vec<&Value> = profiles
+        .iter()
+        .filter(|entry| {
+            selected_agent.is_none_or(|agent| {
+                entry.pointer("/profile/agent_ref").and_then(Value::as_str) == Some(agent.as_str())
+            })
+        })
+        .collect();
     if profiles.is_empty() {
         return Ok(None);
     }
@@ -115,7 +148,7 @@ fn read_project_agent_profile<R: CommandRunner>(
                 "Central profile listing lacks source_path",
             )
         })?;
-    let root = std::fs::canonicalize(project_root).map_err(source_error)?;
+    let root = std::fs::canonicalize(source_root).map_err(source_error)?;
     let path = std::fs::canonicalize(root.join(relative)).map_err(source_error)?;
     if !path.starts_with(&root) {
         return Err(AikitError::new(
@@ -131,14 +164,6 @@ fn read_project_agent_profile<R: CommandRunner>(
             "Central profile changed after owner listing",
         ));
     }
-    let manifest: Value = serde_json::from_slice(
-        &std::fs::read(root.join("ProjectCentral/project.json")).map_err(source_error)?,
-    )
-    .map_err(source_error)?;
-    let project_id = manifest
-        .get("project_id")
-        .and_then(Value::as_str)
-        .unwrap_or(&member);
     let relative = path
         .strip_prefix(&root)
         .map_err(source_error)?
@@ -146,7 +171,59 @@ fn read_project_agent_profile<R: CommandRunner>(
         .replace('%', "%25")
         .replace(':', "%3A")
         .replace(' ', "%20");
-    let reference = format!("central:source:project:{project_id}:{relative}");
+    let reference = if at_root {
+        format!("central:source:control:root:{relative}")
+    } else {
+        let manifest: Value = serde_json::from_slice(
+            &std::fs::read(root.join("ProjectCentral/project.json")).map_err(source_error)?,
+        )
+        .map_err(source_error)?;
+        let project_id = manifest
+            .get("project_id")
+            .and_then(Value::as_str)
+            .or(member.as_deref())
+            .ok_or_else(|| source_error("Missing Project source identity"))?;
+        format!("central:source:project:{project_id}:{relative}")
+    };
+    if selected_agent.is_some() {
+        use crate::central_world_sources::{
+            read_project_binding, read_world_binding, ROOT_WORLD_REF,
+        };
+        let executable = std::env::var_os("CENTRAL_CTRL_BIN")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "ctrl".into());
+        let binding = if at_root {
+            read_world_binding(
+                runner,
+                &executable,
+                central_root,
+                "root",
+                None,
+                ROOT_WORLD_REF,
+            )?
+        } else {
+            read_project_binding(
+                runner,
+                &executable,
+                central_root,
+                member.as_deref().expect("Project member"),
+                &mut Vec::new(),
+            )
+            .ok_or_else(|| source_error("Current World source disclosure is unavailable"))?
+        };
+        if binding.sources.iter().any(|source| {
+            source.state == "excluded"
+                && (reference == source.source_ref
+                    || reference
+                        .strip_prefix(&source.source_ref)
+                        .is_some_and(|tail| tail.starts_with('/')))
+        }) {
+            return Err(AikitError::new(
+                "actor_composition.profile_withheld",
+                "The selected Agent's profile is excluded from this World",
+            ));
+        }
+    }
     let mut descriptor = ResourceDescriptor::new(
         profile.agent_ref.clone(),
         ResourceKind::Agent,
@@ -237,7 +314,7 @@ fn central_action<R: CommandRunner>(
     input: Value,
 ) -> Result<Value> {
     let argv = vec![
-        "ctrl".to_owned(),
+        std::env::var("CENTRAL_CTRL_BIN").unwrap_or_else(|_| "ctrl".to_owned()),
         "--json".to_owned(),
         "--root".to_owned(),
         central_root.display().to_string(),

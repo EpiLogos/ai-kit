@@ -17,9 +17,9 @@
 //! * A discovered (project-wiki) object that re-declares an entity
 //!   subject under a different ref is refused as a stand-in: the
 //!   materialised entity keeps the subject.
-//! * When the world-relations carrier itself is unavailable the binding
-//!   degrades to uncontextualised: entities pass through unannotated and
-//!   the unavailability is disclosed (fail-open, descope law).
+//! * An unavailable World-relations carrier is not an unconstrained context.
+//!   Consumers withhold Central material instead of widening disclosure. Only
+//!   explicit declaration absence may select the documented root lineage.
 
 use crate::runner::CommandRunner;
 use aikit_core::{AikitError, Result, WikiObject};
@@ -109,33 +109,75 @@ pub fn read_world_binding<R: CommandRunner>(
         ));
     }
     let data = &envelope["data"];
+    if data["world_ref"].as_str() != Some(world_ref) {
+        return Err(AikitError::new(
+            "central.world_sources_invalid",
+            "Native World source reading changed or omitted the requested World identity",
+        ));
+    }
+    let entries = data["sources"].as_array().ok_or_else(|| {
+        AikitError::new(
+            "central.world_sources_invalid",
+            "Native World source reading omitted its source array",
+        )
+    })?;
     let mut binding = WorldBinding {
-        world_ref: data["world_ref"]
-            .as_str()
-            .unwrap_or(world_ref)
-            .to_owned(),
+        world_ref: world_ref.into(),
         inherited_root_lineage: false,
         sources: Vec::new(),
     };
-    if let Some(entries) = data["sources"].as_array() {
-        for entry in entries {
-            binding.sources.push(EffectiveSource {
-                source_ref: entry["ref"].as_str().unwrap_or_default().to_owned(),
-                state: entry["state"].as_str().unwrap_or("available").to_owned(),
-                effective_revision: entry["effective_revision"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-                propagation_path: entry["propagation_path"]
-                    .as_array()
-                    .map(|path| {
-                        path.iter()
-                            .filter_map(|world| world.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            });
+    let mut seen = BTreeSet::new();
+    for entry in entries {
+        let source = entry["ref"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                AikitError::new("central.world_sources_invalid", "Missing source identity")
+            })?;
+        let state = entry["state"]
+            .as_str()
+            .filter(|s| matches!(*s, "available" | "excluded"))
+            .ok_or_else(|| {
+                AikitError::new(
+                    "central.world_sources_invalid",
+                    "Missing or unsupported native source state",
+                )
+            })?;
+        let revision = entry["effective_revision"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                AikitError::new("central.world_sources_invalid", "Missing source revision")
+            })?;
+        if !seen.insert(source) {
+            return Err(AikitError::new(
+                "central.world_sources_invalid",
+                "Duplicate effective source identity",
+            ));
         }
+        let path = entry["propagation_path"].as_array().ok_or_else(|| {
+            AikitError::new(
+                "central.world_sources_invalid",
+                "Missing source propagation path",
+            )
+        })?;
+        let propagation_path = path
+            .iter()
+            .map(|p| {
+                p.as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        AikitError::new("central.world_sources_invalid", "Invalid propagation hop")
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        binding.sources.push(EffectiveSource {
+            source_ref: source.into(),
+            state: state.into(),
+            effective_revision: revision.into(),
+            propagation_path,
+        });
     }
     Ok(binding)
 }

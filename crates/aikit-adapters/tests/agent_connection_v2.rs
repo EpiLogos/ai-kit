@@ -283,3 +283,54 @@ fn acp_open_retains_reported_model_configuration_without_promoting_model_identit
     assert!(observation.standing.contains("not-independent"));
     assert!(binding.agent.is_none() && binding.agent_session.is_none());
 }
+
+#[test]
+fn load_and_resume_retain_requested_identity_and_reject_contradictions() {
+    for mode in [SessionOpenMode::Load, SessionOpenMode::Resume] {
+        for result in [
+            serde_json::Value::Null,
+            json!({}),
+            json!({"sessionId":"native-kept"}),
+        ] {
+            let mut adapter = AcpV1ConnectionAdapter::new(r("connection/acp/continuation"), vec![]);
+            adapter.initialize().unwrap();
+            adapter.ingest(json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}})).unwrap();
+            let command = adapter
+                .open_session(SessionOpenRequest {
+                    mode,
+                    native_session_id: Some("native-kept".into()),
+                    agent_session: Some(r("agent-session/kept")),
+                    ..create_request()
+                })
+                .unwrap();
+            let signals = adapter
+                .ingest(json!({"jsonrpc":"2.0","id":command.payload["id"],"result":result}))
+                .unwrap();
+            let ConnectionSignalKind::SessionOpened { binding } = &signals[0].kind else {
+                panic!("expected load binding")
+            };
+            assert_eq!(binding.native_session_id, "native-kept");
+            assert_eq!(binding.agent_session, Some(r("agent-session/kept")));
+        }
+        for result in [
+            json!({"sessionId":"different"}),
+            json!({"sessionId":""}),
+            json!({"sessionId":null}),
+            json!(7),
+        ] {
+            let mut adapter = AcpV1ConnectionAdapter::new(r("connection/acp/refusal"), vec![]);
+            adapter.initialize().unwrap();
+            adapter.ingest(json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}})).unwrap();
+            let command = adapter
+                .open_session(SessionOpenRequest {
+                    mode,
+                    native_session_id: Some("native-kept".into()),
+                    ..create_request()
+                })
+                .unwrap();
+            assert!(adapter
+                .ingest(json!({"jsonrpc":"2.0","id":command.payload["id"],"result":result}))
+                .is_err());
+        }
+    }
+}

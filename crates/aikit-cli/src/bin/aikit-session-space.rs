@@ -35,7 +35,31 @@ enum Command {
     #[cfg(unix)]
     EncounterServe { #[arg(long)] socket: Option<PathBuf> },
     /// Configure a native ACP provider. This operation is not exposed over IPC.
-    EncounterConfigure { #[arg(long)] provider_json: String },
+    EncounterConfigure {
+        #[arg(long)]
+        provider_json: String,
+    },
+    /// Provision or withdraw a native Agency binding under an exact revision.
+    /// This is an owner-only operation, not gateway/IPC input.
+    EncounterAgencyConfigure {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        binding_json: String,
+        #[arg(long)]
+        expected_revision: Option<String>,
+    },
+    /// Correlate operator-reviewed native evidence for a stuck delivery; never replay it.
+    EncounterDeliveryReconcile {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        delivery_ref: String,
+        #[arg(long)]
+        evidence_ref: String,
+        #[arg(long)]
+        expected_phase: String,
+    },
     /// Apply a canonical encounter action to the resident owner.
     #[cfg(unix)]
     Encounter { #[arg(long)] request_json: String, #[arg(long)] socket: Option<PathBuf> },
@@ -107,13 +131,47 @@ fn run() -> Result<()> {
 
     match cli.command {
         #[cfg(unix)]
-        Command::EncounterStart => emit(&aikit_cli::encounter_service::start(service.home(),&cwd)?),
+        Command::EncounterStart => {
+            emit(&aikit_cli::encounter_service::start(service.home(), &cwd)?)
+        }
         #[cfg(unix)]
         Command::EncounterServe{socket} => aikit_cli::encounter_service::serve(service.home().clone(),&socket.unwrap_or_else(||aikit_cli::encounter_service::socket_path(service.home()))),
         Command::EncounterConfigure{provider_json} => {
             aikit_cli::encounter_service::EncounterService::configure(service.home(),parse_json_arg(&provider_json)?)?;
             emit(&serde_json::json!({"configured":true}))
-        },
+        }
+        Command::EncounterAgencyConfigure {
+            agent_session,
+            binding_json,
+            expected_revision,
+        } => {
+            let expected = expected_revision
+                .as_deref()
+                .map(aikit_core::SourceRevision::parse)
+                .transpose()?;
+            aikit_cli::encounter_service::EncounterService::configure_agency(
+                service.home(),
+                &aikit_core::ResourceRef::parse(agent_session)?,
+                &parse_json_arg(&binding_json)?,
+                expected.as_ref(),
+            )?;
+            emit(
+                &serde_json::json!({"configured":true,"standing":"native-owner-provisioning-not-default-selection"}),
+            )
+        }
+        Command::EncounterDeliveryReconcile {
+            agent_session,
+            delivery_ref,
+            evidence_ref,
+            expected_phase,
+        } => emit(
+            &aikit_store::encounter::EncounterStore::open(service.home())?.reconcile_delivery(
+                &aikit_core::ResourceRef::parse(agent_session)?,
+                &aikit_core::ResourceRef::parse(delivery_ref)?,
+                &aikit_core::ResourceRef::parse(evidence_ref)?,
+                &expected_phase,
+            )?,
+        ),
         #[cfg(unix)]
         Command::Encounter{request_json,socket} => emit(&aikit_cli::encounter_service::request(&socket.unwrap_or_else(||aikit_cli::encounter_service::socket_path(service.home())),&parse_json_arg(&request_json)?)?),
         Command::ProjectContext => {
@@ -161,18 +219,12 @@ fn run() -> Result<()> {
         Command::RestorePreview { space, sequence } => {
             emit(&service.session_space_stage_restore(&space_ref(&space)?, sequence)?)
         }
-        Command::Reconstruct { space } => emit(&service.session_space_reconstruct(
-            &space_ref(&space)?,
-            None,
-            &[],
-            &[],
-        )?),
-        Command::Reconcile { space } => emit(&service.session_space_reconcile(
-            &space_ref(&space)?,
-            None,
-            &[],
-            &[],
-        )?),
+        Command::Reconstruct { space } => {
+            emit(&service.session_space_reconstruct(&space_ref(&space)?, None, &[], &[])?)
+        }
+        Command::Reconcile { space } => {
+            emit(&service.session_space_reconcile(&space_ref(&space)?, None, &[], &[])?)
+        }
         Command::Explain { space } => {
             emit(&service.session_space_explain(&space_ref(&space)?, None)?)
         }

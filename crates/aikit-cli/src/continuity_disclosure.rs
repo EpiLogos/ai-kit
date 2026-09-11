@@ -64,6 +64,12 @@ pub fn entity_disclosure_in<R: CommandRunner>(
     let mut objects = reading.objects;
     let mut absences = reading.absences;
     let binding = project_binding(runner, central_root, cwd, &mut absences);
+    let requires_project_binding = cwd
+        .strip_prefix(central_root.join("Work"))
+        .is_ok_and(|relative| !relative.as_os_str().is_empty());
+    if requires_project_binding && binding.is_none() {
+        return Err("Central World disclosure is unavailable; participant context withheld".into());
+    }
     if let Some(binding) = &binding {
         // Exclusions withhold; annotations ride along (same refs). The
         // withholding and coherence disclosures go into the same absence set

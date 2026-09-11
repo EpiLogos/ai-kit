@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::{Capsule, Kind};
 use aikit_core::catalog::Catalog;
-use aikit_core::continuity::ContinuityTuning;
 use aikit_core::context::ContextDescriptor;
+use aikit_core::continuity::ContinuityTuning;
 use aikit_core::id::{CapsuleId, GenerationId, SessionId};
 use aikit_core::platform::TargetId;
 use aikit_core::policy::ManagedPolicy;
@@ -60,10 +60,10 @@ use aikit_adapters::clients::opencode::OpencodeAdapter;
 use aikit_adapters::clients::pi::PiAdapter;
 use aikit_adapters::clients::qwen::QwenAdapter;
 use aikit_adapters::clients::zcode::ZcodeAdapter;
-use aikit_adapters::runner::SystemRunner;
 use aikit_adapters::factory_developmental::{
     read_factory_developmental, start_factory_work, FactoryDevelopmentalBinding,
 };
+use aikit_adapters::runner::SystemRunner;
 
 use aikit_core::working_environment::WorkingEnvironmentObservation;
 use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
@@ -873,18 +873,19 @@ impl Service {
 
         // Credentials qualify usability and nothing else. Only the fact that a
         // binding is recorded is read; no secret is materialised or carried.
-        let credentials = match aikit_store::credentials::CredentialBindingStore::new(&self.home)
-            .list()
-        {
-            Ok(bindings) => aikit_adapters::actuation_model_routes::CredentialEvidence::from_binding_refs(
-                bindings
-                    .into_iter()
-                    .filter(|binding| !binding.revoked)
-                    .map(|binding| binding.credential_ref.as_str().to_string()),
-            ),
-            Err(error) => {
-                notes.push(format!(
-                    "credential bindings unreadable ({error}) — observed routes are reported \
+        let credentials =
+            match aikit_store::credentials::CredentialBindingStore::new(&self.home).list() {
+                Ok(bindings) => {
+                    aikit_adapters::actuation_model_routes::CredentialEvidence::from_binding_refs(
+                        bindings
+                            .into_iter()
+                            .filter(|binding| !binding.revoked)
+                            .map(|binding| binding.credential_ref.as_str().to_string()),
+                    )
+                }
+                Err(error) => {
+                    notes.push(format!(
+                        "credential bindings unreadable ({error}) — observed routes are reported \
                      without their credential state, never as usable"
                 ));
                 aikit_adapters::actuation_model_routes::CredentialEvidence::default()
@@ -951,10 +952,22 @@ impl Service {
             RealisationRequest,
         };
         use aikit_core::resource::{
-            canonical_model_ref, candidates_from_routes, rank_model_roster, select_model,
+            candidates_from_routes, canonical_model_ref, rank_model_roster, select_model,
             ModelRankingPolicy, ModelRouteSet, ProviderRef,
         };
 
+        let native_identity = |field: &str| -> Result<String> {
+            let value = composed.get("composed_inputs").and_then(|c| c.get(field))
+                .and_then(serde_json::Value::as_str).ok_or_else(|| AikitError::new(
+                    "compose.native_identity_required",
+                    format!("An actual Actuation {field} is required; host and SessionSpace are not substitutes"),
+                ))?;
+            aikit_core::ResourceRef::parse(value)?;
+            Ok(value.to_owned())
+        };
+        for field in ["actuation_ref", "agency", "world_binding_ref"] {
+            native_identity(field)?;
+        }
         let model_ref = canonical_model_ref(model)?;
         let route_sets: Vec<ModelRouteSet> =
             serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
@@ -974,7 +987,35 @@ impl Service {
             })?;
         let pin = provider.map(ProviderRef::parse).transpose()?;
 
-        let base = model_roster_candidate_for(&model_ref);
+        let mut base = model_roster_candidate_for(&model_ref);
+        if let Some(value) = composed.get("agency_admission").filter(|v| !v.is_null()) {
+            let held: aikit_adapters::agency_admission::AdmittedAgency =
+                serde_json::from_value(value.clone())
+                    .map_err(|e| AikitError::new("compose.admission_invalid", e.to_string()))?;
+            let current = aikit_adapters::agency_admission::admit_agency(
+                &SystemRunner::new(),
+                "actuation",
+                &held.basis,
+                &held.agent_ref,
+                &held.world_ref,
+            )?;
+            if current != held {
+                return Err(AikitError::new(
+                    "compose.admission_changed",
+                    "Recompose the changed native Agency admission",
+                ));
+            }
+            base.authorised = current.authorises(&aikit_core::ResourceRef::parse(
+                "action/aikit/model-realise",
+            )?);
+            // Policy and compatibility remain independent owner/resolver facts.
+            // No source presently supplies them here: fail closed, do not use
+            // a permission to record an instantiation as a blanket model grant.
+            base.provenance.push(format!(
+                "{}@{}",
+                current.basis.source_ref, current.basis.revision
+            ));
+        }
         let roster = rank_model_roster(
             model_roster_demand(),
             ModelRankingPolicy::Balanced,
@@ -999,6 +1040,14 @@ impl Service {
         let mut attempts = Vec::new();
         for route in &selection.viable_routes {
             let body = material_body_plan(&runner, "workcell", &model_ref, route);
+            if let MaterialBodyOutcome::Unavailable { reason } = &body {
+                attempts.push(serde_json::json!({"route":route,"material_body":"unavailable","reason":reason,"outcome":"not-dispatched"}));
+                continue;
+            }
+            if let MaterialBodyOutcome::Satisfiable { .. } = &body {
+                attempts.push(serde_json::json!({"route":route,"material_body":body_reading(&body),"outcome":"material-plan-only","reason":"Workcell has planned a body, not observed a running inference service"}));
+                continue;
+            }
             if let MaterialBodyOutcome::Unsatisfiable { omissions } = &body {
                 attempts.push(serde_json::json!({
                     "route": route,
@@ -1009,17 +1058,9 @@ impl Service {
                 continue;
             }
             let request = RealisationRequest {
-                actuation_ref: format!("actuation:{}", self.descriptor.host),
-                agency_ref: composed
-                    .pointer("/composed_inputs/agency")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("agency:aikit-compose")
-                    .to_string(),
-                world_binding_ref: composed
-                    .pointer("/plan/session_space")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("binding:aikit-compose")
-                    .to_string(),
+                actuation_ref: native_identity("actuation_ref")?,
+                agency_ref: native_identity("agency")?,
+                world_binding_ref: native_identity("world_binding_ref")?,
                 agent_session_ref: composed
                     .pointer("/composed_inputs/agent_session")
                     .and_then(serde_json::Value::as_str)
@@ -1046,9 +1087,8 @@ impl Service {
                         "detection_ref": detection_ref,
                         "instantiation": receipt,
                         "attempts": attempts,
-                        "standing": "Actuation actualised this relation under its own evidence \
-                                     gate; the model's other viable routes remain on the selection \
-                                     for re-resolution",
+                        "executed": false,
+                        "standing": "Native instantiation recorded and correlated; no provider turn has been executed",
                     }));
                 }
                 RealisationOutcome::Refused { reason } => attempts.push(serde_json::json!({
@@ -1206,11 +1246,12 @@ impl Service {
             // what operative bodies exist; detected harnesses join the
             // candidates as ephemeral resources; a failed run is disclosed
             // unavailability riding on the resolution, never absence.
-            let detection = aikit_adapters::actuation_harness_detection
-                ::intake_actuation_detection(&SystemRunner::new(), "actuation");
-            resolution.harness_detection = Some(
-                aikit_adapters::actuation_harness_detection::detection_summary(&detection),
+            let detection = aikit_adapters::actuation_harness_detection::intake_actuation_detection(
+                &SystemRunner::new(),
+                "actuation",
             );
+            resolution.harness_detection =
+                Some(aikit_adapters::actuation_harness_detection::detection_summary(&detection));
             if let aikit_adapters::actuation_harness_detection::DetectionOutcome::Record(record) =
                 &detection
             {
@@ -1288,21 +1329,101 @@ impl Service {
     /// palette performs during project-world resolution; harness and model are
     /// disclosed only when a surface actually selected them, never guessed.
     pub fn compose_plan(&self) -> Result<serde_json::Value> {
-        let project_root = self.descriptor.project_root.as_deref().ok_or_else(|| {
-            AikitError::new(
-                "compose.no_project",
-                "no project context here — run inside a project directory",
-            )
-        })?;
+        self.compose_selected_plan(None)
+    }
+
+    pub fn compose_selected_plan(
+        &self,
+        admission: Option<&aikit_adapters::agency_admission::AdmittedAgency>,
+    ) -> Result<serde_json::Value> {
+        let project_root = self
+            .descriptor
+            .project_root
+            .as_deref()
+            .unwrap_or(&self.invocation_cwd);
         let central_root = process_central_root(Some(project_root));
         // Explicit composition must report a broken source as a failure, not
         // present a successful plan silently stripped of its authored basis.
         // A missing optional Central root/profile remains an honest absence.
-        let composed = central_root
+        let mut composed = central_root
             .as_ref()
-            .map(|central| compose_live_actor_inputs(&SystemRunner::new(), central, project_root))
+            .map(|central| {
+                aikit_adapters::actor_composition::compose_selected_actor_inputs(
+                    &SystemRunner::new(),
+                    central,
+                    project_root,
+                    admission.map(|a| &a.agent_ref),
+                )
+            })
             .transpose()?
             .flatten();
+        if let Some(admission) = admission {
+            // Recheck admitted material; provider effects re-run native admission.
+            admission.basis.read()?;
+            if let Some(held) = &composed {
+                if held
+                    .requested_actors
+                    .agency
+                    .as_ref()
+                    .is_some_and(|agency| agency != &admission.agency_ref)
+                    || held
+                        .world_binding_ref
+                        .as_ref()
+                        .is_some_and(|binding| binding != &admission.world_binding_ref)
+                {
+                    return Err(AikitError::new(
+                        "compose.agency_mismatch",
+                        "The instantiation source belongs to another Agency/WorldBinding",
+                    ));
+                }
+            }
+            let held = composed.get_or_insert_with(|| {
+                aikit_adapters::actuation_instantiation::ComposedActorInputs {
+                    authored: Default::default(),
+                    source_resources: vec![],
+                    requested_actors: Default::default(),
+                    selected_harness: None,
+                    selected_model: None,
+                    agent_session: None,
+                    actuation_ref: None,
+                    world_binding_ref: None,
+                }
+            });
+            held.requested_actors.agent = Some(admission.agent_ref.clone());
+            held.requested_actors.agency = Some(admission.agency_ref.clone());
+            held.world_binding_ref = Some(admission.world_binding_ref.clone());
+            use aikit_core::resource::{
+                ResourceDescriptor, ResourceKind, ResourceLocator, ResourceRecord, ResourceSource,
+                SourceAuthority, SourceRef, SourceState,
+            };
+            for (id, kind) in [
+                (&admission.agent_ref, ResourceKind::Agent),
+                (&admission.agency_ref, ResourceKind::Agency),
+            ] {
+                if held.source_resources.iter().any(|r| &r.descriptor.id == id) {
+                    continue;
+                }
+                let mut descriptor = ResourceDescriptor::new(
+                    id.clone(),
+                    kind,
+                    id.to_string(),
+                    "Explicitly selected native Agency source",
+                );
+                descriptor.sources.push(ResourceSource {
+                    source: SourceRef::parse(admission.basis.source_ref.as_str())?,
+                    revision: Some(admission.basis.revision.clone()),
+                    locator: Some(ResourceLocator::Path(admission.basis.path.clone())),
+                    authority: Some(SourceAuthority::Observed),
+                    state: SourceState::Available,
+                });
+                descriptor.annotations.insert(
+                    "standing".into(),
+                    "native-supplied-source-admission; not permanent adoption or runtime liveness"
+                        .into(),
+                );
+                held.source_resources.push(ResourceRecord::new(descriptor));
+            }
+        }
 
         let resources = aikit_tui::project_world_service::resource_index_with_records(
             self, composed.as_ref().map(|c|c.source_resources.clone()).unwrap_or_default(),
@@ -1535,7 +1656,11 @@ impl Service {
         composition_notes.extend(detection_notes);
 
         Ok(serde_json::json!({
-            "project_root": project_root.display().to_string(),
+            "project_root": self.descriptor.project_root.as_ref().map(|p|p.display().to_string()),
+            "working_directory": project_root,
+            "project_present": self.descriptor.project_root.is_some(),
+            "agency_admission": admission,
+            "model_candidates": resolution.model_candidates,
             "central_root": central_root.as_ref().map(|p| p.display().to_string()),
             "composition_error": null,
             "composition_notes": composition_notes,
@@ -1554,6 +1679,8 @@ impl Service {
                 "selected_harness": c.selected_harness,
                 "selected_model": c.selected_model,
                 "agent_session": c.agent_session,
+                "actuation_ref": c.actuation_ref,
+                "world_binding_ref": c.world_binding_ref,
             })),
             "plan": plan,
             // The catalogue-to-availability join, in the direction it runs.
@@ -1743,7 +1870,9 @@ impl Service {
             && tuning.allows(aikit_core::continuity::ENTITY_DISCLOSURE)
         {
             match crate::continuity_disclosure::entity_disclosure(event) {
-                Ok(Some(block)) => blocks.push(aikit_core::pressure::Block::ordinary(block, Vec::new())),
+                Ok(Some(block)) => {
+                    blocks.push(aikit_core::pressure::Block::ordinary(block, Vec::new()))
+                }
                 Ok(None) => {}
                 Err(error) => decision.warnings.push(format!(
                     "continuity/entity-disclosure unavailable: {error}"
@@ -1773,7 +1902,9 @@ impl Service {
                 None => crate::orientation_packet::OrientationConfig::default(),
             };
             match crate::orientation_packet::orientation_packet(event, &tuned) {
-                Ok(Some(block)) => blocks.push(aikit_core::pressure::Block::ordinary(block, Vec::new())),
+                Ok(Some(block)) => {
+                    blocks.push(aikit_core::pressure::Block::ordinary(block, Vec::new()))
+                }
                 Ok(None) => {}
                 Err(error) => decision.warnings.push(error),
             }
@@ -1782,11 +1913,14 @@ impl Service {
             && self.descriptor.project_root.is_none()
             && tuning.allows(aikit_core::continuity::PROJECT_RECENCY)
         {
-            let capsule_id = aikit_core::id::CapsuleId::parse(
-                "hook/continuity/project-recency",
-            )?;
-            let config = self.view.active.get(&capsule_id)
-                .map(|active| crate::project_recency::ProjectRecencyConfig::from_config(Some(&active.config)))
+            let capsule_id = aikit_core::id::CapsuleId::parse("hook/continuity/project-recency")?;
+            let config = self
+                .view
+                .active
+                .get(&capsule_id)
+                .map(|active| {
+                    crate::project_recency::ProjectRecencyConfig::from_config(Some(&active.config))
+                })
                 .unwrap_or_default();
             match crate::projects::load_all(&self.home).and_then(|specs| {
                 crate::project_recency::classify_all(
@@ -2116,9 +2250,10 @@ impl Service {
                 TargetId::GOOSE => {
                     plan_effect(&GooseAdapter::new(ctx_dir.join("projections/goose")), &rc)
                 }
-                TargetId::OPENCODE => {
-                    plan_effect(&OpencodeAdapter::new(ctx_dir.join("projections/opencode")), &rc)
-                }
+                TargetId::OPENCODE => plan_effect(
+                    &OpencodeAdapter::new(ctx_dir.join("projections/opencode")),
+                    &rc,
+                ),
                 TargetId::QWEN_CODE => {
                     plan_effect(&QwenAdapter::new(ctx_dir.join("projections/qwen")), &rc)
                 }
@@ -2131,18 +2266,20 @@ impl Service {
                     &AntigravityAdapter::new(ctx_dir.join("projections/antigravity")),
                     &rc,
                 ),
-                TargetId::GROK_BOT => {
-                    plan_effect(&GrokbotAdapter::new(ctx_dir.join("projections/grokbot")), &rc)
-                }
+                TargetId::GROK_BOT => plan_effect(
+                    &GrokbotAdapter::new(ctx_dir.join("projections/grokbot")),
+                    &rc,
+                ),
                 TargetId::KIMI => {
                     plan_effect(&KimiAdapter::new(ctx_dir.join("projections/kimi")), &rc)
                 }
                 TargetId::OLLAMA => {
                     plan_effect(&OllamaAdapter::new(ctx_dir.join("projections/ollama")), &rc)
                 }
-                TargetId::OPENCLAW => {
-                    plan_effect(&OpenclawAdapter::new(ctx_dir.join("projections/openclaw")), &rc)
-                }
+                TargetId::OPENCLAW => plan_effect(
+                    &OpenclawAdapter::new(ctx_dir.join("projections/openclaw")),
+                    &rc,
+                ),
                 TargetId::PI => plan_effect(&PiAdapter::new(ctx_dir.join("projections/pi")), &rc),
                 _ => plan_effect(&BrokerAdapter::new(), &rc),
             };
@@ -2588,7 +2725,9 @@ impl PaletteBackend for Service {
     }
 
     fn context_resource_records(&self) -> Result<Vec<aikit_core::resource::ResourceRecord>> {
-        let Some(project) = self.descriptor.project_root.as_deref() else { return Ok(Vec::new()) };
+        let Some(project) = self.descriptor.project_root.as_deref() else {
+            return Ok(Vec::new());
+        };
         let mut records = if let Some(central) = process_central_root(Some(project)) {
             compose_live_actor_inputs(&SystemRunner::new(), &central, project)?
                 .map(|inputs| inputs.source_resources)
@@ -2691,11 +2830,18 @@ impl PaletteBackend for Service {
     }
 
     fn project_binding(&self) -> Result<Option<aikit_core::project::ProjectBinding>> {
-        let Some(root) = self.descriptor.project_root.as_ref() else { return Ok(None) };
+        let Some(root) = self.descriptor.project_root.as_ref() else {
+            return Ok(None);
+        };
         match std::fs::symlink_metadata(root.join("ProjectCentral/project.json")) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(AikitError::new("projectcentral.manifest_read", error.to_string())),
+            Err(error) => {
+                return Err(AikitError::new(
+                    "projectcentral.manifest_read",
+                    error.to_string(),
+                ))
+            }
         }
         let binding = aikit_adapters::ProjectCentralFilesystemBinding::inspect(root, None)?;
         Ok(Some(binding.project_binding()?))
@@ -2726,8 +2872,12 @@ impl PaletteBackend for Service {
     ///   run at all (`versioned_world.git_spawn_failed`). Sniffing git's
     ///   stderr text to separate them would be worse than the coarse split.
     fn versioned_world(&self) -> Result<Option<aikit_core::resource::VersionedProjectWorld>> {
-        let Some(root) = self.descriptor.project_root.as_deref() else { return Ok(None) };
-        let Some(binding) = self.project_binding()? else { return Ok(None) };
+        let Some(root) = self.descriptor.project_root.as_deref() else {
+            return Ok(None);
+        };
+        let Some(binding) = self.project_binding()? else {
+            return Ok(None);
+        };
         use aikit_core::resource::VersionedWorldProvider;
         let provider = aikit_adapters::native_git::NativeGitProvider::new()?;
         match provider.inspect(&binding.project, &root.to_string_lossy()) {
@@ -3366,11 +3516,11 @@ fn model_roster_candidate_for(
             .expect("static provider ref"),
         provider_revision: None,
         available: false,
-        authorised: true,
+        authorised: false,
         provider_usable: false,
-        policy_allowed: true,
-        contract_compatible: true,
-        harness_compatible: true,
+        policy_allowed: false,
+        contract_compatible: false,
+        harness_compatible: false,
         harness_composition: None,
         native_capabilities: Default::default(),
         harness_capabilities: Default::default(),

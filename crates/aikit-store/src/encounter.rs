@@ -27,6 +27,10 @@ pub struct EncounterPage {
     pub draft: EncounterDraft,
 }
 
+#[path = "encounter_delivery.rs"]
+mod delivery;
+pub use delivery::{DeliveryReservation, EncounterDelivery};
+
 pub struct EncounterStore {
     connection: Mutex<Connection>,
 }
@@ -52,17 +56,19 @@ impl EncounterStore {
             CREATE INDEX IF NOT EXISTS encounter_event_session_cursor ON encounter_events(session,cursor);
             CREATE TABLE IF NOT EXISTS encounter_blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS encounter_block_session ON encounter_blocks(session,id);").map_err(failure)?;
+        delivery::install(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
     }
     pub fn append(&self, session: &ResourceRef, event: &Value) -> Result<u64> {
         validate(session)?;
-        let body = serde_json::to_string(event).map_err(failure)?;
         let mut connection = self.connection.lock().map_err(failure)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
+        let event = delivery::attribute(&transaction, session, event)?;
+        let body = serde_json::to_string(&event).map_err(failure)?;
         transaction
             .execute(
                 "INSERT INTO encounter_events(session,event) VALUES(?1,?2)",
@@ -70,7 +76,8 @@ impl EncounterStore {
             )
             .map_err(failure)?;
         let cursor = transaction.last_insert_rowid() as u64;
-        project_block(&transaction, session, event)?;
+        project_block(&transaction, session, &event)?;
+        delivery::finish(&transaction, session, &event, cursor)?;
         transaction.commit().map_err(failure)?;
         Ok(cursor)
     }

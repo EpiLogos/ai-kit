@@ -151,6 +151,7 @@ fn native_acp_owner_shutdown_reaps_provider_and_preserves_history() {
     EncounterService::configure(
         &home,
         EncounterProvider {
+            protocol: Default::default(),
             id: "native-shutdown".into(),
             label: "Actual installed ACP lifecycle".into(),
             argv,

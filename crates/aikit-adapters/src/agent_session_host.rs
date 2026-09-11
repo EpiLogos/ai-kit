@@ -38,11 +38,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::session_event_queue::EventQueue;
 use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use serde::{Serialize,Deserialize};
-use crate::session_event_queue::EventQueue;
 
 use crate::agent_connection::{
     CancelRequest, ConnectionCommand, ConnectionDescriptor, ConnectionSignal, ConnectionSignalKind,
@@ -276,6 +276,7 @@ enum ControlWaiter {
     Open {
         sender: Sender<ControlDelivery>,
         lane: Arc<LaneCore>,
+        loading_native_id: Option<String>,
     },
 }
 
@@ -310,8 +311,16 @@ impl AgentSessionHost {
         Self::launch_with_journal(adapter,argv,cwd,limits,None)
     }
 
-    pub fn launch_with_journal<A>(adapter:A,argv:&[String],cwd:Option<&Path>,limits:AgentSessionHostLimits,journal:Option<Arc<dyn SessionEventJournal>>) -> Result<Self>
-    where A: InteractiveAgentConnectionAdapter + Send + 'static {
+    pub fn launch_with_journal<A>(
+        adapter: A,
+        argv: &[String],
+        cwd: Option<&Path>,
+        limits: AgentSessionHostLimits,
+        journal: Option<Arc<dyn SessionEventJournal>>,
+    ) -> Result<Self>
+    where
+        A: InteractiveAgentConnectionAdapter + Send + 'static,
+    {
         let (writer, reader, control) = ConnectionProcess::spawn_split(argv, cwd)?;
         let shared = Arc::new(HostShared {
             adapter: Mutex::new(Box::new(adapter)),
@@ -832,7 +841,7 @@ impl HostShared {
             Some(ControlWaiter::Handshake(sender)) => {
                 let _ = sender.send(ControlDelivery::Signals(signals));
             }
-            Some(ControlWaiter::Open { sender, lane }) => {
+            Some(ControlWaiter::Open { sender, lane, .. }) => {
                 state_register_open(&self.state, &lane, &signals);
                 let _ = sender.send(ControlDelivery::Signals(signals));
             }
@@ -855,7 +864,20 @@ impl HostShared {
                     state.push_unattributed(signal);
                     continue;
                 };
-                let Some(lane) = state.lanes.get(&native_session_id).cloned() else {
+                // ACP load replays history before its successful response. Route
+                // only the exact pending load id to its awaiting canonical lane;
+                // it remains non-resident until the owner confirms the load.
+                let lane = state.lanes.get(&native_session_id).cloned().or_else(|| {
+                    state.control.values().find_map(|waiter| match waiter {
+                        ControlWaiter::Open {
+                            lane,
+                            loading_native_id: Some(id),
+                            ..
+                        } if id == &native_session_id => Some(Arc::clone(lane)),
+                        _ => None,
+                    })
+                });
+                let Some(lane) = lane else {
                     state.push_unattributed(signal);
                     continue;
                 };
@@ -883,10 +905,22 @@ impl HostShared {
         }
         self.deliver(deliveries);
         for native_session_id in limited {
-            let commands=self.adapter().and_then(|mut adapter|adapter.coordinated_cancel(CancelRequest{native_session_id}));
+            let commands = self.adapter().and_then(|mut adapter| {
+                adapter.coordinated_cancel(CancelRequest { native_session_id })
+            });
             match commands {
-                Ok(commands)=>for command in commands {if let Err(error)=self.dispatch(&command){self.record_transport_failure(error);return;}},
-                Err(error)=>{self.record_transport_failure(error);return;}
+                Ok(commands) => {
+                    for command in commands {
+                        if let Err(error) = self.dispatch(&command) {
+                            self.record_transport_failure(error);
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.record_transport_failure(error);
+                    return;
+                }
             }
         }
     }
@@ -923,7 +957,19 @@ impl HostShared {
         let token = control_token(&command.payload)?;
         let (sender, receiver) = mpsc::channel();
         let waiter = match open {
-            Some(lane) => ControlWaiter::Open { sender, lane },
+            Some(lane) => ControlWaiter::Open {
+                sender,
+                lane,
+                loading_native_id: (command.operation == "session/load")
+                    .then(|| {
+                        command
+                            .payload
+                            .pointer("/params/sessionId")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .flatten(),
+            },
             None => ControlWaiter::Handshake(sender),
         };
         let mut state = lock(&self.state)?;

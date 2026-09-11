@@ -51,13 +51,71 @@ pub fn materialise_central_entities(root: &Path) -> CentralEntityReading {
 
     match read_identity_entity(root) {
         Ok(Some(node)) => objects.push(WikiObject::Node(node)),
-        Ok(None) => absences.push("Central identity manifest absent; no nara entity materialised".into()),
+        Ok(None) => {
+            absences.push("Central identity manifest absent; no nara entity materialised".into())
+        }
         Err(error) => absences.push(error),
     }
 
-    let agent_nodes = read_agent_entities(root, &mut absences).unwrap_or_default();
+    let mut agent_nodes = read_agent_entities(root, &mut absences).unwrap_or_default();
 
     let (mut set_nodes, set_edges) = read_agent_set_entities(root, &mut absences);
+
+    // An authored, scoped AgentSet may name an Agent without a residence/profile.
+    // Compile that narrower declaration into the SAME Paśu identity. It is not
+    // actualisation, current reachability, a default, or an authority grant.
+    for set in &set_nodes {
+        if let Some(members) = set
+            .extensions
+            .get(PASU_EXTENSION)
+            .and_then(|p| p.pointer("/extra/members"))
+            .and_then(Value::as_array)
+        {
+            for member in members {
+                if member["kind"] != "agent" {
+                    continue;
+                }
+                let Some(agent) = member["agent_ref"].as_str().filter(|r| valid_agent_ref(r))
+                else {
+                    continue;
+                };
+                let reference = entity_ref("agent", agent);
+                let position = agent_nodes
+                    .iter()
+                    .position(|node| node.ref_id.as_str() == reference);
+                let index = position.unwrap_or_else(|| {
+                    agent_nodes.push(participant_node(agent));
+                    agent_nodes.len() - 1
+                });
+                let node = &mut agent_nodes[index];
+                for source in &set.source_refs {
+                    if !node.source_refs.contains(source) {
+                        node.source_refs.push(source.clone());
+                    }
+                }
+                for provenance in &set.provenance {
+                    if !node.provenance.contains(provenance) {
+                        node.provenance.push(provenance.clone());
+                    }
+                }
+                let extra = &mut node
+                    .extensions
+                    .get_mut(PASU_EXTENSION)
+                    .expect("Paśu extension")["extra"];
+                if extra.get("participation").is_none() {
+                    extra["participation"] = json!([]);
+                }
+                extra["participation"].as_array_mut().expect("participation array").push(json!({
+                    "standing":"declared-membership", "agent_set":set.ref_id,
+                    "sources":set.source_refs, "current_reachability":"unproven",
+                    "profile_required":false, "authority_granted":false, "default_selected":false
+                }));
+                if position.is_none() {
+                    absences.push(format!("Agent {agent} is declared by an AgentSet; live Agency/session remains unproven"));
+                }
+            }
+        }
+    }
 
     // Member edges only target entities that exist in this same pass, so the
     // compiled graph never dangles; unresolved members are disclosed.
@@ -210,9 +268,9 @@ fn read_canonical(root: &Path, relative: &str) -> Result<Vec<u8>, String> {
     {
         return Err(format!("carrier `{relative}` is not a plain relative path"));
     }
-    let canonical_root = root.canonicalize().map_err(|error| {
-        format!("central root is unavailable: {error}")
-    })?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("central root is unavailable: {error}"))?;
     let expected = canonical_root.join(relative_path);
     let actual = expected
         .canonicalize()
@@ -351,8 +409,15 @@ fn read_agent_entities(root: &Path, absences: &mut Vec<String>) -> Result<Vec<Wi
             ));
             continue;
         }
-        let Some(agent_ref) = record["agent_ref"].as_str().map(str::to_owned) else {
-            absences.push(format!("AgentProfile {} names no agent_ref", path.display()));
+        let Some(agent_ref) = record["agent_ref"]
+            .as_str()
+            .filter(|r| valid_agent_ref(r))
+            .map(str::to_owned)
+        else {
+            absences.push(format!(
+                "AgentProfile {} names no agent_ref",
+                path.display()
+            ));
             continue;
         };
         // Central serialises the profile identifier as `ref` — ctrl's
@@ -504,7 +569,9 @@ fn read_agent_set_entities(
             for member in members {
                 match member["kind"].as_str() {
                     Some("agent") => {
-                        if let Some(agent_ref) = member["agent_ref"].as_str() {
+                        if let Some(agent_ref) =
+                            member["agent_ref"].as_str().filter(|r| valid_agent_ref(r))
+                        {
                             let from = entity_ref("agent-set", &set_ref);
                             let to = entity_ref("agent", agent_ref);
                             edges.push(WikiEdge {
@@ -546,4 +613,84 @@ fn read_agent_set_entities(
         nodes.push(entity);
     }
     (nodes, edges)
+}
+
+fn valid_agent_ref(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && !value.contains('\0')
+        && ResourceRef::parse(value).is_ok()
+}
+fn participant_node(agent: &str) -> WikiNode {
+    WikiNode {
+        profile: "okf-wiki/v1".into(),
+        ref_id: resource_ref(&entity_ref("agent", agent)),
+        revision: 1,
+        provenance: Vec::new(),
+        node_type: "pasu".into(),
+        title: Some(format!("Pasu entity (agent: {agent})")),
+        space_refs: Vec::new(),
+        source_refs: Vec::new(),
+        local_space_ref: None,
+        extensions: pasu_extension(
+            "agent",
+            &pasu_agent_ref(agent),
+            json!({"agent_ref":agent,"profiles":[]}),
+        ),
+    }
+}
+
+/// Join *caller-scoped, currently admitted* native participants into the ordinary
+/// entity graph. No global Actuation discovery, new profile, or permanent adoption
+/// occurs. Callers must re-admit from source and apply Central's source disclosure
+/// rules before exposing the graph. A withdrawn binding is simply absent on the
+/// next rebuild; existing permitted authored relations/history are not deleted.
+pub fn join_admitted_participants(
+    reading: &mut CentralEntityReading,
+    world: &ResourceRef,
+    participants: &[crate::agency_admission::AdmittedAgency],
+) {
+    for participant in participants.iter().filter(|p| &p.world_ref == world) {
+        let reference = entity_ref("agent", participant.agent_ref.as_str());
+        let index = reading
+            .objects
+            .iter()
+            .position(|o| o.ref_id().as_str() == reference)
+            .unwrap_or_else(|| {
+                reading.objects.push(WikiObject::Node(participant_node(
+                    participant.agent_ref.as_str(),
+                )));
+                reading.objects.len() - 1
+            });
+        let WikiObject::Node(node) = &mut reading.objects[index] else {
+            continue;
+        };
+        let source = source_ref(participant.basis.source_ref.to_string());
+        if !node.source_refs.contains(&source) {
+            node.source_refs.push(source.clone());
+        }
+        node.provenance.push(WikiProvenanceRef {
+            source_ref: source,
+            source_revision: Some(SemanticRevision::Text(
+                participant.basis.revision.to_string(),
+            )),
+            producer_ref: Some(resource_ref(ENTITY_PRODUCER_REF)),
+            generation_ref: None,
+            extensions: BTreeMap::new(),
+        });
+        let extra = &mut node
+            .extensions
+            .get_mut(PASU_EXTENSION)
+            .expect("Paśu extension")["extra"];
+        if extra.get("participation").is_none() {
+            extra["participation"] = json!([]);
+        }
+        extra["participation"].as_array_mut().expect("participation array").push(json!({
+            "standing":"native-agency-admission", "agency_ref":participant.agency_ref,
+            "world_binding_ref":participant.world_binding_ref,"world_ref":participant.world_ref,
+            "scope_ref":participant.scope_ref,"source":participant.basis.source_ref,
+            "revision":participant.basis.revision,"current_reachability":"requires-session-observation",
+            "profile_required":false,"default_selected":false
+        }));
+    }
 }
