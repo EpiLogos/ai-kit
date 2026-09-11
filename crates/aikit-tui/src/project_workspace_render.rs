@@ -20,6 +20,7 @@ use std::collections::BTreeSet;
 use aikit_core::context_resolution::Availability;
 use aikit_core::project::ProjectBindingLocator;
 use aikit_core::credential_world::{CredentialStatusKnowledge, ProviderRosterKnowledge};
+use aikit_core::doctor_world::DoctorSeverity;
 use aikit_core::resource::{Eligibility, ResourceKind, SourceAuthority};
 use aikit_core::explain_history::{HistoryEvidence, HistoryReadModel, HistoryRecoverability};
 use aikit_core::session_space_application::SessionSpaceAuthoredState;
@@ -664,10 +665,77 @@ fn system_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
     lines.push("Adapters      not exposed by application boundary".into());
     lines.push("Workcell      not exposed by application boundary".into());
     lines.push(String::new());
+    lines.extend(health_lines(world, glyphs));
+    lines.push(String::new());
     lines.push(format!(
         "Revision      catalog {} {sep} resolution {}",
         world.effective_revision.catalog_revision, world.effective_revision.resolution_hash,
     ));
+    lines
+}
+
+/// The Health rows of §8 System, read from `ProjectWorldReadModel::doctor`.
+///
+/// Same discipline as `credential_lines`: "the checks were not run" and "the
+/// checks ran and found nothing" are different facts and never share a row. When
+/// the checks ran, the actionable findings (errors and warnings) are listed in
+/// full, and the informational notes are folded into a count — a person wanting
+/// every note runs `aikit doctor`. The gateway gets its own always-present row
+/// pulled from the `gateway.service` check, because "is the agency gateway
+/// running" is a question the System pane should answer whether or not anything
+/// is wrong.
+fn health_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
+    let disclosure = &world.doctor;
+
+    let Some(findings) = disclosure.findings() else {
+        // Not run — unknown, not a clean bill of health.
+        return vec!["Health        not attempted for this world".to_string()];
+    };
+
+    let mut lines = Vec::new();
+    if findings.is_empty() {
+        lines.push("Health        checks ran; nothing to report".to_string());
+    } else {
+        let errors = disclosure.count(DoctorSeverity::Error).unwrap_or(0);
+        let warnings = disclosure.count(DoctorSeverity::Warning).unwrap_or(0);
+        let notes = disclosure.count(DoctorSeverity::Note).unwrap_or(0);
+        lines.push(format!(
+            "Health        {errors} error(s), {warnings} warning(s), {notes} note(s)"
+        ));
+        // List the actionable findings (errors and warnings), most severe
+        // first — `doctor::run` already sorts them. Cap the list so a machine
+        // with many ambient warnings does not push the rest of the pane off the
+        // screen; the full list is one `aikit doctor` away.
+        const MAX_LISTED: usize = 6;
+        let actionable: Vec<_> = findings
+            .iter()
+            .filter(|finding| finding.severity != DoctorSeverity::Note)
+            .collect();
+        for finding in actionable.iter().take(MAX_LISTED) {
+            let fixable = if finding.fixable { " (fixable)" } else { "" };
+            lines.push(format!(
+                "  {} {sep} {}{fixable}",
+                finding.severity.as_str(),
+                finding.summary
+            ));
+        }
+        if actionable.len() > MAX_LISTED {
+            lines.push(format!(
+                "  {} more {sep} run `aikit doctor` for the full list",
+                actionable.len() - MAX_LISTED
+            ));
+        }
+    }
+
+    // The gateway is optional, so its healthy state is a note rather than a
+    // warning; surface it explicitly anyway so the row is always answered.
+    let gateway = findings.iter().find(|finding| finding.check == "gateway.service");
+    match gateway {
+        Some(finding) => lines.push(format!("Gateway       {}", finding.summary)),
+        None => lines.push("Gateway       not disclosed on this platform".to_string()),
+    }
+
     lines
 }
 
@@ -1173,6 +1241,69 @@ mod credential_disclosure_tests {
         assert!(!rendered.contains("none required"));
         assert!(!rendered.contains("none on this machine"));
         assert!(!rendered.contains("0/0"));
+    }
+
+    fn world_with_doctor(doctor: aikit_core::doctor_world::DoctorDisclosure) -> ProjectWorldReadModel {
+        let context = ContextDescriptor::for_project("/work/aikit");
+        ProjectWorldReadModel::empty(
+            ProjectBinding::from_legacy_context(
+                ProjectRef::parse("project:aikit").unwrap(),
+                ProjectConstituentRef::parse("source:working-tree").unwrap(),
+                &context,
+            )
+            .unwrap(),
+            context,
+        )
+        .with_doctor(doctor)
+    }
+
+    /// A reading whose checks were never run must not render as healthy. This is
+    /// the doctor analog of the credential regression above.
+    #[test]
+    fn health_not_attempted_never_renders_as_healthy() {
+        let lines = health_lines(
+            &world_with_doctor(aikit_core::doctor_world::DoctorDisclosure::default()),
+            Glyphs::unicode(),
+        );
+        let rendered = lines.join("\n");
+        assert!(rendered.contains("not attempted for this world"));
+        assert!(!rendered.contains("nothing to report"));
+        assert!(!rendered.contains("error(s)"));
+    }
+
+    /// Observed findings render a severity summary, list the actionable ones,
+    /// and always answer the gateway row — even when the gateway is a healthy
+    /// (optional) note.
+    #[test]
+    fn observed_health_summarises_and_always_answers_the_gateway_row() {
+        use aikit_core::doctor_world::{DoctorDisclosure, DoctorFinding, DoctorSeverity};
+        let disclosure = DoctorDisclosure::observed(vec![
+            DoctorFinding {
+                check: "home.layout".into(),
+                severity: DoctorSeverity::Error,
+                summary: "the state directory is missing".into(),
+                detail: None,
+                fixable: true,
+            },
+            DoctorFinding {
+                check: "gateway.service".into(),
+                severity: DoctorSeverity::Note,
+                summary: "no agency gateway is running at the default endpoint".into(),
+                detail: None,
+                fixable: false,
+            },
+        ]);
+        let lines = health_lines(&world_with_doctor(disclosure), Glyphs::unicode());
+        let rendered = lines.join("\n");
+
+        assert!(rendered.contains("1 error(s), 0 warning(s), 1 note(s)"));
+        // The error is listed in full, with its fixability.
+        assert!(rendered.contains("the state directory is missing"));
+        assert!(rendered.contains("(fixable)"));
+        // The gateway note is not in the actionable list, but its dedicated row
+        // is always present.
+        assert!(rendered.contains("Gateway"));
+        assert!(rendered.contains("no agency gateway is running"));
     }
 }
 

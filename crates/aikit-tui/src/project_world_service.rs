@@ -141,6 +141,21 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
         )),
     }
 
+    // The installation-health reading, when the backend can run the checks.
+    // Same shape again: a producer that ran them hands the findings over; a
+    // backend with none attached answers `None` and the reading keeps its
+    // `not_attempted` default; a producer that failed becomes a warning rather
+    // than a clean-looking absence, because "the checks could not run" is a
+    // different fact from "the checks found nothing wrong".
+    match backend.doctor_world() {
+        Ok(Some(disclosure)) => world = world.with_doctor(disclosure),
+        Ok(None) => {}
+        Err(error) => world.warnings.push(format!(
+            "installation health could not be observed for this world: {}",
+            error.message()
+        )),
+    }
+
     if backend.scope_layers().is_none() {
         world.warnings.push(
             "Project-world basis does not include the ordered scope-layer stack because this application-service boundary does not expose it; scope provenance is not reconstructed from partial evidence"
@@ -172,6 +187,9 @@ mod tests {
         /// What this backend can compose about credentials: nothing, an
         /// observation, or a producer that fell over.
         credential: CredentialAnswer,
+        /// What this backend can run for health: nothing, an observation, or a
+        /// check run that fell over.
+        doctor: DoctorAnswer,
     }
 
     #[derive(Default)]
@@ -190,6 +208,14 @@ mod tests {
         Failed,
     }
 
+    #[derive(Default)]
+    enum DoctorAnswer {
+        #[default]
+        Nothing,
+        Observed(Box<aikit_core::doctor_world::DoctorDisclosure>),
+        Failed,
+    }
+
     impl PaletteBackend for Backend {
         fn versioned_world(
             &self,
@@ -200,6 +226,19 @@ mod tests {
                 VersionedAnswer::Failed => Err(aikit_core::AikitError::new(
                     "versioned_world.git_spawn_failed",
                     "failed to invoke git",
+                )),
+            }
+        }
+
+        fn doctor_world(
+            &self,
+        ) -> Result<Option<aikit_core::doctor_world::DoctorDisclosure>> {
+            match &self.doctor {
+                DoctorAnswer::Nothing => Ok(None),
+                DoctorAnswer::Observed(disclosure) => Ok(Some(disclosure.as_ref().clone())),
+                DoctorAnswer::Failed => Err(aikit_core::AikitError::new(
+                    "doctor.checks_failed",
+                    "failed to run the installation health checks",
                 )),
             }
         }
@@ -287,6 +326,7 @@ mod tests {
             layers: Some(Vec::new()),
             versioned: VersionedAnswer::Nothing,
             credential: CredentialAnswer::Nothing,
+            doctor: DoctorAnswer::Nothing,
         };
 
         let resolution = context_resolution(&backend).unwrap();
@@ -308,6 +348,7 @@ mod tests {
             layers: None,
             versioned: VersionedAnswer::Nothing,
             credential: CredentialAnswer::Nothing,
+            doctor: DoctorAnswer::Nothing,
         };
 
         let world = project_world(&backend).unwrap();
@@ -335,6 +376,7 @@ mod tests {
             layers: Some(layers),
             versioned: VersionedAnswer::Nothing,
             credential: CredentialAnswer::Nothing,
+            doctor: DoctorAnswer::Nothing,
         };
 
         let world = project_world(&backend).unwrap();
@@ -391,6 +433,7 @@ mod tests {
             layers: Some(Vec::new()),
             versioned,
             credential: CredentialAnswer::Nothing,
+            doctor: DoctorAnswer::Nothing,
         })
         .unwrap()
     }
@@ -466,6 +509,22 @@ mod tests {
             layers: Some(Vec::new()),
             versioned: VersionedAnswer::Nothing,
             credential,
+            doctor: DoctorAnswer::Nothing,
+        })
+        .unwrap()
+    }
+
+    fn doctor_world_from(doctor: DoctorAnswer) -> aikit_core::ProjectWorldReadModel {
+        let mut context = ContextDescriptor::for_project("/work/aikit");
+        context.host = "test-host".into();
+        let view = resolved(&context, Vec::new());
+        project_world(&Backend {
+            context,
+            view,
+            layers: Some(Vec::new()),
+            versioned: VersionedAnswer::Nothing,
+            credential: CredentialAnswer::Nothing,
+            doctor,
         })
         .unwrap()
     }
@@ -510,6 +569,49 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| w.contains("credential/provider status could not be observed")),
+            "{:?}",
+            world.warnings
+        );
+    }
+
+    /// A health reading the backend runs reaches the reading the System pane
+    /// renders. Before this wiring `doctor` was absent from the TUI entirely.
+    #[test]
+    fn a_health_reading_reaches_the_reading() {
+        use aikit_core::doctor_world::{DoctorFinding, DoctorSeverity};
+        let disclosure = aikit_core::doctor_world::DoctorDisclosure::observed(vec![DoctorFinding {
+            check: "gateway.service".into(),
+            severity: DoctorSeverity::Note,
+            summary: "no agency gateway is running at the default endpoint".into(),
+            detail: None,
+            fixable: false,
+        }]);
+        let world = doctor_world_from(DoctorAnswer::Observed(Box::new(disclosure)));
+        assert!(world.doctor.was_attempted());
+        assert_eq!(world.doctor.count(DoctorSeverity::Note), Some(1));
+        assert!(world.warnings.iter().all(|w| !w.contains("health")));
+    }
+
+    /// No producer leaves the honest `not_attempted` default — "the checks were
+    /// not run", which is unknown, not a clean bill of health.
+    #[test]
+    fn no_health_producer_leaves_the_not_attempted_default() {
+        let world = doctor_world_from(DoctorAnswer::Nothing);
+        assert!(!world.doctor.was_attempted());
+        assert!(world.warnings.iter().all(|w| !w.contains("health")));
+    }
+
+    /// A check run that failed is disclosed as a warning, never folded into the
+    /// same absence as "the checks found nothing wrong".
+    #[test]
+    fn a_health_run_that_failed_is_disclosed_rather_than_read_as_absence() {
+        let world = doctor_world_from(DoctorAnswer::Failed);
+        assert!(!world.doctor.was_attempted());
+        assert!(
+            world
+                .warnings
+                .iter()
+                .any(|w| w.contains("installation health could not be observed")),
             "{:?}",
             world.warnings
         );
