@@ -92,7 +92,7 @@ fn publish(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Resu
     let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
     staged.write_all(&serde_json::to_vec_pretty(record).map_err(error)?).map_err(error)?;
     staged.as_file().sync_all().map_err(error)?;
-    staged.persist(target).map_err(error)?;
+    staged.persist(&target).map_err(error)?;
     fs::File::open(parent).and_then(|f| f.sync_all()).map_err(error)
 }
 fn authority(home: &AikitHome, session: &ResourceRef, request: &TaskRequest) -> Result<SourceRevision> {
