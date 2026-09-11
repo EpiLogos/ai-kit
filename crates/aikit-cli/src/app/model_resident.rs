@@ -65,7 +65,7 @@ pub(super) fn realise(
     }
     let provider_ref = provider.map(ProviderRef::parse).transpose()?;
     let cwd = service
-        .cwd
+        .invocation_cwd
         .canonicalize()
         .map_err(|e| AikitError::new("model.cwd_unavailable", e.to_string()))?;
     let request = crate::encounter_service::EncounterRequest::OpenModel {
