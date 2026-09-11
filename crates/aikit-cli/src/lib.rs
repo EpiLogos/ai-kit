@@ -51,6 +51,7 @@ pub mod task;
 pub mod temporal;
 pub mod tree_build;
 pub mod ui;
+pub mod working_environment_field;
 pub mod wiki;
 pub mod wiki_shape;
 

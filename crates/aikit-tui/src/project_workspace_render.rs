@@ -20,14 +20,18 @@ use std::collections::BTreeSet;
 use aikit_core::context_resolution::Availability;
 use aikit_core::project::ProjectBindingLocator;
 use aikit_core::credential_world::{CredentialStatusKnowledge, ProviderRosterKnowledge};
+use aikit_core::doctor_world::DoctorSeverity;
+use aikit_core::workcell_world::WorkcellKnowledge;
 use aikit_core::resource::{Eligibility, ResourceKind, SourceAuthority};
 use aikit_core::explain_history::{HistoryEvidence, HistoryReadModel, HistoryRecoverability};
 use aikit_core::session_space_application::SessionSpaceAuthoredState;
+use aikit_core::working_environment::WorkingEnvironmentHealth;
 use aikit_core::{ContextSourceHit, ProjectWorldReadModel, ProjectWorldResource};
 
 use crate::application::{TuiState, WorkspaceSection};
 use crate::backend::FactoryWorkEntry;
 use crate::compose_spine::compose_spine_lines;
+use crate::live_field::LiveWorkingField;
 use crate::layout::Glyphs;
 
 /// Canonical product label for each Workspace slot.
@@ -155,7 +159,11 @@ pub fn project_world_lines(
 ) -> Vec<String> {
     let world = reading.world;
     match state.workspace_section {
-        WorkspaceSection::Worlds => context_lines(world, glyphs),
+        WorkspaceSection::Worlds => {
+            let mut lines = context_lines(world, glyphs);
+            lines.extend(live_field_lines(state.live_field.as_ref(), glyphs));
+            lines
+        }
         WorkspaceSection::Compose => compose_lines(state, reading, glyphs),
         WorkspaceSection::Work => work_lines(state, reading, glyphs),
         WorkspaceSection::History => history_lines(reading, glyphs),
@@ -212,6 +220,9 @@ fn context_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
     }
 
     lines.push(String::new());
+    lines.extend(git_lines(world, sep));
+
+    lines.push(String::new());
     lines.push(format!(
         "Revision catalog {} {sep} resolution {}{}",
         world.effective_revision.catalog_revision,
@@ -225,6 +236,196 @@ fn context_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
     ));
     for warning in &world.warnings {
         lines.push(format!("Boundary {warning}"));
+    }
+    lines
+}
+
+/// The Worlds pane's repository rows, read from
+/// `ProjectWorldReadModel::versioned_world`.
+///
+/// `versioned_world` is `None` for reasons that must not collapse into one
+/// picture: nobody attached a versioned-material provider to this reading at
+/// all, or a provider looked and this Project genuinely is not under version
+/// control. Either way, rendering nothing here — or worse, a blank "clean"
+/// section that looks identical to a real clean repository — would tell the
+/// person less than they had a right to know. `compose_preview::material` and
+/// `compose_spine`'s `WorldsAndBounds` step already carry this exact
+/// discipline and this exact absence sentence for the Compose surfaces; this
+/// is the same fact read from the same field, so it keeps their words rather
+/// than inventing a second vocabulary for one repository.
+fn git_lines(world: &ProjectWorldReadModel, sep: &str) -> Vec<String> {
+    let Some(versioned) = world.versioned_world.as_ref() else {
+        return vec![format!(
+            "{:<8} no versioned material provider attached to this reading",
+            "Git"
+        )];
+    };
+    let repository = &versioned.repository;
+
+    // `detached` and `branch: None` are the same fact reported twice by the
+    // provider (see `NativeGitProvider::inspect`); there is no third case
+    // where a branch name exists but `detached` disagrees, so the fallback
+    // below is defensive, not a live branch.
+    let branch = repository
+        .branch
+        .as_deref()
+        .unwrap_or(if repository.detached { "detached" } else { "unnamed" });
+
+    let mut lines = vec![
+        format!("{:<8} {branch}", "Branch"),
+        format!("{:<8} {}", "Head", short_revision(repository.head.as_str())),
+    ];
+
+    lines.push(match repository.upstream.as_deref() {
+        None => format!("{:<8} no upstream tracked", "Upstream"),
+        Some(upstream) if repository.ahead == 0 && repository.behind == 0 => {
+            format!("{:<8} {upstream} {sep} up to date", "Upstream")
+        }
+        Some(upstream) => format!(
+            "{:<8} {upstream} {sep} {} ahead {sep} {} behind",
+            "Upstream", repository.ahead, repository.behind
+        ),
+    });
+
+    let working = &versioned.working;
+    lines.push(if working.is_clean() {
+        format!("{:<8} clean", "Working")
+    } else {
+        format!(
+            "{:<8} {} staged {sep} {} unstaged {sep} {} untracked {sep} {} conflicted",
+            "Working",
+            working.staged.len(),
+            working.unstaged.len(),
+            working.untracked.len(),
+            working.conflicted.len(),
+        )
+    });
+
+    // `worktrees` names every worktree the provider observed, including this
+    // one (`git worktree list` always does); only the *other*, linked
+    // worktrees are new information for a reader already looking at this one.
+    let linked = versioned
+        .worktrees
+        .iter()
+        .filter(|worktree| worktree.path != repository.worktree_root)
+        .map(|worktree| worktree.path.as_str())
+        .collect::<Vec<_>>();
+    if !linked.is_empty() {
+        lines.push(format!(
+            "{:<8} {} {sep} {}",
+            "Worktrees",
+            linked.len(),
+            linked.join(", ")
+        ));
+    }
+
+    lines
+}
+
+/// A revision short enough for a status line while remaining unambiguous in
+/// any repository this codebase's own scale would produce. Twelve hex
+/// characters of a SHA-1 is the same abbreviation length `git` itself favors
+/// once a repository has grown past a trivial number of objects.
+fn short_revision(revision: &str) -> &str {
+    revision.get(..12).unwrap_or(revision)
+}
+
+/// The live working-environment block of the Worlds pane (§W6).
+///
+/// Three states, kept apart because they are three different facts about the
+/// machine and collapsing them is how a dashboard starts lying:
+///
+/// * no reading at all — no provider was attached at this application
+///   boundary, so nobody looked;
+/// * a reading with no providers — a caller looked and this host is running
+///   none;
+/// * a reading with providers — each one's health and what it can actually do.
+///
+/// Provider-native ids are printed as `native <id>` beside their provider,
+/// never in the identity column. They are how the provider finds the pane, not
+/// what the pane *is*.
+fn live_field_lines(field: Option<&LiveWorkingField>, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
+    let mut lines = vec![String::new()];
+
+    let Some(field) = field else {
+        lines.push("Environment".into());
+        lines.push("  no working-environment provider is attached here".into());
+        return lines;
+    };
+
+    if field.is_empty() {
+        lines.push("Environment".into());
+        lines.push("  observed: no working environment is running on this host".into());
+        return lines;
+    }
+
+    lines.push(format!("Environment {sep} {} observed", field.observed.len()));
+    for provider in &field.observed {
+        let health = match provider.health {
+            WorkingEnvironmentHealth::Healthy => "healthy",
+            WorkingEnvironmentHealth::Degraded => "degraded",
+            WorkingEnvironmentHealth::Unavailable => "unavailable",
+        };
+        let mut can = Vec::new();
+        if provider.capabilities.open {
+            can.push("open");
+        }
+        if provider.capabilities.focus {
+            can.push("focus");
+        }
+        if provider.capabilities.surface_attach_detach {
+            can.push("attach");
+        }
+        let can = if can.is_empty() {
+            "claims nothing".to_string()
+        } else {
+            can.join("/")
+        };
+        lines.push(format!(
+            "  {} {sep} {health} {sep} {can} {sep} {} bound",
+            provider.provider.as_str(),
+            provider.bound_subjects,
+        ));
+    }
+
+    if field.subjects.is_empty() {
+        lines.push("  nothing here is bound to a provider yet".into());
+        return lines;
+    }
+
+    lines.push(String::new());
+    lines.push("Reachable".into());
+    for subject in &field.subjects {
+        lines.push(format!(
+            "  {} {sep} {}",
+            subject.subject.as_str(),
+            subject.semantic_kind
+        ));
+        for reach in &subject.projections {
+            let focus_mark = if reach.focused { " (focused)" } else { "" };
+            let verbs = match (reach.can_open(), reach.can_focus()) {
+                (true, true) => "open/focus".to_string(),
+                (true, false) => "open".to_string(),
+                (false, true) => "focus".to_string(),
+                // Both withheld: say which condition, so the row explains its
+                // own absence instead of looking like an oversight.
+                (false, false) => reach
+                    .open
+                    .map(|withheld| withheld.describe("open"))
+                    .unwrap_or_else(|| "unavailable".into()),
+            };
+            // A live pane shows the native id it is bound to; one that has
+            // never been started says so instead of showing a blank column.
+            let binding = match reach.native_id.as_deref() {
+                Some(native_id) => format!("native {native_id}"),
+                None => "not live yet".to_string(),
+            };
+            lines.push(format!(
+                "    {} {sep} {verbs} {sep} {binding}{focus_mark}",
+                reach.provider.as_str(),
+            ));
+        }
     }
     lines
 }
@@ -462,14 +663,157 @@ fn system_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
         String::new(),
     ];
     lines.extend(credential_lines(world, glyphs));
-    lines.push("Adapters      not exposed by application boundary".into());
-    lines.push("Workcell      not exposed by application boundary".into());
+    lines.push(adapter_line(world, glyphs));
+    lines.push(workcell_line(world, glyphs));
+    lines.push(String::new());
+    lines.extend(health_lines(world, glyphs));
     lines.push(String::new());
     lines.push(format!(
         "Revision      catalog {} {sep} resolution {}",
         world.effective_revision.catalog_revision, world.effective_revision.resolution_hash,
     ));
     lines
+}
+
+/// The Health rows of §8 System, read from `ProjectWorldReadModel::doctor`.
+///
+/// Same discipline as `credential_lines`: "the checks were not run" and "the
+/// checks ran and found nothing" are different facts and never share a row. When
+/// the checks ran, the actionable findings (errors and warnings) are listed in
+/// full, and the informational notes are folded into a count — a person wanting
+/// every note runs `aikit doctor`. The gateway gets its own always-present row
+/// pulled from the `gateway.service` check, because "is the agency gateway
+/// running" is a question the System pane should answer whether or not anything
+/// is wrong.
+fn health_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
+    let disclosure = &world.doctor;
+
+    let Some(findings) = disclosure.findings() else {
+        // Not run — unknown, not a clean bill of health.
+        return vec!["Health        not attempted for this world".to_string()];
+    };
+
+    let mut lines = Vec::new();
+    if findings.is_empty() {
+        lines.push("Health        checks ran; nothing to report".to_string());
+    } else {
+        let errors = disclosure.count(DoctorSeverity::Error).unwrap_or(0);
+        let warnings = disclosure.count(DoctorSeverity::Warning).unwrap_or(0);
+        let notes = disclosure.count(DoctorSeverity::Note).unwrap_or(0);
+        lines.push(format!(
+            "Health        {errors} error(s), {warnings} warning(s), {notes} note(s)"
+        ));
+        // List the actionable findings (errors and warnings), most severe
+        // first — `doctor::run` already sorts them. Cap the list so a machine
+        // with many ambient warnings does not push the rest of the pane off the
+        // screen; the full list is one `aikit doctor` away.
+        const MAX_LISTED: usize = 6;
+        let actionable: Vec<_> = findings
+            .iter()
+            .filter(|finding| finding.severity != DoctorSeverity::Note)
+            .collect();
+        for finding in actionable.iter().take(MAX_LISTED) {
+            let fixable = if finding.fixable { " (fixable)" } else { "" };
+            lines.push(format!(
+                "  {} {sep} {}{fixable}",
+                finding.severity.as_str(),
+                finding.summary
+            ));
+        }
+        if actionable.len() > MAX_LISTED {
+            lines.push(format!(
+                "  {} more {sep} run `aikit doctor` for the full list",
+                actionable.len() - MAX_LISTED
+            ));
+        }
+    }
+
+    // The gateway is optional, so its healthy state is a note rather than a
+    // warning; surface it explicitly anyway so the row is always answered.
+    let gateway = findings.iter().find(|finding| finding.check == "gateway.service");
+    match gateway {
+        Some(finding) => lines.push(format!("Gateway       {}", finding.summary)),
+        None => lines.push("Gateway       not disclosed on this platform".to_string()),
+    }
+
+    lines
+}
+
+/// The Workcell row of §8 System, read from `ProjectWorldReadModel::workcell`.
+///
+/// Same discipline: "not observed" (no producer looked), "unavailable" (the
+/// `workcell` binary could not be read) and "observed, nothing registered" are
+/// three different facts and never share a rendering.
+fn workcell_line(world: &ProjectWorldReadModel, glyphs: Glyphs) -> String {
+    let sep = glyphs.separator();
+    match &world.workcell.knowledge {
+        WorkcellKnowledge::NotAttempted { .. } => {
+            "Workcell      not observed for this world".to_string()
+        }
+        WorkcellKnowledge::Unavailable { reason } => {
+            format!("Workcell      unavailable {sep} {reason}")
+        }
+        WorkcellKnowledge::Observed { instances } if instances.is_empty() => {
+            "Workcell      no instances registered (registry observed)".to_string()
+        }
+        WorkcellKnowledge::Observed { instances } => {
+            let detected = instances.iter().filter(|i| i.detected).count();
+            let live = instances.iter().filter(|i| i.live).count();
+            format!(
+                "Workcell      {} instance(s) {sep} {detected} detected, {live} live",
+                instances.len()
+            )
+        }
+    }
+}
+
+/// The Adapters row of §8 System: a roll-call of the adapter providers this
+/// reading actually observed at the boundary, synthesised from the disclosures
+/// already attached — the versioned-material (git) provider, the secret
+/// providers, and Workcell. It names what is wired here at a glance; the fuller
+/// per-provider detail lives in the rows and panes each provider owns.
+fn adapter_line(world: &ProjectWorldReadModel, glyphs: Glyphs) -> String {
+    use aikit_core::resource::VersionedWorldProviderStatus;
+    let sep = glyphs.separator();
+    let mut providers: Vec<String> = Vec::new();
+
+    if let Some(versioned) = world.versioned_world.as_ref() {
+        let status = match versioned.provider.status {
+            VersionedWorldProviderStatus::Available => "available",
+            VersionedWorldProviderStatus::Degraded { .. } => "degraded",
+            VersionedWorldProviderStatus::Unavailable { .. } => "unavailable",
+        };
+        providers.push(format!("{} ({status})", versioned.provider.provider.as_str()));
+    }
+
+    if let ProviderRosterKnowledge::Observed { providers: secret } =
+        &world.credential_world.providers
+    {
+        for provider in secret {
+            let status = if provider.available { "available" } else { "unavailable" };
+            providers.push(format!("{} ({status})", provider.provider_ref.as_str()));
+        }
+    }
+
+    match &world.workcell.knowledge {
+        WorkcellKnowledge::Observed { instances } => {
+            let detected = instances.iter().filter(|i| i.detected).count();
+            providers.push(format!("workcell ({detected} detected)"));
+        }
+        WorkcellKnowledge::Unavailable { .. } => providers.push("workcell (unavailable)".into()),
+        WorkcellKnowledge::NotAttempted { .. } => {}
+    }
+
+    if providers.is_empty() {
+        "Adapters      none observed at this boundary".to_string()
+    } else {
+        format!(
+            "Adapters      {} observed {sep} {}",
+            providers.len(),
+            providers.join(", ")
+        )
+    }
 }
 
 /// The Credentials and Providers rows of §8 System, read from
@@ -975,6 +1319,129 @@ mod credential_disclosure_tests {
         assert!(!rendered.contains("none on this machine"));
         assert!(!rendered.contains("0/0"));
     }
+
+    fn world_with_doctor(doctor: aikit_core::doctor_world::DoctorDisclosure) -> ProjectWorldReadModel {
+        let context = ContextDescriptor::for_project("/work/aikit");
+        ProjectWorldReadModel::empty(
+            ProjectBinding::from_legacy_context(
+                ProjectRef::parse("project:aikit").unwrap(),
+                ProjectConstituentRef::parse("source:working-tree").unwrap(),
+                &context,
+            )
+            .unwrap(),
+            context,
+        )
+        .with_doctor(doctor)
+    }
+
+    /// A reading whose checks were never run must not render as healthy. This is
+    /// the doctor analog of the credential regression above.
+    #[test]
+    fn health_not_attempted_never_renders_as_healthy() {
+        let lines = health_lines(
+            &world_with_doctor(aikit_core::doctor_world::DoctorDisclosure::default()),
+            Glyphs::unicode(),
+        );
+        let rendered = lines.join("\n");
+        assert!(rendered.contains("not attempted for this world"));
+        assert!(!rendered.contains("nothing to report"));
+        assert!(!rendered.contains("error(s)"));
+    }
+
+    /// Observed findings render a severity summary, list the actionable ones,
+    /// and always answer the gateway row — even when the gateway is a healthy
+    /// (optional) note.
+    #[test]
+    fn observed_health_summarises_and_always_answers_the_gateway_row() {
+        use aikit_core::doctor_world::{DoctorDisclosure, DoctorFinding, DoctorSeverity};
+        let disclosure = DoctorDisclosure::observed(vec![
+            DoctorFinding {
+                check: "home.layout".into(),
+                severity: DoctorSeverity::Error,
+                summary: "the state directory is missing".into(),
+                detail: None,
+                fixable: true,
+            },
+            DoctorFinding {
+                check: "gateway.service".into(),
+                severity: DoctorSeverity::Note,
+                summary: "no agency gateway is running at the default endpoint".into(),
+                detail: None,
+                fixable: false,
+            },
+        ]);
+        let lines = health_lines(&world_with_doctor(disclosure), Glyphs::unicode());
+        let rendered = lines.join("\n");
+
+        assert!(rendered.contains("1 error(s), 0 warning(s), 1 note(s)"));
+        // The error is listed in full, with its fixability.
+        assert!(rendered.contains("the state directory is missing"));
+        assert!(rendered.contains("(fixable)"));
+        // The gateway note is not in the actionable list, but its dedicated row
+        // is always present.
+        assert!(rendered.contains("Gateway"));
+        assert!(rendered.contains("no agency gateway is running"));
+    }
+
+    fn world_with_workcell(
+        workcell: aikit_core::workcell_world::WorkcellDisclosure,
+    ) -> ProjectWorldReadModel {
+        let context = ContextDescriptor::for_project("/work/aikit");
+        ProjectWorldReadModel::empty(
+            ProjectBinding::from_legacy_context(
+                ProjectRef::parse("project:aikit").unwrap(),
+                ProjectConstituentRef::parse("source:working-tree").unwrap(),
+                &context,
+            )
+            .unwrap(),
+            context,
+        )
+        .with_workcell(workcell)
+    }
+
+    /// The three Workcell facts render differently: not observed, unavailable,
+    /// and observed-empty are never collapsed into one row.
+    #[test]
+    fn the_three_workcell_states_do_not_render_alike() {
+        use aikit_core::workcell_world::WorkcellDisclosure;
+        let not_attempted =
+            workcell_line(&world_with_workcell(WorkcellDisclosure::default()), Glyphs::unicode());
+        let unavailable = workcell_line(
+            &world_with_workcell(WorkcellDisclosure::unavailable("could not run workcell")),
+            Glyphs::unicode(),
+        );
+        let observed_empty =
+            workcell_line(&world_with_workcell(WorkcellDisclosure::observed(Vec::new())), Glyphs::unicode());
+
+        assert!(not_attempted.contains("not observed for this world"));
+        assert!(unavailable.contains("unavailable"));
+        assert!(observed_empty.contains("no instances registered"));
+        assert_ne!(not_attempted, unavailable);
+        assert_ne!(unavailable, observed_empty);
+        assert_ne!(not_attempted, observed_empty);
+    }
+
+    /// The Adapters roll-call names the providers the reading actually observed
+    /// (here the secret store) and counts them; a reading with none observed
+    /// says so plainly.
+    #[test]
+    fn adapters_roll_call_names_observed_providers() {
+        let none = adapter_line(&world_with(CredentialWorldDisclosure::default()), Glyphs::unicode());
+        assert!(none.contains("none observed at this boundary"));
+
+        let with_secret = adapter_line(
+            &world_with(CredentialWorldDisclosure {
+                version: "aikit.credential-world/v1".into(),
+                providers: ProviderRosterKnowledge::Observed {
+                    providers: vec![provider("keychain")],
+                },
+                credentials: Default::default(),
+            }),
+            Glyphs::unicode(),
+        );
+        assert!(with_secret.contains("1 observed"));
+        assert!(with_secret.contains("keychain"));
+    }
 }
 
 #[cfg(test)]
@@ -1153,5 +1620,143 @@ mod history_evidence_tests {
         assert!(rendered.contains("Catalog revision"));
         assert!(rendered.contains("Resolution hash"));
         assert!(rendered.contains("Evidence"));
+    }
+}
+
+#[cfg(test)]
+mod live_field_tests {
+    use super::*;
+    use aikit_core::working_environment::{
+        NativeBindingKind, ProviderNativeBinding, WorkingEnvironmentCapabilities,
+        WorkingEnvironmentObservation, WORKING_ENVIRONMENT_PROVIDER_VERSION,
+    };
+    use aikit_core::resource::ResourceRef;
+    use crate::live_field::live_working_field;
+
+    fn r(raw: &str) -> ResourceRef {
+        ResourceRef::parse(raw).unwrap()
+    }
+
+    fn observation(
+        provider: &str,
+        native_id: &str,
+        health: WorkingEnvironmentHealth,
+        open: bool,
+    ) -> WorkingEnvironmentObservation {
+        WorkingEnvironmentObservation {
+            schema: WORKING_ENVIRONMENT_PROVIDER_VERSION.into(),
+            provider: r(provider),
+            provider_version: None,
+            health,
+            capabilities: WorkingEnvironmentCapabilities {
+                discover: true,
+                open,
+                focus: true,
+                terminal_surface: true,
+                surface_attach_detach: true,
+                ..WorkingEnvironmentCapabilities::default()
+            },
+            bindings: vec![ProviderNativeBinding {
+                kind: NativeBindingKind::Surface,
+                native_id: native_id.into(),
+                canonical_ref: Some(r("surface/terminal/main/shell")),
+                provenance: Vec::new(),
+            }],
+            focused_native_id: Some(native_id.into()),
+            provenance: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn no_provider_attached_and_no_provider_running_read_differently() {
+        let nobody_looked = live_field_lines(None, Glyphs::unicode()).join("\n");
+        assert!(nobody_looked.contains("no working-environment provider is attached here"));
+
+        let looked = live_working_field(&[], &[]);
+        let nothing_running = live_field_lines(Some(&looked), Glyphs::unicode()).join("\n");
+        assert!(nothing_running.contains("no working environment is running on this host"));
+        assert_ne!(nobody_looked, nothing_running);
+    }
+
+    #[test]
+    fn two_projections_of_one_subject_are_drawn_under_that_one_subject() {
+        let field = live_working_field(
+            &[
+                observation(
+                    "provider/tmux/current",
+                    "%12",
+                    WorkingEnvironmentHealth::Healthy,
+                    true,
+                ),
+                observation(
+                    "provider/cmux/current",
+                    "surface-3",
+                    WorkingEnvironmentHealth::Healthy,
+                    true,
+                ),
+            ],
+            &[r("surface/terminal/main/shell")],
+        );
+        let rendered = live_field_lines(Some(&field), Glyphs::unicode()).join("\n");
+
+        assert!(rendered.contains("Environment"));
+        assert!(rendered.contains("Reachable"));
+        // The canonical subject appears once; each provider row hangs under it
+        // and carries its own native id, marked as native.
+        assert_eq!(rendered.matches("surface/terminal/main/shell").count(), 1);
+        assert!(rendered.contains("native %12"));
+        assert!(rendered.contains("native surface-3"));
+        assert!(rendered.contains("(focused)"));
+    }
+
+    #[test]
+    fn a_withheld_capability_explains_itself_in_the_row() {
+        let field = live_working_field(
+            &[observation(
+                "provider/tmux/current",
+                "%12",
+                WorkingEnvironmentHealth::Unavailable,
+                true,
+            )],
+            &[r("surface/terminal/main/shell")],
+        );
+        let rendered = live_field_lines(Some(&field), Glyphs::unicode()).join("\n");
+        assert!(rendered.contains("unavailable"));
+        assert!(
+            rendered.contains("provider is unavailable"),
+            "the row must say why, not just go quiet: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_block_is_ascii_pure_under_ascii_glyphs() {
+        let field = live_working_field(
+            &[
+                observation(
+                    "provider/tmux/current",
+                    "%12",
+                    WorkingEnvironmentHealth::Healthy,
+                    true,
+                ),
+                observation(
+                    "provider/cmux/current",
+                    "surface-3",
+                    WorkingEnvironmentHealth::Degraded,
+                    false,
+                ),
+            ],
+            &[r("surface/terminal/main/shell")],
+        );
+        for lines in [
+            live_field_lines(Some(&field), Glyphs::ascii()),
+            live_field_lines(Some(&live_working_field(&[], &[])), Glyphs::ascii()),
+            live_field_lines(None, Glyphs::ascii()),
+        ] {
+            let rendered = lines.join("\n");
+            assert!(
+                rendered.is_ascii(),
+                "ASCII rendering leaked a non-ASCII character: {rendered:?}"
+            );
+        }
     }
 }

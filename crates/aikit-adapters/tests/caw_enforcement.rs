@@ -11,9 +11,16 @@ fn rev(s: &str) -> SourceRevision {
     SourceRevision::parse(s).unwrap()
 }
 struct Owner {
+    // canonical: guard() canonicalises every attempt path, so the fixture's
+    // comparisons must live in the same (/var vs /private/var on macOS) space.
     root: PathBuf,
     revision: &'static str,
     calls: Cell<usize>,
+}
+impl Owner {
+    fn new(root: &std::path::Path) -> Self {
+        Self { root: root.canonicalize().unwrap(), revision: "rev/1", calls: Cell::new(0) }
+    }
 }
 impl PlacementOwner for Owner {
     fn resolve_and_allocate(&self, _: &ResourceRef) -> Result<PlacementBasis> {
@@ -60,11 +67,7 @@ fn coverage() -> EnforcementCoverage {
 #[test]
 fn native_source_writes_and_now_work_succeed_but_root_scratch_returns_usable_destination() {
     let t = tempfile::tempdir().unwrap();
-    let o = Owner {
-        root: t.path().into(),
-        revision: "rev/1",
-        calls: Cell::new(0),
-    };
+    let o = Owner::new(t.path());
     for path in ["source/README.md", "NOW/task/draft.md"] {
         assert!(
             guard(
@@ -101,11 +104,7 @@ fn native_source_writes_and_now_work_succeed_but_root_scratch_returns_usable_des
 #[test]
 fn opaque_shell_and_unsupported_body_cannot_borrow_native_blocking() {
     let t = tempfile::tempdir().unwrap();
-    let o = Owner {
-        root: t.path().into(),
-        revision: "rev/1",
-        calls: Cell::new(0),
-    };
+    let o = Owner::new(t.path());
     let a = WriteAttempt {
         cwd: t.path().into(),
         target: "source/lib.rs".into(),
@@ -155,11 +154,7 @@ fn symlink_redirect_resolves_to_actual_owner_decision_not_lexical_prefix() {
     let t = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(other.path(), t.path().join("source")).unwrap();
-    let o = Owner {
-        root: t.path().into(),
-        revision: "rev/1",
-        calls: Cell::new(0),
-    };
+    let o = Owner::new(t.path());
     let out = guard(
         &o,
         &r("task/a"),

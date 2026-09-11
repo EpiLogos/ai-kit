@@ -22,6 +22,7 @@ pub mod host;
 pub mod inspector_render;
 pub mod knowledge_service;
 pub mod layout;
+pub mod live_field;
 pub mod model_roster_surface;
 pub mod navigation;
 pub mod navigator_groups;
@@ -94,4 +95,9 @@ pub enum PaletteOutcome {
     Run(RunIntent),
     Applied(GenerationId),
     Promoted(CapsuleId),
+    /// The operator left the palette to set up a world credential. The CLI runs
+    /// the interactive setup flow on the restored terminal.
+    RunCredentialSetup,
+    /// The operator left the palette to run the diff-first `doctor` repair.
+    RunDoctorFix,
 }
