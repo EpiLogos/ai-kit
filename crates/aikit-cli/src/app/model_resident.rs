@@ -3,7 +3,7 @@
 //! model observation stay at that execution boundary, not in caller booleans.
 use super::Service;
 use aikit_adapters::agency_admission::AdmittedAgency;
-use aikit_core::model_catalogue::ProviderRef;
+use aikit_core::resource::ProviderRef;
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::{AikitError, ResourceRef, Result};
 use serde::Deserialize;
@@ -34,24 +34,42 @@ pub(super) fn realise(
         })?,
     ).map_err(|e| AikitError::new("model.invalid_resident_target", e.to_string()))?;
     if !target.socket.is_absolute() {
-        return Err(AikitError::new("model.invalid_resident_target", "The native owner socket must be absolute"));
+        return Err(AikitError::new(
+            "model.invalid_resident_target",
+            "The native owner socket must be absolute",
+        ));
     }
-    if body.zip(target.body.as_deref()).is_some_and(|(a, b)| a != b) {
-        return Err(AikitError::new("model.body_conflict", "The explicit body differs from the composed resident target"));
+    if body
+        .zip(target.body.as_deref())
+        .is_some_and(|(a, b)| a != b)
+    {
+        return Err(AikitError::new(
+            "model.body_conflict",
+            "The explicit body differs from the composed resident target",
+        ));
     }
-    let expected_agency: AdmittedAgency = serde_json::from_value(
-        compose.get("agency_admission").cloned().ok_or_else(|| {
-            AikitError::new("model.native_agency_required", "Supply the source-backed selected Agency/WorldBinding from native composition")
-        })?,
-    ).map_err(|e| AikitError::new("model.native_agency_required", e.to_string()))?;
+    let expected_agency: AdmittedAgency =
+        serde_json::from_value(compose.get("agency_admission").cloned().ok_or_else(|| {
+            AikitError::new(
+                "model.native_agency_required",
+                "Supply the source-backed selected Agency/WorldBinding from native composition",
+            )
+        })?)
+        .map_err(|e| AikitError::new("model.native_agency_required", e.to_string()))?;
     let model_ref = ResourceRef::parse(model)?;
     if !model_ref.as_str().starts_with("model:") {
-        return Err(AikitError::new("model.canonical_ref_required", "Choose a canonical catalogue model reference"));
+        return Err(AikitError::new(
+            "model.canonical_ref_required",
+            "Choose a canonical catalogue model reference",
+        ));
     }
     let provider_ref = provider.map(ProviderRef::parse).transpose()?;
-    let cwd = service.cwd.canonicalize().map_err(|e| AikitError::new("model.cwd_unavailable", e.to_string()))?;
+    let cwd = service
+        .cwd
+        .canonicalize()
+        .map_err(|e| AikitError::new("model.cwd_unavailable", e.to_string()))?;
     let request = crate::encounter_service::EncounterRequest::OpenModel {
-        selection: Box::new(crate::encounter_service::EncounterModelOpen {
+        request: Box::new(crate::encounter_service::EncounterModelOpen {
             space: target.space,
             agent_session: target.agent_session,
             cwd,
@@ -62,8 +80,10 @@ pub(super) fn realise(
         }),
     };
     let native = crate::encounter_service::request(&target.socket, &request)?;
-    if native["ok"] != true || native["data"]["selected"] != true
-        || native["data"]["executed"] != false {
+    if native["ok"] != true
+        || native["data"]["selected"] != true
+        || native["data"]["executed"] != false
+    {
         return Err(AikitError::new("model.resident_refused",
             "Native selected-model admission or observation failed; no instantiation receipt or implicit fallback substitutes for a resident")
             .with("native_response", native.to_string()));

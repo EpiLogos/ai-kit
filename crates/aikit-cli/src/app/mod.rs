@@ -78,6 +78,7 @@ use crate::temporal::process_central_root;
 mod development_field;
 mod flow_cognition;
 mod knowledge;
+mod model_resident;
 
 pub use development_field::DevelopmentFieldApplicationRequest;
 pub use flow_cognition::{
@@ -760,7 +761,10 @@ impl Service {
             })?;
             let capsule = Capsule::from_toml_str(&text)?;
             for (name, secret_ref) in &capsule.secrets {
-                items.push(ProjectionItem::secret_env(name.clone(), secret_ref.clone())?);
+                items.push(ProjectionItem::secret_env(
+                    name.clone(),
+                    secret_ref.clone(),
+                )?);
             }
         }
         items.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
@@ -815,17 +819,19 @@ impl Service {
                     source: document.source,
                     observed_at: document.observed_at,
                 };
-            observed.extend(
-                aikit_adapters::provider_catalog_source::observed_router_routes(&outcome),
-            );
+            observed
+                .extend(aikit_adapters::provider_catalog_source::observed_router_routes(&outcome));
         }
 
         // Harness workability: a harness that is actually installed here and
         // declares which provider it dispatches to is evidence that the
         // provider is reachable from this machine. It is the only evidence a
         // hosted provider can have short of calling its API with a key.
-        let capabilities = aikit_adapters::actuation_harness_detection
-            ::intake_actuation_capabilities(&SystemRunner::new(), "actuation");
+        let capabilities =
+            aikit_adapters::actuation_harness_detection::intake_actuation_capabilities(
+                &SystemRunner::new(),
+                "actuation",
+            );
         let (reachable, reach_notes) =
             aikit_adapters::actuation_model_routes::harness_provider_reachability(
                 detection,
@@ -859,10 +865,10 @@ impl Service {
                     notes.push(format!(
                         "credential bindings unreadable ({error}) — observed routes are reported \
                      without their credential state, never as usable"
-                ));
-                aikit_adapters::actuation_model_routes::CredentialEvidence::default()
-            }
-        };
+                    ));
+                    aikit_adapters::actuation_model_routes::CredentialEvidence::default()
+                }
+            };
         if !credentials.is_empty() {
             notes.push(format!(
                 "credential bindings observed for: {}",
@@ -903,182 +909,15 @@ impl Service {
         notes
     }
 
-    /// Actualise a selected Model through Actuation, keeping its routes plural
-    /// right up to the boundary.
-    ///
-    /// The whole chain in one place, in its own direction: the composed
-    /// resolution already carries the catalogue↔availability join, so this
-    /// selects a Model out of it (never a provider), ranks its viable routes,
-    /// asks Workcell for a material body only where one is actually needed,
-    /// and hands the first workable route to Actuation. Actuation re-runs live
-    /// detection and applies its own evidence gate; a refusal comes back as a
-    /// refusal, never as a success with a missing field.
+    /// Native source/authority/credential/model-observed resident selection.
+    /// Opening is not inference: an addressed turn produces that evidence.
     pub fn realise_model(
         &self,
         composed: &serde_json::Value,
         model: &str,
         provider: Option<&str>,
     ) -> Result<serde_json::Value> {
-        use aikit_adapters::model_realisation::{
-            material_body_plan, realise, MaterialBodyOutcome, RealisationOutcome,
-            RealisationRequest,
-        };
-        use aikit_core::resource::{
-            candidates_from_routes, canonical_model_ref, rank_model_roster, select_model,
-            ModelRankingPolicy, ModelRouteSet, ProviderRef,
-        };
-
-        let native_identity = |field: &str| -> Result<String> {
-            let value = composed.get("composed_inputs").and_then(|c| c.get(field))
-                .and_then(serde_json::Value::as_str).ok_or_else(|| AikitError::new(
-                    "compose.native_identity_required",
-                    format!("An actual Actuation {field} is required; host and SessionSpace are not substitutes"),
-                ))?;
-            aikit_core::ResourceRef::parse(value)?;
-            Ok(value.to_owned())
-        };
-        for field in ["actuation_ref", "agency", "world_binding_ref"] {
-            native_identity(field)?;
-        }
-        let model_ref = canonical_model_ref(model)?;
-        let route_sets: Vec<ModelRouteSet> =
-            serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
-                .map_err(|error| {
-                    AikitError::new("compose.route_sets_unreadable", error.to_string())
-                })?;
-        let routes = route_sets
-            .into_iter()
-            .find(|set| set.model == model_ref)
-            .ok_or_else(|| {
-                AikitError::new(
-                    "compose.model_not_catalogued",
-                    format!(
-                        "{model_ref} is not in the resolved catalogue — a Model is selected from                          the catalogue, never minted at selection time"
-                    ),
-                )
-            })?;
-        let pin = provider.map(ProviderRef::parse).transpose()?;
-
-        let mut base = model_roster_candidate_for(&model_ref);
-        if let Some(value) = composed.get("agency_admission").filter(|v| !v.is_null()) {
-            let held: aikit_adapters::agency_admission::AdmittedAgency =
-                serde_json::from_value(value.clone())
-                    .map_err(|e| AikitError::new("compose.admission_invalid", e.to_string()))?;
-            let current = aikit_adapters::agency_admission::admit_agency(
-                &SystemRunner::new(),
-                "actuation",
-                &held.basis,
-                &held.agent_ref,
-                &held.world_ref,
-            )?;
-            if current != held {
-                return Err(AikitError::new(
-                    "compose.admission_changed",
-                    "Recompose the changed native Agency admission",
-                ));
-            }
-            base.authorised = current.authorises(&aikit_core::ResourceRef::parse(
-                "action/aikit/model-realise",
-            )?);
-            // Policy and compatibility remain independent owner/resolver facts.
-            // No source presently supplies them here: fail closed, do not use
-            // a permission to record an instantiation as a blanket model grant.
-            base.provenance.push(format!(
-                "{}@{}",
-                current.basis.source_ref, current.basis.revision
-            ));
-        }
-        let roster = rank_model_roster(
-            model_roster_demand(),
-            ModelRankingPolicy::Balanced,
-            candidates_from_routes(&routes, &base),
-        );
-        let Some(selection) = select_model(&roster, &routes, pin.as_ref()) else {
-            return Ok(serde_json::json!({
-                "model": model_ref,
-                "selected": false,
-                "reason": format!(
-                    "{model_ref} is catalogued but has no viable route{} — known-but-unavailable, \
-                     which is not the same as unknown",
-                    pin.as_ref().map(|p| format!(" through the pinned {p}")).unwrap_or_default()
-                ),
-                "routes": routes.routes,
-            }));
-        };
-
-        // Selection keeps every viable route. Only actualisation picks one,
-        // and the rest stay on the record so a later loss re-resolves.
-        let runner = SystemRunner::new();
-        let mut attempts = Vec::new();
-        for route in &selection.viable_routes {
-            let body = material_body_plan(&runner, "workcell", &model_ref, route);
-            if let MaterialBodyOutcome::Unavailable { reason } = &body {
-                attempts.push(serde_json::json!({"route":route,"material_body":"unavailable","reason":reason,"outcome":"not-dispatched"}));
-                continue;
-            }
-            if let MaterialBodyOutcome::Satisfiable { .. } = &body {
-                attempts.push(serde_json::json!({"route":route,"material_body":body_reading(&body),"outcome":"material-plan-only","reason":"Workcell has planned a body, not observed a running inference service"}));
-                continue;
-            }
-            if let MaterialBodyOutcome::Unsatisfiable { omissions } = &body {
-                attempts.push(serde_json::json!({
-                    "route": route,
-                    "material_body": "unsatisfiable",
-                    "omissions": omissions,
-                    "outcome": "skipped — Workcell cannot supply the body this route needs",
-                }));
-                continue;
-            }
-            let request = RealisationRequest {
-                actuation_ref: native_identity("actuation_ref")?,
-                agency_ref: native_identity("agency")?,
-                world_binding_ref: native_identity("world_binding_ref")?,
-                agent_session_ref: composed
-                    .pointer("/composed_inputs/agent_session")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                harness_ref: composed
-                    .pointer("/plan/harness/resource")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                model: model_ref.clone(),
-                route: route.clone(),
-                evidence_refs: Vec::new(),
-            };
-            match realise(&runner, "actuation", &request) {
-                RealisationOutcome::Instantiated {
-                    receipt,
-                    detection_ref,
-                } => {
-                    return Ok(serde_json::json!({
-                        "model": model_ref,
-                        "selected": true,
-                        "selection": selection,
-                        "realised_through": route,
-                        "material_body": body_reading(&body),
-                        "detection_ref": detection_ref,
-                        "instantiation": receipt,
-                        "attempts": attempts,
-                        "executed": false,
-                        "standing": "Native instantiation recorded and correlated; no provider turn has been executed",
-                    }));
-                }
-                RealisationOutcome::Refused { reason } => attempts.push(serde_json::json!({
-                    "route": route, "outcome": "refused by Actuation", "reason": reason,
-                })),
-                RealisationOutcome::Unavailable { reason } => attempts.push(serde_json::json!({
-                    "route": route, "outcome": "Actuation unavailable", "reason": reason,
-                })),
-            }
-        }
-        Ok(serde_json::json!({
-            "model": model_ref,
-            "selected": true,
-            "selection": selection,
-            "realised": false,
-            "reason": "every viable route was tried and none actualised; see attempts",
-            "attempts": attempts,
-        }))
+        model_resident::realise(self, composed, model, provider, None)
     }
 
     /// Read one Provider Source's published model list into the local
@@ -1109,7 +948,8 @@ impl Service {
                     observed_at.clone(),
                     observations,
                 );
-                let path = aikit_store::model_catalogue::save_provider_catalog(&self.home, &document)?;
+                let path =
+                    aikit_store::model_catalogue::save_provider_catalog(&self.home, &document)?;
                 let folded =
                     aikit_core::resource::catalogue_from_observations(&document.observations)?;
                 Ok(serde_json::json!({
@@ -1209,11 +1049,21 @@ impl Service {
             };
 
             let resources = aikit_tui::project_world_service::resource_index_with_records(
-                self, composed.as_ref().map(|c|c.source_resources.clone()).unwrap_or_default(),
+                self,
+                composed
+                    .as_ref()
+                    .map(|c| c.source_resources.clone())
+                    .unwrap_or_default(),
             )?;
-            let mut resolution = aikit_tui::project_world_service::context_resolution_from_resources(
-                self, composed.as_ref().map(|c|c.requested_actors.clone()).unwrap_or_default(), &resources,
-            )?;
+            let mut resolution =
+                aikit_tui::project_world_service::context_resolution_from_resources(
+                    self,
+                    composed
+                        .as_ref()
+                        .map(|c| c.requested_actors.clone())
+                        .unwrap_or_default(),
+                    &resources,
+                )?;
             // Detection intake, same law as compose_plan: Actuation owns
             // what operative bodies exist; detected harnesses join the
             // candidates as ephemeral resources; a failed run is disclosed
@@ -1241,8 +1091,8 @@ impl Service {
                     if known.iter().any(|id| id == &entry.harness_ref) {
                         continue;
                     }
-                    if let Ok(resource) = aikit_adapters::actuation_harness_detection
-                        ::detected_harness_resource(
+                    if let Ok(resource) =
+                        aikit_adapters::actuation_harness_detection::detected_harness_resource(
                             &entry.slug,
                             &entry.harness_ref,
                             &record.detection_ref,
@@ -1398,10 +1248,19 @@ impl Service {
         }
 
         let resources = aikit_tui::project_world_service::resource_index_with_records(
-            self, composed.as_ref().map(|c|c.source_resources.clone()).unwrap_or_default(),
+            self,
+            composed
+                .as_ref()
+                .map(|c| c.source_resources.clone())
+                .unwrap_or_default(),
         )?;
         let mut resolution = aikit_tui::project_world_service::context_resolution_from_resources(
-            self, composed.as_ref().map(|c|c.requested_actors.clone()).unwrap_or_default(), &resources,
+            self,
+            composed
+                .as_ref()
+                .map(|c| c.requested_actors.clone())
+                .unwrap_or_default(),
+            &resources,
         )?;
         // Harness detection is owned by Actuation and consumed here — one
         // live `actuation harness detect` run discloses which operative
@@ -1409,12 +1268,13 @@ impl Service {
         // candidate set as ephemeral resources (never persisted to any
         // index); a failed run is disclosed unavailability, never an empty
         // set read as absence.
-        let detection = aikit_adapters::actuation_harness_detection
-            ::intake_actuation_detection(&SystemRunner::new(), "actuation");
-        let mut detection_notes: Vec<String> = Vec::new();
-        resolution.harness_detection = Some(
-            aikit_adapters::actuation_harness_detection::detection_summary(&detection),
+        let detection = aikit_adapters::actuation_harness_detection::intake_actuation_detection(
+            &SystemRunner::new(),
+            "actuation",
         );
+        let mut detection_notes: Vec<String> = Vec::new();
+        resolution.harness_detection =
+            Some(aikit_adapters::actuation_harness_detection::detection_summary(&detection));
         match &detection {
             aikit_adapters::actuation_harness_detection::DetectionOutcome::Record(record) => {
                 let known: Vec<String> = resolution
@@ -1432,12 +1292,11 @@ impl Service {
                     if known.iter().any(|id| id == &entry.harness_ref) {
                         continue;
                     }
-                    match aikit_adapters::actuation_harness_detection
-                        ::detected_harness_resource(
-                            &entry.slug,
-                            &entry.harness_ref,
-                            &record.detection_ref,
-                        ) {
+                    match aikit_adapters::actuation_harness_detection::detected_harness_resource(
+                        &entry.slug,
+                        &entry.harness_ref,
+                        &record.detection_ref,
+                    ) {
                         Ok(resource) => {
                             resolution.harness_candidates.push(resource);
                             added.push(entry.slug.clone());
@@ -1475,8 +1334,10 @@ impl Service {
         // binding stays with the instantiation receipt. The matching
         // candidate carries a `self` annotation so surfaces can show it
         // without treating it as chosen.
-        let self_outcome = aikit_adapters::actuation_harness_detection
-            ::intake_actuation_self(&SystemRunner::new(), "actuation");
+        let self_outcome = aikit_adapters::actuation_harness_detection::intake_actuation_self(
+            &SystemRunner::new(),
+            "actuation",
+        );
         match &self_outcome {
             aikit_adapters::actuation_harness_detection::SelfOutcome::Resolved(record) => {
                 if let Some(matched) = &record.resolved {
@@ -1587,7 +1448,11 @@ impl Service {
             composition_notes.push(format!(
                 "no harness selected by an authored source — detected candidates: [{}]; \
                  selection happens via Central profile / Actuation instantiation receipt, not here",
-                plan.harness_candidates.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ")
+                plan.harness_candidates
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if plan.model.is_none() {
@@ -1602,10 +1467,7 @@ impl Service {
                     set.model,
                     set.viable()
                         .into_iter()
-                        .map(|route| format!(
-                            "{} via {}",
-                            route.provider_native_id, route.provider
-                        ))
+                        .map(|route| format!("{} via {}", route.provider_native_id, route.provider))
                         .collect::<Vec<_>>()
                         .join(" | ")
                 );
@@ -1846,9 +1708,9 @@ impl Service {
                     blocks.push(aikit_core::pressure::Block::ordinary(block, Vec::new()))
                 }
                 Ok(None) => {}
-                Err(error) => decision.warnings.push(format!(
-                    "continuity/entity-disclosure unavailable: {error}"
-                )),
+                Err(error) => decision
+                    .warnings
+                    .push(format!("continuity/entity-disclosure unavailable: {error}")),
             }
         }
         if event.kind == aikit_core::hooks::HookEventKind::SessionStart
@@ -1858,15 +1720,13 @@ impl Service {
             // capsule, resolved from the view at event time — never ambient.
             // Closed by default: a missing config keeps the default bounds
             // and keeps the @1 human horizon shut.
-            let capsule_id = aikit_core::id::CapsuleId::parse(
-                "hook/continuity/orientation-packet",
-            )
-            .map_err(|error| {
-                AikitError::new(
-                    "capabilities.invalid_id",
-                    format!("engine reaction id is malformed: {error}"),
-                )
-            })?;
+            let capsule_id = aikit_core::id::CapsuleId::parse("hook/continuity/orientation-packet")
+                .map_err(|error| {
+                    AikitError::new(
+                        "capabilities.invalid_id",
+                        format!("engine reaction id is malformed: {error}"),
+                    )
+                })?;
             let tuned = match self.view.active.get(&capsule_id) {
                 Some(active) => {
                     crate::orientation_packet::OrientationConfig::from_config(Some(&active.config))
@@ -1896,14 +1756,19 @@ impl Service {
                 .unwrap_or_default();
             match crate::projects::load_all(&self.home).and_then(|specs| {
                 crate::project_recency::classify_all(
-                    &self.index, &specs, aikit_store::Timestamp::now(), config)
+                    &self.index,
+                    &specs,
+                    aikit_store::Timestamp::now(),
+                    config,
+                )
             }) {
                 Ok(rows) => blocks.push(aikit_core::pressure::Block::ordinary(
                     crate::project_recency::render_session_start(&rows, config.max_projects),
                     Vec::new(),
                 )),
-                Err(error) => decision.warnings.push(format!(
-                    "continuity/project-recency unavailable: {error}")),
+                Err(error) => decision
+                    .warnings
+                    .push(format!("continuity/project-recency unavailable: {error}")),
             }
         }
         // Star prompt-commands come first and, when one matches, the domain
@@ -1913,15 +1778,13 @@ impl Service {
         if event.kind == aikit_core::hooks::HookEventKind::UserPromptSubmit
             && tuning.allows(aikit_core::continuity::STAR_COMMANDS)
         {
-            let capsule_id =
-                aikit_core::id::CapsuleId::parse("hook/continuity/star-commands").map_err(
-                    |error| {
-                        AikitError::new(
-                            "capabilities.invalid_id",
-                            format!("engine reaction id is malformed: {error}"),
-                        )
-                    },
-                )?;
+            let capsule_id = aikit_core::id::CapsuleId::parse("hook/continuity/star-commands")
+                .map_err(|error| {
+                    AikitError::new(
+                        "capabilities.invalid_id",
+                        format!("engine reaction id is malformed: {error}"),
+                    )
+                })?;
             let config = self
                 .view
                 .active
@@ -1954,17 +1817,17 @@ impl Service {
         {
             // Domains are declared data in the project layer; they load only
             // under this composition, never ambient.
-            if let Some(project_root)=self.descriptor.project_root.as_deref() {
-                let (domains, mut load_warnings)=
+            if let Some(project_root) = self.descriptor.project_root.as_deref() {
+                let (domains, mut load_warnings) =
                     crate::domain_activation::load_domains(project_root);
                 decision.warnings.append(&mut load_warnings);
-                let prompt=crate::domain_activation::prompt_of(event);
-                let scope=crate::domain_activation::dedup_scope(event, Some(project_root));
-                let Some(scope)=scope else {
+                let prompt = crate::domain_activation::prompt_of(event);
+                let scope = crate::domain_activation::dedup_scope(event, Some(project_root));
+                let Some(scope) = scope else {
                     return Ok(self.under_pressure(decision, &blocks, event));
                 };
-                let (domain_blocks, mut reaction_warnings)=crate::domain_activation::run(
-                    &self.index, &scope, &domains, prompt.as_deref());
+                let (domain_blocks, mut reaction_warnings) =
+                    crate::domain_activation::run(&self.index, &scope, &domains, prompt.as_deref());
                 blocks.extend(domain_blocks);
                 decision.warnings.append(&mut reaction_warnings);
             }
@@ -1975,20 +1838,26 @@ impl Service {
             // File context is project-layer knowledge too: the project's wiki
             // relations and path-addressed domains, loaded only under this
             // composition, in front of the operation — never after it.
-            if let Some(project_root)=self.descriptor.project_root.as_deref() {
-                if let Some(path)=crate::file_context::file_path_of(event) {
-                    let (domains, mut load_warnings)=
+            if let Some(project_root) = self.descriptor.project_root.as_deref() {
+                if let Some(path) = crate::file_context::file_path_of(event) {
+                    let (domains, mut load_warnings) =
                         crate::domain_activation::load_domains(project_root);
                     decision.warnings.append(&mut load_warnings);
-                    let (objects, mut wiki_warnings)=
+                    let (objects, mut wiki_warnings) =
                         crate::file_context::load_project_wiki(project_root);
                     decision.warnings.append(&mut wiki_warnings);
-                    let scope=crate::domain_activation::dedup_scope(event, Some(project_root));
-                    let Some(scope)=scope else {
+                    let scope = crate::domain_activation::dedup_scope(event, Some(project_root));
+                    let Some(scope) = scope else {
                         return Ok(self.under_pressure(decision, &blocks, event));
                     };
-                    let (file_blocks, mut reaction_warnings)=crate::file_context::run(
-                        &self.index, &scope, project_root, &path, &domains, objects);
+                    let (file_blocks, mut reaction_warnings) = crate::file_context::run(
+                        &self.index,
+                        &scope,
+                        project_root,
+                        &path,
+                        &domains,
+                        objects,
+                    );
                     blocks.extend(file_blocks);
                     decision.warnings.append(&mut reaction_warnings);
                 }
@@ -1997,12 +1866,16 @@ impl Service {
         if event.kind == aikit_core::hooks::HookEventKind::PostToolUse
             && tuning.allows(aikit_core::continuity::ACTIVITY_EVIDENCE)
         {
-            if let Some(project_root)=self.descriptor.project_root.as_deref() {
-                if let Err(error)=crate::activity_evidence::record(
-                    &self.index, &self.descriptor.context_id, project_root, event)
-                {
-                    decision.warnings.push(format!(
-                        "continuity/activity-evidence unavailable: {error}"));
+            if let Some(project_root) = self.descriptor.project_root.as_deref() {
+                if let Err(error) = crate::activity_evidence::record(
+                    &self.index,
+                    &self.descriptor.context_id,
+                    project_root,
+                    event,
+                ) {
+                    decision
+                        .warnings
+                        .push(format!("continuity/activity-evidence unavailable: {error}"));
                 }
             }
         }
@@ -2265,7 +2138,10 @@ impl Service {
     /// The shell projection: one `bin/` shim per exported command. This is the
     /// projection that makes the contextual PATH — and therefore `run` and the
     /// multicall shims — real.
-    fn shell_plan(view: &ResolvedView, secret_items: Vec<ProjectionItem>) -> Result<ProjectionPlan> {
+    fn shell_plan(
+        view: &ResolvedView,
+        secret_items: Vec<ProjectionItem>,
+    ) -> Result<ProjectionPlan> {
         let mut plan =
             ProjectionPlan::new(TargetId::shell(), ActivationEffect::immediate("shell bin/"));
         for (name, capsule) in view.exported_commands() {
@@ -2406,8 +2282,7 @@ impl ScopeWriter {
 impl AikitApplication for Service {
     fn search(&self, r: SearchRequest) -> Result<SearchResults> {
         let resolved = aikit_tui::application_service::ApplicationService::resolve_search_from(
-            self,
-            &r.query,
+            self, &r.query,
         )?;
         // This compatibility API returns packages only. Keep the canonical
         // relative order and apply its limit after narrowing the typed field.
@@ -3158,84 +3033,4 @@ fn plan_effect(adapter: &dyn TargetAdapter, rc: &ResolvedContext) -> Option<Acti
         .plan(rc)
         .ok()
         .map(|plan| adapter.activation_effect(None, &plan))
-}
-
-/// A neutral roster demand for compose-time selection. The roster exists to
-/// order `(Model, route)` pairs; compose does not invent task fitness it has
-/// not observed, so the demand carries only what it can honestly state.
-fn model_roster_demand() -> aikit_core::resource::ModelRosterDemand {
-    aikit_core::resource::ModelRosterDemand {
-        project: None,
-        profile: None,
-        agency: None,
-        use_type: "compose".into(),
-        required_capabilities: Default::default(),
-        required_modalities: Default::default(),
-        required_tools: Default::default(),
-        required_contracts: Default::default(),
-        context_characteristics: Default::default(),
-        independence_from: Default::default(),
-        estimated_input_tokens: None,
-        estimated_output_tokens: None,
-        cost_ceiling_usd: None,
-    }
-}
-
-/// The model-level facts a compose-time candidate carries. Route-level facts
-/// are filled in per route by `candidates_from_routes`; nothing here asserts
-/// fitness, price or authorisation that has not been observed.
-fn model_roster_candidate_for(
-    model: &aikit_core::resource::ResourceRef,
-) -> aikit_core::resource::ModelRosterCandidate {
-    aikit_core::resource::ModelRosterCandidate {
-        model: model.clone(),
-        variant: model.to_string(),
-        provider: aikit_core::resource::ProviderRef::parse("provider:unresolved")
-            .expect("static provider ref"),
-        provider_revision: None,
-        available: false,
-        authorised: false,
-        provider_usable: false,
-        policy_allowed: false,
-        contract_compatible: false,
-        harness_compatible: false,
-        harness_composition: None,
-        native_capabilities: Default::default(),
-        harness_capabilities: Default::default(),
-        profile_skills: Default::default(),
-        modalities: Default::default(),
-        tool_support: Default::default(),
-        contracts: Default::default(),
-        task_fitness: Default::default(),
-        role_fitness: Default::default(),
-        profile_fit: None,
-        authored_preference: None,
-        frecency: None,
-        latency_ms: None,
-        reliability: None,
-        context_window_tokens: None,
-        price: None,
-        exact_spend: Vec::new(),
-        observed_fitness: Vec::new(),
-        access: Default::default(),
-        provenance: Vec::new(),
-    }
-}
-
-fn body_reading(outcome: &aikit_adapters::model_realisation::MaterialBodyOutcome) -> serde_json::Value {
-    use aikit_adapters::model_realisation::MaterialBodyOutcome;
-    match outcome {
-        MaterialBodyOutcome::NotRequired { reason } => {
-            serde_json::json!({ "state": "not-required", "reason": reason })
-        }
-        MaterialBodyOutcome::Satisfiable { plan_ref } => {
-            serde_json::json!({ "state": "satisfiable", "plan_ref": plan_ref })
-        }
-        MaterialBodyOutcome::Unsatisfiable { omissions } => {
-            serde_json::json!({ "state": "unsatisfiable", "omissions": omissions })
-        }
-        MaterialBodyOutcome::Unavailable { reason } => {
-            serde_json::json!({ "state": "unavailable", "reason": reason })
-        }
-    }
 }

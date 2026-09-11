@@ -86,6 +86,7 @@ fn missing_and_stale_required_source_refuse_before_real_provider_process_effect(
     let source = temp.path().join("law.md");
     let marker = temp.path().join("provider-started");
     let provider = EncounterProvider {
+        model_policy: None,
         protocol: Default::default(),
         id: "native-boundary".into(),
         label: "Real process admission boundary".into(),
@@ -131,6 +132,7 @@ fn missing_and_stale_required_source_refuse_before_real_provider_process_effect(
     EncounterService::configure(
         &home,
         EncounterProvider {
+            model_policy: None,
             required_context: None,
             ..provider
         },

@@ -199,9 +199,12 @@ impl SecretProvider for NativeSecureStoreProvider {
             } else {
                 BTreeSet::new()
             },
-            supported_materialisation: [SecretMaterialisationClass::ProviderNativeLease]
-                .into_iter()
-                .collect(),
+            supported_materialisation: [
+                SecretMaterialisationClass::ProviderNativeLease,
+                SecretMaterialisationClass::ProcessEnv,
+            ]
+            .into_iter()
+            .collect(),
             binding_provenance: binding_provenance(credential_ref),
             revision_or_lease_class: Some(KEYRING_REVISION.into()),
         }
@@ -242,7 +245,11 @@ impl SecretProvider for NativeSecureStoreProvider {
         credential_ref: &CredentialRef,
         class: SecretMaterialisationClass,
     ) -> Result<Option<SecretValue>> {
-        if class != SecretMaterialisationClass::ProviderNativeLease {
+        if !matches!(
+            class,
+            SecretMaterialisationClass::ProviderNativeLease
+                | SecretMaterialisationClass::ProcessEnv
+        ) {
             return Ok(None);
         }
         let entry = Self::entry(credential_ref).map_err(|error| {
@@ -665,9 +672,12 @@ mod encrypted_fallback {
                 } else {
                     BTreeSet::new()
                 },
-                supported_materialisation: [SecretMaterialisationClass::ProviderNativeLease]
-                    .into_iter()
-                    .collect(),
+                supported_materialisation: [
+                    SecretMaterialisationClass::ProviderNativeLease,
+                    SecretMaterialisationClass::ProcessEnv,
+                ]
+                .into_iter()
+                .collect(),
                 binding_provenance: format!(
                     "encrypted-file:{}",
                     self.path(credential_ref).display()
@@ -773,7 +783,11 @@ mod encrypted_fallback {
             credential_ref: &CredentialRef,
             class: SecretMaterialisationClass,
         ) -> Result<Option<SecretValue>> {
-            if class != SecretMaterialisationClass::ProviderNativeLease {
+            if !matches!(
+                class,
+                SecretMaterialisationClass::ProviderNativeLease
+                    | SecretMaterialisationClass::ProcessEnv
+            ) {
                 return Ok(None);
             }
             self.read_secret(credential_ref)
