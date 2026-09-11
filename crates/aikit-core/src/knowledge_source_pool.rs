@@ -181,6 +181,12 @@ pub struct SourceHit {
 pub trait SourcePoolProvider {
     fn capabilities(&self) -> SourceProviderCapabilities;
 
+    /// Live owner read, where this provider attaches to persistent native
+    /// source rather than materialising a disposable local index. None keeps
+    /// the existing in-memory-provider contract; an owner error never falls back.
+    fn read(&self, _source: &SourceRef) -> Result<Option<SourceMaterial>> { Ok(None) }
+
+
     /// Build/rebuild derived provider state from already-authorised material.
     fn rebuild(&mut self, material: &[SourceMaterial]) -> Result<()>;
 

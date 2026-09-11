@@ -125,6 +125,50 @@ pub fn project_world(backend: &dyn PaletteBackend) -> Result<ProjectWorldReadMod
         )),
     }
 
+    // The credential/provider reading, when the backend can compose one. Same
+    // shape as versioned material: a producer that *can* observe the OS secure
+    // store and the world's bindings hands a composed disclosure over; a
+    // backend with none attached answers `None` and the reading keeps its
+    // honest `not_attempted` default. A producer that ran but failed becomes a
+    // warning rather than a clean-looking absence, because "we could not read
+    // credentials" is a different fact from "this world needs none".
+    match backend.credential_world() {
+        Ok(Some(disclosure)) => world = world.with_credential_world(disclosure),
+        Ok(None) => {}
+        Err(error) => world.warnings.push(format!(
+            "credential/provider status could not be observed for this world: {}",
+            error.message()
+        )),
+    }
+
+    // The installation-health reading, when the backend can run the checks.
+    // Same shape again: a producer that ran them hands the findings over; a
+    // backend with none attached answers `None` and the reading keeps its
+    // `not_attempted` default; a producer that failed becomes a warning rather
+    // than a clean-looking absence, because "the checks could not run" is a
+    // different fact from "the checks found nothing wrong".
+    match backend.doctor_world() {
+        Ok(Some(disclosure)) => world = world.with_doctor(disclosure),
+        Ok(None) => {}
+        Err(error) => world.warnings.push(format!(
+            "installation health could not be observed for this world: {}",
+            error.message()
+        )),
+    }
+
+    // The Workcell reading, when the backend can observe it. Same shape once
+    // more: a producer hands the observation over; a backend with none answers
+    // `None` and the reading keeps its `not_attempted` default; a producer that
+    // failed becomes a warning rather than a clean-looking absence.
+    match backend.workcell_world() {
+        Ok(Some(disclosure)) => world = world.with_workcell(disclosure),
+        Ok(None) => {}
+        Err(error) => world.warnings.push(format!(
+            "Workcell status could not be observed for this world: {}",
+            error.message()
+        )),
+    }
+
     if backend.scope_layers().is_none() {
         world.warnings.push(
             "Project-world basis does not include the ordered scope-layer stack because this application-service boundary does not expose it; scope provenance is not reconstructed from partial evidence"
@@ -153,6 +197,14 @@ mod tests {
         /// What this backend can observe about versioned material: nothing,
         /// an observation, or a provider that fell over.
         versioned: VersionedAnswer,
+        /// What this backend can compose about credentials: nothing, an
+        /// observation, or a producer that fell over.
+        credential: CredentialAnswer,
+        /// What this backend can run for health: nothing, an observation, or a
+        /// check run that fell over.
+        doctor: DoctorAnswer,
+        /// What this backend can observe about Workcell.
+        workcell: WorkcellAnswer,
     }
 
     #[derive(Default)]
@@ -160,6 +212,30 @@ mod tests {
         #[default]
         Nothing,
         Observed(Box<aikit_core::resource::VersionedProjectWorld>),
+        Failed,
+    }
+
+    #[derive(Default)]
+    enum CredentialAnswer {
+        #[default]
+        Nothing,
+        Observed(Box<aikit_core::credential_world::CredentialWorldDisclosure>),
+        Failed,
+    }
+
+    #[derive(Default)]
+    enum DoctorAnswer {
+        #[default]
+        Nothing,
+        Observed(Box<aikit_core::doctor_world::DoctorDisclosure>),
+        Failed,
+    }
+
+    #[derive(Default)]
+    enum WorkcellAnswer {
+        #[default]
+        Nothing,
+        Observed(Box<aikit_core::workcell_world::WorkcellDisclosure>),
         Failed,
     }
 
@@ -173,6 +249,45 @@ mod tests {
                 VersionedAnswer::Failed => Err(aikit_core::AikitError::new(
                     "versioned_world.git_spawn_failed",
                     "failed to invoke git",
+                )),
+            }
+        }
+
+        fn doctor_world(
+            &self,
+        ) -> Result<Option<aikit_core::doctor_world::DoctorDisclosure>> {
+            match &self.doctor {
+                DoctorAnswer::Nothing => Ok(None),
+                DoctorAnswer::Observed(disclosure) => Ok(Some(disclosure.as_ref().clone())),
+                DoctorAnswer::Failed => Err(aikit_core::AikitError::new(
+                    "doctor.checks_failed",
+                    "failed to run the installation health checks",
+                )),
+            }
+        }
+
+        fn workcell_world(
+            &self,
+        ) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
+            match &self.workcell {
+                WorkcellAnswer::Nothing => Ok(None),
+                WorkcellAnswer::Observed(disclosure) => Ok(Some(disclosure.as_ref().clone())),
+                WorkcellAnswer::Failed => Err(aikit_core::AikitError::new(
+                    "workcell.probe_failed",
+                    "failed to observe Workcell",
+                )),
+            }
+        }
+
+        fn credential_world(
+            &self,
+        ) -> Result<Option<aikit_core::credential_world::CredentialWorldDisclosure>> {
+            match &self.credential {
+                CredentialAnswer::Nothing => Ok(None),
+                CredentialAnswer::Observed(disclosure) => Ok(Some(disclosure.as_ref().clone())),
+                CredentialAnswer::Failed => Err(aikit_core::AikitError::new(
+                    "credential_world.probe_failed",
+                    "failed to observe the secret provider roster",
                 )),
             }
         }
@@ -246,6 +361,9 @@ mod tests {
             view,
             layers: Some(Vec::new()),
             versioned: VersionedAnswer::Nothing,
+            credential: CredentialAnswer::Nothing,
+            doctor: DoctorAnswer::Nothing,
+            workcell: WorkcellAnswer::Nothing,
         };
 
         let resolution = context_resolution(&backend).unwrap();
@@ -266,6 +384,9 @@ mod tests {
             view,
             layers: None,
             versioned: VersionedAnswer::Nothing,
+            credential: CredentialAnswer::Nothing,
+            doctor: DoctorAnswer::Nothing,
+            workcell: WorkcellAnswer::Nothing,
         };
 
         let world = project_world(&backend).unwrap();
@@ -292,6 +413,9 @@ mod tests {
             view,
             layers: Some(layers),
             versioned: VersionedAnswer::Nothing,
+            credential: CredentialAnswer::Nothing,
+            doctor: DoctorAnswer::Nothing,
+            workcell: WorkcellAnswer::Nothing,
         };
 
         let world = project_world(&backend).unwrap();
@@ -347,6 +471,9 @@ mod tests {
             view,
             layers: Some(Vec::new()),
             versioned,
+            credential: CredentialAnswer::Nothing,
+            doctor: DoctorAnswer::Nothing,
+            workcell: WorkcellAnswer::Nothing,
         })
         .unwrap()
     }
@@ -405,6 +532,178 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| w.contains("does not belong to this Project")),
+            "{:?}",
+            world.warnings
+        );
+    }
+
+    fn credential_world_from(
+        credential: CredentialAnswer,
+    ) -> aikit_core::ProjectWorldReadModel {
+        let mut context = ContextDescriptor::for_project("/work/aikit");
+        context.host = "test-host".into();
+        let view = resolved(&context, Vec::new());
+        project_world(&Backend {
+            context,
+            view,
+            layers: Some(Vec::new()),
+            versioned: VersionedAnswer::Nothing,
+            credential,
+            doctor: DoctorAnswer::Nothing,
+            workcell: WorkcellAnswer::Nothing,
+        })
+        .unwrap()
+    }
+
+    fn doctor_world_from(doctor: DoctorAnswer) -> aikit_core::ProjectWorldReadModel {
+        let mut context = ContextDescriptor::for_project("/work/aikit");
+        context.host = "test-host".into();
+        let view = resolved(&context, Vec::new());
+        project_world(&Backend {
+            context,
+            view,
+            layers: Some(Vec::new()),
+            versioned: VersionedAnswer::Nothing,
+            credential: CredentialAnswer::Nothing,
+            doctor,
+            workcell: WorkcellAnswer::Nothing,
+        })
+        .unwrap()
+    }
+
+    /// A disclosure the backend composes reaches the reading the System pane
+    /// renders. Before this wiring nobody attached a producer, so the reading
+    /// carried the `not_attempted` default no matter what was bound.
+    #[test]
+    fn a_composed_credential_reading_reaches_the_reading() {
+        use aikit_core::credential_world::{
+            disclose_credential_world, ProviderRosterKnowledge,
+        };
+        let disclosure = disclose_credential_world(
+            ProviderRosterKnowledge::Observed { providers: vec![] },
+            &[],
+            true,
+            false,
+        );
+        let world = credential_world_from(CredentialAnswer::Observed(Box::new(disclosure)));
+        // Observed roster, not the `Unknown` the default carries.
+        assert!(world.credential_world.providers.is_known());
+        assert!(world.warnings.iter().all(|w| !w.contains("credential")));
+    }
+
+    /// A backend with no credential producer leaves the honest `not_attempted`
+    /// default in place — "nobody looked", distinct from any observed state.
+    #[test]
+    fn no_credential_producer_leaves_the_not_attempted_default() {
+        let world = credential_world_from(CredentialAnswer::Nothing);
+        assert!(!world.credential_world.providers.is_known());
+        assert!(world.warnings.iter().all(|w| !w.contains("credential")));
+    }
+
+    /// A producer that ran and failed is disclosed as a warning, never folded
+    /// into the same absence as "this world needs no credentials".
+    #[test]
+    fn a_credential_producer_that_failed_is_disclosed_rather_than_read_as_absence() {
+        let world = credential_world_from(CredentialAnswer::Failed);
+        assert!(!world.credential_world.providers.is_known());
+        assert!(
+            world
+                .warnings
+                .iter()
+                .any(|w| w.contains("credential/provider status could not be observed")),
+            "{:?}",
+            world.warnings
+        );
+    }
+
+    /// A health reading the backend runs reaches the reading the System pane
+    /// renders. Before this wiring `doctor` was absent from the TUI entirely.
+    #[test]
+    fn a_health_reading_reaches_the_reading() {
+        use aikit_core::doctor_world::{DoctorFinding, DoctorSeverity};
+        let disclosure = aikit_core::doctor_world::DoctorDisclosure::observed(vec![DoctorFinding {
+            check: "gateway.service".into(),
+            severity: DoctorSeverity::Note,
+            summary: "no agency gateway is running at the default endpoint".into(),
+            detail: None,
+            fixable: false,
+        }]);
+        let world = doctor_world_from(DoctorAnswer::Observed(Box::new(disclosure)));
+        assert!(world.doctor.was_attempted());
+        assert_eq!(world.doctor.count(DoctorSeverity::Note), Some(1));
+        assert!(world.warnings.iter().all(|w| !w.contains("health")));
+    }
+
+    /// No producer leaves the honest `not_attempted` default — "the checks were
+    /// not run", which is unknown, not a clean bill of health.
+    #[test]
+    fn no_health_producer_leaves_the_not_attempted_default() {
+        let world = doctor_world_from(DoctorAnswer::Nothing);
+        assert!(!world.doctor.was_attempted());
+        assert!(world.warnings.iter().all(|w| !w.contains("health")));
+    }
+
+    /// A check run that failed is disclosed as a warning, never folded into the
+    /// same absence as "the checks found nothing wrong".
+    #[test]
+    fn a_health_run_that_failed_is_disclosed_rather_than_read_as_absence() {
+        let world = doctor_world_from(DoctorAnswer::Failed);
+        assert!(!world.doctor.was_attempted());
+        assert!(
+            world
+                .warnings
+                .iter()
+                .any(|w| w.contains("installation health could not be observed")),
+            "{:?}",
+            world.warnings
+        );
+    }
+
+    fn workcell_world_from(workcell: WorkcellAnswer) -> aikit_core::ProjectWorldReadModel {
+        let mut context = ContextDescriptor::for_project("/work/aikit");
+        context.host = "test-host".into();
+        let view = resolved(&context, Vec::new());
+        project_world(&Backend {
+            context,
+            view,
+            layers: Some(Vec::new()),
+            versioned: VersionedAnswer::Nothing,
+            credential: CredentialAnswer::Nothing,
+            doctor: DoctorAnswer::Nothing,
+            workcell,
+        })
+        .unwrap()
+    }
+
+    /// A Workcell reading the backend observes reaches the reading. Before this
+    /// wiring the observer existed in `aikit-adapters` but had no caller.
+    #[test]
+    fn a_workcell_reading_reaches_the_reading() {
+        let disclosure = aikit_core::workcell_world::WorkcellDisclosure::observed(Vec::new());
+        let world = workcell_world_from(WorkcellAnswer::Observed(Box::new(disclosure)));
+        assert!(world.workcell.was_observed());
+        assert!(world.warnings.iter().all(|w| !w.contains("Workcell")));
+    }
+
+    /// No producer leaves the honest `not_attempted` default — distinct from an
+    /// observed-but-empty registry and from an unavailable binary.
+    #[test]
+    fn no_workcell_producer_leaves_the_not_attempted_default() {
+        let world = workcell_world_from(WorkcellAnswer::Nothing);
+        assert!(!world.workcell.was_observed());
+        assert!(world.warnings.iter().all(|w| !w.contains("Workcell")));
+    }
+
+    /// A Workcell observation that failed is disclosed as a warning.
+    #[test]
+    fn a_workcell_probe_that_failed_is_disclosed_rather_than_read_as_absence() {
+        let world = workcell_world_from(WorkcellAnswer::Failed);
+        assert!(!world.workcell.was_observed());
+        assert!(
+            world
+                .warnings
+                .iter()
+                .any(|w| w.contains("Workcell status could not be observed")),
             "{:?}",
             world.warnings
         );

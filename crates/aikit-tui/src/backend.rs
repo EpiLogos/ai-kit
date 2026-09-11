@@ -310,6 +310,120 @@ pub trait PaletteBackend {
         Ok(None)
     }
 
+    /// Optional already-observed working-environment providers for this host.
+    ///
+    /// Same seam, same reason as [`PaletteBackend::versioned_world`]: tmux,
+    /// cmux, Herdr and Hyprland providers do I/O and live in `aikit-adapters`,
+    /// which this crate does not depend on. So the caller that *can* observe
+    /// hands the observations over, and a backend that cannot observe answers
+    /// `None`.
+    ///
+    /// The two meanings of an absent answer stay apart. `None` is "no provider
+    /// was attached at all — nobody looked". `Some(vec![])` is "a caller looked
+    /// and found no working environment here". A surface renders those
+    /// differently because they are different facts about the machine.
+    fn working_environments(
+        &self,
+    ) -> Result<Option<Vec<aikit_core::working_environment::WorkingEnvironmentObservation>>> {
+        Ok(None)
+    }
+
+    /// Ask one observed provider to open or focus one canonical subject.
+    ///
+    /// The default answers `NotExposed` rather than erroring: a backend with no
+    /// provider attached has not failed at anything, and the operator needs to
+    /// be told the boundary is empty, not shown a failure they cannot act on.
+    fn act_in_working_environment(
+        &mut self,
+        provider: &ResourceRef,
+        subject: &ResourceRef,
+        operation: crate::live_field::WorkingEnvironmentOperation,
+    ) -> Result<crate::live_field::WorkingEnvironmentOutcome> {
+        Ok(crate::live_field::WorkingEnvironmentOutcome::NotExposed {
+            provider: provider.clone(),
+            subject: subject.clone(),
+            reason: format!(
+                "no working-environment provider is attached at this application boundary, so {} is not available here",
+                operation.as_str()
+            ),
+        })
+    }
+
+    /// Optional already-composed credential/provider reading for this world.
+    ///
+    /// Same seam, same reason as [`PaletteBackend::versioned_world`]: resolving
+    /// what secret providers reach this machine, and which of the world's
+    /// declared credentials are bound, is I/O over the OS secure store and the
+    /// binding record. `aikit-core` is I/O-free and `aikit-tui` does not depend
+    /// on the crates that do it, so the caller that *can* observe composes the
+    /// disclosure through `disclose_credential_world` and hands it over.
+    ///
+    /// The two meanings of an absent answer stay apart, on two levels. `None`
+    /// here is "no producer is attached at all — nobody looked", and the
+    /// reading keeps its honest `not_attempted` default. A `Some(disclosure)`
+    /// then carries the finer distinctions the disclosure itself exists to
+    /// keep: a roster genuinely observed empty versus one that could not be
+    /// enumerated, and a credential resolved to no provider versus one never
+    /// resolved at all.
+    fn credential_world(
+        &self,
+    ) -> Result<Option<aikit_core::credential_world::CredentialWorldDisclosure>> {
+        Ok(None)
+    }
+
+    /// Optional already-run installation-health reading for this world.
+    ///
+    /// Same seam, same reason as [`PaletteBackend::credential_world`]: running
+    /// the health checks is I/O — it probes the OS secure store, reads harness
+    /// config, asks the gateway socket, lists registries — and lives in the CLI
+    /// crate `aikit-tui` cannot depend on. The caller that *can* run them does,
+    /// and hands the composed findings over.
+    ///
+    /// `None` is "the checks were not run — nobody looked", and the reading
+    /// keeps its honest `not_attempted` default. A `Some(disclosure)` whose
+    /// `findings` are empty is the different, confirmed fact that the checks ran
+    /// and found nothing wrong.
+    fn doctor_world(&self) -> Result<Option<aikit_core::doctor_world::DoctorDisclosure>> {
+        Ok(None)
+    }
+
+    /// Optional already-observed Workcell (body materialisation) reading.
+    ///
+    /// Same seam, same reason as the others: observing Workcell runs its
+    /// external binary (`workcell instances list`), which lives behind the CLI
+    /// crate `aikit-tui` cannot depend on. The caller that *can* observe does,
+    /// and hands the composed disclosure over.
+    ///
+    /// `None` is "nobody looked", and the reading keeps its `not_attempted`
+    /// default. A `Some(disclosure)` then keeps the finer split: the `workcell`
+    /// binary that could not be read (`Unavailable`) versus a registry observed
+    /// to hold nothing (`Observed` empty).
+    fn workcell_world(&self) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
+        Ok(None)
+    }
+
+    /// The ranked Model roster for this world, when the backend can compose one.
+    ///
+    /// Fetched on demand (when the roster overlay is opened), not on every world
+    /// read: building it composes the resolution and joins the catalogue against
+    /// live route observation, which is real work the operator asked for by
+    /// opening the panel. A backend that cannot compose one answers `None`.
+    fn model_roster(&self) -> Result<Option<aikit_core::resource::ModelRoster>> {
+        Ok(None)
+    }
+
+    /// The canonical subjects this world can project into a working
+    /// environment — the panes the current session plan defines, whether or
+    /// not any of them is live yet.
+    ///
+    /// Separate from [`PaletteBackend::working_environments`] because it
+    /// answers a different question. That one asks the machine what exists;
+    /// this one asks the plan what could. Open needs the second: a subject
+    /// that has never been started is exactly the one worth starting.
+    fn working_environment_subjects(&self) -> Result<Vec<ResourceRef>> {
+        Ok(Vec::new())
+    }
+
     fn scope_layers(&self) -> Option<&[ScopeLayer]> {
         None
     }

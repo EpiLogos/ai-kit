@@ -462,6 +462,8 @@ pub struct SourceCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum SourceSub {
+    /// Bind an existing or new skill source to Central's stable directory ref.
+    BindCentral(SourceBindCentralArgs),
     /// Register a machine-local skill directory without making it active.
     AddDirectory(SourceAddDirectoryArgs),
     /// Register a Git repository and exact revision without fetching it yet.
@@ -476,6 +478,14 @@ pub enum SourceSub {
     Promote(SourcePromoteArgs),
     /// Return to the previous promoted snapshot.
     Rollback(SourceNameArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SourceBindCentralArgs {
+    pub id: String,
+    pub source_ref: String,
+    #[arg(long)]
+    pub root: std::path::PathBuf,
 }
 
 #[derive(Debug, Args)]

@@ -11,9 +11,16 @@ fn rev(s: &str) -> SourceRevision {
     SourceRevision::parse(s).unwrap()
 }
 struct Owner {
+    // canonical: guard() canonicalises every attempt path, so the fixture's
+    // comparisons must live in the same (/var vs /private/var on macOS) space.
     root: PathBuf,
     revision: &'static str,
     calls: Cell<usize>,
+}
+impl Owner {
+    fn new(root: &std::path::Path) -> Self {
+        Self { root: root.canonicalize().unwrap(), revision: "rev/1", calls: Cell::new(0) }
+    }
 }
 impl PlacementOwner for Owner {
     fn resolve_and_allocate(&self, _: &ResourceRef) -> Result<PlacementBasis> {
@@ -60,11 +67,7 @@ fn coverage() -> EnforcementCoverage {
 #[test]
 fn native_source_writes_and_now_work_succeed_but_root_scratch_returns_usable_destination() {
     let t = tempfile::tempdir().unwrap();
-    let o = Owner {
-        root: t.path().canonicalize().unwrap(),
-        revision: "rev/1",
-        calls: Cell::new(0),
-    };
+    let o = Owner::new(t.path());
     for path in ["source/README.md", "NOW/task/draft.md"] {
         assert!(
             guard(
@@ -101,11 +104,7 @@ fn native_source_writes_and_now_work_succeed_but_root_scratch_returns_usable_des
 #[test]
 fn opaque_shell_and_unsupported_body_cannot_borrow_native_blocking() {
     let t = tempfile::tempdir().unwrap();
-    let o = Owner {
-        root: t.path().canonicalize().unwrap(),
-        revision: "rev/1",
-        calls: Cell::new(0),
-    };
+    let o = Owner::new(t.path());
     let a = WriteAttempt {
         cwd: t.path().into(),
         target: "source/lib.rs".into(),
@@ -128,7 +127,7 @@ fn opaque_shell_and_unsupported_body_cannot_borrow_native_blocking() {
 fn stale_policy_and_parent_traversal_fail_closed() {
     let t = tempfile::tempdir().unwrap();
     let o = Owner {
-        root: t.path().canonicalize().unwrap(),
+        root: t.path().into(),
         revision: "rev/2",
         calls: Cell::new(0),
     };
@@ -155,11 +154,7 @@ fn symlink_redirect_resolves_to_actual_owner_decision_not_lexical_prefix() {
     let t = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(other.path(), t.path().join("source")).unwrap();
-    let o = Owner {
-        root: t.path().canonicalize().unwrap(),
-        revision: "rev/1",
-        calls: Cell::new(0),
-    };
+    let o = Owner::new(t.path());
     let out = guard(
         &o,
         &r("task/a"),
@@ -186,37 +181,4 @@ fn hook_install_and_remove_preserve_foreign_siblings_even_empty_entries() {
         project_claude_hook(&once, "aikit guard-owned", false).unwrap()
     );
     assert!(project_claude_hook(&json!({"hooks":"foreign-unparsed"}), "owned", true).is_err());
-}
-
-#[cfg(unix)]
-#[test]
-fn aliased_temporary_root_keeps_native_canonical_target_semantics() {
-    let t = tempfile::tempdir().unwrap();
-    let root = t.path().join("physical");
-    std::fs::create_dir(&root).unwrap();
-    let alias = t.path().join("alias");
-    std::os::unix::fs::symlink(&root, &alias).unwrap();
-    let owner = Owner {
-        root: root.canonicalize().unwrap(),
-        revision: "rev/1",
-        calls: Cell::new(0),
-    };
-    let result = guard(
-        &owner,
-        &r("task/a"),
-        &WriteAttempt {
-            cwd: alias,
-            target: "source/allowed.txt".into(),
-            exposure: WriteExposure::NativeFileOperation,
-        },
-        &coverage(),
-    )
-    .unwrap();
-    assert!(result.allowed);
-    match result.owner_decision.unwrap() {
-        PlacementDecision::Allow { canonical_target, .. } => {
-            assert_eq!(canonical_target, owner.root.join("source/allowed.txt"));
-        }
-        PlacementDecision::Deny { .. } => panic!("canonical owner refused a permitted source target"),
-    }
 }

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aikit_adapters::bkmr::BkmrSourcePoolProvider;
+use aikit_adapters::central_file_map::CentralFileMapProvider;
 use aikit_adapters::gitnexus::GitNexusCodeIndexProvider;
 use aikit_adapters::runner::SystemRunner;
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
@@ -39,6 +40,8 @@ pub(super) struct KnowledgeRuntime {
     material: Vec<SourceMaterial>,
     native_source: NativeSourcePoolProvider,
     bkmr: Option<BkmrSourcePoolProvider<SystemRunner>>,
+    central: Option<CentralFileMapProvider<SystemRunner>>,
+    central_expected: bool,
     code: Option<GitNexusCodeIndexProvider<SystemRunner>>,
     project_map: ProjectMap,
     absences: Vec<String>,
@@ -54,13 +57,19 @@ impl KnowledgeRuntime {
     pub(super) fn source_material(&self) -> &[SourceMaterial] {
         &self.material
     }
+    pub(super) fn owner_source_provider(&self) -> Option<&dyn SourcePoolProvider> {
+        self.central.as_ref().map(|p| p as &dyn SourcePoolProvider)
+    }
     fn application(&self, context: FamiliarityContext) -> KnowledgeApplication<'_> {
         let mut application = KnowledgeApplication::new(context)
-            .with_source_pool(&self.native_source, &self.material)
             .with_project_map(&self.project_map);
         if let Some(provider) = &self.wiki {
             application = application.with_wiki(provider);
         }
+        if let Some(provider) = &self.central {
+            application = application.with_source_pool(provider, provider.descriptors());
+        }
+        application = application.with_source_pool(&self.native_source, &self.material);
         if let Some(provider) = &self.bkmr {
             application = application.with_source_pool(provider, &self.material);
         }
@@ -97,6 +106,11 @@ impl Service {
         &self,
         operation: impl FnOnce(&KnowledgeRuntime, KnowledgeApplication<'_>) -> Result<T>,
     ) -> Result<T> {
+        let owner_backed = self.knowledge_runtime.borrow().as_ref()
+            .is_some_and(|r| r.central_expected);
+        if owner_backed {
+            self.invalidate_knowledge_runtime();
+        }
         if self.knowledge_runtime.borrow().is_none() {
             let runtime = self.materialize_knowledge_runtime()?;
             *self.knowledge_runtime.borrow_mut() = Some(runtime);
@@ -530,6 +544,24 @@ impl Service {
             }
         };
 
+        let central = if let Some(central_root) = central_root {
+            let project = root.strip_prefix(central_root).ok().and_then(|relative| {
+                let mut parts = relative.components();
+                if parts.next()?.as_os_str() != "Work" { return None; }
+                parts.next()?.as_os_str().to_str()
+            });
+            // A missing map degrades this lens, not independent Wiki/code
+            // faculties. Its absence never activates a disposable substitute.
+            match CentralFileMapProvider::connect(SystemRunner::new(),
+                aikit_adapters::central_file_map::executable(), central_root, project) {
+                Ok(provider) => Some(provider),
+                Err(error) => { absences.push(format!("Central file map unavailable: {}", error.message())); None }
+            }
+        } else { None };
+        // Filesystem source shards are a standalone discovery mechanism. In a
+        // Central World their copied bodies must not bypass the live source owner
+        // (including a source withheld since an earlier cached corpus was written).
+        if central_root.is_some() { discovered.sources.clear(); }
         let mut material = Vec::new();
         let mut bindings = Vec::new();
         for item in discovered.sources.into_values() {
@@ -542,9 +574,13 @@ impl Service {
         native_source.rebuild(&material)?;
 
         let mut bkmr = None;
+        if central_root.is_none() {
         if let Some(config) = self.active_provider_config("tool/search/bkmr") {
             let db = config.get("db").and_then(|value| value.as_str());
             if let Some(db) = db {
+                if config.get("disposable").and_then(|v|v.as_bool()) != Some(true) {
+                    return Err(aikit_core::AikitError::new("knowledge.bkmr_adoption_required", "standalone bkmr rebuild requires disposable=true; existing native databases must be adopted by Central"));
+                }
                 let db_path = resolve_provider_path(root, db);
                 let embeddings = config
                     .get("embeddings")
@@ -570,6 +606,10 @@ impl Service {
             }
         }
 
+        }
+        // Only descriptors join the map; payloads are fetched by the live
+        // source owner at read/context/Flow time, not copied into this cache.
+        if let Some(provider) = &central { material.extend(provider.descriptors().iter().cloned()); }
         let mut code = None;
         if let Some(project_id) = self.descriptor.project_id.as_ref() {
             let source = SourceRef::parse(format!("source:project-code:{project_id}"))?;
@@ -600,6 +640,8 @@ impl Service {
             material,
             native_source,
             bkmr,
+            central,
+            central_expected: central_root.is_some(),
             code,
             project_map,
             absences,

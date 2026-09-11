@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::ContextDescriptor;
 use crate::credential_world::CredentialWorldDisclosure;
+use crate::doctor_world::DoctorDisclosure;
+use crate::workcell_world::WorkcellDisclosure;
 use crate::context_resolution::{
     Availability, ContextResolution, ReferenceResolution, ResolvedResource, ScopeResolution,
 };
@@ -176,6 +178,20 @@ pub struct ProjectWorldReadModel {
     /// `credential_world.rs` exists to remove.
     #[serde(default)]
     pub credential_world: CredentialWorldDisclosure,
+    /// Installation health for this world. Deliberately not an `Option`, for the
+    /// same reason as `credential_world`: an absent producer is a
+    /// `DoctorDisclosure::not_attempted(..)` reading — "the checks were not run"
+    /// — which is a different fact from an observed clean bill of health. A
+    /// `None` would collapse "unknown" back into "healthy".
+    #[serde(default)]
+    pub doctor: DoctorDisclosure,
+    /// Workcell (body materialisation) status for this world. Not an `Option`
+    /// for the same reason as the disclosures above: an absent producer is a
+    /// `WorkcellDisclosure::not_attempted(..)` reading, distinct from an
+    /// observed-but-empty registry and from a `workcell` binary that could not
+    /// be read.
+    #[serde(default)]
+    pub workcell: WorkcellDisclosure,
     pub warnings: Vec<String>,
 }
 
@@ -204,6 +220,22 @@ impl ProjectWorldReadModel {
     /// pure function over already-observed facts.
     pub fn with_credential_world(mut self, credential_world: CredentialWorldDisclosure) -> Self {
         self.credential_world = credential_world;
+        self
+    }
+
+    /// Attach an already-run installation-health reading, mirroring
+    /// `with_credential_world`. `aikit-core` runs no checks: the caller runs
+    /// `doctor` (which is I/O) and hands over the composed findings.
+    pub fn with_doctor(mut self, doctor: DoctorDisclosure) -> Self {
+        self.doctor = doctor;
+        self
+    }
+
+    /// Attach an already-observed Workcell reading, mirroring `with_doctor`.
+    /// `aikit-core` observes nothing: the caller runs the `workcell` observer
+    /// and hands the composed disclosure over.
+    pub fn with_workcell(mut self, workcell: WorkcellDisclosure) -> Self {
+        self.workcell = workcell;
         self
     }
 
@@ -242,10 +274,39 @@ impl ProjectWorldReadModel {
             credential_world: CredentialWorldDisclosure::not_attempted(
                 "this reading was built as a shell; no credential input was composed into it",
             ),
+            doctor: DoctorDisclosure::not_attempted(
+                "this reading was built as a shell; no health checks were run for it",
+            ),
+            workcell: WorkcellDisclosure::not_attempted(
+                "this reading was built as a shell; Workcell was not observed for it",
+            ),
             warnings: Vec::new(),
         }
     }
 }
+
+/// What the System pane's Providers row says when a reading was produced
+/// without ever asking what secrets are configured.
+///
+/// This used to name the internal construction path instead of the fact a
+/// person on the other side of the pane actually needs — "disclose_project_world
+/// was given no credential roster; a caller attaches one with
+/// with_credential_world" is a note to whoever calls this function, not a
+/// sentence about the world being disclosed. The replacement says the same
+/// thing `ProjectWorldReadModel::empty`'s own credential reason already says
+/// in different words: nothing about credentials or providers has been
+/// checked for this reading, so their status is unknown rather than negative.
+const CREDENTIAL_WORLD_NOT_CHECKED_REASON: &str =
+    "no credential or provider check has been run for this reading yet";
+
+/// What the System pane's Health rows say when a reading was produced without
+/// running the checks. The same discipline as the credential reason above:
+/// "not run" is unknown, never a clean bill of health.
+const DOCTOR_NOT_CHECKED_REASON: &str = "no health checks have been run for this reading yet";
+
+/// What the System pane's Workcell row says when a reading was produced without
+/// observing Workcell. "Not observed" is unknown, never "no Workcell here".
+const WORKCELL_NOT_OBSERVED_REASON: &str = "Workcell has not been observed for this reading yet";
 
 pub fn disclose_project_world(
     resolution: &ContextResolution,
@@ -292,8 +353,10 @@ pub fn disclose_project_world(
         },
         versioned_world: None,
         credential_world: CredentialWorldDisclosure::not_attempted(
-            "disclose_project_world was given no credential roster; a caller attaches one with with_credential_world",
+            CREDENTIAL_WORLD_NOT_CHECKED_REASON,
         ),
+        doctor: DoctorDisclosure::not_attempted(DOCTOR_NOT_CHECKED_REASON),
+        workcell: WorkcellDisclosure::not_attempted(WORKCELL_NOT_OBSERVED_REASON),
         warnings: resolution.warnings.clone(),
     }
 }
@@ -412,6 +475,8 @@ mod tests {
             credential_world: CredentialWorldDisclosure::not_attempted(
                 "test fixture composed no credential input",
             ),
+            doctor: DoctorDisclosure::not_attempted("test fixture ran no health checks"),
+            workcell: WorkcellDisclosure::not_attempted("test fixture observed no Workcell"),
             warnings: vec![],
         }
     }
@@ -553,5 +618,19 @@ mod tests {
             .with_versioned_world(versioned_world("project:other"))
             .unwrap_err();
         assert_eq!(error.code(), "project_world.versioned_project_mismatch");
+    }
+
+    /// The System pane renders `CredentialWorldDisclosure`'s `Unknown` reason
+    /// directly to a human (`project_workspace_render::credential_lines`:
+    /// `"Providers     not observed {sep} {reason}"`). That reason must read
+    /// as a sentence about the world, not a note aimed at whichever caller
+    /// forgot to attach a credential roster -- so this guards both the
+    /// absence of the two internal names the old text carried and the
+    /// presence of a plain statement of what is actually unknown.
+    #[test]
+    fn the_no_credential_check_reason_reads_as_plain_english() {
+        assert!(!CREDENTIAL_WORLD_NOT_CHECKED_REASON.contains("disclose_project_world"));
+        assert!(!CREDENTIAL_WORLD_NOT_CHECKED_REASON.contains("with_credential_world"));
+        assert!(CREDENTIAL_WORLD_NOT_CHECKED_REASON.contains("credential"));
     }
 }

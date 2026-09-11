@@ -26,6 +26,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::compose_spine::ComposeStep;
+use crate::live_field::{
+    reach_for, LiveWorkingField, WorkingEnvironmentOperation, WorkingEnvironmentOutcome,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -387,6 +390,46 @@ pub trait TuiApplicationService {
             summary: format!("action {} has no application implementation", action.action),
         })
     }
+
+    /// Observe the host's working-environment providers and derive the live
+    /// field from what they report.
+    ///
+    /// `None` means no provider was attached at this application boundary —
+    /// nobody looked. That is distinct from an attached caller that looked and
+    /// found nothing, which answers an empty field. Minimal and test services
+    /// stay source-compatible through this default and are truthful in doing
+    /// so: they genuinely cannot observe a mux.
+    fn live_working_field(&mut self) -> Result<Option<LiveWorkingField>> {
+        Ok(None)
+    }
+
+    /// The ranked Model roster, fetched on demand for the roster overlay.
+    /// Navigation-only services that cannot compose one answer `None`.
+    fn model_roster(&mut self) -> Result<Option<aikit_core::resource::ModelRoster>> {
+        Ok(None)
+    }
+
+    /// Ask one provider to open the canonical subject in a pane/window of its
+    /// own choosing, or to focus the pane it is already bound to.
+    ///
+    /// The default never claims success it did not achieve: it answers
+    /// `NotExposed` naming the missing wiring, so the surface can say so in the
+    /// operator's terms rather than showing a failure they cannot act on.
+    fn act_in_working_environment(
+        &mut self,
+        provider: &ResourceRef,
+        subject: &ResourceRef,
+        operation: WorkingEnvironmentOperation,
+    ) -> Result<WorkingEnvironmentOutcome> {
+        Ok(WorkingEnvironmentOutcome::NotExposed {
+            provider: provider.clone(),
+            subject: subject.clone(),
+            reason: format!(
+                "no working-environment provider is attached at this application boundary, so {} is not available here",
+                operation.as_str()
+            ),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -396,6 +439,23 @@ pub enum Overlay {
     Explain,
     CompositionPreview,
     ConfirmApply,
+    /// The ranked Model roster, fetched on demand and shown read-only.
+    ModelRoster,
+}
+
+/// Why the palette is exiting, when it exits to hand an interactive flow to the
+/// restored terminal rather than merely closing. The palette is a launcher —
+/// `PaletteOutcome::Run` already exits it to run a command — and these are the
+/// same idiom: credential setup and `doctor` repair are interactive/mutating
+/// flows the CLI runs on the real terminal after the alternate screen is torn
+/// down, not things reimplemented inside the event loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExitIntent {
+    /// Run the interactive credential-setup flow for a world credential.
+    CredentialSetup,
+    /// Run the diff-first `doctor` repair flow.
+    DoctorFix,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -474,7 +534,7 @@ impl Default for GraphPresentation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TuiState {
     pub query: String,
     pub read_model: ResourceListReadModel,
@@ -516,7 +576,22 @@ pub struct TuiState {
     pub preview: Option<CompositionPreview>,
     pub status: Option<UiStatus>,
     pub area: (u16, u16),
+    /// The live working-environment reading, as last observed. `None` means no
+    /// provider was attached at this application boundary; `Some` of an empty
+    /// field means a caller looked and found none. Presentation keeps them
+    /// apart.
+    #[serde(default)]
+    pub live_field: Option<LiveWorkingField>,
+    /// The ranked Model roster, as last fetched for the roster overlay. `None`
+    /// until the overlay is opened (it is fetched on demand, not on every world
+    /// read).
+    #[serde(default)]
+    pub model_roster: Option<aikit_core::resource::ModelRoster>,
     pub exit_requested: bool,
+    /// Set alongside `exit_requested` when the palette is closing to hand an
+    /// interactive flow to the restored terminal; `None` is an ordinary close.
+    #[serde(default)]
+    pub exit_intent: Option<ExitIntent>,
 }
 
 impl Default for TuiState {
@@ -543,12 +618,15 @@ impl Default for TuiState {
             preview: None,
             status: None,
             area: (80, 24),
+            live_field: None,
+            model_roster: None,
             exit_requested: false,
+            exit_intent: None,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
     SetQuery(String),
     SearchFinished(ResourceListReadModel),
@@ -611,6 +689,30 @@ pub enum UiAction {
     RequestApply,
     ConfirmApply,
     ApplyFinished(ApplyReceipt),
+    /// The live working-environment reading was (re)observed. `None` carries
+    /// the honest "nobody looked" state through to presentation rather than
+    /// being flattened into an empty field.
+    LiveWorkingFieldObserved(Option<LiveWorkingField>),
+    /// Open the Model roster overlay — fetch the ranked roster, then show it.
+    RequestModelRoster,
+    /// The roster was fetched. `None` means the backend could compose none
+    /// (e.g. no Project here); the overlay then says so rather than showing an
+    /// empty roster as if no Models existed.
+    ModelRosterLoaded(Option<Box<aikit_core::resource::ModelRoster>>),
+    /// Leave the palette to run the interactive credential-setup flow on the
+    /// restored terminal (the launcher idiom, like `Run`).
+    RequestCredentialSetup,
+    /// Leave the palette to run the diff-first `doctor` repair flow.
+    RequestDoctorFix,
+    /// Ask a named provider to open or focus the canonical subject. The
+    /// reducer guards the request against the current reading before it
+    /// becomes an effect, so a withheld capability never reaches a provider.
+    ActInWorkingEnvironment {
+        provider: ResourceRef,
+        subject: ResourceRef,
+        operation: WorkingEnvironmentOperation,
+    },
+    WorkingEnvironmentActed(WorkingEnvironmentOutcome),
     Resize(u16, u16),
     Exit,
 }
@@ -636,9 +738,16 @@ pub enum UiEffect {
     ApplyComposition {
         preview: CompositionPreview,
     },
+    ObserveWorkingEnvironments,
+    ActInWorkingEnvironment {
+        provider: ResourceRef,
+        subject: ResourceRef,
+        operation: WorkingEnvironmentOperation,
+    },
+    LoadModelRoster,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TuiReduction {
     pub state: TuiState,
     pub effects: Vec<UiEffect>,
@@ -679,6 +788,19 @@ impl TuiRuntime {
             UiEffect::ApplyComposition { preview } => Ok(UiAction::ApplyFinished(
                 service.apply_composition(&preview)?,
             )),
+            UiEffect::ObserveWorkingEnvironments => Ok(UiAction::LiveWorkingFieldObserved(
+                service.live_working_field()?,
+            )),
+            UiEffect::ActInWorkingEnvironment {
+                provider,
+                subject,
+                operation,
+            } => Ok(UiAction::WorkingEnvironmentActed(
+                service.act_in_working_environment(&provider, &subject, operation)?,
+            )),
+            UiEffect::LoadModelRoster => Ok(UiAction::ModelRosterLoaded(
+                service.model_roster()?.map(Box::new),
+            )),
         }
     }
 
@@ -706,6 +828,27 @@ impl TuiRuntime {
     ) -> Result<TuiState> {
         let reduction = reduce_tui(state, action);
         self.settle(service, reduction.state, reduction.effects)
+    }
+}
+
+/// Request that the palette leave, handing an interactive flow to the restored
+/// terminal. Mirrors `UiAction::Exit`'s guard: staged composition changes must
+/// be applied or discarded first rather than silently lost when the palette
+/// closes.
+fn request_exit_to(state: &mut TuiState, intent: ExitIntent, label: &str) {
+    if state.staged.is_empty() {
+        state.exit_requested = true;
+        state.exit_intent = Some(intent);
+    } else {
+        state.exit_requested = false;
+        state.exit_intent = None;
+        state.status = Some(UiStatus {
+            message: format!(
+                "{} staged change{} remain; apply or discard them before leaving for {label}",
+                state.staged.len(),
+                if state.staged.len() == 1 { "" } else { "s" }
+            ),
+        });
     }
 }
 
@@ -1055,6 +1198,65 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             state.status = Some(UiStatus {
                 message: receipt.summary,
             });
+        }
+        UiAction::LiveWorkingFieldObserved(field) => {
+            state.live_field = field;
+        }
+        UiAction::RequestModelRoster => {
+            effects.push(UiEffect::LoadModelRoster);
+        }
+        UiAction::ModelRosterLoaded(roster) => {
+            state.model_roster = roster.map(|roster| *roster);
+            state.overlay = Some(Overlay::ModelRoster);
+        }
+        UiAction::RequestCredentialSetup => {
+            request_exit_to(&mut state, ExitIntent::CredentialSetup, "credential setup");
+        }
+        UiAction::RequestDoctorFix => {
+            request_exit_to(&mut state, ExitIntent::DoctorFix, "doctor repair");
+        }
+        UiAction::ActInWorkingEnvironment {
+            provider,
+            subject,
+            operation,
+        } => match state.live_field.as_ref() {
+            // No reading means nobody has observed the host yet. Observe first
+            // and let the operator ask again against a real field, rather than
+            // sending a request no reading justifies.
+            None => {
+                effects.push(UiEffect::ObserveWorkingEnvironments);
+                state.status = Some(UiStatus {
+                    message: format!(
+                        "no working-environment reading yet; observing before {} {subject}",
+                        operation.as_str()
+                    ),
+                });
+            }
+            Some(field) => match reach_for(field, &provider, &subject, operation) {
+                Ok(_) => effects.push(UiEffect::ActInWorkingEnvironment {
+                    provider,
+                    subject,
+                    operation,
+                }),
+                // The field already says this cannot work. Refusing here keeps
+                // the provider from being asked something it would have to
+                // fail, and gives the operator the actual condition.
+                Err(error) => {
+                    state.status = Some(UiStatus {
+                        message: error.to_string(),
+                    })
+                }
+            },
+        },
+        UiAction::WorkingEnvironmentActed(outcome) => {
+            state.status = Some(UiStatus {
+                message: outcome.summary(),
+            });
+            // A provider that opened or focused something has changed the host.
+            // Re-observe so the reading and the machine agree.
+            if !matches!(outcome, WorkingEnvironmentOutcome::NotExposed { .. }) {
+                effects.push(UiEffect::ObserveWorkingEnvironments);
+            }
         }
         UiAction::Resize(cols, rows) => state.area = (cols, rows),
         UiAction::Exit => {
