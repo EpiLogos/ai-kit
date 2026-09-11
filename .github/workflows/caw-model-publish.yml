@@ -1,0 +1,103 @@
+name: CAW scoped model source publication
+on:
+  push:
+    branches: [agent/caw-model-resident-selection]
+    paths: [.github/workflows/caw-model-publish.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish-source:
+    if: github.repository == 'EpiLogos/ai-kit' && github.ref == 'refs/heads/agent/caw-model-resident-selection'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/caw-model-resident-selection
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt
+      - name: Publish exact native source, not a runtime test overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor bf4b8cea15ad03e69b5dc934703d6fa5e775c6e4 HEAD
+          python3 scripts/caw_model_publish.py
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          p=Path('crates/aikit-cli/src/encounter_model.rs')
+          s=p.read_text()
+          assert s == subprocess.check_output(['git','show','bf4b8cea15ad03e69b5dc934703d6fa5e775c6e4:'+str(p)]).decode()
+          s=s.replace('        if materialise { EnvironmentImportProvider::from_process(use_.credential_ref.clone(), name, None) }\n        else { EnvironmentImportProvider::from_process_metadata(use_.credential_ref.clone(), name, None) }', '        EnvironmentImportProvider::from_process(use_.credential_ref.clone(), name, None)')
+          s=s.replace('let (catalogue, _) = aikit_store::model_catalogue::resolved_catalogue(home)?;', 'let (catalogue, _) = aikit_store::model_catalogue::resolved_catalogue(home);')
+          s += '''
+          /// Addressed native target for the existing encounter open-model operation.
+          #[derive(Debug, Clone, Serialize, Deserialize)]
+          #[serde(deny_unknown_fields)]
+          pub struct EncounterModelOpen {
+              pub space: aikit_core::session_space::SessionSpaceRef,
+              pub agent_session: ResourceRef,
+              pub cwd: std::path::PathBuf,
+              pub model_ref: ResourceRef,
+              pub provider_ref: Option<ProviderRef>,
+              pub body: Option<String>,
+              pub expected_agency: aikit_adapters::agency_admission::AdmittedAgency,
+          }
+          pub(crate) fn validate_target(home: &AikitHome, session: &ResourceRef, configured: &EncounterProvider, request: &EncounterModelOpen) -> Result<()> {
+              let binding = read_binding(home, session)?.ok_or_else(|| error("Selected model target lacks native Agency"))?;
+              let admitted = native_admission(&binding)?;
+              if admitted != request.expected_agency {
+                  return Err(error("Selected Agency/source/WorldBinding changed between composition and resident admission"));
+              }
+              let model = prepare(home, session, configured)?.ok_or_else(|| error("The configured body has no explicit model policy"))?;
+              if model.policy.model_ref != request.model_ref
+                  || request.provider_ref.as_ref().is_some_and(|p| p != &model.policy.provider_ref)
+                  || request.body.as_ref().is_some_and(|b| b != &configured.id) {
+                  return Err(error("Resolved body/model does not match the explicit catalogue target"));
+              }
+              Ok(())
+          }
+          impl EncounterService {
+              pub(crate) fn open_model(&self, request: EncounterModelOpen) -> Result<Value> {
+                  self.require_attached(&request.agent_session)?;
+                  let mut candidates = Vec::new();
+                  for configured in self.providers()? {
+                      if configured.model_policy.is_none() || request.body.as_ref().is_some_and(|b| b != &configured.id) { continue; }
+                      if validate_target(&self.home, &request.agent_session, &configured, &request).is_ok()
+                          && self.check_task_launch(&request.agent_session, &configured, &request.cwd).is_ok() {
+                          candidates.push(configured);
+                      }
+                  }
+                  if candidates.len() != 1 {
+                      return Err(error(if candidates.is_empty() {
+                          "No configured body has current canonical-model, source, credential, authority and protocol eligibility for this Agency/World; no fallback was selected"
+                      } else {
+                          "Several configured bodies are eligible; select a native body explicitly rather than executing an implicit default"
+                      }));
+                  }
+                  let provider = candidates.remove(0);
+                  let mut result = self.open_native(request.space.clone(), request.agent_session.clone(), provider.id, request.cwd.clone(), false, Some(&request))?;
+                  result["selected"] = json!(true);
+                  result["executed"] = json!(false);
+                  result["standing"] = json!("selected native body/model observed and resident; no inference result is claimed until an addressed turn actually returns");
+                  Ok(result)
+              }
+          }
+          '''
+          p.write_text(s)
+          PY
+          git add crates/aikit-cli/src/encounter_model.rs
+          # Format only the changed native files; preserve all other owner work.
+          while IFS= read -r file; do
+            case "$file" in *.rs) rustfmt --edition 2021 --config skip_children=true "$file" ;; esac
+          done < <(git diff --cached --name-only)
+          rustfmt --edition 2021 --config skip_children=true crates/aikit-cli/tests/support/caw_model_resident.rs
+          git add crates .github/workflows/caw-native-delivery.yml
+          git rm --ignore-unmatch .caw-model-source.json scripts/caw_model_publish.py .github/workflows/caw-model-publish.yml
+          git diff --cached --check
+          git -c user.name='CAW integration' -c user.email='caw-integration@users.noreply.github.com' commit -m 'feat(caw): connect catalogue and scoped credentials to native resident model execution'
+          git push origin HEAD:refs/heads/agent/caw-model-resident-selection
+          git rev-parse HEAD
