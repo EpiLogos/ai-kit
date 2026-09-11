@@ -21,6 +21,7 @@ use aikit_core::context_resolution::Availability;
 use aikit_core::project::ProjectBindingLocator;
 use aikit_core::credential_world::{CredentialStatusKnowledge, ProviderRosterKnowledge};
 use aikit_core::doctor_world::DoctorSeverity;
+use aikit_core::workcell_world::WorkcellKnowledge;
 use aikit_core::resource::{Eligibility, ResourceKind, SourceAuthority};
 use aikit_core::explain_history::{HistoryEvidence, HistoryReadModel, HistoryRecoverability};
 use aikit_core::session_space_application::SessionSpaceAuthoredState;
@@ -662,8 +663,8 @@ fn system_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
         String::new(),
     ];
     lines.extend(credential_lines(world, glyphs));
-    lines.push("Adapters      not exposed by application boundary".into());
-    lines.push("Workcell      not exposed by application boundary".into());
+    lines.push(adapter_line(world, glyphs));
+    lines.push(workcell_line(world, glyphs));
     lines.push(String::new());
     lines.extend(health_lines(world, glyphs));
     lines.push(String::new());
@@ -737,6 +738,82 @@ fn health_lines(world: &ProjectWorldReadModel, glyphs: Glyphs) -> Vec<String> {
     }
 
     lines
+}
+
+/// The Workcell row of §8 System, read from `ProjectWorldReadModel::workcell`.
+///
+/// Same discipline: "not observed" (no producer looked), "unavailable" (the
+/// `workcell` binary could not be read) and "observed, nothing registered" are
+/// three different facts and never share a rendering.
+fn workcell_line(world: &ProjectWorldReadModel, glyphs: Glyphs) -> String {
+    let sep = glyphs.separator();
+    match &world.workcell.knowledge {
+        WorkcellKnowledge::NotAttempted { .. } => {
+            "Workcell      not observed for this world".to_string()
+        }
+        WorkcellKnowledge::Unavailable { reason } => {
+            format!("Workcell      unavailable {sep} {reason}")
+        }
+        WorkcellKnowledge::Observed { instances } if instances.is_empty() => {
+            "Workcell      no instances registered (registry observed)".to_string()
+        }
+        WorkcellKnowledge::Observed { instances } => {
+            let detected = instances.iter().filter(|i| i.detected).count();
+            let live = instances.iter().filter(|i| i.live).count();
+            format!(
+                "Workcell      {} instance(s) {sep} {detected} detected, {live} live",
+                instances.len()
+            )
+        }
+    }
+}
+
+/// The Adapters row of §8 System: a roll-call of the adapter providers this
+/// reading actually observed at the boundary, synthesised from the disclosures
+/// already attached — the versioned-material (git) provider, the secret
+/// providers, and Workcell. It names what is wired here at a glance; the fuller
+/// per-provider detail lives in the rows and panes each provider owns.
+fn adapter_line(world: &ProjectWorldReadModel, glyphs: Glyphs) -> String {
+    use aikit_core::resource::VersionedWorldProviderStatus;
+    let sep = glyphs.separator();
+    let mut providers: Vec<String> = Vec::new();
+
+    if let Some(versioned) = world.versioned_world.as_ref() {
+        let status = match versioned.provider.status {
+            VersionedWorldProviderStatus::Available => "available",
+            VersionedWorldProviderStatus::Degraded { .. } => "degraded",
+            VersionedWorldProviderStatus::Unavailable { .. } => "unavailable",
+        };
+        providers.push(format!("{} ({status})", versioned.provider.provider.as_str()));
+    }
+
+    if let ProviderRosterKnowledge::Observed { providers: secret } =
+        &world.credential_world.providers
+    {
+        for provider in secret {
+            let status = if provider.available { "available" } else { "unavailable" };
+            providers.push(format!("{} ({status})", provider.provider_ref.as_str()));
+        }
+    }
+
+    match &world.workcell.knowledge {
+        WorkcellKnowledge::Observed { instances } => {
+            let detected = instances.iter().filter(|i| i.detected).count();
+            providers.push(format!("workcell ({detected} detected)"));
+        }
+        WorkcellKnowledge::Unavailable { .. } => providers.push("workcell (unavailable)".into()),
+        WorkcellKnowledge::NotAttempted { .. } => {}
+    }
+
+    if providers.is_empty() {
+        "Adapters      none observed at this boundary".to_string()
+    } else {
+        format!(
+            "Adapters      {} observed {sep} {}",
+            providers.len(),
+            providers.join(", ")
+        )
+    }
 }
 
 /// The Credentials and Providers rows of §8 System, read from
@@ -1304,6 +1381,66 @@ mod credential_disclosure_tests {
         // is always present.
         assert!(rendered.contains("Gateway"));
         assert!(rendered.contains("no agency gateway is running"));
+    }
+
+    fn world_with_workcell(
+        workcell: aikit_core::workcell_world::WorkcellDisclosure,
+    ) -> ProjectWorldReadModel {
+        let context = ContextDescriptor::for_project("/work/aikit");
+        ProjectWorldReadModel::empty(
+            ProjectBinding::from_legacy_context(
+                ProjectRef::parse("project:aikit").unwrap(),
+                ProjectConstituentRef::parse("source:working-tree").unwrap(),
+                &context,
+            )
+            .unwrap(),
+            context,
+        )
+        .with_workcell(workcell)
+    }
+
+    /// The three Workcell facts render differently: not observed, unavailable,
+    /// and observed-empty are never collapsed into one row.
+    #[test]
+    fn the_three_workcell_states_do_not_render_alike() {
+        use aikit_core::workcell_world::WorkcellDisclosure;
+        let not_attempted =
+            workcell_line(&world_with_workcell(WorkcellDisclosure::default()), Glyphs::unicode());
+        let unavailable = workcell_line(
+            &world_with_workcell(WorkcellDisclosure::unavailable("could not run workcell")),
+            Glyphs::unicode(),
+        );
+        let observed_empty =
+            workcell_line(&world_with_workcell(WorkcellDisclosure::observed(Vec::new())), Glyphs::unicode());
+
+        assert!(not_attempted.contains("not observed for this world"));
+        assert!(unavailable.contains("unavailable"));
+        assert!(observed_empty.contains("no instances registered"));
+        assert_ne!(not_attempted, unavailable);
+        assert_ne!(unavailable, observed_empty);
+        assert_ne!(not_attempted, observed_empty);
+    }
+
+    /// The Adapters roll-call names the providers the reading actually observed
+    /// (here the secret store) and counts them; a reading with none observed
+    /// says so plainly.
+    #[test]
+    fn adapters_roll_call_names_observed_providers() {
+        let none = adapter_line(&world_with(CredentialWorldDisclosure::default()), Glyphs::unicode());
+        assert!(none.contains("none observed at this boundary"));
+
+        let with_secret = adapter_line(
+            &world_with(CredentialWorldDisclosure {
+                version: "aikit.credential-world/v1".into(),
+                providers: ProviderRosterKnowledge::Observed {
+                    providers: vec![provider("keychain")],
+                },
+                credentials: Default::default(),
+            }),
+            Glyphs::unicode(),
+        );
+        assert!(with_secret.contains("1 observed"));
+        assert!(with_secret.contains("keychain"));
     }
 }
 

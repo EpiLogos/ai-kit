@@ -37,6 +37,7 @@ pub mod context_source;
 pub mod credential;
 pub mod credential_world;
 pub mod doctor_world;
+pub mod workcell_world;
 pub mod secret_ref;
 pub mod duration;
 pub mod effects;
@@ -178,6 +179,9 @@ pub use credential_world::{
 };
 pub use doctor_world::{
     DoctorDisclosure, DoctorFinding, DoctorKnowledge, DoctorSeverity, DOCTOR_WORLD_VERSION,
+};
+pub use workcell_world::{
+    WorkcellDisclosure, WorkcellInstanceDisclosure, WorkcellKnowledge, WORKCELL_WORLD_VERSION,
 };
 pub use secret_ref::{SecretRef, SecretResolver};
 pub use duration::HumanDuration;
