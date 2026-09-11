@@ -23,7 +23,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use crate::application::{
-    selected_contextual_action, visible_contextual_actions, Overlay, PresentationMode,
+    selected_contextual_action, visible_contextual_actions, ExitIntent, Overlay, PresentationMode,
     RelationReadModel, RelationView, TuiApplicationService, TuiRuntime, TuiState, UiAction,
     UiEffect, WorkspaceSection,
 };
@@ -345,7 +345,12 @@ impl ApplicationSurfaceController {
         }
 
         if self.semantic.exit_requested {
-            return Ok(ApplicationSurfaceStep::Outcome(PaletteOutcome::Closed));
+            let outcome = match self.semantic.exit_intent {
+                Some(ExitIntent::CredentialSetup) => PaletteOutcome::RunCredentialSetup,
+                Some(ExitIntent::DoctorFix) => PaletteOutcome::RunDoctorFix,
+                None => PaletteOutcome::Closed,
+            };
+            return Ok(ApplicationSurfaceStep::Outcome(outcome));
         }
         Ok(ApplicationSurfaceStep::Continue)
     }
@@ -532,6 +537,12 @@ impl ApplicationSurfaceController {
         }
         if ctrl && matches!(code, KeyCode::Char('r') | KeyCode::Char('R')) {
             return self.dispatch(backend, UiAction::RequestModelRoster);
+        }
+        if ctrl && matches!(code, KeyCode::Char('e') | KeyCode::Char('E')) {
+            return self.dispatch(backend, UiAction::RequestCredentialSetup);
+        }
+        if ctrl && matches!(code, KeyCode::Char('d') | KeyCode::Char('D')) {
+            return self.dispatch(backend, UiAction::RequestDoctorFix);
         }
         if code == KeyCode::Insert || (ctrl && code == KeyCode::Char(' ')) {
             return self.stage_selected(backend);

@@ -1601,11 +1601,122 @@ fn open_surface(
             }
             Ok(Reply::Status(report.status))
         }
+        // The palette left to hand an interactive flow to the restored terminal
+        // (the launcher idiom, like `Run`). The alternate screen is already torn
+        // down by the time we are here, so these run against the real terminal.
+        aikit_tui::PaletteOutcome::RunCredentialSetup => run_credential_setup_from_palette(&service),
+        aikit_tui::PaletteOutcome::RunDoctorFix => run_doctor_fix_from_palette(&service),
         aikit_tui::PaletteOutcome::Closed
         | aikit_tui::PaletteOutcome::Tree
         | aikit_tui::PaletteOutcome::Applied(_)
         | aikit_tui::PaletteOutcome::Promoted(_) => Ok(Reply::Silent),
     }
+}
+
+/// Set up a world credential after the palette handed control back. The
+/// credentials the world declares a need for are read from its resolved Model
+/// routes; the operator picks one of the unresolved ones, and the shared
+/// interactive `credential::setup` flow does the rest.
+fn run_credential_setup_from_palette(service: &Service) -> Result<Reply> {
+    use aikit_core::credential_world::credential_requirements_for_model_routes;
+    use aikit_core::resource::ModelRouteSet;
+
+    let composed = service.compose_plan()?;
+    let route_sets: Vec<ModelRouteSet> =
+        serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
+            .map_err(|error| {
+                AikitError::new("palette.credential_setup_routes_unreadable", error.to_string())
+            })?;
+    let requirements = credential_requirements_for_model_routes(&route_sets);
+
+    let store = aikit_store::CredentialBindingStore::new(service.home());
+    let unresolved: Vec<_> = requirements
+        .into_iter()
+        .filter(|requirement| {
+            store
+                .load(&requirement.credential_ref)
+                .ok()
+                .flatten()
+                .is_none()
+        })
+        .collect();
+
+    if unresolved.is_empty() {
+        println!("Every credential this world declares is already bound; nothing to set up.");
+        return Ok(Reply::Status(0));
+    }
+
+    let chosen = if unresolved.len() == 1 {
+        &unresolved[0]
+    } else {
+        eprintln!("This world has unbound credentials:");
+        for (index, requirement) in unresolved.iter().enumerate() {
+            eprintln!("  {}) {}", index + 1, requirement.credential_ref.as_str());
+        }
+        eprint!("Set up which? [1-{}, or q to cancel] ", unresolved.len());
+        use std::io::Write;
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|error| AikitError::new("palette.credential_setup_prompt", error.to_string()))?;
+        let choice = line.trim();
+        if choice.eq_ignore_ascii_case("q") {
+            return Ok(Reply::Status(0));
+        }
+        match choice.parse::<usize>().ok().filter(|n| *n >= 1 && *n <= unresolved.len()) {
+            Some(n) => &unresolved[n - 1],
+            None => return Err(AikitError::new("palette.credential_setup_choice", "not a listed option")),
+        }
+    };
+
+    let request = credential::CredentialRequest {
+        credential: chosen.credential_ref.clone(),
+        consumer_ref: chosen.consumer_ref.clone(),
+        purpose: chosen.purpose.clone(),
+        env_var: None,
+        project_env: None,
+        from_env: false,
+        headless: false,
+    };
+    let outcome = credential::setup(service.home(), &request)?;
+    println!(
+        "{} is now bound through {}.",
+        request.credential.as_str(),
+        outcome.binding.provider_ref.as_str()
+    );
+    Ok(Reply::Status(0))
+}
+
+/// Run the diff-first `doctor` repair after the palette handed control back:
+/// plan the fixable findings, show the diff, ask, and apply on a yes. This is
+/// the same engine `aikit doctor --fix` uses, driven interactively.
+fn run_doctor_fix_from_palette(service: &Service) -> Result<Reply> {
+    let findings = aikit_cli::doctor::run(service)?;
+    let Some(procedure) = aikit_cli::doctor::plan_fixes(service, &findings)? else {
+        println!("Nothing here is automatically fixable; the rest are decisions for you.");
+        return Ok(Reply::Status(0));
+    };
+    let runner = aikit_store::procedure::ProcedureRunner::new(service.home());
+    let diff = runner.diff(&procedure)?;
+    println!("{}", diff.render());
+    eprint!("Apply this repair? [y/N] ");
+    use std::io::Write;
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|error| AikitError::new("palette.doctor_fix_prompt", error.to_string()))?;
+    if !line.trim().eq_ignore_ascii_case("y") {
+        println!("Left unapplied.");
+        return Ok(Reply::Status(0));
+    }
+    let applied = runner.run(&procedure)?;
+    println!(
+        "Applied {} edit(s). Undo with `aikit procedure undo {}`.",
+        applied.applied, procedure.id
+    );
+    Ok(Reply::Status(0))
 }
 
 fn spawn_palette_command(command: &run::ScriptCommand) -> Result<()> {
