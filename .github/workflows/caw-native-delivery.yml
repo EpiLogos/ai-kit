@@ -81,10 +81,11 @@ jobs:
           set -euo pipefail
           {
             cargo build --locked --manifest-path .caw-native/Central/Cargo.toml -p ctrl
-            cargo build --locked --manifest-path .caw-native/Workcell/Cargo.toml -p epilogos-workcell-cli --bin workcell-write-boundary
+            cargo build --locked --manifest-path .caw-native/Workcell/Cargo.toml -p epilogos-workcell-cli --bin workcell-write-boundary --bin workcell
           } 2>&1 | tee "$RUNNER_TEMP/caw-evidence/owners-build.log"
           echo "AIKIT_CAW_CTRL_BIN=$GITHUB_WORKSPACE/.caw-native/Central/target/debug/ctrl" >> "$GITHUB_ENV"
           echo "AIKIT_CAW_BOUNDARY_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-write-boundary" >> "$GITHUB_ENV"
+          echo "AIKIT_CAW_WORKCELL_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell" >> "$GITHUB_ENV"
       - name: Actual binaries through native Actuation and controlled provider processes
         shell: bash
         run: |
@@ -96,6 +97,12 @@ jobs:
           set -euo pipefail
           cargo test --locked -p aikit-cli --test caw_native_placement -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/joined-placement.log"
           grep -q CAW_JOINED_PLACEMENT_EXECUTED "$RUNNER_TEMP/caw-evidence/joined-placement.log"
+      - name: Governed task through selected resident session and native storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p aikit-cli --test caw_task_session -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/task-session.log"
+          grep -q CAW_TASK_RESIDENT_EXECUTED "$RUNNER_TEMP/caw-evidence/task-session.log"
       - name: Receipt, admission, ACP, placement, recurrence and duplicate regressions
         shell: bash
         run: |
@@ -111,8 +118,8 @@ jobs:
           set -euo pipefail
           cargo build --locked -p aikit-cli --bin aikit-work-prepare --bin aikit-session-space 2>&1 | tee "$RUNNER_TEMP/caw-evidence/aikit-build.log"
           cp target/debug/aikit-work-prepare target/debug/aikit-session-space "$RUNNER_TEMP/caw-evidence/"
-          cp "$AIKIT_CAW_CTRL_BIN" "$AIKIT_CAW_BOUNDARY_BIN" "$RUNNER_TEMP/caw-evidence/"
-          (cd "$RUNNER_TEMP/caw-evidence" && sha256sum aikit-work-prepare aikit-session-space ctrl workcell-write-boundary > binaries.sha256)
+          cp "$AIKIT_CAW_CTRL_BIN" "$AIKIT_CAW_BOUNDARY_BIN" "$AIKIT_CAW_WORKCELL_BIN" "$RUNNER_TEMP/caw-evidence/"
+          (cd "$RUNNER_TEMP/caw-evidence" && sha256sum aikit-work-prepare aikit-session-space ctrl workcell-write-boundary workcell > binaries.sha256)
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -183,6 +183,10 @@ fn spawn_parts(
         ));
     };
     let mut command = Command::new(program);
+    // Host-only native owner credentials are not provider/model credentials.
+    // A task may receive its own scoped lease explicitly, never these inherited
+    // administrator tokens from the encounter owner process.
+    command.env_remove("CENTRAL_NATIVE_TOKEN").env_remove("WORKCELL_CONTROL_TOKEN");
     command
         .args(args)
         .stdin(Stdio::piped())

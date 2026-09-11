@@ -29,6 +29,10 @@ pub use agency::{
     EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket, EncounterGroupRecipient,
 };
 
+#[path = "encounter_task.rs"]
+mod task;
+pub use task::EncounterTaskBinding;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EncounterProtocol {
@@ -269,6 +273,7 @@ impl SessionEventJournal for Journal {
     }
 }
 struct Resident {
+    task: Option<task::PreparedEncounterTask>,
     host: AgentSessionHost,
     lane: SessionLane,
     space: SessionSpaceRef,
@@ -283,6 +288,7 @@ struct Resident {
 }
 impl Resident {
     fn prompt_payload(&self, text: &str) -> Value {
+        let text = self.task.as_ref().map_or_else(|| text.to_owned(), |task| task.prompt(text));
         match self.protocol {
             EncounterProtocol::Acp => json!([{"type":"text","text":text}]),
             EncounterProtocol::PiRpc => json!(text),
@@ -425,6 +431,7 @@ impl EncounterService {
             self.store.append(session, &json!({"kind":"context-admission-refused", "provider":resident.provider, "phase":phase, "code":failure.code(), "reason":failure.to_string()}))?;
             return Err(failure);
         }
+        self.check_resident_task(session, resident, phase)?;
         self.check_context(
             session,
             &resident.provider,
@@ -609,11 +616,13 @@ impl EncounterService {
             self.permissions.clone(),
             generation.clone(),
         )));
+        let task = self.prepare_task(&agent_session, &provider, &cwd, &configured.argv)?;
+        let actual_argv = task.as_ref().map_or(configured.argv.as_slice(), |task| task.argv.as_slice());
         let provenance = vec![format!("native encounter provider {provider}")];
         let host = match configured.protocol {
             EncounterProtocol::Acp => AgentSessionHost::launch_with_journal(
                 AcpStableConnectionAdapter::new(connection, provenance),
-                &configured.argv,
+                actual_argv,
                 Some(&cwd),
                 AgentSessionHostLimits::default(),
                 journal,
@@ -624,7 +633,7 @@ impl EncounterService {
                     cwd.to_string_lossy().into_owned(),
                     provenance,
                 ),
-                &configured.argv,
+                actual_argv,
                 Some(&cwd),
                 AgentSessionHostLimits::default(),
                 journal,
@@ -657,7 +666,7 @@ impl EncounterService {
         })?;
         let native = lane.binding().native_session_id.clone();
         let model_observation = lane.binding().model_observation.clone();
-        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
+        self.store.append(&agent_session,&json!({"kind":"binding","task":task.as_ref().map(|task|task.snapshot()),"space":space,"provider":provider,"protocol":configured.protocol,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
         // The owner drains transport delivery; durable cursor readers are
         // independent views of the same canonical journal.
         let drain = lane.clone();
@@ -665,6 +674,7 @@ impl EncounterService {
         residents.insert(
             agent_session.clone(),
             Arc::new(Resident {
+                task,
                 host,
                 lane,
                 space,

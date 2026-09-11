@@ -19,6 +19,19 @@ def turn(message, text):
         reply(message,error='CONTROLLED_DENIAL'); return
     if 'CONTROLLED_SLOW' in text:
         time.sleep(0.25)
+    if mode == 'placement':
+        try:
+            assert 'CENTRAL_NATIVE_TOKEN' not in os.environ
+            assert 'WORKCELL_CONTROL_TOKEN' not in os.environ
+            try:
+                with open(sys.argv[3], 'w', encoding='utf-8') as f: f.write('FORBIDDEN')
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError('protected human checkout was writable')
+            with open(sys.argv[4], 'w', encoding='utf-8') as f: f.write('controlled worktree change\n')
+        except Exception as e:
+            reply(message, error=str(e)); return
     if mode == 'pi':
         reply(message)
         emit({'type':'message_update','assistantMessageEvent':{'type':'text_delta','delta':'FIXTURE_REPLY'}})

@@ -49,6 +49,16 @@ enum Command {
         #[arg(long)]
         expected_revision: Option<String>,
     },
+    /// Bind a continuous task to native Central placement and Workcell execution.
+    /// This is owner configuration, never an imported message or an IPC grant.
+    EncounterTaskConfigure {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        binding_json: String,
+        #[arg(long)]
+        expected_revision: Option<String>,
+    },
     /// Correlate operator-reviewed native evidence for a stuck delivery; never replay it.
     EncounterDeliveryReconcile {
         #[arg(long)]
@@ -158,6 +168,13 @@ fn run() -> Result<()> {
             emit(
                 &serde_json::json!({"configured":true,"standing":"native-owner-provisioning-not-default-selection"}),
             )
+        }
+        Command::EncounterTaskConfigure { agent_session, binding_json, expected_revision } => {
+            let expected = expected_revision.as_deref().map(aikit_core::SourceRevision::parse).transpose()?;
+            emit(&aikit_cli::encounter_service::EncounterService::configure_task(
+                service.home(), &aikit_core::ResourceRef::parse(agent_session)?,
+                &parse_json_arg(&binding_json)?, expected.as_ref(),
+            )?)
         }
         Command::EncounterDeliveryReconcile {
             agent_session,

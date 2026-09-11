@@ -263,7 +263,7 @@ fn path_text(path: &Path) -> Result<String> {
     path.to_str().map(str::to_owned).ok_or_else(|| failure("invalid_path", "Native protocol requires a UTF-8 path"))
 }
 fn failure(code: &str, message: &str) -> AikitError {
-    AikitError::new(format!("placement.{code}"), message)
+    AikitError::new("placement.native_owner", format!("{code}: {message}"))
 }
 fn io_error(error: impl std::fmt::Display) -> AikitError {
     failure("native_io", &error.to_string())
