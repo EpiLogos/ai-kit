@@ -34,7 +34,10 @@ fn run() -> Result<serde_json::Value> {
     let runner = SystemRunner::new();
     let owner = CentralPlacement::new(&runner, task)?;
     let allocation = owner.allocate()?;
-    let validation = owner.validate(&allocation, &owner.task.root, &allocation.basis.now)?;
+    // Central protects replacement/removal of the T directory itself. Ask
+    // about an output inside its aperture without creating that output.
+    let destination = allocation.basis.now.join(".aikit-admission-output");
+    let validation = owner.validate(&allocation, &owner.task.root, &destination)?;
     if validation["allowed"] != true {
         return Err(AikitError::new("placement.denied", "Central no longer permits this task's NOW destination"));
     }
