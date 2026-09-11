@@ -139,11 +139,14 @@ impl PiRpcConnectionAdapter {
             {
                 return Err(error("connection.pi_rpc.model_mismatch", "Pi native state does not confirm the selected provider/model; no default or fallback is admitted"));
             }
-            self.model_observation = Some(crate::agent_connection::NativeModelObservation {
-                current_model_id:Some(model.clone()),
-                available_models:vec![crate::agent_connection::NativeModelEntry {
-                    id:model.clone(), name:data["model"]["name"].as_str().unwrap_or(model).into(), description:None,
-                }], standing:Some(format!("Pi native get_state; provider={provider}; configuration, not an inference receipt")),
+            self.model_observation = Some(NativeModelObservation {
+                current_model_id: model.clone(),
+                available_models: vec![NativeAdvertisedModel {
+                    model_id: model.clone(),
+                    name: data["model"]["name"].as_str().unwrap_or(model).into(),
+                    description: None,
+                }],
+                standing: format!("Pi native get_state; provider={provider}; configuration, not an inference receipt"),
             });
         }
         self.observed_session = Some(id.into());
