@@ -79,6 +79,8 @@ pub enum Command {
     WikiShape(WikiShapeCmd),
     /// Show the effective view for the current context.
     Status(StatusArgs),
+    /// Emit the owner settings-disclosure descriptor for the O:I System surface.
+    System(SystemArgs),
     /// Explain why a capability or V2 Resource has its current effective evidence.
     Explain(ExplainArgs),
     /// Read cross-domain evidence-bearing History, optionally scoped to one Resource.
@@ -1371,6 +1373,9 @@ pub struct StatusArgs {
     #[arg(long)]
     pub all: bool,
 }
+
+#[derive(Debug, Args)]
+pub struct SystemArgs {}
 
 #[derive(Debug, Args)]
 pub struct ExplainArgs {

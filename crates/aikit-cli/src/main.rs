@@ -106,6 +106,11 @@ enum Reply {
         /// reports `EXIT_OK`.
         exit_code: i32,
     },
+    /// A bare JSON document printed verbatim, never wrapped in the ActionResult
+    /// envelope. `system` uses this so the O:I mount reads a bare
+    /// `oi.product-settings-disclosure/v2` document on stdout (the L6 rule:
+    /// mounts never unwrap a product-specific envelope).
+    RawJson(Value),
     /// Raw text to print verbatim, envelope or not (`shell init`, an explanation).
     Text(String),
     /// A child process ran; its exit status is ours.
@@ -146,6 +151,14 @@ fn emit(reply: Reply, json_mode: bool) -> i32 {
                 }
             }
             exit_code
+        }
+        Reply::RawJson(value) => {
+            if json_mode {
+                println!("{}", json::line(&value));
+            } else {
+                println!("{}", json::pretty(&value));
+            }
+            json::EXIT_OK
         }
         Reply::Text(text) => {
             println!("{text}");
@@ -190,6 +203,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Wiki(c)) => cmd_wiki(cwd, c),
         Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),
         Some(Command::Status(a)) => cmd_status(cwd, a),
+        Some(Command::System(_)) => cmd_system(cwd),
         Some(Command::Explain(a)) => cmd_explain(cwd, a),
         Some(Command::History(a)) => cmd_history(cwd, a),
         Some(Command::Run(a)) => cmd_run(cwd, a),
@@ -2221,6 +2235,20 @@ fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
             ))
         }
     }
+}
+
+/// `aikit system` — the owner settings-disclosure descriptor for the O:I System
+/// surface (Wave 5). Read-only: it projects the already-resolved composition
+/// truth into `oi.product-settings-disclosure/v2` and changes nothing.
+///
+/// Unlike every other command, `system` emits the descriptor as a bare
+/// document on stdout (never wrapped in the ActionResult envelope), exactly as
+/// `ctrl system --json` does. Mounts read the top-level `schema` key and would
+/// otherwise degrade AIKit to unavailable.
+fn cmd_system(cwd: &std::path::Path) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let data = aikit_cli::system::disclose(&service)?;
+    Ok(Reply::RawJson(data))
 }
 
 fn cmd_status(cwd: &std::path::Path, a: StatusArgs) -> Result<Reply> {

@@ -149,3 +149,76 @@ fn a_bad_scope_argument_is_a_usage_error_with_exit_code_two() {
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "cli.usage");
 }
+
+#[test]
+fn system_emits_the_wave5_owner_disclosure_descriptor() {
+    let (home, project) = scene();
+    let (output, value) = run_json(home.path(), project.path(), &["system", "--json"]);
+
+    assert!(output.status.success(), "system should succeed: {value}");
+
+    // The bare v2 descriptor is the document on stdout — no ActionResult
+    // envelope. Mounts read the top-level `schema` key and would otherwise
+    // degrade AIKit to unavailable.
+    assert_eq!(value["schema"], "oi.product-settings-disclosure/v2");
+    for envelope_key in ["ok", "context", "data", "warnings"] {
+        assert!(
+            value.get(envelope_key).is_none(),
+            "system must not wrap the descriptor in the ActionResult envelope (found top-level `{envelope_key}`)"
+        );
+    }
+
+    assert_eq!(value["product_id"], "ai-kit");
+    assert_eq!(value["contract_revision"], "wave-5/system.1");
+    assert_eq!(
+        value["owner"]["reading_command"],
+        serde_json::json!(["aikit", "system", "--json"])
+    );
+    assert_eq!(value["owner"]["owner_id"], "ai-kit");
+    // The canonical reading digest is a real SHA-256 hex fingerprint, not null.
+    let digest = value["owner"]["reading_digest"].as_str().expect("digest present");
+    assert_eq!(digest.len(), 64);
+    assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+
+    assert_eq!(value["availability"]["state"], "available");
+
+    // Every section exposes settings, and every setting exposes all five axes.
+    let sections = value["sections"].as_array().expect("sections present");
+    assert!(!sections.is_empty());
+    for section in sections {
+        for setting in section["settings"].as_array().unwrap() {
+            for axis in ["declared", "effective", "active", "staged"] {
+                assert!(
+                    setting["axes"][axis]["provenance"]["owner_ref"].as_str().is_some(),
+                    "axis {axis} must carry provenance in {setting}"
+                );
+            }
+            assert!(setting["axes"]["staged"]["stage_state"].as_str().is_some());
+            assert_eq!(setting["axes"]["expected_effect"]["ref"], "aikit diff");
+            assert_eq!(setting["mutable"], false);
+
+            // The declared axis is never a clone of effective (§4.8): where
+            // nothing was authored declared is null, and where something was
+            // authored it carries its own provenance path.
+            let declared = &setting["axes"]["declared"];
+            let effective = &setting["axes"]["effective"];
+            if !declared["value"].is_null() {
+                assert_ne!(
+                    declared["provenance"]["path"], effective["provenance"]["path"],
+                    "a non-null declared axis must not share effective's provenance: {setting}"
+                );
+            }
+        }
+    }
+
+    // Actions are disclosed or named as obligations, never rendered disabled.
+    let actions = value["actions"].as_array().expect("actions present");
+    assert!(actions.iter().any(|a| a["action_ref"] == "aikit.explain"));
+    assert!(actions.iter().any(|a| a["action_ref"] == "aikit.session.attach"));
+
+    // Presence-only: the reading must never carry a secret value or marker.
+    let raw = value.to_string();
+    assert!(!raw.contains("SecretValue"));
+    assert!(!raw.contains("sk-"));
+}
+

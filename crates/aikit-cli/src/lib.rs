@@ -32,6 +32,7 @@ pub mod closeout;
 pub mod orientation_packet;
 pub mod pressure;
 pub mod star_commands;
+pub mod system;
 pub mod gateway_ops;
 pub mod hook;
 pub mod json;
