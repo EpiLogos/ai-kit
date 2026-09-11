@@ -28,6 +28,8 @@ pub struct PiRpcConnectionAdapter {
     observed_session: Option<String>,
     binding: Option<NativeSessionBinding>,
     stop: Option<(String, Option<String>)>,
+    expected_model: Option<(String, String)>,
+    model_observation: Option<crate::agent_connection::NativeModelObservation>,
     abort_acknowledged: bool,
 }
 
@@ -43,8 +45,21 @@ impl PiRpcConnectionAdapter {
             observed_session: None,
             binding: None,
             stop: None,
+            expected_model: None,
+            model_observation: None,
             abort_acknowledged: false,
         }
+    }
+
+    pub fn with_selected_model(mut self, provider: &str, model_id: &str) -> Result<Self> {
+        if provider.trim().is_empty() || model_id.trim().is_empty() {
+            return Err(error(
+                "connection.pi_rpc.model_selection",
+                "Native provider and model id are required",
+            ));
+        }
+        self.expected_model = Some((provider.into(), model_id.into()));
+        Ok(self)
     }
 
     fn request(
@@ -117,6 +132,22 @@ impl PiRpcConnectionAdapter {
                 "connection.pi_rpc.session_busy",
                 "Attach requires an idle Pi session with no pending messages",
             ));
+        }
+        if let Some((provider, model)) = &self.expected_model {
+            if data["model"]["provider"].as_str() != Some(provider.as_str())
+                || data["model"]["id"].as_str() != Some(model.as_str())
+            {
+                return Err(error("connection.pi_rpc.model_mismatch", "Pi native state does not confirm the selected provider/model; no default or fallback is admitted"));
+            }
+            self.model_observation = Some(NativeModelObservation {
+                current_model_id: model.clone(),
+                available_models: vec![NativeAdvertisedModel {
+                    model_id: model.clone(),
+                    name: data["model"]["name"].as_str().unwrap_or(model).into(),
+                    description: None,
+                }],
+                standing: format!("Pi native get_state; provider={provider}; configuration, not an inference receipt"),
+            });
         }
         self.observed_session = Some(id.into());
         Ok(id.into())
@@ -237,6 +268,7 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                     let mut binding = NativeSessionBinding::unbound(id, SessionOpenMode::Attach)
                         .bind_agent_session(canonical);
                     binding.provenance = self.provenance.clone();
+                    binding.model_observation = self.model_observation.clone();
                     self.binding = Some(binding.clone());
                     Ok(vec![
                         self.signal(ConnectionSignalKind::SessionOpened { binding })
@@ -268,6 +300,13 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
             Some("message_end") => {
                 let result = &message["message"];
                 if result["role"] == "assistant" {
+                    if let Some((provider, model)) = &self.expected_model {
+                        if result["provider"].as_str() != Some(provider.as_str())
+                            || result["model"].as_str() != Some(model.as_str())
+                        {
+                            return Err(error("connection.pi_rpc.response_model_mismatch", "Assistant result does not name the selected native provider/model; response remains failed, not attributed to the requested Model"));
+                        }
+                    }
                     self.stop = Some((
                         result["stopReason"].as_str().unwrap_or("unknown").into(),
                         result["errorMessage"].as_str().map(str::to_owned),

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::ContextDescriptor;
 use crate::id::ProjectId;
-use crate::resource::{ProviderRef, SourceRef};
+use crate::resource::{ProviderRef, ResourceRef, SourceRef, SourceRevision};
 use crate::{AikitError, Result};
 
 use super::{ProjectConstituentRef, ProjectRef};
@@ -15,6 +15,16 @@ pub enum ProjectBindingLocator {
     LocalDirectory { path: PathBuf },
     Repository { repository: String },
     Remote { locator: String },
+    /// An owner-admitted World is an operative ground even when it has no
+    /// local child-Project directory. This locator preserves the native relation;
+    /// it neither invents a working tree nor grants filesystem access.
+    NativeWorld {
+        world: ResourceRef,
+        binding: ResourceRef,
+        scope: ResourceRef,
+        source_revision: SourceRevision,
+        content_digest: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -25,6 +25,7 @@ use std::{
 
 #[path = "encounter_agency.rs"]
 mod agency;
+pub use agency::model::EncounterModelOpen;
 pub use agency::{
     EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket, EncounterGroupRecipient,
 };
@@ -47,6 +48,9 @@ pub struct EncounterProvider {
     /// Explicit owner-configured admission basis. Absence preserves optional context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_context: Option<EncounterContextAdmission>,
+    /// A pinned scoped policy. It selects a catalogue route, not an Agent identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_policy: Option<EncounterRequiredSource>,
 }
 
 /// Pins existing source, not a copy of its content or a grant of semantic authority.
@@ -173,6 +177,10 @@ impl EncounterContextAdmission {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum EncounterRequest {
+    /// Select a catalogue-backed, scoped, already configured native body.
+    OpenModel {
+        request: Box<EncounterModelOpen>,
+    },
     Health,
     /// Stop only this explicitly identified owner after its provider processes
     /// have been shut down. This is never an ordinary view-detach operation.
@@ -280,6 +288,7 @@ struct Resident {
     generation: String,
     cwd: PathBuf,
     argv: Vec<String>,
+    model: Option<agency::model::PreparedModel>,
 }
 impl Resident {
     fn prompt_payload(&self, text: &str) -> Value {
@@ -430,7 +439,26 @@ impl EncounterService {
             &resident.provider,
             phase,
             resident.required_context.as_ref(),
-        )
+        )?;
+        let model = agency::model::prepare(&self.home, session, &current)?;
+        if model != resident.model {
+            return Err(error("Resident model policy/catalogue/credential/Agency basis changed; explicit re-resolution is required"));
+        }
+        if let Some(model) = &model {
+            if resident.host.identity(session)?.state != aikit_adapters::SessionLaneState::Resident
+            {
+                return Err(error("Model-selected resident already has a turn in flight; no overlapping model readmission"));
+            }
+            // Pi get_state is a native read. The adapter rejects changed native
+            // provider/model/session before another prompt can be submitted.
+            resident.host.initialize()?;
+            self.store.append(
+                session,
+                &json!({"kind":"model-admission-checked", "phase":phase,
+                "selection":model, "native_model_state_checked":true, "inference_observed":false}),
+            )?;
+        }
+        Ok(())
     }
 
     /// Exclusive shutdown waits for already admitted owner operations, then
@@ -514,6 +542,7 @@ impl EncounterService {
         provider: String,
         cwd: PathBuf,
         reconnect: bool,
+        model_target: Option<&EncounterModelOpen>,
     ) -> Result<Value> {
         let authored = SessionSpaceApplicationStore::new(self.home.clone()).load(&space)?;
         if !authored.agent_sessions.contains_key(&agent_session) {
@@ -551,7 +580,7 @@ impl EncounterService {
             }
             self.check_resident_context(&agent_session, held, "resident-open")?;
             return Ok(
-                json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"resident":true}),
+                json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"model_selection":held.model,"resident":true}),
             );
         }
         if !reconnect && previous.is_some() {
@@ -595,6 +624,10 @@ impl EncounterService {
             "before-provider-start",
             configured.required_context.as_ref(),
         )?;
+        if let Some(target) = model_target {
+            agency::model::validate_target(&self.home, &agent_session, &configured, target)?;
+        }
+        self.check_task_launch(&agent_session, &configured, &cwd)?;
         let connection = ResourceRef::parse(format!(
             "connection/encounter-{}",
             blake3::hash(agent_session.as_str().as_bytes()).to_hex()
@@ -609,22 +642,41 @@ impl EncounterService {
             self.permissions.clone(),
             generation.clone(),
         )));
+        let model = agency::model::prepare(&self.home, &agent_session, &configured)?;
+        let launch_argv = if let Some(model) = &model {
+            if self.is_task_bound(&agent_session)? {
+                configured.argv.clone()
+            } else {
+                agency::model::direct_launcher(&agent_session, &configured, model)?
+            }
+        } else {
+            configured.argv.clone()
+        };
         let provenance = vec![format!("native encounter provider {provider}")];
         let host = match configured.protocol {
             EncounterProtocol::Acp => AgentSessionHost::launch_with_journal(
                 AcpStableConnectionAdapter::new(connection, provenance),
-                &configured.argv,
+                &launch_argv,
                 Some(&cwd),
                 AgentSessionHostLimits::default(),
                 journal,
             ),
             EncounterProtocol::PiRpc => AgentSessionHost::launch_with_journal(
-                aikit_adapters::pi_rpc_connection::PiRpcConnectionAdapter::new(
-                    connection,
-                    cwd.to_string_lossy().into_owned(),
-                    provenance,
-                ),
-                &configured.argv,
+                {
+                    let adapter = aikit_adapters::pi_rpc_connection::PiRpcConnectionAdapter::new(
+                        connection,
+                        cwd.to_string_lossy().into_owned(),
+                        provenance,
+                    );
+                    match &model {
+                        Some(model) => adapter.with_selected_model(
+                            &model.policy.native_provider,
+                            &model.policy.provider_native_id,
+                        )?,
+                        None => adapter,
+                    }
+                },
+                &launch_argv,
                 Some(&cwd),
                 AgentSessionHostLimits::default(),
                 journal,
@@ -657,7 +709,8 @@ impl EncounterService {
         })?;
         let native = lane.binding().native_session_id.clone();
         let model_observation = lane.binding().model_observation.clone();
-        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
+        let model_reading = serde_json::to_value(&model).map_err(error)?;
+        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
         // The owner drains transport delivery; durable cursor readers are
         // independent views of the same canonical journal.
         let drain = lane.clone();
@@ -676,10 +729,11 @@ impl EncounterService {
                 generation,
                 cwd,
                 argv: configured.argv,
+                model,
             }),
         );
         Ok(
-            json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"resident":true}),
+            json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"resident":true,"inference_observed":false}),
         )
     }
 
@@ -709,6 +763,7 @@ impl EncounterService {
             ));
         }
         match request {
+            EncounterRequest::OpenModel { request } => self.open_model(*request),
             request @ (EncounterRequest::Send { .. }
             | EncounterRequest::SendGroup { .. }
             | EncounterRequest::Delivery { .. }) => self.agency_request(request),
@@ -717,7 +772,7 @@ impl EncounterService {
                 agent_session,
                 provider,
                 cwd,
-            } => self.open_native(space, agent_session, provider, cwd, true),
+            } => self.open_native(space, agent_session, provider, cwd, true, None),
             EncounterRequest::Shutdown { .. } => {
                 unreachable!("handled before acquiring read lease")
             }
@@ -839,7 +894,7 @@ impl EncounterService {
                 agent_session,
                 provider,
                 cwd,
-            } => self.open_native(space, agent_session, provider, cwd, false),
+            } => self.open_native(space, agent_session, provider, cwd, false, None),
             EncounterRequest::Read {
                 agent_session,
                 after,

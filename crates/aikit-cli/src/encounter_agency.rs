@@ -11,6 +11,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, path::PathBuf};
 
+#[path = "encounter_model.rs"]
+pub(crate) mod model;
+
+#[path = "encounter_task.rs"]
+mod task;
+#[path = "encounter_task_expectation.rs"]
+mod task_expectation;
+pub use task_expectation::EncounterTaskExpectation;
+
 pub const SEND_ACTION: &str = "action/aikit/encounter-send";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,6 +54,8 @@ pub struct EncounterAddressedTurn {
     pub delivery_ref: ResourceRef,
     pub sender: ResourceRef,
     pub expected_binding_revision: SourceRevision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_task: Option<EncounterTaskExpectation>,
     pub packet: EncounterContextPacket,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +63,8 @@ pub struct EncounterAddressedTurn {
 pub struct EncounterGroupRecipient {
     pub agent_session: ResourceRef,
     pub expected_binding_revision: SourceRevision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_task: Option<EncounterTaskExpectation>,
 }
 fn binding_path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
     home.state().join("encounter-agencies").join(format!(
@@ -185,6 +198,7 @@ impl EncounterService {
         &self,
         session: &ResourceRef,
     ) -> Result<Option<(EncounterAgencyBinding, AdmittedAgency)>> {
+        task::check(&self.home, session)?;
         read_binding(&self.home, session)?
             .map(|binding| {
                 let admitted = native_admission(&binding)?;
@@ -196,6 +210,7 @@ impl EncounterService {
     /// it is not merely named in an orientation receipt. Source text remains
     /// attributed material and cannot configure tools, consent or other Agents.
     pub(super) fn prepare_agency_text(&self, session: &ResourceRef, text: &str) -> Result<String> {
+        let task_context = task::prompt(self, session)?;
         let Some((binding, admitted)) = self.check_agency(session)? else {
             return Ok(text.to_owned());
         };
@@ -221,6 +236,7 @@ impl EncounterService {
                 }
             }
         }
+        prompt.push_str(&task_context);
         prompt.push_str("\n<explicit-request>\n");
         prompt.push_str(text);
         prompt.push_str("\n</explicit-request>\n");
@@ -233,6 +249,9 @@ impl EncounterService {
     ) -> Result<EncounterAgencyBinding> {
         self.require_attached(session)?;
         let (binding,_) = self.check_agency(session)?.ok_or_else(||AikitError::new("encounter.agency_required","Addressed delivery requires a current native Agency binding, not a profile or display name"))?;
+        if let Some(expected) = &turn.expected_task {
+            task_expectation::check(self, session, &binding, expected)?;
+        }
         if binding.revision != turn.expected_binding_revision {
             return Err(AikitError::new(
                 "encounter.binding_changed",
@@ -336,6 +355,7 @@ impl EncounterService {
                 delivery_ref: delivery.clone(),
                 sender: sender.clone(),
                 expected_binding_revision: recipient.expected_binding_revision.clone(),
+                expected_task: recipient.expected_task.clone(),
                 packet: packet.clone(),
             };
             let binding = self.preflight_addressed(&recipient.agent_session, &turn)?;
@@ -349,7 +369,7 @@ impl EncounterService {
             ));
         }
         let results=recipients.into_iter().map(|recipient| {
-            let turn=EncounterAddressedTurn{delivery_ref:delivery.clone(),sender:sender.clone(),expected_binding_revision:recipient.expected_binding_revision,packet:packet.clone()};
+            let turn=EncounterAddressedTurn{delivery_ref:delivery.clone(),sender:sender.clone(),expected_binding_revision:recipient.expected_binding_revision,expected_task:recipient.expected_task,packet:packet.clone()};
             match self.send_addressed(recipient.agent_session.clone(),turn) {
                 Ok(result)=>json!({"agent_session":recipient.agent_session,"result":result}),
                 Err(failure)=>json!({"agent_session":recipient.agent_session,"error":{"code":failure.code(),"message":failure.message()}}),

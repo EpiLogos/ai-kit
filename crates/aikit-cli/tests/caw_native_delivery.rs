@@ -412,3 +412,6 @@ fn native_root_agency_requires_no_project_profile_or_adoption() {
     assert!(!w.temp.path().join("Control").exists());
     w.stop();
 }
+
+#[path = "support/caw_model_resident.rs"]
+mod model_proof;

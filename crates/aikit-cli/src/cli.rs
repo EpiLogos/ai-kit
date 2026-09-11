@@ -301,6 +301,9 @@ pub struct ComposeArgs {
     /// disclosing the plan. Requires --model.
     #[arg(long)]
     pub realise: bool,
+    /// JSON file naming the existing SessionSpace, AgentSession and native owner socket.
+    #[arg(long, requires = "realise")]
+    pub resident_target: Option<std::path::PathBuf>,
     /// The Model to select, as a canonical `model:<stable-id>` ref.
     #[arg(long)]
     pub model: Option<String>,

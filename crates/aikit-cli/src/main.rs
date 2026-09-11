@@ -370,14 +370,13 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 .gateway_ref
                 .or_else(|| std::env::var("AIKIT_GATEWAY_REF").ok())
                 .unwrap_or_else(|| "agency-gateway/local".into());
-            let gateway_ref = aikit_core::resource::ResourceRef::parse(&gateway_ref).map_err(
-                |error| {
+            let gateway_ref =
+                aikit_core::resource::ResourceRef::parse(&gateway_ref).map_err(|error| {
                     AikitError::new(
                         "cli.gateway_ref_invalid",
                         format!("parse gateway ref {gateway_ref}: {error}"),
                     )
-                },
-            )?;
+                })?;
             aikit_adapters::run_gateway_service(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -542,6 +541,20 @@ fn cmd_compose(cwd: &std::path::Path, args: ComposeArgs) -> Result<Reply> {
         })
         .transpose()?;
     let mut data = service.compose_selected_plan(admission.as_ref())?;
+    if let Some(path) = &args.resident_target {
+        let metadata = std::fs::metadata(path)
+            .map_err(|e| AikitError::new("compose.resident_target", e.to_string()))?;
+        if !metadata.is_file() || metadata.len() > 1_048_576 {
+            return Err(AikitError::new(
+                "compose.resident_target",
+                "Resident target must be a bounded JSON file",
+            ));
+        }
+        let bytes = std::fs::read(path)
+            .map_err(|e| AikitError::new("compose.resident_target", e.to_string()))?;
+        data["resident_target"] = serde_json::from_slice(&bytes)
+            .map_err(|e| AikitError::new("compose.resident_target", e.to_string()))?;
+    }
     if args.realise {
         let model = args.model.as_deref().ok_or_else(|| {
             AikitError::new(
@@ -1815,8 +1828,7 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         KnowledgeSub::Resolve(a) => {
             // One query path: a plain typed string is legitimate input and is
             // lowered into the Vāk resolver contract before resolution.
-            let expression =
-                aikit_core::resource::parse_or_search_expression(&a.query)?;
+            let expression = aikit_core::resource::parse_or_search_expression(&a.query)?;
             let resolution = service.knowledge_resolve(&expression, a.limit)?;
             warnings.extend(resolution.absences.clone());
             jval!(resolution)
@@ -2137,7 +2149,11 @@ fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
 fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
     let service = Service::discover(cwd)?;
     let (capability_text, requested_source, note) = match &a.command {
-        TrustSub::Record(args) => (args.capability.clone(), args.source.clone(), args.note.clone()),
+        TrustSub::Record(args) => (
+            args.capability.clone(),
+            args.source.clone(),
+            args.note.clone(),
+        ),
         TrustSub::Show(args) => (args.capability.clone(), None, None),
     };
     let capability = CapsuleId::parse(&capability_text).map_err(|error| {
@@ -2180,14 +2196,22 @@ fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
     let Some(revision) = revision else {
         return Err(AikitError::new(
             "trust.no_revision",
-            format!("{} has no content revision in source {}", capability, source.as_str()),
+            format!(
+                "{} has no content revision in source {}",
+                capability,
+                source.as_str()
+            ),
         )
         .with("capability", capability.to_string()));
     };
     match &a.command {
         TrustSub::Record(_) => {
             store.record(
-                &aikit_core::trust::TrustKey::new(source.clone(), capability.clone(), revision.clone()),
+                &aikit_core::trust::TrustKey::new(
+                    source.clone(),
+                    capability.clone(),
+                    revision.clone(),
+                ),
                 aikit_core::trust::TrustState::Trusted,
                 note.as_deref().or(Some("explicit registry review")),
             )?;
@@ -2641,9 +2665,13 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
         ContextSub::Current(_) => {
             let d = service.descriptor();
             let tuning = service.continuity_tuning();
-            let last_active=d.project_root.as_deref()
+            let last_active = d
+                .project_root
+                .as_deref()
                 .map(|root| service.index().project_last_activity(root))
-                .transpose()?.flatten().as_ref()
+                .transpose()?
+                .flatten()
+                .as_ref()
                 .map(aikit_cli::activity_evidence::describe);
             let data = jval!({
                 "context_id": d.context_id.to_string(),
@@ -3065,9 +3093,7 @@ fn cmd_session_lifecycle(service: &Service, c: SessionLifecycleCmd) -> Result<Re
         SessionLifecycleSub::Cancel(a) => {
             let event = service.session_lifecycle_record(
                 a.session,
-                SessionLifecycleRecord::Cancel {
-                    reason: a.reason,
-                },
+                SessionLifecycleRecord::Cancel { reason: a.reason },
                 a.activity,
                 a.origin,
             )?;
@@ -3092,9 +3118,7 @@ fn cmd_session_lifecycle(service: &Service, c: SessionLifecycleCmd) -> Result<Re
             SessionLifecyclePermissionSub::Grant(a) => {
                 let event = service.session_lifecycle_record(
                     a.session,
-                    SessionLifecycleRecord::PermissionGrant {
-                        request: a.request,
-                    },
+                    SessionLifecycleRecord::PermissionGrant { request: a.request },
                     None,
                     a.origin,
                 )?;
