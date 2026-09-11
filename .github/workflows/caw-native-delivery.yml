@@ -5,7 +5,7 @@ on:
       - 'crates/**'
       - '.github/workflows/caw-native-delivery.yml'
   push:
-    branches: [main, agent/caw-274-277-native-continuation]
+    branches: [main, agent/caw-274-277-native-continuation, agent/caw-native-owner-joins]
     paths:
       - 'crates/**'
       - '.github/workflows/caw-native-delivery.yml'
@@ -23,11 +23,26 @@ jobs:
     env:
       ACTUATION_SHA: 2d73f957c287ef386b09ac2c55eeab3603b60873
       CENTRAL_SHA: 5d1b8bf6692f9aca45b2fe39db54cbc378dda70e
-      WORKCELL_SHA: 0187b0d76e8f27632d127d54ef2441310b073108
+      WORKCELL_SHA: 0c44ee373f5a5e11ab33e885be84dd8293bc358f
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Retain exact source under test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/caw-source"
+          git archive --format=tar --prefix=ai-kit/ HEAD | gzip > "$RUNNER_TEMP/caw-source/ai-kit.tar.gz"
+          git rev-parse HEAD > "$RUNNER_TEMP/caw-source/revision.txt"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/caw-source/tree.txt"
+          sha256sum "$RUNNER_TEMP/caw-source/ai-kit.tar.gz" > "$RUNNER_TEMP/caw-source/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: caw-native-source-${{ github.sha }}
+          path: ${{ runner.temp }}/caw-source
+          if-no-files-found: error
+          retention-days: 7
       - uses: dtolnay/rust-toolchain@1.98.0
       - uses: actions/setup-node@v4
         with:
@@ -47,10 +62,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Workcell
-          ref: 0187b0d76e8f27632d127d54ef2441310b073108
+          ref: 0c44ee373f5a5e11ab33e885be84dd8293bc358f
           path: .caw-native/Workcell
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: |
+            . -> target
+            .caw-native/Central -> target
+            .caw-native/Workcell -> target
       - name: Record exact native basis
         shell: bash
         run: |
@@ -59,7 +79,11 @@ jobs:
           test "$(git -C .caw-native/Central rev-parse HEAD)" = "$CENTRAL_SHA"
           test "$(git -C .caw-native/Workcell rev-parse HEAD)" = "$WORKCELL_SHA"
           test -x "$GITHUB_WORKSPACE/.caw-native/Actuation/bin/actuation"
-          echo "AIKIT_CAW_ACTUATION_BIN=$GITHUB_WORKSPACE/.caw-native/Actuation/bin/actuation" >> "$GITHUB_ENV"
+          {
+            echo "AIKIT_CAW_ACTUATION_BIN=$GITHUB_WORKSPACE/.caw-native/Actuation/bin/actuation"
+            echo "AIKIT_CAW_CENTRAL_BIN=$GITHUB_WORKSPACE/.caw-native/Central/target/debug/ctrl"
+            echo "AIKIT_CAW_WORKCELL_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-write-boundary"
+          } >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/caw-evidence"
           git archive --format=tar.gz HEAD > "$RUNNER_TEMP/caw-evidence/aikit-source.tar.gz"
           {
@@ -70,7 +94,7 @@ jobs:
             rustc -Vv
             node --version
             python3 --version
-            echo 'Standing=pinned unmerged candidate cut; controlled native providers, not accepted main.'
+            echo 'Standing=accepted cut revisions pinned per product; controlled native providers, not installed or real-model proof.'
             echo 'FIXTURE_REPLY is not a real model response or installed-harness proof.'
           } > "$RUNNER_TEMP/caw-evidence/basis.txt"
       - name: Build the native placement and material owners
