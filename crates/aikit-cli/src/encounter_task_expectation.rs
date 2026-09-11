@@ -7,9 +7,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+/// Keep this optional, comparatively large basis out of every IPC enum value.
+/// Serde's Box representation preserves the existing JSON object unchanged.
+pub type EncounterTaskExpectation = Box<EncounterTaskBasis>;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EncounterTaskExpectation {
+pub struct EncounterTaskBasis {
     pub revision: SourceRevision,
     pub task_ref: ResourceRef,
     pub now_ref: ResourceRef,
