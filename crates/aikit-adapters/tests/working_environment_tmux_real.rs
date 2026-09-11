@@ -53,9 +53,9 @@ impl SocketGuard {
 }
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("tmux")
-            .args(["-L", &self.0, "kill-server"])
-            .output();
+        // Runs during unwind too, which is the point: a failing test must not
+        // leave a tmux server, its s, or its socket inode behind.
+        common::end_tmux_server(&self.0);
     }
 }
 
@@ -238,6 +238,14 @@ fn real_tmux_survives_adapter_restart_recovers_relations_and_never_mints_canonic
         .bindings
         .iter()
         .all(|binding| binding.kind != NativeBindingKind::Surface));
+
+    // That was the server's last session, so tmux is now tearing the server
+    // down. Reconstructing before it has finished lands the new session on a
+    // server that is already exiting, and the  that follows finds
+    // nothing running — an intermittent failure that reads like a product bug
+    // and is not one. This test is about surviving a restart, so let the
+    // restart actually happen before proving it survived.
+    common::wait_for_tmux_server_gone(guard.name());
 
     let reconstructed = restarted.open().unwrap();
     assert_eq!(

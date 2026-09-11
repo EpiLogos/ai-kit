@@ -64,6 +64,7 @@ dependencies = [
  "aikit-store",
  "aikit-tui",
  "assert_cmd",
+ "base64",
  "blake3",
  "clap",
  "crossterm",

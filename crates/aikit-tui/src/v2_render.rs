@@ -6,7 +6,7 @@
 
 use ratatui::layout::Alignment;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use aikit_core::resource::ActionStageability;
@@ -96,7 +96,27 @@ fn draw_shell(
     let panes = layout.split(inner);
     frame.render_widget(query_line(state, &theme, glyphs), panes.query);
 
-    let compact_world_lines = if panes.preview.is_none()
+    // `ApplicationSurfaceController::draw` (`application_surface.rs`) draws
+    // the Relations panel directly on top of `panes.list` — at this exact
+    // Rect, later in the same frame — whenever the Workspace is showing the
+    // Knowledge section, regardless of `relation_view`. `Paragraph`/`Block`
+    // only touch the cells their own content actually reaches (see
+    // `ratatui::widgets::Clear`'s doc comment: "this will clear/reset the
+    // area first" is something a caller has to ask for, not something
+    // rendering does on its own), so whatever this function drew into that
+    // Rect a moment ago — or what an earlier frame left there, since
+    // `Terminal::draw`'s contract only promises a diff against the
+    // previous frame, not a blanked buffer — stays behind as far as the
+    // panel's own content is shorter than the row it sits over. Rather
+    // than let the list content it will never let the viewer see reach the
+    // buffer at all, this leaves `panes.list` genuinely blank for the
+    // Relations panel to draw onto, the same way a popup clears before it
+    // draws (`Clear`'s own example).
+    let relations_panel_covers_list = state.presentation == PresentationMode::Workspace
+        && state.workspace_section == WorkspaceSection::Knowledge;
+
+    let compact_world_lines = if !relations_panel_covers_list
+        && panes.preview.is_none()
         && state.presentation == PresentationMode::Workspace
     {
         reading
@@ -105,7 +125,9 @@ fn draw_shell(
     } else {
         None
     };
-    if let Some(lines) = compact_world_lines {
+    if relations_panel_covers_list {
+        frame.render_widget(Clear, panes.list);
+    } else if let Some(lines) = compact_world_lines {
         frame.render_widget(project_world_pane(lines, &theme), panes.list);
     } else {
         draw_resources(frame, state, &theme, panes.list, glyphs);
@@ -283,6 +305,25 @@ fn preview_pane<'a>(
 ) -> Paragraph<'a> {
     let world = reading.map(|reading| reading.world);
     let sep = glyphs.separator();
+    if state.overlay == Some(Overlay::ModelRoster) {
+        let mut lines: Vec<Line> = vec![
+            Line::from(Span::styled("Model roster", theme.heading())),
+            Line::from(""),
+        ];
+        match state.model_roster.as_ref() {
+            Some(roster) => lines.extend(
+                crate::model_roster_matrix(roster, glyphs)
+                    .into_iter()
+                    .map(|line| Line::from(Span::raw(line))),
+            ),
+            None => lines.push(Line::from(Span::raw(
+                "no Model roster is available here (no Project bound)".to_string(),
+            ))),
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Esc returns", theme.staged())));
+        return Paragraph::new(lines).wrap(Wrap { trim: false });
+    }
     if state.overlay == Some(Overlay::ConfirmApply) {
         let summary = state
             .preview
@@ -473,8 +514,15 @@ fn footer<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragraph<'
             "Action mode {sep} type to filter {sep} {updown} choose {sep} Enter invoke {sep} Space invoke if stageable {sep} Esc return"
         )
     } else if state.presentation == PresentationMode::Workspace {
+        // The System destination is where the installation's own controls live,
+        // so its footer names them; elsewhere they would be noise.
+        let system_hints = if state.workspace_section == WorkspaceSection::System {
+            format!(" {sep} Ctrl+R roster {sep} Ctrl+E credential setup {sep} Ctrl+D repair")
+        } else {
+            String::new()
+        };
         format!(
-            "{} {sep} {} result{} {sep} {} staged {sep} scope {} {sep} Alt+{} fields {sep} : actions {sep} Ctrl+W Quick",
+            "{} {sep} {} result{} {sep} {} staged {sep} scope {} {sep} Alt+{} fields {sep} : actions {sep} Ctrl+W Quick{system_hints}",
             workspace_section_label(state.workspace_section),
             state.read_model.resources.len(),
             if state.read_model.resources.len() == 1 { "" } else { "s" },

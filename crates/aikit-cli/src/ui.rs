@@ -110,6 +110,60 @@ impl PaletteBackend for V2SurfaceService<'_> {
         <Service as PaletteBackend>::view(self.service)
     }
 
+    /// Forwarded so the interactive surface can see the same native owner
+    /// identity the CLI's own commands already resolve through `Service`.
+    /// Before this forward existed the trait default (`Ok(None)`) answered
+    /// here instead, which is indistinguishable from "no ProjectCentral
+    /// identity is bound" — a silent downgrade this decorator must not
+    /// introduce.
+    fn project_binding(&self) -> Result<Option<aikit_core::project::ProjectBinding>> {
+        <Service as PaletteBackend>::project_binding(self.service)
+    }
+
+    /// Forwarded for the same reason as `project_binding`: `Service` already
+    /// observes real Git material through `NativeGitProvider`, and this
+    /// decorator's job is to carry every resolver/package/runtime answer
+    /// through unchanged, not to re-decide which of them the interactive
+    /// surface is allowed to see. Leaving this one unforwarded is exactly the
+    /// wiring gap that made the Worlds pane's Git section permanently absent.
+    fn versioned_world(
+        &self,
+    ) -> Result<Option<aikit_core::resource::VersionedProjectWorld>> {
+        <Service as PaletteBackend>::versioned_world(self.service)
+    }
+
+    /// Forwarded for the same reason as `versioned_world`: `Service` is the
+    /// layer that can observe the OS secure store and the world's bindings, and
+    /// this decorator must carry that observation through unchanged. Leaving it
+    /// on the trait default (`Ok(None)`) is exactly the wiring gap that made the
+    /// System pane's Credentials/Providers rows permanently "not attempted".
+    fn credential_world(
+        &self,
+    ) -> Result<Option<aikit_core::credential_world::CredentialWorldDisclosure>> {
+        <Service as PaletteBackend>::credential_world(self.service)
+    }
+
+    /// Forwarded for the same reason as `credential_world`: the health checks
+    /// run on `Service`, and this decorator must carry that reading through so
+    /// the System pane the TUI opens through sees it rather than the trait
+    /// default of `Ok(None)`.
+    fn doctor_world(&self) -> Result<Option<aikit_core::doctor_world::DoctorDisclosure>> {
+        <Service as PaletteBackend>::doctor_world(self.service)
+    }
+
+    /// Forwarded for the same reason as `doctor_world`: the Workcell
+    /// observation runs on `Service`, and the System pane sees it only if the
+    /// decorator carries it through.
+    fn workcell_world(&self) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
+        <Service as PaletteBackend>::workcell_world(self.service)
+    }
+
+    /// Forwarded like the others: the roster is composed on `Service`, and the
+    /// palette's roster overlay reaches it only through this decorator.
+    fn model_roster(&self) -> Result<Option<aikit_core::resource::ModelRoster>> {
+        <Service as PaletteBackend>::model_roster(self.service)
+    }
+
     fn scope_layers(&self) -> Option<&[ScopeLayer]> {
         <Service as PaletteBackend>::scope_layers(self.service)
     }
@@ -172,6 +226,30 @@ impl PaletteBackend for V2SurfaceService<'_> {
 
     fn open_source(&mut self, id: &CapsuleId) -> Result<PathBuf> {
         <Service as PaletteBackend>::open_source(self.service, id)
+    }
+
+    fn working_environments(
+        &self,
+    ) -> Result<Option<Vec<aikit_core::working_environment::WorkingEnvironmentObservation>>> {
+        <Service as PaletteBackend>::working_environments(self.service)
+    }
+
+    fn working_environment_subjects(&self) -> Result<Vec<aikit_core::resource::ResourceRef>> {
+        <Service as PaletteBackend>::working_environment_subjects(self.service)
+    }
+
+    fn act_in_working_environment(
+        &mut self,
+        provider: &aikit_core::resource::ResourceRef,
+        subject: &aikit_core::resource::ResourceRef,
+        operation: aikit_tui::live_field::WorkingEnvironmentOperation,
+    ) -> Result<aikit_tui::live_field::WorkingEnvironmentOutcome> {
+        <Service as PaletteBackend>::act_in_working_environment(
+            self.service,
+            provider,
+            subject,
+            operation,
+        )
     }
 }
 
@@ -241,4 +319,197 @@ pub fn run(
     fullscreen: bool,
 ) -> Result<PaletteOutcome> {
     run_surface(service, query, fullscreen, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .expect("git is available in the test environment");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A real repository with a real ProjectCentral identity, the same
+    /// minimal fixture `versioned_world_wiring.rs` uses for `Service` itself
+    /// -- `.aikit` is what makes the service recognise a Project at all, and
+    /// `ProjectCentral/project.json` is what gives it a native owner identity
+    /// `versioned_world`/`project_binding` refuse to observe without.
+    fn project(root: &Path) {
+        std::fs::create_dir_all(root.join(".aikit")).unwrap();
+        std::fs::write(root.join(".aikit/profile.toml"), "schema = 1\n").unwrap();
+        std::fs::create_dir_all(root.join("ProjectCentral")).unwrap();
+        std::fs::write(
+            root.join("ProjectCentral/project.json"),
+            r#"{"schema":"central.project/v1","project_id":"project:surface-probe","human_source":"ProjectCentral/user","wiki":{"profile":"okf-wiki/v1","source":"ProjectCentral/agents/wiki/wiki.json"}}"#,
+        )
+        .unwrap();
+        git(root, &["init", "--initial-branch=trunk"]);
+        git(root, &["config", "user.email", "probe@example.invalid"]);
+        git(root, &["config", "user.name", "probe"]);
+        std::fs::write(root.join("README.md"), "probe\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "first"]);
+    }
+
+    fn service(home: &Path, root: &Path) -> Service {
+        let mut env = BTreeMap::new();
+        env.insert(
+            "AIKIT_CONTEXT_ID".to_owned(),
+            aikit_core::ContextId::generate().to_string(),
+        );
+        Service::open(AikitHome::at(home), root, |key| env.get(key).cloned()).unwrap()
+    }
+
+    /// The wiring proof this module exists to guard: every interactive entry
+    /// point opens the terminal application through `V2SurfaceService`, not
+    /// through `Service` directly, so a forward that only exists on
+    /// `Service` never reaches the TUI. Before `project_binding` and
+    /// `versioned_world` were added to this `impl PaletteBackend for
+    /// V2SurfaceService`, calling them on the decorator silently ran the
+    /// `PaletteBackend` trait default (`Ok(None)`) instead of `Service`'s
+    /// real observation -- indistinguishable, at the type level, from "this
+    /// Project has no Git material". This test drives the decorator itself
+    /// against a real repository made by real `git`, the same discipline
+    /// `versioned_world_wiring.rs` uses one layer down for `Service` alone.
+    #[test]
+    fn the_surface_decorator_forwards_real_git_material_not_the_trait_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("probe");
+        std::fs::create_dir_all(&root).unwrap();
+        project(&root);
+
+        let mut svc = service(tmp.path(), &root);
+        let backend = V2SurfaceService::new(&mut svc);
+
+        let observed = backend
+            .versioned_world()
+            .expect("observation does not fail on a real worktree");
+        let versioned = observed.expect(
+            "the decorator must forward Service's real observation, not the \
+             PaletteBackend trait default of None",
+        );
+        assert_eq!(versioned.repository.branch.as_deref(), Some("trunk"));
+        assert!(versioned.working.is_clean(), "a fresh commit leaves a clean tree");
+
+        let binding = backend
+            .project_binding()
+            .expect("binding observation does not fail")
+            .expect(
+                "the decorator must forward Service's real ProjectBinding, not the \
+                 PaletteBackend trait default of None",
+            );
+        assert_eq!(binding.project.as_str(), "project:surface-probe");
+    }
+
+    /// The credential-world forward has the same failure mode as the git one:
+    /// the TUI opens through `V2SurfaceService`, so a producer that exists only
+    /// on `Service` never reaches the System pane unless the decorator forwards
+    /// it. Left on the trait default (`Ok(None)`) the pane would read
+    /// `not attempted` forever — the exact defect W7 fixes. This drives the
+    /// decorator itself and asserts it carries `Service`'s real reading through.
+    #[test]
+    fn the_surface_decorator_forwards_the_real_credential_reading_not_the_trait_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("probe");
+        std::fs::create_dir_all(&root).unwrap();
+        project(&root);
+
+        let mut svc = service(tmp.path(), &root);
+        let backend = V2SurfaceService::new(&mut svc);
+
+        let disclosure = backend
+            .credential_world()
+            .expect("composing the credential world does not fail")
+            .expect(
+                "the decorator must forward Service's real reading, not the \
+                 PaletteBackend trait default of None",
+            );
+        // Observed, not the `Unknown` roster the `not_attempted` default carries.
+        assert!(
+            disclosure.providers.is_known(),
+            "the decorator carries a real observed roster: {:?}",
+            disclosure.providers
+        );
+        assert!(
+            !disclosure.credentials.is_empty(),
+            "the seed catalogue's hosted Models declare credential needs the \
+             decorator's reading must carry"
+        );
+    }
+
+    /// The doctor forward has the same failure mode: the TUI opens through the
+    /// decorator, so the health checks that run on `Service` reach the System
+    /// pane only if the decorator forwards them. Left on the trait default the
+    /// pane would read `not attempted` forever.
+    #[test]
+    fn the_surface_decorator_forwards_the_real_health_reading_not_the_trait_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("probe");
+        std::fs::create_dir_all(&root).unwrap();
+        project(&root);
+
+        let mut svc = service(tmp.path(), &root);
+        let backend = V2SurfaceService::new(&mut svc);
+
+        let disclosure = backend
+            .doctor_world()
+            .expect("running the checks does not fail")
+            .expect(
+                "the decorator must forward Service's real reading, not the \
+                 PaletteBackend trait default of None",
+            );
+        assert!(
+            disclosure.was_attempted(),
+            "the decorator carries an observed health reading, not not-attempted"
+        );
+    }
+
+    /// The Workcell forward, same failure mode as the others.
+    #[test]
+    fn the_surface_decorator_forwards_the_real_workcell_reading_not_the_trait_default() {
+        use aikit_core::workcell_world::WorkcellKnowledge;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("probe");
+        std::fs::create_dir_all(&root).unwrap();
+        project(&root);
+
+        let mut svc = service(tmp.path(), &root);
+        let backend = V2SurfaceService::new(&mut svc);
+
+        let disclosure = backend
+            .workcell_world()
+            .expect("observing does not fail")
+            .expect("the decorator must forward Service's real reading, not None");
+        // A real observation, not the not-attempted default.
+        assert!(
+            !matches!(disclosure.knowledge, WorkcellKnowledge::NotAttempted { .. }),
+            "the decorator carries a real observation"
+        );
+    }
+
+    /// The roster forward: composed on `Service`, reaching the palette overlay
+    /// only through the decorator.
+    #[test]
+    fn the_surface_decorator_forwards_the_model_roster() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("probe");
+        std::fs::create_dir_all(&root).unwrap();
+        project(&root);
+
+        let mut svc = service(tmp.path(), &root);
+        let backend = V2SurfaceService::new(&mut svc);
+        assert!(
+            backend.model_roster().unwrap().is_some(),
+            "the decorator carries Service's composed roster, not the trait default"
+        );
+    }
 }
