@@ -21,9 +21,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      ACTUATION_SHA: 0ac4bbb47cc37a7ac3c1db42b88a39ffd6bb5b30
-      CENTRAL_SHA: d91dee416a71b95f280c691c2d17e756bd8db10c
-      WORKCELL_SHA: dcac0a26f9c0f01d6b6b4dd2486566161ab9bf6f
+      ACTUATION_SHA: 2d73f957c287ef386b09ac2c55eeab3603b60873
+      CENTRAL_SHA: 5d1b8bf6692f9aca45b2fe39db54cbc378dda70e
+      WORKCELL_SHA: 0187b0d76e8f27632d127d54ef2441310b073108
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,19 +35,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Actuation
-          ref: 0ac4bbb47cc37a7ac3c1db42b88a39ffd6bb5b30
+          ref: 2d73f957c287ef386b09ac2c55eeab3603b60873
           path: .caw-native/Actuation
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Central
-          ref: d91dee416a71b95f280c691c2d17e756bd8db10c
+          ref: 5d1b8bf6692f9aca45b2fe39db54cbc378dda70e
           path: .caw-native/Central
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Workcell
-          ref: dcac0a26f9c0f01d6b6b4dd2486566161ab9bf6f
+          ref: 0187b0d76e8f27632d127d54ef2441310b073108
           path: .caw-native/Workcell
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2.9.2

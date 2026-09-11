@@ -199,4 +199,5 @@ mod session_event_queue;
 
 pub mod agency_admission;
 pub mod placement_enforcement;
+pub mod central_file_map;
 pub mod central_placement;
