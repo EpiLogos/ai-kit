@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{fs, io::{Read, Write}, path::PathBuf, process::{Command, Stdio}, time::{Duration, Instant}};
 
+#[path = "encounter_task_material.rs"]
+mod material;
+use material::{MaterialBinding, MaterialHost};
+
 const WRITE_ACTION: &str = "action/aikit/encounter-task";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +25,10 @@ struct TaskRequest {
     selected_directories: Vec<PathBuf>,
     workcell_boundary_bin: PathBuf,
     authority_ref: ResourceRef,
+    /// A hosted arrangement must prepare/observe this native owner; omission
+    /// keeps the explicitly unhosted protected-process mode, not fake hosting.
+    #[serde(default)]
+    material_host: Option<MaterialHost>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaskRecord {
@@ -34,6 +42,8 @@ struct TaskRecord {
     inspection: Option<Value>,
     cwd_anchor: Option<Value>,
     launcher: EncounterProvider,
+    #[serde(default)]
+    material: Option<MaterialBinding>,
 }
 /// Finite native-owner requests, not protocol/session lifetime. Partial effects
 /// stay uncertain on timeout; the durable task key is never replaced for retry.
@@ -88,6 +98,22 @@ fn publish(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Resu
     #[cfg(unix)] {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(error)?;
+    }
+    // Keep every replaced pending/ready reading. A new body/configuration must
+    // not erase the historical material, NOW/source and return correlations.
+    if target.exists() {
+        let previous = fs::read(&target).map_err(error)?;
+        let history = parent.join("history");
+        fs::create_dir_all(&history).map_err(error)?;
+        let entry = history.join(format!("{}.json", blake3::hash(&previous).to_hex()));
+        match fs::OpenOptions::new().write(true).create_new(true).open(&entry) {
+            Ok(mut file) => { file.write_all(&previous).map_err(error)?; file.sync_all().map_err(error)?; }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if fs::read(&entry).map_err(error)? != previous { return Err(error("Task history conflict")); }
+            }
+            Err(e) => return Err(error(e)),
+        }
+        fs::File::open(&history).and_then(|f| f.sync_all()).map_err(error)?;
     }
     let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
     staged.write_all(&serde_json::to_vec_pretty(record).map_err(error)?).map_err(error)?;
@@ -146,6 +172,11 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
         || old["objects"] != fresh["objects"]) {
         return Err(error("Material path identity changed; prepare an explicit new binding"));
     }
+    match (&record.request.material_host, &record.material) {
+        (Some(host), Some(binding)) if host == &binding.host => { binding.validate(task)?; }
+        (None, None) => {}
+        _ => return Err(error("Required native material binding is missing or replaced; no unhosted fallback")),
+    }
     Ok(())
 }
 
@@ -183,8 +214,12 @@ impl EncounterService {
             return Err(error("Task cwd must be an existing canonical directory"));
         }
         let agency_revision = authority(home, session, &request)?;
+        if let Some(host) = &request.material_host { host.preflight()?; }
         let current = read(home, session)?;
         if current.as_ref().map(|c| &c.revision) != expected { return Err(error("Task revision conflict; read current task before changing it")); }
+        if current.as_ref().is_some_and(|c| c.request.material_host.is_some() && request.material_host.is_none()) {
+            return Err(error("A hosted task cannot silently drop its material requirement"));
+        }
         if current.as_ref().is_some_and(|c| c.request.central.task_ref != request.central.task_ref) {
             return Err(error("A session cannot silently become another task or Candidate"));
         }
@@ -199,7 +234,7 @@ impl EncounterService {
             "--expected-revision".into(), revision.to_string()];
         let mut record = TaskRecord { schema: "aikit.encounter-task/v1".into(), revision,
             request, agency_revision, ready: false, allocation: None, requirements: None,
-            inspection: None, cwd_anchor: None, launcher };
+            inspection: None, cwd_anchor: None, launcher, material: None };
         publish(home, session, &record)?;
         let owner = NativeCentralPlacement::new(OwnerRunner);
         let task = owner.allocate(&record.request.central)?;
@@ -210,6 +245,17 @@ impl EncounterService {
         record.cwd_anchor = Some(owner.validate_write(&task, &record.request.cwd)?["destination_anchor"].clone());
         let requirements = owner.write_boundary_requirements(&task, &record.request.authority_ref, &record.request.selected_directories)?;
         record.inspection = Some(inspect(&record.request, &requirements)?);
+        if let Some(host) = &record.request.material_host {
+            record.material = Some(host.prepare(&task, json!({
+                "agent":binding.agent_ref, "agency":binding.agency_ref,
+                "world_binding":binding.world_binding_ref, "world":binding.world_ref,
+                "agent_session":session, "task":task.request.task_ref,
+                "now":task.allocation["now_ref"], "source":task.allocation["source"]["ref"],
+                "now_revision":task.allocation["revision"]["revision"],
+                "policy_revision":task.allocation["policy"]["revision"],
+                "authority":record.request.authority_ref
+            }))?);
+        }
         record.allocation = Some(task);
         record.requirements = Some(requirements);
         // Configuration is independent from the resident. Changing this does
@@ -248,7 +294,8 @@ impl EncounterService {
         let mut command = Command::new(&record.request.workcell_boundary_bin);
         command.args(["exec", &file.path().display().to_string(), requirements["policy_revision"].as_str().expect("validated revision"), inspection["requirements_digest"].as_str().expect("validated digest"), "--"])
             .args(&record.request.provider.argv)
-            .env_remove("CENTRAL_NATIVE_TOKEN");
+            .env_remove("CENTRAL_NATIVE_TOKEN")
+            .env_remove("WORKCELL_CONTROL_TOKEN");
         // Retain the immutable requirements path across exec. Its private owner
         // directory is outside every write aperture. History can inspect it.
         let (_file, _retained_path) = file.keep().map_err(error)?;
