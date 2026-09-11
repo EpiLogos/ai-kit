@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::ContextDescriptor;
 use crate::credential_world::CredentialWorldDisclosure;
+use crate::doctor_world::DoctorDisclosure;
 use crate::context_resolution::{
     Availability, ContextResolution, ReferenceResolution, ResolvedResource, ScopeResolution,
 };
@@ -176,6 +177,13 @@ pub struct ProjectWorldReadModel {
     /// `credential_world.rs` exists to remove.
     #[serde(default)]
     pub credential_world: CredentialWorldDisclosure,
+    /// Installation health for this world. Deliberately not an `Option`, for the
+    /// same reason as `credential_world`: an absent producer is a
+    /// `DoctorDisclosure::not_attempted(..)` reading — "the checks were not run"
+    /// — which is a different fact from an observed clean bill of health. A
+    /// `None` would collapse "unknown" back into "healthy".
+    #[serde(default)]
+    pub doctor: DoctorDisclosure,
     pub warnings: Vec<String>,
 }
 
@@ -204,6 +212,14 @@ impl ProjectWorldReadModel {
     /// pure function over already-observed facts.
     pub fn with_credential_world(mut self, credential_world: CredentialWorldDisclosure) -> Self {
         self.credential_world = credential_world;
+        self
+    }
+
+    /// Attach an already-run installation-health reading, mirroring
+    /// `with_credential_world`. `aikit-core` runs no checks: the caller runs
+    /// `doctor` (which is I/O) and hands over the composed findings.
+    pub fn with_doctor(mut self, doctor: DoctorDisclosure) -> Self {
+        self.doctor = doctor;
         self
     }
 
@@ -242,6 +258,9 @@ impl ProjectWorldReadModel {
             credential_world: CredentialWorldDisclosure::not_attempted(
                 "this reading was built as a shell; no credential input was composed into it",
             ),
+            doctor: DoctorDisclosure::not_attempted(
+                "this reading was built as a shell; no health checks were run for it",
+            ),
             warnings: Vec::new(),
         }
     }
@@ -260,6 +279,11 @@ impl ProjectWorldReadModel {
 /// checked for this reading, so their status is unknown rather than negative.
 const CREDENTIAL_WORLD_NOT_CHECKED_REASON: &str =
     "no credential or provider check has been run for this reading yet";
+
+/// What the System pane's Health rows say when a reading was produced without
+/// running the checks. The same discipline as the credential reason above:
+/// "not run" is unknown, never a clean bill of health.
+const DOCTOR_NOT_CHECKED_REASON: &str = "no health checks have been run for this reading yet";
 
 pub fn disclose_project_world(
     resolution: &ContextResolution,
@@ -308,6 +332,7 @@ pub fn disclose_project_world(
         credential_world: CredentialWorldDisclosure::not_attempted(
             CREDENTIAL_WORLD_NOT_CHECKED_REASON,
         ),
+        doctor: DoctorDisclosure::not_attempted(DOCTOR_NOT_CHECKED_REASON),
         warnings: resolution.warnings.clone(),
     }
 }
@@ -426,6 +451,7 @@ mod tests {
             credential_world: CredentialWorldDisclosure::not_attempted(
                 "test fixture composed no credential input",
             ),
+            doctor: DoctorDisclosure::not_attempted("test fixture ran no health checks"),
             warnings: vec![],
         }
     }

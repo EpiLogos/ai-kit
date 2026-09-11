@@ -143,6 +143,14 @@ impl PaletteBackend for V2SurfaceService<'_> {
         <Service as PaletteBackend>::credential_world(self.service)
     }
 
+    /// Forwarded for the same reason as `credential_world`: the health checks
+    /// run on `Service`, and this decorator must carry that reading through so
+    /// the System pane the TUI opens through sees it rather than the trait
+    /// default of `Ok(None)`.
+    fn doctor_world(&self) -> Result<Option<aikit_core::doctor_world::DoctorDisclosure>> {
+        <Service as PaletteBackend>::doctor_world(self.service)
+    }
+
     fn scope_layers(&self) -> Option<&[ScopeLayer]> {
         <Service as PaletteBackend>::scope_layers(self.service)
     }
@@ -422,6 +430,33 @@ mod tests {
             !disclosure.credentials.is_empty(),
             "the seed catalogue's hosted Models declare credential needs the \
              decorator's reading must carry"
+        );
+    }
+
+    /// The doctor forward has the same failure mode: the TUI opens through the
+    /// decorator, so the health checks that run on `Service` reach the System
+    /// pane only if the decorator forwards them. Left on the trait default the
+    /// pane would read `not attempted` forever.
+    #[test]
+    fn the_surface_decorator_forwards_the_real_health_reading_not_the_trait_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("probe");
+        std::fs::create_dir_all(&root).unwrap();
+        project(&root);
+
+        let mut svc = service(tmp.path(), &root);
+        let backend = V2SurfaceService::new(&mut svc);
+
+        let disclosure = backend
+            .doctor_world()
+            .expect("running the checks does not fail")
+            .expect(
+                "the decorator must forward Service's real reading, not the \
+                 PaletteBackend trait default of None",
+            );
+        assert!(
+            disclosure.was_attempted(),
+            "the decorator carries an observed health reading, not not-attempted"
         );
     }
 }

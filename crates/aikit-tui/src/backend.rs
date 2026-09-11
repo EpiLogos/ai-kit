@@ -371,6 +371,22 @@ pub trait PaletteBackend {
         Ok(None)
     }
 
+    /// Optional already-run installation-health reading for this world.
+    ///
+    /// Same seam, same reason as [`PaletteBackend::credential_world`]: running
+    /// the health checks is I/O — it probes the OS secure store, reads harness
+    /// config, asks the gateway socket, lists registries — and lives in the CLI
+    /// crate `aikit-tui` cannot depend on. The caller that *can* run them does,
+    /// and hands the composed findings over.
+    ///
+    /// `None` is "the checks were not run — nobody looked", and the reading
+    /// keeps its honest `not_attempted` default. A `Some(disclosure)` whose
+    /// `findings` are empty is the different, confirmed fact that the checks ran
+    /// and found nothing wrong.
+    fn doctor_world(&self) -> Result<Option<aikit_core::doctor_world::DoctorDisclosure>> {
+        Ok(None)
+    }
+
     /// The canonical subjects this world can project into a working
     /// environment — the panes the current session plan defines, whether or
     /// not any of them is live yet.

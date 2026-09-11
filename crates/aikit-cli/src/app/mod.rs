@@ -270,6 +270,12 @@ pub struct Service {
     /// input-responsiveness defect. Observe once, and re-observe only after an
     /// operation this application performed changed the host.
     working_environments: std::cell::RefCell<Option<Vec<WorkingEnvironmentObservation>>>,
+    /// Cached installation-health reading. `doctor::run` spawns `actuation`
+    /// several times (detection plus a capability probe per harness) and asks
+    /// the gateway socket, so an un-cached run would put all of that behind
+    /// every world-changing action. Health does not shift under ordinary
+    /// navigation, so it is observed once per session and reused.
+    doctor_report: std::cell::RefCell<Option<aikit_core::doctor_world::DoctorDisclosure>>,
 }
 
 impl Service {
@@ -408,6 +414,7 @@ impl Service {
             factory_request_file,
             factory_started_resources: None,
             working_environments: std::cell::RefCell::new(None),
+            doctor_report: std::cell::RefCell::new(None),
         })
     }
 
@@ -2788,6 +2795,48 @@ impl PaletteBackend for Service {
             true,
             false,
         )))
+    }
+
+    /// Run the installation-health checks and project them as an owned
+    /// disclosure the TUI can render.
+    ///
+    /// `doctor::run` is the same health surface `aikit doctor` prints; it is the
+    /// layer that *can* look (probing the OS secure store, harness config, the
+    /// gateway socket and the registries), and this is where its findings are
+    /// turned into the I/O-free read model the System pane consumes. Findings
+    /// are mapped one-for-one; the fix a finding might carry is reduced to a
+    /// `fixable` flag, because a Procedure is a CLI-owned mutation that has no
+    /// place in a read model.
+    ///
+    /// Cached per session: the checks spawn `actuation` several times and ask
+    /// the gateway socket, and health does not shift under ordinary navigation,
+    /// so running them behind every world-changing action would be the
+    /// input-responsiveness defect all over again.
+    fn doctor_world(&self) -> Result<Option<aikit_core::doctor_world::DoctorDisclosure>> {
+        use aikit_core::doctor_world::{DoctorDisclosure, DoctorFinding, DoctorSeverity};
+
+        if let Some(cached) = self.doctor_report.borrow().as_ref() {
+            return Ok(Some(cached.clone()));
+        }
+
+        let findings = crate::doctor::run(self)?
+            .into_iter()
+            .map(|finding| DoctorFinding {
+                check: finding.check.to_string(),
+                severity: match finding.severity {
+                    crate::doctor::Severity::Error => DoctorSeverity::Error,
+                    crate::doctor::Severity::Warning => DoctorSeverity::Warning,
+                    crate::doctor::Severity::Note => DoctorSeverity::Note,
+                },
+                summary: finding.summary,
+                detail: finding.detail,
+                fixable: finding.fix.is_some(),
+            })
+            .collect();
+
+        let disclosure = DoctorDisclosure::observed(findings);
+        *self.doctor_report.borrow_mut() = Some(disclosure.clone());
+        Ok(Some(disclosure))
     }
 
     fn context(&self) -> &ContextDescriptor {
