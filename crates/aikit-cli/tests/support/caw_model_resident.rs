@@ -41,7 +41,8 @@ fn catalogue(w: &World) -> ModelCatalogueEntry {
         routes: vec![DeclaredRoute {
             provider: ProviderRef::parse("provider:controlled-native").unwrap(),
             kind: ModelRouteKind::ProviderNative,
-            native_ids: ["controlled-model-v1".to_string()].into(),
+            provider_native_ids: ["controlled-model-v1".to_string()].into(),
+            endpoint: None,
             credential: CredentialCondition::Required {
                 hint: "Explicit controlled environment source".into(),
             },
