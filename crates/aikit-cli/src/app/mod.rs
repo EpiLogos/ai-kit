@@ -280,6 +280,10 @@ pub struct Service {
     /// binary; like the health reading, it does not shift under ordinary
     /// navigation, so it is observed once per session and reused.
     workcell_reading: std::cell::RefCell<Option<aikit_core::workcell_world::WorkcellDisclosure>>,
+    /// Cached Model roster. Composing it runs the same detection+join the
+    /// compose path does; it is fetched on demand (roster overlay open), so one
+    /// composition per session is reused rather than recomputed on each open.
+    model_roster_reading: std::cell::RefCell<Option<aikit_core::resource::ModelRoster>>,
 }
 
 impl Service {
@@ -420,6 +424,7 @@ impl Service {
             working_environments: std::cell::RefCell::new(None),
             doctor_report: std::cell::RefCell::new(None),
             workcell_reading: std::cell::RefCell::new(None),
+            model_roster_reading: std::cell::RefCell::new(None),
         })
     }
 
@@ -2882,6 +2887,48 @@ impl PaletteBackend for Service {
 
         *self.workcell_reading.borrow_mut() = Some(disclosure.clone());
         Ok(Some(disclosure))
+    }
+
+    /// Compose the ranked Model roster the palette's roster overlay renders.
+    ///
+    /// Reuses the compose path's resolved `model_routes` (catalogue joined
+    /// against live route observation) — the same route sets `realise_model`
+    /// selects from — and ranks their viable `(model, route)` candidates through
+    /// the shared `rank_model_roster`. A context with no Project has nothing to
+    /// compose over, so it answers `None` rather than an empty roster that would
+    /// read as "no models". Cached per session.
+    fn model_roster(&self) -> Result<Option<aikit_core::resource::ModelRoster>> {
+        use aikit_core::resource::{
+            candidates_from_routes, rank_model_roster, ModelRankingPolicy, ModelRouteSet,
+        };
+
+        if self.descriptor.project_root.is_none() {
+            return Ok(None);
+        }
+        if let Some(cached) = self.model_roster_reading.borrow().as_ref() {
+            return Ok(Some(cached.clone()));
+        }
+
+        let composed = self.compose_plan()?;
+        let route_sets: Vec<ModelRouteSet> =
+            serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
+                .map_err(|error| {
+                    AikitError::new("model_roster.route_sets_unreadable", error.to_string())
+                })?;
+
+        let mut candidates = Vec::new();
+        for set in &route_sets {
+            let base = model_roster_candidate_for(&set.model);
+            candidates.extend(candidates_from_routes(set, &base));
+        }
+        let roster = rank_model_roster(
+            model_roster_demand(),
+            ModelRankingPolicy::Balanced,
+            candidates,
+        );
+
+        *self.model_roster_reading.borrow_mut() = Some(roster.clone());
+        Ok(Some(roster))
     }
 
     fn context(&self) -> &ContextDescriptor {

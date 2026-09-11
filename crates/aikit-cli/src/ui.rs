@@ -158,6 +158,12 @@ impl PaletteBackend for V2SurfaceService<'_> {
         <Service as PaletteBackend>::workcell_world(self.service)
     }
 
+    /// Forwarded like the others: the roster is composed on `Service`, and the
+    /// palette's roster overlay reaches it only through this decorator.
+    fn model_roster(&self) -> Result<Option<aikit_core::resource::ModelRoster>> {
+        <Service as PaletteBackend>::model_roster(self.service)
+    }
+
     fn scope_layers(&self) -> Option<&[ScopeLayer]> {
         <Service as PaletteBackend>::scope_layers(self.service)
     }
@@ -487,6 +493,23 @@ mod tests {
         assert!(
             !matches!(disclosure.knowledge, WorkcellKnowledge::NotAttempted { .. }),
             "the decorator carries a real observation"
+        );
+    }
+
+    /// The roster forward: composed on `Service`, reaching the palette overlay
+    /// only through the decorator.
+    #[test]
+    fn the_surface_decorator_forwards_the_model_roster() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("probe");
+        std::fs::create_dir_all(&root).unwrap();
+        project(&root);
+
+        let mut svc = service(tmp.path(), &root);
+        let backend = V2SurfaceService::new(&mut svc);
+        assert!(
+            backend.model_roster().unwrap().is_some(),
+            "the decorator carries Service's composed roster, not the trait default"
         );
     }
 }
