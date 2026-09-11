@@ -232,6 +232,14 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
     }
 
     fn rebuild(&mut self, material: &[SourceMaterial]) -> Result<()> {
+        // Central's persistent map is never a disposable SourcePool, even when
+        // a stale standalone configuration still points at that database.
+        let resolved=self.db_path.canonicalize().unwrap_or_else(|_|self.db_path.clone());
+        let parts:Vec<_>=resolved.components().collect();
+        if parts.windows(2).any(|p|p[0].as_os_str()==".central"&&p[1].as_os_str()=="bkmr") {
+            return Err(AikitError::new("knowledge.bkmr_owner_only","Central-owned bkmr storage cannot be rebuilt by AIKit"));
+        }
+
         if let Some(reason) = self.surface_reason() {
             return Err(AikitError::new(
                 "knowledge.bkmr_unavailable",
@@ -257,6 +265,26 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
                     format!("could not create bkmr database directory: {error}"),
                 )
             })?;
+        }
+        // Only a view whose first creation this adapter owns can be replaced.
+        // An explicit provider configuration is not ownership of existing data.
+        let ownership = self.db_path.with_extension("aikit-disposable-owner");
+        let owner_text = format!("aikit.bkmr-disposable/v1\n{}\n", self.db_path.display());
+        let owner_is_regular = std::fs::symlink_metadata(&ownership)
+            .is_ok_and(|metadata| metadata.file_type().is_file());
+        if std::fs::symlink_metadata(&self.db_path).is_ok()
+            && (!owner_is_regular
+                || std::fs::read_to_string(&ownership).ok().as_deref() != Some(&owner_text))
+        {
+            return Err(AikitError::new("knowledge.bkmr_not_disposable",
+                "Existing bkmr database is not this adapter's disposable view; adopt it through Central"));
+        }
+        if !owner_is_regular {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+                .open(&ownership).map_err(|e| AikitError::new("knowledge.bkmr_owner_failed", e.to_string()))?;
+            file.write_all(owner_text.as_bytes()).and_then(|_| file.sync_all())
+                .map_err(|e| AikitError::new("knowledge.bkmr_owner_failed", e.to_string()))?;
         }
         for suffix in ["", "-wal", "-shm"] {
             let candidate = PathBuf::from(format!("{}{}", self.db_path.display(), suffix));
@@ -620,6 +648,19 @@ mod tests {
             },
             body: "Astronomy uses a telescope to observe distant quasars.".into(),
         }
+    }
+
+    #[test]
+    fn existing_unowned_database_is_never_rebuilt_even_with_working_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hand-authored.db");
+        std::fs::write(&path, b"retained database").unwrap();
+        let runner = scripted("[]");
+        let mut provider = BkmrSourcePoolProvider::new(Arc::clone(&runner), &path, false);
+        assert!(provider.status().available);
+        assert_eq!(provider.rebuild(&[astronomy()]).unwrap_err().code(), "knowledge.bkmr_not_disposable");
+        assert_eq!(std::fs::read(&path).unwrap(), b"retained database");
+        assert!(!runner.call_lines().iter().any(|line| line.contains("create-db ")));
     }
 
     #[test]

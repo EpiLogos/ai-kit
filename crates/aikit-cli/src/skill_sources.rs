@@ -33,6 +33,12 @@ pub struct SourceSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum SourceKind {
+    /// Central retains the authoritative location and standing. The root is
+    /// a connection hint; CENTRAL_ROOT can rebind it after a World relocation.
+    Central {
+        central_root: PathBuf,
+        source_ref: String,
+    },
     Directory {
         path: PathBuf,
         /// The directory publishes the Control ground skill manifest contract
@@ -53,13 +59,14 @@ pub enum SourceKind {
 impl SourceKind {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Central { .. } => "central",
             Self::Directory { .. } => "directory",
             Self::Git { .. } => "git",
         }
     }
 
     pub fn portable(&self) -> bool {
-        matches!(self, Self::Git { .. })
+        matches!(self, Self::Git { .. } | Self::Central { .. })
     }
 
     /// Whether this source reads the Control ground skill manifest contract.
@@ -69,7 +76,7 @@ impl SourceKind {
             Self::Directory {
                 control_ground: true,
                 ..
-            }
+            } | Self::Central { .. }
         )
     }
 }
@@ -104,6 +111,8 @@ pub struct SnapshotRecord {
     pub digest: String,
     #[serde(default)]
     pub git_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_revision: Option<String>,
     pub skills: Vec<SnapshotSkill>,
 }
 
@@ -233,7 +242,7 @@ pub fn set_revision(home: &AikitHome, id: &str, revision: &str) -> Result<Source
         SourceKind::Git {
             revision: current, ..
         } => *current = revision.to_string(),
-        SourceKind::Directory { .. } => {
+        SourceKind::Directory { .. } | SourceKind::Central { .. } => {
             return Err(AikitError::new(
                 "source.not_git",
                 format!("skill source `{id}` is a directory source"),
@@ -285,6 +294,7 @@ pub fn sync(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
             return Err(error);
         }
     };
+    validate_owner_snapshot(&spec, &record)?;
     let checkout = staging.join("checkout");
     if checkout.exists() {
         fs::remove_dir_all(&checkout)
@@ -309,6 +319,7 @@ pub fn sync(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
 fn prepare_source(spec: &SourceSpec, staging: &Path) -> Result<(PathBuf, Option<String>)> {
     match &spec.kind {
         SourceKind::Directory { path, .. } => Ok((path.clone(), None)),
+        SourceKind::Central { .. } => prepare_central_source(spec, staging),
         SourceKind::Git {
             repository,
             revision,
@@ -372,6 +383,21 @@ fn build_snapshot(
         ));
     }
     let mut hasher = blake3::Hasher::new();
+    let owner_revision = if matches!(&spec.kind, SourceKind::Central { .. }) {
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(staging.join("central-receipt.json"))
+                .map_err(|e| AikitError::new("source.central_receipt", e.to_string()))?,
+        )
+        .map_err(|e| AikitError::new("source.central_receipt", e.to_string()))?;
+        let revision = receipt["tree_revision"]
+            .as_str()
+            .ok_or_else(|| AikitError::new("source.central_receipt", "missing owner revision"))?
+            .to_owned();
+        hash_field(&mut hasher, &revision);
+        Some(revision)
+    } else {
+        None
+    };
     hasher.update(b"aikit-skill-source-snapshot-v2\n");
     if let Some(commit) = git_commit.as_deref() {
         hash_field(&mut hasher, "git-commit");
@@ -485,6 +511,7 @@ fn build_snapshot(
         source: spec.id.clone(),
         digest,
         git_commit,
+        owner_revision,
         skills,
     };
     write_toml_atomic(&staging.join(SNAPSHOT_FILE), &record)?;
@@ -499,7 +526,10 @@ pub fn promote(
 ) -> Result<(SnapshotRecord, usize)> {
     // Registering and promoting an existing local directory is the user's
     // acceptance of that source. Downloaded Git snapshots retain explicit trust.
-    let local = matches!(load_spec(home, id)?.kind, SourceKind::Directory { .. });
+    let local = matches!(
+        load_spec(home, id)?.kind,
+        SourceKind::Directory { .. } | SourceKind::Central { .. }
+    );
     let trust_all = trust_all || (local && trust_skills.is_empty());
     let mut state = load_state(home, id)?;
     let digest = state.candidate_snapshot.clone().ok_or_else(|| {
@@ -509,6 +539,7 @@ pub fn promote(
         )
     })?;
     let record = load_snapshot(home, id, &digest)?;
+    validate_owner_snapshot(&load_spec(home, id)?, &record)?;
     let registry = snapshot_dir(home, id, &digest).join("registry");
     let mut trusted = 0;
     let requested: BTreeSet<&str> = trust_skills.iter().map(String::as_str).collect();
@@ -566,6 +597,7 @@ pub fn rollback(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
         )
     })?;
     let record = load_snapshot(home, id, &previous)?;
+    validate_owner_snapshot(&load_spec(home, id)?, &record)?;
     restore_previously_reviewed_trust(home, id, &previous)?;
     state.active_snapshot = Some(previous.clone());
     write_toml_atomic(&source_dir(home, id).join(STATE_FILE), &state)?;
@@ -634,6 +666,7 @@ pub fn active_registries(home: &AikitHome) -> Result<Vec<(String, PathBuf)>> {
         let id = entry.file_name().to_string_lossy().to_string();
         let state = load_state(home, &id)?;
         if let Some(active) = state.active_snapshot {
+            validate_owner_snapshot(&load_spec(home, &id)?, &load_snapshot(home, &id, &active)?)?;
             out.push((
                 id.clone(),
                 snapshot_dir(home, &id, &active).join("registry"),
@@ -646,6 +679,9 @@ pub fn active_registries(home: &AikitHome) -> Result<Vec<(String, PathBuf)>> {
 
 pub fn active_registry(home: &AikitHome, id: &str) -> Result<Option<PathBuf>> {
     let state = load_state(home, id)?;
+    if let Some(active) = &state.active_snapshot {
+        validate_owner_snapshot(&load_spec(home, id)?, &load_snapshot(home, id, active)?)?;
+    }
     Ok(state
         .active_snapshot
         .map(|digest| snapshot_dir(home, id, &digest).join("registry")))
@@ -865,4 +901,216 @@ fn copy_permissions(from: &Path, to: &Path) -> Result<u32> {
 fn io(code: &'static str, path: &Path, error: std::io::Error) -> AikitError {
     AikitError::new(code, format!("{}: {error}", path.display()))
         .with("path", path.display().to_string())
+}
+
+/// Explicit binding/rebinding of a source through Central, retaining snapshot
+/// history. A prior active snapshot cannot project until its owner basis agrees.
+pub fn bind_central(
+    home: &AikitHome,
+    id: &str,
+    root: &Path,
+    source_ref: &str,
+) -> Result<SourceSpec> {
+    validate_id(id)?;
+    aikit_core::resource::SourceRef::parse(source_ref)?;
+    let spec = SourceSpec {
+        schema: 1,
+        id: id.into(),
+        kind: SourceKind::Central {
+            central_root: root.into(),
+            source_ref: source_ref.into(),
+        },
+    };
+    let _ = central_bundle(&spec)?;
+    let dir = source_dir(home, id);
+    let mut state = if dir.join(SPEC_FILE).exists() {
+        load_state(home, id)?
+    } else {
+        SourceState::default()
+    };
+    fs::create_dir_all(dir.join("snapshots")).map_err(|e| io("source.write_failed", &dir, e))?;
+    write_toml_atomic(&dir.join(SPEC_FILE), &spec)?;
+    state.candidate_snapshot = None;
+    write_toml_atomic(&dir.join(STATE_FILE), &state)?;
+    Ok(spec)
+}
+fn central_bundle(spec: &SourceSpec) -> Result<serde_json::Value> {
+    let SourceKind::Central {
+        central_root,
+        source_ref,
+    } = &spec.kind
+    else {
+        return Err(AikitError::new(
+            "source.not_central",
+            "source is not Central-backed",
+        ));
+    };
+    let root = std::env::var_os("CENTRAL_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| central_root.clone());
+    let value = aikit_adapters::central_file_map::call(
+        &aikit_adapters::runner::SystemRunner::new(),
+        &aikit_adapters::central_file_map::executable(),
+        &root,
+        "skill-tree",
+        &serde_json::json!({"scope":"root","federated":true,"source_ref":source_ref}),
+    )?;
+    if value["source_ref"] != source_ref.as_str() || !value["tree_revision"].is_string() {
+        return Err(AikitError::new(
+            "source.central_mismatch",
+            "owner returned a different source or no revision",
+        ));
+    }
+    Ok(value)
+}
+fn prepare_central_source(spec: &SourceSpec, staging: &Path) -> Result<(PathBuf, Option<String>)> {
+    use base64::Engine;
+    let bundle = central_bundle(spec)?;
+    let root = staging.join("checkout");
+    fs::create_dir_all(&root).map_err(|e| io("source.snapshot_failed", &root, e))?;
+    let files = bundle["files"]
+        .as_array()
+        .ok_or_else(|| AikitError::new("source.central_invalid", "owner file list absent"))?;
+    if files.len() > 4096 {
+        return Err(AikitError::new(
+            "source.central_invalid",
+            "owner file bound exceeded",
+        ));
+    }
+    let mut total = 0usize;
+    let mut seen = BTreeSet::new();
+    for file in files {
+        let relative = file["path"]
+            .as_str()
+            .ok_or_else(|| AikitError::new("source.central_invalid", "owner path absent"))?;
+        let p = Path::new(relative);
+        if !seen.insert(relative.to_owned()) || p.as_os_str().is_empty()
+            || !p
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(AikitError::new(
+                "source.central_invalid",
+                "unsafe owner file path",
+            ));
+        }
+        let data = file["content_base64"]
+            .as_str()
+            .ok_or_else(|| AikitError::new("source.central_invalid", "owner bytes absent"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|e| AikitError::new("source.central_invalid", e.to_string()))?;
+        total += bytes.len();
+        if total > 32 * 1024 * 1024 {
+            return Err(AikitError::new(
+                "source.central_invalid",
+                "owner payload bound exceeded",
+            ));
+        }
+        let mut hash = 0xcbf29ce484222325u64;
+        for b in &bytes {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        if file["revision"] != format!("central.content-fnv1a64/v1:{}:{hash:016x}", bytes.len()) {
+            return Err(AikitError::new(
+                "source.central_invalid",
+                "owner source bytes do not match revision",
+            ));
+        }
+        let destination = root.join(p);
+        fs::create_dir_all(destination.parent().unwrap())
+            .map_err(|e| io("source.snapshot_failed", &destination, e))?;
+        fs::write(&destination, &bytes)
+            .map_err(|e| io("source.snapshot_failed", &destination, e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = file["mode"].as_u64().ok_or_else(|| {
+                AikitError::new("source.central_invalid", "owner file mode absent")
+            })? as u32
+                & 0o777;
+            fs::set_permissions(&destination, fs::Permissions::from_mode(mode))
+                .map_err(|e| io("source.snapshot_failed", &destination, e))?;
+        }
+    }
+    fs::write(staging.join("central-receipt.json"),serde_json::to_vec(&serde_json::json!({"source_ref":bundle["source_ref"],"world_ref":bundle["world_ref"],"tree_revision":bundle["tree_revision"],"skills":bundle["skills"]})).map_err(|e|AikitError::new("source.central_invalid",e.to_string()))?).map_err(|e|io("source.snapshot_failed",staging,e))?;
+    Ok((root, None))
+}
+fn validate_owner_snapshot(spec: &SourceSpec, snapshot: &SnapshotRecord) -> Result<()> {
+    if matches!(&spec.kind, SourceKind::Central { .. }) {
+        let bundle = central_bundle(spec)?;
+        if bundle["tree_revision"].as_str() != snapshot.owner_revision.as_deref() {
+            return Err(AikitError::new("source.central_revision_changed","Central source or standing changed; sync and promote a new owner-backed snapshot before projection"));
+        }
+    }
+    Ok(())
+}
+
+/// Revalidate every participating Central-backed source before a generation
+/// publication. Loading an old registry earlier in the process is not a lease.
+pub fn validate_central_generations(home: &AikitHome) -> Result<()> {
+    let _ = active_registries(home)?;
+    Ok(())
+}
+/// Record the actual generated target, retaining the distinction from a loaded
+/// harness. Errors are returned as reconciliation warnings after local commit.
+pub fn report_central_generation(home: &AikitHome, generation: &str, target: &Path) -> Vec<String> {
+    let root = home.root().join("sources");
+    let mut warnings = Vec::new();
+    let active = match aikit_store::generation::read_lock(target) {
+        Ok(view) => view.active.keys().map(ToString::to_string).collect::<std::collections::BTreeSet<_>>(),
+        Err(error) => return vec![format!("Generation committed; source-selection receipt unavailable: {}", error.message())],
+    };
+    let entries = match fs::read_dir(&root) {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return warnings,
+        Err(e) => return vec![e.to_string()],
+    };
+    for entry in entries {
+        let result = (|| -> Result<()> {
+            let entry = entry.map_err(|e| io("source.read_failed", &root, e))?;
+            if !entry.path().is_dir() {
+                return Ok(());
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            let spec = load_spec(home, &id)?;
+            let SourceKind::Central {
+                central_root,
+                source_ref,
+            } = &spec.kind
+            else {
+                return Ok(());
+            };
+            let state = load_state(home, &id)?;
+            let Some(digest) = state.active_snapshot else {
+                return Ok(());
+            };
+            let snapshot = load_snapshot(home, &id, &digest)?;
+            let selected: Vec<_> = snapshot.skills.iter().filter(|skill| active.contains(&skill.id)).map(|skill| skill.id.clone()).collect();
+            if selected.is_empty() { return Ok(()); }
+            validate_owner_snapshot(&spec, &snapshot)?;
+            let root = std::env::var_os("CENTRAL_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| central_root.clone());
+            let runner = aikit_adapters::runner::SystemRunner::new();
+            let executable = aikit_adapters::central_file_map::executable();
+            let bundle = central_bundle(&spec)?;
+            aikit_adapters::central_file_map::call(
+                &runner, &executable, &root, "projection-record",
+                &serde_json::json!({"source_ref":source_ref,"project":bundle["project"],
+                    "owner":format!("aikit/source/{id}"),"path":target,
+                    "generation":generation,"tree_revision":snapshot.owner_revision,
+                    "projection_kind":"reported-generation","selected_capsules":selected,"allow_external":true}),
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            warnings.push(format!(
+                "Generation committed; Central projection reconciliation pending: {}",
+                error.message()
+            ));
+        }
+    }
+    warnings
 }
