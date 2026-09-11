@@ -11,6 +11,10 @@ fn main() {
                 "cargo:rustc-env=AIKIT_BUILD_SOURCE_REVISION={}",
                 revision.trim()
             );
+            println!(
+                "cargo:rustc-env=SUITE_BUILD_REVISION={}",
+                short_revision(revision.trim())
+            );
             let dirty = env::var("AIKIT_BUILD_SOURCE_DIRTY").unwrap_or_else(|_| "0".into());
             println!("cargo:rustc-env=AIKIT_BUILD_SOURCE_DIRTY={dirty}");
             return;
@@ -30,6 +34,10 @@ fn main() {
 
     if let Some(revision) = revision {
         println!("cargo:rustc-env=AIKIT_BUILD_SOURCE_REVISION={revision}");
+        println!(
+            "cargo:rustc-env=SUITE_BUILD_REVISION={}",
+            short_revision(&revision)
+        );
         let dirty = Command::new("git")
             .arg("-C")
             .arg(&manifest)
@@ -43,4 +51,9 @@ fn main() {
             if dirty { "1" } else { "0" }
         );
     }
+}
+
+/// The suite-wide short build identity stamped into `--version`.
+fn short_revision(revision: &str) -> String {
+    revision.chars().take(12).collect()
 }
