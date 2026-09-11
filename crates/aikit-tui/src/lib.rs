@@ -95,4 +95,9 @@ pub enum PaletteOutcome {
     Run(RunIntent),
     Applied(GenerationId),
     Promoted(CapsuleId),
+    /// The operator left the palette to set up a world credential. The CLI runs
+    /// the interactive setup flow on the restored terminal.
+    RunCredentialSetup,
+    /// The operator left the palette to run the diff-first `doctor` repair.
+    RunDoctorFix,
 }

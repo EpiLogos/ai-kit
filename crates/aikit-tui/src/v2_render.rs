@@ -514,8 +514,15 @@ fn footer<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragraph<'
             "Action mode {sep} type to filter {sep} {updown} choose {sep} Enter invoke {sep} Space invoke if stageable {sep} Esc return"
         )
     } else if state.presentation == PresentationMode::Workspace {
+        // The System destination is where the installation's own controls live,
+        // so its footer names them; elsewhere they would be noise.
+        let system_hints = if state.workspace_section == WorkspaceSection::System {
+            format!(" {sep} Ctrl+R roster {sep} Ctrl+E credential setup {sep} Ctrl+D repair")
+        } else {
+            String::new()
+        };
         format!(
-            "{} {sep} {} result{} {sep} {} staged {sep} scope {} {sep} Alt+{} fields {sep} : actions {sep} Ctrl+W Quick",
+            "{} {sep} {} result{} {sep} {} staged {sep} scope {} {sep} Alt+{} fields {sep} : actions {sep} Ctrl+W Quick{system_hints}",
             workspace_section_label(state.workspace_section),
             state.read_model.resources.len(),
             if state.read_model.resources.len() == 1 { "" } else { "s" },

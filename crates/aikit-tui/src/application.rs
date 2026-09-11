@@ -443,6 +443,21 @@ pub enum Overlay {
     ModelRoster,
 }
 
+/// Why the palette is exiting, when it exits to hand an interactive flow to the
+/// restored terminal rather than merely closing. The palette is a launcher —
+/// `PaletteOutcome::Run` already exits it to run a command — and these are the
+/// same idiom: credential setup and `doctor` repair are interactive/mutating
+/// flows the CLI runs on the real terminal after the alternate screen is torn
+/// down, not things reimplemented inside the event loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExitIntent {
+    /// Run the interactive credential-setup flow for a world credential.
+    CredentialSetup,
+    /// Run the diff-first `doctor` repair flow.
+    DoctorFix,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NavigationPoint {
     pub selected: Option<ResourceRef>,
@@ -573,6 +588,10 @@ pub struct TuiState {
     #[serde(default)]
     pub model_roster: Option<aikit_core::resource::ModelRoster>,
     pub exit_requested: bool,
+    /// Set alongside `exit_requested` when the palette is closing to hand an
+    /// interactive flow to the restored terminal; `None` is an ordinary close.
+    #[serde(default)]
+    pub exit_intent: Option<ExitIntent>,
 }
 
 impl Default for TuiState {
@@ -602,6 +621,7 @@ impl Default for TuiState {
             live_field: None,
             model_roster: None,
             exit_requested: false,
+            exit_intent: None,
         }
     }
 }
@@ -679,6 +699,11 @@ pub enum UiAction {
     /// (e.g. no Project here); the overlay then says so rather than showing an
     /// empty roster as if no Models existed.
     ModelRosterLoaded(Option<Box<aikit_core::resource::ModelRoster>>),
+    /// Leave the palette to run the interactive credential-setup flow on the
+    /// restored terminal (the launcher idiom, like `Run`).
+    RequestCredentialSetup,
+    /// Leave the palette to run the diff-first `doctor` repair flow.
+    RequestDoctorFix,
     /// Ask a named provider to open or focus the canonical subject. The
     /// reducer guards the request against the current reading before it
     /// becomes an effect, so a withheld capability never reaches a provider.
@@ -803,6 +828,27 @@ impl TuiRuntime {
     ) -> Result<TuiState> {
         let reduction = reduce_tui(state, action);
         self.settle(service, reduction.state, reduction.effects)
+    }
+}
+
+/// Request that the palette leave, handing an interactive flow to the restored
+/// terminal. Mirrors `UiAction::Exit`'s guard: staged composition changes must
+/// be applied or discarded first rather than silently lost when the palette
+/// closes.
+fn request_exit_to(state: &mut TuiState, intent: ExitIntent, label: &str) {
+    if state.staged.is_empty() {
+        state.exit_requested = true;
+        state.exit_intent = Some(intent);
+    } else {
+        state.exit_requested = false;
+        state.exit_intent = None;
+        state.status = Some(UiStatus {
+            message: format!(
+                "{} staged change{} remain; apply or discard them before leaving for {label}",
+                state.staged.len(),
+                if state.staged.len() == 1 { "" } else { "s" }
+            ),
+        });
     }
 }
 
@@ -1162,6 +1208,12 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         UiAction::ModelRosterLoaded(roster) => {
             state.model_roster = roster.map(|roster| *roster);
             state.overlay = Some(Overlay::ModelRoster);
+        }
+        UiAction::RequestCredentialSetup => {
+            request_exit_to(&mut state, ExitIntent::CredentialSetup, "credential setup");
+        }
+        UiAction::RequestDoctorFix => {
+            request_exit_to(&mut state, ExitIntent::DoctorFix, "doctor repair");
         }
         UiAction::ActInWorkingEnvironment {
             provider,
