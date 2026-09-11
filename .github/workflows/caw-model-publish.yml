@@ -23,22 +23,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git merge-base --is-ancestor bf4b8cea15ad03e69b5dc934703d6fa5e775c6e4 HEAD
+          git merge-base --is-ancestor 752dc5ec25a3430ab338c43947965c20603f0a64 HEAD
           python3 - <<'PY'
           from pathlib import Path
           import subprocess
+          base='752dc5ec25a3430ab338c43947965c20603f0a64'
           p=Path('scripts/caw_model_publish.py')
-          text=p.read_text()
+          text=p.read_text().replace("BASE = 'bf4b8cea15ad03e69b5dc934703d6fa5e775c6e4'", "BASE = '"+base+"'")
           begin=text.index("edit('crates/aikit-cli/src/encounter_service.rs'")
           end=text.index("for path in ['crates/aikit-cli/tests/encounter_context_admission.rs'",begin)
           p.write_text(text[:begin]+text[end:])
           subprocess.run(['python3',str(p)],check=True)
-          subprocess.run(['git','diff','--exit-code','bf4b8cea15ad03e69b5dc934703d6fa5e775c6e4','--','crates/aikit-cli/src/encounter_service.rs'],check=True)
+          subprocess.run(['git','diff','--exit-code',base,'--','crates/aikit-cli/src/encounter_service.rs'],check=True)
           subprocess.run(['git','apply','--check','scripts/caw_model_service.patch'],check=True)
           subprocess.run(['git','apply','--index','scripts/caw_model_service.patch'],check=True)
           p=Path('crates/aikit-cli/src/encounter_model.rs')
           s=p.read_text()
-          assert s == subprocess.check_output(['git','show','bf4b8cea15ad03e69b5dc934703d6fa5e775c6e4:'+str(p)]).decode()
+          assert s == subprocess.check_output(['git','show',base+':'+str(p)]).decode()
           s=s.replace('        if materialise { EnvironmentImportProvider::from_process(use_.credential_ref.clone(), name, None) }\n        else { EnvironmentImportProvider::from_process_metadata(use_.credential_ref.clone(), name, None) }', '        EnvironmentImportProvider::from_process(use_.credential_ref.clone(), name, None)')
           s=s.replace('let (catalogue, _) = aikit_store::model_catalogue::resolved_catalogue(home)?;', 'let (catalogue, _) = aikit_store::model_catalogue::resolved_catalogue(home);')
           s += '''
