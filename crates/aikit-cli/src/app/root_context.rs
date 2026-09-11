@@ -42,6 +42,23 @@ where
         return Ok((discovered, None));
     }
 
+    // Discovery can arrive through an alias while Central's root is canonical.
+    // Compare the same filesystem locations so an alias cannot drop a narrower
+    // profile layer (or replace an existing reusable Project specification).
+    let mut discovered = discovered;
+    if let Some(project) = &mut discovered {
+        project.root = project
+            .root
+            .canonicalize()
+            .map_err(|e| invalid(e.to_string()))?;
+        for layer in &mut project.chain {
+            layer.dir = layer
+                .dir
+                .canonicalize()
+                .map_err(|e| invalid(e.to_string()))?;
+        }
+    }
+
     let at_root = current == root
         || current == root.join("Work")
         || current.starts_with(root.join("Control"));
@@ -152,4 +169,45 @@ pub(super) fn binding(root: &Path) -> Result<ProjectBinding> {
 
 fn invalid(message: impl Into<String>) -> AikitError {
     AikitError::new("central.root_context_unavailable", message)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aliased_root_entry_keeps_the_existing_profile_chain_and_specification() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Central");
+        let nested = root.join("Control/nested");
+        for path in [root.join(".aikit"), root.join("Work"), nested.join(".aikit")] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let alias = temp.path().join("chosen-root-alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let cwd = alias.join("Control/nested");
+        let mut existing = crate::discover::discover_project(&cwd).unwrap();
+        existing.specification = Some("root-spec".into());
+        existing.skill_sets = vec!["root-skills".into()];
+        let (project, meta_root) = discover(
+            &cwd,
+            &|key| (key == "CENTRAL_ROOT").then(|| alias.display().to_string()),
+            Some(existing),
+        )
+        .unwrap();
+        let project = project.unwrap();
+        let canonical = root.canonicalize().unwrap();
+        assert_eq!(meta_root.as_ref(), Some(&canonical));
+        assert_eq!(project.root, canonical);
+        assert_eq!(project.specification.as_deref(), Some("root-spec"));
+        assert_eq!(project.skill_sets, vec!["root-skills"]);
+        assert_eq!(
+            project.chain.iter().map(|layer| layer.dir.clone()).collect::<Vec<_>>(),
+            vec![canonical, nested.canonicalize().unwrap()]
+        );
+        assert_eq!(
+            project.chain.iter().map(|layer| layer.depth).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
 }
