@@ -1,0 +1,245 @@
+name: Cross-product (weekly)
+
+# Every check that checks out or builds another repository runs here weekly
+# and on demand, not per push: each sibling gates its own main. A red job is
+# a rotted pin or a moved seam, repaired in its own change.
+
+on:
+  schedule:
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  factory-developmental-real:
+    name: Real Factory developmental consumer conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Rust 1.98
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Checkout exact Factory owner revision
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/agent-system-design
+          ref: 12a721dbbb51e3c70d52ef00220efa859ef930fd
+          path: factory-owner
+      - name: Build native Factory CLI
+        working-directory: factory-owner
+        run: cargo build --locked -p epilogos-factory --bin factory
+      - name: Consume owner-generated state through the real Factory CLI
+        env:
+          AIKIT_FACTORY_REAL_BIN: ${{ github.workspace }}/factory-owner/target/debug/factory
+          AIKIT_FACTORY_COMMISSION_REQUEST: ${{ github.workspace }}/factory-owner/contracts/factory/fixtures/oi-self-hosting-commission-request.json
+          AIKIT_FACTORY_TEST_STATE_OUT: ${{ runner.temp }}/factory-developmental-state.json
+          AIKIT_FACTORY_TEST_MANIFEST_OUT: ${{ runner.temp }}/factory-developmental-manifest.json
+        run: |
+          cargo test --locked -p aikit-adapters --test factory_developmental_native -- --ignored --nocapture
+          cargo test --locked -p aikit-cli --test factory_start_work_native -- --ignored --nocapture
+          cargo test --locked -p aikit-cli --test factory_work_tui_native -- --ignored --nocapture
+          project_ref=$(python3 -c 'import json; print(json.load(open("${{ runner.temp }}/factory-developmental-manifest.json"))["projectRef"])')
+          echo "AIKIT_FACTORY_PROJECT_REF=$project_ref" >> "$GITHUB_ENV"
+      - name: Resolve the Factory WorkflowUnit through AIKit's real structured CLI
+        env:
+          AIKIT_HOME: ${{ runner.temp }}/aikit-home
+          AIKIT_FACTORY_BIN: ${{ github.workspace }}/factory-owner/target/debug/factory
+          AIKIT_FACTORY_STATE: ${{ runner.temp }}/factory-developmental-state.json
+        run: |
+          mkdir -p ${{ runner.temp }}/aikit-project/.aikit
+          cargo run --locked -p aikit-cli --bin aikit -- --json -C ${{ runner.temp }}/aikit-project search implement > ${{ runner.temp }}/aikit-factory-search.json
+          grep -q '"resource_kind":"workflow-unit"' ${{ runner.temp }}/aikit-factory-search.json
+
+  deepseek-cordis-real:
+    name: Real DeepSeek Cordis SessionSpace activation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Rust 1.98
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.11.0"
+      - name: Checkout pinned DeepSeek Harness
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: 99f6f02fecdb7dff40c3fbc9470f5907c29f74ca
+          path: deepseek-harness
+      - name: Install pinned DeepSeek Harness workspace
+        working-directory: deepseek-harness
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.7.0 --activate
+          pnpm install --frozen-lockfile
+      - name: Prove current upstream Web/Cordis launch seam
+        working-directory: deepseek-harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_failure() {
+            tail -n 100 /tmp/deepseek-cordis.log > /tmp/deepseek-cordis-focus.log || true
+            message=$(cat /tmp/deepseek-cordis-focus.log)
+            message=${message//'%'/'%25'}; message=${message//$'\r'/'%0D'}; message=${message//$'\n'/'%0A'}
+            echo "::error title=Upstream DeepSeek Web/Cordis launch failure::$message"
+          }
+          node --import tsx apps/cli/src/bin.ts web > /tmp/deepseek-cordis.log 2>&1 &
+          pid=$!
+          cleanup() {
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          ready=0
+          for _ in $(seq 1 100); do
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo 'DeepSeek Web/Cordis process exited before readiness:'
+              cat /tmp/deepseek-cordis.log
+              report_failure
+              exit 1
+            fi
+            if (echo > /dev/tcp/127.0.0.1/3080) 2>/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo 'DeepSeek Web/Cordis process did not expose 127.0.0.1:3080:'
+            cat /tmp/deepseek-cordis.log
+            report_failure
+            exit 1
+          fi
+          echo 'DeepSeek Web/Cordis endpoint is live at 127.0.0.1:3080'
+          cleanup
+          trap - EXIT
+      - name: Run real Cordis activation through SessionSpace
+        shell: bash
+        env:
+          AIKIT_REQUIRE_DEEPSEEK_CORDIS_REAL: "1"
+          AIKIT_DEEPSEEK_HARNESS_CHECKOUT: ${{ github.workspace }}/deepseek-harness
+        run: |
+          set +e
+          cargo test --locked -p aikit-adapters --test deepseek_cordis_real -- --nocapture --test-threads=1 2>&1 | tee /tmp/aikit-cordis.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E '(^error(\[|:)|^failures:|^test result:|^thread .*panicked|^  left:|^ right:|^note:|^help:|session_space|cordis\.process|Cordis provider)' /tmp/aikit-cordis.log | tail -n 120 > /tmp/aikit-cordis-focus.log || true
+            message=$(cat /tmp/aikit-cordis-focus.log)
+            message=${message//'%'/'%25'}; message=${message//$'\r'/'%0D'}; message=${message//$'\n'/'%0A'}
+            echo "::error title=Real DeepSeek Cordis SessionSpace failure::$message"
+          fi
+          exit "$status"
+  collapsed-local-workcell:
+    name: AIKit Surface ↔ Workcell managed-service proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout AIKit candidate
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Rust 1.98
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Prove AIKit persistent Surface identity and rebinding
+        run: cargo test --locked -p aikit-core --test surface_material_v2 -- --nocapture --test-threads=1
+
+      - name: Checkout pinned Workcell collapsed-local substrate
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/Workcell
+          ref: 8184f9ba95c5efc0077701a4b58c1abb2943bd6e
+          path: workcell
+
+      - name: Prove real local managed-service lifecycle in Workcell
+        working-directory: workcell
+        run: cargo test --locked -p epilogos-workcell-runtime --test managed_host_service -- --nocapture --test-threads=1
+
+      - name: Record pre-physical boundary
+        shell: bash
+        run: |
+          cat <<'EOF'
+          Persistent Surface conformance passed against Workcell 8184f9ba95c5efc0077701a4b58c1abb2943bd6e.
+          This gate proves collapsed-local process/service readiness, observation, disappearance,
+          release/rematerialisation and AIKit identity-preserving Surface rebinding.
+          It deliberately does not claim Ubuntu/Tailscale/Fabric physical acceptance.
+          EOF
+
+  native-composition:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CENTRAL_SHA: 4cd0fe52b10fb0e09a5a9e4486ea3d40d4946c5c
+      ACTUATION_SHA: 6398b23e0972e85d61295ddc1cfcbb83989dc00b
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Exact native owner dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          for owner in Central Actuation; do
+            revision="$CENTRAL_SHA"
+            if [ "$owner" = Actuation ]; then revision="$ACTUATION_SHA"; fi
+            root="$RUNNER_TEMP/$owner"
+            git init -q "$root"
+            git -C "$root" remote add origin "https://github.com/EpiLogos/$owner.git"
+            git -C "$root" fetch --depth=1 origin "$revision"
+            git -C "$root" checkout --detach FETCH_HEAD
+            test "$(git -C "$root" rev-parse HEAD)" = "$revision"
+          done
+          printf '%s\n' "$RUNNER_TEMP/Central/target/debug" "$RUNNER_TEMP/Actuation/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: |
+            .
+            ${{ runner.temp }}/Central
+      - name: Build native Central
+        run: cargo build --manifest-path "$RUNNER_TEMP/Central/Cargo.toml" --locked --bin ctrl
+      - name: Run native composition and exact source-byte receipt regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p aikit-cli --test compose_native_central -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/composition.log"
+      - name: Retain exact execution context
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "AIKit=$(git rev-parse HEAD)"
+            echo "Central=$CENTRAL_SHA"
+            echo "Actuation=$ACTUATION_SHA"
+            echo 'Standing=native deterministic composition; no live provider or human acceptance'
+            rustc -Vv
+            node --version
+          } > "$RUNNER_TEMP/composition-basis.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: development-field-native-composition
+          path: |
+            ${{ runner.temp }}/composition.log
+            ${{ runner.temp }}/composition-basis.txt
+          if-no-files-found: error
