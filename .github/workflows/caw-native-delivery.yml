@@ -5,7 +5,7 @@ on:
       - 'crates/**'
       - '.github/workflows/caw-native-delivery.yml'
   push:
-    branches: [main, agent/caw-274-277-native-continuation]
+    branches: [main, agent/caw-274-277-native-continuation, agent/caw-connected-integration]
     paths:
       - 'crates/**'
       - '.github/workflows/caw-native-delivery.yml'
@@ -51,6 +51,8 @@ jobs:
             echo 'Standing=source-built native binaries with controlled ACP/Pi process fixtures.'
             echo 'FIXTURE_REPLY is not a real model response or installed-harness proof.'
           } > "$RUNNER_TEMP/caw-evidence/basis.txt"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/caw-evidence/aikit-source.tar.gz"
+          git -C .caw-native/Actuation archive --format=tar.gz HEAD > "$RUNNER_TEMP/caw-evidence/actuation-source.tar.gz"
       - name: Actual binaries through native Actuation and controlled provider processes
         shell: bash
         run: |
@@ -65,6 +67,16 @@ jobs:
             cargo test --locked -p aikit-core --test caw_recurrence --test caw_route_eligibility
             cargo test --locked -p aikit-store --test caw_delivery
           } 2>&1 | tee "$RUNNER_TEMP/caw-evidence/focused.log"
+      - name: Build and retain the exact product binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked -p aikit-cli --bins 2>&1 | tee "$RUNNER_TEMP/caw-evidence/build.log"
+          for product in aikit aikit-session-space aikit-gateway; do
+            test -x "target/debug/$product"
+            install -m 755 "target/debug/$product" "$RUNNER_TEMP/caw-evidence/$product"
+          done
+          (cd "$RUNNER_TEMP/caw-evidence" && sha256sum aikit aikit-session-space aikit-gateway > binaries.sha256)
       - uses: actions/upload-artifact@v4
         if: always()
         with:
