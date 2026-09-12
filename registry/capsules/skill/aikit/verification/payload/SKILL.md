@@ -1,11 +1,12 @@
 ---
 name: aikit-verification
-description: Verify AIKit managed sources, Methods, SkillSets, resolution, Project reflection, projection and provider/application contracts without treating green tests as authority promotion.
+description: "METHOD: Use before claiming an AIKit operation or cross-product experience complete, or when checking a source, projection, upgrade or recovery claim. Start from the original whole and required evidence; a passing component or installed file is not proof of lived use."
 ---
 
 # Verification and conformance
 
 Semantic ref: `aikit:verification`. Native owner: `EpiLogos/ai-kit`.
+Capsule identity remains `skill/aikit/verification`, kind `skill`, in its existing SkillSets. The description prefix classifies this procedure as a Method; it does not create another identity, runtime, grant or evidence standing.
 
 ## Whole-relative verification law
 
@@ -74,3 +75,21 @@ For an ordinary contrasting Project with no Central directories, Bimba/QL coordi
 When a target owns a stable coordinate identity and reflection law, consume that law as source-owned conformance input rather than hard-coding the target ontology into AIKit. An Epi/QL specimen may therefore prove the generic mechanism while AIKit remains ignorant of what an `Mx/Mx′`, Bimba category or other target coordinate means.
 
 If the exact owner source required for a stronger claim is unavailable, stop at the strongest honestly source-backed fixture and record the missing owner-level boundary. Do not fabricate a semantic coordinate in order to make the test look complete.
+
+## Agent and human experience verification
+
+For a UX claim, recover the originating human intention/corrections and its place in the existing UX spine before inspecting implementation. Issue discussions and Wayfinder/design sources establish intent; PRs and code do not redefine it. In CAW, use O:I `docs/cradle/04-VERIFICATION.md` §2 and §6, companion A–K states, the existing bootstrap/upgrade states and P01–P28. Retain Candidate-worktree/NOW, environment continuity, assisted commissioning and Candidate-comparison subcases.
+
+Begin the test at **Agent orientation and discovery**, not with an already-configured helper fixture. Does a fresh participant locate the root meta-Project or child Project, original task, relevant description/Skill/METHOD, permitted source and actual native operation? Can it understand the result and refusal, act within current scope, and leave a continuation another participant can find? A Profile is optional where actual World participation permits; no fake Project/Agency/default is allowed to make the test start.
+
+For tool and Skill descriptions, exercise selection from realistic task language including near-misses. Check trigger, required input/authority, operation, output/readback and failure/recovery route. A general `object` result or `available:true` registration cannot by itself prove contextual executability. Where the descriptor is incomplete, read the owner's current contract and record the precise interface obligation; do not fabricate supported inputs.
+
+For Skill delivery, retain **source → catalogue → selected/eligible → projected → harness entry/link → loaded → demonstrated use**. Test a new Skill, a revised existing Skill and retirement. A changed `current` pointer establishes file resolution only; an already-running Agent's retained instructions may differ. Observe fresh-session use or report the loading fact unavailable. Do not turn an explicit temporary body load into proof of automatic discovery.
+
+For developer updates, verify the final reconciled source cut, built artifacts, installed registrations, actual running companions/services and effective practice separately. Preserve dirty work and use isolated build outputs per worktree or serialize builds. Old branch tests or an unchanged stale executable do not establish the new cut. A clean Git tree, successful install and working process are three different observations.
+
+Exercise the public entry → actual action → returned result → durable readback, plus consequential refusal, cancellation, failure, repair and re-entry. Keep private material private, human-edited contributions intact, uncertain effects un-replayed and the original task/Return destination recoverable. The user's ability to resume their work is the recovery result; an installer exit alone is not.
+
+Repository code and controlled native/Git/clock/provider tests can be written and executed in the web environment or CI without personal credentials. Actual installed harness/model/material/desktop use requires the appropriate local environment. Missing production code is not merely local proof pending. Keep essential skips and manually supplied bootstrap steps visible; do not normalise hidden human repair to pass the scenario.
+
+A fresh verification session or independent subagent which did not implement the slice must exercise the whole promised path before feature-level closure. The person assesses intelligibility, control and the quality of the returned experience. Use the explicit verdict **usable end-to-end feature.** only at the required whole scope with that independent and applicable local/human evidence. Otherwise return the exact outstanding condition and one next action through the existing ledger, retaining all original obligations.

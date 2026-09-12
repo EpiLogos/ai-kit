@@ -21,6 +21,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: '1.98.0'
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2.9.2
       - name: Record exact subject
@@ -34,7 +35,7 @@ jobs:
           set -euo pipefail
           cargo test -p aikit-core --locked 2>&1 | tee evidence/core-tests.txt
           cargo clippy -p aikit-core --all-targets --locked -- -D warnings 2>&1 | tee evidence/clippy.txt
-      - name: Disclose formatting differences without modifying accepted source
+      - name: Check scope formatting without modifying accepted source
         if: always()
         run: |
           set -o pipefail
