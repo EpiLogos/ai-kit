@@ -76,6 +76,9 @@ jobs:
           cargo build --locked --release --manifest-path .caw-native/Actuation/Cargo.toml -p actuation-cli
           cargo build --locked --manifest-path .caw-native/Central/Cargo.toml -p ctrl
           cargo build --locked --manifest-path .caw-native/Workcell/Cargo.toml -p epilogos-workcell-cli --bins
+          test -x "$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell"
+          test -x "$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-control-service"
+          test -x "$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-write-boundary"
           echo "AIKIT_CAW_CTRL_BIN=$GITHUB_WORKSPACE/.caw-native/Central/target/debug/ctrl" >> "$GITHUB_ENV"
           echo "AIKIT_CAW_WORKCELL_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell" >> "$GITHUB_ENV"
           echo "AIKIT_CAW_WORKCELL_SERVICE_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-control-service" >> "$GITHUB_ENV"
@@ -88,10 +91,13 @@ jobs:
           test "$(git -C .caw-native/Central rev-parse HEAD)" = "$CENTRAL_SHA"
           test "$(git -C .caw-native/Workcell rev-parse HEAD)" = "$WORKCELL_SHA"
           test -x "$GITHUB_WORKSPACE/.caw-native/Actuation/target/release/actuation"
+          # The material workcell bindings (full CLI, control service, write
+          # boundary) stay owned by the build step above; this basis step names
+          # only what it verifies. AIKIT_CAW_WORKCELL_BIN must remain the full
+          # `workcell` CLI — the material status/prepare/inspect/observe client.
           {
             echo "AIKIT_CAW_ACTUATION_BIN=$GITHUB_WORKSPACE/.caw-native/Actuation/target/release/actuation"
             echo "AIKIT_CAW_CENTRAL_BIN=$GITHUB_WORKSPACE/.caw-native/Central/target/debug/ctrl"
-            echo "AIKIT_CAW_WORKCELL_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-write-boundary"
           } >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/caw-evidence"
           git archive --format=tar.gz HEAD > "$RUNNER_TEMP/caw-evidence/aikit-source.tar.gz"
