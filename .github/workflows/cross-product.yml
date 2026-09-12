@@ -189,13 +189,10 @@ jobs:
     timeout-minutes: 30
     env:
       CENTRAL_SHA: 4cd0fe52b10fb0e09a5a9e4486ea3d40d4946c5c
-      ACTUATION_SHA: 6398b23e0972e85d61295ddc1cfcbb83989dc00b
+      ACTUATION_SHA: 4af495f6509bb0dd779112a225d71a9df8145b6e
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
       - name: Exact native owner dependencies
         shell: bash
         run: |
@@ -210,14 +207,17 @@ jobs:
             git -C "$root" checkout --detach FETCH_HEAD
             test "$(git -C "$root" rev-parse HEAD)" = "$revision"
           done
-          printf '%s\n' "$RUNNER_TEMP/Central/target/debug" "$RUNNER_TEMP/Actuation/bin" >> "$GITHUB_PATH"
+          printf '%s\n' "$RUNNER_TEMP/Central/target/debug" "$RUNNER_TEMP/Actuation/target/release" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           workspaces: |
             .
             ${{ runner.temp }}/Central
+            ${{ runner.temp }}/Actuation
       - name: Build native Central
         run: cargo build --manifest-path "$RUNNER_TEMP/Central/Cargo.toml" --locked --bin ctrl
+      - name: Build native Actuation
+        run: cargo build --manifest-path "$RUNNER_TEMP/Actuation/Cargo.toml" --locked -p actuation-cli
       - name: Run native composition and exact source-byte receipt regression
         shell: bash
         run: |
@@ -233,7 +233,6 @@ jobs:
             echo "Actuation=$ACTUATION_SHA"
             echo 'Standing=native deterministic composition; no live provider or human acceptance'
             rustc -Vv
-            node --version
           } > "$RUNNER_TEMP/composition-basis.txt"
       - uses: actions/upload-artifact@v4
         if: always()
