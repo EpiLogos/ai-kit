@@ -1,0 +1,38 @@
+name: AW94 continuation source receipt
+on:
+  pull_request:
+    paths: ['.github/workflows/aw94-source-snapshot.yml']
+permissions:
+  contents: read
+jobs:
+  source-receipt:
+    if: github.head_ref == 'agent/aw94-native-operative-scope'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          path: ai-kit
+      - uses: actions/checkout@v4
+        with:
+          repository: EpiLogos/QL-MEF
+          ref: 058b0868cb3dbe8ebc792ff369d9665c627b49b3
+          persist-credentials: false
+          path: QL-MEF
+      - name: Retain exact tracked sources and commit objects
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          for owner in ai-kit QL-MEF; do
+            git -C "$owner" archive --format=tar.gz HEAD > "evidence/$owner.tar.gz"
+            git -C "$owner" cat-file -p HEAD > "evidence/$owner.commit"
+            git -C "$owner" rev-parse HEAD > "evidence/$owner.sha"
+            git -C "$owner" rev-parse 'HEAD^{tree}' > "evidence/$owner.tree"
+          done
+          sha256sum evidence/*.tar.gz > evidence/archive-digests.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aw94-continuation-sources
+          path: evidence/
+          retention-days: 7
