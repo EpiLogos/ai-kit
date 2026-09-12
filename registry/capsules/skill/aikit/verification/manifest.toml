@@ -2,7 +2,7 @@ schema = 1
 id = "skill/aikit/verification"
 kind = "skill"
 name = "AIKit verification and conformance"
-description = "Run AIKit structural, resolution, projection, provider and application conformance with inspectable provenance."
+description = "METHOD: Use before claiming an AIKit operation or cross-product experience complete, or when checking a source, projection, upgrade or recovery claim. Start from the original whole and required evidence; a passing component or installed file is not proof of lived use."
 maturity = "stable"
 tags = ["aikit", "verification", "conformance"]
 
