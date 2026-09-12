@@ -18,6 +18,7 @@ mod model_roster;
 mod model_route;
 mod operative;
 mod operative_provider;
+pub mod operative_scope;
 mod refs;
 #[path = "../routine.rs"]
 pub mod routine;
