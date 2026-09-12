@@ -126,7 +126,7 @@ fn generated() -> ContemplateGenerated {
 }
 
 #[test]
-fn native_contamplate_performs_once_and_retains_original_scope_in_actual_reading() {
+fn native_contemplate_performs_once_and_retains_original_scope_in_actual_reading() {
     let index = index();
     let context = context(&index);
     let provider = ObservingProvider::new();
@@ -159,25 +159,39 @@ fn native_contamplate_performs_once_and_retains_original_scope_in_actual_reading
         &provider,
         |preflight, scope| {
             calls += 1;
-            assert_eq!(scope.path().native().identity, resolution.path().native().identity);
-            assert_eq!(preflight.operative.as_ref().unwrap().resolve_path_identity,
-                resolution.path().native().identity);
+            assert_eq!(
+                scope.path().native().identity,
+                resolution.path().native().identity
+            );
+            assert_eq!(
+                preflight.operative.as_ref().unwrap().resolve_path_identity,
+                resolution.path().native().identity
+            );
             Ok(generated())
         },
     )
     .unwrap();
     assert_eq!(calls, 1);
     assert_eq!(result.standing, ScopedKnowledgeReturnStanding::Current);
-    assert_eq!(result.native.outcome.candidates, ["native generated candidate"]);
+    assert_eq!(
+        result.native.outcome.candidates,
+        ["native generated candidate"]
+    );
     let reading = &result.native.outcome.integrative_readings[0];
     let scope = &reading.reading.extensions[OPERATIVE_SCOPE_RETURN_EXTENSION];
-    assert_eq!(scope["resolve_path_identity"], resolution.path().native().identity);
+    assert_eq!(
+        scope["resolve_path_identity"],
+        resolution.path().native().identity
+    );
     assert_eq!(scope["scopes"][0]["binding"]["whole"], "whole/one");
-    assert_eq!(reading.basis[0].source_revision, Some(binding().sources[0].revision.clone()));
+    assert_eq!(
+        reading.basis[0].source_revision,
+        Some(binding().sources[0].revision.clone())
+    );
 }
 
 #[test]
-fn denied_stale_or_foreign_source_performs_nothing_and_backend_failure_is_not_retried() {
+fn stale_scope_performs_nothing_and_backend_failure_is_not_retried() {
     let index = index();
     let context = context(&index);
     let provider = ObservingProvider::new();
@@ -209,12 +223,16 @@ fn denied_stale_or_foreign_source_performs_nothing_and_backend_failure_is_not_re
     assert!(explicit_scoped_contemplate(input(), &provider, |_, _| {
         calls += 1;
         Ok(generated())
-    }).is_err());
+    })
+    .is_err());
     assert_eq!(calls, 0);
     *provider.current.borrow_mut() = binding();
     let result = explicit_scoped_contemplate(input(), &provider, |_, _| {
         calls += 1;
-        Err(AikitError::new("native.denied", "native execution authority withheld"))
+        Err(AikitError::new(
+            "native.denied",
+            "native execution authority withheld",
+        ))
     });
     assert!(result.is_err());
     assert_eq!(calls, 1);
@@ -251,12 +269,94 @@ fn source_change_during_execution_preserves_late_return_without_claiming_current
         },
         &provider,
         |_, _| {
-            provider.current.borrow_mut().sources[0].revision = SourceRevision::parse("r2").unwrap();
+            provider.current.borrow_mut().sources[0].revision =
+                SourceRevision::parse("r2").unwrap();
             Ok(generated())
         },
-    ).unwrap();
-    assert_eq!(result.standing, ScopedKnowledgeReturnStanding::ReobservationRequired);
-    assert_eq!(result.native.outcome.candidates, ["native generated candidate"]);
-    assert!(matches!(result.completion[0].observation, ScopeObservation::Stale { .. }));
-    assert_eq!(result.original_resolution.observations()[0].scope.binding, binding());
+    )
+    .unwrap();
+    assert_eq!(
+        result.standing,
+        ScopedKnowledgeReturnStanding::ReobservationRequired
+    );
+    assert_eq!(
+        result.native.outcome.candidates,
+        ["native generated candidate"]
+    );
+    assert!(matches!(
+        result.completion[0].observation,
+        ScopeObservation::Stale { .. }
+    ));
+    assert_eq!(
+        result.original_resolution.observations()[0].scope.binding,
+        binding()
+    );
+}
+
+#[test]
+fn unbound_or_stale_native_source_is_rejected_before_execution() {
+    let index = index();
+    let context = context(&index);
+    let provider = ObservingProvider::new();
+    let resolution = compose_scoped_context(&request(), &index, &context, 16, &provider).unwrap();
+    let runtime = runtime();
+    let mut calls = 0;
+    for foreign in [false, true] {
+        let mut horizon = horizon();
+        let mut dependency = dependency();
+        if foreign {
+            dependency.source = SourceRef::parse("source/not-in-scope").unwrap();
+        } else {
+            horizon.sources[0].revision = Some(SourceRevision::parse("source-r2").unwrap());
+        }
+        let dependencies = [dependency];
+        let request = ContemplateRequest {
+            project: context.project_binding.project.clone(),
+            focus: vec![resource("project/one")],
+            horizon: &horizon,
+            dependencies: &dependencies,
+            current_wiki_objects: &[],
+            runtime: &runtime,
+            method: None,
+            ql: None,
+        };
+        let result = explicit_scoped_contemplate(
+            ScopedContemplateInput {
+                request: &request,
+                resolution: &resolution,
+                current_context: &context,
+                resource_dependencies: &[],
+                max_objects: 16,
+                relation_depth: 2,
+                shape_budget: 24,
+            },
+            &provider,
+            |_, _| {
+                calls += 1;
+                Ok(generated())
+            },
+        );
+        assert!(result.is_err());
+    }
+    assert_eq!(calls, 0);
+}
+
+#[test]
+fn producer_cannot_replace_original_binding_in_native_reading() {
+    let index = index();
+    let context = context(&index);
+    let provider = ObservingProvider::new();
+    let resolution = compose_scoped_context(&request(), &index, &context, 16, &provider).unwrap();
+    let mut generated = generated();
+    generated.integrative_readings[0].reading.extensions.insert(
+        OPERATIVE_SCOPE_RETURN_EXTENSION.into(),
+        serde_json::json!({"scopes": "other"}),
+    );
+    assert!(
+        crate::resource::operative_scope::knowledge::attribute_generated(
+            &mut generated,
+            &resolution,
+        )
+        .is_err()
+    );
 }

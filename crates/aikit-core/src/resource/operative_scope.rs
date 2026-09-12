@@ -36,10 +36,7 @@ fn require(condition: bool, code: &'static str, message: &str) -> Result<()> {
 
 fn reference(raw: &str) -> Result<()> {
     require(
-        !raw.is_empty()
-            && raw == raw.trim()
-            && !raw.contains('\0')
-            && raw.len() <= MAX_REF_BYTES,
+        !raw.is_empty() && raw == raw.trim() && !raw.contains('\0') && raw.len() <= MAX_REF_BYTES,
         "resolve.invalid_scope_reference",
         "scope references must be bounded, nonempty, trimmed and NUL-free",
     )
@@ -481,7 +478,10 @@ fn observe_one<P: ScopeAwareOperativeProvider>(
             reason: "binding belongs to another provider".into(),
         });
     }
-    if !matches!(descriptor.status, OperativeSemanticProviderStatus::Available) {
+    if !matches!(
+        descriptor.status,
+        OperativeSemanticProviderStatus::Available
+    ) {
         return Ok(ScopeObservation::Unavailable {
             reason: "semantic provider is not available".into(),
         });
@@ -491,7 +491,8 @@ fn observe_one<P: ScopeAwareOperativeProvider>(
         if binding.canonical()? != requested.canonical()? {
             return Ok(ScopeObservation::Stale {
                 observed: binding.clone(),
-                reason: "observed owner/source/whole binding differs from the requested scope".into(),
+                reason: "observed owner/source/whole binding differs from the requested scope"
+                    .into(),
             });
         }
         require(

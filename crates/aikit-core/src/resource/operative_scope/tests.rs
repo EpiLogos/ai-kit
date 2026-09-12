@@ -142,12 +142,14 @@ impl ScopeAwareOperativeProvider for ObservingProvider {
         context: &ContextResolution,
     ) -> Result<ScopeObservation> {
         assert_eq!(context.project_binding.project.as_str(), "project/one");
-        Ok(self.standing.borrow().clone().unwrap_or_else(|| {
-            ScopeObservation::Current {
+        Ok(self
+            .standing
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| ScopeObservation::Current {
                 binding: self.current.borrow().clone(),
                 evidence: vec![ResourceRef::parse("source/observation/one").unwrap()],
-            }
-        }))
+            }))
     }
 }
 
@@ -181,7 +183,8 @@ fn no_ql_search_and_path_identity_stay_native() {
     let expression = ResolveExpression::ordinary_search("verify");
     let native = resolve_expression(&expression, &index, 16);
     let scoped =
-        resolve_scoped_expression(&ScopedResolveExpression::unbound(expression), &index, 16).unwrap();
+        resolve_scoped_expression(&ScopedResolveExpression::unbound(expression), &index, 16)
+            .unwrap();
     assert_eq!(scoped.path, native);
     assert!(scoped.scopes.is_empty());
 }
@@ -211,8 +214,14 @@ fn child_binding_shadows_only_its_own_branch() {
         binding: child.clone(),
     });
     let left = vec![ExpressionEdge::Operand, ExpressionEdge::Left];
-    assert_eq!(request.effective_scopes(&left).unwrap()[0].binding, binding());
-    assert_eq!(request.effective_scopes(&child_path).unwrap()[0].binding, child);
+    assert_eq!(
+        request.effective_scopes(&left).unwrap()[0].binding,
+        binding()
+    );
+    assert_eq!(
+        request.effective_scopes(&child_path).unwrap()[0].binding,
+        child
+    );
     assert_eq!(request.canonical().unwrap().scopes.len(), 2);
     let mut reordered = request.clone();
     reordered.scopes.reverse();
@@ -281,7 +290,9 @@ fn structural_budget_covers_structured_clients_too() {
             expression: Box::new(expression),
         };
     }
-    assert!(ScopedResolveExpression::unbound(expression).canonical().is_err());
+    assert!(ScopedResolveExpression::unbound(expression)
+        .canonical()
+        .is_err());
     let mut request = request();
     request.scopes[0].binding.sources.clear();
     assert!(request.canonical().is_err());
@@ -300,7 +311,10 @@ fn current_native_context_and_provider_revision_are_both_required() {
     provider.current.borrow_mut().sources[0].revision = SourceRevision::parse("source-r2").unwrap();
     assert!(resolution.revalidate(&context, &provider).is_err());
     let completed = resolution.completion_observations(&context, &provider);
-    assert!(matches!(completed[0].observation, ScopeObservation::Stale { .. }));
+    assert!(matches!(
+        completed[0].observation,
+        ScopeObservation::Stale { .. }
+    ));
     assert_eq!(resolution.observations[0].scope.binding, binding());
 }
 
@@ -310,16 +324,23 @@ fn missing_ambiguous_unavailable_and_unsupported_do_not_become_current() {
     let context = context(&index);
     let provider = ObservingProvider::new();
     for observation in [
-        ScopeObservation::Missing { reason: "removed".into() },
+        ScopeObservation::Missing {
+            reason: "removed".into(),
+        },
         ScopeObservation::Ambiguous {
             candidates: vec![ResourceRef::parse("binding/other").unwrap()],
             reason: "two owners".into(),
         },
-        ScopeObservation::Unavailable { reason: "offline".into() },
-        ScopeObservation::Unsupported { reason: "no capability".into() },
+        ScopeObservation::Unavailable {
+            reason: "offline".into(),
+        },
+        ScopeObservation::Unsupported {
+            reason: "no capability".into(),
+        },
     ] {
         *provider.standing.borrow_mut() = Some(observation.clone());
-        let resolution = compose_scoped_context(&request(), &index, &context, 16, &provider).unwrap();
+        let resolution =
+            compose_scoped_context(&request(), &index, &context, 16, &provider).unwrap();
         assert_eq!(resolution.observations[0].observation, observation);
         assert!(resolution.require_current().is_err());
     }

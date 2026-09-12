@@ -9,8 +9,8 @@ use crate::knowledge_living::{ContemplateGenerated, ContemplateRequest};
 use crate::knowledge_living_relations::KnowledgeResourceDependency;
 use crate::knowledge_wiki::WikiObject;
 use crate::knowledge_wiki_shape::{
-    explicit_ql_shaped_resolve_contemplate, QlShapedContemplateExecutor, QlShapedContemplateOutcome,
-    QlShapedContemplatePreflight,
+    explicit_ql_shaped_resolve_contemplate, QlShapedContemplateExecutor,
+    QlShapedContemplateOutcome, QlShapedContemplatePreflight,
 };
 use crate::{AikitError, Result};
 
@@ -46,7 +46,7 @@ pub struct ScopedContemplateOutcome {
     pub standing: ScopedKnowledgeReturnStanding,
 }
 
-fn attribute_generated(
+pub(super) fn attribute_generated(
     generated: &mut ContemplateGenerated,
     resolution: &ScopedContextResolution,
 ) -> Result<()> {
@@ -96,7 +96,10 @@ pub fn explicit_scoped_contemplate<P, F>(
 ) -> Result<ScopedContemplateOutcome>
 where
     P: ScopeAwareOperativeProvider,
-    F: FnMut(&QlShapedContemplatePreflight, &ScopedContextResolution) -> Result<ContemplateGenerated>,
+    F: FnMut(
+        &QlShapedContemplatePreflight,
+        &ScopedContextResolution,
+    ) -> Result<ContemplateGenerated>,
 {
     let resolution = input.resolution;
     resolution.revalidate(input.current_context, provider)?;
@@ -127,18 +130,24 @@ where
         // carry the precise source pins they are about to consume, not use scope
         // presence as a pretext for widening into unrelated or stale sources.
         if !resolution.path().scopes().is_empty() {
-            let pin = resolution
+            let pins: Vec<_> = resolution
                 .path()
                 .scopes()
                 .iter()
                 .flat_map(|scope| &scope.binding.sources)
-                .find(|pin| pin.source == dependency.source)
-                .ok_or_else(|| {
-                    AikitError::new(
-                        "knowledge.scope_source_unbound",
-                        "Contemplate dependency is outside the qualified source basis",
-                    )
-                })?;
+                .filter(|pin| pin.source == dependency.source)
+                .collect();
+            let pin = pins.first().copied().ok_or_else(|| {
+                AikitError::new(
+                    "knowledge.scope_source_unbound",
+                    "Contemplate dependency is outside the qualified source basis",
+                )
+            })?;
+            require(
+                pins.iter().all(|other| other.revision == pin.revision),
+                "knowledge.scope_source_ambiguous",
+                "different scoped revisions require a narrower explicit source aperture",
+            )?;
             require(
                 input.request.horizon.sources.iter().any(|source| {
                     source.source == pin.source
@@ -165,7 +174,10 @@ where
             &ScopedContextResolution,
         ) -> Result<ContemplateGenerated>,
     {
-        fn execute(&mut self, preflight: &QlShapedContemplatePreflight) -> Result<ContemplateGenerated> {
+        fn execute(
+            &mut self,
+            preflight: &QlShapedContemplatePreflight,
+        ) -> Result<ContemplateGenerated> {
             // Recheck at the actual execution aperture, not merely at Resolve.
             self.resolution
                 .revalidate(self.current_context, self.provider)?;
