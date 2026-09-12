@@ -1,0 +1,48 @@
+name: Operative scope native acceptance
+on:
+  pull_request:
+    paths:
+      - 'crates/aikit-core/**'
+      - '.github/workflows/operative-scope.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: operative-scope-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  operative-scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.98.0'
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Record exact subject
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/source-sha.txt
+          git rev-parse HEAD^{tree} > evidence/source-tree.txt
+          rustc --version > evidence/toolchain.txt
+      - name: Exercise native core and scope laws
+        run: |
+          set -euo pipefail
+          cargo test -p aikit-core --locked 2>&1 | tee evidence/core-tests.txt
+          cargo clippy -p aikit-core --all-targets --locked -- -D warnings 2>&1 | tee evidence/clippy.txt
+      - name: Check scope formatting without modifying accepted source
+        if: always()
+        run: |
+          set -o pipefail
+          rustfmt --edition 2021 --check crates/aikit-core/src/resource/operative_scope.rs 2>&1 | tee evidence/format.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: operative-scope-${{ github.event.pull_request.head.sha || github.sha }}
+          path: evidence/
+          retention-days: 14
