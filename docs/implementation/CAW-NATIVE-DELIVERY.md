@@ -219,7 +219,8 @@ instantiation-record success as an executed development attempt.
 ## Tests and proof standing
 
 The mandatory `CAW native delivery` workflow builds the actual AIKit binaries,
-checks out the pinned Actuation source and invokes its native executable. The
+checks out the pinned Actuation source, builds its native executable with the
+owner's locked cargo command, and invokes that built binary. The
 ACP/Pi providers are real child processes implementing controlled protocol
 fixtures. Every reply is marked `FIXTURE_REPLY`. They prove the caller, source
 bytes, IPC, native host, ordering, duplicate refusal and recovery code—not a
@@ -228,7 +229,7 @@ commercial model or installed harness.
 Run locally against an exact Actuation source checkout:
 
 ```sh
-AIKIT_CAW_ACTUATION_BIN=/absolute/Actuation/bin/actuation \
+AIKIT_CAW_ACTUATION_BIN=/absolute/Actuation/target/release/actuation \
   cargo test --locked -p aikit-cli --test caw_native_delivery \
   -- --ignored --nocapture --test-threads=1
 cargo test --locked -p aikit-adapters --test caw_realisation --test caw_enforcement \

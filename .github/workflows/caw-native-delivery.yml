@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      ACTUATION_SHA: 2d73f957c287ef386b09ac2c55eeab3603b60873
+      ACTUATION_SHA: 4af495f6509bb0dd779112a225d71a9df8145b6e
       CENTRAL_SHA: 5d1b8bf6692f9aca45b2fe39db54cbc378dda70e
       WORKCELL_SHA: 0c44ee373f5a5e11ab33e885be84dd8293bc358f
     steps:
@@ -44,13 +44,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - uses: dtolnay/rust-toolchain@1.98.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Actuation
-          ref: 2d73f957c287ef386b09ac2c55eeab3603b60873
+          ref: 4af495f6509bb0dd779112a225d71a9df8145b6e
           path: .caw-native/Actuation
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -71,6 +68,18 @@ jobs:
             . -> target
             .caw-native/Central -> target
             .caw-native/Workcell -> target
+            .caw-native/Actuation -> target
+      - name: Build the native placement and material owners
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path .caw-native/Actuation/Cargo.toml -p actuation-cli
+          cargo build --locked --manifest-path .caw-native/Central/Cargo.toml -p ctrl
+          cargo build --locked --manifest-path .caw-native/Workcell/Cargo.toml -p epilogos-workcell-cli --bins
+          echo "AIKIT_CAW_CTRL_BIN=$GITHUB_WORKSPACE/.caw-native/Central/target/debug/ctrl" >> "$GITHUB_ENV"
+          echo "AIKIT_CAW_WORKCELL_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell" >> "$GITHUB_ENV"
+          echo "AIKIT_CAW_WORKCELL_SERVICE_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-control-service" >> "$GITHUB_ENV"
+          echo "AIKIT_CAW_WORKCELL_BOUNDARY_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-write-boundary" >> "$GITHUB_ENV"
       - name: Record exact native basis
         shell: bash
         run: |
@@ -78,9 +87,9 @@ jobs:
           test "$(git -C .caw-native/Actuation rev-parse HEAD)" = "$ACTUATION_SHA"
           test "$(git -C .caw-native/Central rev-parse HEAD)" = "$CENTRAL_SHA"
           test "$(git -C .caw-native/Workcell rev-parse HEAD)" = "$WORKCELL_SHA"
-          test -x "$GITHUB_WORKSPACE/.caw-native/Actuation/bin/actuation"
+          test -x "$GITHUB_WORKSPACE/.caw-native/Actuation/target/release/actuation"
           {
-            echo "AIKIT_CAW_ACTUATION_BIN=$GITHUB_WORKSPACE/.caw-native/Actuation/bin/actuation"
+            echo "AIKIT_CAW_ACTUATION_BIN=$GITHUB_WORKSPACE/.caw-native/Actuation/target/release/actuation"
             echo "AIKIT_CAW_CENTRAL_BIN=$GITHUB_WORKSPACE/.caw-native/Central/target/debug/ctrl"
             echo "AIKIT_CAW_WORKCELL_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-write-boundary"
           } >> "$GITHUB_ENV"
@@ -92,21 +101,10 @@ jobs:
             echo "Central=$CENTRAL_SHA"
             echo "Workcell=$WORKCELL_SHA"
             rustc -Vv
-            node --version
             python3 --version
             echo 'Standing=accepted cut revisions pinned per product; controlled native providers, not installed or real-model proof.'
             echo 'FIXTURE_REPLY is not a real model response or installed-harness proof.'
           } > "$RUNNER_TEMP/caw-evidence/basis.txt"
-      - name: Build the native placement and material owners
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo build --locked --manifest-path .caw-native/Central/Cargo.toml -p ctrl
-          cargo build --locked --manifest-path .caw-native/Workcell/Cargo.toml -p epilogos-workcell-cli --bins
-          echo "AIKIT_CAW_CTRL_BIN=$GITHUB_WORKSPACE/.caw-native/Central/target/debug/ctrl" >> "$GITHUB_ENV"
-          echo "AIKIT_CAW_WORKCELL_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell" >> "$GITHUB_ENV"
-          echo "AIKIT_CAW_WORKCELL_SERVICE_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-control-service" >> "$GITHUB_ENV"
-          echo "AIKIT_CAW_WORKCELL_BOUNDARY_BIN=$GITHUB_WORKSPACE/.caw-native/Workcell/target/debug/workcell-write-boundary" >> "$GITHUB_ENV"
       - name: Actual binaries through native Actuation and controlled provider processes
         shell: bash
         run: |
