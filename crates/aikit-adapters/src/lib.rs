@@ -48,7 +48,6 @@ pub mod native_git;
 pub mod okf;
 pub mod projectcentral;
 pub mod projectcentral_authored_wiki;
-pub mod provider_catalog_source;
 pub mod ql_provider;
 pub mod runner;
 pub mod session_space_connection;
