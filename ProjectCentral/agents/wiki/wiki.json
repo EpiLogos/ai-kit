@@ -12,9 +12,9 @@
       ],
       "profile": "okf-wiki/v1",
       "provenance": [],
-      "ref": "central:wiki:project:project:ai-kit",
+      "ref": "central:wiki:project:ai-kit",
       "revision": 3,
-      "title": "project:ai-kit"
+      "title": "ai-kit"
     },
     {
       "object": "node",
@@ -30,7 +30,7 @@
         "ProjectCentral/project.json"
       ],
       "space_refs": [
-        "central:wiki:project:project:ai-kit"
+        "central:wiki:project:ai-kit"
       ],
       "title": "ai-kit",
       "type": "project-root"
