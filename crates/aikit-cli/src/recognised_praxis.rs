@@ -8,7 +8,7 @@
 
 use std::fs;
 
-use aikit_core::method::{method_payload, Method};
+use aikit_core::method::{method_payload, resolve_method, Method};
 use aikit_core::resource::operative_scope::invocation::{
     ScopedActionAttemptEvidence, ScopedActionAttemptOutcome, ScopedActionInvocation,
     ScopedActionReturnEvidence,
@@ -18,10 +18,9 @@ use aikit_core::routine::{prove_method, MethodProofInput, ProvenMethodBasis};
 use aikit_core::{AikitError, Capsule, CapsuleId, Kind, Maturity, Result};
 use aikit_store::inbox::{Capture, Inbox, PromotedCapsule, PromotionEdits};
 use aikit_store::Index;
-use aikit_tui::backend::PaletteBackend;
 
 use crate::app::Service;
-use crate::scoped_invocation::NATIVE_CAPABILITY_RUN_ACTION;
+use crate::scoped_invocation::{current_scoped_invocation_context, NATIVE_CAPABILITY_RUN_ACTION};
 
 #[derive(Debug, Clone)]
 pub struct RecognisedPraxisRequest {
@@ -56,11 +55,17 @@ pub struct RecognisedPraxisReceipt {
 }
 
 pub trait RecognisedPraxisApplication {
-    fn recognise_praxis(&self, request: RecognisedPraxisRequest) -> Result<RecognisedPraxisReceipt>;
+    fn recognise_praxis(
+        &mut self,
+        request: RecognisedPraxisRequest,
+    ) -> Result<RecognisedPraxisReceipt>;
 }
 
 impl RecognisedPraxisApplication for Service {
-    fn recognise_praxis(&self, request: RecognisedPraxisRequest) -> Result<RecognisedPraxisReceipt> {
+    fn recognise_praxis(
+        &mut self,
+        request: RecognisedPraxisRequest,
+    ) -> Result<RecognisedPraxisReceipt> {
         validate_execution_basis(&request)?;
         let name = request.name.trim();
         if name.is_empty() {
@@ -88,14 +93,7 @@ impl RecognisedPraxisApplication for Service {
             ));
         }
 
-        let home = PaletteBackend::application_home(self)
-            .cloned()
-            .ok_or_else(|| {
-                AikitError::new(
-                    "praxis.application_home_unavailable",
-                    "recognised praxis requires the current AIKit application home",
-                )
-            })?;
+        let home = self.home().clone();
         let index = Index::open(&home.database())?;
         let inbox = Inbox::new(&home, &index);
 
@@ -213,6 +211,22 @@ impl RecognisedPraxisApplication for Service {
                 verification_passed: request.verification_passed,
             },
         )?;
+
+        // Native promotion is not enough. Refresh the application's ordinary
+        // catalogue and prove that the exact promoted Skill identity now resolves
+        // as METHOD:-classified together with the Action/capability it retained.
+        self.refresh()?;
+        let (resources, _) = current_scoped_invocation_context(self)?;
+        let resolution = resolve_method(&method, &resources)?;
+        if !resolution.is_complete() {
+            return Err(AikitError::new(
+                "praxis.promoted_method_not_reusable",
+                format!(
+                    "promoted Skill did not re-resolve as a complete Method: {}",
+                    resolution.warnings.join("; ")
+                ),
+            ));
+        }
 
         Ok(RecognisedPraxisReceipt {
             naming_expression,
