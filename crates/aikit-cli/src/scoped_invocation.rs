@@ -47,7 +47,7 @@ pub enum ScopedRunOutcome {
         run: RunHandle,
     },
     Failed {
-        invocation: Box<ScopedActionInvocation>,
+        invocation: ScopedActionInvocation,
         attempt: ScopedActionAttemptEvidence,
         error: AikitError,
     },
@@ -165,7 +165,7 @@ impl ScopedActionApplication for Service {
                     },
                 )?;
                 Ok(ScopedRunOutcome::Failed {
-                    invocation: Box::new(invocation),
+                    invocation,
                     attempt,
                     error,
                 })
