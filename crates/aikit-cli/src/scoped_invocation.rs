@@ -41,13 +41,13 @@ pub struct ScopedRunRequest {
 #[derive(Debug, Clone)]
 pub enum ScopedRunOutcome {
     Completed {
-        invocation: ScopedActionInvocation,
+        invocation: Box<ScopedActionInvocation>,
         attempt: ScopedActionAttemptEvidence,
         returned: ScopedActionReturnEvidence,
         run: RunHandle,
     },
     Failed {
-        invocation: ScopedActionInvocation,
+        invocation: Box<ScopedActionInvocation>,
         attempt: ScopedActionAttemptEvidence,
         error: AikitError,
     },
@@ -147,7 +147,7 @@ impl ScopedActionApplication for Service {
                     ))?],
                 )?;
                 Ok(ScopedRunOutcome::Completed {
-                    invocation,
+                    invocation: Box::new(invocation),
                     attempt,
                     returned,
                     run,
@@ -165,7 +165,7 @@ impl ScopedActionApplication for Service {
                     },
                 )?;
                 Ok(ScopedRunOutcome::Failed {
-                    invocation,
+                    invocation: Box::new(invocation),
                     attempt,
                     error,
                 })
