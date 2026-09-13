@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AikitError, Result};
+use crate::Result;
 
 use super::{digest, reference, require, ObservedExpressionScope, ScopedContextResolution};
 use crate::resource::{ActionRef, ResolvedActionCandidate, ResourceRef, SourceRevision};
