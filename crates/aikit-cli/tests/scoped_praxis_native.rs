@@ -228,7 +228,7 @@ fn qualified_resolve_runs_real_subprocess_then_names_proves_and_reresolves_metho
             skill_body: "# AW94 native echo\n\nInvoke the proven scoped capability and verify its returned evidence.\n"
                 .into(),
             skill_id: None,
-            invocation,
+            invocation: *invocation,
             attempt,
             returned,
             recognition_refs: vec![ResourceRef::parse("recognition/aw94/one").unwrap()],
