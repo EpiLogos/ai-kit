@@ -23,8 +23,8 @@ use aikit_core::resource::{
     parse_resolve_expression, ActionRef, ActionSemanticProfile, AddressHorizon,
     OperativeSemanticProvider, OperativeSemanticProviderCapabilities,
     OperativeSemanticProviderDescriptor, OperativeSemanticProviderStatus, OwnerRef, ProviderRef,
-    RelationOp, ResolveExpression, ResolvePath, ResourceRef, SourceRef, SourceRevision,
-    OPERATIVE_SEMANTIC_PROVIDER_VERSION,
+    RelationOp, ResolveExpression, ResolvePath, ResourceRef, ResourceSource, SourceAuthority,
+    SourceRef, SourceRevision, SourceState, OPERATIVE_SEMANTIC_PROVIDER_VERSION,
 };
 use aikit_store::AikitHome;
 use tempfile::TempDir;
@@ -111,7 +111,13 @@ impl OperativeSemanticProvider for Provider {
             provider: ProviderRef::parse("provider/ql-mef").unwrap(),
             status: OperativeSemanticProviderStatus::Available,
             capabilities: OperativeSemanticProviderCapabilities::default(),
-            provenance: vec![ResourceRef::parse("evidence/ql-provider/aw94").unwrap()],
+            provenance: vec![ResourceSource {
+                source: SourceRef::parse("source/ql-mef/provider-aw94").unwrap(),
+                authority: Some(SourceAuthority::Authored),
+                revision: Some(SourceRevision::parse("provider-r1").unwrap()),
+                locator: None,
+                state: SourceState::Available,
+            }],
         }
     }
 
@@ -231,7 +237,10 @@ fn qualified_resolve_runs_real_subprocess_then_names_proves_and_reresolves_metho
         })
         .unwrap();
 
-    assert_eq!(receipt.method.id.as_str(), "skill/recognised/aw94-native-echo");
+    assert_eq!(
+        receipt.method.id.as_str(),
+        "skill/recognised/aw94-native-echo"
+    );
     assert_eq!(receipt.proof.method, receipt.method.id);
     assert!(matches!(
         receipt.naming_expression,
