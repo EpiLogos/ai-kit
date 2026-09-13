@@ -42,6 +42,7 @@ pub mod mux_install;
 pub mod profile_ops;
 pub mod project_binding;
 pub mod projects;
+pub mod recognised_praxis;
 pub mod run;
 pub mod scoped_invocation;
 pub mod session_lifecycle_ops;
