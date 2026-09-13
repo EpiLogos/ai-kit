@@ -48,6 +48,7 @@ pub mod native_git;
 pub mod okf;
 pub mod projectcentral;
 pub mod projectcentral_authored_wiki;
+pub mod ql_provider;
 pub mod runner;
 pub mod session_space_connection;
 pub mod session_space_observation;
@@ -167,6 +168,7 @@ pub use projectcentral_authored_wiki::{
     projectcentral_authored_wiki, ProjectCentralAuthoredWiki, ProjectCentralAuthoredWikiStatus,
     PROJECTCENTRAL_AUTHORED_WIKI_VERSION,
 };
+pub use ql_provider::{QlCliClient, QlOperativeProvider, QL_CLI_PROVIDER_VERSION};
 pub use session_space_connection::connection_into_session_space;
 pub use session_space_observation::{
     SessionSpaceFileObservationProvider, SessionSpaceObservationError,

@@ -19,6 +19,7 @@ use super::{
     ResourceRecord, ResourceRef, SourceRef, SourceRevision,
 };
 
+pub mod invocation;
 pub mod knowledge;
 
 pub const OPERATIVE_SCOPE_VERSION: &str = "aikit.operative-scope/v1";
@@ -363,7 +364,7 @@ pub trait ScopeAwareOperativeProvider: OperativeSemanticProvider {
     ) -> Result<ScopeObservation>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedExpressionScope {
     pub scope: ExpressionScope,
     pub observation: ScopeObservation,
