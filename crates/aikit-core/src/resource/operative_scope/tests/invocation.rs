@@ -36,7 +36,8 @@ fn admitted() -> (
     let index = executable_index();
     let context = super::context(&index);
     let provider = ObservingProvider::new();
-    let scoped = compose_scoped_context(&super::request(), &index, &context, 16, &provider).unwrap();
+    let scoped =
+        compose_scoped_context(&super::request(), &index, &context, 16, &provider).unwrap();
     let candidate = scoped
         .action(&ResourceRef::parse("action/verify").unwrap(), &index)
         .unwrap();
