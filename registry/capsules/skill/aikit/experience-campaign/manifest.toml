@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/experience-campaign"
+kind = "skill"
+name = "Human and Agent story campaign"
+description = "METHOD: Use when preparing or directing a semi-automated campaign of real user and Agent stories, including computer-use testers, subagent failures and independent repair/retest. A single ordinary task or narrow unit test does not require a campaign."
+maturity = "experimental"
+tags = ["aikit", "verification", "ux", "agent-practice", "campaign"]
+
+[skill]
+root = "payload"
