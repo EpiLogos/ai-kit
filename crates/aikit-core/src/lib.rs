@@ -47,6 +47,7 @@ pub mod explain_history_actions;
 pub mod familiarity;
 pub mod flow;
 pub mod flow_cognition;
+pub mod now_contemplation;
 pub mod frecency;
 pub mod guidance;
 pub mod harness_admission;
@@ -219,6 +220,12 @@ pub use flow_cognition::{
     FlowChangedSinceState, FlowCognition, FlowThoughtOutcome, FlowThoughtRecord,
     FLOW_CHANGED_SINCE_VERSION, FLOW_COGNITION_VERSION, FLOW_CONTEMPLATE_USE_RECORDED,
 };
+pub use now_contemplation::{
+    explain_now_contemplate_preflight, explicit_now_contemplate, now_contemplate_preflight,
+    validate_now_contemplate_record, NowContemplateExecutor, NowContemplateRecord,
+    NowContemplation, NowContemplationPreflight, NowFixture, NowFixturesSeam,
+    NowLearningProposal, NOW_CONTEMPLATION_VERSION, THOUGHTS_READING_SCHEMA,
+};
 pub use frecency::{Candidate, Jump, Tiebreak};
 pub use guidance::{
     compose, estimate_tokens, Composition, CompositionEntry, CompositionRequest, FragmentStatus,
@@ -287,7 +294,8 @@ pub use knowledge_operations::{
 };
 pub use knowledge_resolution::{
     KnowledgeOpenReceipt, KnowledgeResolution, ResolutionKind, ResolutionRow, UnavailableProvider,
-    ACTION_CONTEMPLATE_FLOW, ACTION_KNOWLEDGE_EXPLAIN, ACTION_KNOWLEDGE_OPEN,
+    ACTION_CONTEMPLATE_FLOW, ACTION_CONTEMPLATE_NOW, ACTION_KNOWLEDGE_EXPLAIN,
+    ACTION_KNOWLEDGE_OPEN,
     ACTION_KNOWLEDGE_READ, ACTION_KNOWLEDGE_RELATIONS, ACTION_KNOWLEDGE_ROUTE,
     ACTION_KNOWLEDGE_SOURCES, ACTION_RUN, ACTION_SKILL_OVERLAY_SET, KNOWLEDGE_RESOLUTION_VERSION,
 };

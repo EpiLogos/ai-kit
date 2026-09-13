@@ -149,3 +149,72 @@ fn a_bad_scope_argument_is_a_usage_error_with_exit_code_two() {
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "cli.usage");
 }
+
+#[test]
+fn flow_contemplates_a_now_stream_through_the_real_binary() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write(&project.path().join(".aikit/profile.toml"), "schema = 1\n");
+    let seam = project.path().join("now-stream.json");
+    write(
+        &seam,
+        r#"{
+  "schema": "central.thoughts-reading/v1",
+  "now_ref": "central:now:control:root:cli",
+  "total": 1,
+  "truncated": false,
+  "fixtures": [
+    {"file": "raw-2026-09-13.md", "revision": "central.content-fnv1a64/v1:1:aa", "conforming": true, "day": "2026-09-13", "actor": "agent:test", "actor_kind": "agent", "content": "raw body"}
+  ]
+}"#,
+    );
+    let run = |args: &[&str]| {
+        let output = std::process::Command::new(cargo_bin!("aikit"))
+            .env("AIKIT_HOME", home.path())
+            .current_dir(project.path())
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            serde_json::from_slice::<Value>(&output.stdout).ok(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (ok, json, stderr) = run(&[
+        "flow",
+        "preflight",
+        "--now-ref",
+        "central:now:control:root:cli",
+        "--fixtures",
+        seam.to_str().unwrap(),
+    ]);
+    assert!(ok, "{stderr}");
+    let data = json.unwrap();
+    assert_eq!(data["contemplation"]["state"], "unavailable");
+    assert_eq!(data["preflight"]["fixture_count"], 1);
+    assert!(data["preflight"]["invocation_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("now-contemplate/"));
+
+    // A stream that disagrees with the addressed NOW refuses outright.
+    let (ok, _, stderr) = run(&[
+        "flow",
+        "preflight",
+        "--now-ref",
+        "central:now:control:root:other",
+        "--fixtures",
+        seam.to_str().unwrap(),
+    ]);
+    assert!(!ok, "{stderr}");
+
+    // `--now-ref` without `--fixtures` refuses before any owner call.
+    let (ok, _, stderr) = run(&[
+        "flow",
+        "preflight",
+        "--now-ref",
+        "central:now:control:root:cli",
+    ]);
+    assert!(!ok, "{stderr}");
+}

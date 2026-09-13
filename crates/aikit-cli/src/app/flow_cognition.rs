@@ -31,10 +31,13 @@ use aikit_core::praxis::PraxisResolution;
 use aikit_core::resource::{MemoryResourceIndex, ResourceRef, SourceRevision};
 use aikit_core::wiki_living_dependencies;
 use aikit_core::{
-    changed_since_thought, explain_flow_contemplate_preflight, explicit_flow_contemplate_validated,
-    AikitError, EventId, FamiliarityObservation, FlowChangedSince, FlowChangedSinceState,
-    FlowCognition, FlowThoughtRecord, ACTION_CONTEMPLATE_FLOW, FLOW_COGNITION_VERSION,
-    FLOW_CONTEMPLATE_USE_RECORDED,
+    changed_since_thought, explain_flow_contemplate_preflight, explain_now_contemplate_preflight,
+    explicit_flow_contemplate_validated, explicit_now_contemplate, now_contemplate_preflight,
+    validate_now_contemplate_record, AikitError, EventId, FamiliarityObservation,
+    FlowChangedSince, FlowChangedSinceState, FlowCognition, FlowThoughtRecord, NowContemplation,
+    NowContemplationPreflight, NowContemplateRecord, NowFixturesSeam, ACTION_CONTEMPLATE_FLOW,
+    ACTION_CONTEMPLATE_NOW, FLOW_COGNITION_VERSION, FLOW_CONTEMPLATE_USE_RECORDED,
+    NOW_CONTEMPLATION_VERSION,
 };
 use aikit_store::append_familiarity_observation;
 use aikit_tui::backend::PaletteBackend;
@@ -619,4 +622,152 @@ impl Service {
             reading,
         })
     }
+
+    // -----------------------------------------------------------------------
+    // NOW contemplation — the re-aimed subject (Central #175 cell 2)
+    // -----------------------------------------------------------------------
+
+    /// Deterministic NOW preflight over the caller-supplied raw-stream seam.
+    /// The seam must agree with the addressed NOW; the facts are computed
+    /// from the seam alone. Inert — records nothing.
+    pub fn now_contemplate_preflight_receipt(
+        &mut self,
+        now_ref: &str,
+        seam: &NowFixturesSeam,
+        unavailable_reason: &str,
+    ) -> aikit_core::Result<NowContemplateReceipt> {
+        if seam.now_ref != now_ref {
+            return Err(AikitError::new(
+                "now.contemplate_subject_mismatch",
+                format!(
+                    "the fixtures seam carries NOW {} but the addressed subject is {now_ref}",
+                    seam.now_ref
+                ),
+            ));
+        }
+        let preflight = now_contemplate_preflight(seam)?;
+        let explain = explain_now_contemplate_preflight(&preflight)?;
+        Ok(NowContemplateReceipt {
+            version: NOW_CONTEMPLATION_VERSION.into(),
+            now_ref: preflight.now_ref.clone(),
+            preflight: Some(preflight),
+            explain,
+            contemplation: NowContemplation::Unavailable {
+                version: NOW_CONTEMPLATION_VERSION.into(),
+                invocation_ref: None,
+                now_ref: now_ref.to_owned(),
+                reason: unavailable_reason.to_owned(),
+            },
+            recorded: None,
+            observation_id: None,
+        })
+    }
+
+    /// Execution half: the supplied record is validated against a fresh
+    /// deterministic preflight; drift refuses before any executor is called.
+    /// Without a host executor the reading is explicitly `unavailable`.
+    /// With one, the distilled learning leaves as an unapplied proposal —
+    /// the T-prime write is Central's `central.now.learnings.distill`.
+    pub fn now_contemplate_with_record(
+        &mut self,
+        now_ref: &str,
+        seam: &NowFixturesSeam,
+        record: &NowContemplateRecord,
+        executor: Option<&mut dyn aikit_core::NowContemplateExecutor>,
+    ) -> aikit_core::Result<NowContemplateReceipt> {
+        let fresh = now_contemplate_preflight(seam)?;
+        let mut receipt = NowContemplateReceipt {
+            version: NOW_CONTEMPLATION_VERSION.into(),
+            now_ref: now_ref.to_owned(),
+            preflight: Some(fresh.clone()),
+            explain: explain_now_contemplate_preflight(&fresh)?,
+            contemplation: NowContemplation::Unavailable {
+                version: NOW_CONTEMPLATION_VERSION.into(),
+                invocation_ref: Some(fresh.invocation_ref.clone()),
+                now_ref: now_ref.to_owned(),
+                reason: String::new(),
+            },
+            recorded: None,
+            observation_id: None,
+        };
+        if let Err(error) = validate_now_contemplate_record(record, &fresh) {
+            receipt.contemplation = NowContemplation::Refused {
+                version: NOW_CONTEMPLATION_VERSION.into(),
+                invocation_ref: Some(record.invocation_ref.clone()),
+                now_ref: now_ref.to_owned(),
+                reason: format!("{}: {}", error.code(), error.message()),
+            };
+            return Ok(receipt);
+        }
+        let Some(executor) = executor else {
+            receipt.contemplation = NowContemplation::Unavailable {
+                version: NOW_CONTEMPLATION_VERSION.into(),
+                invocation_ref: Some(fresh.invocation_ref),
+                now_ref: now_ref.to_owned(),
+                reason: "no host executor supplied; contemplate is never auto-invoked and the CLI surface carries no Agent/model executor".into(),
+            };
+            return Ok(receipt);
+        };
+        receipt.contemplation = match explicit_now_contemplate(seam, record, executor) {
+            Ok(reading) => reading,
+            Err(error) => NowContemplation::Refused {
+                version: NOW_CONTEMPLATION_VERSION.into(),
+                invocation_ref: Some(record.invocation_ref.clone()),
+                now_ref: now_ref.to_owned(),
+                reason: format!("{}: {}", error.code(), error.message()),
+            },
+        };
+        if matches!(receipt.contemplation, NowContemplation::Proposed { .. }) {
+            let observation_id = format!("now-contemplate-use/{}", EventId::generate());
+            let observation = FamiliarityObservation::destination(
+                observation_id.clone(),
+                ResourceRef::parse(now_ref)?,
+                self.knowledge_context(),
+                now_ms(),
+            )
+            .from_surface(ResourceRef::parse(KNOWLEDGE_SURFACE_REF)?)
+            .via_action(ResourceRef::parse(ACTION_CONTEMPLATE_NOW)?);
+            append_familiarity_observation(&self.index, observation)?;
+            receipt.recorded = Some(FLOW_CONTEMPLATE_USE_RECORDED.into());
+            receipt.observation_id = Some(observation_id);
+        }
+        Ok(receipt)
+    }
+
+    /// One explicit Contemplate(now_ref): preflight → Explain disclosure →
+    /// record-gated execution. Preflight-first; never auto-invoked.
+    pub fn now_contemplate(
+        &mut self,
+        now_ref: &str,
+        seam: &NowFixturesSeam,
+        record: Option<&NowContemplateRecord>,
+        executor: Option<&mut dyn aikit_core::NowContemplateExecutor>,
+    ) -> aikit_core::Result<NowContemplateReceipt> {
+        match record {
+            Some(record) => self.now_contemplate_with_record(now_ref, seam, record, executor),
+            None => self.now_contemplate_preflight_receipt(
+                now_ref,
+                seam,
+                "no host executor supplied; contemplate is never auto-invoked",
+            ),
+        }
+    }
+}
+
+/// One explicit Contemplate(now_ref) result: the preflight record that gated
+/// it, its Explain disclosure, the typed contemplation reading and — only on
+/// a proposal — the single recorded familiarity observation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NowContemplateReceipt {
+    pub version: String,
+    pub now_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight: Option<NowContemplationPreflight>,
+    #[serde(default)]
+    pub explain: Vec<ExplainEvidence>,
+    pub contemplation: NowContemplation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
 }

@@ -1911,10 +1911,49 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
 /// here always stops at the record gate with an `unavailable` reading unless
 /// a host kernel cell supplies the executor — Contemplate is never
 /// auto-invoked (#138 §7).
+/// Resolve the contemplate subject on the CLI surface: either the Flow node
+/// (`flow_ref`) or the NOW raw stream (`--now-ref` + `--fixtures`), never
+/// both and never neither.
+fn flow_subject(a: &FlowContemplateArgs) -> Result<aikit_core::resource::ResourceRef> {
+    let flow_ref = a.flow_ref.as_deref().ok_or_else(|| {
+        AikitError::new(
+            "flow.subject_required",
+            "contemplate requires a Flow node or `--now-ref` with `--fixtures`",
+        )
+    })?;
+    aikit_core::resource::ResourceRef::parse(flow_ref)
+}
+
+fn now_subject(
+    a: &FlowContemplateArgs,
+) -> Result<Option<(String, aikit_core::NowFixturesSeam)>> {
+    let Some(now_ref) = &a.now_ref else {
+        return Ok(None);
+    };
+    if a.flow_ref.is_some() {
+        return Err(AikitError::new(
+            "flow.subject_ambiguous",
+            "contemplate takes one subject: a Flow node or `--now-ref`, not both",
+        ));
+    }
+    let fixtures_path = a.fixtures.as_deref().ok_or_else(|| {
+        AikitError::new(
+            "now.fixtures_seam_required",
+            "`--now-ref` requires `--fixtures <file>`: the caller supplies the NOW's central.thoughts-reading/v1 stream verbatim",
+        )
+    })?;
+    let body = std::fs::read_to_string(fixtures_path).map_err(|error| {
+        AikitError::new(
+            "now.fixtures_seam_unreadable",
+            format!("cannot read {}: {error}", fixtures_path.display()),
+        )
+    })?;
+    Ok(Some((now_ref.clone(), aikit_core::NowFixturesSeam::parse(&body)?)))
+}
+
 fn cmd_flow(cwd: &std::path::Path, c: FlowCmd) -> Result<Reply> {
     use aikit_core::knowledge_living::KnowledgeChangeHorizon;
     use aikit_core::model_runtime::ModelRuntimeReadModel;
-    use aikit_core::resource::ResourceRef;
 
     fn read_json<T: serde::de::DeserializeOwned>(
         path: &std::path::Path,
@@ -1932,48 +1971,70 @@ fn cmd_flow(cwd: &std::path::Path, c: FlowCmd) -> Result<Reply> {
     let warnings = diagnostic_warnings(&service);
     let data = match c.command {
         FlowSub::Preflight(a) => {
-            let basis = FlowContemplateBasis {
-                horizon: a
-                    .horizon
-                    .as_deref()
-                    .map(|path| {
-                        read_json::<KnowledgeChangeHorizon>(path, "flow.horizon_unreadable")
-                    })
-                    .transpose()?,
-                runtime: a
-                    .runtime
-                    .as_deref()
-                    .map(|path| read_json::<ModelRuntimeReadModel>(path, "flow.runtime_unreadable"))
-                    .transpose()?,
-                agent: None,
-                agency: None,
-            };
-            let flow_ref = ResourceRef::parse(&a.flow_ref)?;
-            jval!(service.flow_contemplate_preflight(&flow_ref, &basis)?)
+            if let Some(subject) = now_subject(&a)? {
+                let (now_ref, seam) = subject;
+                jval!(service.now_contemplate_preflight_receipt(
+                    &now_ref,
+                    &seam,
+                    "preflight only; nothing was executed",
+                )?)
+            } else {
+                let basis = FlowContemplateBasis {
+                    horizon: a
+                        .horizon
+                        .as_deref()
+                        .map(|path| {
+                            read_json::<KnowledgeChangeHorizon>(path, "flow.horizon_unreadable")
+                        })
+                        .transpose()?,
+                    runtime: a
+                        .runtime
+                        .as_deref()
+                        .map(|path| {
+                            read_json::<ModelRuntimeReadModel>(path, "flow.runtime_unreadable")
+                        })
+                        .transpose()?,
+                    agent: None,
+                    agency: None,
+                };
+                let flow_ref = flow_subject(&a)?;
+                jval!(service.flow_contemplate_preflight(&flow_ref, &basis)?)
+            }
         }
         FlowSub::Contemplate(a) => {
-            let basis = FlowContemplateBasis {
-                horizon: a
-                    .horizon
-                    .as_deref()
-                    .map(|path| {
-                        read_json::<KnowledgeChangeHorizon>(path, "flow.horizon_unreadable")
-                    })
-                    .transpose()?,
-                runtime: a
-                    .runtime
-                    .as_deref()
-                    .map(|path| read_json::<ModelRuntimeReadModel>(path, "flow.runtime_unreadable"))
-                    .transpose()?,
-                agent: None,
-                agency: None,
-            };
-            let flow_ref = ResourceRef::parse(&a.flow_ref)?;
-            // The CLI surface never carries a host executor: the reading is
-            // produced through the same record gate and is explicitly
-            // `unavailable` — which is also why no familiarity observation is
-            // recorded here.
-            jval!(service.flow_contemplate(&flow_ref, &basis, None)?)
+            if let Some(subject) = now_subject(&a)? {
+                let (now_ref, seam) = subject;
+                jval!(service.now_contemplate_preflight_receipt(
+                    &now_ref,
+                    &seam,
+                    "no host executor supplied; contemplate is never auto-invoked and the CLI surface carries no Agent/model executor",
+                )?)
+            } else {
+                let basis = FlowContemplateBasis {
+                    horizon: a
+                        .horizon
+                        .as_deref()
+                        .map(|path| {
+                            read_json::<KnowledgeChangeHorizon>(path, "flow.horizon_unreadable")
+                        })
+                        .transpose()?,
+                    runtime: a
+                        .runtime
+                        .as_deref()
+                        .map(|path| {
+                            read_json::<ModelRuntimeReadModel>(path, "flow.runtime_unreadable")
+                        })
+                        .transpose()?,
+                    agent: None,
+                    agency: None,
+                };
+                let flow_ref = flow_subject(&a)?;
+                // The CLI surface never carries a host executor: the reading
+                // is produced through the same record gate and is explicitly
+                // `unavailable` — which is also why no familiarity observation
+                // is recorded here.
+                jval!(service.flow_contemplate(&flow_ref, &basis, None)?)
+            }
         }
         FlowSub::ChangedSince(a) => {
             let thought =

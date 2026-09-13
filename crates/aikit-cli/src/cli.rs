@@ -853,8 +853,19 @@ pub enum FlowSub {
 #[derive(Debug, Args)]
 pub struct FlowContemplateArgs {
     /// ResourceRef of the Flow node, as listed by `knowledge resolve`.
+    /// Required unless `--now-ref` names the subject instead.
     #[arg(value_name = "FLOW_REF")]
-    pub flow_ref: String,
+    pub flow_ref: Option<String>,
+    /// Address a NOW clearing's raw contemplative stream instead of a Flow:
+    /// the contemplate subject is the NOW's T/T' system (Central #175).
+    /// Requires `--fixtures`.
+    #[arg(long, value_name = "NOW_REF")]
+    pub now_ref: Option<String>,
+    /// Path to the NOW's `central.thoughts-reading/v1` stream JSON, carried
+    /// verbatim from Central's `central.now.thoughts.read`. The caller
+    /// supplies the seam; this surface fabricates none.
+    #[arg(long, value_name = "FILE")]
+    pub fixtures: Option<std::path::PathBuf>,
     /// Path to a provider-neutral `KnowledgeChangeHorizon` JSON owner seam
     /// (e.g. Central's `central.source-change-horizon/v1`, adapted).
     #[arg(long, value_name = "FILE")]
