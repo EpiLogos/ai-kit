@@ -13,11 +13,14 @@ use aikit_core::resource::operative_scope::invocation::{
     ScopedActionAttemptEvidence, ScopedActionAttemptOutcome, ScopedActionInvocation,
     ScopedActionReturnEvidence,
 };
-use aikit_core::resource::{RelationOp, ResolveExpression, ResourceRef, SourceRef, SourceRevision};
-use aikit_core::routine::{prove_method, MethodProofInput, ProvenMethodBasis};
+use aikit_core::resource::{
+    prove_method, MethodProofInput, ProvenMethodBasis, RelationOp, ResolveExpression, ResourceRef,
+    SourceRef, SourceRevision,
+};
 use aikit_core::{AikitError, Capsule, CapsuleId, Kind, Maturity, Result};
 use aikit_store::inbox::{Capture, Inbox, PromotedCapsule, PromotionEdits};
 use aikit_store::Index;
+use aikit_tui::backend::PaletteBackend;
 
 use crate::app::Service;
 use crate::scoped_invocation::{current_scoped_invocation_context, NATIVE_CAPABILITY_RUN_ACTION};
@@ -123,7 +126,7 @@ impl RecognisedPraxisApplication for Service {
             None => CapsuleId::parse(&format!("skill/recognised/{}", slug(name)))?,
         };
         let description = format!("METHOD: {name}");
-        let edits = PromotionEdits::new(skill_id.clone(), description.clone())
+        let edits = PromotionEdits::new(skill_id.clone(), description)
             .with_name(name)
             .with_tags(["recognised-praxis"])
             .with_maturity(Maturity::Draft);
