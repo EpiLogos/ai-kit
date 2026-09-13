@@ -409,7 +409,7 @@ mod tests {
                 .to_string()
                 .starts_with("now-contemplate/")
         );
-        assert_eq!(first.automatic_agent_or_model_invocation, false);
+        assert!(!first.automatic_agent_or_model_invocation);
     }
 
     struct Echo;
