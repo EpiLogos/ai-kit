@@ -43,6 +43,7 @@ pub mod profile_ops;
 pub mod project_binding;
 pub mod projects;
 pub mod run;
+pub mod scoped_invocation;
 pub mod session_lifecycle_ops;
 pub mod session_space_ops;
 pub mod session_space_service;
