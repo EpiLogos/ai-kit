@@ -172,11 +172,20 @@ fn cancelled_attempt_can_receive_late_stale_and_reordered_returns_without_rewrit
     )
     .unwrap();
 
-    assert_eq!(second_from_producer.original_scopes, invocation.original_scopes);
-    assert_eq!(first_from_producer.original_scopes, invocation.original_scopes);
+    assert_eq!(
+        second_from_producer.original_scopes,
+        invocation.original_scopes
+    );
+    assert_eq!(
+        first_from_producer.original_scopes,
+        invocation.original_scopes
+    );
     assert_eq!(second_from_producer.arrival.producer_sequence, Some(2));
     assert_eq!(first_from_producer.arrival.producer_sequence, Some(1));
-    assert_ne!(second_from_producer.return_ref, first_from_producer.return_ref);
+    assert_ne!(
+        second_from_producer.return_ref,
+        first_from_producer.return_ref
+    );
 }
 
 #[test]
