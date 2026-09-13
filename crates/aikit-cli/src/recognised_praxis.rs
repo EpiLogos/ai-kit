@@ -162,7 +162,7 @@ impl RecognisedPraxisApplication for Service {
         let source_revision = promoted_revision(&manifest, &body)?;
         let method_id = ResourceRef::parse(skill_id.to_string())?;
         let naming_expression = ResolveExpression::Binary {
-            op: RelationOp::Name,
+            op: RelationOp::Express,
             left: Box::new(ResolveExpression::subject(request.invocation.subject.to_string())),
             right: Box::new(ResolveExpression::subject(name)),
         };
@@ -180,7 +180,7 @@ impl RecognisedPraxisApplication for Service {
             context_sources: Vec::new(),
             verification: Vec::new(),
             expected_resolve: Some(ResolveExpression::Binary {
-                op: RelationOp::Transform,
+                op: RelationOp::Relate,
                 left: Box::new(ResolveExpression::subject(request.invocation.subject.to_string())),
                 right: Box::new(ResolveExpression::subject(NATIVE_CAPABILITY_RUN_ACTION)),
             }),
@@ -188,7 +188,8 @@ impl RecognisedPraxisApplication for Service {
         };
         method.validate()?;
 
-        let context_resolution_ref = ResourceRef::parse(request.invocation.resolve_path_identity.clone())?;
+        let context_resolution_ref =
+            ResourceRef::parse(request.invocation.resolve_path_identity.clone())?;
         let proof_ref = proof_ref(
             &method_id,
             &source_revision,
