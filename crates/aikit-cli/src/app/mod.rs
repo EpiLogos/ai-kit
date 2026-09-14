@@ -287,6 +287,11 @@ pub struct Service {
     /// compose path does; it is fetched on demand (roster overlay open), so one
     /// composition per session is reused rather than recomputed on each open.
     model_roster_reading: std::cell::RefCell<Option<aikit_core::resource::ModelRoster>>,
+    /// Context-composition notes. Read-only discovery (search, explain,
+    /// relations, contextual actions) is decorated by live Central actor
+    /// composition but never gated by it: when composition fails, the reading
+    /// proceeds without the actor slice and the reason is disclosed here.
+    context_composition_notes: std::cell::RefCell<Vec<String>>,
 }
 
 impl Service {
@@ -430,6 +435,7 @@ impl Service {
             doctor_report: std::cell::RefCell::new(None),
             workcell_reading: std::cell::RefCell::new(None),
             model_roster_reading: std::cell::RefCell::new(None),
+            context_composition_notes: std::cell::RefCell::new(Vec::new()),
         })
     }
 
@@ -2111,6 +2117,12 @@ impl Service {
             .collect()
     }
 
+    /// Context-composition notes: why a reading is missing its actor-context
+    /// slice (see `context_composition_notes`).
+    pub fn context_composition_notes(&self) -> Vec<String> {
+        self.context_composition_notes.borrow().clone()
+    }
+
     /// The context directory under the home, created if needed.
     fn context_dir(&self) -> Result<PathBuf> {
         self.home.ensure_context_dir(&self.descriptor.context_id)
@@ -2696,9 +2708,22 @@ impl PaletteBackend for Service {
             return Ok(Vec::new());
         };
         let mut records = if let Some(central) = self.central_meta_root.clone().or_else(|| process_central_root(Some(project))) {
-            compose_live_actor_inputs(&SystemRunner::new(), &central, project)?
-                .map(|inputs| inputs.source_resources)
-                .unwrap_or_default()
+            match compose_live_actor_inputs(&SystemRunner::new(), &central, project) {
+                Ok(composed) => composed
+                    .map(|inputs| inputs.source_resources)
+                    .unwrap_or_default(),
+                Err(error) => {
+                    // The same fail-soft law as projection_context_for: actor
+                    // context decorates a reading, it never gates one. The
+                    // failure is disclosed, not swallowed.
+                    self.context_composition_notes.borrow_mut().push(format!(
+                        "context composition skipped ({}): {}",
+                        error.code(),
+                        error.message()
+                    ));
+                    Vec::new()
+                }
+            }
         } else {
             Vec::new()
         };
