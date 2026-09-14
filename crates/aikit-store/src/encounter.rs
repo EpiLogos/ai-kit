@@ -217,10 +217,8 @@ impl EncounterStore {
         let rows = q
             .query_map(params![session.as_str()], |r| r.get::<_, String>(0))
             .map_err(failure)?;
-        let result = rows
-            .map(|r| serde_json::from_str(&r.map_err(failure)?).map_err(failure))
-            .collect();
-        result
+        rows.map(|r| serde_json::from_str(&r.map_err(failure)?).map_err(failure))
+            .collect()
     }
     pub fn draft(&self, session: &ResourceRef) -> Result<EncounterDraft> {
         validate(session)?;
