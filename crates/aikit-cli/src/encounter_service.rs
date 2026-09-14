@@ -198,6 +198,10 @@ pub enum EncounterRequest {
     ModelRead {
         agent_session: ResourceRef,
     },
+    /// Reclassify only a causally proven legacy native-load replay projection.
+    ClassifyLegacyLoadReplay {
+        agent_session: ResourceRef,
+    },
     /// Request an exact provider-advertised model from the resident native
     /// session. Durable model policy/Agency selection stays outside this route.
     ModelSelect {
@@ -905,6 +909,7 @@ impl EncounterService {
                     .map(|r| r.values().cloned().collect::<Vec<_>>())
                     .unwrap_or_default());
                 view["permission_authority"] = json!("native-provider-consent");
+                view["history_reclassifications"] = json!(self.store.legacy_load_reclassifications(&agent_session)?);
                 let can_open = !view["connection"]["resident"].as_bool().unwrap_or(false)
                     && !self.providers()?.is_empty();
                 view["actions"] = json!([
@@ -922,6 +927,12 @@ impl EncounterService {
                 .into_iter()
                 .map(|p| json!({"id":p.id,"label":p.label}))
                 .collect::<Vec<_>>())),
+            EncounterRequest::ClassifyLegacyLoadReplay { agent_session } => {
+                self.require_attached(&agent_session)?;
+                let classification = self.store.classify_legacy_load_replay(&agent_session)?;
+                self.store.append(&agent_session, &json!({"kind":"legacy-native-load-replay-classification","classification":classification}))?;
+                Ok(classification)
+            }
             EncounterRequest::ModelRead { agent_session } => {
                 self.require_attached(&agent_session)?;
                 let resident = self.resident(&agent_session)?;

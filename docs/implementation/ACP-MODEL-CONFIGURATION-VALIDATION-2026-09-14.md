@@ -35,10 +35,14 @@ Negative controls used the same resident binding and sent no prompts:
 The reconnect generated raw `provider-history-replay` receipts. Ordinary live
 provider projections counted 31 before and 31 after the negative controls;
 raw history-replay receipts counted 10 before and 10 after. That shows the
-negative controls did not add projected live blocks. It does not repair or
-reinterpret historic duplicate projections already in the journal: ACP load
-updates do not supply a stable per-history-event identity, so replay is kept as
-unreconciled raw evidence rather than text-deduplicated.
+negative controls did not add projected live blocks.
+
+A later owner repair can exclude a historic projection only when its own journal
+proves one precise shutdown → same native session → one provider replay →
+native-load binding sequence with no intervening owner write. The raw event and
+stored block remain intact, and the derived causal receipt is exposed in the
+owner view. Ambiguous or unmatched history remains visible; this is not
+text-based deduplication.
 
 The complete machine-local command outputs are retained at
 `/tmp/oi-encounter-model-live-20260914/`. They deliberately remain outside this
