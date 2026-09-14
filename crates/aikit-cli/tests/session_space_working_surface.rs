@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
 use aikit_cli::session_space_working_surface::{
@@ -74,25 +74,25 @@ fn attach_through_public_cli(
     space: &SessionSpaceRef,
     binding: &ResourceRef,
     marker: &str,
+    native: &str,
 ) -> Vec<u8> {
     if !std::path::Path::new("/usr/bin/script").is_file() {
         eprintln!("SKIP terminal attach PTY proof: /usr/bin/script is unavailable");
         return Vec::new();
     }
     let binary = cargo_bin("aikit-session-space");
-    let mut client = Command::new("/usr/bin/script")
-        .args([
-            "-q",
-            "/dev/null",
-            "--",
-            binary.to_str().unwrap(),
-            "-C",
-            home.to_str().unwrap(),
-            "working-surface",
-            "attach",
-            &space.to_string(),
-            binding.as_str(),
-        ])
+    let argv = vec![binary.to_str().unwrap().to_owned(), "-C".into(),
+        home.to_str().unwrap().to_owned(), "working-surface".into(), "attach".into(),
+        space.to_string(), binding.as_str().to_owned()];
+    let mut script = Command::new("/usr/bin/script");
+    // util-linux uses -c; BSD script accepts a command argv. Do not depend on
+    // the recent util-linux positional-command extension absent on CI hosts.
+    if cfg!(target_os = "linux") {
+        script.args(["-q", "-e", "-c", &shell_words::join(&argv), "/dev/null"]);
+    } else {
+        script.args(["-q", "/dev/null"]).args(&argv);
+    }
+    let mut client = script
         .env("AIKIT_HOME", home)
         .env("AIKIT_TMUX_SOCKET", socket)
         .env("TERM", "xterm-256color")
@@ -102,12 +102,23 @@ fn attach_through_public_cli(
         .spawn()
         .expect("public owner command attaches a terminal client through a PTY");
     let mut input = client.stdin.take().unwrap();
-    std::thread::sleep(Duration::from_millis(150));
-    input
-        .write_all(format!("printf '{marker}\\n'\\n").as_bytes())
-        .unwrap();
+    input.write_all(format!("printf '{marker}\\n'\n").as_bytes()).unwrap();
     input.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(150));
+    // Verify shell execution in the exact native pane, not merely input echoed
+    // by the outer PTY. The owner-resolved pane remains the same throughout.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let capture = Command::new("tmux").args(["-L", socket, "capture-pane", "-p", "-t", native]).output().unwrap();
+        if capture.status.success() && String::from_utf8_lossy(&capture.stdout).lines().any(|line| line.trim() == marker) {
+            break;
+        }
+        if client.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+            let _ = client.kill();
+            let output = client.wait_with_output().unwrap();
+            panic!("public PTY command did not execute in exact pane: stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
     // tmux detach prefix. The shell continues in the provider Surface.
     input.write_all(&[0x02, b'd']).unwrap();
     input.flush().unwrap();
@@ -262,6 +273,7 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
         &space,
         &binding,
         marker_one,
+        &native,
     );
     if !output_one.is_empty() {
         assert!(
@@ -280,6 +292,7 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
         &space,
         &binding,
         marker_two,
+        &native,
     );
     if !output_two.is_empty() {
         assert!(
