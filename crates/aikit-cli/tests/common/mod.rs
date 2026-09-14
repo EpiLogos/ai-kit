@@ -35,7 +35,11 @@ pub fn end_tmux_server(socket: &str) {
     let path = reported.map(std::path::PathBuf::from).or_else(|| {
         let base = std::env::var("TMUX_TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
         let uid = String::from_utf8(
-            std::process::Command::new("id").arg("-u").output().ok()?.stdout,
+            std::process::Command::new("id")
+                .arg("-u")
+                .output()
+                .ok()?
+                .stdout,
         )
         .ok()?;
         Some(

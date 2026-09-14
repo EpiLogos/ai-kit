@@ -36,6 +36,7 @@ crossterm = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+toml = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 serde_json = { workspace = true }

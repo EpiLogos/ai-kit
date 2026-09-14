@@ -4,7 +4,8 @@
 mod common;
 
 use aikit_cli::working_environment_field::{
-    act, observe, plan_surfaces, provider_ref, surface_ref,
+    act, herdr_provider_ref, herdr_recorded_surfaces, herdr_recorded_workspace, observe,
+    plan_surfaces, provider_ref, surface_ref,
 };
 use aikit_core::platform::MuxKind;
 use aikit_core::session::SessionSpec;
@@ -235,6 +236,7 @@ fn a_real_provider_opens_then_focuses_the_same_canonical_subject() {
             provider,
             subject: opened_subject,
             native_id,
+            ..
         } => {
             assert_eq!(provider, &tmux);
             // The canonical subject is the one we asked for, unchanged.
@@ -309,4 +311,90 @@ direction = "down"
     assert!(refs.len() < plan.pane_count());
     // And observing over that plan still works rather than raising.
     observe(&plan).expect("an unnameable pane must not fail the whole reading");
+}
+
+/// Herdr is the first rich Omarchy reference provider. It answers over the
+/// same plan and canonical Surfaces as the muxes, through its own adapter and
+/// provider Ref, and only persisted provider-native evidence binds a Surface.
+mod herdr_public_route {
+    use super::*;
+
+    fn with_herdr_extension(
+        plan: &mut SessionPlan,
+        workspace: Option<&str>,
+        surfaces: &[(&str, &str)],
+    ) {
+        let mut herdr = toml::map::Map::new();
+        if let Some(id) = workspace {
+            herdr.insert("workspace-id".into(), toml::Value::String(id.into()));
+        }
+        let mut recorded = toml::map::Map::new();
+        for (logical, pane) in surfaces {
+            recorded.insert((*logical).into(), toml::Value::String((*pane).into()));
+        }
+        herdr.insert("surfaces".into(), toml::Value::Table(recorded));
+        plan.backend_extensions.insert("herdr".into(), herdr);
+    }
+
+    fn herdr_installed() -> bool {
+        std::process::Command::new("herdr")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn herdr_provider_ref_is_distinct_from_every_mux_provider() {
+        let herdr = herdr_provider_ref().unwrap();
+        assert_eq!(herdr.to_string(), "provider/herdr/current");
+        assert_ne!(herdr, provider_ref(MuxKind::Tmux).unwrap());
+        assert_ne!(herdr, provider_ref(MuxKind::Cmux).unwrap());
+    }
+
+    #[test]
+    fn recorded_herdr_evidence_binds_exactly_the_named_surfaces() {
+        let mut recorded = plan();
+        with_herdr_extension(&mut recorded, Some("ws-1"), &[("main/shell", "pane-a")]);
+        assert_eq!(herdr_recorded_workspace(&recorded).as_deref(), Some("ws-1"));
+        let bound = herdr_recorded_surfaces(&recorded);
+        assert_eq!(bound.len(), 1, "only the recorded surface binds: {bound:?}");
+        assert_eq!(bound[0].0.to_string(), "surface/terminal/main/shell");
+        assert_eq!(bound[0].1, "pane-a");
+
+        // The sibling surface has no recorded pane id, so it stays unbound
+        // rather than being guessed from the plan.
+        assert_eq!(herdr_recorded_surfaces(&plan()).len(), 0);
+        assert_eq!(herdr_recorded_workspace(&plan()), None);
+    }
+
+    #[test]
+    fn a_pane_recorded_for_an_unknown_logical_key_is_not_invented() {
+        let mut stale = plan();
+        with_herdr_extension(&mut stale, Some("ws-2"), &[("other/view", "pane-x")]);
+        assert_eq!(herdr_recorded_surfaces(&stale).len(), 0);
+    }
+
+    #[test]
+    fn herdr_answers_in_the_field_exactly_when_installed() {
+        let observations = observe(&plan()).expect("observation must not fail on any host");
+        let herdr_row = observations
+            .iter()
+            .find(|observation| observation.provider == herdr_provider_ref().unwrap());
+        if herdr_installed() {
+            let row = herdr_row.expect("an installed herdr must answer in the field");
+            assert!(row.provider_version.is_some());
+            if row.health == WorkingEnvironmentHealth::Unavailable {
+                assert!(
+                    !row.provenance.is_empty(),
+                    "an unobservable herdr must say why"
+                );
+            }
+        } else {
+            assert!(
+                herdr_row.is_none(),
+                "herdr is absent here: listing it would put an unusable row in the field"
+            );
+        }
+    }
 }
