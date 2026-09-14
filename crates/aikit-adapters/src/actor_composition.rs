@@ -127,9 +127,29 @@ fn read_project_agent_profile<R: CommandRunner>(
         return Ok(None);
     }
     let [entry] = profiles.as_slice() else {
+        let candidates = profiles
+            .iter()
+            .map(|entry| {
+                let agent = entry
+                    .pointer("/profile/agent_ref")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown-agent");
+                let source = entry
+                    .get("source_path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown-source");
+                format!("{agent} ({source})")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(AikitError::new(
             "actor_composition.ambiguous_profile",
-            "Multiple Central profiles require explicit selection; none is guessed",
+            format!(
+                "{} Central agent profiles match this scope, so none is guessed: {candidates}. \
+                 Select one explicitly with `aikit compose --agency-source <basis.json> --agent <agent_ref> --world <world_ref>`, \
+                 or keep the authored ground to one profile for this scope",
+                profiles.len()
+            ),
         ));
     };
     let source = entry.get("profile").ok_or_else(|| {
