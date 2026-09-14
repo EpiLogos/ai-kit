@@ -194,7 +194,7 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
         &store,
         &space,
         SessionSpaceMutation::BindWorkingSurface {
-            binding: SessionSpaceWorkingSurfaceBinding {
+            binding: Box::new(SessionSpaceWorkingSurfaceBinding {
                 binding: binding.clone(),
                 surface: surface.clone(),
                 agent_session: agent.clone(),
@@ -202,7 +202,7 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
                 plan: plan("aikit-persisted-surface"),
                 plan_key: "main/shell".into(),
                 provenance: vec!["persisted test binding".into()],
-            },
+            }),
         },
     );
 
@@ -347,7 +347,7 @@ fn working_surface_binding_refuses_unattached_or_mismatched_identities() {
         .stage(
             Some(&space),
             SessionSpaceMutation::BindWorkingSurface {
-                binding: SessionSpaceWorkingSurfaceBinding {
+                binding: Box::new(SessionSpaceWorkingSurfaceBinding {
                     binding: r("working-surface/invalid"),
                     surface: r("surface/terminal/main/shell"),
                     agent_session: r("agent-session/missing"),
@@ -355,7 +355,7 @@ fn working_surface_binding_refuses_unattached_or_mismatched_identities() {
                     plan: plan("invalid-binding"),
                     plan_key: "main/shell".into(),
                     provenance: vec![],
-                },
+                }),
             },
         )
         .unwrap_err();

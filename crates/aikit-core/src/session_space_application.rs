@@ -410,7 +410,7 @@ pub enum SessionSpaceMutation {
         surface: ResourceRef,
     },
     BindWorkingSurface {
-        binding: SessionSpaceWorkingSurfaceBinding,
+        binding: Box<SessionSpaceWorkingSurfaceBinding>,
     },
     UnbindWorkingSurface {
         binding: ResourceRef,
@@ -594,7 +594,7 @@ fn apply_intent(
         SessionSpaceMutation::BindWorkingSurface { binding } => {
             state
                 .working_surfaces
-                .insert(binding.binding.clone(), binding.clone());
+                .insert(binding.binding.clone(), (**binding).clone());
             changed.push(change(
                 "working-surface",
                 binding.binding.as_str(),
