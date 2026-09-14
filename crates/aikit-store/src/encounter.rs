@@ -103,7 +103,7 @@ impl EncounterStore {
     /// replay. Canonical journal events and stored blocks remain untouched.
     pub fn classify_legacy_load_replay(&self, session: &ResourceRef) -> Result<Value> {
         validate(session)?;
-        let connection = self.connection.lock().map_err(failure)?;
+        let mut connection = self.connection.lock().map_err(failure)?;
         let events = journal_events(&connection, session)?;
         let blocks = journal_blocks(&connection, session)?;
         let mut output = Vec::new();
@@ -176,6 +176,12 @@ impl EncounterStore {
             let Some(block_index) = projected_assistant_block_index(&events, replay_cursor) else {
                 continue;
             };
+            let projected = projected_blocks(&events);
+            if projected.len() != blocks.len()
+                || !projected.iter().zip(&blocks).all(|((kind, text), (_, actual_kind, actual_text))| kind == actual_kind && text == actual_text)
+            {
+                continue;
+            }
             let Some((block_id, kind, text)) = blocks.get(block_index) else {
                 continue;
             };
@@ -188,9 +194,16 @@ impl EncounterStore {
                 continue;
             }
             let basis = serde_json::json!({"kind":"legacy-native-load-replay","standing":"derived-from-exact-owner-journal-causality","shutdown_completed_cursor":event.cursor,"native_session_id":native,"connection_generation":generation,"pre_native_load_provider_cursors":[replay_cursor],"native_load_binding_cursor":binding_cursor,"projection_block_id":block_id,"intervening_owner_prompt_or_user_write":false});
-            connection.execute("INSERT OR IGNORE INTO encounter_block_exclusions(session,block_id,basis) VALUES(?1,?2,?3)",params![session.as_str(),block_id,serde_json::to_string(&basis).map_err(failure)?]).map_err(failure)?;
             output.push(basis);
         }
+        // Replace, rather than accumulate, this derived presentation overlay.
+        // The raw journal and persisted blocks are never mutated.
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failure)?;
+        transaction.execute("DELETE FROM encounter_block_exclusions WHERE session=?1", params![session.as_str()]).map_err(failure)?;
+        for basis in &output {
+            transaction.execute("INSERT INTO encounter_block_exclusions(session,block_id,basis) VALUES(?1,?2,?3)", params![session.as_str(), basis["projection_block_id"].as_u64(), serde_json::to_string(basis).map_err(failure)?]).map_err(failure)?;
+        }
+        transaction.commit().map_err(failure)?;
         Ok(serde_json::json!({"classified":!output.is_empty(),"receipts":output}))
     }
     pub fn legacy_load_reclassifications(&self, session: &ResourceRef) -> Result<Vec<Value>> {
@@ -361,6 +374,20 @@ fn journal_blocks(
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(failure)?;
     Ok(result)
+}
+
+fn projected_blocks(events: &[EncounterEvent]) -> Vec<(String, String)> {
+    let mut blocks = Vec::new();
+    for event in events {
+        let piece = if event.event["kind"] == "user-message" { event.event["text"].as_str().map(|text| ("user", text))
+        } else if let Some(kind) = event.event.pointer("/event/Signal/kind") { match kind["kind"].as_str() {
+            Some("agent-message-chunk") => kind["text"].as_str().map(|text| ("assistant", text)),
+            Some("agent-thought-chunk") => kind["text"].as_str().map(|text| ("thinking", text)), _ => None,
+        }} else if event.event.pointer("/event/TurnEnded/stop/Completed").is_some() { Some(("completed", "")) } else { None };
+        let Some((kind, text)) = piece else { continue };
+        if matches!(kind, "assistant" | "thinking") && blocks.last().is_some_and(|(held, prior): &(String, String)| held == kind && prior.len() + text.len() <= 16 * 1024) { blocks.last_mut().unwrap().1.push_str(text); } else { blocks.push((kind.into(), text.into())); }
+    }
+    blocks
 }
 
 fn projected_assistant_block_index(events: &[EncounterEvent], target: u64) -> Option<usize> {
@@ -714,5 +741,16 @@ mod tests {
                 if with_user { 5 } else { 4 }
             );
         }
+    }
+    #[test]
+    fn actual_sqlite_legacy_load_reclassification_refuses_unmatched_projection() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path());
+        let session = ResourceRef::parse("agent-session/legacy-extra-block").unwrap();
+        let store = EncounterStore::open(&home).unwrap();
+        install_legacy_window(&store, &session, "native/a", "native/a", false);
+        store.connection.lock().unwrap().execute("INSERT INTO encounter_blocks(session,kind,text) VALUES(?1,?2,?3)", params![session.as_str(), "assistant", "answer"]).unwrap();
+        assert_eq!(store.classify_legacy_load_replay(&session).unwrap()["classified"], false);
+        assert_eq!(store.view(&session, None).unwrap()["blocks"].as_array().unwrap().len(), 5);
     }
 }
