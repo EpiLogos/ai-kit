@@ -1,16 +1,19 @@
 //! Production QL-MEF client binding over AIKit's existing provider seams.
 //!
 //! AIKit invokes the installed `ql` owner for discovery/negotiation and consumes
-//! provider-owned refraction payloads when a transport exposes them. It does not
-//! parse QL expressions, mirror the QL registry, or create a second context store.
+//! provider-owned readings when a transport exposes them. Generic MEF refraction
+//! and source-qualified operative-scope currentness are distinct QL operations:
+//! neither is emulated by overloading the other's lens/form fields. AIKit does
+//! not parse QL expressions, mirror the QL registry, or create a second context
+//! store.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use aikit_core::ql::{
-    QlClientSubject, QlInputLimits, QlOperation, QlProviderCapabilities, QlProviderClass,
-    QlProviderClient, QlProviderFailure, QlProviderHealth, QlProviderRef, QlProviderState,
-    QlReading, QlRefractionRequest, QL_OUTPUT_SCHEMA_VERSION,
+    QlInputLimits, QlOperation, QlProviderCapabilities, QlProviderClass, QlProviderClient,
+    QlProviderFailure, QlProviderHealth, QlProviderRef, QlProviderState, QlReading,
+    QlRefractionRequest, QL_OUTPUT_SCHEMA_VERSION,
 };
 use aikit_core::resource::operative_scope::{
     OperativeScope, ScopeAwareOperativeProvider, ScopeObservation,
@@ -26,6 +29,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 pub const QL_CLI_PROVIDER_VERSION: &str = "aikit.ql-cli-provider/v1";
+pub const QL_OPERATIVE_SCOPE_CLIENT_VERSION: &str = "aikit.ql-operative-scope-client/v1";
 
 #[derive(Debug, Clone)]
 pub struct QlCliClient {
@@ -202,6 +206,30 @@ impl QlProviderClient for QlCliClient {
     }
 }
 
+/// Transport capability for the QL-owned operative binding. It is intentionally
+/// separate from generic MEF `refract`: an operative interpretation such as
+/// `ql/interpretation/c-prime` is not a LensRef and a World is not a QL FormRef.
+/// The outer AIKit provider architecture remains `ScopeAwareOperativeProvider`;
+/// this trait only describes what the concrete QL transport must be able to read.
+pub trait QlOperativeScopeClient {
+    fn observe_operative_scope(
+        &self,
+        requested: &OperativeScope,
+    ) -> std::result::Result<QlReading, QlProviderFailure>;
+}
+
+impl QlOperativeScopeClient for QlCliClient {
+    fn observe_operative_scope(
+        &self,
+        _requested: &OperativeScope,
+    ) -> std::result::Result<QlReading, QlProviderFailure> {
+        Err(QlProviderFailure::new(
+            "ql.operative_scope_transport_unexposed",
+            "the installed QL CLI has no source-backed operative-scope observation endpoint; do not substitute generic refract or echo the requested scope",
+        ))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct QlOperativeScopeReading {
@@ -285,47 +313,47 @@ impl<C: QlProviderClient> OperativeSemanticProvider for QlOperativeProvider<C> {
     }
 }
 
-impl<C: QlProviderClient> ScopeAwareOperativeProvider for QlOperativeProvider<C> {
+impl<C: QlProviderClient + QlOperativeScopeClient> ScopeAwareOperativeProvider
+    for QlOperativeProvider<C>
+{
     fn observe_scope(
         &self,
         requested: &OperativeScope,
         _: &aikit_core::context_resolution::ContextResolution,
     ) -> Result<ScopeObservation> {
-        let capabilities = self.client.capabilities();
-        if !capabilities.operations.contains(&QlOperation::Refract) {
-            return Ok(ScopeObservation::Unsupported {
-                reason: "QL provider does not advertise refract".into(),
-            });
-        }
-        let mut request = QlRefractionRequest::new(
-            QlClientSubject::new(
-                requested.binding.clone(),
-                Some(requested.generation.to_string()),
-            ),
-            requested.interpretation.to_string(),
-        );
-        request.frame = Some(requested.world.to_string());
-        let reading = self.client.refract(&request).map_err(|failure| {
-            AikitError::new(
-                "resolve.ql_scope_observation_failed",
-                format!("{}: {}", failure.code, failure.message),
-            )
-        })?;
+        let reading = self
+            .client
+            .observe_operative_scope(requested)
+            .map_err(|failure| {
+                AikitError::new(
+                    "resolve.ql_scope_observation_failed",
+                    format!("{}: {}", failure.code, failure.message),
+                )
+            })?;
         if reading.target.subject != requested.binding {
             return Ok(ScopeObservation::Stale {
                 observed: requested.clone(),
                 reason: "QL returned a scope reading for another binding subject".into(),
             });
         }
-        let projection: QlOperativeScopeReading = serde_json::from_value(reading.reading).map_err(|error| {
-            AikitError::new(
-                "resolve.ql_scope_reading_invalid",
-                format!("QL refract result does not expose the source-qualified operative scope projection: {error}"),
-            )
-        })?;
+        let projection: QlOperativeScopeReading =
+            serde_json::from_value(reading.reading).map_err(|error| {
+                AikitError::new(
+                    "resolve.ql_scope_reading_invalid",
+                    format!(
+                        "QL operative-scope reading does not expose the source-qualified binding: {error}"
+                    ),
+                )
+            })?;
         let mut evidence = projection.evidence;
         evidence.extend(reading.evidence_refs);
-        evidence.extend(reading.provenance.input_refs.into_iter().map(|input| input.reference));
+        evidence.extend(
+            reading
+                .provenance
+                .input_refs
+                .into_iter()
+                .map(|input| input.reference),
+        );
         evidence.sort();
         evidence.dedup();
         Ok(ScopeObservation::Current {
