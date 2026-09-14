@@ -30,6 +30,13 @@ pub use agency::{
     EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket, EncounterGroupRecipient,
 };
 
+#[path = "encounter_addressing.rs"]
+mod encounter_addressing;
+pub use encounter_addressing::{
+    EncounterAddressableParticipant, EncounterAddressableParticipantsReading,
+    EncounterAddressableParticipantsRequest,
+};
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EncounterProtocol {
@@ -201,6 +208,13 @@ pub enum EncounterRequest {
     /// Reclassify only a causally proven legacy native-load replay projection.
     ClassifyLegacyLoadReplay {
         agent_session: ResourceRef,
+    },
+    /// Read-only addressed-delivery preflight: which candidate sessions this
+    /// sender may currently address with these exact sources. It opens no
+    /// provider, writes no membership and reserves no delivery; the send path
+    /// repeats this admission before any transport.
+    AddressableParticipants {
+        request: Box<EncounterAddressableParticipantsRequest>,
     },
     /// Request an exact provider-advertised model from the resident native
     /// session. Durable model policy/Agency selection stays outside this route.
@@ -932,6 +946,9 @@ impl EncounterService {
                 let classification = self.store.classify_legacy_load_replay(&agent_session)?;
                 self.store.append(&agent_session, &json!({"kind":"legacy-native-load-replay-classification","classification":classification}))?;
                 Ok(classification)
+            }
+            EncounterRequest::AddressableParticipants { request } => {
+                self.addressable_participants(*request)
             }
             EncounterRequest::ModelRead { agent_session } => {
                 self.require_attached(&agent_session)?;
