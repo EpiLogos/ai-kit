@@ -22,7 +22,7 @@ pub use aikit_core::context::Isolation;
 #[derive(Debug, Parser)]
 #[command(name = "aikit", version = version_line(), about, disable_help_subcommand = true)]
 pub struct Cli {
-    /// Emit machine-readable JSON on stdout instead of human text.
+    /// Emit machine-readable JSON on stdout.
     #[arg(long, global = true)]
     pub json: bool,
 
