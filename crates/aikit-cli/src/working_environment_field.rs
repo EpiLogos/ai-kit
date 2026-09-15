@@ -23,7 +23,26 @@ use aikit_core::working_environment::{
     WORKING_ENVIRONMENT_PROVIDER_VERSION,
 };
 use aikit_core::Result;
+use serde::Serialize;
 use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
+
+/// Provider-owned terminal client attachment material. It is intentionally
+/// narrower than `open`: attachment never creates or reconciles a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "kebab-case")]
+pub enum WorkingEnvironmentTerminalAttachment {
+    Attach {
+        provider: ResourceRef,
+        subject: ResourceRef,
+        native_id: String,
+        argv: Vec<String>,
+    },
+    NotExposed {
+        provider: ResourceRef,
+        subject: ResourceRef,
+        reason: String,
+    },
+}
 
 /// The canonical Surface Ref for one logical pane of a plan.
 ///
@@ -192,6 +211,60 @@ pub fn act(
             subject: subject.clone(),
             reason: format!("{provider} has no working-environment projection in this build"),
         }),
+    }
+}
+
+/// Resolve a terminal-client attachment command for one already-live Surface.
+///
+/// The caller never names tmux argv. This owner operation inspects the exact
+/// persisted plan binding first and refuses to recreate absent work.
+pub fn terminal_attachment(
+    plan: &SessionPlan,
+    provider: &ResourceRef,
+    subject: &ResourceRef,
+) -> Result<WorkingEnvironmentTerminalAttachment> {
+    let surfaces = plan_surfaces(plan);
+    let Some((_, logical)) = surfaces.iter().find(|(surface, _)| surface == subject) else {
+        return Ok(WorkingEnvironmentTerminalAttachment::NotExposed {
+            provider: provider.clone(),
+            subject: subject.clone(),
+            reason: format!("{subject} is not a canonical Surface in persisted plan {}", plan.id),
+        });
+    };
+    let tmux_provider = provider_ref(MuxKind::Tmux)?;
+    if provider != &tmux_provider {
+        return Ok(WorkingEnvironmentTerminalAttachment::NotExposed {
+            provider: provider.clone(),
+            subject: subject.clone(),
+            reason: format!("{provider} does not publish a terminal-client attachment operation"),
+        });
+    }
+    let tmux = Tmux::system();
+    let presence = tmux.detect()?;
+    if !presence.installed {
+        return Ok(WorkingEnvironmentTerminalAttachment::NotExposed {
+            provider: provider.clone(),
+            subject: subject.clone(),
+            reason: presence
+                .detail
+                .unwrap_or_else(|| "tmux is not installed on this host".into()),
+        });
+    }
+    match tmux.attach_surface_command(plan, logical) {
+        Ok((native_id, argv)) => Ok(WorkingEnvironmentTerminalAttachment::Attach {
+            provider: provider.clone(),
+            subject: subject.clone(),
+            native_id,
+            argv,
+        }),
+        Err(error) if error.code() == "mux.tmux_surface_not_live" => {
+            Ok(WorkingEnvironmentTerminalAttachment::NotExposed {
+                provider: provider.clone(),
+                subject: subject.clone(),
+                reason: error.message().to_string(),
+            })
+        }
+        Err(error) => Err(error),
     }
 }
 

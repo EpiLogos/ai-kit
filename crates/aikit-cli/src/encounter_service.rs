@@ -30,6 +30,13 @@ pub use agency::{
     EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket, EncounterGroupRecipient,
 };
 
+#[path = "encounter_addressing.rs"]
+mod encounter_addressing;
+pub use encounter_addressing::{
+    EncounterAddressableParticipant, EncounterAddressableParticipantsReading,
+    EncounterAddressableParticipantsRequest,
+};
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EncounterProtocol {
@@ -193,6 +200,32 @@ pub enum EncounterRequest {
         decision: PermissionDecision,
     },
     Providers,
+    /// Read only the exact model selector observed from an already-resident
+    /// native provider session. This does not claim catalogue availability.
+    ModelRead {
+        agent_session: ResourceRef,
+    },
+    /// Reclassify only a causally proven legacy native-load replay projection.
+    ClassifyLegacyLoadReplay {
+        agent_session: ResourceRef,
+    },
+    /// Read-only addressed-delivery preflight: which candidate sessions this
+    /// sender may currently address with these exact sources. It opens no
+    /// provider, writes no membership and reserves no delivery; the send path
+    /// repeats this admission before any transport.
+    AddressableParticipants {
+        request: Box<EncounterAddressableParticipantsRequest>,
+    },
+    /// Request an exact provider-advertised model from the resident native
+    /// session. Durable model policy/Agency selection stays outside this route.
+    ModelSelect {
+        agent_session: ResourceRef,
+        provider_model_id: String,
+        /// Optional exact provider-advertised execution budget. It is applied
+        /// only after model confirmation and never exposes arbitrary config.
+        #[serde(default)]
+        provider_reasoning_effort: Option<String>,
+    },
     Send {
         agent_session: ResourceRef,
         turn: EncounterAddressedTurn,
@@ -251,6 +284,23 @@ type PendingPermissions =
 struct Journal(Arc<EncounterStore>, PendingPermissions, String);
 impl SessionEventJournal for Journal {
     fn append(&self, session: &ResourceRef, event: &HostEvent) -> Result<()> {
+        if let HostEvent::Signal(signal) = event {
+            if let ConnectionSignalKind::HistoryReplay { update } = &signal.kind {
+                // ACP v1 load replay has no provider-history-item identifier.
+                // Retain raw update evidence in exact observed order, but keep it
+                // out of the live transcript projection: comparing text/chunks
+                // would collapse distinct messages or duplicate a re-chunked one.
+                self.0.append(session, &json!({
+                    "kind":"provider-history-replay",
+                    "standing":"unreconciled-no-provider-history-event-id",
+                    "connection_generation":self.2,
+                    "native_session_id":signal.native_session_id,
+                    "sequence":signal.sequence,
+                    "update":update,
+                }))?;
+                return Ok(());
+            }
+        }
         self.0.append(
             session,
             &json!({"kind":"provider","event":event,"connection_generation":self.2}),
@@ -873,6 +923,7 @@ impl EncounterService {
                     .map(|r| r.values().cloned().collect::<Vec<_>>())
                     .unwrap_or_default());
                 view["permission_authority"] = json!("native-provider-consent");
+                view["history_reclassifications"] = json!(self.store.legacy_load_reclassifications(&agent_session)?);
                 let can_open = !view["connection"]["resident"].as_bool().unwrap_or(false)
                     && !self.providers()?.is_empty();
                 view["actions"] = json!([
@@ -880,7 +931,8 @@ impl EncounterService {
                     {"ref":"aikit.encounter.draft","enabled":true,"reason":null},
                     {"ref":"aikit.encounter.prompt","enabled":ready,"reason":if ready{None}else{Some("A ready resident provider is required")}},
                     {"ref":"aikit.encounter.cancel","enabled":active,"reason":if active{None}else{Some("There is no active provider turn")}},
-                    {"ref":"aikit.encounter.permission","enabled":!view["permissions"].as_array().is_none_or(|r|r.is_empty()),"reason":"Only an actual pending provider consent request can be answered; this does not confer Actuation authority"}
+                    {"ref":"aikit.encounter.permission","enabled":!view["permissions"].as_array().is_none_or(|r|r.is_empty()),"reason":"Only an actual pending provider consent request can be answered; this does not confer Actuation authority"},
+                    {"ref":"aikit.encounter.model-read","enabled":ready,"reason":if ready{None}else{Some("A ready resident provider is required")}}
                 ]);
                 Ok(view)
             }
@@ -889,6 +941,74 @@ impl EncounterService {
                 .into_iter()
                 .map(|p| json!({"id":p.id,"label":p.label}))
                 .collect::<Vec<_>>())),
+            EncounterRequest::ClassifyLegacyLoadReplay { agent_session } => {
+                self.require_attached(&agent_session)?;
+                let classification = self.store.classify_legacy_load_replay(&agent_session)?;
+                self.store.append(&agent_session, &json!({"kind":"legacy-native-load-replay-classification","classification":classification}))?;
+                Ok(classification)
+            }
+            EncounterRequest::AddressableParticipants { request } => {
+                self.addressable_participants(*request)
+            }
+            EncounterRequest::ModelRead { agent_session } => {
+                self.require_attached(&agent_session)?;
+                let resident = self.resident(&agent_session)?;
+                let _operation = resident.operations.lock().map_err(error)?;
+                self.check_resident_context(&agent_session, &resident, "native-model-read")?;
+                let identity = resident.host.identity(&agent_session)?;
+                Ok(json!({
+                    "agent_session":agent_session,
+                    "native_session_id":identity.binding.native_session_id,
+                    "model_observation":identity.binding.model_observation,
+                    "standing":"provider-reported-configuration-not-independent-selection-or-inference-proof"
+                }))
+            }
+            EncounterRequest::ModelSelect { agent_session, provider_model_id, provider_reasoning_effort } => {
+                self.require_attached(&agent_session)?;
+                if provider_model_id.trim().is_empty() || provider_model_id.len() > 256 {
+                    return Err(AikitError::new("encounter.invalid_provider_model_id", "Provider model id must be a non-empty bounded native identifier"));
+                }
+                if provider_reasoning_effort.as_ref().is_some_and(|value| value.trim().is_empty() || value.len() > 128) {
+                    return Err(AikitError::new("encounter.invalid_provider_reasoning_effort", "Provider reasoning effort must be a non-empty bounded native identifier"));
+                }
+                let resident = self.resident(&agent_session)?;
+                let _operation = resident.operations.lock().map_err(error)?;
+                self.check_resident_context(&agent_session, &resident, "native-model-select")?;
+                if resident.model.as_ref().is_some_and(|model| model.policy.provider_native_id != provider_model_id) {
+                    return Err(AikitError::new(
+                        "encounter.model_policy_conflict",
+                        "The requested provider model conflicts with this resident's explicit durable model policy; reopen through the policy owner",
+                    ));
+                }
+                let before = resident.host.identity(&agent_session)?;
+                self.store.append(&agent_session, &json!({
+                    "kind":"native-model-configuration-requested",
+                    "agent_session":agent_session,
+                    "native_session_id":before.binding.native_session_id,
+                    "provider":resident.provider,
+                    "requested_provider_model_id":provider_model_id,
+                    "requested_provider_reasoning_effort":provider_reasoning_effort,
+                    "authority":"provider-advertised-session-config; not-durable-model-policy-or-agency"
+                }))?;
+                let mut receipt = resident.lane.set_model(&provider_model_id)?;
+                if let Some(provider_reasoning_effort) = provider_reasoning_effort.as_deref() {
+                    receipt = resident.lane.set_reasoning_effort(provider_reasoning_effort)?;
+                }
+                self.store.append(&agent_session, &json!({
+                    "kind":"native-model-configuration-confirmed",
+                    "receipt":receipt,
+                    "authority":"provider-confirmed-session-config; not-durable-model-policy-or-agency"
+                })).map_err(|e| AikitError::new("encounter.model_configuration_uncertain", format!("Provider confirmed configuration but receipt persistence failed; do not resend automatically: {e}")))?;
+                Ok(json!({
+                    "agent_session":receipt.agent_session,
+                    "native_session_id":receipt.native_session_id,
+                    "previous_model_observation":receipt.previous,
+                    "model_observation":receipt.current,
+                    "selected":true,
+                    "inference_observed":false,
+                    "standing":"provider-confirmed-native-session-configuration; durable-model-policy-and-agency-unchanged"
+                }))
+            }
             EncounterRequest::Open {
                 space,
                 agent_session,

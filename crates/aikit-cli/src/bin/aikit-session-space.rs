@@ -110,6 +110,11 @@ enum Command {
     Show { space: String },
     /// Open persisted semantic state without claiming provider-native recovery.
     Open { space: String },
+    /// Read, open, or focus one exact persisted provider working Surface.
+    WorkingSurface {
+        #[command(subcommand)]
+        command: WorkingSurfaceCommand,
+    },
     /// Discover SessionSpaces, optionally by exact ProjectRef.
     Discover {
         #[arg(long)]
@@ -149,6 +154,18 @@ enum Command {
     Reconcile { space: String },
     /// Explain persisted SessionSpace state and the receipt that last changed it.
     Explain { space: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkingSurfaceCommand {
+    /// Read the persisted binding and its current provider observation.
+    Observe { space: String, binding: String },
+    /// Explicitly create-or-attach the persisted provider plan for this Surface.
+    Open { space: String, binding: String },
+    /// Focus only the currently live persisted Surface; this never recreates it.
+    Focus { space: String, binding: String },
+    /// Replace this terminal client with attachment to the exact live provider Surface.
+    Attach { space: String, binding: String },
 }
 
 fn main() {
@@ -280,6 +297,48 @@ fn run() -> Result<()> {
         Command::List => emit(&service.session_space_list()?),
         Command::Show { space } => emit(&service.session_space_show(&space_ref(&space)?)?),
         Command::Open { space } => emit(&service.session_space_open(&space_ref(&space)?)?),
+        Command::WorkingSurface { command } => match command {
+            WorkingSurfaceCommand::Observe { space, binding } => {
+                let state = service.session_space_show(&space_ref(&space)?)?;
+                emit(&aikit_cli::session_space_working_surface::observe(
+                    &state,
+                    &aikit_core::ResourceRef::parse(binding)?,
+                )?)
+            }
+            WorkingSurfaceCommand::Open { space, binding } => {
+                let state = service.session_space_show(&space_ref(&space)?)?;
+                emit(&aikit_cli::session_space_working_surface::open(
+                    &state,
+                    &aikit_core::ResourceRef::parse(binding)?,
+                )?)
+            }
+            WorkingSurfaceCommand::Focus { space, binding } => {
+                let state = service.session_space_show(&space_ref(&space)?)?;
+                emit(&aikit_cli::session_space_working_surface::focus(
+                    &state,
+                    &aikit_core::ResourceRef::parse(binding)?,
+                )?)
+            }
+            WorkingSurfaceCommand::Attach { space, binding } => {
+                let state = service.session_space_show(&space_ref(&space)?)?;
+                match aikit_cli::session_space_working_surface::terminal_attachment(
+                    &state,
+                    &aikit_core::ResourceRef::parse(binding)?,
+                )? {
+                    aikit_cli::working_environment_field::WorkingEnvironmentTerminalAttachment::Attach {
+                        argv,
+                        ..
+                    } => attach_terminal_client(argv),
+                    aikit_cli::working_environment_field::WorkingEnvironmentTerminalAttachment::NotExposed {
+                        reason,
+                        ..
+                    } => Err(AikitError::new(
+                        "session_space.working_surface_attach_unavailable",
+                        reason,
+                    )),
+                }
+            }
+        },
         Command::Discover { project } => {
             let project = project.as_deref().map(ProjectRef::parse).transpose()?;
             emit(&service.session_space_discover(project.as_ref())?)
@@ -326,6 +385,31 @@ fn run() -> Result<()> {
             emit(&service.session_space_explain(&space_ref(&space)?, None)?)
         }
     }
+}
+
+#[cfg(unix)]
+fn attach_terminal_client(argv: Vec<String>) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let Some((program, args)) = argv.split_first() else {
+        return Err(AikitError::new(
+            "session_space.working_surface_attach_invalid",
+            "working-environment provider returned an empty terminal attachment command",
+        ));
+    };
+    let error = std::process::Command::new(program).args(args).exec();
+    Err(AikitError::new(
+        "session_space.working_surface_attach_failed",
+        format!("could not attach terminal client through persisted working Surface: {error}"),
+    ))
+}
+
+#[cfg(not(unix))]
+fn attach_terminal_client(_argv: Vec<String>) -> Result<()> {
+    Err(AikitError::new(
+        "session_space.working_surface_attach_unsupported",
+        "terminal attachment through a persisted working Surface is unsupported on this platform",
+    ))
 }
 
 fn space_ref(raw: &str) -> Result<SessionSpaceRef> {

@@ -200,6 +200,17 @@ fn portable_signal(signal: &ConnectionSignal) -> (&'static str, Option<String>, 
         ConnectionSignalKind::Status { message } => {
             ("harness-event", Some(message.clone()), Some(json!({ "event": "status" })))
         }
+        ConnectionSignalKind::ModelConfigured { model_observation } => (
+            "harness-event",
+            None,
+            Some(json!({ "event": "native-model-configured", "model_observation": model_observation })),
+        ),
+        ConnectionSignalKind::HistoryReplay { update } => (
+            "harness-history-replay",
+            None,
+            Some(json!({ "event": "provider-history-replay", "update": update,
+                "standing":"unreconciled-no-provider-history-event-id" })),
+        ),
         ConnectionSignalKind::Degraded { degradation } => (
             "harness-event",
             None,

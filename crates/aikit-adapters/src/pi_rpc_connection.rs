@@ -146,6 +146,7 @@ impl PiRpcConnectionAdapter {
                     name: data["model"]["name"].as_str().unwrap_or(model).into(),
                     description: None,
                 }],
+                reasoning_effort: None,
                 standing: format!("Pi native get_state; provider={provider}; configuration, not an inference receipt"),
             });
         }
@@ -362,6 +363,17 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
 }
 
 impl InteractiveAgentConnectionAdapter for PiRpcConnectionAdapter {
+    fn set_session_model(
+        &mut self,
+        _native_session_id: &str,
+        _provider_model_id: &str,
+    ) -> Result<ConnectionCommand> {
+        Err(error(
+            "connection.pi_rpc.model_selection_unsupported",
+            "Pi model selection is a launch-time owner configuration; this resident protocol exposes no confirmed in-session selector",
+        ))
+    }
+
     fn respond_permission(
         &mut self,
         _: &NativePermissionRequest,
@@ -383,6 +395,17 @@ impl InteractiveAgentConnectionAdapter for PiRpcConnectionAdapter {
             "Closing a view does not close the Pi session; the host owns process shutdown",
         ))
     }
+    fn set_session_reasoning_effort(
+        &mut self,
+        _native_session_id: &str,
+        _provider_reasoning_effort: &str,
+    ) -> Result<ConnectionCommand> {
+        Err(AikitError::new(
+            "connection.reasoning_effort_selection_unsupported",
+            "this provider does not advertise a bounded ACP reasoning-effort selector",
+        ))
+    }
+
     fn disconnect(&mut self) -> Result<ConnectionCommand> {
         Err(error(
             "connection.pi_rpc.disconnect_unsupported",

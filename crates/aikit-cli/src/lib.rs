@@ -50,6 +50,7 @@ pub mod scoped_invocation;
 pub mod session_lifecycle_ops;
 pub mod session_space_ops;
 pub mod session_space_service;
+pub mod session_space_working_surface;
 pub mod skill_sources;
 pub mod task;
 pub mod temporal;
