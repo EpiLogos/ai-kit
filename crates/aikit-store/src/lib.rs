@@ -50,6 +50,7 @@
 
 pub mod channel;
 pub mod composition_application;
+pub mod config_plane;
 pub mod credentials;
 pub mod curator;
 pub mod edit;
@@ -86,6 +87,7 @@ pub use composition_application::{
     SkillSetRelationProcedurePreview, SkillSetRelationProcedureReceipt,
 };
 pub use credentials::{CredentialBindingStore, CREDENTIAL_BINDING_STORE_VERSION};
+pub use config_plane::{ConfigReceiptStore, ExecutedKey};
 pub use curator::{curate, detect_drift, report_drift, CurationReport, Drift};
 pub use edit::{OverlayDocument, ProfileDocument};
 pub use events::{Event, EventAction, EventRecorder, Outcome, Timestamp};

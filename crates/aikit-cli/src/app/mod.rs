@@ -23,7 +23,7 @@ use aikit_core::continuity::ContinuityTuning;
 use aikit_core::id::{CapsuleId, GenerationId, SessionId};
 use aikit_core::platform::TargetId;
 use aikit_core::policy::ManagedPolicy;
-use aikit_core::profile::SkillUsageOverlayPatch;
+use aikit_core::profile::{PoolPatch, SkillUsageOverlayPatch};
 use aikit_core::projection::{
     ActivationEffect, ProjectionItem, ProjectionPlan, ResolvedContext, TargetAdapter,
 };
@@ -750,6 +750,49 @@ impl Service {
         {
             let mut writer = self.scope_document(scope)?;
             writer.clear_skill_overlay(id);
+            writer.save()?;
+        }
+        AikitApplication::apply(
+            self,
+            ApplyRequest {
+                scope,
+                toggles: vec![],
+                label: None,
+            },
+        )
+    }
+
+    /// Remove every profile declaration this scope carries, letting lower
+    /// scopes decide again. The configuration plane's `reset` for
+    /// `ai-kit:resolution:resolution.profiles` runs on this.
+    pub fn reset_scope_profiles(&mut self, scope: ScopeKind) -> Result<AppliedGeneration> {
+        {
+            let mut writer = self.scope_document(scope)?;
+            for profile in writer.patch()?.profiles {
+                writer.drop_profile(&profile);
+            }
+            writer.save()?;
+        }
+        AikitApplication::apply(
+            self,
+            ApplyRequest {
+                scope,
+                toggles: vec![],
+                label: None,
+            },
+        )
+    }
+
+    /// Remove every enable/disable declaration this scope carries. The
+    /// configuration plane's `reset` for `ai-kit:skills:skills.capabilities`
+    /// runs on this.
+    pub fn clear_scope_toggles(&mut self, scope: ScopeKind) -> Result<AppliedGeneration> {
+        {
+            let mut writer = self.scope_document(scope)?;
+            let patch = writer.patch()?;
+            for id in patch.enable.iter().chain(patch.disable.iter()) {
+                writer.clear(id);
+            }
             writer.save()?;
         }
         AikitApplication::apply(
@@ -2277,6 +2320,14 @@ enum ScopeWriter {
 }
 
 impl ScopeWriter {
+    /// The scope's current declarations, as the resolver reads them.
+    fn patch(&self) -> Result<PoolPatch> {
+        match self {
+            ScopeWriter::Overlay(doc) => doc.patch(),
+            ScopeWriter::Profile(doc) => doc.patch(),
+        }
+    }
+
     fn apply_toggles(&mut self, toggles: &[Toggle]) {
         for toggle in toggles {
             match self {
@@ -2302,6 +2353,23 @@ impl ScopeWriter {
         match self {
             ScopeWriter::Overlay(doc) => doc.use_profile(profile),
             ScopeWriter::Profile(doc) => doc.use_profile(profile),
+        }
+    }
+
+    /// Remove a profile declaration from this scope, letting lower scopes
+    /// decide again.
+    fn drop_profile(&mut self, profile: &aikit_core::id::ProfileId) {
+        match self {
+            ScopeWriter::Overlay(doc) => doc.drop_profile(profile),
+            ScopeWriter::Profile(doc) => doc.drop_profile(profile),
+        }
+    }
+
+    /// Remove every declaration for a capsule from this scope.
+    fn clear(&mut self, id: &CapsuleId) {
+        match self {
+            ScopeWriter::Overlay(doc) => doc.clear(id),
+            ScopeWriter::Profile(doc) => doc.clear(id),
         }
     }
 

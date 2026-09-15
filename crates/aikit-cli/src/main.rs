@@ -111,6 +111,10 @@ enum Reply {
     /// `oi.product-settings-disclosure/v2` document on stdout (the L6 rule:
     /// mounts never unwrap a product-specific envelope).
     RawJson(Value),
+    /// A bare JSON document printed verbatim with its own exit status. The
+    /// configuration-plane verbs speak bare documents in both directions: a
+    /// failure is an `oi.config-error/v1` document on stdout, never an envelope.
+    RawJsonWithStatus(Value, i32),
     /// Raw text to print verbatim, envelope or not (`shell init`, an explanation).
     Text(String),
     /// A child process ran; its exit status is ours.
@@ -160,6 +164,14 @@ fn emit(reply: Reply, json_mode: bool) -> i32 {
             }
             json::EXIT_OK
         }
+        Reply::RawJsonWithStatus(value, code) => {
+            if json_mode {
+                println!("{}", json::line(&value));
+            } else {
+                println!("{}", json::pretty(&value));
+            }
+            code
+        }
         Reply::Text(text) => {
             println!("{text}");
             json::EXIT_OK
@@ -204,6 +216,13 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),
         Some(Command::Status(a)) => cmd_status(cwd, a),
         Some(Command::System(_)) => cmd_system(cwd),
+        Some(Command::ConfigContribution(_)) => {
+            Ok(Reply::RawJson(aikit_cli::config_plane::contribution_document(cwd)))
+        }
+        Some(Command::Config(c)) => match aikit_cli::config_plane::dispatch(cwd, c) {
+            Ok(document) => Ok(Reply::RawJsonWithStatus(document, json::EXIT_OK)),
+            Err(failure) => Ok(Reply::RawJsonWithStatus(failure.doc, failure.exit)),
+        },
         Some(Command::Explain(a)) => cmd_explain(cwd, a),
         Some(Command::History(a)) => cmd_history(cwd, a),
         Some(Command::Run(a)) => cmd_run(cwd, a),
