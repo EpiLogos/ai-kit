@@ -1,0 +1,7 @@
+{
+  "id": "cli:pane:split",
+  "result": {
+    "type": "pane_info",
+    "pane": { "pane_id": "w7:p2" }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "id": "cli:workspace:create",
+  "result": {
+    "type": "workspace_created",
+    "workspace": { "workspace_id": "w7" },
+    "tab": { "tab_id": "w7:t1" },
+    "root_pane": { "pane_id": "w7:p1" }
+  }
+}
