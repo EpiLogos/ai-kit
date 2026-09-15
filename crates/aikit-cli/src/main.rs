@@ -222,6 +222,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Jobs(_)) => cmd_jobs(cwd),
         Some(Command::Log(c)) => cmd_log(cwd, c),
         Some(Command::Client(c)) => cmd_client(cwd, c),
+        Some(Command::Mcp(c)) => cmd_mcp(cwd, c),
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
         Some(Command::Gateway(c)) => cmd_gateway(c),
@@ -3818,6 +3819,29 @@ fn cmd_client(cwd: &std::path::Path, c: ClientCmd) -> Result<Reply> {
             let rows = aikit_cli::client::status(&service, a.client.as_deref())?;
             Ok(reply(&service, jval!({ "clients": rows }), vec![]))
         }
+    }
+}
+
+fn cmd_mcp(cwd: &std::path::Path, c: McpCmd) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    match c.command {
+        McpSub::BimbaMap(bimba) => match bimba.command {
+            BimbaMapSub::Status => Ok(reply(
+                &service,
+                aikit_cli::mcp::bimba_map_status(service.home())?,
+                vec![],
+            )),
+            BimbaMapSub::Select => Ok(reply(
+                &service,
+                aikit_cli::mcp::select_bimba_map(service.home())?,
+                vec![],
+            )),
+            BimbaMapSub::Deselect => Ok(reply(
+                &service,
+                aikit_cli::mcp::deselect_bimba_map(service.home())?,
+                vec![],
+            )),
+        },
     }
 }
 

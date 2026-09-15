@@ -125,6 +125,8 @@ pub enum Command {
     Bypass(BypassCmd),
     /// Install, launch and inspect agent clients.
     Client(ClientCmd),
+    /// Project selected external MCPs into the native installed harnesses.
+    Mcp(McpCmd),
     /// Install multiplexer integration and detect the current stack.
     Mux(MuxCmd),
     /// The hook dispatcher entry point (invoked by clients, not usually by hand).
@@ -2104,6 +2106,34 @@ pub enum ClientSub {
     Launch(ClientLaunchArgs),
     /// Report a client's installation and projection status.
     Status(ClientStatusArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct McpCmd {
+    #[command(subcommand)]
+    pub command: McpSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpSub {
+    /// Control the locally selected Bimba map MCP projection.
+    BimbaMap(BimbaMapCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct BimbaMapCmd {
+    #[command(subcommand)]
+    pub command: BimbaMapSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BimbaMapSub {
+    /// Report selection, map health, and the native harness projection.
+    Status,
+    /// Health-check the local map and project Bimba into installed native clients.
+    Select,
+    /// Retract Bimba from native clients. Existing MCP processes are denied immediately.
+    Deselect,
 }
 
 #[derive(Debug, Args)]
