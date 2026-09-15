@@ -176,6 +176,12 @@ impl AikitHome {
         self.state().join("credentials")
     }
 
+    /// Configuration-plane receipts and idempotency records (`state/config/`).
+    /// The owner-side history an `oi.config-receipt/v1` `native_ref` points into.
+    pub fn config_plane(&self) -> PathBuf {
+        self.state().join("config")
+    }
+
     pub fn event_log(&self) -> PathBuf {
         self.logs().join("events.jsonl")
     }

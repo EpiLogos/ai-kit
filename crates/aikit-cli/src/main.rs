@@ -106,6 +106,15 @@ enum Reply {
         /// reports `EXIT_OK`.
         exit_code: i32,
     },
+    /// A bare JSON document printed verbatim, never wrapped in the ActionResult
+    /// envelope. `system` uses this so the O:I mount reads a bare
+    /// `oi.product-settings-disclosure/v2` document on stdout (the L6 rule:
+    /// mounts never unwrap a product-specific envelope).
+    RawJson(Value),
+    /// A bare JSON document printed verbatim with its own exit status. The
+    /// configuration-plane verbs speak bare documents in both directions: a
+    /// failure is an `oi.config-error/v1` document on stdout, never an envelope.
+    RawJsonWithStatus(Value, i32),
     /// Raw text to print verbatim, envelope or not (`shell init`, an explanation).
     Text(String),
     /// A child process ran; its exit status is ours.
@@ -125,6 +134,7 @@ fn reply(service: &Service, data: Value, warnings: Vec<String>) -> Reply {
 
 fn diagnostic_warnings(service: &Service) -> Vec<String> {
     let mut warnings = service.load_warnings();
+    warnings.extend(service.context_composition_notes());
     warnings.extend(service.resolved().warnings.clone());
     warnings
 }
@@ -146,6 +156,22 @@ fn emit(reply: Reply, json_mode: bool) -> i32 {
                 }
             }
             exit_code
+        }
+        Reply::RawJson(value) => {
+            if json_mode {
+                println!("{}", json::line(&value));
+            } else {
+                println!("{}", json::pretty(&value));
+            }
+            json::EXIT_OK
+        }
+        Reply::RawJsonWithStatus(value, code) => {
+            if json_mode {
+                println!("{}", json::line(&value));
+            } else {
+                println!("{}", json::pretty(&value));
+            }
+            code
         }
         Reply::Text(text) => {
             println!("{text}");
@@ -189,7 +215,15 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Trust(a)) => cmd_trust(cwd, a),
         Some(Command::Wiki(c)) => cmd_wiki(cwd, c),
         Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),
-        Some(Command::Status(a)) => cmd_status(cwd, a),
+        Some(Command::Status(a)) => cmd_status(cwd, a, json_mode),
+        Some(Command::System(_)) => cmd_system(cwd),
+        Some(Command::ConfigContribution(_)) => {
+            Ok(Reply::RawJson(aikit_cli::config_plane::contribution_document(cwd)))
+        }
+        Some(Command::Config(c)) => match aikit_cli::config_plane::dispatch(cwd, c) {
+            Ok(document) => Ok(Reply::RawJsonWithStatus(document, json::EXIT_OK)),
+            Err(failure) => Ok(Reply::RawJsonWithStatus(failure.doc, failure.exit)),
+        },
         Some(Command::Explain(a)) => cmd_explain(cwd, a),
         Some(Command::History(a)) => cmd_history(cwd, a),
         Some(Command::Run(a)) => cmd_run(cwd, a),
@@ -2308,40 +2342,169 @@ fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
     }
 }
 
-fn cmd_status(cwd: &std::path::Path, a: StatusArgs) -> Result<Reply> {
+/// `aikit system` — the owner settings-disclosure descriptor for the O:I System
+/// surface (Wave 5). Read-only: it projects the already-resolved composition
+/// truth into `oi.product-settings-disclosure/v2` and changes nothing.
+///
+/// Unlike every other command, `system` emits the descriptor as a bare
+/// document on stdout (never wrapped in the ActionResult envelope), exactly as
+/// `ctrl system --json` does. Mounts read the top-level `schema` key and would
+/// otherwise degrade AIKit to unavailable.
+fn cmd_system(cwd: &std::path::Path) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let data = aikit_cli::system::disclose(&service)?;
+    Ok(Reply::RawJson(data))
+}
+
+fn cmd_status(cwd: &std::path::Path, a: StatusArgs, json_mode: bool) -> Result<Reply> {
     let service = Service::discover(cwd)?;
     let view = service.resolved();
-    let active: Vec<Value> = view
-        .active
-        .values()
-        .map(|c| {
-            jval!({
-                "id": c.id.to_string(),
-                "kind": c.kind.as_str(),
-                "name": c.name,
-                "exports": c.exports,
+    let warnings = diagnostic_warnings(&service);
+    if json_mode {
+        let active: Vec<Value> = view
+            .active
+            .values()
+            .map(|c| {
+                jval!({
+                    "id": c.id.to_string(),
+                    "kind": c.kind.as_str(),
+                    "name": c.name,
+                    "exports": c.exports,
+                })
             })
-        })
-        .collect();
-    let properties = service.current_generation_properties();
-    let mut data = jval!({
-        "active": active,
-        "active_count": view.active.len(),
-        "hash": view.hash.to_string(),
-        "isolation": service.descriptor().isolation.as_str(),
-        "bypasses": bypass_summaries(&service)?,
-        "generation_label": properties.get("label"),
-        "generation_properties": properties,
-    });
-    if a.all {
-        let unavailable: Vec<Value> = view
-            .unavailable
-            .iter()
-            .map(|(id, reason)| jval!({ "id": id.to_string(), "reason": reason.describe() }))
             .collect();
-        data["unavailable"] = jval!(unavailable);
+        let properties = service.current_generation_properties();
+        let mut data = jval!({
+            "active": active,
+            "active_count": view.active.len(),
+            "hash": view.hash.to_string(),
+            "isolation": service.descriptor().isolation.as_str(),
+            "bypasses": bypass_summaries(&service)?,
+            "generation_label": properties.get("label"),
+            "generation_properties": properties,
+        });
+        if a.all {
+            let unavailable: Vec<Value> = view
+                .unavailable
+                .iter()
+                .map(|(id, reason)| jval!({ "id": id.to_string(), "reason": reason.describe() }))
+                .collect();
+            data["unavailable"] = jval!(unavailable);
+        }
+        return Ok(reply(&service, data, warnings));
     }
-    Ok(reply(&service, data, diagnostic_warnings(&service)))
+    let generation_properties = service.current_generation_properties();
+    let generation_label = generation_properties.get("label").map(String::as_str);
+    Ok(Reply::Text(status_summary(
+        service.descriptor(),
+        view,
+        a.all,
+        generation_label,
+        bypass_summaries(&service)?,
+        warnings,
+    )))
+}
+
+/// The person-facing reading of `aikit status`. The `--json` envelope is the
+/// machine contract and keeps its exact shape; this text is for the terminal.
+fn status_summary(
+    descriptor: &aikit_core::ContextDescriptor,
+    view: &aikit_core::resolve::ResolvedView,
+    include_unavailable: bool,
+    generation_label: Option<&str>,
+    bypasses: Vec<Value>,
+    warnings: Vec<String>,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let project_root = descriptor
+        .project_root
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(no project root)".to_owned());
+    lines.push(format!("AIKit status — {project_root}"));
+    lines.push(format!(
+        "Context {} · isolation {}",
+        descriptor.context_id,
+        descriptor.isolation.as_str()
+    ));
+
+    let mut by_kind: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for capability in view.active.values() {
+        *by_kind.entry(capability.kind.as_str()).or_default() += 1;
+    }
+    let counts = by_kind
+        .iter()
+        .map(|(kind, count)| format!("{count} {kind}{}", if *count == 1 { "" } else { "s" }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let counts = if counts.is_empty() {
+        "none".to_owned()
+    } else {
+        counts
+    };
+    lines.push(format!(
+        "Catalogued: {} capabilities",
+        view.catalog_index.len()
+    ));
+    lines.push(format!("Active capabilities: {} ({})", view.active.len(), counts));
+
+    let hash = view.hash.to_string();
+    let generation = match generation_label {
+        Some(label) => format!("Generation: {label}"),
+        None => "Generation: none".to_owned(),
+    };
+    lines.push(format!(
+        "{generation} · resolution hash {}",
+        &hash[..hash.len().min(12)]
+    ));
+
+    if bypasses.is_empty() {
+        lines.push("Hook bypasses: none open".to_owned());
+    } else {
+        lines.push(format!("Hook bypasses: {} open", bypasses.len()));
+        for bypass in &bypasses {
+            let capability = bypass["capability"].as_str().unwrap_or_default();
+            let for_clause = if capability.is_empty() {
+                String::new()
+            } else {
+                format!(" for {capability}")
+            };
+            lines.push(format!(
+                "  - {} ({}): {}{}",
+                bypass["bypass_id"].as_str().unwrap_or("?"),
+                bypass["scope"].as_str().unwrap_or("?"),
+                bypass["reason"].as_str().unwrap_or("?"),
+                for_clause
+            ));
+        }
+    }
+
+    if view.unavailable.is_empty() {
+        lines.push("Catalogued but inactive: none".to_owned());
+    } else if include_unavailable {
+        lines.push(format!(
+            "Catalogued but inactive: {}",
+            view.unavailable.len()
+        ));
+        for (id, reason) in &view.unavailable {
+            lines.push(format!("  - {id}: {}", reason.describe()));
+        }
+    } else {
+        lines.push(format!(
+            "Catalogued but inactive: {} hidden (run `aikit status --all` to list)",
+            view.unavailable.len()
+        ));
+    }
+
+    if warnings.is_empty() {
+        lines.push("Health findings: none".to_owned());
+    } else {
+        lines.push(format!("Health findings: {}", warnings.len()));
+        for warning in &warnings {
+            lines.push(format!("  - {warning}"));
+        }
+    }
+    lines.join("\n")
 }
 
 fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {

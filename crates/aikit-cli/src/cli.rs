@@ -22,7 +22,7 @@ pub use aikit_core::context::Isolation;
 #[derive(Debug, Parser)]
 #[command(name = "aikit", version = version_line(), about, disable_help_subcommand = true)]
 pub struct Cli {
-    /// Emit machine-readable JSON on stdout instead of human text.
+    /// Emit machine-readable JSON on stdout.
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -79,6 +79,12 @@ pub enum Command {
     WikiShape(WikiShapeCmd),
     /// Show the effective view for the current context.
     Status(StatusArgs),
+    /// Emit the owner settings-disclosure descriptor for the O:I System surface.
+    System(SystemArgs),
+    /// Emit the owner configuration contribution for the O:I configuration plane.
+    ConfigContribution(ConfigContributionArgs),
+    /// Owner-native configuration verbs for the O:I configuration plane.
+    Config(ConfigCmd),
     /// Explain why a capability or V2 Resource has its current effective evidence.
     Explain(ExplainArgs),
     /// Read cross-domain evidence-bearing History, optionally scoped to one Resource.
@@ -1384,6 +1390,87 @@ pub struct StatusArgs {
     /// Include catalogued-but-inactive capabilities.
     #[arg(long)]
     pub all: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SystemArgs {}
+
+/// The owner configuration contribution: a bare `oi.configuration-contribution/v1`
+/// document on stdout, exactly like `system --json` (no envelope, never wrapped).
+#[derive(Debug, Args)]
+pub struct ConfigContributionArgs {}
+
+#[derive(Debug, Args)]
+pub struct ConfigCmd {
+    #[command(subcommand)]
+    pub command: ConfigSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigSub {
+    /// Validate one requested value at one scope, owner-natively.
+    Validate(ConfigValidateArgs),
+    /// Plan one requested change; mints the idempotency anchor (plan_digest).
+    Plan(ConfigPlanArgs),
+    /// Apply a minted plan owner-natively; returns the receipt.
+    Apply(ConfigApplyArgs),
+    /// Reset a setting at a scope to the owner baseline.
+    Reset(ConfigResetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigValidateArgs {
+    /// The setting ref (ai-kit:<section>:<key>).
+    #[arg(long, value_name = "REF")]
+    pub setting: String,
+    /// The compact scope address (machine, project:<id>, agent-session:<id>).
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+    /// The requested value as inline JSON.
+    #[arg(long, value_name = "JSON", conflicts_with = "value_file")]
+    pub value: Option<String>,
+    /// Read the requested value from a file, or `-` for stdin.
+    #[arg(long, value_name = "PATH")]
+    pub value_file: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigPlanArgs {
+    /// The setting ref (ai-kit:<section>:<key>).
+    #[arg(long, value_name = "REF")]
+    pub setting: String,
+    /// The compact scope address (machine, project:<id>, agent-session:<id>).
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+    /// The requested value as inline JSON.
+    #[arg(long, value_name = "JSON", conflicts_with = "value_file")]
+    pub value: Option<String>,
+    /// Read the requested value from a file, or `-` for stdin.
+    #[arg(long, value_name = "PATH")]
+    pub value_file: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigApplyArgs {
+    /// The plan document to apply: a path, or `-` for stdin.
+    #[arg(long, value_name = "PATH")]
+    pub plan_file: String,
+    /// The client-minted ChangeSet id that anchors idempotent replay.
+    #[arg(long, value_name = "ID")]
+    pub changeset: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigResetArgs {
+    /// The setting ref (ai-kit:<section>:<key>).
+    #[arg(long, value_name = "REF")]
+    pub setting: String,
+    /// The compact scope address (machine, project:<id>, agent-session:<id>).
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+    /// The client-minted ChangeSet id that anchors idempotent replay.
+    #[arg(long, value_name = "ID")]
+    pub changeset: Option<String>,
 }
 
 #[derive(Debug, Args)]
