@@ -1,6 +1,6 @@
 {
   "human_source": "ProjectCentral/user",
-  "project_id": "project:ai-kit",
+  "project_id": "ai-kit",
   "schema": "central.project/v1",
   "wiki": {
     "profile": "okf-wiki/v1",

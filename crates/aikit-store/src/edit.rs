@@ -314,6 +314,12 @@ impl OverlayDocument {
         self.inner.use_profile(id);
     }
 
+    /// Remove a profile reference from this overlay, letting lower scopes
+    /// decide again.
+    pub fn drop_profile(&mut self, id: &ProfileId) {
+        self.inner.drop_profile(id);
+    }
+
     pub fn set_config(&mut self, id: &CapsuleId, key: &str, value: Item) {
         self.inner.set_config(id, key, value);
     }

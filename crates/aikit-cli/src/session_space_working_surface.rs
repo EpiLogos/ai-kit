@@ -10,15 +10,15 @@ use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
     SessionSpaceAuthoredState, SessionSpaceWorkingSurfaceBinding,
 };
-use aikit_core::working_environment::WorkingEnvironmentObservation;
 use aikit_core::{AikitError, Result};
+use aikit_core::working_environment::WorkingEnvironmentObservation;
 use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
 use serde::Serialize;
-use std::collections::BTreeMap;
 
 use crate::working_environment_field;
 
-pub const SESSION_SPACE_WORKING_SURFACE_VERSION: &str = "aikit.session-space-working-surface/v1";
+pub const SESSION_SPACE_WORKING_SURFACE_VERSION: &str =
+    "aikit.session-space-working-surface/v1";
 
 #[derive(Debug, Clone, Copy)]
 pub enum WorkingSurfaceOperation {
@@ -60,11 +60,6 @@ pub struct WorkingSurfaceResult {
     pub reading: WorkingSurfaceReading,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<WorkingEnvironmentOutcome>,
-    /// The persisted binding updated with provider-native evidence this open
-    /// created, when the caller must persist it (Herdr workspaces/panes).
-    /// Applying it is the caller's act: this operation never writes state.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub refreshed_binding: Option<SessionSpaceWorkingSurfaceBinding>,
 }
 
 fn binding<'a>(
@@ -121,13 +116,8 @@ pub fn observe(
 ) -> Result<WorkingSurfaceResult> {
     let binding = binding(state, binding_ref)?;
     Ok(WorkingSurfaceResult {
-        reading: read(
-            state,
-            binding,
-            WorkingSurfaceNativeStanding::ReobservedUnproven,
-        )?,
+        reading: read(state, binding, WorkingSurfaceNativeStanding::ReobservedUnproven)?,
         outcome: None,
-        refreshed_binding: None,
     })
 }
 
@@ -135,9 +125,6 @@ pub fn observe(
 ///
 /// The result reports only the provider's fresh native fact. It does not claim
 /// AgentSession continuity merely because a terminal plan was created again.
-/// When the open created Herdr provider-native material, `refreshed_binding`
-/// carries the binding with that evidence recorded; applying it is the
-/// caller's separate persisted write.
 pub fn open(
     state: &SessionSpaceAuthoredState,
     binding_ref: &ResourceRef,
@@ -149,16 +136,13 @@ pub fn open(
         &binding.surface,
         WorkingEnvironmentOperation::Open,
     )?;
-    let reading = read(
-        state,
-        binding,
-        WorkingSurfaceNativeStanding::ReboundByExplicitOpen,
-    )?;
-    let refreshed_binding = herdr_binding_refresh(binding, &reading, Some(&outcome))?;
     Ok(WorkingSurfaceResult {
-        reading,
+        reading: read(
+            state,
+            binding,
+            WorkingSurfaceNativeStanding::ReboundByExplicitOpen,
+        )?,
         outcome: Some(outcome),
-        refreshed_binding,
     })
 }
 
@@ -171,11 +155,7 @@ pub fn focus(
     binding_ref: &ResourceRef,
 ) -> Result<WorkingSurfaceResult> {
     let binding = binding(state, binding_ref)?;
-    let before = read(
-        state,
-        binding,
-        WorkingSurfaceNativeStanding::ReobservedUnproven,
-    )?;
+    let before = read(state, binding, WorkingSurfaceNativeStanding::ReobservedUnproven)?;
     let outcome = if before.live_native_id.is_some() {
         working_environment_field::act(
             &binding.plan,
@@ -191,13 +171,8 @@ pub fn focus(
         }
     };
     Ok(WorkingSurfaceResult {
-        reading: read(
-            state,
-            binding,
-            WorkingSurfaceNativeStanding::ReobservedUnproven,
-        )?,
+        reading: read(state, binding, WorkingSurfaceNativeStanding::ReobservedUnproven)?,
         outcome: Some(outcome),
-        refreshed_binding: None,
     })
 }
 
@@ -216,77 +191,4 @@ pub fn terminal_attachment(
         &binding.provider,
         &binding.surface,
     )
-}
-
-/// Derive the updated persisted binding after an explicit Herdr open.
-///
-/// Evidence created by this open travels on the outcome; the open's fresh
-/// provider observation is the fallback source. The workspace binding and
-/// every observed Surface pane id are copied into the plan's
-/// `backend_extensions.herdr` table so later observes re-derive the exact
-/// provider bindings instead of losing them. Returns `None` for any non-Herdr
-/// provider, for opens without usable evidence, and when the evidence equals
-/// what the plan already records — a repeated open must not stage a no-op
-/// write.
-fn herdr_binding_refresh(
-    binding: &SessionSpaceWorkingSurfaceBinding,
-    reading: &WorkingSurfaceReading,
-    outcome: Option<&WorkingEnvironmentOutcome>,
-) -> Result<Option<SessionSpaceWorkingSurfaceBinding>> {
-    use aikit_adapters::working_environment::NativeBindingKind;
-
-    if binding.provider != working_environment_field::herdr_provider_ref()? {
-        return Ok(None);
-    }
-    // Created material travels on the outcome itself; a plain observation is
-    // the fallback for opens that only ensured already-recorded material.
-    let bindings: &[aikit_adapters::working_environment::ProviderNativeBinding] = match outcome {
-        Some(WorkingEnvironmentOutcome::Opened {
-            created: Some(created),
-            ..
-        }) => created,
-        _ => match &reading.provider_observation {
-            Some(observation) => &observation.bindings,
-            None => return Ok(None),
-        },
-    };
-    let plan_surfaces = working_environment_field::plan_surfaces(&binding.plan);
-    let mut workspace_id = None;
-    let mut recorded: BTreeMap<String, String> = BTreeMap::new();
-    for native in bindings {
-        match (&native.kind, &native.canonical_ref) {
-            (NativeBindingKind::Session, None) => {
-                workspace_id = Some(native.native_id.clone());
-            }
-            (NativeBindingKind::Surface, Some(surface)) => {
-                if let Some((_, logical)) = plan_surfaces.iter().find(|(known, _)| known == surface)
-                {
-                    recorded.insert(logical.clone(), native.native_id.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-    let Some(workspace_id) = workspace_id else {
-        return Ok(None);
-    };
-    if recorded.is_empty() {
-        return Ok(None);
-    }
-
-    let mut plan = binding.plan.clone();
-    let mut herdr = toml::map::Map::new();
-    herdr.insert("workspace-id".into(), toml::Value::String(workspace_id));
-    let mut surfaces = toml::map::Map::new();
-    for (logical, pane) in recorded {
-        surfaces.insert(logical, toml::Value::String(pane));
-    }
-    herdr.insert("surfaces".into(), toml::Value::Table(surfaces));
-    if plan.backend_extensions.get("herdr") == Some(&herdr) {
-        return Ok(None);
-    }
-    plan.backend_extensions.insert("herdr".into(), herdr);
-    let mut updated = binding.clone();
-    updated.plan = plan;
-    Ok(Some(updated))
 }
