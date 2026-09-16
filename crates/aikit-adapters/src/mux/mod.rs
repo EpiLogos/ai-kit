@@ -23,11 +23,11 @@ pub mod cmux;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use aikit_core::Result;
 use aikit_core::context::Isolation;
 use aikit_core::id::{ContextId, SessionId};
 use aikit_core::platform::MuxKind;
 use aikit_core::session::{Direction, Placement, SessionPlan};
-use aikit_core::Result;
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -629,4 +629,60 @@ pub trait MuxAdapter {
     fn set_status(&self, status: StatusUpdate) -> Result<()>;
 
     fn notify(&self, notification: Notification) -> Result<()>;
+}
+
+/// A boxed adapter is itself an adapter, so generic environments
+/// (`MuxWorkingEnvironment<A>`) can be built from registry-resolved handles.
+impl MuxAdapter for Box<dyn MuxAdapter> {
+    fn kind(&self) -> MuxKind {
+        (**self).kind()
+    }
+
+    fn capabilities(&self) -> MuxCapabilities {
+        (**self).capabilities()
+    }
+
+    fn detect(&self) -> Result<MuxPresence> {
+        (**self).detect()
+    }
+
+    fn current_location(&self) -> Result<MuxLocation> {
+        (**self).current_location()
+    }
+
+    fn session_exists(&self, plan: &SessionPlan) -> Result<bool> {
+        (**self).session_exists(plan)
+    }
+
+    fn inspect_session(&self, plan: &SessionPlan) -> Result<SessionBinding> {
+        (**self).inspect_session(plan)
+    }
+
+    fn ensure_session(&self, plan: &SessionPlan, mode: ReconcileMode) -> Result<SessionBinding> {
+        (**self).ensure_session(plan, mode)
+    }
+
+    fn spawn(&self, request: SpawnRequest) -> Result<SpawnedTarget> {
+        (**self).spawn(request)
+    }
+
+    fn focus(&self, target: &MuxTarget) -> Result<()> {
+        (**self).focus(target)
+    }
+
+    fn close(&self, target: &MuxTarget) -> Result<()> {
+        (**self).close(target)
+    }
+
+    fn open_palette(&self, request: PaletteRequest) -> Result<UiHost> {
+        (**self).open_palette(request)
+    }
+
+    fn set_status(&self, status: StatusUpdate) -> Result<()> {
+        (**self).set_status(status)
+    }
+
+    fn notify(&self, notification: Notification) -> Result<()> {
+        (**self).notify(notification)
+    }
 }

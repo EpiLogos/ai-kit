@@ -6,12 +6,12 @@ mod common;
 use aikit_cli::working_environment_field::{
     act, observe, plan_surfaces, provider_ref, surface_ref,
 };
-use aikit_core::platform::MuxKind;
+use aikit_core::SessionPlan;
+use aikit_core::platform::{MuxKind, PlaceTechnology};
 use aikit_core::session::SessionSpec;
 use aikit_core::working_environment::WorkingEnvironmentHealth;
-use aikit_core::SessionPlan;
 use aikit_tui::live_field::{
-    live_working_field, WorkingEnvironmentOperation, WorkingEnvironmentOutcome,
+    WorkingEnvironmentOperation, WorkingEnvironmentOutcome, live_working_field,
 };
 
 fn plan() -> SessionPlan {
@@ -60,11 +60,52 @@ fn canonical_surface_refs_come_from_the_plan_and_nothing_else() {
 
 #[test]
 fn provider_refs_are_distinct_per_mux_and_stable() {
-    let tmux = provider_ref(MuxKind::Tmux).unwrap();
-    let cmux = provider_ref(MuxKind::Cmux).unwrap();
+    let tmux = provider_ref(PlaceTechnology::from(MuxKind::Tmux)).unwrap();
+    let cmux = provider_ref(PlaceTechnology::from(MuxKind::Cmux)).unwrap();
     assert_ne!(tmux, cmux);
     assert_eq!(tmux.to_string(), "provider/tmux/current");
     assert_eq!(cmux.to_string(), "provider/cmux/current");
+}
+
+/// An unregistered place technology is a first-class declared-unsupported
+/// outcome: typed (`NotExposed`), naming the technology and what would support
+/// it. Never a crash, never a silent fallback onto another technology.
+#[test]
+fn an_unregistered_technology_is_declared_unsupported_not_crashed_or_fallback() {
+    let herdr = PlaceTechnology::new("herdr");
+    let provider = provider_ref(herdr).unwrap();
+    let subject = surface_ref("main", "shell").unwrap();
+
+    let opened = act(
+        &plan(),
+        &provider,
+        &subject,
+        WorkingEnvironmentOperation::Open,
+    )
+    .unwrap();
+    match opened {
+        WorkingEnvironmentOutcome::NotExposed { reason, .. } => {
+            assert!(
+                reason.contains("herdr") && reason.contains("adapter"),
+                "reason must name the technology and what would support it: {reason}"
+            );
+        }
+        other => panic!("herdr must be declared unsupported, not silently served: {other:?}"),
+    }
+
+    // The same discipline for focus, so every operation routes through the
+    // registry's declared answer.
+    let focused = act(
+        &plan(),
+        &provider,
+        &subject,
+        WorkingEnvironmentOperation::Focus,
+    )
+    .unwrap();
+    assert!(matches!(
+        focused,
+        WorkingEnvironmentOutcome::NotExposed { .. }
+    ));
 }
 
 /// Whatever this host happens to have installed, the observation is honest
@@ -213,7 +254,7 @@ fn a_real_provider_opens_then_focuses_the_same_canonical_subject() {
 
     let plan = live_plan("aikit-w6-roundtrip");
     let subject = surface_ref("main", "shell").unwrap();
-    let tmux = provider_ref(MuxKind::Tmux).unwrap();
+    let tmux = provider_ref(PlaceTechnology::tmux()).unwrap();
     let plan_refs = vec![subject.clone()];
 
     // Before: projectable, openable, not live, not focusable.

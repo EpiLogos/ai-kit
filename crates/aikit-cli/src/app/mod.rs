@@ -27,19 +27,19 @@ use aikit_core::profile::{PoolPatch, SkillUsageOverlayPatch};
 use aikit_core::projection::{
     ActivationEffect, ProjectionItem, ProjectionPlan, ResolvedContext, TargetAdapter,
 };
-use aikit_core::resolve::{resolve_diagnostic, ResolveRequest as CoreResolveRequest, ResolvedView};
+use aikit_core::resolve::{ResolveRequest as CoreResolveRequest, ResolvedView, resolve_diagnostic};
 use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
 use aikit_core::trust::TrustOracle;
 use aikit_core::{AikitError, Result};
 
+use aikit_store::SessionSpaceApplicationStore;
 use aikit_store::edit::{OverlayDocument, ProfileDocument};
 use aikit_store::generation::{self, GenerationBuilder};
 use aikit_store::home::AikitHome;
 use aikit_store::index::Index;
-use aikit_store::registry::{load_project_local, load_registry, RegistryProblem, Snapshot};
+use aikit_store::registry::{RegistryProblem, Snapshot, load_project_local, load_registry};
 use aikit_store::trust::{TrustSnapshot, TrustStore};
-use aikit_store::SessionSpaceApplicationStore;
 
 use aikit_adapters::actor_composition::compose_live_actor_inputs;
 use aikit_adapters::clients::agent_skills;
@@ -61,16 +61,16 @@ use aikit_adapters::clients::pi::PiAdapter;
 use aikit_adapters::clients::qwen::QwenAdapter;
 use aikit_adapters::clients::zcode::ZcodeAdapter;
 use aikit_adapters::factory_developmental::{
-    read_factory_developmental, start_factory_work, FactoryDevelopmentalBinding,
+    FactoryDevelopmentalBinding, read_factory_developmental, start_factory_work,
 };
 use aikit_adapters::runner::SystemRunner;
 
 use aikit_core::working_environment::WorkingEnvironmentObservation;
-use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
 use aikit_tui::backend::{
     ClientEffect, FactoryWorkEntry, FactoryWorkStartReceipt, JobOutput, PaletteBackend, Projected,
     PromotionDraft, RunIntent, Toggle,
 };
+use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
 pub use aikit_tui::staging::StagedDiff;
 
 use crate::discover::{self, DiscoveredProject};
@@ -623,11 +623,32 @@ impl Service {
         plan: &aikit_core::SessionPlan,
     ) -> Result<(aikit_adapters::mux::stack::MuxStack, SessionId)> {
         use aikit_adapters::mux::{
-            cmux::Cmux, plain::Plain, stack::MuxStack, tmux::Tmux, SessionIdentity,
+            SessionIdentity, cmux::Cmux, plain::Plain, stack::MuxStack, tmux::Tmux,
         };
         use aikit_store::state::StateStore;
 
-        let mux = match plan.mux.or(self.descriptor.mux) {
+        // The plan's declared place technology is an open name. The session
+        // stack can only drive the built-in multiplexers, so an unregistered
+        // name is a declared-unsupported outcome naming the technology — never
+        // a silent fallback onto some other technology's session.
+        let declared = match &plan.mux {
+            Some(technology) => match technology.known() {
+                Some(kind) => Some(kind),
+                None => {
+                    return Err(AikitError::new(
+                        "mux.technology_unsupported",
+                        format!(
+                            "session `{}` declares the place technology `{technology}`, which \
+                             this build's session stack cannot drive; it needs a registered \
+                             adapter for that technology",
+                            plan.id
+                        ),
+                    ));
+                }
+            },
+            None => self.descriptor.mux,
+        };
+        let mux = match declared {
             Some(kind) => kind,
             None => crate::mux_install::choose_installed(None)?,
         };
@@ -1007,7 +1028,7 @@ impl Service {
     /// separable from the credential half ("what can I use today").
     pub fn refresh_model_catalogue(&self, provider: &str) -> Result<serde_json::Value> {
         use aikit_adapters::provider_catalog_source::{
-            fetch_openrouter_catalog, ProviderCatalogOutcome, OPENROUTER_PROVIDER,
+            OPENROUTER_PROVIDER, ProviderCatalogOutcome, fetch_openrouter_catalog,
         };
         if provider != "openrouter" {
             return Err(AikitError::new(
@@ -1120,12 +1141,16 @@ impl Service {
             // projections resolve to defaults — never guessed; a fetch failure
             // is fail-soft (no projection), never a resolution failure.
             let composed = match self.descriptor.project_root.as_deref() {
-                Some(root) => self.central_meta_root.clone().or_else(|| process_central_root(Some(root))).and_then(|central| {
-                    let runner = SystemRunner::new();
-                    compose_live_actor_inputs(&runner, &central, root)
-                        .ok()
-                        .flatten()
-                }),
+                Some(root) => self
+                    .central_meta_root
+                    .clone()
+                    .or_else(|| process_central_root(Some(root)))
+                    .and_then(|central| {
+                        let runner = SystemRunner::new();
+                        compose_live_actor_inputs(&runner, &central, root)
+                            .ok()
+                            .flatten()
+                    }),
                 None => None,
             };
 
@@ -1244,13 +1269,18 @@ impl Service {
             .project_root
             .as_deref()
             .unwrap_or(&self.invocation_cwd);
-        let central_root = self.central_meta_root.clone()
+        let central_root = self
+            .central_meta_root
+            .clone()
             .or_else(|| process_central_root(Some(project_root)));
         let native_binding = if self.descriptor.project_root.is_none() {
             admission.map(|a| a.context_binding()).transpose()?
-        } else { None };
+        } else {
+            None
+        };
         if admission.is_some_and(|a| a.scope_ref.as_str() == "scope:root")
-            && self.descriptor.project_root.is_some() && self.central_meta_root.is_none()
+            && self.descriptor.project_root.is_some()
+            && self.central_meta_root.is_none()
         {
             return Err(AikitError::new(
                 "compose.root_world_child_context",
@@ -1347,17 +1377,29 @@ impl Service {
                 .map(|c| c.source_resources.clone())
                 .unwrap_or_default(),
         )?;
-        let actors = composed.as_ref().map(|c| c.requested_actors.clone()).unwrap_or_default();
+        let actors = composed
+            .as_ref()
+            .map(|c| c.requested_actors.clone())
+            .unwrap_or_default();
         let mut resolution = if self.descriptor.project_root.is_none() {
             if let Some(binding) = native_binding {
                 aikit_core::application_context_resolution_with_binding(
-                    &self.descriptor, &self.view, &self.layers, &resources, actors, binding,
+                    &self.descriptor,
+                    &self.view,
+                    &self.layers,
+                    &resources,
+                    actors,
+                    binding,
                 )?
             } else {
-                aikit_tui::project_world_service::context_resolution_from_resources(self, actors, &resources)?
+                aikit_tui::project_world_service::context_resolution_from_resources(
+                    self, actors, &resources,
+                )?
             }
         } else {
-            aikit_tui::project_world_service::context_resolution_from_resources(self, actors, &resources)?
+            aikit_tui::project_world_service::context_resolution_from_resources(
+                self, actors, &resources,
+            )?
         };
         // Harness detection is owned by Actuation and consumed here — one
         // live `actuation harness detect` run discloses which operative
@@ -1756,7 +1798,7 @@ impl Service {
         &self,
         event: &aikit_core::hooks::HookEvent,
     ) -> Result<aikit_core::hooks::HookDecision> {
-        use aikit_core::hooks::{build_chains, HookChain};
+        use aikit_core::hooks::{HookChain, build_chains};
         let chains = build_chains(&self.view, &self.catalog)?;
         let chain = match chains.get(event.kind.as_str()) {
             Some(chain) => chain.clone(),
@@ -2511,7 +2553,10 @@ impl AikitApplication for Service {
         let committed = staged.commit(base.as_ref())?;
         let mut warnings = self.view.warnings.clone();
         warnings.extend(crate::skill_sources::report_central_generation(
-            &self.home, &committed.id.to_string(), &committed.path));
+            &self.home,
+            &committed.id.to_string(),
+            &committed.path,
+        ));
         let effects = self.client_effects(&self.view);
 
         Ok(AppliedGeneration {
@@ -2707,7 +2752,11 @@ impl PaletteBackend for Service {
         let Some(project) = self.descriptor.project_root.as_deref() else {
             return Ok(Vec::new());
         };
-        let mut records = if let Some(central) = self.central_meta_root.clone().or_else(|| process_central_root(Some(project))) {
+        let mut records = if let Some(central) = self
+            .central_meta_root
+            .clone()
+            .or_else(|| process_central_root(Some(project)))
+        {
             match compose_live_actor_inputs(&SystemRunner::new(), &central, project) {
                 Ok(composed) => composed
                     .map(|inputs| inputs.source_resources)
@@ -2739,9 +2788,8 @@ impl PaletteBackend for Service {
                     state.clone(),
                     project_ref.clone(),
                 )?;
-                records.extend(
-                    read_factory_developmental(&SystemRunner::new(), &binding)?.resources,
-                );
+                records
+                    .extend(read_factory_developmental(&SystemRunner::new(), &binding)?.resources);
             }
             // A configured start-work request may legitimately point at a new
             // state path. Until the owner accepts the Commission, this is a
@@ -2751,7 +2799,7 @@ impl PaletteBackend for Service {
                 return Err(AikitError::new(
                     "factory.developmental_incomplete_binding",
                     "Factory navigation requires an existing AIKIT_FACTORY_STATE plus AIKIT_FACTORY_PROJECT_REF, or a complete AIKIT_FACTORY_STATE + AIKIT_FACTORY_REQUEST_FILE start-work binding; no Factory identity is inferred from the current Session or harness",
-                ))
+                ));
             }
         }
         Ok(records)
@@ -2835,7 +2883,7 @@ impl PaletteBackend for Service {
                 return Err(AikitError::new(
                     "projectcentral.manifest_read",
                     error.to_string(),
-                ))
+                ));
             }
         }
         let binding = aikit_adapters::ProjectCentralFilesystemBinding::inspect(root, None)?;
@@ -2908,8 +2956,8 @@ impl PaletteBackend for Service {
         &self,
     ) -> Result<Option<aikit_core::credential_world::CredentialWorldDisclosure>> {
         use aikit_core::credential_world::{
-            credential_requirements_for_model_routes, disclose_credential_world,
-            ProviderRosterKnowledge,
+            ProviderRosterKnowledge, credential_requirements_for_model_routes,
+            disclose_credential_world,
         };
 
         let (catalogue, _notes) = aikit_store::model_catalogue::resolved_catalogue(&self.home);
@@ -3010,7 +3058,9 @@ impl PaletteBackend for Service {
     /// `Unavailable` arms; only identity and observed liveness cross the
     /// boundary. Cached per session for the same reason as the health reading.
     fn workcell_world(&self) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
-        use aikit_adapters::workcell_instance_intake::{intake_workcell_instances, InstancesOutcome};
+        use aikit_adapters::workcell_instance_intake::{
+            InstancesOutcome, intake_workcell_instances,
+        };
         use aikit_core::workcell_world::{WorkcellDisclosure, WorkcellInstanceDisclosure};
 
         if let Some(cached) = self.workcell_reading.borrow().as_ref() {
@@ -3051,7 +3101,7 @@ impl PaletteBackend for Service {
     /// Cached per session.
     fn model_roster(&self) -> Result<Option<aikit_core::resource::ModelRoster>> {
         use aikit_core::resource::{
-            candidates_from_routes, rank_model_roster, ModelRankingPolicy, ModelRouteSet,
+            ModelRankingPolicy, ModelRouteSet, candidates_from_routes, rank_model_roster,
         };
 
         if self.project_binding()?.is_none() && self.descriptor.project_root.is_none() {
@@ -3536,4 +3586,3 @@ fn model_roster_candidate_for(
         provenance: Vec::new(),
     }
 }
-
