@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use aikit_cli::app::Service;
 use aikit_cli::SessionSpaceServiceOps;
+use aikit_cli::app::Service;
 use aikit_core::project::ProjectRef;
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
@@ -10,8 +10,8 @@ use aikit_core::session_space_application::{
 };
 use aikit_core::{AikitError, Result};
 use clap::{Parser, Subcommand};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -127,11 +127,23 @@ enum Command {
         label: Option<String>,
     },
     /// Stage any typed SessionSpace mutation from JSON. Prefix with @ to read a file.
+    ///
+    /// `--print-schema` prints documented JSON templates instead of staging:
+    /// every mutation operation, each with the `intent` value to pass here and
+    /// field notes beside it — including the complete SessionPlan template a
+    /// bind-working-surface binding requires. Pass `--operation` for one.
     Stage {
         #[arg(long)]
         space: Option<String>,
+        /// Print documented intent templates instead of staging.
+        #[arg(long = "print-schema", default_value_t = false)]
+        print_schema: bool,
+        /// With --print-schema: restrict the output to one operation
+        /// (kebab-case, e.g. bind-working-surface).
+        #[arg(long = "operation", value_name = "OPERATION")]
+        operation: Option<String>,
         #[arg(long = "intent-json", value_name = "JSON|@FILE")]
-        intent_json: String,
+        intent_json: Option<String>,
     },
     /// Apply exactly a previously reviewed preview. Prefix with @ to read a file.
     Apply {
@@ -353,8 +365,37 @@ fn run() -> Result<()> {
             )?;
             emit(&preview)
         }
-        Command::Stage { space, intent_json } => {
-            let intent: SessionSpaceMutation = parse_json_arg(&intent_json)?;
+        Command::Stage {
+            space,
+            print_schema,
+            operation,
+            intent_json,
+        } => {
+            if print_schema {
+                return match operation.as_deref() {
+                    Some(operation) => emit(
+                        &aikit_cli::session_space_schema::operation_schema(operation).ok_or_else(
+                            || {
+                                AikitError::new(
+                                    "cli.session_space_operation_unknown",
+                                    format!(
+                                        "`{operation}` is not a SessionSpace mutation operation; \
+                                         run stage --print-schema with no --operation to list them"
+                                    ),
+                                )
+                            },
+                        )?,
+                    ),
+                    None => emit(&aikit_cli::session_space_schema::schema()),
+                };
+            }
+            let Some(intent_json) = intent_json.as_deref() else {
+                return Err(AikitError::new(
+                    "cli.session_space_intent_missing",
+                    "stage needs --intent-json, or --print-schema to print the templates",
+                ));
+            };
+            let intent: SessionSpaceMutation = parse_json_arg(intent_json)?;
             let space = space.as_deref().map(space_ref).transpose()?;
             emit(&service.session_space_stage(space.as_ref(), intent)?)
         }

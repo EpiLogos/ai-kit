@@ -72,6 +72,14 @@ Herdr and Hyprland are current first-party reference implementations of this pub
 
 The deterministic #139 reference-world specimen additionally proves that an external-style provider can implement the public trait using only the crate-root public contract. That fixture is conformance evidence, not a privileged built-in provider.
 
+## Open place technologies
+
+A session plan names the technology that owns its place with an open, validated name — `PlaceTechnology` in `aikit-core` — not a closed enum. The wire field is still `mux`, and the built-ins serialize exactly as before (`tmux`, `cmux`, `plain`), so every persisted plan and provider ref keeps its byte-exact meaning; `herdr` and any other lowercase `[a-z0-9-]` name (1–32 characters) now parse as a first-class declared name instead of failing with "not a known multiplexer". This widening is additive acceptance only: no persisted document changes shape or value, and no schema revision moves.
+
+The naming follows the same law as `TargetId`: the provider names itself, and what the build can *drive* is a downstream question. That question lives in the `aikit-adapters` place-technology registry (`aikit_adapters::place_technology`): one entry per technology, each able to detect presence for real (a version probe, a socket check) and to hand back the `MuxAdapter` that drives it where one exists. The built-in registry carries tmux and cmux over their existing adapter surfaces, plus `plain` as the builtin no-mux technology — registered and resolvable everywhere a plan can name it, but never a row in the working-environment field, because the terminal the process already lives in is not a switchable world.
+
+An unregistered name is a first-class declared-unsupported outcome, mirroring the harness-admission law that unsupported and unknown faculties are never normalised away: a working-surface open/focus against a technology with no registry entry returns the typed `NotExposed` outcome naming the technology and what would support it (a registry adapter for that technology). It is never a parse failure at plan level, never a crash, and never a silent fallback onto another technology's session. A herdr working-surface binding therefore stages, persists and validates exactly like a tmux one today, and the herdr *driver* remains a separate adapter lane.
+
 ## Acceptance boundary
 
 Remote/source acceptance can prove:

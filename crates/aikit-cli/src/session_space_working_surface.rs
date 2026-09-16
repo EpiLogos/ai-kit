@@ -10,15 +10,14 @@ use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
     SessionSpaceAuthoredState, SessionSpaceWorkingSurfaceBinding,
 };
-use aikit_core::{AikitError, Result};
 use aikit_core::working_environment::WorkingEnvironmentObservation;
+use aikit_core::{AikitError, Result};
 use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
 use serde::Serialize;
 
 use crate::working_environment_field;
 
-pub const SESSION_SPACE_WORKING_SURFACE_VERSION: &str =
-    "aikit.session-space-working-surface/v1";
+pub const SESSION_SPACE_WORKING_SURFACE_VERSION: &str = "aikit.session-space-working-surface/v1";
 
 #[derive(Debug, Clone, Copy)]
 pub enum WorkingSurfaceOperation {
@@ -89,6 +88,16 @@ fn read(
         .as_ref()
         .and_then(|observation| observation.canonical_native_id(&binding.surface))
         .map(ToString::to_string);
+    // The plan's declared place technology is an open name, so the reading
+    // names it explicitly: a provider that this build cannot drive stays a
+    // declared fact of the binding rather than a silent absence.
+    let mut provenance = vec![
+        "persisted SessionSpace binding selected before provider operation".into(),
+        "provider-native ids are re-observed and remain provenance".into(),
+    ];
+    if let Some(technology) = &binding.plan.mux {
+        provenance.push(format!("plan declares place technology `{technology}`"));
+    }
     Ok(WorkingSurfaceReading {
         schema: SESSION_SPACE_WORKING_SURFACE_VERSION.into(),
         space: state.id().clone(),
@@ -102,10 +111,7 @@ fn read(
         provider_observation,
         live_native_id,
         native_standing,
-        provenance: vec![
-            "persisted SessionSpace binding selected before provider operation".into(),
-            "provider-native ids are re-observed and remain provenance".into(),
-        ],
+        provenance,
     })
 }
 
@@ -116,7 +122,11 @@ pub fn observe(
 ) -> Result<WorkingSurfaceResult> {
     let binding = binding(state, binding_ref)?;
     Ok(WorkingSurfaceResult {
-        reading: read(state, binding, WorkingSurfaceNativeStanding::ReobservedUnproven)?,
+        reading: read(
+            state,
+            binding,
+            WorkingSurfaceNativeStanding::ReobservedUnproven,
+        )?,
         outcome: None,
     })
 }
@@ -155,7 +165,11 @@ pub fn focus(
     binding_ref: &ResourceRef,
 ) -> Result<WorkingSurfaceResult> {
     let binding = binding(state, binding_ref)?;
-    let before = read(state, binding, WorkingSurfaceNativeStanding::ReobservedUnproven)?;
+    let before = read(
+        state,
+        binding,
+        WorkingSurfaceNativeStanding::ReobservedUnproven,
+    )?;
     let outcome = if before.live_native_id.is_some() {
         working_environment_field::act(
             &binding.plan,
@@ -171,7 +185,11 @@ pub fn focus(
         }
     };
     Ok(WorkingSurfaceResult {
-        reading: read(state, binding, WorkingSurfaceNativeStanding::ReobservedUnproven)?,
+        reading: read(
+            state,
+            binding,
+            WorkingSurfaceNativeStanding::ReobservedUnproven,
+        )?,
         outcome: Some(outcome),
     })
 }

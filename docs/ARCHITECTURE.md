@@ -54,7 +54,7 @@ The product is therefore **the resolver and the contextual lifecycle**.
 | **Projection** | A target-specific representation of an effective view. |
 | **Generation** | An immutable, content-addressed materialization of an effective view. |
 | **Procedure** | An immutable, reviewable, forward-checked and reversible mutation outside a generation. Planned Procedures remain addressable by id for separate diff/run/undo invocations. |
-| **Session space** | An AIKit concept bound to a tmux session, a cmux workspace/group, or a plain terminal. |
+| **Session space** | An AIKit concept bound to the place technology that owns it — a tmux session, a cmux workspace/group, a plain terminal, or any other declared place technology (an open, validated name; tmux/cmux/plain are the built-ins this build drives). |
 
 *Available*, *enabled* and *loaded* are three different things and are rendered
 differently everywhere.
@@ -348,6 +348,15 @@ mixed across a remote boundary.
 
 Portable session topology is canonical; tmuxp / tmuxinator / cmux JSON are
 export targets, never the source of truth.
+
+A plan names its place technology with an open, validated name (`PlaceTechnology`,
+wire field `mux`; `tmux`/`cmux`/`plain` serialize exactly as the old closed enum
+did). tmux and cmux are the built-ins this build drives; other declared names —
+`herdr` today, anything else tomorrow — stage and persist as first-class plans,
+and a place-technology registry in `aikit-adapters` decides what is detectable
+and drivable. An unregistered name is a declared-unsupported outcome naming the
+technology and what would support it, never a parse failure or a silent
+fallback.
 
 ---
 

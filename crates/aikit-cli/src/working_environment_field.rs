@@ -13,18 +13,19 @@
 //! look alike. Which native pane each provider hands back is that provider's
 //! own business and stays provenance.
 
-use aikit_adapters::mux::{cmux::Cmux, tmux::Tmux, MuxAdapter, MuxPresence};
+use aikit_adapters::mux::{MuxAdapter, tmux::Tmux};
+use aikit_adapters::place_technology::{PlaceTechnologyReading, PlaceTechnologyRegistry};
 use aikit_adapters::{MuxWorkingEnvironment, WorkingEnvironmentProvider};
-use aikit_core::platform::MuxKind;
+use aikit_core::Result;
+use aikit_core::platform::PlaceTechnology;
 use aikit_core::resource::ResourceRef;
 use aikit_core::session::SessionPlan;
 use aikit_core::working_environment::{
-    WorkingEnvironmentCapabilities, WorkingEnvironmentHealth, WorkingEnvironmentObservation,
-    WORKING_ENVIRONMENT_PROVIDER_VERSION,
+    WORKING_ENVIRONMENT_PROVIDER_VERSION, WorkingEnvironmentCapabilities, WorkingEnvironmentHealth,
+    WorkingEnvironmentObservation,
 };
-use aikit_core::Result;
-use serde::Serialize;
 use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
+use serde::Serialize;
 
 /// Provider-owned terminal client attachment material. It is intentionally
 /// narrower than `open`: attachment never creates or reconciles a session.
@@ -53,9 +54,9 @@ pub fn surface_ref(view: &str, pane: &str) -> Result<ResourceRef> {
     ResourceRef::parse(format!("surface/terminal/{view}/{pane}"))
 }
 
-/// The canonical provider Ref for a mux kind.
-pub fn provider_ref(kind: MuxKind) -> Result<ResourceRef> {
-    ResourceRef::parse(format!("provider/{}/current", kind.as_str()))
+/// The canonical provider Ref for a place technology.
+pub fn provider_ref(technology: PlaceTechnology) -> Result<ResourceRef> {
+    ResourceRef::parse(format!("provider/{}/current", technology.as_str()))
 }
 
 /// Every (canonical Surface, logical plan key) pair in a plan, in plan order.
@@ -80,8 +81,13 @@ pub fn plan_surfaces(plan: &SessionPlan) -> Vec<(ResourceRef, String)> {
 
 /// Which terminal working environments this host actually has, with the reason
 /// attached when one is present but unusable.
-pub fn detect() -> Result<Vec<MuxPresence>> {
-    Ok(vec![Tmux::system().detect()?, Cmux::system().detect()?])
+///
+/// The readings come from the place-technology registry: each registered
+/// technology that hosts a working field is probed for real. plain is
+/// registered and resolvable but never a field row — it is the terminal this
+/// process already lives in, not a switchable world.
+pub fn detect() -> Result<Vec<PlaceTechnologyReading>> {
+    PlaceTechnologyRegistry::builtin().detect_field()
 }
 
 fn environment<A: MuxAdapter>(
@@ -97,37 +103,37 @@ fn environment<A: MuxAdapter>(
     environment
 }
 
-/// Observe every installed mux over one plan.
+/// Observe every installed working-environment technology over one plan.
 ///
-/// A mux that is not installed is left out entirely rather than reported as
-/// unavailable: "not on this machine" is not a degraded provider, and listing
+/// A technology that is not installed is left out entirely rather than reported
+/// as unavailable: "not on this machine" is not a degraded provider, and listing
 /// it would put a row in the operator's field that can never become useful. A
-/// mux that *is* installed but whose observation fails is reported with the
-/// failure as provenance, because that one is worth knowing about.
+/// technology that *is* installed but whose observation fails is reported with
+/// the failure as provenance, because that one is worth knowing about.
 pub fn observe(plan: &SessionPlan) -> Result<Vec<WorkingEnvironmentObservation>> {
     let surfaces = plan_surfaces(plan);
+    let registry = PlaceTechnologyRegistry::builtin();
     let mut observations = Vec::new();
 
-    for presence in detect()? {
-        if !presence.installed {
+    for reading in registry.detect_field()? {
+        if !reading.installed {
             continue;
         }
-        let provider = provider_ref(presence.kind)?;
-        let observed = match presence.kind {
-            MuxKind::Tmux => {
-                environment(Tmux::system(), plan, provider.clone(), &surfaces).observe()
-            }
-            MuxKind::Cmux => {
-                environment(Cmux::system(), plan, provider.clone(), &surfaces).observe()
-            }
-            // Any mux kind this build does not yet project is skipped rather
-            // than guessed at. A silent guess here would put a row in the
-            // operator's field that no provider stands behind.
-            _ => continue,
+        let provider = provider_ref(reading.technology.clone())?;
+        // The registry, not a closed match, decides who projects this plan.
+        // An installed technology with no adapter is skipped rather than
+        // guessed at: a silent guess would put a row in the operator's field
+        // that no provider stands behind.
+        let Some(adapter) = registry
+            .resolve(&reading.technology)
+            .and_then(|entry| entry.mux_adapter())
+        else {
+            continue;
         };
+        let observed = environment(adapter, plan, provider.clone(), &surfaces).observe();
         match observed {
             Ok(mut observation) => {
-                if let Some(version) = presence.version.clone() {
+                if let Some(version) = reading.version.clone() {
                     observation.provider_version = Some(version);
                 }
                 observation
@@ -135,9 +141,9 @@ pub fn observe(plan: &SessionPlan) -> Result<Vec<WorkingEnvironmentObservation>>
                     .push(format!("observed over session plan {}", plan.name));
                 observations.push(observation);
             }
-            // An installed mux that will not answer is a real, common state —
-            // a cmux app that is not running, a tmux server that died. It is
-            // an unavailable provider, not a failure of this reading, and
+            // An installed technology that will not answer is a real, common
+            // state — a cmux app that is not running, a tmux server that died.
+            // It is an unavailable provider, not a failure of this reading, and
             // certainly not a reason to refuse the whole field: doing that
             // would take the TUI's whole Worlds pane down with one dead
             // socket. Report it as the provider vocabulary already can, with
@@ -145,7 +151,7 @@ pub fn observe(plan: &SessionPlan) -> Result<Vec<WorkingEnvironmentObservation>>
             Err(error) => observations.push(WorkingEnvironmentObservation {
                 schema: WORKING_ENVIRONMENT_PROVIDER_VERSION.into(),
                 provider,
-                provider_version: presence.version.clone(),
+                provider_version: reading.version.clone(),
                 health: WorkingEnvironmentHealth::Unavailable,
                 capabilities: WorkingEnvironmentCapabilities::default(),
                 bindings: Vec::new(),
@@ -166,6 +172,11 @@ pub fn observe(plan: &SessionPlan) -> Result<Vec<WorkingEnvironmentObservation>>
 /// `Open` reconciles the whole session (create-or-attach) because that is what
 /// a mux can actually do — it has no "create just this pane in a session that
 /// does not exist" primitive. `Focus` targets the single bound Surface.
+///
+/// The provider's place technology is resolved through the registry. A
+/// technology this build cannot drive is a first-class declared-unsupported
+/// outcome (`NotExposed`) naming the technology and what would support it —
+/// never a crash and never a fallback onto another technology.
 pub fn act(
     plan: &SessionPlan,
     provider: &ResourceRef,
@@ -173,45 +184,84 @@ pub fn act(
     operation: WorkingEnvironmentOperation,
 ) -> Result<WorkingEnvironmentOutcome> {
     let surfaces = plan_surfaces(plan);
-    let Some(presence) = detect()?
+    let registry = PlaceTechnologyRegistry::builtin();
+    let Some(reading) = registry
+        .detect_field()?
         .into_iter()
-        .find(|presence| provider_ref(presence.kind).ok().as_ref() == Some(provider))
+        .find(|reading| provider_ref(reading.technology.clone()).ok().as_ref() == Some(provider))
     else {
         return Ok(WorkingEnvironmentOutcome::NotExposed {
             provider: provider.clone(),
             subject: subject.clone(),
-            reason: format!("{provider} is not a working environment this build projects"),
+            reason: declared_unsupported_reason(&registry, provider),
         });
     };
-    if !presence.installed {
+    if !reading.installed {
         return Ok(WorkingEnvironmentOutcome::NotExposed {
             provider: provider.clone(),
             subject: subject.clone(),
-            reason: presence
+            reason: reading
                 .detail
-                .unwrap_or_else(|| format!("{provider} is not installed on this host")),
+                .unwrap_or_else(|| format!("{} is not installed on this host", reading.technology)),
         });
     }
-
-    match presence.kind {
-        MuxKind::Tmux => act_in(
-            environment(Tmux::system(), plan, provider.clone(), &surfaces),
-            provider,
-            subject,
-            operation,
-        ),
-        MuxKind::Cmux => act_in(
-            environment(Cmux::system(), plan, provider.clone(), &surfaces),
-            provider,
-            subject,
-            operation,
-        ),
-        _ => Ok(WorkingEnvironmentOutcome::NotExposed {
+    let Some(adapter) = registry
+        .resolve(&reading.technology)
+        .and_then(|entry| entry.mux_adapter())
+    else {
+        return Ok(WorkingEnvironmentOutcome::NotExposed {
             provider: provider.clone(),
             subject: subject.clone(),
             reason: format!("{provider} has no working-environment projection in this build"),
-        }),
+        });
+    };
+    act_in(
+        environment(adapter, plan, provider.clone(), &surfaces),
+        provider,
+        subject,
+        operation,
+    )
+}
+
+/// Why a provider ref cannot be acted on, stated so the operator can act on it.
+///
+/// A well-formed technology name is never laundered into "unknown": the
+/// registry says whether the technology is registered at all, hosts a field,
+/// and has a driver, and the reason names what would change the answer.
+fn declared_unsupported_reason(
+    registry: &PlaceTechnologyRegistry,
+    provider: &ResourceRef,
+) -> String {
+    match technology_from_provider(provider) {
+        Some(technology) => match registry.resolve(&technology) {
+            Some(entry) if !entry.hosts_working_field() => format!(
+                "{provider}: `{technology}` is the terminal this command already runs in and \
+                 hosts no switchable world to open or focus"
+            ),
+            Some(_) => format!(
+                "{provider}: `{technology}` is registered but this build cannot drive it as a \
+                 working environment"
+            ),
+            None => format!(
+                "{provider}: the place technology `{technology}` is declared, but this build \
+                 registers no working-environment provider for it; a `{technology}` adapter in \
+                 the place-technology registry would support it"
+            ),
+        },
+        None => format!("{provider} is not a working environment this build projects"),
     }
+}
+
+/// The place technology a canonical provider ref names, when it names one.
+fn technology_from_provider(provider: &ResourceRef) -> Option<PlaceTechnology> {
+    let raw = provider
+        .as_str()
+        .strip_prefix("provider/")?
+        .strip_suffix("/current")?;
+    if raw.contains('/') {
+        return None;
+    }
+    raw.parse::<PlaceTechnology>().ok()
 }
 
 /// Resolve a terminal-client attachment command for one already-live Surface.
@@ -228,10 +278,13 @@ pub fn terminal_attachment(
         return Ok(WorkingEnvironmentTerminalAttachment::NotExposed {
             provider: provider.clone(),
             subject: subject.clone(),
-            reason: format!("{subject} is not a canonical Surface in persisted plan {}", plan.id),
+            reason: format!(
+                "{subject} is not a canonical Surface in persisted plan {}",
+                plan.id
+            ),
         });
     };
-    let tmux_provider = provider_ref(MuxKind::Tmux)?;
+    let tmux_provider = provider_ref(PlaceTechnology::tmux())?;
     if provider != &tmux_provider {
         return Ok(WorkingEnvironmentTerminalAttachment::NotExposed {
             provider: provider.clone(),

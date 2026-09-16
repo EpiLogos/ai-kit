@@ -30,8 +30,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::context::Isolation;
-use crate::error::{err, AikitError, Result};
-use crate::platform::MuxKind;
+use crate::error::{AikitError, Result, err};
+use crate::platform::PlaceTechnology;
 use crate::profile::{ConfigTable, PoolPatch};
 
 pub const SUPPORTED_SCHEMA: u32 = 1;
@@ -170,8 +170,11 @@ impl Placement {
 /// `[backend.cmux]` extensions.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BackendSpec {
-    /// `None` means `auto`: the adapter picks based on what is running.
-    pub mux: Option<MuxKind>,
+    /// The place technology that owns the session's place, or `None` for
+    /// `auto`: the adapter picks based on what is running. An open name —
+    /// tmux and cmux are just the built-ins — so a spec can declare a place
+    /// this build cannot drive yet instead of failing to parse.
+    pub mux: Option<PlaceTechnology>,
     /// Per-multiplexer opaque options, keyed by multiplexer name.
     pub extensions: BTreeMap<String, ConfigTable>,
     /// Extension tables addressed to a multiplexer this build does not know.
@@ -377,7 +380,7 @@ impl RawSpec {
                     return err(
                         "session.invalid",
                         format!("`{other}` is not an attach policy (always, never, if-created)"),
-                    )
+                    );
                 }
             },
         };
@@ -445,18 +448,24 @@ impl RawSpec {
     }
 }
 
-fn parse_backend_name(name: &str) -> Result<Option<MuxKind>> {
+fn parse_backend_name(name: &str) -> Result<Option<PlaceTechnology>> {
     if name == "auto" {
         return Ok(None);
     }
-    name.parse::<MuxKind>()
-        .map(Some)
-        .map_err(|_| {
-            AikitError::new(
-                "session.invalid",
-                format!("`{name}` is not a backend (auto, tmux, cmux, plain)"),
-            )
-        })
+    // `none` remains an accepted spelling of the built-in no-mux technology;
+    // it serializes as `plain`, exactly as the closed enum always did.
+    if name == "none" {
+        return Ok(Some(PlaceTechnology::plain()));
+    }
+    name.parse::<PlaceTechnology>().map(Some).map_err(|_| {
+        AikitError::new(
+            "session.invalid",
+            format!(
+                "`{name}` is not a backend name (auto, or a place technology of lowercase \
+                 letters, digits and hyphens such as tmux, cmux, plain)"
+            ),
+        )
+    })
 }
 
 /// Reconcile `isolation` with the legacy `worktree` flag.
@@ -544,8 +553,13 @@ pub struct SessionPlan {
     pub name: String,
     #[serde(default)]
     pub root: Option<PathBuf>,
+    /// The place technology that owns this session's place, serialized under
+    /// the same `mux` wire field with the same values for the built-ins
+    /// (tmux/cmux/plain) as ever. An unregistered name is kept exactly as
+    /// declared: whether the build can drive it is a registry question, not a
+    /// parse error.
     #[serde(default)]
-    pub mux: Option<MuxKind>,
+    pub mux: Option<PlaceTechnology>,
     pub attach: Attach,
     pub lifecycle: Lifecycle,
     pub capabilities: PoolPatch,
@@ -598,7 +612,10 @@ pub fn compile(spec: &SessionSpec) -> Result<SessionPlan> {
         if !seen_views.insert(view.id.as_str()) {
             return Err(AikitError::new(
                 "session.duplicate_view",
-                format!("session `{}` declares the view `{}` twice", spec.id, view.id),
+                format!(
+                    "session `{}` declares the view `{}` twice",
+                    spec.id, view.id
+                ),
             )
             .with("session", spec.id.clone())
             .with("view", view.id.clone()));
@@ -610,7 +627,7 @@ pub fn compile(spec: &SessionSpec) -> Result<SessionPlan> {
         id: spec.id.clone(),
         name: spec.name.clone(),
         root: spec.root.clone(),
-        mux: spec.backend.mux,
+        mux: spec.backend.mux.clone(),
         attach: spec.attach,
         lifecycle: spec.lifecycle,
         capabilities: spec.capabilities.clone(),
@@ -625,7 +642,10 @@ fn compile_view(spec: &SessionSpec, view: &ViewSpec) -> Result<ViewPlan> {
     if view.panes.is_empty() {
         return Err(AikitError::new(
             "session.empty_view",
-            format!("view `{}` has no panes; there would be nothing to create", view.id),
+            format!(
+                "view `{}` has no panes; there would be nothing to create",
+                view.id
+            ),
         )
         .with("session", spec.id.clone())
         .with("view", view.id.clone()));
@@ -696,7 +716,11 @@ fn compile_view(spec: &SessionSpec, view: &ViewSpec) -> Result<ViewPlan> {
         }
     }
 
-    let roots: Vec<&PaneSpec> = view.panes.iter().filter(|p| p.split_from.is_none()).collect();
+    let roots: Vec<&PaneSpec> = view
+        .panes
+        .iter()
+        .filter(|p| p.split_from.is_none())
+        .collect();
     if roots.len() > 1 {
         return Err(AikitError::new(
             "session.multiple_root_panes",
@@ -812,11 +836,13 @@ mod tests {
             capabilities: PoolPatch::default(),
         };
         assert!(!shared.is_isolated());
-        assert!(TaskSpec {
-            isolation: Isolation::Directory,
-            ..shared
-        }
-        .is_isolated());
+        assert!(
+            TaskSpec {
+                isolation: Isolation::Directory,
+                ..shared
+            }
+            .is_isolated()
+        );
     }
 
     #[test]
@@ -846,5 +872,96 @@ id = "r"
         assert_eq!(plan.pane_count(), 3);
         assert!(plan.view("b").is_some());
         assert!(plan.view("nope").is_none());
+    }
+
+    fn plan_with_backend(backend: &str) -> SessionPlan {
+        SessionSpec::from_toml_str(&format!(
+            r#"
+schema = 1
+id = "t"
+name = "T"
+backend = "{backend}"
+
+[[views]]
+id = "main"
+[[views.panes]]
+id = "p"
+"#
+        ))
+        .unwrap()
+        .compile()
+        .unwrap()
+    }
+
+    #[test]
+    fn built_in_backend_names_compile_to_the_same_wire_values() {
+        for (name, wire) in [
+            ("tmux", "\"tmux\""),
+            ("cmux", "\"cmux\""),
+            ("plain", "\"plain\""),
+            // The legacy spelling still lands on the same wire value.
+            ("none", "\"plain\""),
+        ] {
+            let plan = plan_with_backend(name);
+            assert_eq!(
+                serde_json::to_string(&plan.mux).unwrap(),
+                wire,
+                "backend = {name} must keep its exact wire value"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plan_can_name_a_place_technology_this_build_does_not_drive() {
+        // TM02-R: a commissioned herdr room could not be named by a plan at
+        // all, because the mux enum refused the word. The open name parses,
+        // carries through the plan, and serializes back as itself.
+        let plan = plan_with_backend("herdr");
+        let mux = plan.mux.as_ref().unwrap();
+        assert_eq!(mux.as_str(), "herdr");
+        assert_eq!(mux.known(), None);
+        assert_eq!(serde_json::to_string(&plan.mux).unwrap(), "\"herdr\"");
+    }
+
+    #[test]
+    fn persisted_plan_mux_values_parse_unchanged() {
+        // A plan document persisted before the widening.
+        let document = r#"
+{
+  "id": "t",
+  "name": "T",
+  "mux": "cmux",
+  "attach": "always",
+  "lifecycle": "persist",
+  "capabilities": {},
+  "views": [],
+  "backend_extensions": {},
+  "warnings": []
+}
+"#;
+        let plan: SessionPlan = serde_json::from_str(document).unwrap();
+        assert_eq!(plan.mux.as_ref().map(PlaceTechnology::as_str), Some("cmux"));
+    }
+
+    #[test]
+    fn backend_names_outside_the_discipline_are_refused_with_it() {
+        let too_long = "a".repeat(PlaceTechnology::MAX_LEN + 1);
+        for bad in ["Tmux", "not a name", too_long.as_str(), ""] {
+            let source = format!(
+                r#"
+schema = 1
+id = "t"
+name = "T"
+backend = "{bad}"
+
+[[views]]
+id = "main"
+[[views.panes]]
+id = "p"
+"#
+            );
+            let error = SessionSpec::from_toml_str(&source).unwrap_err();
+            assert_eq!(error.code(), "session.invalid", "backend = {bad:?}");
+        }
     }
 }
