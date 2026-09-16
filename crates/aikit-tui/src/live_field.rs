@@ -27,8 +27,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use aikit_core::resource::{ActionStageability, ContextualActionDescriptor, ResourceRef};
 use aikit_core::working_environment::{
-    NativeBindingKind, WorkingEnvironmentCapabilities, WorkingEnvironmentHealth,
-    WorkingEnvironmentObservation,
+    NativeBindingKind, ProviderNativeBinding, WorkingEnvironmentCapabilities,
+    WorkingEnvironmentHealth, WorkingEnvironmentObservation,
 };
 use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
@@ -302,6 +302,12 @@ pub enum WorkingEnvironmentOutcome {
         provider: ResourceRef,
         subject: ResourceRef,
         native_id: String,
+        /// Provider-native bindings this open created, when the operation
+        /// created material whose identity the caller must persist (a Herdr
+        /// workspace and its root pane, for example). Absent for opens that
+        /// only ensured already-recorded material.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created: Option<Vec<ProviderNativeBinding>>,
     },
     Focused {
         provider: ResourceRef,
@@ -339,6 +345,7 @@ impl WorkingEnvironmentOutcome {
                 provider,
                 subject,
                 native_id,
+                ..
             } => format!("opened {subject} in {provider} · native {native_id}"),
             Self::Focused {
                 provider,
