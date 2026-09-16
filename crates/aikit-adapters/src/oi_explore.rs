@@ -372,13 +372,11 @@ pub fn materialise_explore_discovery(seed: &Value) -> ExploreDiscoveryReading {
     let mut field_titles: BTreeMap<String, String> = BTreeMap::new();
     if let Some(fields) = seed.get("fields").and_then(Value::as_array) {
         for field in fields {
-            if let (Some(field_ref), title) = (
+            if let (Some(field_ref), Some(title)) = (
                 field.get("field_ref").and_then(Value::as_str),
                 field.get("title").and_then(Value::as_str),
             ) {
-                if let Some(title) = title {
-                    field_titles.insert(field_ref.to_owned(), title.to_owned());
-                }
+                field_titles.insert(field_ref.to_owned(), title.to_owned());
             }
         }
     }

@@ -80,7 +80,7 @@ fn node_refs(objects: &[WikiObject]) -> Vec<String> {
         .collect()
 }
 
-fn edges<'a>(objects: &'a [WikiObject]) -> Vec<&'a aikit_core::WikiEdge> {
+fn edges(objects: &[WikiObject]) -> Vec<&aikit_core::WikiEdge> {
     objects
         .iter()
         .filter_map(|object| match object {
