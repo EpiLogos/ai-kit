@@ -600,8 +600,7 @@ impl SemanticWikiIndex {
             .chain(self.readings.keys())
     }
 
-    fn search_document(&self, resource: &ResourceRef) -> (&'static str, String, String, String) {
-        if let Some(space) = self.spaces.get(resource) {
+    fn search_document(&self, resource: &ResourceRef) -> (&'static str, String, String, String) {        if let Some(space) = self.spaces.get(resource) {
             let label = space.title.clone().unwrap_or_else(|| resource.to_string());
             let searchable = format!("{} {}", label, space.node_refs.len());
             return (
@@ -613,7 +612,22 @@ impl SemanticWikiIndex {
         }
         if let Some(node) = self.nodes.get(resource) {
             let label = node.title.clone().unwrap_or_else(|| resource.to_string());
-            let searchable = format!("{} {} {}", label, node.node_type, node.source_refs.len());
+            // Admitted aliases are discovery aids over the same ref: a query
+            // matching an alias must resolve the canonical node, never a
+            // second identity. Aliases ride the conventional `aliases`
+            // extension (string or array of strings).
+            let aliases = extension_aliases(&node.extensions);
+            let searchable = if aliases.is_empty() {
+                format!("{} {} {}", label, node.node_type, node.source_refs.len())
+            } else {
+                format!(
+                    "{} {} {} {}",
+                    label,
+                    node.node_type,
+                    node.source_refs.len(),
+                    aliases.join(" ")
+                )
+            };
             return (
                 "node",
                 label,
@@ -719,6 +733,24 @@ fn tokens(query: &str) -> Vec<String> {
         .filter(|token| !token.is_empty())
         .map(str::to_lowercase)
         .collect()
+}
+
+/// Admitted aliases carried on the conventional `aliases` node/space
+/// extension (a string or an array of strings). Aliases widen what a query
+/// can match; they never become identity.
+fn extension_aliases(extensions: &std::collections::BTreeMap<String, serde_json::Value>) -> Vec<String> {
+    match extensions.get("aliases") {
+        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+            vec![value.clone()]
+        }
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn score(tokens: &[String], id: &str, label: &str, searchable: &str) -> Option<u32> {
@@ -1008,5 +1040,36 @@ mod tests {
             .find(|hit| hit.hit_kind() == WikiSearchHitKind::AuthoredSource)
             .expect("the shared source is findable");
         assert!(hit.summary.contains("Alpha") && hit.summary.contains("Beta"));
+    }
+
+    #[test]
+    fn node_aliases_are_searchable_over_the_canonical_ref() {
+        let mut subject = node("wiki:node:quay", "The Quay wall", &[], None);
+        if let WikiObject::Node(value) = &mut subject {
+            value.extensions.insert(
+                "aliases".into(),
+                serde_json::json!(["quay-wall", "harbour-quay"]),
+            );
+        }
+        let index = SemanticWikiIndex::rebuild(vec![subject, node("wiki:node:other", "Beta", &[], None)])
+            .unwrap();
+
+        // The alias resolves the canonical node.
+        let hits = index.search("quay-wall", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].address.as_curated().unwrap().as_str(), "wiki:node:quay");
+
+        // A token that only the other node carries does not match through
+        // the alias-bearing node's searchable text (curated hits only; the
+        // authored-source facet is a separate hit class over cited labels).
+        assert_eq!(
+            index
+                .search("beta", 10)
+                .iter()
+                .filter_map(|hit| hit.address.as_curated())
+                .map(|resource| resource.as_str())
+                .collect::<Vec<_>>(),
+            vec!["wiki:node:other"]
+        );
     }
 }
