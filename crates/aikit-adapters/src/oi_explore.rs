@@ -152,6 +152,25 @@ pub fn materialise_explore_discovery(seed: &Value) -> ExploreDiscoveryReading {
                         .cloned(),
                 }),
             );
+            // Admitted aliases also ride the conventional top-level
+            // `aliases` extension the rest of the suite reads
+            // (authored-wiki aliases, SemanticWikiIndex alias search), so a
+            // query matching an alias resolves the canonical entry.
+            if let Some(aliases) = entry
+                .get("aliases")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|values: &Vec<String>| !values.is_empty())
+            {
+                extensions.insert("aliases".to_owned(), serde_json::json!(aliases));
+            }
             nodes.insert(
                 reference.to_owned(),
                 WikiNode {

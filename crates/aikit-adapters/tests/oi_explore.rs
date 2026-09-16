@@ -12,7 +12,7 @@ use aikit_adapters::oi_explore::{
     discovery_seed_path, materialise_explore_discovery, read_explore_discovery,
     EXPLORE_DISCOVERY_SCHEMA, EXPLORE_EXTENSION, RELATION_PRESENTS, RELATION_PROJECTED_IN,
 };
-use aikit_core::WikiObject;
+use aikit_core::{SemanticWikiIndex, WikiObject};
 use serde_json::{json, Value};
 use std::fs;
 use tempfile::TempDir;
@@ -119,6 +119,9 @@ fn entries_materialise_as_nodes_carrying_their_own_stable_refs() {
     let extension = quay.extensions.get(EXPLORE_EXTENSION).expect("extension");
     assert_eq!(extension["kind"], "wiki-node");
     assert_eq!(extension["aliases"][0], "quay-wall");
+    // The admitted alias also rides the conventional top-level `aliases`
+    // extension, so SemanticWikiIndex alias search resolves the entry.
+    assert_eq!(quay.extensions["aliases"][0], "quay-wall");
     let expression = reading
         .objects
         .iter()
@@ -133,6 +136,24 @@ fn entries_materialise_as_nodes_carrying_their_own_stable_refs() {
         extension["projection_ref"],
         "projection:harbour:quay-light",
         "the Projection identity an entry names stays disclosed"
+    );
+}
+
+#[test]
+fn an_admitted_alias_is_searchable_over_the_canonical_entry_ref() {
+    let reading = materialise_explore_discovery(&discovery_seed());
+    let index = SemanticWikiIndex::rebuild(reading.objects.clone())
+        .expect("materialised seed rebuilds into the SemanticWiki");
+
+    let hits = index.search("quay-wall", 10);
+    assert_eq!(hits.len(), 1, "exactly the canonical entry matches: {:?}", hits
+        .iter()
+        .map(|hit| hit.label.clone())
+        .collect::<Vec<_>>());
+    assert_eq!(
+        hits[0].address.as_curated().expect("curated hit").as_str(),
+        SUBJECT,
+        "the alias resolves the canonical entry, never a second identity"
     );
 }
 
