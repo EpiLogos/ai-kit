@@ -110,6 +110,47 @@ fn an_unregistered_technology_is_declared_unsupported_not_crashed_or_fallback() 
     ));
 }
 
+/// A provider ref may carry an instance id (`provider/herdr/w6`, the shape a
+/// commissioned place actually carries), not only the technology-canonical
+/// `/current`. The ref's first segment names the technology either way, so an
+/// instance ref must reach the herdr driver — a typed herdr-side refusal —
+/// and never fall through to "not a working environment this build
+/// projects", which is the unparseable-ref answer. Found live when a
+/// workcell-commissioned herdr room stayed unprojectable under its instance
+/// ref.
+#[test]
+fn an_instance_provider_ref_names_its_technology_and_reaches_its_driver() {
+    let addressed = aikit_core::resource::ResourceRef::parse("provider/herdr/w6").unwrap();
+    let subject = surface_ref("main", "shell").unwrap();
+    let focused = act(
+        &plan(),
+        &addressed,
+        &subject,
+        WorkingEnvironmentOperation::Focus,
+    );
+    match focused {
+        // The herdr driver answering with its own typed refusal (e.g.
+        // `herdr.surface_unbound` on a plan with no recorded pane) is the
+        // routed outcome this test wants.
+        Err(error) => assert!(
+            error.code().starts_with("herdr."),
+            "the herdr driver answers under its own error vocabulary: {error}"
+        ),
+        Ok(WorkingEnvironmentOutcome::NotExposed { reason, .. }) => assert!(
+            !reason.contains("not a working environment this build projects"),
+            "an instance ref names its technology: the refusal must be about the \
+             technology's own state on this host (installed? server running?), never \
+             about ref parsing: {reason}"
+        ),
+        Ok(other) => {
+            // Any herdr-side outcome is the driver answering — the regression
+            // this test pins is the unparseable-ref fallback, not the driver's
+            // own refusals.
+            let _ = other;
+        }
+    }
+}
+
 /// Whatever this host happens to have installed, the observation is honest
 /// about it and never fails: no mux gives an empty reading, an installed mux
 /// that will not answer gives an unavailable one carrying the reason, and any

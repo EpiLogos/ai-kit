@@ -196,10 +196,17 @@ pub fn act(
 ) -> Result<WorkingEnvironmentOutcome> {
     let surfaces = plan_surfaces(plan);
     let registry = PlaceTechnologyRegistry::builtin();
+    // The addressed provider may be a technology-canonical ref
+    // (`provider/herdr/current`) or an instance ref a commissioned place
+    // carries (`provider/herdr/w6`): both name herdr, and both are answered
+    // by herdr's own entry — never laundered into an unknown.
     let Some(reading) = registry
         .detect_field()?
         .into_iter()
-        .find(|reading| provider_ref(reading.technology.clone()).ok().as_ref() == Some(provider))
+        .find(|reading| {
+            provider_ref(reading.technology.clone()).ok().as_ref() == Some(provider)
+                || technology_from_provider(provider).as_ref() == Some(&reading.technology)
+        })
     else {
         return Ok(WorkingEnvironmentOutcome::NotExposed {
             provider: provider.clone(),
@@ -279,16 +286,18 @@ fn declared_unsupported_reason(
     }
 }
 
-/// The place technology a canonical provider ref names, when it names one.
+/// The place technology a provider ref names, when it names one.
+///
+/// Both ref shapes resolve: the technology-canonical `provider/herdr/current`
+/// and the instance ref a commissioned place actually carries —
+/// `provider/herdr/w6`, found live when a workcell-commissioned herdr room
+/// stayed unprojectable because only `/current` refs were read. The
+/// technology is the ref's first segment; the rest is the instance's own
+/// business and never re-parsed here.
 fn technology_from_provider(provider: &ResourceRef) -> Option<PlaceTechnology> {
-    let raw = provider
-        .as_str()
-        .strip_prefix("provider/")?
-        .strip_suffix("/current")?;
-    if raw.contains('/') {
-        return None;
-    }
-    raw.parse::<PlaceTechnology>().ok()
+    let raw = provider.as_str().strip_prefix("provider/")?;
+    let (technology, _instance) = raw.split_once('/')?;
+    technology.parse::<PlaceTechnology>().ok()
 }
 
 /// Resolve a terminal-client attachment command for one already-live Surface.
