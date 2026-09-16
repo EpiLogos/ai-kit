@@ -1,0 +1,484 @@
+#!/usr/bin/env bash
+# agents — one persistent room for your coding agents (pi, hermes, codex, ...)
+#
+# The room lives in herdr by default (rich provider) with tmux as the portable
+# fallback (`--provider tmux`). Room creation goes through
+# `workcell place request`, so a named place is claimed once, never duplicated,
+# and released with a generation proof. Disconnect keeps agents running (the
+# provider server holds them); after a server restart or reboot the room
+# topology is restored and `agents up` re-seeds the agent processes.
+#
+# Additive user tool: ~/.local/bin/agents, config ~/.config/agents/room.conf.
+# No key material is ever read, printed or stored: `doctor` confirms auth-file
+# presence only.
+#
+# Usage:
+#   agents [up] [--provider auto|herdr|tmux] [--no-attach] [--json]
+#   agents attach   [--provider herdr|tmux]
+#   agents status   [--json]
+#   agents down     [--provider herdr|tmux]
+#   agents doctor   [--json]
+#   agents persist  [--off]
+
+set -u -o pipefail
+
+CONF_DIR="$HOME/.config/agents"
+CONF_FILE="$CONF_DIR/room.conf"
+STATE_DIR="$HOME/.local/state/agents-room"
+STATE_FILE="$STATE_DIR/state.json"
+HERDR_UNIT="$HOME/.config/systemd/user/herdr-server.service"
+
+# Defaults; a room.conf may override any of these.
+AGENTS_ROOM="agents"
+AGENTS_CWD="$HOME"
+AGENTS_PROVIDER="auto"          # auto | herdr | tmux
+AGENTS_SLOTS=(                  # "name kind [cwd]"
+  "pi pi"
+  "hermes hermes"
+  "codex codex"
+)
+
+die() { printf 'agents: %s\n' "$*" >&2; exit 1; }
+say() { printf '%s\n' "$*"; }
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not on PATH — install it, then retry."; }
+json() { jq -c "$@"; }
+
+load_conf() {
+  [[ -f "$CONF_FILE" ]] && source "$CONF_FILE"
+  [[ "$AGENTS_ROOM" =~ ^[a-z0-9-]{1,64}$ ]] || die "room name '$AGENTS_ROOM' must match [a-z0-9-]{1,64}"
+}
+
+# ---------------------------------------------------------------- provider --
+
+herdr_running() { herdr status 2>/dev/null | grep -q "status: running"; }
+
+ensure_herdr_server() {
+  herdr_running && return 0
+  say "herdr server is not running — starting it headless."
+  mkdir -p "$STATE_DIR"
+  nohup herdr server >>"$STATE_DIR/herdr-server.log" 2>&1 &
+  local i
+  for i in $(seq 1 20); do
+    herdr_running && return 0
+    sleep 0.5
+  done
+  die "herdr server did not come up; see $STATE_DIR/herdr-server.log"
+}
+
+resolve_provider() {
+  case "$1" in
+    herdr|tmux) printf '%s' "$1" ;;
+    auto)
+      if command -v herdr >/dev/null 2>&1; then printf 'herdr'
+      elif command -v tmux >/dev/null 2>&1; then printf 'tmux'
+      else die "auto: neither herdr nor tmux is installed"; fi ;;
+    *) die "unknown provider '$1' (use auto|herdr|tmux)" ;;
+  esac
+}
+
+# ------------------------------------------------------------------- state --
+
+save_state() { mkdir -p "$STATE_DIR"; printf '%s' "$1" > "$STATE_FILE"; }
+clear_state() { rm -f "$STATE_FILE"; }
+load_state() { [[ -f "$STATE_FILE" ]] && cat "$STATE_FILE" || printf '{}'; }
+state_provider() { json -r '.provider // empty' <<<"$(load_state)" 2>/dev/null; }
+
+# ------------------------------------------------------------ herdr helpers --
+
+herdr_ws_id() {
+  herdr workspace list 2>/dev/null | jq -r --arg l "$1" \
+    '.result.workspaces[]? | select(.label == $l) | .workspace_id' | head -1
+}
+
+herdr_panes() { herdr pane list --workspace "$1" 2>/dev/null | jq -r '.result.panes[]?.pane_id'; }
+herdr_agents_json() { herdr agent list 2>/dev/null | jq -c '.result.agents[]?'; }
+
+# ------------------------------------------------------------- tmux helpers --
+
+tmux_panes() { tmux list-panes -t "$1" -F '#{pane_id}' 2>/dev/null; }
+tmux_pane_cmd() { tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null; }
+
+# ------------------------------------------------------------------- verbs --
+
+cmd_up() {
+  local no_attach="$1"
+  local provider
+  provider="$(resolve_provider "$AGENTS_PROVIDER")"
+
+  [[ "$provider" == herdr ]] && { need herdr; ensure_herdr_server; }
+  [[ "$provider" == tmux ]] && need tmux
+  need workcell
+
+  # Resolve the place: adopt it if it exists, otherwise claim it once.
+  local ws_id="" grant
+  grant="$(load_state)"
+  if [[ "$provider" == herdr ]]; then
+    ws_id="$(herdr_ws_id "$AGENTS_ROOM")"
+  else
+    tmux has-session -t "$AGENTS_ROOM" 2>/dev/null && ws_id="$AGENTS_ROOM"
+  fi
+
+  if [[ -z "$ws_id" ]]; then
+    local req_out rc
+    req_out="$(workcell place request --provider "$provider" --name "$AGENTS_ROOM" 2>&1)"
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+      local msg
+      msg="$(json -r '.refusal.message // empty' <<<"$req_out" 2>/dev/null)"
+      [[ -n "$msg" ]] || msg="$req_out"
+      if [[ "$provider" == tmux ]]; then
+        # workcell could not claim the place (for instance when its tmux
+        # reader cannot yet observe what it created). It refuses rather than
+        # fabricate a grant; remove the session it just created and claim
+        # natively, disclosed. No workcell grant exists on this path, so
+        # `down` tears the session down directly.
+        tmux has-session -t "$AGENTS_ROOM" 2>/dev/null && tmux kill-session -t "$AGENTS_ROOM"
+        tmux new-session -d -s "$AGENTS_ROOM" -c "$AGENTS_CWD"
+        grant="{}"
+        ws_id="$AGENTS_ROOM"
+        say "workcell refused the tmux claim ($msg)"
+        say "claimed tmux place '$AGENTS_ROOM' natively instead."
+      else
+        die "place request refused: $msg"
+      fi
+    else
+      grant="$req_out"
+      provider="$(json -r '.provider' <<<"$grant")"
+      ws_id="$(json -r '.workspace_id // .session_name' <<<"$grant")"
+      say "claimed $provider place '$AGENTS_ROOM' ($ws_id)"
+    fi
+  else
+    say "adopting existing $provider place '$AGENTS_ROOM' ($ws_id)"
+  fi
+
+  # Shape one pane per slot, reusing live panes in order.
+  local -a pane_ids=()
+  if [[ "$provider" == herdr ]]; then
+    mapfile -t pane_ids < <(herdr_panes "$ws_id")
+  else
+    mapfile -t pane_ids < <(tmux_panes "$AGENTS_ROOM")
+  fi
+
+  local slot slot_name slot_kind slot_cwd idx=0
+  local -a slot_pane=()
+  for slot in "${AGENTS_SLOTS[@]}"; do
+    slot_name="${slot%% *}"
+    slot_kind="$(printf '%s' "$slot" | cut -d' ' -f2)"
+    slot_cwd="$(printf '%s' "$slot" | cut -d' ' -f3-)"
+    [[ -z "$slot_cwd" ]] && slot_cwd="$AGENTS_CWD"
+    slot_cwd="${slot_cwd/#\~/$HOME}"
+
+    if (( idx >= ${#pane_ids[@]} )); then
+      local last="${pane_ids[$(( ${#pane_ids[@]} - 1 ))]:-}"
+      local newpane=""
+      if [[ "$provider" == herdr ]]; then
+        local dir="right"; (( idx >= 2 )) && dir="down"
+        newpane="$(herdr pane split --pane "$last" --direction "$dir" --no-focus --cwd "$slot_cwd" 2>/dev/null | json -r '.result.pane.pane_id' 2>/dev/null)" || true
+      else
+        local dir="-h"; (( idx >= 2 )) && dir="-v"
+        newpane="$(tmux split-window "$dir" -t "$last" -c "$slot_cwd" -d -P -F '#{pane_id}')" || true
+      fi
+      [[ -n "$newpane" ]] || die "could not create pane for slot '$slot_name'"
+      pane_ids+=("$newpane")
+      say "  created pane $newpane for $slot_name"
+    fi
+    slot_pane[$idx]="${pane_ids[$idx]}"
+    idx=$((idx + 1))
+  done
+
+  # Seed agents into their panes.
+  local out='{"schema":"agents.room/v1","command":"up","room":"'"$AGENTS_ROOM"'","provider":"'"$provider"'","place":"'"$ws_id"'","slots":[]}'
+  idx=0
+  for slot in "${AGENTS_SLOTS[@]}"; do
+    slot_name="${slot%% *}"
+    slot_kind="$(printf '%s' "$slot" | cut -d' ' -f2)"
+    local agent_name="$AGENTS_ROOM-$slot_name" pane="${slot_pane[$idx]}" state="started"
+    if [[ "$provider" == herdr ]]; then
+      if herdr_agents_json | jq -e --arg n "$agent_name" 'select(.name == $n)' >/dev/null 2>&1; then
+        state="already-running"
+      elif herdr_agents_json | jq -e --arg p "$pane" --arg k "$slot_kind" \
+             'select(.pane_id == $p and .agent == $k)' >/dev/null 2>&1; then
+        # The pane already hosts this kind of agent (e.g. from an earlier
+        # manual start). Adopt it under the slot name, best effort.
+        herdr agent rename "$pane" "$agent_name" >/dev/null 2>&1 || true
+        state="adopted"
+      elif herdr_agents_json | jq -e --arg p "$pane" 'select(.pane_id == $p)' >/dev/null 2>&1; then
+        say "  $slot_name: pane $pane is held by a different agent — left untouched."
+        state="pane-busy"
+      elif herdr agent start "$agent_name" --kind "$slot_kind" --pane "$pane" --timeout 60000 >/dev/null 2>&1; then
+        state="started"
+      else
+        say "  $slot_name: agent start failed — is the pane at a shell prompt? Check with: herdr agent list"
+        state="not-started"
+      fi
+    else
+      local cur; cur="$(tmux_pane_cmd "$pane")"
+      case "$cur" in
+        ""|sh|bash|zsh|dash|fish|nu)
+          # A shell (or an empty read) means the slot is free. The agent
+          # process may exec to an interpreter (python, node), so any other
+          # current command is treated as an occupied pane, never re-typed.
+          tmux send-keys -t "$pane" "$slot_kind" Enter
+          state="started"
+          ;;
+        *)
+          state="already-running"
+          ;;
+      esac
+    fi
+    say "  $slot_name -> pane $pane [$state]"
+    out="$(json --arg n "$slot_name" --arg k "$slot_kind" --arg p "$pane" --arg a "$agent_name" --arg s "$state" \
+      '.slots += [{name:$n, kind:$k, pane:$p, agent:$a, state:$s}]' <<<"$out")"
+    idx=$((idx + 1))
+  done
+
+  # Persist the grant so `down` can release with a generation proof.
+  save_state "$(json --arg room "$AGENTS_ROOM" --arg p "$provider" \
+    '. + {room:$room, provider:$p}' <<<"$grant")"
+
+  if [[ "$no_attach" == "--json" ]]; then say "$out"; return 0; fi
+  if [[ -n "$no_attach" ]]; then
+    say "room ready — attach later with: agents attach"
+    return 0
+  fi
+  cmd_attach "$provider"
+}
+
+cmd_attach() {
+  local provider="${1:-}"
+  if [[ -z "$provider" ]]; then
+    provider="$(state_provider)"
+    [[ -n "$provider" ]] || provider="$AGENTS_PROVIDER"
+  fi
+  provider="$(resolve_provider "$provider")"
+  if [[ "$provider" == herdr ]]; then
+    need herdr; ensure_herdr_server
+    local ws; ws="$(herdr_ws_id "$AGENTS_ROOM")"
+    [[ -n "$ws" ]] || die "no herdr room '$AGENTS_ROOM' — run: agents up"
+    herdr workspace focus "$ws" >/dev/null 2>&1 || true
+    exec herdr
+  else
+    need tmux
+    tmux has-session -t "$AGENTS_ROOM" 2>/dev/null || die "no tmux session '$AGENTS_ROOM' — run: agents up"
+    exec tmux attach -t "$AGENTS_ROOM"
+  fi
+}
+
+cmd_status() {
+  local fmt="${1:-human}"
+  local provider="${2:-}"
+  [[ -n "$provider" ]] || { provider="$(state_provider)"; }
+  [[ -n "$provider" ]] || provider="$AGENTS_PROVIDER"
+  provider="$(resolve_provider "$provider")"
+  local out="{\"schema\":\"agents.room/v1\",\"command\":\"status\",\"room\":\"$AGENTS_ROOM\",\"provider\":\"$provider\",\"slots\":[]}"
+
+  if [[ "$provider" == herdr ]]; then
+    local ws; ws="$(herdr_ws_id "$AGENTS_ROOM")"
+    if [[ -z "$ws" ]]; then
+      out="$(json '. + {state:"absent"}' <<<"$out")"
+    else
+      out="$(json --arg w "$ws" '. + {state:"up", place:$w}' <<<"$out")"
+      local slot json_row slot_name
+      for slot in "${AGENTS_SLOTS[@]}"; do
+        slot_name="${slot%% *}"
+        json_row="$(herdr_agents_json | jq -c --arg n "$AGENTS_ROOM-$slot_name" \
+          'select(.name == $n) | {name, agent_status, pane_id, cwd}' | head -1)"
+        [[ -n "$json_row" ]] || json_row="{\"name\":\"$AGENTS_ROOM-$slot_name\",\"agent_status\":\"absent\"}"
+        out="$(json '.slots += ['"$json_row"']' <<<"$out")"
+      done
+    fi
+  else
+    if tmux has-session -t "$AGENTS_ROOM" 2>/dev/null; then
+      out="$(json '. + {state:"up"}' <<<"$out")"
+      local slot slot_name pane cmd i=0
+      for slot in "${AGENTS_SLOTS[@]}"; do
+        slot_name="${slot%% *}"
+        pane="$(tmux_panes "$AGENTS_ROOM" | sed -n "$((i + 1))p")"
+        cmd="$(tmux_pane_cmd "$pane")"
+        out="$(json --arg n "$slot_name" --arg p "$pane" --arg c "$cmd" \
+          '.slots += [{name:$n, pane:$p, agent_status:$c}]' <<<"$out")"
+        i=$((i + 1))
+      done
+    else
+      out="$(json '. + {state:"absent"}' <<<"$out")"
+    fi
+  fi
+
+  if [[ "$fmt" == "--json" ]]; then say "$out"; return 0; fi
+  local state; state="$(json -r '.state // "unknown"' <<<"$out")"
+  say "room '$AGENTS_ROOM' ($provider): $state"
+  if [[ "$state" == "up" ]]; then
+    json -r '.slots[] | "  \(.name)\t\(.agent_status)\t\(.pane_id // .pane // "")"' <<<"$out"
+    say "attach with: agents attach   |   tear down with: agents down"
+  else
+    say "bring it up with: agents up"
+  fi
+}
+
+cmd_down() {
+  local provider="${1:-}"
+  [[ -n "$provider" ]] || { provider="$(state_provider)"; }
+  [[ -n "$provider" ]] || provider="$AGENTS_PROVIDER"
+  provider="$(resolve_provider "$provider")"
+  local st; st="$(load_state)"
+  if [[ "$provider" == herdr ]]; then
+    need herdr
+    local ws; ws="$(herdr_ws_id "$AGENTS_ROOM")"
+    if [[ -z "$ws" ]]; then say "room '$AGENTS_ROOM' is not up."; clear_state; return 0; fi
+    if json -e '.place_ref' <<<"$st" >/dev/null 2>&1 && [[ "$(json -r '.provider // empty' <<<"$st")" == "herdr" ]]; then
+      if workcell place release \
+           --place-ref "$(json -r '.place_ref' <<<"$st")" \
+           --pid "$(json -r '.pane_pid' <<<"$st")" \
+           --start-marker "$(json -r '.process_start_marker' <<<"$st")" >/dev/null 2>&1; then
+        say "released place with generation proof (workcell place release)"
+      else
+        say "generation proof is stale — closing the room directly."
+        herdr workspace close "$ws" >/dev/null 2>&1 || die "could not close workspace $ws"
+      fi
+    else
+      herdr workspace close "$ws" >/dev/null 2>&1 || die "could not close workspace $ws"
+    fi
+    say "room '$AGENTS_ROOM' closed."
+  else
+    need tmux
+    tmux has-session -t "$AGENTS_ROOM" 2>/dev/null || { say "room '$AGENTS_ROOM' is not up."; clear_state; return 0; }
+    tmux kill-session -t "$AGENTS_ROOM"
+    say "tmux session '$AGENTS_ROOM' killed."
+  fi
+  clear_state
+}
+
+cmd_doctor() {
+  local fmt="${1:-human}"
+  local ok=1
+  local out='{"schema":"agents.doctor/v1","checks":[]}'
+  add_check() {
+    out="$(json --arg c "$1" --argjson o "$2" --arg d "$3" \
+      '.checks += [{check:$c, ok:$o, detail:$d}]' <<<"$out")"
+    [[ "$2" == "true" ]] || ok=0
+  }
+
+  local tool
+  for tool in jq herdr tmux workcell; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      add_check "$tool" true "$("$tool" --version 2>/dev/null | head -1 || printf 'present')"
+    else
+      add_check "$tool" false "missing"
+    fi
+  done
+
+  local slot slot_name slot_kind auth_file
+  for slot in "${AGENTS_SLOTS[@]}"; do
+    slot_name="${slot%% *}"
+    slot_kind="$(printf '%s' "$slot" | cut -d' ' -f2)"
+    if command -v "$slot_kind" >/dev/null 2>&1; then
+      add_check "agent:$slot_name" true "$slot_kind on PATH"
+    else
+      add_check "agent:$slot_name" false "$slot_kind not on PATH"
+    fi
+    case "$slot_kind" in
+      pi)     auth_file="$HOME/.pi/agent/auth.json" ;;
+      hermes) auth_file="$HOME/.hermes/auth.json" ;;
+      codex)  auth_file="$HOME/.codex/auth.json" ;;
+      claude) auth_file="$HOME/.claude.json" ;;
+      *)      auth_file="" ;;
+    esac
+    if [[ -n "$auth_file" ]]; then
+      if [[ -s "$auth_file" ]]; then
+        add_check "auth:$slot_name" true "present (not read)"
+      else
+        add_check "auth:$slot_name" false "no auth material at $auth_file — run $slot_kind once to authenticate"
+      fi
+    fi
+  done
+
+  if [[ "$fmt" == "--json" ]]; then say "$out"; return $(( ok == 1 ? 0 : 1 )); fi
+  json -r '.checks[] | (.ok | if . then " ok  " else "FAIL " end) + .check + "\t" + .detail' <<<"$out"
+  if (( ok )); then say "doctor: all checks passed."; else say "doctor: problems found above."; exit 1; fi
+}
+
+cmd_persist() {
+  local off="${1:-}"
+  if [[ "$off" == "--off" ]]; then
+    if systemctl --user disable --now herdr-server.service 2>/dev/null; then
+      say "persist unit disabled."
+    else
+      say "persist unit was not enabled."
+    fi
+    return 0
+  fi
+  mkdir -p "$(dirname "$HERDR_UNIT")"
+  cat > "$HERDR_UNIT" <<'EOF'
+[Unit]
+Description=herdr headless server (agents room)
+Documentation=https://herdr.dev
+
+[Service]
+ExecStart=/usr/bin/herdr server
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+  if herdr_running; then
+    systemctl --user enable herdr-server.service
+    say "persist enabled. A herdr server started outside systemd is running;"
+    say "it will be used until it stops, then the unit takes over."
+  else
+    systemctl --user enable --now herdr-server.service \
+      && say "persist enabled: herdr server now starts at login and restarts on failure."
+  fi
+  say "After a reboot the room topology is restored; run 'agents up' once to re-seed the agents."
+}
+
+usage() {
+  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+# --------------------------------------------------------------------- main --
+
+[[ $# -gt 0 ]] || set -- up
+need jq
+load_conf
+
+case "$1" in
+  up)
+    shift
+    local_provider="$AGENTS_PROVIDER"; no_attach=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --provider) local_provider="$2"; shift 2 ;;
+        --no-attach) no_attach="--no-attach"; shift ;;
+        --json) no_attach="--json"; shift ;;
+        *) die "unknown option '$1' (try: agents --help)" ;;
+      esac
+    done
+    AGENTS_PROVIDER="$local_provider" cmd_up "$no_attach"
+    ;;
+  attach|status|down)
+    main_cmd="$1"; shift
+    prov=""; extra=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --provider) prov="$2"; shift 2 ;;
+        --json) extra="--json"; shift ;;
+        *) die "unknown option '$1' (try: agents --help)" ;;
+      esac
+    done
+    prov_flag=""
+    if [[ -n "$prov" ]]; then
+      prov_flag="$(resolve_provider "$prov")"
+    fi
+    case "$main_cmd" in
+      attach) [[ -z "$extra" ]] || die "attach does not take --json"; cmd_attach "$prov_flag" ;;
+      status) cmd_status "$extra" "$prov_flag" ;;
+      down)   [[ -z "$extra" ]] || die "down does not take --json"; cmd_down "$prov_flag" ;;
+    esac
+    ;;
+  doctor) shift; cmd_doctor "${1:-human}" ;;
+  persist) shift; cmd_persist "${1:-}" ;;
+  --help|-h|help) usage 0 ;;
+  *) die "unknown command '$1' (try: agents --help)" ;;
+esac
