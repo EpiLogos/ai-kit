@@ -14,8 +14,13 @@
 
 use aikit_core::Result;
 use aikit_core::platform::{MuxKind, PlaceTechnology};
+use aikit_core::resource::ResourceRef;
+use aikit_core::session::SessionPlan;
 
+use crate::herdr::HerdrWorkingEnvironment;
 use crate::mux::{MuxAdapter, MuxPresence, cmux::Cmux, plain::Plain, tmux::Tmux};
+use crate::runner::{CommandRunner, SystemRunner};
+use crate::working_environment::WorkingEnvironmentProvider;
 
 /// The mux adapter behind a registry entry, as an object-safe handle.
 pub type MuxAdapterHandle = Box<dyn MuxAdapter>;
@@ -78,6 +83,26 @@ pub trait PlaceTechnologyAdapter {
     /// the driving is not, and consumers say so rather than guessing.
     fn mux_adapter(&self) -> Option<MuxAdapterHandle>;
 
+    /// The working-environment provider this build drives the technology with
+    /// over one plan, when it projects plans without going through the mux
+    /// contract.
+    ///
+    /// `surfaces` is the caller-owned canonical Surface -> logical plan key
+    /// list — canonical identity is minted by the caller, never by the
+    /// adapter — and `subject`, when given, is the canonical Surface a
+    /// following open would address. `None` is the same declared fact as
+    /// [`Self::mux_adapter`]'s: the name may be known and detected, and
+    /// consumers state so rather than guessing.
+    fn working_environment(
+        &self,
+        plan: &SessionPlan,
+        surfaces: &[(ResourceRef, String)],
+        subject: Option<&ResourceRef>,
+    ) -> Option<Box<dyn WorkingEnvironmentProvider>> {
+        let _ = (plan, surfaces, subject);
+        None
+    }
+
     /// Whether this technology owns a switchable world that the
     /// working-environment field projects as a provider row. plain declines:
     /// it is the terminal the process already lives in — registered and
@@ -129,6 +154,93 @@ impl PlaceTechnologyAdapter for CmuxTechnology {
     }
 }
 
+/// herdr, the terminal workspace manager, consumed through its public CLI.
+///
+/// Herdr is deliberately not a `MuxKind`: its workspace/tab/pane/agent world
+/// is richer than the mux contract, so it is driven through the
+/// working-environment provider contract instead. `mux_adapter` is therefore
+/// `None` — a declared fact, not a gap — while `working_environment` carries
+/// the plan route: create-or-attach against the Herdr workspace the
+/// plan names, under the recorded provider-native evidence as attach
+/// identity.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HerdrTechnology;
+
+impl PlaceTechnologyAdapter for HerdrTechnology {
+    fn technology(&self) -> PlaceTechnology {
+        PlaceTechnology::herdr()
+    }
+
+    fn detect(&self) -> Result<PlaceTechnologyReading> {
+        // `herdr --version` is the real presence probe. A binary that cannot
+        // be spawned is absent; a binary that spawns but will not answer is
+        // reported absent with the failure named, never silently assumed.
+        let version = match SystemRunner::new().run(&["herdr".into(), "--version".into()]) {
+            Ok(output) if output.ok() => output.line().trim().to_string(),
+            Ok(_) => {
+                return Ok(PlaceTechnologyReading::absent(
+                    PlaceTechnology::herdr(),
+                    "`herdr --version` exited with a failure, so herdr's presence cannot be proved",
+                ));
+            }
+            Err(error) if error.code() == "mux.command_spawn_failed" => {
+                return Ok(PlaceTechnologyReading::absent(
+                    PlaceTechnology::herdr(),
+                    "herdr is not installed on this host",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        // An installed herdr whose server is not answering is still installed;
+        // the status probe separates the two states instead of folding them.
+        let server_running = system_reports_herdr_server_running();
+        Ok(PlaceTechnologyReading {
+            technology: PlaceTechnology::herdr(),
+            installed: true,
+            version: Some(version),
+            server_running,
+            inside: false,
+            detail: None,
+        })
+    }
+
+    fn mux_adapter(&self) -> Option<MuxAdapterHandle> {
+        None
+    }
+
+    fn working_environment(
+        &self,
+        plan: &SessionPlan,
+        surfaces: &[(ResourceRef, String)],
+        subject: Option<&ResourceRef>,
+    ) -> Option<Box<dyn WorkingEnvironmentProvider>> {
+        let Ok(provider) = ResourceRef::parse(format!(
+            "provider/{}/current",
+            PlaceTechnology::HERDR
+        )) else {
+            return None;
+        };
+        Some(Box::new(HerdrWorkingEnvironment::for_plan(
+            SystemRunner::new(),
+            plan,
+            provider,
+            surfaces,
+            subject,
+        )))
+    }
+}
+
+/// Whether a local `herdr status server` reports the server running.
+///
+/// The probe reads exactly the `status: running` line; any other output,
+/// exit or parse shape is reported as not running rather than interpreted.
+fn system_reports_herdr_server_running() -> bool {
+    matches!(
+        SystemRunner::new().run(&["herdr".into(), "status".into(), "server".into()]),
+        Ok(output) if output.ok() && output.line().trim() == "status: running"
+    )
+}
+
 /// The builtin no-mux technology: the terminal this process was invoked in.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PlainTechnology;
@@ -162,14 +274,16 @@ pub struct PlaceTechnologyRegistry {
 
 impl PlaceTechnologyRegistry {
     /// The built-in registry: tmux and cmux over their existing mux adapter
-    /// surfaces, and plain as the builtin no-mux technology. A build with
-    /// more place technologies composes its own registry from the same trait
-    /// — no core release required, which is the point of open names.
+    /// surfaces, herdr over its rich public-CLI provider, and plain as the
+    /// builtin no-mux technology. A build with more place technologies
+    /// composes its own registry from the same trait — no core release
+    /// required, which is the point of open names.
     pub fn builtin() -> Self {
         Self {
             entries: vec![
                 Box::new(TmuxTechnology),
                 Box::new(CmuxTechnology),
+                Box::new(HerdrTechnology),
                 Box::new(PlainTechnology),
             ],
         }

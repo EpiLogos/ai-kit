@@ -6,13 +6,15 @@
 //! `aikit-adapters` — so the observing happens here, where both crates are in
 //! scope, and the result is handed over as plain data.
 //!
-//! Every installed mux is observed over *the same* `SessionPlan` with *the
-//! same* canonical Surface bindings. That is what makes W6's acceptance
-//! meaningful: `surface/terminal/main/shell` is one canonical subject, and tmux
-//! and cmux are two projections of it, rather than two subjects that happen to
-//! look alike. Which native pane each provider hands back is that provider's
-//! own business and stays provenance.
+//! Every installed working-environment technology — the muxes and, through
+//! its own rich provider, herdr — is observed over *the same* `SessionPlan`
+//! with *the same* canonical Surface bindings. That is what makes W6's
+//! acceptance meaningful: `surface/terminal/main/shell` is one canonical
+//! subject, and tmux, cmux and herdr are projections of it, rather than
+//! subjects that happen to look alike. Which native pane each provider hands
+//! back is that provider's own business and stays provenance.
 
+use aikit_adapters::herdr::created_place_bindings;
 use aikit_adapters::mux::{MuxAdapter, tmux::Tmux};
 use aikit_adapters::place_technology::{PlaceTechnologyReading, PlaceTechnologyRegistry};
 use aikit_adapters::{MuxWorkingEnvironment, WorkingEnvironmentProvider};
@@ -124,13 +126,22 @@ pub fn observe(plan: &SessionPlan) -> Result<Vec<WorkingEnvironmentObservation>>
         // An installed technology with no adapter is skipped rather than
         // guessed at: a silent guess would put a row in the operator's field
         // that no provider stands behind.
-        let Some(adapter) = registry
-            .resolve(&reading.technology)
-            .and_then(|entry| entry.mux_adapter())
-        else {
+        let Some(entry) = registry.resolve(&reading.technology) else {
             continue;
         };
-        let observed = environment(adapter, plan, provider.clone(), &surfaces).observe();
+        let mut observed_environment: Box<dyn WorkingEnvironmentProvider> = if let Some(adapter) =
+            entry.mux_adapter()
+        {
+            Box::new(environment(adapter, plan, provider.clone(), &surfaces))
+        } else {
+            // A technology driven without the mux contract hands back its own
+            // plan-scoped provider through the same registry entry.
+            let Some(registered) = entry.working_environment(plan, &surfaces, None) else {
+                continue;
+            };
+            registered
+        };
+        let observed = observed_environment.observe();
         match observed {
             Ok(mut observation) => {
                 if let Some(version) = reading.version.clone() {
@@ -205,18 +216,34 @@ pub fn act(
                 .unwrap_or_else(|| format!("{} is not installed on this host", reading.technology)),
         });
     }
-    let Some(adapter) = registry
-        .resolve(&reading.technology)
-        .and_then(|entry| entry.mux_adapter())
-    else {
+    let Some(entry) = registry.resolve(&reading.technology) else {
         return Ok(WorkingEnvironmentOutcome::NotExposed {
             provider: provider.clone(),
             subject: subject.clone(),
             reason: format!("{provider} has no working-environment projection in this build"),
         });
     };
-    act_in(
-        environment(adapter, plan, provider.clone(), &surfaces),
+    if let Some(adapter) = entry.mux_adapter() {
+        return act_in(
+            environment(adapter, plan, provider.clone(), &surfaces),
+            provider,
+            subject,
+            operation,
+        );
+    }
+    // The technology is driven without the mux contract: the registry hands
+    // back its own plan-scoped provider, addressed through the same public
+    // outcome vocabulary.
+    let Some(mut registered) = entry.working_environment(plan, &surfaces, Some(subject)) else {
+        return Ok(WorkingEnvironmentOutcome::NotExposed {
+            provider: provider.clone(),
+            subject: subject.clone(),
+            reason: format!("{provider} has no working-environment projection in this build"),
+        });
+    };
+    act_via_registered(
+        registered.as_mut(),
+        plan,
         provider,
         subject,
         operation,
@@ -285,6 +312,16 @@ pub fn terminal_attachment(
         });
     };
     let tmux_provider = provider_ref(PlaceTechnology::tmux())?;
+    let herdr_provider = provider_ref(PlaceTechnology::herdr())?;
+    if provider == &herdr_provider {
+        return Ok(WorkingEnvironmentTerminalAttachment::NotExposed {
+            provider: provider.clone(),
+            subject: subject.clone(),
+            reason: "the herdr provider publishes open and workspace-focus operations, not a \
+                     terminal-client attach command; a tmux Surface is the attachable route"
+                .into(),
+        });
+    }
     if provider != &tmux_provider {
         return Ok(WorkingEnvironmentTerminalAttachment::NotExposed {
             provider: provider.clone(),
@@ -345,6 +382,7 @@ fn act_in<A: MuxAdapter>(
                 provider: provider.clone(),
                 subject: subject.clone(),
                 native_id: native_id.to_string(),
+                created: None,
             })
         }
         WorkingEnvironmentOperation::Focus => {
@@ -360,5 +398,67 @@ fn act_in<A: MuxAdapter>(
                 native_id,
             })
         }
+    }
+}
+
+/// Act through a registry-resolved provider that is driven without the mux
+/// contract (herdr is the current one).
+///
+/// The provider owns create-or-attach over the plan's recorded evidence; the
+/// outcome reports its fresh native fact. When an open created
+/// provider-native material, the created bindings travel with the outcome so
+/// the caller can persist them; nothing here writes state on its own. A
+/// provider refusal that names a withheld operation (a focus the provider
+/// cannot address directly) comes back typed as `NotExposed`, not as an
+/// error the operator cannot act on.
+fn act_via_registered(
+    environment: &mut dyn WorkingEnvironmentProvider,
+    plan: &SessionPlan,
+    provider: &ResourceRef,
+    subject: &ResourceRef,
+    operation: WorkingEnvironmentOperation,
+) -> Result<WorkingEnvironmentOutcome> {
+    match operation {
+        WorkingEnvironmentOperation::Open => {
+            let observation = environment.open()?;
+            let Some(native_id) = observation.canonical_native_id(subject) else {
+                return Ok(WorkingEnvironmentOutcome::NotExposed {
+                    provider: provider.clone(),
+                    subject: subject.clone(),
+                    reason: format!(
+                        "{provider} ensured its place but has no live pane bound to {subject}; \
+                         pane ids enter the plan only through an explicit open that creates them"
+                    ),
+                });
+            };
+            Ok(WorkingEnvironmentOutcome::Opened {
+                provider: provider.clone(),
+                subject: subject.clone(),
+                native_id: native_id.to_string(),
+                created: created_place_bindings(plan, &observation),
+            })
+        }
+        WorkingEnvironmentOperation::Focus => match environment.focus_surface(subject) {
+            Ok(()) => {
+                let observation = environment.observe()?;
+                let native_id = observation
+                    .canonical_native_id(subject)
+                    .unwrap_or("unreported")
+                    .to_string();
+                Ok(WorkingEnvironmentOutcome::Focused {
+                    provider: provider.clone(),
+                    subject: subject.clone(),
+                    native_id,
+                })
+            }
+            Err(error) if error.code() == "herdr.surface_focus_unsupported" => {
+                Ok(WorkingEnvironmentOutcome::NotExposed {
+                    provider: provider.clone(),
+                    subject: subject.clone(),
+                    reason: error.message().to_string(),
+                })
+            }
+            Err(error) => Err(error),
+        },
     }
 }

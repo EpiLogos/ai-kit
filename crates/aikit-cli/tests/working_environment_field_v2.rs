@@ -70,10 +70,12 @@ fn provider_refs_are_distinct_per_mux_and_stable() {
 /// An unregistered place technology is a first-class declared-unsupported
 /// outcome: typed (`NotExposed`), naming the technology and what would support
 /// it. Never a crash, never a silent fallback onto another technology.
+/// `screen` names nothing this build registers; `herdr`, by contrast, is
+/// registered and driven (see the herdr module below).
 #[test]
 fn an_unregistered_technology_is_declared_unsupported_not_crashed_or_fallback() {
-    let herdr = PlaceTechnology::new("herdr");
-    let provider = provider_ref(herdr).unwrap();
+    let screen = PlaceTechnology::new("screen");
+    let provider = provider_ref(screen).unwrap();
     let subject = surface_ref("main", "shell").unwrap();
 
     let opened = act(
@@ -86,11 +88,11 @@ fn an_unregistered_technology_is_declared_unsupported_not_crashed_or_fallback() 
     match opened {
         WorkingEnvironmentOutcome::NotExposed { reason, .. } => {
             assert!(
-                reason.contains("herdr") && reason.contains("adapter"),
+                reason.contains("screen") && reason.contains("adapter"),
                 "reason must name the technology and what would support it: {reason}"
             );
         }
-        other => panic!("herdr must be declared unsupported, not silently served: {other:?}"),
+        other => panic!("screen must be declared unsupported, not silently served: {other:?}"),
     }
 
     // The same discipline for focus, so every operation routes through the
@@ -195,6 +197,135 @@ fn print_this_hosts_reading() {
 }
 
 // --------------------------------------------------------------------------
+// Herdr: a nameable and executable place technology
+// --------------------------------------------------------------------------
+
+/// Herdr is the first place technology that is registered and driven without
+/// the mux contract. Its route shares every law the mux path enforces, only
+/// the provider differs, so these tests pin the wiring: the canonical provider
+/// ref, the registry resolution, the honest detect reading, and the field row
+/// that exists exactly when the CLI is installed. The deep create-or-attach
+/// proofs live in `aikit-adapters/tests/herdr_contract.rs`, driven by
+/// recorded responses, because no live herdr daemon can run on every host.
+mod herdr_place_technology {
+    use super::*;
+    use aikit_adapters::place_technology::PlaceTechnologyRegistry;
+    use aikit_cli::working_environment_field::WorkingEnvironmentTerminalAttachment;
+
+    fn herdr_installed() -> bool {
+        std::process::Command::new("herdr")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn herdr_provider_ref_is_distinct_from_every_mux_provider() {
+        let herdr = provider_ref(PlaceTechnology::herdr()).unwrap();
+        assert_eq!(herdr.to_string(), "provider/herdr/current");
+        assert_ne!(herdr, provider_ref(PlaceTechnology::tmux()).unwrap());
+        assert_ne!(herdr, provider_ref(PlaceTechnology::cmux()).unwrap());
+        assert_ne!(herdr, provider_ref(PlaceTechnology::plain()).unwrap());
+    }
+
+    #[test]
+    fn the_registry_drives_herdr_without_a_mux_adapter() {
+        let registry = PlaceTechnologyRegistry::builtin();
+        let entry = registry
+            .resolve(&PlaceTechnology::herdr())
+            .expect("this build registers herdr");
+        assert_eq!(entry.technology(), PlaceTechnology::herdr());
+        assert!(
+            entry.mux_adapter().is_none(),
+            "herdr is not a mux; driving it through the mux contract would be a lie"
+        );
+        let subject = surface_ref("main", "shell").unwrap();
+        let plan = plan();
+        let driven = entry.working_environment(
+            &plan,
+            &plan_surfaces(&plan),
+            Some(&subject),
+        );
+        assert!(
+            driven.is_some(),
+            "a registered herdr must hand back the plan-scoped provider"
+        );
+    }
+
+    /// Not an assertion about this machine — the reading is honest either
+    /// way: installed carries a real version, absent carries the reason.
+    #[test]
+    fn herdr_detect_reading_is_honest_on_every_host() {
+        let registry = PlaceTechnologyRegistry::builtin();
+        let reading = registry
+            .resolve(&PlaceTechnology::herdr())
+            .unwrap()
+            .detect()
+            .expect("detection must observe, never assume");
+        assert_eq!(reading.technology, PlaceTechnology::herdr());
+        if herdr_installed() {
+            assert!(reading.installed, "an installed herdr is reported installed");
+            assert!(
+                reading.version.is_some(),
+                "the version probe result is carried: {:?}",
+                reading.version
+            );
+        } else {
+            let detail = reading.detail.clone().unwrap_or_default();
+            assert!(
+                !reading.installed && detail.contains("not installed"),
+                "an absent herdr is absent with the reason attached: {reading:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn herdr_answers_in_the_field_exactly_when_installed() {
+        let observations = observe(&plan()).expect("observation must not fail on any host");
+        let herdr_row = observations
+            .iter()
+            .find(|observation| observation.provider == provider_ref(PlaceTechnology::herdr()).unwrap());
+        if herdr_installed() {
+            let row = herdr_row.expect("an installed herdr must answer in the field");
+            assert!(row.provider_version.is_some());
+            if row.health == WorkingEnvironmentHealth::Unavailable {
+                assert!(
+                    !row.provenance.is_empty(),
+                    "an unobservable herdr must say why"
+                );
+            }
+        } else {
+            assert!(
+                herdr_row.is_none(),
+                "herdr is absent here: listing it would put an unusable row in the field"
+            );
+        }
+    }
+
+    #[test]
+    fn herdr_publishes_no_terminal_client_attachment() {
+        // Refused before any provider probe, on every host: the provider
+        // check is about what the adapter publishes, not what is installed.
+        let attachment = aikit_cli::working_environment_field::terminal_attachment(
+            &plan(),
+            &provider_ref(PlaceTechnology::herdr()).unwrap(),
+            &surface_ref("main", "shell").unwrap(),
+        )
+        .unwrap();
+        match attachment {
+            WorkingEnvironmentTerminalAttachment::NotExposed { reason, .. } => {
+                assert!(
+                    reason.contains("herdr") && reason.contains("attach"),
+                    "the refusal names the provider fact: {reason}"
+                );
+            }
+            other => panic!("herdr must not publish attachment: {other:?}"),
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
 // Real-provider round trip
 // --------------------------------------------------------------------------
 
@@ -276,6 +407,7 @@ fn a_real_provider_opens_then_focuses_the_same_canonical_subject() {
             provider,
             subject: opened_subject,
             native_id,
+            ..
         } => {
             assert_eq!(provider, &tmux);
             // The canonical subject is the one we asked for, unchanged.

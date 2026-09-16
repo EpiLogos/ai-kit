@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use aikit_core::resource::ResourceRef;
+use aikit_core::session::SessionPlan;
 use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -197,12 +198,87 @@ pub fn parse_herdr_snapshot(raw: &str) -> Result<HerdrSnapshot> {
     })
 }
 
+/// The canonical provider Ref this build drives herdr through, as a string.
+///
+/// Kept beside the plan-route code so the created-evidence derivation and the
+/// CLI's `provider_ref(PlaceTechnology::herdr())` answer identically without
+/// either layer importing the other.
+pub fn herdr_provider_ref_uri() -> &'static str {
+    "provider/herdr/current"
+}
+
+/// The Herdr workspace id recorded in a plan's `backend_extensions.herdr`
+/// table, if the plan carries persisted provider-native evidence.
+///
+/// A workspace id enters the plan only through an explicit open whose created
+/// evidence the caller persisted, so a recorded id is the attach identity of
+/// the plan route. A workspace label is never read back as identity: Herdr
+/// labels are display metadata and provably not unique, so a name match can
+/// never stand in for the recorded place.
+pub fn herdr_recorded_workspace(plan: &SessionPlan) -> Option<String> {
+    plan.backend_extensions
+        .get("herdr")?
+        .get("workspace-id")
+        .and_then(toml::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+/// The recorded Herdr pane ids for a plan, as (logical plan key, pane id)
+/// pairs.
+///
+/// Only logical keys with an explicitly recorded pane id are returned. A pane
+/// id is never guessed from a name: provider-native ids are minted by Herdr
+/// and enter the plan only through an explicit open whose created evidence
+/// the caller persisted.
+pub fn herdr_recorded_surface_keys(plan: &SessionPlan) -> Vec<(String, String)> {
+    let Some(herdr) = plan.backend_extensions.get("herdr") else {
+        return Vec::new();
+    };
+    let Some(surfaces) = herdr.get("surfaces").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    surfaces
+        .iter()
+        .filter_map(|(logical, pane)| {
+            pane.as_str().map(|pane| (logical.clone(), pane.to_owned()))
+        })
+        .collect()
+}
+
+/// The provider-native bindings an explicit open created, when the fresh
+/// observation proves a Herdr place the plan does not yet record.
+///
+/// This is the travel permit for created evidence: the observation's Session
+/// binding names the workspace this open proved, and only when that id is not
+/// what the plan already records did this open mint a new place. Attaching to
+/// the recorded place returns `None` — a repeated open must not re-issue
+/// evidence the caller already persists.
+pub fn created_place_bindings(
+    plan: &SessionPlan,
+    observation: &WorkingEnvironmentObservation,
+) -> Option<Vec<ProviderNativeBinding>> {
+    if observation.provider.as_str() != herdr_provider_ref_uri() {
+        return None;
+    }
+    let session = observation
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.kind == NativeBindingKind::Session && binding.canonical_ref.is_none()
+        })?;
+    if herdr_recorded_workspace(plan).as_deref() == Some(session.native_id.as_str()) {
+        return None;
+    }
+    Some(observation.bindings.clone())
+}
+
 pub struct HerdrWorkingEnvironment<R> {
     runner: R,
     provider: ResourceRef,
     workspace_id: Option<String>,
     create_cwd: Option<String>,
     create_label: Option<String>,
+    open_subject: Option<ResourceRef>,
     surface_bindings: BTreeMap<ResourceRef, String>,
     project_bindings: BTreeMap<ResourceRef, String>,
     agent_session_bindings: BTreeMap<ResourceRef, String>,
@@ -216,6 +292,7 @@ impl<R> HerdrWorkingEnvironment<R> {
             workspace_id: None,
             create_cwd: None,
             create_label: None,
+            open_subject: None,
             surface_bindings: BTreeMap::new(),
             project_bindings: BTreeMap::new(),
             agent_session_bindings: BTreeMap::new(),
@@ -233,6 +310,44 @@ impl<R> HerdrWorkingEnvironment<R> {
         self.create_cwd = Some(cwd.into());
         self.create_label = label;
         self
+    }
+
+    /// The plan-routed environment: the place this plan names is the Herdr
+    /// workspace created under the plan's own name as its label, and the
+    /// provider-native evidence recorded in `backend_extensions.herdr` is
+    /// the only attach identity.
+    ///
+    /// `surfaces` is the caller-owned canonical Surface -> logical plan key
+    /// list; recorded evidence binds exactly those canonical Surfaces whose
+    /// logical key carries a pane id. `subject`, when given, is the canonical
+    /// Surface a following open addresses: a first open binds it to the root
+    /// pane Herdr mints, so the created evidence can travel back to the
+    /// caller for persistence.
+    #[must_use]
+    pub fn for_plan(
+        runner: R,
+        plan: &SessionPlan,
+        provider: ResourceRef,
+        surfaces: &[(ResourceRef, String)],
+        subject: Option<&ResourceRef>,
+    ) -> Self {
+        let mut environment = Self::new(runner, provider);
+        environment.create_label = Some(plan.name.clone());
+        environment.create_cwd = plan
+            .root
+            .as_ref()
+            .map(|root| root.display().to_string());
+        environment.open_subject = subject.cloned();
+        if let Some(workspace_id) = herdr_recorded_workspace(plan) {
+            environment.workspace_id = Some(workspace_id);
+        }
+        let recorded = herdr_recorded_surface_keys(plan);
+        for (surface, logical) in surfaces {
+            if let Some((_, pane)) = recorded.iter().find(|(key, _)| key == logical) {
+                environment = environment.bind_surface(surface.clone(), pane.clone());
+            }
+        }
+        environment
     }
 
     #[must_use]
@@ -516,6 +631,15 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
             WorkingEnvironmentHealth::Healthy
         };
         let mut bindings = Vec::new();
+        // Recorded panes that are no longer live are churn, not identity:
+        // Herdr never reuses pane ids, so a missing id is a closed pane, and
+        // the observation discloses it by name instead of silently rebinding.
+        let churned: Vec<&str> = self
+            .surface_bindings
+            .values()
+            .filter(|pane| !snapshot.pane_ids.contains(pane))
+            .map(String::as_str)
+            .collect();
         if let Some(workspace_id) = &self.workspace_id {
             bindings.push(ProviderNativeBinding {
                 kind: NativeBindingKind::Session,
@@ -548,6 +672,17 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
                 provenance: vec!["explicit AgentSessionRef -> Herdr live Agent/pane binding".into()],
             }
         }));
+        let mut provenance = vec![
+            format!("Herdr public API snapshot protocol={}", snapshot.protocol),
+            format!("herdrdev/herdr@{HERDR_UPSTREAM_REVISION}"),
+            HERDR_PROVIDER_VERSION.into(),
+        ];
+        if !churned.is_empty() {
+            provenance.push(format!(
+                "recorded Herdr pane(s) {} no longer live; herdr never reuses pane ids",
+                churned.join(", ")
+            ));
+        }
         WorkingEnvironmentObservation {
             schema: WORKING_ENVIRONMENT_PROVIDER_VERSION.into(),
             provider: self.provider.clone(),
@@ -556,11 +691,7 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
             capabilities: self.capabilities(),
             bindings,
             focused_native_id: snapshot.focused_pane_id.clone(),
-            provenance: vec![
-                format!("Herdr public API snapshot protocol={}", snapshot.protocol),
-                format!("herdrdev/herdr@{HERDR_UPSTREAM_REVISION}"),
-                HERDR_PROVIDER_VERSION.into(),
-            ],
+            provenance,
         }
     }
 
@@ -599,25 +730,51 @@ impl<R: CommandRunner> WorkingEnvironmentProvider for HerdrWorkingEnvironment<R>
 
     fn open(&mut self) -> Result<WorkingEnvironmentObservation> {
         let snapshot = self.snapshot()?;
-        if self
+        let recorded_live = self
             .workspace_id
             .as_ref()
-            .is_some_and(|id| !snapshot.workspace_ids.contains(id))
-        {
-            self.create_workspace()?;
+            .is_some_and(|id| snapshot.workspace_ids.contains(id));
+        if !recorded_live {
+            // Either no place was ever recorded for this plan, or the recorded
+            // place is gone. Herdr never reuses workspace ids, so an id
+            // missing from a fresh snapshot is a closed place, not a stale
+            // read: creating anew is the create half of create-or-attach, and
+            // nothing pretends the old place came back. Its pane bindings
+            // belong to that gone place and are dropped with it.
+            self.surface_bindings.clear();
+            let created = self.create_workspace()?;
+            if let Some(subject) = self.open_subject.clone() {
+                self.surface_bindings
+                    .insert(subject, created.root_pane_id.clone());
+            }
         }
-        self.observe()
+        // Whatever was decided, the returned observation is fresh provider
+        // proof: the workspace this open now stands on, and every bound pane
+        // seen live in the same snapshot.
+        let proof = self.snapshot()?;
+        Ok(self.observation(proof))
     }
 
     fn focus_surface(&mut self, surface: &ResourceRef) -> Result<()> {
-        let pane = self.surface_bindings.get(surface).ok_or_else(|| {
+        let pane = self.surface_bindings.get(surface).cloned().ok_or_else(|| {
             AikitError::new(
                 "herdr.surface_unbound",
                 format!("Surface {surface} has no explicit Herdr pane binding"),
             )
         })?;
-        self.run(&["pane", "focus", pane])?;
-        Ok(())
+        // Installed Herdr has no absolute pane focus: `herdr pane focus` is
+        // neighbour-relative navigation (`--direction left|right|up|down`), so
+        // the only available command would silently move the operator to a
+        // neighbour of the bound pane. Withhold the surface-level operation
+        // rather than focus something else; `focus_workspace` remains the
+        // supported coarse route.
+        Err(AikitError::new(
+            "herdr.surface_focus_unsupported",
+            format!(
+                "Herdr cannot focus pane {pane} directly: `herdr pane focus` is \
+                 neighbour-relative and `herdr workspace focus` is the coarser supported route"
+            ),
+        ))
     }
 
     fn detach_surface(&mut self, surface: &ResourceRef) -> Result<()> {

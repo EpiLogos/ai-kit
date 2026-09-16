@@ -80,6 +80,28 @@ The naming follows the same law as `TargetId`: the provider names itself, and wh
 
 An unregistered name is a first-class declared-unsupported outcome, mirroring the harness-admission law that unsupported and unknown faculties are never normalised away: a working-surface open/focus against a technology with no registry entry returns the typed `NotExposed` outcome naming the technology and what would support it (a registry adapter for that technology). It is never a parse failure at plan level, never a crash, and never a silent fallback onto another technology's session. A herdr working-surface binding therefore stages, persists and validates exactly like a tmux one today, and the herdr *driver* remains a separate adapter lane.
 
+## Herdr: a nameable and executable place technology
+
+Herdr is the first technology the registry both detects and drives without the mux contract. The registry entry (`HerdrTechnology`) answers two questions:
+
+- *detection* is a real probe — `herdr --version` for presence and version, `herdr status server` for whether the daemon is answering — so an absent herdr is an absent reading with the reason attached, never an assumption from the name;
+- *driving* hands back a plan-scoped `WorkingEnvironmentProvider` (`HerdrWorkingEnvironment::for_plan`) through the registry's `working_environment` seam, because Herdr's workspace/tab/pane/agent world is richer than the mux contract. `mux_adapter` stays `None` for herdr — a declared fact, not a gap.
+
+A session plan with `mux = "herdr"` executes create-or-attach against the Herdr workspace the plan names, under the same law the tmux path enforces:
+
+- the plan's `name` is the workspace `label` at creation, and the plan's `root` is the creation `cwd`; creation never steals focus;
+- attach identity is the provider-native evidence recorded in the plan's `backend_extensions.herdr` table (`workspace-id` plus per-surface pane ids), which only an explicit open whose created evidence the caller persisted can write. A label is display metadata and provably not unique, so a label match is never read back as identity: with no recorded evidence the route creates rather than adopts;
+- open succeeds only when a fresh `api snapshot` proves the place live, and the returned observation carries the provider-minted ids from that snapshot. Herdr never reuses workspace or pane ids, so a recorded id missing from a fresh snapshot is a closed place: the route recreates under the same label and returns the *new* evidence, and nothing pretends the old place came back;
+- pane churn is disclosed, not absorbed: a recorded pane missing from the snapshot degrades the observation's health and names the churned id in its provenance;
+- focus never recreates, and it does not silently misaddress either: installed Herdr's `pane focus` is neighbour-relative navigation, so the surface-level focus is withheld (`NotExposed`) until the provider can address an exact pane; workspace focus remains the coarse supported route;
+- herdr publishes no terminal-client attach command, so `working-surface attach` is a declared tmux-only operation.
+
+The created evidence travels on the `Opened` outcome (`created` bindings) and through the working-surface result's `refreshed_binding`; applying it is the caller's separate staged `BindWorkingSurface` write — the provider route never writes state on its own. The live reference walk is guarded (`AIKIT_HERDR_LIVE_PROOF=1`) so ordinary test runs and CI never touch a live daemon; the recorded-response contract suite carries the create-or-attach proofs everywhere else.
+
+## Open place technologies still without a driver
+
+The registry makes the *next* technology a composition, not a release: a desktop or window-manager provider (Hyprland first among them, as the current reference implementation of the public seam), an IDE provider, or any third party can compose an entry that detects for real and hands back its own plan-scoped provider. What remains open for herdr itself is pane-level topology projection — driving a plan's full split tree into Herdr panes and tab layout — which the current route deliberately leaves to Herdr's own layout management rather than guessing at.
+
 ## Acceptance boundary
 
 Remote/source acceptance can prove:

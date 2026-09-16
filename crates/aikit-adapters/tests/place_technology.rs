@@ -52,20 +52,30 @@ impl PlaceTechnologyAdapter for FakeTechnology {
 }
 
 #[test]
-fn the_builtin_registry_detects_tmux_cmux_and_registers_plain() {
+fn the_builtin_registry_detects_tmux_cmux_herdr_and_registers_plain() {
     let registry = PlaceTechnologyRegistry::builtin();
     let readings = registry.detect_all().expect("detection never fails the read");
     let names: Vec<&str> = readings
         .iter()
         .map(|reading| reading.technology.as_str())
         .collect();
-    assert_eq!(names, vec!["tmux", "cmux", "plain"]);
+    assert_eq!(names, vec!["tmux", "cmux", "herdr", "plain"]);
 
     // Plain is always present: it is the terminal this process is in.
-    let plain = &readings[2];
+    let plain = &readings[3];
     assert!(plain.installed);
     assert_eq!(plain.technology, PlaceTechnology::plain());
     assert_eq!(plain.technology.known(), Some(MuxKind::Plain));
+
+    // herdr's reading is a real probe of this host: installed with a
+    // version, or absent with the reason — never a fabricated middle.
+    let herdr = &readings[2];
+    assert_eq!(herdr.technology, PlaceTechnology::herdr());
+    assert!(
+        herdr.installed ^ herdr.detail.is_some(),
+        "herdr is either installed or honestly absent, not both: {:?}",
+        herdr
+    );
 }
 
 #[test]
@@ -73,8 +83,9 @@ fn the_working_field_enumerates_only_technologies_that_host_a_switchable_world()
     let registry = PlaceTechnologyRegistry::builtin();
     let field = registry.detect_field().expect("detection never fails");
     let names: Vec<&str> = field.iter().map(|r| r.technology.as_str()).collect();
-    // Same field scope as before the registry: tmux and cmux, never plain.
-    assert_eq!(names, vec!["tmux", "cmux"]);
+    // herdr owns a switchable world, so the field now names it alongside
+    // tmux and cmux; plain is never a field row.
+    assert_eq!(names, vec!["tmux", "cmux", "herdr"]);
 
     // Detection is a real probe of this host: each reading says installed or
     // carries the reason it is not.
@@ -92,18 +103,20 @@ fn the_working_field_enumerates_only_technologies_that_host_a_switchable_world()
 #[test]
 fn a_registered_technology_resolves_and_an_unregistered_name_stays_first_class() {
     let registry = PlaceTechnologyRegistry::builtin().with_entry(Box::new(FakeTechnology {
-        name: "herdr",
+        // Not a builtin name: the builtins already carry herdr, and
+        // `with_entry` appends rather than replaces.
+        name: "weave",
         installed: true,
         hosts_field: true,
     }));
 
     // An open name this build registers resolves — detection works even where
     // no mux adapter exists yet.
-    let herdr = PlaceTechnology::new("herdr");
+    let weave = PlaceTechnology::new("weave");
     let entry = registry
-        .resolve(&herdr)
+        .resolve(&weave)
         .expect("a registered technology resolves by name");
-    assert_eq!(entry.technology(), herdr);
+    assert_eq!(entry.technology(), weave);
     let reading = entry.detect().unwrap();
     assert!(reading.installed);
     assert_eq!(reading.version.as_deref(), Some("fake 1.0"));
