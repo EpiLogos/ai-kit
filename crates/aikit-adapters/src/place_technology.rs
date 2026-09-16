@@ -87,19 +87,23 @@ pub trait PlaceTechnologyAdapter {
     /// over one plan, when it projects plans without going through the mux
     /// contract.
     ///
-    /// `surfaces` is the caller-owned canonical Surface -> logical plan key
-    /// list — canonical identity is minted by the caller, never by the
-    /// adapter — and `subject`, when given, is the canonical Surface a
-    /// following open would address. `None` is the same declared fact as
+    /// `provider` is the exact provider ref the caller addresses — the
+    /// binding's ref, not a technology-canonical one — so the returned
+    /// environment is the one that ref names. `surfaces` is the
+    /// caller-owned canonical Surface -> logical plan key list — canonical
+    /// identity is minted by the caller, never by the adapter — and
+    /// `subject`, when given, is the canonical Surface a following open
+    /// would address. `None` is the same declared fact as
     /// [`Self::mux_adapter`]'s: the name may be known and detected, and
     /// consumers state so rather than guessing.
     fn working_environment(
         &self,
         plan: &SessionPlan,
+        provider: &ResourceRef,
         surfaces: &[(ResourceRef, String)],
         subject: Option<&ResourceRef>,
     ) -> Option<Box<dyn WorkingEnvironmentProvider>> {
-        let _ = (plan, surfaces, subject);
+        let _ = (plan, provider, surfaces, subject);
         None
     }
 
@@ -211,19 +215,14 @@ impl PlaceTechnologyAdapter for HerdrTechnology {
     fn working_environment(
         &self,
         plan: &SessionPlan,
+        provider: &ResourceRef,
         surfaces: &[(ResourceRef, String)],
         subject: Option<&ResourceRef>,
     ) -> Option<Box<dyn WorkingEnvironmentProvider>> {
-        let Ok(provider) = ResourceRef::parse(format!(
-            "provider/{}/current",
-            PlaceTechnology::HERDR
-        )) else {
-            return None;
-        };
         Some(Box::new(HerdrWorkingEnvironment::for_plan(
             SystemRunner::new(),
             plan,
-            provider,
+            provider.clone(),
             surfaces,
             subject,
         )))
