@@ -866,21 +866,31 @@ fn generic_detach_is_refused_as_destructive_provider_local_lifecycle() {
 }
 
 #[test]
-fn focusing_a_surface_addresses_its_explicitly_bound_pane() {
-    let runner = Arc::new(snapshot_runner().on("pane focus", "{}"));
+fn focusing_a_surface_is_withheld_because_herdr_pane_focus_is_neighbour_relative() {
+    // Installed Herdr has no absolute pane focus: `herdr pane focus` navigates
+    // to a *neighbour* (`--direction left|right|up|down`), so the only command
+    // that looks like pane focus would silently move the operator somewhere
+    // they did not ask to go. The provider withholds instead.
+    let runner = Arc::new(ScriptedRunner::new());
     let mut provider = HerdrWorkingEnvironment::new(runner.clone(), r("provider/herdr"))
         .bind_surface(r("surface/reference/root"), "w1:p1");
 
-    provider
+    let error = provider
         .focus_surface(&r("surface/reference/root"))
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(error.code(), "herdr.surface_focus_unsupported");
+    let message = error.message();
     assert!(
-        runner
-            .call_lines()
-            .iter()
-            .any(|call| call == "herdr pane focus w1:p1")
+        message.contains("neighbour-relative") && message.contains("w1:p1"),
+        "the refusal names the real provider limitation and the pane: {message}"
+    );
+    assert!(
+        runner.calls().is_empty(),
+        "a withheld operation must not reach the provider: {:?}",
+        runner.calls()
     );
 
+    // An unbound surface refuses before any of that, as ever.
     let error = provider
         .focus_surface(&r("surface/reference/unbound"))
         .unwrap_err();
@@ -929,7 +939,343 @@ fn the_provider_participates_through_the_public_trait_object_seam() {
     assert_eq!(opened.health, WorkingEnvironmentHealth::Healthy);
     assert_eq!(opened.provider_version.as_deref(), Some("0.9.1"));
     assert_eq!(provider.provider_ref(), &r("provider/herdr"));
-    provider.focus_surface(&root).unwrap();
+    provider.focus_surface(&root).unwrap_err();
     let observed = provider.observe().unwrap();
     assert_eq!(observed.canonical_native_id(&root), Some("w7:p1"));
+}
+
+// ---------------------------------------------------------------------------
+// The plan route: create-or-attach against the workspace the plan names
+// ---------------------------------------------------------------------------
+
+/// The plan route is how a session plan with `mux = "herdr"` executes. The
+/// plan's name is the workspace label at creation; the provider-native
+/// evidence recorded in `backend_extensions.herdr` is the only attach
+/// identity — a workspace or pane id enters the plan only through an explicit
+/// open whose created evidence the caller persisted. Herdr never reuses
+/// workspace or pane ids, so a recorded id missing from a fresh snapshot is a
+/// closed place, never a stale read, and pane churn is disclosed rather than
+/// treated as identity.
+mod plan_route {
+    use aikit_core::SessionPlan;
+    use aikit_core::session::SessionSpec;
+
+    use super::*;
+
+    fn plan() -> SessionPlan {
+        let mut plan = SessionSpec::from_toml_str(
+            r#"
+schema = 1
+id = "reference-plan"
+name = "reference"
+
+[[views]]
+id = "main"
+[[views.panes]]
+id = "shell"
+"#,
+        )
+        .unwrap()
+        .compile()
+        .unwrap();
+        plan.root = Some("/repo".into());
+        plan
+    }
+
+    fn record(plan: &mut SessionPlan, workspace: Option<&str>, surfaces: &[(&str, &str)]) {
+        let mut herdr = toml::map::Map::new();
+        if let Some(id) = workspace {
+            herdr.insert("workspace-id".into(), toml::Value::String(id.into()));
+        }
+        let mut recorded = toml::map::Map::new();
+        for (logical, pane) in surfaces {
+            recorded.insert((*logical).into(), toml::Value::String((*pane).into()));
+        }
+        herdr.insert("surfaces".into(), toml::Value::Table(recorded));
+        plan.backend_extensions.insert("herdr".into(), herdr);
+    }
+
+    fn surface() -> ResourceRef {
+        r("surface/terminal/main/shell")
+    }
+
+    fn surfaces(plan_surfaces: &[(ResourceRef, String)]) -> Vec<(ResourceRef, String)> {
+        plan_surfaces.to_vec()
+    }
+
+    #[test]
+    fn recorded_evidence_reads_back_exactly_what_an_open_recorded() {
+        let mut recorded = plan();
+        record(&mut recorded, Some("w7"), &[("main/shell", "w7:p1")]);
+        assert_eq!(
+            aikit_adapters::herdr::herdr_recorded_workspace(&recorded).as_deref(),
+            Some("w7")
+        );
+        assert_eq!(
+            aikit_adapters::herdr::herdr_recorded_surface_keys(&recorded),
+            vec![("main/shell".to_string(), "w7:p1".to_string())]
+        );
+
+        // Nothing is invented for a plan that never carried evidence.
+        assert_eq!(
+            aikit_adapters::herdr::herdr_recorded_workspace(&plan()),
+            None
+        );
+        assert!(aikit_adapters::herdr::herdr_recorded_surface_keys(&plan()).is_empty());
+    }
+
+    #[test]
+    fn a_first_open_creates_the_labelled_workspace_and_binds_the_subject_to_its_root_pane() {
+        // Pre-snapshot: the plan has no live workspace anywhere. The create
+        // response mints the ids; the proof snapshot shows them live.
+        let runner = Arc::new(
+            ScriptedRunner::new()
+                .sequence(
+                    "api snapshot",
+                    &[
+                        &fixture("session-snapshot.json"),
+                        &fixture("session-snapshot-wide.json"),
+                    ],
+                )
+                .on("workspace create", &fixture("workspace-created.json")),
+        );
+        let subject = surface();
+        let plan = plan();
+        let mut provider = HerdrWorkingEnvironment::for_plan(
+            runner.clone(),
+            &plan,
+            r("provider/herdr/current"),
+            &surfaces(&[(subject.clone(), "main/shell".into())]),
+            Some(&subject),
+        );
+
+        let opened = provider.open().unwrap();
+        assert_eq!(opened.health, WorkingEnvironmentHealth::Healthy);
+        assert_eq!(
+            opened.canonical_native_id(&subject),
+            Some("w7:p1"),
+            "the opened Surface is bound to the root pane Herdr minted"
+        );
+        let session = opened
+            .bindings
+            .iter()
+            .find(|binding| binding.kind == NativeBindingKind::Session)
+            .expect("the created workspace is reported as session evidence");
+        assert_eq!(session.native_id, "w7");
+
+        let calls = runner.call_lines();
+        assert!(
+            calls
+                .iter()
+                .any(|call| call == "herdr workspace create --cwd /repo --no-focus --label reference"),
+            "creation must carry the plan root and the plan name as label: {calls:?}"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.contains("workspace create"))
+                .count(),
+            1
+        );
+
+        // The created evidence is exactly what the caller must persist.
+        let created = aikit_adapters::herdr::created_place_bindings(&plan, &opened)
+            .expect("a first open mints evidence the plan does not yet record");
+        assert!(created
+            .iter()
+            .any(|binding| binding.kind == NativeBindingKind::Session
+                && binding.native_id == "w7"));
+    }
+
+    #[test]
+    fn an_open_attaches_to_the_recorded_workspace_without_creating_anything() {
+        let runner = Arc::new(ScriptedRunner::new().on(
+            "api snapshot",
+            &fixture("session-snapshot-wide.json"),
+        ));
+        let subject = surface();
+        let mut plan = plan();
+        record(&mut plan, Some("w7"), &[("main/shell", "w7:p1")]);
+        let mut provider = HerdrWorkingEnvironment::for_plan(
+            runner.clone(),
+            &plan,
+            r("provider/herdr/current"),
+            &surfaces(&[(subject.clone(), "main/shell".into())]),
+            Some(&subject),
+        );
+
+        let opened = provider.open().unwrap();
+        assert_eq!(opened.health, WorkingEnvironmentHealth::Healthy);
+        assert_eq!(
+            opened.canonical_native_id(&subject),
+            Some("w7:p1"),
+            "Herdr never reuses pane ids, so the live recorded pane is the same pane"
+        );
+        assert!(
+            !runner
+                .call_lines()
+                .iter()
+                .any(|call| call.contains("workspace create")),
+            "attach must not create: {:?}",
+            runner.call_lines()
+        );
+        assert!(
+            aikit_adapters::herdr::created_place_bindings(&plan, &opened).is_none(),
+            "attaching to the recorded place mints no new evidence"
+        );
+    }
+
+    #[test]
+    fn a_recorded_workspace_that_vanished_is_recreated_and_the_stale_bindings_dropped() {
+        // The recorded workspace w-gone and its pane are not in any snapshot;
+        // the pre-snapshot proves the place gone, the open recreates under the
+        // plan's label, and the proof snapshot shows the new ids live.
+        let runner = Arc::new(
+            ScriptedRunner::new()
+                .sequence(
+                    "api snapshot",
+                    &[
+                        &fixture("session-snapshot.json"),
+                        &fixture("session-snapshot-wide.json"),
+                    ],
+                )
+                .on("workspace create", &fixture("workspace-created.json")),
+        );
+        let subject = surface();
+        let mut plan = plan();
+        record(&mut plan, Some("w-gone"), &[("main/shell", "w-gone:p1")]);
+        let mut provider = HerdrWorkingEnvironment::for_plan(
+            runner.clone(),
+            &plan,
+            r("provider/herdr/current"),
+            &surfaces(&[(subject.clone(), "main/shell".into())]),
+            Some(&subject),
+        );
+
+        let opened = provider.open().unwrap();
+        assert_eq!(opened.health, WorkingEnvironmentHealth::Healthy);
+        assert_eq!(
+            opened.canonical_native_id(&subject),
+            Some("w7:p1"),
+            "the recreated place's fresh root pane is the binding, not the stale recorded one"
+        );
+        assert!(
+            !opened
+                .bindings
+                .iter()
+                .any(|binding| binding.native_id == "w-gone:p1"),
+            "bindings of the closed place are dropped: Herdr never reuses ids"
+        );
+        assert_eq!(
+            runner
+                .call_lines()
+                .iter()
+                .filter(|call| call.contains("workspace create"))
+                .count(),
+            1,
+            "the gone place is recreated exactly once per open"
+        );
+    }
+
+    #[test]
+    fn recorded_pane_churn_is_disclosed_rather_than_treated_as_identity() {
+        // w7 is live, but the recorded pane w7:p9 is not in the snapshot: the
+        // pane closed and Herdr never mints that id again. The surviving
+        // binding still resolves; the churn is disclosed by name.
+        let mut plan = plan();
+        record(
+            &mut plan,
+            Some("w7"),
+            &[("main/shell", "w7:p1"), ("main/agent", "w7:p9")],
+        );
+        let shell = r("surface/terminal/main/shell");
+        let agent = r("surface/terminal/main/agent");
+        let mut provider = HerdrWorkingEnvironment::for_plan(
+            wide_runner(),
+            &plan,
+            r("provider/herdr/current"),
+            &surfaces(&[
+                (shell.clone(), "main/shell".into()),
+                (agent.clone(), "main/agent".into()),
+            ]),
+            Some(&shell),
+        );
+
+        let opened = provider.open().unwrap();
+        assert_eq!(
+            opened.health,
+            WorkingEnvironmentHealth::Degraded,
+            "a bound pane missing from the snapshot degrades the observation"
+        );
+        assert_eq!(opened.canonical_native_id(&shell), Some("w7:p1"));
+        let provenance = opened.provenance.join("\n");
+        assert!(
+            provenance.contains("w7:p9") && provenance.contains("never reuses pane ids"),
+            "the churned pane is disclosed: {provenance}"
+        );
+    }
+
+    #[test]
+    fn an_open_with_no_recorded_place_and_no_plan_root_refuses_creation() {
+        let runner = Arc::new(ScriptedRunner::new().on(
+            "api snapshot",
+            &fixture("session-snapshot.json"),
+        ));
+        let subject = surface();
+        let mut plan = plan();
+        plan.root = None;
+        let mut provider = HerdrWorkingEnvironment::for_plan(
+            runner.clone(),
+            &plan,
+            r("provider/herdr/current"),
+            &surfaces(&[(subject.clone(), "main/shell".into())]),
+            Some(&subject),
+        );
+
+        let error = provider.open().unwrap_err();
+        assert_eq!(error.code(), "herdr.workspace_absent");
+        assert!(
+            !runner
+                .call_lines()
+                .iter()
+                .any(|call| call.contains("workspace create")),
+            "the refusal must not create anything: {:?}",
+            runner.call_lines()
+        );
+    }
+
+    #[test]
+    fn a_workspace_label_is_never_read_back_as_attach_identity() {
+        // With no recorded evidence, nothing in the snapshot may be adopted —
+        // not even a workspace that happens to share the plan's name — so the
+        // open goes down the create path instead of silently attaching.
+        let runner = Arc::new(
+            ScriptedRunner::new()
+                .on("api snapshot", &fixture("session-snapshot-wide.json"))
+                .failing("workspace create", 1, "herdr: socket refused"),
+        );
+        let subject = surface();
+        let plan = plan(); // carries label "reference", records no evidence
+        let mut provider = HerdrWorkingEnvironment::for_plan(
+            runner.clone(),
+            &plan,
+            r("provider/herdr/current"),
+            &surfaces(&[(subject.clone(), "main/shell".into())]),
+            Some(&subject),
+        );
+
+        let error = provider.open().unwrap_err();
+        assert_eq!(
+            error.code(),
+            "herdr.workspace_create_failed",
+            "the open attempted creation rather than adopting a label match: {error}"
+        );
+        assert!(
+            runner
+                .call_lines()
+                .iter()
+                .any(|call| call.contains("workspace create")),
+            "no recorded evidence means create-or-fail, never attach-by-name"
+        );
+    }
 }

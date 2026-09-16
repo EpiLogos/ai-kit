@@ -75,6 +75,7 @@ fn apply(
 fn attach_through_public_cli(
     home: &std::path::Path,
     socket: &str,
+    session: &str,
     space: &SessionSpaceRef,
     binding: &ResourceRef,
     marker: &str,
@@ -142,18 +143,37 @@ fn attach_through_public_cli(
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    // tmux detach prefix. The shell continues in the provider Surface.
-    input.write_all(&[0x02, b'd']).unwrap();
-    input.flush().unwrap();
-    drop(input);
-    let output = client
-        .wait_with_output()
-        .expect("attached public CLI client exits after tmux detach");
+    // Detach the client provider-side, by session. A prefix keystroke would
+    // depend on the host's tmux.conf (a rebound prefix typed `d` straight
+    // into the pane's shell on one workstation); `tmux detach-client` on a
+    // named session cannot be reconfigured away. The shell continues in the
+    // provider Surface.
+    let detached = Command::new("tmux")
+        .args(["-L", socket, "detach-client", "-s", session])
+        .output()
+        .expect("provider-side detach is issued");
     assert!(
-        output.status.success(),
-        "public CLI attach client failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        detached.status.success(),
+        "tmux detach-client failed: {}",
+        String::from_utf8_lossy(&detached.stderr)
     );
+    drop(input);
+    // Graceful detach, or — should the client still linger — an abrupt
+    // kill. Both exercise the same law under test: client exit, graceful or
+    // not, never stops the provider Surface. The caller's next attachment
+    // to the same native pane is the real assertion.
+    let detach_deadline = Instant::now() + Duration::from_secs(20);
+    let output = loop {
+        if client.try_wait().unwrap().is_some() {
+            break client.wait_with_output().unwrap();
+        }
+        if Instant::now() >= detach_deadline {
+            eprintln!("attach client did not exit after detach; killed (pane must survive)");
+            let _ = client.kill();
+            break client.wait_with_output().unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     output.stdout
 }
 
@@ -258,6 +278,7 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
             provider: opened_provider,
             subject,
             native_id,
+            ..
         } => {
             assert_eq!(opened_provider, provider);
             assert_eq!(subject, surface);
@@ -302,7 +323,7 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
 
     let marker_one = "PERSISTED_WORKING_SURFACE_ONE";
     let output_one =
-        attach_through_public_cli(home.root(), &socket, &space, &binding, marker_one, &native);
+        attach_through_public_cli(home.root(), &socket, "aikit-persisted-surface", &space, &binding, marker_one, &native);
     if !output_one.is_empty() {
         assert!(
             String::from_utf8_lossy(&output_one).contains(marker_one),
@@ -318,7 +339,7 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
 
     let marker_two = "PERSISTED_WORKING_SURFACE_TWO";
     let output_two =
-        attach_through_public_cli(home.root(), &socket, &space, &binding, marker_two, &native);
+        attach_through_public_cli(home.root(), &socket, "aikit-persisted-surface", &space, &binding, marker_two, &native);
     if !output_two.is_empty() {
         assert!(
             String::from_utf8_lossy(&output_two).contains(marker_two),
@@ -403,13 +424,13 @@ fn working_surface_binding_refuses_unattached_or_mismatched_identities() {
     assert_eq!(preview.code(), "session_space.working_surface_unattached");
 }
 
-/// TM02-R, closed: a commissioned herdr room can now be *named* by a
-/// working-surface plan. The open place-technology name stages, persists and
-/// validates exactly like tmux does; what this build still cannot do is drive
-/// herdr, and the provider boundary says so as a declared-unsupported outcome
-/// naming the technology — not a parse failure, not a crash, not a fallback.
+/// TM02-R, closed and carried forward: a commissioned herdr room is *named*
+/// by a working-surface plan and, since the place-technology registry drives
+/// herdr, also *executed* by the same public open that serves tmux. The
+/// staging/persistence discipline is identical to tmux's; the live
+/// create-or-attach proof is the guarded test below.
 #[test]
-fn a_plan_naming_herdr_stages_and_validates_then_declares_it_unsupported() {
+fn a_plan_naming_herdr_stages_and_persists_like_any_provider() {
     let temp = tempfile::tempdir().unwrap();
     let home = AikitHome::at(temp.path().join("aikit-home"));
     home.ensure_layout().unwrap();
@@ -492,8 +513,8 @@ command = ["sh"]
             },
         },
     );
-    // Validation passes the whole way to the provider boundary: the open name
-    // is a first-class binding, not a parse error.
+    // The open name stages and persists the whole way: it is a first-class
+    // binding, not a parse error.
     let preview = store
         .stage(
             Some(&space),
@@ -520,10 +541,10 @@ command = ["sh"]
         Some("herdr".to_string())
     );
 
-    // Observing is honest: no provider observation (nothing drives herdr),
-    // and the reading names the declared technology.
+    // Observing is honest either way: the registry-driven field answers for
+    // herdr exactly when the CLI is installed on this host, and the reading
+    // names the declared place technology.
     let observed = observe(&state, &binding).unwrap();
-    assert!(observed.reading.provider_observation.is_none());
     assert!(observed.outcome.is_none());
     assert!(
         observed
@@ -532,22 +553,206 @@ command = ["sh"]
             .iter()
             .any(|line| line.contains("herdr") && line.contains("place technology"))
     );
+    if herdr_installed() {
+        assert!(
+            observed.reading.provider_observation.is_some(),
+            "an installed herdr must answer the observe"
+        );
+    } else {
+        assert!(
+            observed.reading.provider_observation.is_none(),
+            "herdr is absent here, so no provider observation may exist"
+        );
+    }
+}
 
-    // Opening reaches the provider boundary and comes back as the typed
-    // declared-unsupported outcome, naming herdr and what would support it.
-    let opened = open(&state, &binding).unwrap();
-    match opened.outcome.expect("open returns a provider outcome") {
-        WorkingEnvironmentOutcome::NotExposed {
-            provider: not_exposed_provider,
-            reason,
+fn herdr_installed() -> bool {
+    Command::new("herdr")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn herdr_server_running() -> bool {
+    Command::new("herdr")
+        .args(["api", "snapshot"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// The real Herdr reference walk, over the same public operations the muxes
+/// use, guarded so ordinary runs and CI never touch a live daemon: it runs
+/// only with `AIKIT_HERDR_LIVE_PROOF=1` on a host with herdr installed and
+/// its server running.
+///
+/// The first explicit open creates one clearly-labelled Herdr workspace,
+/// binds the opened Surface to its root pane, and returns the created
+/// provider-native evidence for persistence. A later observe must re-derive
+/// the exact same native pane through the persisted plan evidence, and focus
+/// tells the truth about what the installed provider can address. The
+/// created workspace is closed afterwards, so the owner's Herdr keeps no
+/// test residue.
+#[test]
+fn herdr_working_surface_open_persists_evidence_and_reobserves_the_same_pane() {
+    use aikit_adapters::working_environment::NativeBindingKind;
+
+    if std::env::var("AIKIT_HERDR_LIVE_PROOF").as_deref() != Ok("1") {
+        eprintln!("SKIP live herdr walk: set AIKIT_HERDR_LIVE_PROOF=1 to run it");
+        return;
+    }
+    if !herdr_installed() || !herdr_server_running() {
+        eprintln!("SKIP live herdr walk: herdr CLI or server unavailable");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let home = AikitHome::at(temp.path().join("aikit-home"));
+    home.ensure_layout().unwrap();
+    let store = SessionSpaceApplicationStore::new(home);
+    let space = SessionSpaceRef::parse("session-space/persisted-herdr").unwrap();
+    let agent = r("agent-session/persisted-herdr");
+    let surface = r("surface/terminal/main/shell");
+    let provider = r("provider/herdr/current");
+    let binding_ref = r("working-surface/persisted-herdr-shell");
+
+    let mut herdr_plan = plan("aikit-persisted-herdr");
+    herdr_plan.root = Some(temp.path().to_path_buf());
+
+    let create = store
+        .stage(
+            None,
+            SessionSpaceMutation::Create {
+                id: space.clone(),
+                label: Some("persisted herdr".into()),
+            },
+        )
+        .unwrap();
+    store.apply(&create).unwrap();
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::AttachAgentSession {
+            attachment: SessionSpaceAgentAttachmentIntent {
+                agent_session: agent.clone(),
+                purpose: Some("real Herdr reference proof".into()),
+                provenance: vec!["test".into()],
+            },
+        },
+    );
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::AttachSurface {
+            attachment: SessionSpaceSurfaceAttachmentIntent {
+                surface: surface.clone(),
+                component: None,
+                purpose: Some("exact terminal Surface".into()),
+                provenance: vec!["test".into()],
+            },
+        },
+    );
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::BindNativeReference {
+            binding: SessionSpaceNativeReferenceBinding {
+                reference: provider.clone(),
+                kind: SessionSpaceNativeReferenceKind::Provider,
+                owner: None,
+                provider: None,
+                host: None,
+                purpose: Some("herdr provider".into()),
+                provenance: vec!["test".into()],
+            },
+        },
+    );
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::BindWorkingSurface {
+            binding: Box::new(SessionSpaceWorkingSurfaceBinding {
+                binding: binding_ref.clone(),
+                surface: surface.clone(),
+                agent_session: agent.clone(),
+                provider: provider.clone(),
+                plan: herdr_plan,
+                plan_key: "main/shell".into(),
+                provenance: vec!["persisted herdr test binding".into()],
+            }),
+        },
+    );
+
+    let before = observe(&store.load(&space).unwrap(), &binding_ref).unwrap();
+    assert!(
+        before.reading.live_native_id.is_none(),
+        "no Herdr evidence is recorded yet, so nothing may claim to be live"
+    );
+
+    let opened = open(&store.load(&space).unwrap(), &binding_ref).unwrap();
+    let opened_pane = match &opened.outcome {
+        Some(WorkingEnvironmentOutcome::Opened {
+            native_id,
+            created,
             ..
-        } => {
-            assert_eq!(not_exposed_provider, provider);
+        }) => {
             assert!(
-                reason.contains("herdr") && reason.contains("adapter"),
-                "the reason must name the technology and what would support it: {reason}"
+                created.is_some(),
+                "a first Herdr open must return created provider-native evidence"
+            );
+            native_id.clone()
+        }
+        other => panic!("expected a real Herdr open, got {other:?}"),
+    };
+    let refreshed = opened
+        .refreshed_binding
+        .clone()
+        .expect("a first Herdr open must return the binding with created evidence");
+    assert!(
+        refreshed.plan.backend_extensions.contains_key("herdr"),
+        "the refreshed binding must record the Herdr workspace evidence"
+    );
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::BindWorkingSurface {
+            binding: Box::new(refreshed),
+        },
+    );
+
+    let after = observe(&store.load(&space).unwrap(), &binding_ref).unwrap();
+    assert_eq!(
+        after.reading.live_native_id.as_deref(),
+        Some(opened_pane.as_str()),
+        "the persisted evidence must re-derive the exact same native pane"
+    );
+
+    // Focus must address the exact persisted surface. Installed Herdr cannot
+    // focus a pane directly (its `pane focus` is neighbour-relative), so the
+    // public operation truthfully withholds instead of focusing something
+    // else — the §13 discipline applied to the reference provider.
+    let focused = focus(&store.load(&space).unwrap(), &binding_ref).unwrap();
+    match &focused.outcome {
+        Some(WorkingEnvironmentOutcome::NotExposed { reason, .. }) => {
+            assert!(
+                reason.contains("neighbour-relative"),
+                "the focus refusal must name the real provider limitation: {reason}"
             );
         }
-        other => panic!("herdr must be declared unsupported, not silently served: {other:?}"),
+        Some(WorkingEnvironmentOutcome::Focused { native_id, .. }) => {
+            // A provider that can focus the exact pane must focus THIS pane.
+            assert_eq!(native_id, &opened_pane);
+        }
+        other => panic!("expected a focus outcome, got {other:?}"),
+    }
+
+    // Bounded cleanup: close the workspace this test created.
+    let observation = after.reading.provider_observation.as_ref().unwrap();
+    for native in &observation.bindings {
+        if matches!(native.kind, NativeBindingKind::Session) && native.canonical_ref.is_none() {
+            let _ = Command::new("herdr")
+                .args(["workspace", "close", &native.native_id])
+                .output();
+        }
     }
 }

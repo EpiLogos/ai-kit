@@ -319,10 +319,25 @@ fn run() -> Result<()> {
             }
             WorkingSurfaceCommand::Open { space, binding } => {
                 let state = service.session_space_show(&space_ref(&space)?)?;
-                emit(&aikit_cli::session_space_working_surface::open(
+                let result = aikit_cli::session_space_working_surface::open(
                     &state,
                     &aikit_core::ResourceRef::parse(binding)?,
-                )?)
+                )?;
+                // An open that created provider-native material (a Herdr
+                // workspace and its root pane) returns the binding carrying
+                // it; persisting that evidence is this operation's separate
+                // write, through the same staged mutation path as every
+                // other SessionSpace change.
+                if let Some(updated) = result.refreshed_binding.clone() {
+                    let preview = service.session_space_stage(
+                        Some(&space_ref(&space)?),
+                        SessionSpaceMutation::BindWorkingSurface {
+                            binding: Box::new(updated),
+                        },
+                    )?;
+                    service.session_space_apply(&preview)?;
+                }
+                emit(&result)
             }
             WorkingSurfaceCommand::Focus { space, binding } => {
                 let state = service.session_space_show(&space_ref(&space)?)?;

@@ -208,6 +208,7 @@ impl PlaceTechnology {
     pub const TMUX: &'static str = "tmux";
     pub const CMUX: &'static str = "cmux";
     pub const PLAIN: &'static str = "plain";
+    pub const HERDR: &'static str = "herdr";
 
     /// The longest name the discipline allows. Kept small so a typo in a
     /// persisted plan fails as a name problem, not as a mystery.
@@ -227,6 +228,10 @@ impl PlaceTechnology {
 
     pub fn plain() -> Self {
         Self::new(Self::PLAIN)
+    }
+
+    pub fn herdr() -> Self {
+        Self::new(Self::HERDR)
     }
 
     pub fn as_str(&self) -> &str {
