@@ -461,6 +461,27 @@ impl Service {
                     .map(WikiObject::Edge)
                     .collect(),
             );
+            // SharedField SF4: the projected world's Explore discovery seed
+            // joins the same SemanticWiki — stable entry refs, typed
+            // relations, derived presentation edges and SharedField
+            // membership — so Search/Resolve reveals eligible presentations
+            // without a second store. An absent seed is ordinary (nothing
+            // projected yet); it never gates addressability.
+            if let Some(seed_path) = aikit_adapters::oi_explore::discovery_seed_path(central_root)
+            {
+                match aikit_adapters::oi_explore::read_explore_discovery(&seed_path) {
+                    Ok(reading) => {
+                        absences.extend(reading.absences);
+                        aikit_adapters::central_entities::adopt_into(
+                            &mut discovered.wiki,
+                            reading.objects,
+                        );
+                    }
+                    Err(error) => absences.push(format!(
+                        "Explore discovery seed unreadable: {error}"
+                    )),
+                }
+            }
             // W10 V5: a project context binds the same entity refs through
             // Central's effective world sources — never a second subject;
             // declared exclusions withhold, per-hop provenance is recorded.
