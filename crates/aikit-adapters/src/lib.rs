@@ -197,6 +197,7 @@ pub mod capability_matrix;
 pub mod central_entities;
 pub mod central_wiki;
 pub mod central_world_sources;
+pub mod techne_temporal;
 mod session_event_queue;
 
 pub mod agency_admission;

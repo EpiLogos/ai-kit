@@ -56,6 +56,7 @@ pub mod id;
 pub mod knowledge;
 pub mod knowledge_code;
 pub mod knowledge_entity_address;
+pub mod knowledge_facets;
 pub mod knowledge_ingest;
 pub mod knowledge_wiki_shape_v2;
 pub mod knowledge_living;
@@ -255,6 +256,14 @@ pub use knowledge::{
 pub use knowledge_code::{
     CodeContext, CodeImpact, CodeIndexCapabilities, CodeIndexProvider, CodeIndexStatus,
     CodeReference, CodeSearchHit, CodeTrace, GITNEXUS_TESTED_VERSION,
+};
+pub use knowledge_facets::{
+    attach_source_selector, parse_facets_from_extensions, parse_source_selector,
+    read_source_selector, write_facets_to_extensions, write_source_selector, FacetError,
+    PlaceFacet, PlaceGeometry, PlaceGeometryType, PlaceHierarchyEntry, PlaceIdentity, PlaceName,
+    PlacePrecision, SourceSelector, TechneFacetDeclaration, TechneFacets,
+    TechneSelectorDeclaration, TemporalFacet, TemporalInterval, TemporalKind, TemporalPrecision,
+    TECHNE_FACET_EXTENSION,
 };
 pub use knowledge_living::{
     build_integrative_reading, contemplate_preflight, deterministic_knowledge_impact,
