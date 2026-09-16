@@ -242,8 +242,14 @@ mod herdr_place_technology {
         );
         let subject = surface_ref("main", "shell").unwrap();
         let plan = plan();
+        // The addressed provider is the binding's ref, not the technology-
+        // canonical one: the returned environment must be the one that ref
+        // names (found live — a hardcoded `provider/herdr/current` left a
+        // binding addressed at `provider/herdr/w6` unprojectable).
+        let addressed = aikit_core::resource::ResourceRef::parse("provider/herdr/w6").unwrap();
         let driven = entry.working_environment(
             &plan,
+            &addressed,
             &plan_surfaces(&plan),
             Some(&subject),
         );

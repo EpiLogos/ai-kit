@@ -136,7 +136,7 @@ pub fn observe(plan: &SessionPlan) -> Result<Vec<WorkingEnvironmentObservation>>
         } else {
             // A technology driven without the mux contract hands back its own
             // plan-scoped provider through the same registry entry.
-            let Some(registered) = entry.working_environment(plan, &surfaces, None) else {
+            let Some(registered) = entry.working_environment(plan, &provider, &surfaces, None) else {
                 continue;
             };
             registered
@@ -234,7 +234,7 @@ pub fn act(
     // The technology is driven without the mux contract: the registry hands
     // back its own plan-scoped provider, addressed through the same public
     // outcome vocabulary.
-    let Some(mut registered) = entry.working_environment(plan, &surfaces, Some(subject)) else {
+    let Some(mut registered) = entry.working_environment(plan, provider, &surfaces, Some(subject)) else {
         return Ok(WorkingEnvironmentOutcome::NotExposed {
             provider: provider.clone(),
             subject: subject.clone(),
