@@ -240,8 +240,12 @@ pub enum SurfaceAvailability {
     Available,
     /// Usable with a stated reduction; the reason is the provider's or the
     /// body's own words, not a flattened label.
-    Degraded { reason: String },
-    Unavailable { reason: String },
+    Degraded {
+        reason: String,
+    },
+    Unavailable {
+        reason: String,
+    },
 }
 
 impl SurfaceAvailability {
@@ -540,12 +544,18 @@ impl ModelModalityContract {
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum ModalitySupport {
     Supported,
-    Degraded { reason: String },
-    Unsupported { reason: String },
+    Degraded {
+        reason: String,
+    },
+    Unsupported {
+        reason: String,
+    },
     /// No modality contract was declared for the surface, so nothing is
     /// known. This is not unsupported: unproven and proven-absent stay
     /// distinct.
-    Unknown { reason: String },
+    Unknown {
+        reason: String,
+    },
 }
 
 impl ModalitySupport {
@@ -657,7 +667,10 @@ impl ComposedModalityView {
     /// What enters the first stage and what leaves the last, for bodies
     /// whose stages form a pipeline.
     pub fn pipeline_modalities(&self) -> (BTreeSet<ModelModality>, BTreeSet<ModelModality>) {
-        (self.input_modalities.clone(), self.output_modalities.clone())
+        (
+            self.input_modalities.clone(),
+            self.output_modalities.clone(),
+        )
     }
 }
 
@@ -798,8 +811,7 @@ pub fn explain_model_modality(read_model: &ModelRuntimeReadModel) -> ExplainEvid
         facts.push(ExplainFact {
             relation: "body-modality".into(),
             authority: Some(crate::resource::SourceAuthority::Derived),
-            summary: "no modality contract was declared; the surface is a plain text body"
-                .into(),
+            summary: "no modality contract was declared; the surface is a plain text body".into(),
             canonical_refs: Vec::new(),
             provenance: Vec::new(),
         });
@@ -1053,10 +1065,16 @@ mod tests {
             ProviderRef::parse("provider:openai").unwrap(),
             "gpt-realtime",
         );
-        contract.input_modalities =
-            BTreeSet::from([ModelModality::Audio, ModelModality::Speech, ModelModality::Text]);
-        contract.output_modalities =
-            BTreeSet::from([ModelModality::Audio, ModelModality::Speech, ModelModality::Text]);
+        contract.input_modalities = BTreeSet::from([
+            ModelModality::Audio,
+            ModelModality::Speech,
+            ModelModality::Text,
+        ]);
+        contract.output_modalities = BTreeSet::from([
+            ModelModality::Audio,
+            ModelModality::Speech,
+            ModelModality::Text,
+        ]);
         contract.transforms.insert(
             TransformCapability::SpeechToSpeech,
             DeclaredSupport::Supported,
@@ -1120,9 +1138,10 @@ mod tests {
                 reason: "region failover active".into()
             }
         );
-        contract
-            .degraded_interaction
-            .insert(InteractionCapability::BargeIn, "half-duplex until resume".into());
+        contract.degraded_interaction.insert(
+            InteractionCapability::BargeIn,
+            "half-duplex until resume".into(),
+        );
         assert_eq!(
             contract.interaction_support(InteractionCapability::BargeIn),
             ModalitySupport::Degraded {
@@ -1158,17 +1177,24 @@ mod tests {
         let mut contract = realtime_contract();
         contract.output_modalities.clear();
         let error = contract.validate().unwrap_err();
-        assert_eq!(error.code(), "model_modality.transform_without_output_modality");
+        assert_eq!(
+            error.code(),
+            "model_modality.transform_without_output_modality"
+        );
 
         let mut text_only = ModelModalityContract::new(
             ProviderRef::parse("provider:example").unwrap(),
             "text-chat",
         );
-        text_only
-            .transforms
-            .insert(TransformCapability::SpeechToText, DeclaredSupport::Supported);
+        text_only.transforms.insert(
+            TransformCapability::SpeechToText,
+            DeclaredSupport::Supported,
+        );
         let error = text_only.validate().unwrap_err();
-        assert_eq!(error.code(), "model_modality.transform_without_input_modality");
+        assert_eq!(
+            error.code(),
+            "model_modality.transform_without_input_modality"
+        );
     }
 
     #[test]
@@ -1192,7 +1218,10 @@ mod tests {
         assert!(capabilities.contains("speech-to-speech"));
         assert!(capabilities.contains("full-duplex-realtime"));
         assert!(capabilities.contains("barge-in"));
-        assert!(!capabilities.contains("text"), "modalities are not capabilities");
+        assert!(
+            !capabilities.contains("text"),
+            "modalities are not capabilities"
+        );
     }
 
     #[test]
@@ -1203,8 +1232,10 @@ mod tests {
         );
         stt.input_modalities = BTreeSet::from([ModelModality::Audio, ModelModality::Speech]);
         stt.output_modalities = BTreeSet::from([ModelModality::Text]);
-        stt.transforms
-            .insert(TransformCapability::SpeechToText, DeclaredSupport::Supported);
+        stt.transforms.insert(
+            TransformCapability::SpeechToText,
+            DeclaredSupport::Supported,
+        );
         stt.interaction = BTreeSet::from([
             InteractionCapability::RequestResponse,
             InteractionCapability::FinalTranscripts,
@@ -1216,35 +1247,48 @@ mod tests {
         );
         tts.input_modalities = BTreeSet::from([ModelModality::Text]);
         tts.output_modalities = BTreeSet::from([ModelModality::Audio, ModelModality::Speech]);
-        tts.transforms
-            .insert(TransformCapability::TextToSpeech, DeclaredSupport::Supported);
+        tts.transforms.insert(
+            TransformCapability::TextToSpeech,
+            DeclaredSupport::Supported,
+        );
         tts.interaction = BTreeSet::from([
             InteractionCapability::StreamingOutput,
             InteractionCapability::StructuredEvents,
         ]);
-        stt.interaction.insert(InteractionCapability::StructuredEvents);
+        stt.interaction
+            .insert(InteractionCapability::StructuredEvents);
         let text_stage: Option<&ModelModalityContract> = None;
 
         let stages = [
-            (r("component/stt"), Some(&stt) as Option<&ModelModalityContract>),
+            (
+                r("component/stt"),
+                Some(&stt) as Option<&ModelModalityContract>,
+            ),
             (r("component/text"), text_stage),
             (r("component/tts"), Some(&tts)),
         ];
-        let stage_refs: Vec<(&ResourceRef, Option<&ModelModalityContract>)> =
-            stages.iter().map(|(component, contract)| (component, *contract)).collect();
+        let stage_refs: Vec<(&ResourceRef, Option<&ModelModalityContract>)> = stages
+            .iter()
+            .map(|(component, contract)| (component, *contract))
+            .collect();
         let view = compose_stage_modalities(&stage_refs);
 
         assert!(view.speech_capable);
         let (pipeline_in, pipeline_out) = view.pipeline_modalities();
         assert!(pipeline_in.contains(&ModelModality::Speech));
         assert!(pipeline_out.contains(&ModelModality::Speech));
-        assert!(!pipeline_out.contains(&ModelModality::Text),
-            "body output is the last stage's output; the STT stage's text must not leak");
+        assert!(
+            !pipeline_out.contains(&ModelModality::Text),
+            "body output is the last stage's output; the STT stage's text must not leak"
+        );
         // An explicit refusal by a declared stage refutes the body claim and
         // names who withheld it.
         match view.interaction_support(InteractionCapability::RequestResponse) {
             ModalitySupport::Unsupported { reason } => {
-                assert!(reason.contains("component/tts"), "reason names who withheld: {reason}");
+                assert!(
+                    reason.contains("component/tts"),
+                    "reason names who withheld: {reason}"
+                );
             }
             other => panic!("request-response must not read as {other:?}"),
         }
@@ -1297,12 +1341,17 @@ mod tests {
         let text_stage: Option<&ModelModalityContract> = None;
 
         let stages = [
-            (r("component/stt"), Some(&stt) as Option<&ModelModalityContract>),
+            (
+                r("component/stt"),
+                Some(&stt) as Option<&ModelModalityContract>,
+            ),
             (r("component/text"), text_stage),
             (r("component/tts"), Some(&tts)),
         ];
-        let stage_refs: Vec<(&ResourceRef, Option<&ModelModalityContract>)> =
-            stages.iter().map(|(component, contract)| (component, *contract)).collect();
+        let stage_refs: Vec<(&ResourceRef, Option<&ModelModalityContract>)> = stages
+            .iter()
+            .map(|(component, contract)| (component, *contract))
+            .collect();
         let view = compose_stage_modalities(&stage_refs);
         // Both declared stages carry barge-in, but the opaque text stage
         // never spoke, so the body cannot claim it end-to-end.
@@ -1329,7 +1378,9 @@ mod tests {
             (&r("component/realtime"), Some(&s2s)),
         ]);
         assert!(view.complete);
-        assert!(view.interaction_support(InteractionCapability::BargeIn).is_supported());
+        assert!(view
+            .interaction_support(InteractionCapability::BargeIn)
+            .is_supported());
         stt.interaction.remove(&InteractionCapability::BargeIn);
         let view = compose_stage_modalities(&[
             (&r("component/stt"), Some(&stt)),
@@ -1337,7 +1388,10 @@ mod tests {
         ]);
         match view.interaction_support(InteractionCapability::BargeIn) {
             ModalitySupport::Unsupported { reason } => {
-                assert!(reason.contains("component/stt"), "the reason names who withheld: {reason}");
+                assert!(
+                    reason.contains("component/stt"),
+                    "the reason names who withheld: {reason}"
+                );
             }
             other => panic!("barge-in must not survive one stage withholding it: {other:?}"),
         }
@@ -1386,9 +1440,7 @@ mod tests {
                     protocol: "openai-realtime-websocket".into(),
                     capabilities: BTreeSet::new(),
                     access: crate::model_runtime::ModelAccessReading {
-                        inference: crate::model_runtime::AccessFieldReading::available([
-                            "invoke",
-                        ]),
+                        inference: crate::model_runtime::AccessFieldReading::available(["invoke"]),
                         material_control: crate::model_runtime::AccessFieldReading::unavailable(
                             "provider owns lifecycle",
                         ),
@@ -1474,9 +1526,7 @@ mod tests {
                     protocol: "openai-compatible-chat".into(),
                     capabilities: BTreeSet::new(),
                     access: crate::model_runtime::ModelAccessReading {
-                        inference: crate::model_runtime::AccessFieldReading::available([
-                            "invoke",
-                        ]),
+                        inference: crate::model_runtime::AccessFieldReading::available(["invoke"]),
                         material_control: crate::model_runtime::AccessFieldReading::unavailable(
                             "provider owns lifecycle",
                         ),

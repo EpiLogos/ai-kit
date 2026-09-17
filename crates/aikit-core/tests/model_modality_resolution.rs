@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use aikit_core::composition::{
     resolve_harness_composition, ActivationScope, ActivationScopeKind, ComponentContribution,
     ComponentDescriptor, ComponentRequirement, ComponentSelection, CompositionActivationMode,
-    CompositionCatalog, ContributionKind, ContractProvider, HarnessCompositionRequest,
+    CompositionCatalog, ContractProvider, ContributionKind, HarnessCompositionRequest,
     LifetimeOwner, LifetimeOwnerKind, RequirementStrength, ResolutionScope, RetractionMode,
     SurfaceDescriptor, SurfaceKind, TargetNativeComponentBinding,
 };
@@ -19,8 +19,8 @@ use aikit_core::model_modality::{
     ModelModalityContract, SurfaceAvailability, TransformCapability, TransportKind,
 };
 use aikit_core::model_runtime::{
-    disclose_model_runtime, disclose_staged_model_runtime, AccessFieldReading,
-    InferenceEngineForm, InferenceEngineReading, MaterialResourceReading, ModelAccessReading,
+    disclose_model_runtime, disclose_staged_model_runtime, AccessFieldReading, InferenceEngineForm,
+    InferenceEngineReading, MaterialResourceReading, ModelAccessReading,
     ModelMaterialisationReading, ModelRuntimeRelation, ModelStageRelation, ModelSurfaceReading,
     ModelVariantReading, PlacementObservation, RuntimeChangeApplication, RuntimeSurfaceReading,
 };
@@ -124,8 +124,7 @@ fn realtime_request() -> HarnessCompositionRequest {
 /// it from its frozen session fixture (see the adapter's own conformance
 /// tests). Provider vocabulary stays out of the generic fields.
 fn realtime_modality(credential: CredentialCondition) -> ModelModalityContract {
-    let mut modality =
-        ModelModalityContract::new(provider("provider:openai"), "gpt-realtime");
+    let mut modality = ModelModalityContract::new(provider("provider:openai"), "gpt-realtime");
     modality.input_modalities = BTreeSet::from([
         ModelModality::Audio,
         ModelModality::Speech,
@@ -286,8 +285,7 @@ fn cascade_catalog(stt_winner: &str, stt_loser: &str) -> CompositionCatalog {
 }
 
 fn stt_relation() -> ModelRuntimeRelation {
-    let mut modality =
-        ModelModalityContract::new(provider("provider:openai"), "gpt-4o-transcribe");
+    let mut modality = ModelModalityContract::new(provider("provider:openai"), "gpt-4o-transcribe");
     modality.input_modalities = BTreeSet::from([ModelModality::Audio, ModelModality::Speech]);
     modality.output_modalities = BTreeSet::from([ModelModality::Text]);
     modality.transforms = BTreeMap::from([(
@@ -457,26 +455,47 @@ fn a_native_realtime_body_resolves_with_its_declared_modality_set() {
     // The body carries the realtime conversation surface and the provider
     // binding resolved through the ordinary contract path.
     assert_eq!(composition.surfaces.len(), 1);
-    assert_eq!(composition.surfaces[0].resource, r("surface/realtime-conversation"));
-    assert_eq!(composition.contract_bindings.len(), 0,
-        "the adapter component requires no upstream contract");
+    assert_eq!(
+        composition.surfaces[0].resource,
+        r("surface/realtime-conversation")
+    );
+    assert_eq!(
+        composition.contract_bindings.len(),
+        0,
+        "the adapter component requires no upstream contract"
+    );
     assert!(composition.model.as_ref().unwrap() == &r("model:gpt-realtime"));
 
-    let read = disclose_model_runtime(&composition, realtime_relation(CredentialCondition::Satisfied {
-        hint: "openai inference credential".into(),
-        binding_ref: "credential-binding/openai-1".into(),
-    }))
+    let read = disclose_model_runtime(
+        &composition,
+        realtime_relation(CredentialCondition::Satisfied {
+            hint: "openai inference credential".into(),
+            binding_ref: "credential-binding/openai-1".into(),
+        }),
+    )
     .unwrap();
 
     // The question a consumer asks: is this session speech-capable,
     // full-duplex, barge-in-capable?
     assert_eq!(read.speech_capable(), Some(true));
-    assert!(read.interaction_support(InteractionCapability::FullDuplexRealtime).is_supported());
-    assert!(read.interaction_support(InteractionCapability::BargeIn).is_supported());
-    assert!(read.interaction_support(InteractionCapability::VadTurnDetection).is_supported());
-    assert!(read.modality_support(ModalityDirection::Input, ModelModality::Speech).is_supported());
-    assert!(read.modality_support(ModalityDirection::Output, ModelModality::Speech).is_supported());
-    assert!(read.modality_support(ModalityDirection::Input, ModelModality::Text).is_supported());
+    assert!(read
+        .interaction_support(InteractionCapability::FullDuplexRealtime)
+        .is_supported());
+    assert!(read
+        .interaction_support(InteractionCapability::BargeIn)
+        .is_supported());
+    assert!(read
+        .interaction_support(InteractionCapability::VadTurnDetection)
+        .is_supported());
+    assert!(read
+        .modality_support(ModalityDirection::Input, ModelModality::Speech)
+        .is_supported());
+    assert!(read
+        .modality_support(ModalityDirection::Output, ModelModality::Speech)
+        .is_supported());
+    assert!(read
+        .modality_support(ModalityDirection::Input, ModelModality::Text)
+        .is_supported());
     // What the provider does not offer is explicitly unsupported, with the
     // reason naming the surface that withheld it.
     match read.interaction_support(InteractionCapability::PartialTranscripts) {
@@ -496,7 +515,10 @@ fn a_native_realtime_body_resolves_with_its_declared_modality_set() {
             reconnect: aikit_core::model_modality::ReconnectSupport::ReconnectWithoutSession,
         }
     );
-    assert_eq!(modality.credential_scope, CredentialScope::EphemeralSurfaceToken);
+    assert_eq!(
+        modality.credential_scope,
+        CredentialScope::EphemeralSurfaceToken
+    );
     // A connected surface that cannot restore session state says so.
     assert!(!matches!(
         modality.connection,
@@ -512,10 +534,13 @@ fn realtime_resolution_is_deterministic_and_tool_requests_stay_non_action() {
     let second = resolve_harness_composition(&realtime_catalog(), realtime_request()).unwrap();
     assert_eq!(first.fingerprint, second.fingerprint);
 
-    let read = disclose_model_runtime(&first, realtime_relation(CredentialCondition::Satisfied {
-        hint: "openai inference credential".into(),
-        binding_ref: "credential-binding/openai-1".into(),
-    }))
+    let read = disclose_model_runtime(
+        &first,
+        realtime_relation(CredentialCondition::Satisfied {
+            hint: "openai inference credential".into(),
+            binding_ref: "credential-binding/openai-1".into(),
+        }),
+    )
     .unwrap();
 
     // The structured tool-request channel is a capability the model may
@@ -523,7 +548,9 @@ fn realtime_resolution_is_deterministic_and_tool_requests_stay_non_action() {
     // Action.
     let surface: &RuntimeSurfaceReading = &read.surfaces[0];
     assert!(surface.action_refs.is_empty());
-    assert!(surface.non_action_refs.contains(&r("capability/realtime-tool-request-channel")));
+    assert!(surface
+        .non_action_refs
+        .contains(&r("capability/realtime-tool-request-channel")));
     assert_eq!(surface.kind, SurfaceKind::Conversation);
     // Declaring the ToolRequests interaction capability grants nothing
     // beyond the channel: the read model's Action surface stays empty even
@@ -533,7 +560,10 @@ fn realtime_resolution_is_deterministic_and_tool_requests_stay_non_action() {
         .unwrap()
         .interaction
         .contains(&InteractionCapability::ToolRequests));
-    assert!(read.surfaces.iter().all(|surface| surface.action_refs.is_empty()));
+    assert!(read
+        .surfaces
+        .iter()
+        .all(|surface| surface.action_refs.is_empty()));
 }
 
 #[test]
@@ -556,7 +586,11 @@ fn a_missing_credential_degrades_the_realtime_body_explicitly() {
 
 #[test]
 fn a_cascade_body_resolves_with_per_stage_provider_model_materialisation_relations() {
-    let composition = resolve_harness_composition(&cascade_catalog("provider:openai", "provider:deepseek"), cascade_request()).unwrap();
+    let composition = resolve_harness_composition(
+        &cascade_catalog("provider:openai", "provider:deepseek"),
+        cascade_request(),
+    )
+    .unwrap();
     // The resolver wired the cascade through ordinary contract bindings.
     let pairs: Vec<(&ResourceRef, &ResourceRef)> = composition
         .contract_bindings
@@ -579,10 +613,16 @@ fn a_cascade_body_resolves_with_per_stage_provider_model_materialisation_relatio
     let stt = read.stage(&r("component/stt-stage")).unwrap();
     assert_eq!(stt.relation.model.model, r("model:gpt-4o-transcribe"));
     assert_eq!(stt.relation.engine.provider, provider("provider:openai"));
-    assert_eq!(stt.relation.materialisation.placement, PlacementObservation::Remote);
+    assert_eq!(
+        stt.relation.materialisation.placement,
+        PlacementObservation::Remote
+    );
     let text = read.stage(&r("component/text-harness")).unwrap();
     assert_eq!(text.relation.model.model, r("model:llama3.2"));
-    assert_eq!(text.relation.materialisation.placement, PlacementObservation::Local);
+    assert_eq!(
+        text.relation.materialisation.placement,
+        PlacementObservation::Local
+    );
     let tts = read.stage(&r("component/tts-stage")).unwrap();
     assert_eq!(tts.relation.model.model, r("model:gpt-4o-mini-tts"));
 
@@ -592,7 +632,10 @@ fn a_cascade_body_resolves_with_per_stage_provider_model_materialisation_relatio
     let (body_in, body_out) = read.composed_modality.pipeline_modalities();
     assert!(body_in.contains(&ModelModality::Speech));
     assert!(body_out.contains(&ModelModality::Speech));
-    assert!(!body_in.contains(&ModelModality::Text), "body input is the first stage's input");
+    assert!(
+        !body_in.contains(&ModelModality::Text),
+        "body input is the first stage's input"
+    );
 
     // Strict derivation: both acoustic stages declare request-response but
     // the text harness declared no contract, so the body-level claim is
@@ -615,7 +658,11 @@ fn a_cascade_body_resolves_with_per_stage_provider_model_materialisation_relatio
 
 #[test]
 fn the_cascade_explains_why_it_is_speech_capable_with_stage_provenance() {
-    let composition = resolve_harness_composition(&cascade_catalog("provider:openai", "provider:deepseek"), cascade_request()).unwrap();
+    let composition = resolve_harness_composition(
+        &cascade_catalog("provider:openai", "provider:deepseek"),
+        cascade_request(),
+    )
+    .unwrap();
     let read = disclose_staged_model_runtime(&composition, cascade_stages()).unwrap();
     let evidence = explain_staged_model_runtime(&read);
 
@@ -635,9 +682,17 @@ fn the_cascade_explains_why_it_is_speech_capable_with_stage_provenance() {
         .iter()
         .find(|fact| fact.summary.contains("component/stt-stage"))
         .unwrap();
-    assert_eq!(stt_fact.provenance[0].native_id.as_deref(), Some("gpt-4o-transcribe"));
-    assert_eq!(stt_fact.provenance[0].provider.as_ref().unwrap().as_str(), "provider:openai");
-    assert!(stt_fact.canonical_refs.contains(&r("model:gpt-4o-transcribe")));
+    assert_eq!(
+        stt_fact.provenance[0].native_id.as_deref(),
+        Some("gpt-4o-transcribe")
+    );
+    assert_eq!(
+        stt_fact.provenance[0].provider.as_ref().unwrap().as_str(),
+        "provider:openai"
+    );
+    assert!(stt_fact
+        .canonical_refs
+        .contains(&r("model:gpt-4o-transcribe")));
 
     assert!(evidence.facts.iter().any(|fact| {
         fact.relation == "body-speech-capability"
@@ -652,19 +707,28 @@ fn the_cascade_explains_why_it_is_speech_capable_with_stage_provenance() {
 
 #[test]
 fn body_provider_replacement_changes_facts_never_agent_identity() {
-    let before =
-        resolve_harness_composition(&cascade_catalog("provider:openai", "provider:deepseek"), cascade_request()).unwrap();
+    let before = resolve_harness_composition(
+        &cascade_catalog("provider:openai", "provider:deepseek"),
+        cascade_request(),
+    )
+    .unwrap();
     // The alternative provider wins the transcript contract: a provider
     // replacement through ordinary resolution, nothing else changed.
-    let after =
-        resolve_harness_composition(&cascade_catalog("provider:deepseek", "provider:openai"), cascade_request()).unwrap();
+    let after = resolve_harness_composition(
+        &cascade_catalog("provider:deepseek", "provider:openai"),
+        cascade_request(),
+    )
+    .unwrap();
 
     assert_eq!(before.harness, after.harness);
     assert_eq!(before.project, after.project);
     assert_eq!(before.agent, after.agent);
     assert_eq!(before.agency, after.agency);
     assert_eq!(before.session, after.session);
-    assert_ne!(before.fingerprint, after.fingerprint, "the body facts did change");
+    assert_ne!(
+        before.fingerprint, after.fingerprint,
+        "the body facts did change"
+    );
 
     // The diff is explainable as a provider rebind.
     let diff = diff_harness_compositions(&before, &after).unwrap();
@@ -681,8 +745,14 @@ fn body_provider_replacement_changes_facts_never_agent_identity() {
     let before_read = disclose_staged_model_runtime(&before, cascade_stages()).unwrap();
     let after_read = disclose_staged_model_runtime(&after, cascade_stages()).unwrap();
     assert_eq!(
-        before_read.stage(&r("component/stt-stage")).unwrap().component,
-        after_read.stage(&r("component/stt-stage")).unwrap().component
+        before_read
+            .stage(&r("component/stt-stage"))
+            .unwrap()
+            .component,
+        after_read
+            .stage(&r("component/stt-stage"))
+            .unwrap()
+            .component
     );
     assert_eq!(before_read.agent_session, after_read.agent_session);
 }
@@ -709,7 +779,11 @@ fn a_text_only_surface_reports_absent_speech_honestly() {
     }
 
     // A surface that declared no contract at all is unproven, not refuted.
-    let composition = resolve_harness_composition(&cascade_catalog("provider:openai", "provider:deepseek"), cascade_request()).unwrap();
+    let composition = resolve_harness_composition(
+        &cascade_catalog("provider:openai", "provider:deepseek"),
+        cascade_request(),
+    )
+    .unwrap();
     let read = disclose_staged_model_runtime(&composition, cascade_stages()).unwrap();
     let text_stage = read.stage(&r("component/text-harness")).unwrap();
     assert!(text_stage.relation.model_surface.modality.is_none());
@@ -725,10 +799,13 @@ fn a_text_only_surface_reports_absent_speech_honestly() {
 #[test]
 fn the_realtime_explanation_carries_provider_native_provenance() {
     let composition = resolve_harness_composition(&realtime_catalog(), realtime_request()).unwrap();
-    let read = disclose_model_runtime(&composition, realtime_relation(CredentialCondition::Satisfied {
-        hint: "openai inference credential".into(),
-        binding_ref: "credential-binding/openai-1".into(),
-    }))
+    let read = disclose_model_runtime(
+        &composition,
+        realtime_relation(CredentialCondition::Satisfied {
+            hint: "openai inference credential".into(),
+            binding_ref: "credential-binding/openai-1".into(),
+        }),
+    )
     .unwrap();
     let evidence = explain_model_modality(&read);
     assert_eq!(evidence.subject, r("harness/realvoice"));
@@ -738,7 +815,10 @@ fn the_realtime_explanation_carries_provider_native_provenance() {
         .find(|fact| fact.summary.contains("full-duplex realtime"))
         .expect("the explanation must answer the full-duplex question");
     assert!(full_duplex.summary.contains("is supported"));
-    assert_eq!(full_duplex.provenance[0].native_id.as_deref(), Some("gpt-realtime"));
+    assert_eq!(
+        full_duplex.provenance[0].native_id.as_deref(),
+        Some("gpt-realtime")
+    );
     assert!(evidence
         .facts
         .iter()
@@ -814,8 +894,16 @@ fn roster_gates_refuse_a_speech_demand_against_a_text_only_candidate() {
         demand,
         ModelRankingPolicy::TaskFit,
         vec![
-            candidate("model:llama3.2", text_only.modality_tags(), text_only.capability_tags()),
-            candidate("model:gpt-realtime", speech.modality_tags(), speech.capability_tags()),
+            candidate(
+                "model:llama3.2",
+                text_only.modality_tags(),
+                text_only.capability_tags(),
+            ),
+            candidate(
+                "model:gpt-realtime",
+                speech.modality_tags(),
+                speech.capability_tags(),
+            ),
         ],
     );
     assert_eq!(roster.entries[0].model, r("model:gpt-realtime"));
@@ -833,7 +921,10 @@ fn roster_gates_refuse_a_speech_demand_against_a_text_only_candidate() {
     // unsupported candidate states the failed gate, the supported one the
     // passed gate.
     let speech_entry = roster.entries.first().unwrap();
-    assert!(speech_entry.explanation.hard_gates.contains(&"modality:speech".to_string()));
+    assert!(speech_entry
+        .explanation
+        .hard_gates
+        .contains(&"modality:speech".to_string()));
     assert!(speech
         .capability_tags()
         .contains(&"full-duplex-realtime".to_string()));

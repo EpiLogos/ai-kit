@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::composition::{HarnessComposition, RetractionMode, SurfaceKind};
 use crate::model_modality::{
     compose_stage_modalities, surface_interaction_support, surface_modality_support,
-    ComposedModalityView, InteractionCapability, ModalityDirection, ModalitySupport,
-    ModelModalityContract, ModelModality,
+    ComposedModalityView, InteractionCapability, ModalityDirection, ModalitySupport, ModelModality,
+    ModelModalityContract,
 };
 use crate::resource::{ProviderRef, ResourceKind, ResourceRef};
 use crate::{AikitError, Result};
@@ -22,12 +22,9 @@ pub const MODEL_RUNTIME_RELATION_VERSION: &str = "aikit.model-runtime/v1";
 
 /// Source revisions inspected for the first comparative provider set. They are
 /// evidence pins, never provider or Model identity.
-pub const OLLAMA_CONFORMANCE_REVISION: &str =
-    "48cb7b94e446bb3f32555d8e21a5552ebe463711";
-pub const LLAMA_CPP_CONFORMANCE_REVISION: &str =
-    "ce8d842306b6e206f2833e04d472cff79c3c9be1";
-pub const VLLM_CONFORMANCE_REVISION: &str =
-    "a0a3c32dd705fd447488262c757ffa18ab9e39d3";
+pub const OLLAMA_CONFORMANCE_REVISION: &str = "48cb7b94e446bb3f32555d8e21a5552ebe463711";
+pub const LLAMA_CPP_CONFORMANCE_REVISION: &str = "ce8d842306b6e206f2833e04d472cff79c3c9be1";
+pub const VLLM_CONFORMANCE_REVISION: &str = "a0a3c32dd705fd447488262c757ffa18ab9e39d3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelVariantReading {
@@ -108,7 +105,9 @@ pub enum AccessFieldReading {
         #[serde(default)]
         capabilities: BTreeSet<String>,
     },
-    Unavailable { reason: String },
+    Unavailable {
+        reason: String,
+    },
 }
 
 impl AccessFieldReading {
@@ -253,8 +252,14 @@ pub fn disclose_model_runtime(
         .collect::<Vec<_>>();
     for (field, access) in [
         ("inference-access", &relation.model_surface.access.inference),
-        ("material-control-access", &relation.model_surface.access.material_control),
-        ("model-interior-access", &relation.model_surface.access.interior),
+        (
+            "material-control-access",
+            &relation.model_surface.access.material_control,
+        ),
+        (
+            "model-interior-access",
+            &relation.model_surface.access.interior,
+        ),
     ] {
         if let AccessFieldReading::Unavailable { reason } = access {
             unavailable.push(RuntimeUnavailability {
@@ -317,7 +322,8 @@ pub fn disclose_model_runtime(
         })
         .collect::<Vec<_>>();
     contracts.sort_by(|left, right| {
-        (&left.consumer_component, &left.contract).cmp(&(&right.consumer_component, &right.contract))
+        (&left.consumer_component, &left.contract)
+            .cmp(&(&right.consumer_component, &right.contract))
     });
 
     let mut surfaces = composition
@@ -355,7 +361,8 @@ pub fn disclose_model_runtime(
         })
         .collect::<Vec<_>>();
     surfaces.sort_by(|left, right| left.surface.cmp(&right.surface));
-    unavailable.sort_by(|left, right| (&left.field, &left.reason).cmp(&(&right.field, &right.reason)));
+    unavailable
+        .sort_by(|left, right| (&left.field, &left.reason).cmp(&(&right.field, &right.reason)));
 
     Ok(ModelRuntimeReadModel {
         version: MODEL_RUNTIME_RELATION_VERSION.to_string(),
@@ -453,7 +460,9 @@ pub struct StagedModelRuntimeReadModel {
 
 impl StagedModelRuntimeReadModel {
     pub fn stage(&self, component: &ResourceRef) -> Option<&ModelStageRelation> {
-        self.stages.iter().find(|stage| &stage.component == component)
+        self.stages
+            .iter()
+            .find(|stage| &stage.component == component)
     }
 
     pub fn interaction_support(&self, capability: InteractionCapability) -> ModalitySupport {
@@ -542,7 +551,10 @@ pub fn disclose_staged_model_runtime(
     for stage in &stages {
         let prefix = format!("stage:{}", stage.component);
         for (field, access) in [
-            ("inference-access", &stage.relation.model_surface.access.inference),
+            (
+                "inference-access",
+                &stage.relation.model_surface.access.inference,
+            ),
             (
                 "material-control-access",
                 &stage.relation.model_surface.access.material_control,
@@ -583,11 +595,17 @@ pub fn disclose_staged_model_runtime(
             }
         }
     }
-    unavailable.sort_by(|left, right| (&left.field, &left.reason).cmp(&(&right.field, &right.reason)));
+    unavailable
+        .sort_by(|left, right| (&left.field, &left.reason).cmp(&(&right.field, &right.reason)));
 
     let stage_views: Vec<(&ResourceRef, Option<&ModelModalityContract>)> = stages
         .iter()
-        .map(|stage| (&stage.component, stage.relation.model_surface.modality.as_ref()))
+        .map(|stage| {
+            (
+                &stage.component,
+                stage.relation.model_surface.modality.as_ref(),
+            )
+        })
         .collect();
     let composed_modality = compose_stage_modalities(&stage_views);
 
@@ -637,7 +655,8 @@ pub fn model_provider_conformance_fixtures() -> [ModelProviderConformanceFixture
             upstream_revision: VLLM_CONFORMANCE_REVISION,
             engine_form: InferenceEngineForm::ServingRuntime,
             daemon_required: false,
-            material_shape: "rich serving runtime whose placement may expand across accelerators/hosts",
+            material_shape:
+                "rich serving runtime whose placement may expand across accelerators/hosts",
         },
     ]
 }
