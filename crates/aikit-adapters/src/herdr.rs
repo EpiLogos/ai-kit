@@ -128,7 +128,10 @@ fn agent_status_field(agent: &Value) -> Result<HerdrAgentStatus> {
 
 fn parse_json(raw: &str, code: &'static str, subject: &str) -> Result<Value> {
     serde_json::from_str(raw).map_err(|error| {
-        AikitError::new(code, format!("could not parse Herdr {subject} response: {error}"))
+        AikitError::new(
+            code,
+            format!("could not parse Herdr {subject} response: {error}"),
+        )
     })
 }
 
@@ -158,13 +161,14 @@ pub fn parse_herdr_snapshot(raw: &str) -> Result<HerdrSnapshot> {
             "Herdr session_snapshot result has no snapshot",
         )
     })?;
-    let version = string_field(snapshot, "version").ok_or_else(|| {
-        AikitError::new("herdr.missing_version", "Herdr snapshot has no version")
-    })?;
+    let version = string_field(snapshot, "version")
+        .ok_or_else(|| AikitError::new("herdr.missing_version", "Herdr snapshot has no version"))?;
     let protocol = snapshot
         .get("protocol")
         .and_then(Value::as_u64)
-        .ok_or_else(|| AikitError::new("herdr.missing_protocol", "Herdr snapshot has no protocol"))?;
+        .ok_or_else(|| {
+            AikitError::new("herdr.missing_protocol", "Herdr snapshot has no protocol")
+        })?;
     let agents = snapshot
         .get("agents")
         .and_then(Value::as_array)
@@ -390,7 +394,7 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
     }
 
     pub fn snapshot(&self) -> Result<HerdrSnapshot> {
-        parse_herdr_snapshot(&self.run(&["api", "snapshot"])? )
+        parse_herdr_snapshot(&self.run(&["api", "snapshot"])?)
     }
 
     pub fn create_workspace(&mut self) -> Result<HerdrWorkspaceCreation> {
@@ -412,11 +416,7 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
             argv.extend(["--label".to_string(), label.clone()]);
         }
         let raw = self.run_argv(argv, "herdr.workspace_create_failed")?;
-        let envelope = parse_json(
-            &raw,
-            "herdr.invalid_create_response",
-            "workspace create",
-        )?;
+        let envelope = parse_json(&raw, "herdr.invalid_create_response", "workspace create")?;
         let result = envelope.get("result").ok_or_else(|| {
             AikitError::new(
                 "herdr.create_missing_result",
@@ -582,7 +582,10 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
             )
         })?;
         let returned_name = string_field(agent, "name");
-        if returned_name.as_deref().is_some_and(|returned| returned != name) {
+        if returned_name
+            .as_deref()
+            .is_some_and(|returned| returned != name)
+        {
             return Err(AikitError::new(
                 "herdr.agent_name_drift",
                 format!("Herdr returned agent name {returned_name:?}, expected {name:?}"),
@@ -591,7 +594,9 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
         let status = agent_status_field(agent)?;
         self.agent_session_bindings.insert(
             agent_session,
-            returned_name.clone().unwrap_or_else(|| returned_pane.clone()),
+            returned_name
+                .clone()
+                .unwrap_or_else(|| returned_pane.clone()),
         );
         Ok(HerdrStartedAgent {
             terminal_id,
@@ -602,12 +607,17 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
     }
 
     pub fn focus_agent_session(&self, agent_session: &ResourceRef) -> Result<()> {
-        let native = self.agent_session_bindings.get(agent_session).ok_or_else(|| {
-            AikitError::new(
-                "herdr.agent_session_unbound",
-                format!("AgentSession {agent_session} has no explicit Herdr agent/pane binding"),
-            )
-        })?;
+        let native = self
+            .agent_session_bindings
+            .get(agent_session)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "herdr.agent_session_unbound",
+                    format!(
+                        "AgentSession {agent_session} has no explicit Herdr agent/pane binding"
+                    ),
+                )
+            })?;
         self.run(&["agent", "focus", native])?;
         Ok(())
     }
@@ -683,6 +693,15 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
                 churned.join(", ")
             ));
         }
+        bindings.extend(
+            self.agent_session_bindings
+                .iter()
+                .map(|(canonical, native)| ProviderNativeBinding {
+                    provenance: vec![
+                        "explicit AgentSessionRef -> Herdr live Agent/pane binding".into()
+                    ],
+                }),
+        );
         WorkingEnvironmentObservation {
             schema: WORKING_ENVIRONMENT_PROVIDER_VERSION.into(),
             provider: self.provider.clone(),

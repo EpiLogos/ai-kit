@@ -180,7 +180,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("Central");
         let nested = root.join("Control/nested");
-        for path in [root.join(".aikit"), root.join("Work"), nested.join(".aikit")] {
+        for path in [
+            root.join(".aikit"),
+            root.join("Work"),
+            nested.join(".aikit"),
+        ] {
             std::fs::create_dir_all(path).unwrap();
         }
         let alias = temp.path().join("chosen-root-alias");
@@ -202,11 +206,19 @@ mod tests {
         assert_eq!(project.specification.as_deref(), Some("root-spec"));
         assert_eq!(project.skill_sets, vec!["root-skills"]);
         assert_eq!(
-            project.chain.iter().map(|layer| layer.dir.clone()).collect::<Vec<_>>(),
+            project
+                .chain
+                .iter()
+                .map(|layer| layer.dir.clone())
+                .collect::<Vec<_>>(),
             vec![canonical, nested.canonicalize().unwrap()]
         );
         assert_eq!(
-            project.chain.iter().map(|layer| layer.depth).collect::<Vec<_>>(),
+            project
+                .chain
+                .iter()
+                .map(|layer| layer.depth)
+                .collect::<Vec<_>>(),
             vec![0, 1]
         );
     }

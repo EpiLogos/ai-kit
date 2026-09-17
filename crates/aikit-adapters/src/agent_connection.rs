@@ -149,45 +149,166 @@ impl NativeModelObservation {
     /// disclosure only; its values are neither an AIKit catalogue nor a durable
     /// ModelPolicy selection.
     pub(crate) fn from_acp_model_config_options(value: &Value) -> Result<Option<Self>> {
-        let Some(options) = value.as_array() else { return Ok(None); };
+        let Some(options) = value.as_array() else {
+            return Ok(None);
+        };
         let Some(model) = options.iter().find(|option| {
             option.get("id").and_then(Value::as_str) == Some("model")
                 && option.get("category").and_then(Value::as_str) == Some("model")
                 && option.get("type").and_then(Value::as_str) == Some("select")
-        }) else { return Ok(None); };
-        let current_model_id = model.get("currentValue").and_then(Value::as_str)
+        }) else {
+            return Ok(None);
+        };
+        let current_model_id = model
+            .get("currentValue")
+            .and_then(Value::as_str)
             .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| AikitError::new("connection.acp.invalid_model_config", "ACP model config has no non-empty currentValue"))?
+            .ok_or_else(|| {
+                AikitError::new(
+                    "connection.acp.invalid_model_config",
+                    "ACP model config has no non-empty currentValue",
+                )
+            })?
             .to_owned();
-        let available_models = model.get("options").and_then(Value::as_array)
-            .ok_or_else(|| AikitError::new("connection.acp.invalid_model_config", "ACP model config selector has no options"))?
-            .iter().map(|option| {
-                let model_id=option.get("value").and_then(Value::as_str).filter(|id|!id.trim().is_empty())
-                    .ok_or_else(|| AikitError::new("connection.acp.invalid_model_config", "ACP model option has no non-empty value"))?;
-                let name=option.get("name").and_then(Value::as_str).filter(|name|!name.trim().is_empty())
-                    .ok_or_else(|| AikitError::new("connection.acp.invalid_model_config", "ACP model option has no non-empty name"))?;
-                Ok(NativeAdvertisedModel { model_id:model_id.to_owned(), name:name.to_owned(), description:option.get("description").and_then(Value::as_str).map(ToOwned::to_owned) })
-            }).collect::<Result<Vec<_>>>()?;
-        if !available_models.iter().any(|model| model.model_id == current_model_id) {
-            return Err(AikitError::new("connection.acp.invalid_model_config", "ACP model config currentValue is absent from its advertised options"));
+        let available_models = model
+            .get("options")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "connection.acp.invalid_model_config",
+                    "ACP model config selector has no options",
+                )
+            })?
+            .iter()
+            .map(|option| {
+                let model_id = option
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                    .ok_or_else(|| {
+                        AikitError::new(
+                            "connection.acp.invalid_model_config",
+                            "ACP model option has no non-empty value",
+                        )
+                    })?;
+                let name = option
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                    .ok_or_else(|| {
+                        AikitError::new(
+                            "connection.acp.invalid_model_config",
+                            "ACP model option has no non-empty name",
+                        )
+                    })?;
+                Ok(NativeAdvertisedModel {
+                    model_id: model_id.to_owned(),
+                    name: name.to_owned(),
+                    description: option
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if !available_models
+            .iter()
+            .any(|model| model.model_id == current_model_id)
+        {
+            return Err(AikitError::new(
+                "connection.acp.invalid_model_config",
+                "ACP model config currentValue is absent from its advertised options",
+            ));
         }
         let reasoning_effort = Self::select_config(value, "reasoning_effort")?;
-        Ok(Some(Self { current_model_id, available_models, reasoning_effort, standing:"provider-reported-configuration-not-independent-selection-or-inference-proof".into() }))
+        Ok(Some(Self {
+            current_model_id,
+            available_models,
+            reasoning_effort,
+            standing:
+                "provider-reported-configuration-not-independent-selection-or-inference-proof"
+                    .into(),
+        }))
     }
 
     /// Only model and its advertised execution-budget selector are admitted.
     /// Arbitrary ACP configuration remains outside this public route.
-    pub(crate) fn select_config(value: &Value, config_id: &str) -> Result<Option<NativeConfigSelector>> {
-        let Some(selectors) = value.as_array() else { return Ok(None); };
-        let Some(selector) = selectors.iter().find(|option| option.get("id").and_then(Value::as_str) == Some(config_id) && option.get("type").and_then(Value::as_str) == Some("select")) else { return Ok(None); };
-        let current_value = selector.get("currentValue").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or_else(|| AikitError::new("connection.acp.invalid_model_config", format!("ACP {config_id} selector has no non-empty currentValue")))?.to_owned();
-        let options = selector.get("options").and_then(Value::as_array).ok_or_else(|| AikitError::new("connection.acp.invalid_model_config", format!("ACP {config_id} selector has no options")))?.iter().map(|option| {
-            let value=option.get("value").and_then(Value::as_str).filter(|value|!value.trim().is_empty()).ok_or_else(|| AikitError::new("connection.acp.invalid_model_config", format!("ACP {config_id} option has no non-empty value")))?;
-            let name=option.get("name").and_then(Value::as_str).filter(|name|!name.trim().is_empty()).ok_or_else(|| AikitError::new("connection.acp.invalid_model_config", format!("ACP {config_id} option has no non-empty name")))?;
-            Ok(NativeConfigOption { value:value.to_owned(), name:name.to_owned(), description:option.get("description").and_then(Value::as_str).map(ToOwned::to_owned) })
-        }).collect::<Result<Vec<_>>>()?;
-        if !options.iter().any(|option| option.value == current_value) { return Err(AikitError::new("connection.acp.invalid_model_config", format!("ACP {config_id} currentValue is absent from advertised options"))); }
-        Ok(Some(NativeConfigSelector { config_id:config_id.to_owned(), current_value, options }))
+    pub(crate) fn select_config(
+        value: &Value,
+        config_id: &str,
+    ) -> Result<Option<NativeConfigSelector>> {
+        let Some(selectors) = value.as_array() else {
+            return Ok(None);
+        };
+        let Some(selector) = selectors.iter().find(|option| {
+            option.get("id").and_then(Value::as_str) == Some(config_id)
+                && option.get("type").and_then(Value::as_str) == Some("select")
+        }) else {
+            return Ok(None);
+        };
+        let current_value = selector
+            .get("currentValue")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                AikitError::new(
+                    "connection.acp.invalid_model_config",
+                    format!("ACP {config_id} selector has no non-empty currentValue"),
+                )
+            })?
+            .to_owned();
+        let options = selector
+            .get("options")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "connection.acp.invalid_model_config",
+                    format!("ACP {config_id} selector has no options"),
+                )
+            })?
+            .iter()
+            .map(|option| {
+                let value = option
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        AikitError::new(
+                            "connection.acp.invalid_model_config",
+                            format!("ACP {config_id} option has no non-empty value"),
+                        )
+                    })?;
+                let name = option
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                    .ok_or_else(|| {
+                        AikitError::new(
+                            "connection.acp.invalid_model_config",
+                            format!("ACP {config_id} option has no non-empty name"),
+                        )
+                    })?;
+                Ok(NativeConfigOption {
+                    value: value.to_owned(),
+                    name: name.to_owned(),
+                    description: option
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if !options.iter().any(|option| option.value == current_value) {
+            return Err(AikitError::new(
+                "connection.acp.invalid_model_config",
+                format!("ACP {config_id} currentValue is absent from advertised options"),
+            ));
+        }
+        Ok(Some(NativeConfigSelector {
+            config_id: config_id.to_owned(),
+            current_value,
+            options,
+        }))
     }
 }
 
@@ -552,7 +673,7 @@ impl AcpV1ConnectionAdapter {
                         return Err(AikitError::new(
                             "connection.acp.invalid_session_response",
                             "Invalid returned sessionId",
-                        ))
+                        ));
                     }
                 };
                 let native_session_id = if mode == SessionOpenMode::Create {
@@ -747,7 +868,7 @@ impl AgentConnectionAdapter for AcpV1ConnectionAdapter {
                 return Err(AikitError::new(
                     "connection.session_operation_unsupported",
                     "ACP v1 has no generic attach operation",
-                ))
+                ));
             }
         };
         let mut params = json!({

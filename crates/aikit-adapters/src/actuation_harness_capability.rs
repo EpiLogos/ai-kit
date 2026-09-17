@@ -194,7 +194,7 @@ pub fn intake_actuation_capability(
         Err(error) => {
             return CapabilityOutcome::Unavailable {
                 reason: format!("could not run {actuation_bin}: {error}"),
-            }
+            };
         }
     };
     if output.status != 0 {

@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "w7-merged-to-main-all-five-2026-09-11",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "claude-opus-4-8-tui-w7-2026-09-11",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1789097608,
+  "subject": "W7 merged to main: all five commits landed via PR #293",
+  "result": "Per the owners instruction, combined the three stacked W7 PRs into one against main and merged it. Rebased the five W7 commits onto current origin/main (e4c6066, picking up #289), retargeted #293 base to main with a combined body, closed #290 and #292 as superseded. Branch protection required the Real integration suite check (enforce_admins on, 0 approvals required); the force-push needed a close/reopen of #293 to re-trigger CI on the rebased SHA, which then passed. Merge-commits are disallowed on the repo, so merged via --rebase, keeping all five commits linear on main: 688b55d credentials, 46430f3 health/gateway, 6ec5100 workcell/adapters, 5c39459 model roster, d479915 credential setup + doctor repair. All three wave7 remote branches deleted; worktrees and target dirs cleaned. W7 (the System pane: disclosure + interactive surfaces) is now on main. Remaining #282 items are other waves: W3 blocked on #227, W9/W10 separate.",
+  "status": "active"
+}

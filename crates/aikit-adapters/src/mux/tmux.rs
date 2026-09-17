@@ -623,7 +623,7 @@ pub fn install(config_path: &Path, key: &str) -> Result<InstallOutcome> {
                 "mux.config_unreadable",
                 format!("could not read {}: {e}", config_path.display()),
             )
-            .with("path", config_path.display().to_string()))
+            .with("path", config_path.display().to_string()));
         }
     };
 
@@ -771,10 +771,10 @@ impl<R: CommandRunner> MuxAdapter for Tmux<R> {
                 return Ok(MuxPresence::absent(
                     MuxKind::Tmux,
                     format!("`tmux -V` exited with status {}", out.status),
-                ))
+                ));
             }
             Err(e) if e.code() == "mux.command_spawn_failed" => {
-                return Ok(MuxPresence::absent(MuxKind::Tmux, "`tmux` is not on PATH"))
+                return Ok(MuxPresence::absent(MuxKind::Tmux, "`tmux` is not on PATH"));
             }
             Err(e) => return Err(e),
         };

@@ -35,10 +35,13 @@ pub mod gateway_connector;
 pub mod gateway_runtime;
 pub mod gateway_service;
 pub mod gitnexus;
+pub mod harness_disclosure;
 pub mod herdr;
 pub mod home_agent_profile;
 pub mod hyprland;
 pub mod interactive_connection;
+pub mod layers;
+pub mod profiles;
 pub mod local_source_discovery;
 pub mod model_realisation;
 pub mod mux;
@@ -58,6 +61,7 @@ pub mod session_space_reconstruction;
 pub mod shells;
 mod telegram_bot_api;
 pub mod telegram_gateway;
+pub mod tool_sources;
 pub mod workcell_instance_intake;
 pub mod working_environment;
 pub mod working_environment_control;
@@ -142,10 +146,20 @@ pub use gateway_runtime::{
     GatewayReplay, GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope,
     GatewaySnapshot, GatewayStatus, GatewayStreamEvent, GatewayStreamJournal, connector_descriptor,
     execute_gateway_command, text_send,
+    GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency,
+    GatewayEcologySession, GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope,
+    GatewayForkOrigin, GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult,
+    GatewayInvocationMode, GatewayReplay, GatewayRequestEnvelope, GatewayResponse,
+    GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
+    GatewayStreamJournal, connector_descriptor, execute_gateway_command, text_send,
 };
 pub use gateway_service::{
     DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION, GatewayServiceConfig,
     persist_gateway_state, restore_gateway_state, run_gateway_service,
+};
+pub use harness_disclosure::{
+    ComposedEntry, DriftEntry, DriftKind, HarnessDisclosure, NativeEntry, NativeObservation,
+    disclose,
 };
 pub use herdr::{
     HERDR_PROVIDER_VERSION, HERDR_UPSTREAM_REVISION, HerdrAgentObservation, HerdrAgentStatus,
@@ -158,6 +172,10 @@ pub use hyprland::{
 pub use interactive_connection::{
     AcpStableConnectionAdapter, AcpStableSessionCapabilities, InteractiveAgentConnectionAdapter,
     PermissionDecision,
+};
+pub use layers::{
+    LayerMergeError, MatcherPolicy, MergeArgs, MergeReport, apply_merge, claude_hook_map,
+    mcp_servers_record, zcode_hook_wrapper,
 };
 pub use local_source_discovery::{
     DiscoveredLocalSource, LOCAL_SOURCE_DISCOVERY_VERSION, LocalSourceDiscovery,
@@ -181,6 +199,10 @@ pub use telegram_gateway::{
     TELEGRAM_BOT_API_BASE, TELEGRAM_GATEWAY_CONNECTOR_VERSION, TelegramBotApiTransport,
     TelegramBotIdentity, TelegramConnector, TelegramConnectorConfig,
 };
+pub use tool_sources::{
+    TOOLS_PROJECTION_OWNERSHIP, ToolSourceEntry, ToolSourceError, ToolsProjectionOutcome,
+    ToolsProjectionPlan, ToolServerRecord, plan_tools_projection,
+};
 pub use working_environment::{
     MuxSessionSpaceActivationDriver, MuxWorkingEnvironment, NativeBindingKind,
     ProviderNativeBinding, WORKING_ENVIRONMENT_PROVIDER_VERSION, WorkingEnvironmentCapabilities,
@@ -200,6 +222,7 @@ pub mod oi_explore;
 pub mod central_wiki;
 pub mod central_world_sources;
 mod session_event_queue;
+pub mod techne_temporal;
 
 pub mod agency_admission;
 pub mod central_file_map;

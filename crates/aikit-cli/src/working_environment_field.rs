@@ -26,6 +26,7 @@ use aikit_core::working_environment::{
     WORKING_ENVIRONMENT_PROVIDER_VERSION, WorkingEnvironmentCapabilities, WorkingEnvironmentHealth,
     WorkingEnvironmentObservation,
 };
+use aikit_core::Result;
 use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
 use serde::Serialize;
 

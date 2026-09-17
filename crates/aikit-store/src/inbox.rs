@@ -839,6 +839,7 @@ fn entry_for(kind: Kind) -> &'static str {
         Kind::Session => "payload/session.toml",
         Kind::Template => "payload/template",
         Kind::Tool => "payload/tool",
+        Kind::ToolProtocol => "payload/tool-protocol",
     }
 }
 
@@ -897,6 +898,10 @@ fn render_manifest(candidate: &Candidate, edits: &PromotionEdits, entry: &str) -
         Kind::Session => out.push_str(&format!("spec = {}\n", quote(entry))),
         Kind::Template => out.push_str("root = \"payload\"\n"),
         Kind::Tool => out.push_str(&format!("commands = [{}]\n", quote(edits.id.leaf()))),
+        Kind::ToolProtocol => out.push_str(&format!(
+            "[tool-protocol.server]\ncommand = {}\n",
+            quote(edits.id.leaf())
+        )),
     }
     out
 }

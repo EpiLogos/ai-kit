@@ -33,9 +33,9 @@ use aikit_core::wiki_living_dependencies;
 use aikit_core::{
     changed_since_thought, explain_flow_contemplate_preflight, explain_now_contemplate_preflight,
     explicit_flow_contemplate_validated, explicit_now_contemplate, now_contemplate_preflight,
-    validate_now_contemplate_record, AikitError, EventId, FamiliarityObservation,
-    FlowChangedSince, FlowChangedSinceState, FlowCognition, FlowThoughtRecord, NowContemplation,
-    NowContemplationPreflight, NowContemplateRecord, NowFixturesSeam, ACTION_CONTEMPLATE_FLOW,
+    validate_now_contemplate_record, AikitError, EventId, FamiliarityObservation, FlowChangedSince,
+    FlowChangedSinceState, FlowCognition, FlowThoughtRecord, NowContemplateRecord,
+    NowContemplation, NowContemplationPreflight, NowFixturesSeam, ACTION_CONTEMPLATE_FLOW,
     ACTION_CONTEMPLATE_NOW, FLOW_COGNITION_VERSION, FLOW_CONTEMPLATE_USE_RECORDED,
     NOW_CONTEMPLATION_VERSION,
 };
@@ -155,7 +155,11 @@ impl FlowProvider for KnowledgeFlowProvider<'_> {
                 reason: "Flow source is not present in the source pool in this context".into(),
             });
         };
-        let live = self.owner.map(|owner| owner.read(&self.descriptor.source_ref)).transpose()?.flatten();
+        let live = self
+            .owner
+            .map(|owner| owner.read(&self.descriptor.source_ref))
+            .transpose()?
+            .flatten();
         let material = live.as_ref().unwrap_or(material);
         if &material.binding.revision != revision {
             return Err(AikitError::new(

@@ -39,12 +39,21 @@ pub(super) fn check(
         ("/revision", json!(expected.revision)),
         ("/request/central/task_ref", json!(expected.task_ref)),
         ("/allocation/allocation/now_ref", json!(expected.now_ref)),
-        ("/allocation/allocation/revision/revision", json!(expected.now_revision)),
-        ("/allocation/allocation/policy/revision", json!(expected.policy_revision)),
+        (
+            "/allocation/allocation/revision/revision",
+            json!(expected.now_revision),
+        ),
+        (
+            "/allocation/allocation/policy/revision",
+            json!(expected.policy_revision),
+        ),
         ("/request/cwd", json!(expected.cwd)),
     ];
-    if task["schema"] != "aikit.encounter-task/v1" || task["ready"] != true
-        || pairs.iter().any(|(path, value)| task.pointer(path) != Some(value))
+    if task["schema"] != "aikit.encounter-task/v1"
+        || task["ready"] != true
+        || pairs
+            .iter()
+            .any(|(path, value)| task.pointer(path) != Some(value))
         || binding.agent_ref != expected.agent_ref
         || binding.agency_ref != expected.agency_ref
         || binding.world_binding_ref != expected.world_binding_ref

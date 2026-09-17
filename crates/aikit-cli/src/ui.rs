@@ -20,8 +20,7 @@ use aikit_core::search::SearchDoc;
 use aikit_core::{FamiliarityObservation, FamiliarityStore, Result};
 
 use aikit_store::{
-    familiarity_observation_event, replay_familiarity, AikitHome, EventRecorder,
-    FamiliarityReplay,
+    familiarity_observation_event, replay_familiarity, AikitHome, EventRecorder, FamiliarityReplay,
 };
 
 use aikit_tui::application::RelationView;
@@ -71,8 +70,10 @@ impl<'a> V2SurfaceService<'a> {
                 ));
                 index.insert_resource(
                     record,
-                    vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
-                        .with_detail("profile selected by the active scope stack")],
+                    vec![
+                        NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                            .with_detail("profile selected by the active scope stack"),
+                    ],
                 );
             }
         }
@@ -92,8 +93,10 @@ impl<'a> V2SurfaceService<'a> {
             ));
             index.insert_resource(
                 record,
-                vec![NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
-                    .with_detail("skill set selected by the current Project")],
+                vec![
+                    NavigationEvidence::new(NavigationEvidenceClass::CurrentContext)
+                        .with_detail("skill set selected by the current Project"),
+                ],
             );
         }
 
@@ -126,9 +129,7 @@ impl PaletteBackend for V2SurfaceService<'_> {
     /// through unchanged, not to re-decide which of them the interactive
     /// surface is allowed to see. Leaving this one unforwarded is exactly the
     /// wiring gap that made the Worlds pane's Git section permanently absent.
-    fn versioned_world(
-        &self,
-    ) -> Result<Option<aikit_core::resource::VersionedProjectWorld>> {
+    fn versioned_world(&self) -> Result<Option<aikit_core::resource::VersionedProjectWorld>> {
         <Service as PaletteBackend>::versioned_world(self.service)
     }
 
@@ -398,7 +399,10 @@ mod tests {
              PaletteBackend trait default of None",
         );
         assert_eq!(versioned.repository.branch.as_deref(), Some("trunk"));
-        assert!(versioned.working.is_clean(), "a fresh commit leaves a clean tree");
+        assert!(
+            versioned.working.is_clean(),
+            "a fresh commit leaves a clean tree"
+        );
 
         let binding = backend
             .project_binding()

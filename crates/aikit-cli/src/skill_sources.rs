@@ -984,7 +984,8 @@ fn prepare_central_source(spec: &SourceSpec, staging: &Path) -> Result<(PathBuf,
             .as_str()
             .ok_or_else(|| AikitError::new("source.central_invalid", "owner path absent"))?;
         let p = Path::new(relative);
-        if !seen.insert(relative.to_owned()) || p.as_os_str().is_empty()
+        if !seen.insert(relative.to_owned())
+            || p.as_os_str().is_empty()
             || !p
                 .components()
                 .all(|c| matches!(c, std::path::Component::Normal(_)))
@@ -1059,8 +1060,17 @@ pub fn report_central_generation(home: &AikitHome, generation: &str, target: &Pa
     let root = home.root().join("sources");
     let mut warnings = Vec::new();
     let active = match aikit_store::generation::read_lock(target) {
-        Ok(view) => view.active.keys().map(ToString::to_string).collect::<std::collections::BTreeSet<_>>(),
-        Err(error) => return vec![format!("Generation committed; source-selection receipt unavailable: {}", error.message())],
+        Ok(view) => view
+            .active
+            .keys()
+            .map(ToString::to_string)
+            .collect::<std::collections::BTreeSet<_>>(),
+        Err(error) => {
+            return vec![format!(
+                "Generation committed; source-selection receipt unavailable: {}",
+                error.message()
+            )]
+        }
     };
     let entries = match fs::read_dir(&root) {
         Ok(v) => v,
@@ -1087,8 +1097,15 @@ pub fn report_central_generation(home: &AikitHome, generation: &str, target: &Pa
                 return Ok(());
             };
             let snapshot = load_snapshot(home, &id, &digest)?;
-            let selected: Vec<_> = snapshot.skills.iter().filter(|skill| active.contains(&skill.id)).map(|skill| skill.id.clone()).collect();
-            if selected.is_empty() { return Ok(()); }
+            let selected: Vec<_> = snapshot
+                .skills
+                .iter()
+                .filter(|skill| active.contains(&skill.id))
+                .map(|skill| skill.id.clone())
+                .collect();
+            if selected.is_empty() {
+                return Ok(());
+            }
             validate_owner_snapshot(&spec, &snapshot)?;
             let root = std::env::var_os("CENTRAL_ROOT")
                 .map(PathBuf::from)
@@ -1097,7 +1114,10 @@ pub fn report_central_generation(home: &AikitHome, generation: &str, target: &Pa
             let executable = aikit_adapters::central_file_map::executable();
             let bundle = central_bundle(&spec)?;
             aikit_adapters::central_file_map::call(
-                &runner, &executable, &root, "projection-record",
+                &runner,
+                &executable,
+                &root,
+                "projection-record",
                 &serde_json::json!({"source_ref":source_ref,"project":bundle["project"],
                     "owner":format!("aikit/source/{id}"),"path":target,
                     "generation":generation,"tree_revision":snapshot.owner_revision,

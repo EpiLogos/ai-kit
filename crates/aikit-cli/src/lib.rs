@@ -65,4 +65,5 @@ pub use session_lifecycle_ops::SessionLifecycleServiceOps;
 pub use session_space_ops::SessionSpaceCliAdapter;
 pub use session_space_service::SessionSpaceServiceOps;
 
+pub mod encounter_mcp;
 pub mod encounter_service;

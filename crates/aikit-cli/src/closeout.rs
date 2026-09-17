@@ -102,13 +102,20 @@ pub fn verify<R: CommandRunner>(
     let empty = Vec::new();
     let active = field["active_items"].as_array().unwrap_or(&empty);
     let recorded_at = |item: &Value| item["recorded_at_unix_seconds"].as_i64().unwrap_or(0);
-    let within = |item: &Value| since.map(|since| recorded_at(item) >= since).unwrap_or(true);
+    let within = |item: &Value| {
+        since
+            .map(|since| recorded_at(item) >= since)
+            .unwrap_or(true)
+    };
 
     let handoffs: Vec<&Value> = active
         .iter()
         .filter(|item| item["kind"].as_str() == Some("handoff"))
         .collect();
-    let newest = handoffs.iter().copied().max_by_key(|item| recorded_at(item));
+    let newest = handoffs
+        .iter()
+        .copied()
+        .max_by_key(|item| recorded_at(item));
 
     let mut clauses = Vec::new();
 

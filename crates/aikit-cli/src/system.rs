@@ -441,12 +441,10 @@ pub fn disclose(service: &Service) -> Result<Value> {
     let world = world.with_credential_world(credential_world(service)?);
 
     // SessionSpaces authored for this project (read-only; no spawn).
-    let session_spaces = SessionSpaceServiceOps::session_space_discover(
-        service,
-        Some(&world.project.project),
-    )
-    .map(|states| json!(states))
-    .unwrap_or_else(|error| json!({ "error": error.message() }));
+    let session_spaces =
+        SessionSpaceServiceOps::session_space_discover(service, Some(&world.project.project))
+            .map(|states| json!(states))
+            .unwrap_or_else(|error| json!({ "error": error.message() }));
 
     // AIKit's real stage: a read-only diff preview. Clean = "none"; any
     // consequential change = "previewed".

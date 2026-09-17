@@ -2,7 +2,7 @@
 //! submits owner actions; disconnecting an IPC client never drops a provider.
 use aikit_adapters::{
     agent_connection::{
-        ConnectionSignalKind, NativePermissionRequest, SessionOpenMode, SessionOpenRequest,
+        ConnectionSignalKind, NativePermissionRequest, SessionOpenMode,
     },
     agent_session_host::{
         AgentSessionHost, AgentSessionHostLimits, HostEvent, SessionEventJournal, SessionLane,
@@ -290,14 +290,17 @@ impl SessionEventJournal for Journal {
                 // Retain raw update evidence in exact observed order, but keep it
                 // out of the live transcript projection: comparing text/chunks
                 // would collapse distinct messages or duplicate a re-chunked one.
-                self.0.append(session, &json!({
-                    "kind":"provider-history-replay",
-                    "standing":"unreconciled-no-provider-history-event-id",
-                    "connection_generation":self.2,
-                    "native_session_id":signal.native_session_id,
-                    "sequence":signal.sequence,
-                    "update":update,
-                }))?;
+                self.0.append(
+                    session,
+                    &json!({
+                        "kind":"provider-history-replay",
+                        "standing":"unreconciled-no-provider-history-event-id",
+                        "connection_generation":self.2,
+                        "native_session_id":signal.native_session_id,
+                        "sequence":signal.sequence,
+                        "update":update,
+                    }),
+                )?;
                 return Ok(());
             }
         }
@@ -686,6 +689,14 @@ impl EncounterService {
         if reconnect && configured.protocol != EncounterProtocol::Acp {
             return Err(AikitError::new("encounter.reconnect_unsupported","This native provider does not publish a supported load/resume operation; no replacement session was created"));
         }
+        // Resolve the composed tool surface before any provider process exists,
+        // so a composition failure cannot orphan a native provider. Whether the
+        // resolved entries are carried is decided by the negotiated capability
+        // after the provider handshake below.
+        let mcp_entries = match configured.protocol {
+            EncounterProtocol::Acp => crate::encounter_mcp::active_tool_source_entries(&self.home, &cwd)?,
+            EncounterProtocol::PiRpc => Vec::new(),
+        };
         let generation = ulid::Ulid::generate().to_string();
         let journal: Option<Arc<dyn SessionEventJournal>> = Some(Arc::new(Journal(
             self.store.clone(),
@@ -732,16 +743,25 @@ impl EncounterService {
                 journal,
             ),
         }?;
-        host.initialize()?;
-        let lane = host.open_session(SessionOpenRequest {
-            mode: if reconnect {
+        let negotiated = host.initialize()?;
+        let protocol_name = match configured.protocol {
+            EncounterProtocol::Acp => "acp",
+            EncounterProtocol::PiRpc => "pi-rpc",
+        };
+        let mcp = crate::encounter_mcp::session_mcp_resolution(
+            protocol_name,
+            negotiated.capabilities.mcp_servers,
+            mcp_entries,
+        );
+        let lane = host.open_session(crate::encounter_mcp::build_session_open_request(
+            if reconnect {
                 SessionOpenMode::Load
             } else if configured.protocol == EncounterProtocol::PiRpc {
                 SessionOpenMode::Attach
             } else {
                 SessionOpenMode::Create
             },
-            native_session_id: if reconnect {
+            if reconnect {
                 Some(
                     previous
                         .as_ref()
@@ -752,11 +772,10 @@ impl EncounterService {
             } else {
                 None
             },
-            cwd: cwd.to_string_lossy().into_owned(),
-            additional_directories: vec![],
-            mcp_servers: vec![],
-            agent_session: Some(agent_session.clone()),
-        })?;
+            &cwd.to_string_lossy(),
+            mcp,
+            Some(agent_session.clone()),
+        ))?;
         let native = lane.binding().native_session_id.clone();
         let model_observation = lane.binding().model_observation.clone();
         let model_reading = serde_json::to_value(&model).map_err(error)?;
@@ -923,7 +942,8 @@ impl EncounterService {
                     .map(|r| r.values().cloned().collect::<Vec<_>>())
                     .unwrap_or_default());
                 view["permission_authority"] = json!("native-provider-consent");
-                view["history_reclassifications"] = json!(self.store.legacy_load_reclassifications(&agent_session)?);
+                view["history_reclassifications"] =
+                    json!(self.store.legacy_load_reclassifications(&agent_session)?);
                 let can_open = !view["connection"]["resident"].as_bool().unwrap_or(false)
                     && !self.providers()?.is_empty();
                 view["actions"] = json!([
@@ -963,18 +983,35 @@ impl EncounterService {
                     "standing":"provider-reported-configuration-not-independent-selection-or-inference-proof"
                 }))
             }
-            EncounterRequest::ModelSelect { agent_session, provider_model_id, provider_reasoning_effort } => {
+            EncounterRequest::ModelSelect {
+                agent_session,
+                provider_model_id,
+                provider_reasoning_effort,
+            } => {
                 self.require_attached(&agent_session)?;
                 if provider_model_id.trim().is_empty() || provider_model_id.len() > 256 {
-                    return Err(AikitError::new("encounter.invalid_provider_model_id", "Provider model id must be a non-empty bounded native identifier"));
+                    return Err(AikitError::new(
+                        "encounter.invalid_provider_model_id",
+                        "Provider model id must be a non-empty bounded native identifier",
+                    ));
                 }
-                if provider_reasoning_effort.as_ref().is_some_and(|value| value.trim().is_empty() || value.len() > 128) {
-                    return Err(AikitError::new("encounter.invalid_provider_reasoning_effort", "Provider reasoning effort must be a non-empty bounded native identifier"));
+                if provider_reasoning_effort
+                    .as_ref()
+                    .is_some_and(|value| value.trim().is_empty() || value.len() > 128)
+                {
+                    return Err(AikitError::new(
+                        "encounter.invalid_provider_reasoning_effort",
+                        "Provider reasoning effort must be a non-empty bounded native identifier",
+                    ));
                 }
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
                 self.check_resident_context(&agent_session, &resident, "native-model-select")?;
-                if resident.model.as_ref().is_some_and(|model| model.policy.provider_native_id != provider_model_id) {
+                if resident
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| model.policy.provider_native_id != provider_model_id)
+                {
                     return Err(AikitError::new(
                         "encounter.model_policy_conflict",
                         "The requested provider model conflicts with this resident's explicit durable model policy; reopen through the policy owner",
@@ -992,7 +1029,9 @@ impl EncounterService {
                 }))?;
                 let mut receipt = resident.lane.set_model(&provider_model_id)?;
                 if let Some(provider_reasoning_effort) = provider_reasoning_effort.as_deref() {
-                    receipt = resident.lane.set_reasoning_effort(provider_reasoning_effort)?;
+                    receipt = resident
+                        .lane
+                        .set_reasoning_effort(provider_reasoning_effort)?;
                 }
                 self.store.append(&agent_session, &json!({
                     "kind":"native-model-configuration-confirmed",

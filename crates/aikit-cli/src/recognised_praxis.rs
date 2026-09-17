@@ -164,7 +164,9 @@ impl RecognisedPraxisApplication for Service {
         let method_id = ResourceRef::parse(skill_id.to_string())?;
         let naming_expression = ResolveExpression::Binary {
             op: RelationOp::Express,
-            left: Box::new(ResolveExpression::subject(request.invocation.subject.to_string())),
+            left: Box::new(ResolveExpression::subject(
+                request.invocation.subject.to_string(),
+            )),
             right: Box::new(ResolveExpression::subject(name)),
         };
         let method = Method {
@@ -172,7 +174,9 @@ impl RecognisedPraxisApplication for Service {
             source: SourceRef::parse(format!("source/aikit/personal-registry/{skill_id}"))?,
             revision: Some(source_revision.clone()),
             name: name.into(),
-            description: method_payload(&capsule.description).unwrap_or_default().into(),
+            description: method_payload(&capsule.description)
+                .unwrap_or_default()
+                .into(),
             focus: Vec::new(),
             project_domain: Vec::new(),
             skills: Vec::new(),
@@ -182,7 +186,9 @@ impl RecognisedPraxisApplication for Service {
             verification: Vec::new(),
             expected_resolve: Some(ResolveExpression::Binary {
                 op: RelationOp::Relate,
-                left: Box::new(ResolveExpression::subject(request.invocation.subject.to_string())),
+                left: Box::new(ResolveExpression::subject(
+                    request.invocation.subject.to_string(),
+                )),
                 right: Box::new(ResolveExpression::subject(NATIVE_CAPABILITY_RUN_ACTION)),
             }),
             expected_return_forms: vec!["run-result".into(), "return-evidence".into()],

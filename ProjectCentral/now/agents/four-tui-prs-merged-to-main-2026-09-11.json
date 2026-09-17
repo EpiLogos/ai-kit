@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "four-tui-prs-merged-to-main-2026-09-11",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "claude-opus-5-tui-w6-2026-09-11",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1789082690,
+  "subject": "Four TUI PRs merged to main, W6 landed, one flaky conformance test found",
+  "result": "Owner authorised merging; squash merged one at a time with verification between each: 244f5c5 (#279 keystroke responsiveness), ed0386e (#280 Relations panel opacity), 6478465 (#281 Worlds pane Git material), 65d5b88 (#284 W6 working environment). Branches deleted. #284 conflicted after the first three landed and was rebased onto the new main; the conflict was additive in project_workspace_render.rs, where #281 added git_lines and W6 added live_field_lines after context_lines, so both were kept and both are called (git_lines from inside context_lines, live_field_lines from the Worlds dispatch arm). Verified after rebase: clippy clean, cargo test --workspace 243 binaries exit 0, and CI green on the rebased head with tmux-3-7c-real and cmux-0-64-22-real both passing. origin/main re-verified after all four merges in a clean worktree: 243 binaries, exit 0. Finding worth an owner decision: crates/aikit-adapters/tests/working_environment_tmux_real.rs is intermittently flaky. It failed once with mux.tmux_failed, no server running on its own socket, at the split-window step, then passed 6 of 6 on the same binary; main flakes the same way, so it is not caused by any of these changes. The machine also carries several hundred stale tmux socket files under /private/tmp/tmux-501 and three live tmux servers, which is the likely pressure. The test asserts on a real server it creates and kills per run, so the split-window race is real rather than cosmetic and will surface in CI eventually. Not opened as a ticket yet. Still open and untouched, outside the scope discussed: PRs 268, 273, 278, 283, 285, which belong to the CAW, wave 5 system disclosure and docs lanes.",
+  "status": "active"
+}

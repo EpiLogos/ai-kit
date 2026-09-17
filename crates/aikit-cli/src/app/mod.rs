@@ -2218,6 +2218,11 @@ impl Service {
 
         let mut effects = Vec::new();
         for target in &self.descriptor.targets {
+            // The single-roster law: every harness arm below has its row in
+            // client.rs's REGISTRY (qwen-code and ollama included). The guard
+            // test `every_harness_client_effects_dispatches_has_a_registry_row`
+            // in client.rs fails when the dispatch grows a harness arm the
+            // roster does not carry.
             let effect = match target.as_str() {
                 TargetId::SHELL => Some(ActivationEffect::immediate("shell bin/")),
                 TargetId::CLAUDE_CODE => {
@@ -3060,6 +3065,7 @@ impl PaletteBackend for Service {
     fn workcell_world(&self) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
         use aikit_adapters::workcell_instance_intake::{
             InstancesOutcome, intake_workcell_instances,
+            intake_workcell_instances, InstancesOutcome,
         };
         use aikit_core::workcell_world::{WorkcellDisclosure, WorkcellInstanceDisclosure};
 

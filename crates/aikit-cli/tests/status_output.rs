@@ -57,8 +57,8 @@ fn json_status_keeps_the_machine_envelope() {
     let (home, project) = fixture();
     let output = run(home.path(), project.path(), true);
     assert!(output.status.success());
-    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .expect("status --json must emit a JSON envelope");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("status --json must emit a JSON envelope");
     assert_eq!(envelope["ok"], true);
     assert!(envelope["data"]["active_count"].is_u64());
     assert!(envelope["data"]["hash"].is_string());

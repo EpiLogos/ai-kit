@@ -102,14 +102,24 @@ fn run(home: &Path, project: &Path, args: &[&str]) -> (i32, Value) {
 #[test]
 fn contribution_is_a_bare_conforming_document() {
     let (home, project) = scene();
-    let (code, value) = run(home.path(), project.path(), &["config-contribution", "--json"]);
+    let (code, value) = run(
+        home.path(),
+        project.path(),
+        &["config-contribution", "--json"],
+    );
 
     assert_eq!(code, 0);
     // Bare: no envelope anywhere. The read/operability plane separation is
     // structural, not a convention.
-    assert!(value.get("ok").is_none(), "config-contribution must be bare");
+    assert!(
+        value.get("ok").is_none(),
+        "config-contribution must be bare"
+    );
     assert_eq!(value["schema"], "oi.configuration-contribution/v1");
-    assert_eq!(value["contract_revision"], "configuration-plane/contribution.1");
+    assert_eq!(
+        value["contract_revision"],
+        "configuration-plane/contribution.1"
+    );
     assert_eq!(value["owner"]["owner_ref"], "ai-kit");
     assert_eq!(value["owner"]["owner_kind"], "product");
     assert_eq!(
@@ -119,8 +129,14 @@ fn contribution_is_a_bare_conforming_document() {
     assert_eq!(value["availability"]["state"], "available");
     // A contribution never carries native axes: no declared/effective/active.
     let text = value.to_string();
-    assert!(!text.contains("\"effective\""), "no disclosure axes in a contribution");
-    assert!(!text.contains("\"declared\""), "no disclosure axes in a contribution");
+    assert!(
+        !text.contains("\"effective\""),
+        "no disclosure axes in a contribution"
+    );
+    assert!(
+        !text.contains("\"declared\""),
+        "no disclosure axes in a contribution"
+    );
 
     let digest = value["owner"]["reading_digest"].as_str().unwrap();
     assert_eq!(digest.len(), 64, "reading_digest is sha256 hex");
@@ -144,7 +160,11 @@ fn contribution_is_a_bare_conforming_document() {
 
 fn split_ref(reference: &str) -> (&str, &str, &str) {
     let parts: Vec<&str> = reference.split(':').collect();
-    assert_eq!(parts.len(), 3, "setting_ref parses into exactly three parts");
+    assert_eq!(
+        parts.len(),
+        3,
+        "setting_ref parses into exactly three parts"
+    );
     (parts[0], parts[1], parts[2])
 }
 
@@ -159,11 +179,12 @@ fn contribution_validates_against_the_frozen_schema() {
     let schema = jsonschema::validator_for(&schema_json).unwrap();
 
     let (home, project) = scene();
-    let (_, value) = run(home.path(), project.path(), &["config-contribution", "--json"]);
-    let errors: Vec<String> = schema
-        .iter_errors(&value)
-        .map(|e| format!("{e}"))
-        .collect();
+    let (_, value) = run(
+        home.path(),
+        project.path(),
+        &["config-contribution", "--json"],
+    );
+    let errors: Vec<String> = schema.iter_errors(&value).map(|e| format!("{e}")).collect();
     assert!(errors.is_empty(), "schema violations: {errors:?}");
 }
 
@@ -172,7 +193,11 @@ fn contribution_validates_against_the_frozen_schema() {
 #[test]
 fn session_restart_effects_are_disclosed_on_the_resolution_chain() {
     let (home, project) = scene();
-    let (_, value) = run(home.path(), project.path(), &["config-contribution", "--json"]);
+    let (_, value) = run(
+        home.path(),
+        project.path(),
+        &["config-contribution", "--json"],
+    );
 
     let effect = |reference: &str| {
         value["sections"]
@@ -256,7 +281,10 @@ fn profile_selection_round_trips_through_plan_apply_replay_and_reset() {
 
     // The declared state before: no profile declaration at all.
     let before = fs::read_to_string(project.path().join(".aikit/profile.toml")).unwrap_or_default();
-    assert!(!before.contains("coding"), "nothing declared before apply: {before}");
+    assert!(
+        !before.contains("coding"),
+        "nothing declared before apply: {before}"
+    );
 
     let (code, receipt) = run(
         home.path(),
@@ -278,13 +306,19 @@ fn profile_selection_round_trips_through_plan_apply_replay_and_reset() {
     assert_eq!(receipt["owner_ref"], "ai-kit");
     assert_eq!(receipt["changeset_id"], "cs-test-profile-1");
     assert_eq!(receipt["plan_digest"], plan["plan_digest"]);
-    assert!(receipt["native_ref"].as_str().unwrap().starts_with("aikit:config:receipts/"));
+    assert!(receipt["native_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("aikit:config:receipts/"));
     let original_receipt = receipt["receipt_id"].as_str().unwrap().to_string();
 
     // plan → apply → state actually changed: the scope's own declaration file
     // now carries the native profile ref, and nothing else was copied.
     let after = fs::read_to_string(project.path().join(".aikit/profile.toml")).unwrap();
-    assert!(after.contains("profiles = [\"profile/team/coding\"]"), "{after}");
+    assert!(
+        after.contains("profiles = [\"profile/team/coding\"]"),
+        "{after}"
+    );
 
     // Replay under the same idempotency key: no_op naming the original, and
     // the owner must not re-execute (the receipt ids must differ).
@@ -326,7 +360,10 @@ fn profile_selection_round_trips_through_plan_apply_replay_and_reset() {
     assert_eq!(reset_receipt["operation"], "reset");
     assert_eq!(reset_receipt["outcome"], "applied");
     let cleared = fs::read_to_string(project.path().join(".aikit/profile.toml")).unwrap();
-    assert!(!cleared.contains("coding"), "the profile declaration is gone: {cleared}");
+    assert!(
+        !cleared.contains("coding"),
+        "the profile declaration is gone: {cleared}"
+    );
 
     // A reset replay is also a no_op.
     let (code, reset_replay) = run(
@@ -389,7 +426,10 @@ fn capability_toggles_round_trip_and_reach_the_active_generation() {
     assert_eq!(receipt["outcome"], "applied");
 
     let after = fs::read_to_string(project.path().join(".aikit/profile.toml")).unwrap();
-    assert!(after.contains("enable = [\"script/demo/greet\"]"), "{after}");
+    assert!(
+        after.contains("enable = [\"script/demo/greet\"]"),
+        "{after}"
+    );
 
     // The native resolution follows the declared change: the toggle pipeline
     // re-materialised the scope's generation, so the disclosure's effective
@@ -400,8 +440,7 @@ fn capability_toggles_round_trip_and_reach_the_active_generation() {
         .current_dir(project.path())
         .output()
         .unwrap();
-    let status: Value =
-        serde_json::from_slice(&output.stdout).expect("status emits JSON");
+    let status: Value = serde_json::from_slice(&output.stdout).expect("status emits JSON");
     let active = status["data"]["active"]
         .as_array()
         .unwrap()
@@ -449,7 +488,10 @@ fn default_skill_sets_round_trip_at_machine_scope() {
         ],
     );
     assert_eq!(code, 0, "plan: {plan}");
-    assert_eq!(plan["scope"], json!({"scope_kind": "machine", "scope_ref": null}));
+    assert_eq!(
+        plan["scope"],
+        json!({"scope_kind": "machine", "scope_ref": null})
+    );
 
     let plan_path = project.path().join("plan.json");
     fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
@@ -468,8 +510,7 @@ fn default_skill_sets_round_trip_at_machine_scope() {
     );
     assert_eq!(code, 0, "apply: {receipt}");
 
-    let config =
-        fs::read_to_string(home.path().join("config.toml")).expect("home config written");
+    let config = fs::read_to_string(home.path().join("config.toml")).expect("home config written");
     assert!(config.contains("default_skill_sets"), "{config}");
 
     let (code, _) = run(
@@ -518,9 +559,15 @@ fn secret_material_is_refused_with_a_structured_error() {
     // The message names the law and never echoes the material.
     let message = error["message"].as_str().unwrap();
     assert!(message.contains("secret_reference"), "{message}");
-    assert!(!message.contains("sk-ant"), "no material in the error: {message}");
+    assert!(
+        !message.contains("sk-ant"),
+        "no material in the error: {message}"
+    );
     let entire = error.to_string();
-    assert!(!entire.contains("sk-ant"), "no material anywhere in the document");
+    assert!(
+        !entire.contains("sk-ant"),
+        "no material anywhere in the document"
+    );
 }
 
 #[test]
@@ -600,7 +647,10 @@ fn disclosure_only_settings_refuse_every_write() {
     assert_ne!(code, 0);
     assert_eq!(error["error_code"], "unsupported_setting");
     assert!(
-        error["message"].as_str().unwrap().contains("aikit credential setup"),
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("aikit credential setup"),
         "the error points at the owner-native mechanism: {error}"
     );
 }

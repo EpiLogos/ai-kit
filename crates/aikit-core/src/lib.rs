@@ -51,11 +51,13 @@ pub mod now_contemplation;
 pub mod frecency;
 pub mod guidance;
 pub mod harness_admission;
+pub mod harness_profile;
 pub mod hooks;
 pub mod id;
 pub mod knowledge;
 pub mod knowledge_code;
 pub mod knowledge_entity_address;
+pub mod knowledge_facets;
 pub mod knowledge_ingest;
 pub mod knowledge_wiki_shape_v2;
 pub mod knowledge_living;
@@ -76,6 +78,7 @@ pub mod lifecycle;
 pub mod live_activation_history;
 pub mod method;
 pub mod model_modality;
+pub mod model_harness_binding;
 pub mod model_runtime;
 pub mod platform;
 pub mod policy;
@@ -238,6 +241,13 @@ pub use harness_admission::{
     HarnessCompatibilityGap, HarnessEditionKind, HarnessFaculty, HarnessFacultyObservation,
     HarnessLifecyclePhase, HARNESS_ADAPTER_AUTHORING_SKILL, HARNESS_ADAPTER_SDK_VERSION,
 };
+pub use harness_profile::{
+    ActivationEffectName, GuidanceLayer, HookObserveDeclaration, HookProjectDeclaration, HooksLayer,
+    HarnessPresence, HarnessProfile, HarnessProfileError, LayerPosture, MergeGrammar, MergePolicy,
+    ModelDispatchPosture, SessionCapabilityFlags, SessionProtocol, SettingsLayer, SkillsLayer,
+    SkillsObserveDeclaration, ToolObserveDeclaration, ToolProjectDeclaration, ToolsLayer,
+    HARNESS_PROFILE_SCHEMA,
+};
 pub use hooks::{
     build_chains, matches as hook_matches, BypassScope, BypassToken, Denial, Dispatcher,
     ExecutionGroup, HookChain, HookDecision, HookEvent, HookEventKind, HookStep, StepOutcome,
@@ -256,6 +266,14 @@ pub use knowledge::{
 pub use knowledge_code::{
     CodeContext, CodeImpact, CodeIndexCapabilities, CodeIndexProvider, CodeIndexStatus,
     CodeReference, CodeSearchHit, CodeTrace, GITNEXUS_TESTED_VERSION,
+};
+pub use knowledge_facets::{
+    attach_source_selector, parse_facets_from_extensions, parse_source_selector,
+    read_source_selector, write_facets_to_extensions, write_source_selector, FacetError,
+    PlaceFacet, PlaceGeometry, PlaceGeometryType, PlaceHierarchyEntry, PlaceIdentity, PlaceName,
+    PlacePrecision, SourceSelector, TechneFacetDeclaration, TechneFacets,
+    TechneSelectorDeclaration, TemporalFacet, TemporalInterval, TemporalKind, TemporalPrecision,
+    TECHNE_FACET_EXTENSION,
 };
 pub use knowledge_living::{
     build_integrative_reading, contemplate_preflight, deterministic_knowledge_impact,
@@ -360,6 +378,7 @@ pub use model_modality::{
     ModelModalityContract, ReconnectSupport, SurfaceAvailability, TransformCapability,
     TransportKind, MODEL_MODALITY_VERSION,
 };
+pub use model_harness_binding::{HarnessModelDemand, HarnessProviderGate};
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;
 pub use praxis::{resolve_praxis, PraxisResolution, SelectedMethod, PRAXIS_RESOLUTION_VERSION};

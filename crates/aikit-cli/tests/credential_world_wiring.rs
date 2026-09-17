@@ -126,8 +126,8 @@ fn a_world_with_no_credential_routes_reports_an_observed_empty_need() {
     // the derivation guarantees: a local-only route contributes no requirement.
     use aikit_core::credential_world::credential_requirements_for_model_routes;
     use aikit_core::resource::{
-        CredentialCondition, ModelRoute, ModelRouteKind, ModelRouteSet, ProviderRef,
-        ResourceRef, RouteAvailability,
+        CredentialCondition, ModelRoute, ModelRouteKind, ModelRouteSet, ProviderRef, ResourceRef,
+        RouteAvailability,
     };
 
     let mut set = ModelRouteSet::new(ResourceRef::parse("model:local").unwrap());
