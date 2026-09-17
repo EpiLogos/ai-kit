@@ -14,8 +14,8 @@ use aikit_core::composition::{
 };
 use aikit_core::composition_view::diff_harness_compositions;
 use aikit_core::model_modality::{
-    explain_model_modality, explain_staged_model_runtime, CredentialScope, DeclaredSupport,
-    InteractionCapability, ModalityDirection, ModalitySupport, ModelModality,
+    diff_modality_contracts, explain_model_modality, explain_staged_model_runtime, CredentialScope,
+    DeclaredSupport, InteractionCapability, ModalityDirection, ModalitySupport, ModelModality,
     ModelModalityContract, SurfaceAvailability, TransformCapability, TransportKind,
 };
 use aikit_core::model_runtime::{
@@ -743,7 +743,43 @@ fn body_provider_replacement_changes_facts_never_agent_identity() {
     // The replaced stage keeps the same component identity: the stage is a
     // binding, not an Agent.
     let before_read = disclose_staged_model_runtime(&before, cascade_stages()).unwrap();
-    let after_read = disclose_staged_model_runtime(&after, cascade_stages()).unwrap();
+    // The replacement swaps the STT surface for a whisper-class local
+    // surface with a narrower declared capability set, and the exact
+    // capability change is diffable.
+    let mut replaced_stt = stt_relation();
+    replaced_stt.model.model = r("model:whisper-large-v3");
+    replaced_stt.model.variant = "whisper-large-v3".into();
+    replaced_stt.engine.engine = r("engine/whisper-local");
+    replaced_stt.engine.provider = provider("provider:deepseek");
+    replaced_stt.engine.form = InferenceEngineForm::LightweightServer;
+    replaced_stt.materialisation.placement = PlacementObservation::Local;
+    replaced_stt.materialisation.endpoint = None;
+    let modality = replaced_stt.model_surface.modality.as_mut().unwrap();
+    modality.provider = provider("provider:deepseek");
+    modality.provider_native_surface = "whisper-large-v3".into();
+    modality
+        .interaction
+        .remove(&InteractionCapability::FinalTranscripts);
+    modality.transport = TransportKind::Cli;
+
+    let after_read = disclose_staged_model_runtime(
+        &after,
+        vec![
+            ModelStageRelation {
+                component: r("component/stt-stage"),
+                relation: replaced_stt,
+            },
+            ModelStageRelation {
+                component: r("component/text-harness"),
+                relation: text_relation(),
+            },
+            ModelStageRelation {
+                component: r("component/tts-stage"),
+                relation: tts_relation(),
+            },
+        ],
+    )
+    .unwrap();
     assert_eq!(
         before_read
             .stage(&r("component/stt-stage"))
@@ -755,6 +791,36 @@ fn body_provider_replacement_changes_facts_never_agent_identity() {
             .component
     );
     assert_eq!(before_read.agent_session, after_read.agent_session);
+
+    // The exact capability change across the replacement is diffable from
+    // the two stage contracts alone.
+    let delta = diff_modality_contracts(
+        before_read
+            .stage(&r("component/stt-stage"))
+            .unwrap()
+            .relation
+            .model_surface
+            .modality
+            .as_ref()
+            .unwrap(),
+        after_read
+            .stage(&r("component/stt-stage"))
+            .unwrap()
+            .relation
+            .model_surface
+            .modality
+            .as_ref()
+            .unwrap(),
+    );
+    assert!(delta
+        .lost_interaction
+        .contains(&InteractionCapability::FinalTranscripts));
+    assert!(delta.gained_interaction.is_empty());
+    assert!(delta.lost_input.is_empty() && delta.gained_input.is_empty());
+    assert!(delta
+        .basis
+        .iter()
+        .any(|line| line == "lost interaction `final-transcripts`"));
 }
 
 #[test]
@@ -925,8 +991,6 @@ fn roster_gates_refuse_a_speech_demand_against_a_text_only_candidate() {
         .explanation
         .hard_gates
         .contains(&"modality:speech".to_string()));
-    assert!(speech
-        .capability_tags()
-        .contains(&"full-duplex-realtime".to_string()));
+    assert!(speech.capability_tags().contains("full-duplex-realtime"));
     assert!(RequirementStrength::Required.is_required());
 }

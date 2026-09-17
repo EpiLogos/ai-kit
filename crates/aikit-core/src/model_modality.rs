@@ -640,6 +640,111 @@ pub struct ComposedModalityView {
     pub basis: Vec<String>,
 }
 
+/// The exact capability change between two contracts — the fact a consumer
+/// renders when a body's provider is replaced: what was gained, what was
+/// lost, and whether availability moved. Losses are facts, not judgements;
+/// nothing here re-resolves or softens them.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ModalityContractDelta {
+    #[serde(default)]
+    pub gained_interaction: BTreeSet<InteractionCapability>,
+    #[serde(default)]
+    pub lost_interaction: BTreeSet<InteractionCapability>,
+    #[serde(default)]
+    pub gained_transforms: BTreeSet<TransformCapability>,
+    #[serde(default)]
+    pub lost_transforms: BTreeSet<TransformCapability>,
+    #[serde(default)]
+    pub gained_input: BTreeSet<ModelModality>,
+    #[serde(default)]
+    pub lost_input: BTreeSet<ModelModality>,
+    #[serde(default)]
+    pub gained_output: BTreeSet<ModelModality>,
+    #[serde(default)]
+    pub lost_output: BTreeSet<ModelModality>,
+    /// `(before, after)` when the availability state changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_changed: Option<(SurfaceAvailability, SurfaceAvailability)>,
+    #[serde(default)]
+    pub basis: Vec<String>,
+}
+
+/// Diff two declared contracts. A provider replacement whose capability
+/// sets genuinely match produces an empty delta; the `basis` lines name
+/// every change in the caller's words.
+pub fn diff_modality_contracts(
+    before: &ModelModalityContract,
+    after: &ModelModalityContract,
+) -> ModalityContractDelta {
+    fn set_delta<T: Copy + Ord>(
+        before_set: &BTreeSet<T>,
+        after_set: &BTreeSet<T>,
+    ) -> (BTreeSet<T>, BTreeSet<T>) {
+        (
+            after_set.difference(before_set).copied().collect(),
+            before_set.difference(after_set).copied().collect(),
+        )
+    }
+
+    let (gained_interaction, lost_interaction) = set_delta(&before.interaction, &after.interaction);
+    let before_transforms: BTreeSet<TransformCapability> =
+        before.transforms.keys().copied().collect();
+    let after_transforms: BTreeSet<TransformCapability> =
+        after.transforms.keys().copied().collect();
+    let (gained_transforms, lost_transforms) = set_delta(&before_transforms, &after_transforms);
+    let (gained_input, lost_input) = set_delta(&before.input_modalities, &after.input_modalities);
+    let (gained_output, lost_output) =
+        set_delta(&before.output_modalities, &after.output_modalities);
+
+    let mut basis = Vec::new();
+    for item in &gained_interaction {
+        basis.push(format!("gained interaction `{}`", item.as_str()));
+    }
+    for item in &lost_interaction {
+        basis.push(format!("lost interaction `{}`", item.as_str()));
+    }
+    for item in &gained_transforms {
+        basis.push(format!("gained transform `{}`", item.as_str()));
+    }
+    for item in &lost_transforms {
+        basis.push(format!("lost transform `{}`", item.as_str()));
+    }
+    for item in &gained_input {
+        basis.push(format!("gained input modality `{}`", item.as_str()));
+    }
+    for item in &lost_input {
+        basis.push(format!("lost input modality `{}`", item.as_str()));
+    }
+    for item in &gained_output {
+        basis.push(format!("gained output modality `{}`", item.as_str()));
+    }
+    for item in &lost_output {
+        basis.push(format!("lost output modality `{}`", item.as_str()));
+    }
+    let availability_changed = if before.availability == after.availability {
+        None
+    } else {
+        basis.push(format!(
+            "availability moved from {:?} to {:?}",
+            before.availability, after.availability
+        ));
+        Some((before.availability.clone(), after.availability.clone()))
+    };
+
+    ModalityContractDelta {
+        gained_interaction,
+        lost_interaction,
+        gained_transforms,
+        lost_transforms,
+        gained_input,
+        lost_input,
+        gained_output,
+        lost_output,
+        availability_changed,
+        basis,
+    }
+}
+
 impl ComposedModalityView {
     /// Body-level answer for one interaction capability. Capabilities the
     /// map carries were derivable from fully-declared stages; anything else
@@ -1547,6 +1652,58 @@ mod tests {
         assert_eq!(evidence.facts.len(), 1);
         assert!(evidence.facts[0].summary.contains("no modality contract"));
         assert!(evidence.facts[0].summary.contains("plain text body"));
+    }
+
+    #[test]
+    fn replacement_capability_changes_are_diffable_exactly() {
+        let before = realtime_contract();
+        let mut after = realtime_contract();
+        after.interaction.remove(&InteractionCapability::BargeIn);
+        after
+            .interaction
+            .insert(InteractionCapability::PartialTranscripts);
+        after
+            .transforms
+            .remove(&TransformCapability::AudioUnderstanding);
+        after.input_modalities.remove(&ModelModality::Speech);
+        after.availability = SurfaceAvailability::Degraded {
+            reason: "failover".into(),
+        };
+
+        let delta = diff_modality_contracts(&before, &after);
+        assert!(delta
+            .lost_interaction
+            .contains(&InteractionCapability::BargeIn));
+        assert!(delta
+            .gained_interaction
+            .contains(&InteractionCapability::PartialTranscripts));
+        assert!(delta
+            .lost_transforms
+            .contains(&TransformCapability::AudioUnderstanding));
+        assert!(delta.lost_input.contains(&ModelModality::Speech));
+        assert!(delta.gained_input.is_empty());
+        assert_eq!(
+            delta.availability_changed,
+            Some((
+                SurfaceAvailability::Available,
+                SurfaceAvailability::Degraded {
+                    reason: "failover".into()
+                }
+            ))
+        );
+        assert!(delta
+            .basis
+            .iter()
+            .any(|line| line == "lost interaction `barge-in`"));
+        assert!(delta
+            .basis
+            .iter()
+            .any(|line| line.contains("availability moved")));
+
+        // Identical contracts produce an empty delta.
+        let identical = diff_modality_contracts(&before, &realtime_contract());
+        assert_eq!(identical, ModalityContractDelta::default());
+        assert!(identical.basis.is_empty());
     }
 
     #[test]

@@ -353,11 +353,12 @@ pub use method::{
     SkillPraxisMetadataResolution, SkillPraxisResolvedRef, UsageOverlayRef, METHOD_VERSION,
 };
 pub use model_modality::{
-    compose_stage_modalities, explain_model_modality, surface_interaction_support,
-    surface_modality_support, ComposedModalityView, ConnectionSemantics, CredentialScope,
-    DeclaredSupport, InteractionCapability, MaterialConstraints, ModalityDirection,
-    ModalitySupport, ModelModality, ModelModalityContract, ReconnectSupport,
-    SurfaceAvailability, TransformCapability, TransportKind, MODEL_MODALITY_VERSION,
+    compose_stage_modalities, diff_modality_contracts, explain_model_modality,
+    surface_interaction_support, surface_modality_support, ComposedModalityView,
+    ConnectionSemantics, CredentialScope, DeclaredSupport, InteractionCapability,
+    MaterialConstraints, ModalityContractDelta, ModalityDirection, ModalitySupport, ModelModality,
+    ModelModalityContract, ReconnectSupport, SurfaceAvailability, TransformCapability,
+    TransportKind, MODEL_MODALITY_VERSION,
 };
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;

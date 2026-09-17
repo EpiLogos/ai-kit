@@ -284,7 +284,7 @@ mod tests {
         SurfaceDescriptor, SurfaceKind, TargetNativeComponentBinding,
     };
     use aikit_core::composition::{
-        ComponentContribution, CompositionBodyRequest, ContributionKind, RetractionMode,
+        ComponentContribution, ContributionKind, RetractionMode,
     };
     use aikit_core::model_runtime::{
         disclose_model_runtime, InferenceEngineForm, InferenceEngineReading, ModelRuntimeRelation,
