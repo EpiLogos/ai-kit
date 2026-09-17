@@ -390,7 +390,12 @@ pub fn read_factory_developmental<R: CommandRunner>(
                             telemetry.insert(telemetry_ref.clone(), unit_ref.clone())
                         {
                             if existing != *unit_ref {
-                                return Err(error("factory.developmental_relation_mismatch", format!("telemetry {telemetry_ref} is related to both {existing} and {unit_ref}")));
+                                return Err(error(
+                                    "factory.developmental_relation_mismatch",
+                                    format!(
+                                        "telemetry {telemetry_ref} is related to both {existing} and {unit_ref}"
+                                    ),
+                                ));
                             }
                         }
                     }
@@ -675,7 +680,7 @@ fn project_resources(
                 return Err(error(
                     "factory.developmental_unsupported_contract",
                     &reading.contract,
-                ))
+                ));
             }
         };
         let mut descriptor = ResourceDescriptor::new(
@@ -739,7 +744,12 @@ fn project_resources(
                     if entry.get().descriptor.annotations.get("factory.action")
                         != record.descriptor.annotations.get("factory.action")
                     {
-                        return Err(error("factory.developmental_conflicting_action", format!("Factory reused Action identity {action_ref} with conflicting evidence")));
+                        return Err(error(
+                            "factory.developmental_conflicting_action",
+                            format!(
+                                "Factory reused Action identity {action_ref} with conflicting evidence"
+                            ),
+                        ));
                     }
                     let mut runs: BTreeSet<String> = serde_json::from_str(
                         entry
@@ -1144,11 +1154,13 @@ mod tests {
             .unwrap();
         assert_eq!(action.descriptor.kind, ResourceKind::Action);
         assert!(action.descriptor.annotations["factory.action"].contains("currentlyApplicable"));
-        assert!(observed.resources.iter().all(|record| record
-            .descriptor
-            .annotations
-            .contains_key("factory.owner-reading")
-            || record.descriptor.kind == ResourceKind::Action));
+        assert!(observed.resources.iter().all(|record| {
+            record
+                .descriptor
+                .annotations
+                .contains_key("factory.owner-reading")
+                || record.descriptor.kind == ResourceKind::Action
+        }));
     }
 
     #[test]

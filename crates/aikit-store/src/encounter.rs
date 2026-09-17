@@ -178,7 +178,11 @@ impl EncounterStore {
             };
             let projected = projected_blocks(&events);
             if projected.len() != blocks.len()
-                || !projected.iter().zip(&blocks).all(|((kind, text), (_, actual_kind, actual_text))| kind == actual_kind && text == actual_text)
+                || !projected.iter().zip(&blocks).all(
+                    |((kind, text), (_, actual_kind, actual_text))| {
+                        kind == actual_kind && text == actual_text
+                    },
+                )
             {
                 continue;
             }
@@ -198,8 +202,15 @@ impl EncounterStore {
         }
         // Replace, rather than accumulate, this derived presentation overlay.
         // The raw journal and persisted blocks are never mutated.
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failure)?;
-        transaction.execute("DELETE FROM encounter_block_exclusions WHERE session=?1", params![session.as_str()]).map_err(failure)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        transaction
+            .execute(
+                "DELETE FROM encounter_block_exclusions WHERE session=?1",
+                params![session.as_str()],
+            )
+            .map_err(failure)?;
         for basis in &output {
             transaction.execute("INSERT INTO encounter_block_exclusions(session,block_id,basis) VALUES(?1,?2,?3)", params![session.as_str(), basis["projection_block_id"].as_u64(), serde_json::to_string(basis).map_err(failure)?]).map_err(failure)?;
         }
@@ -377,13 +388,37 @@ fn journal_blocks(
 fn projected_blocks(events: &[EncounterEvent]) -> Vec<(String, String)> {
     let mut blocks = Vec::new();
     for event in events {
-        let piece = if event.event["kind"] == "user-message" { event.event["text"].as_str().map(|text| ("user", text))
-        } else if let Some(kind) = event.event.pointer("/event/Signal/kind") { match kind["kind"].as_str() {
-            Some("agent-message-chunk") => kind["text"].as_str().map(|text| ("assistant", text)),
-            Some("agent-thought-chunk") => kind["text"].as_str().map(|text| ("thinking", text)), _ => None,
-        }} else if event.event.pointer("/event/TurnEnded/stop/Completed").is_some() { Some(("completed", "")) } else { None };
+        let piece = if event.event["kind"] == "user-message" {
+            event.event["text"].as_str().map(|text| ("user", text))
+        } else if let Some(kind) = event.event.pointer("/event/Signal/kind") {
+            match kind["kind"].as_str() {
+                Some("agent-message-chunk") => {
+                    kind["text"].as_str().map(|text| ("assistant", text))
+                }
+                Some("agent-thought-chunk") => kind["text"].as_str().map(|text| ("thinking", text)),
+                _ => None,
+            }
+        } else if event
+            .event
+            .pointer("/event/TurnEnded/stop/Completed")
+            .is_some()
+        {
+            Some(("completed", ""))
+        } else {
+            None
+        };
         let Some((kind, text)) = piece else { continue };
-        if matches!(kind, "assistant" | "thinking") && blocks.last().is_some_and(|(held, prior): &(String, String)| held == kind && prior.len() + text.len() <= 16 * 1024) { blocks.last_mut().unwrap().1.push_str(text); } else { blocks.push((kind.into(), text.into())); }
+        if matches!(kind, "assistant" | "thinking")
+            && blocks
+                .last()
+                .is_some_and(|(held, prior): &(String, String)| {
+                    held == kind && prior.len() + text.len() <= 16 * 1024
+                })
+        {
+            blocks.last_mut().unwrap().1.push_str(text);
+        } else {
+            blocks.push((kind.into(), text.into()));
+        }
     }
     blocks
 }
@@ -747,8 +782,25 @@ mod tests {
         let session = ResourceRef::parse("agent-session/legacy-extra-block").unwrap();
         let store = EncounterStore::open(&home).unwrap();
         install_legacy_window(&store, &session, "native/a", "native/a", false);
-        store.connection.lock().unwrap().execute("INSERT INTO encounter_blocks(session,kind,text) VALUES(?1,?2,?3)", params![session.as_str(), "assistant", "answer"]).unwrap();
-        assert_eq!(store.classify_legacy_load_replay(&session).unwrap()["classified"], false);
-        assert_eq!(store.view(&session, None).unwrap()["blocks"].as_array().unwrap().len(), 5);
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO encounter_blocks(session,kind,text) VALUES(?1,?2,?3)",
+                params![session.as_str(), "assistant", "answer"],
+            )
+            .unwrap();
+        assert_eq!(
+            store.classify_legacy_load_replay(&session).unwrap()["classified"],
+            false
+        );
+        assert_eq!(
+            store.view(&session, None).unwrap()["blocks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
     }
 }

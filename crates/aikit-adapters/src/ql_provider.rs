@@ -78,7 +78,9 @@ impl QlCliClient {
         })
     }
 
-    fn observed_capabilities(&self) -> std::result::Result<QlProviderCapabilities, QlProviderFailure> {
+    fn observed_capabilities(
+        &self,
+    ) -> std::result::Result<QlProviderCapabilities, QlProviderFailure> {
         let value = self.json(&["capabilities"])?;
         let version = value
             .get("version")
@@ -107,7 +109,11 @@ impl QlCliClient {
         let mut deterministic_operations = Vec::new();
         if let Some(items) = service.get("operations").and_then(Value::as_array) {
             for item in items {
-                if !item.get("supported").and_then(Value::as_bool).unwrap_or(false) {
+                if !item
+                    .get("supported")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 let Some(operation) = item
@@ -133,7 +139,10 @@ impl QlCliClient {
                 version,
             },
             health,
-            classes: vec![QlProviderClass::FormalKernel, QlProviderClass::SemanticRefraction],
+            classes: vec![
+                QlProviderClass::FormalKernel,
+                QlProviderClass::SemanticRefraction,
+            ],
             supported_forms: value
                 .get("kernel")
                 .and_then(|kernel| kernel.get("supportedForms"))
@@ -161,27 +170,28 @@ impl QlCliClient {
 
 impl QlProviderClient for QlCliClient {
     fn capabilities(&self) -> QlProviderCapabilities {
-        self.observed_capabilities().unwrap_or_else(|failure| QlProviderCapabilities {
-            provider: QlProviderRef {
-                provider: "ql-mef".into(),
-                version: "unobserved".into(),
-            },
-            health: QlProviderHealth {
-                state: QlProviderState::Absent,
-                detail: Some(format!("{}: {}", failure.code, failure.message)),
-            },
-            classes: Vec::new(),
-            supported_forms: Vec::new(),
-            supported_lenses: Vec::new(),
-            operations: Vec::new(),
-            extension_namespaces: Vec::new(),
-            deterministic_operations: Vec::new(),
-            input_limits: QlInputLimits {
-                max_relation_subjects: 0,
-                max_synthesis_readings: 0,
-            },
-            output_schema_versions: Vec::new(),
-        })
+        self.observed_capabilities()
+            .unwrap_or_else(|failure| QlProviderCapabilities {
+                provider: QlProviderRef {
+                    provider: "ql-mef".into(),
+                    version: "unobserved".into(),
+                },
+                health: QlProviderHealth {
+                    state: QlProviderState::Absent,
+                    detail: Some(format!("{}: {}", failure.code, failure.message)),
+                },
+                classes: Vec::new(),
+                supported_forms: Vec::new(),
+                supported_lenses: Vec::new(),
+                operations: Vec::new(),
+                extension_namespaces: Vec::new(),
+                deterministic_operations: Vec::new(),
+                input_limits: QlInputLimits {
+                    max_relation_subjects: 0,
+                    max_synthesis_readings: 0,
+                },
+                output_schema_versions: Vec::new(),
+            })
     }
 
     fn refract(

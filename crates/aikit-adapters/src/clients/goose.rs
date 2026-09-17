@@ -25,16 +25,16 @@
 
 use std::path::{Path, PathBuf};
 
-use aikit_core::Result;
 use aikit_core::harness_admission::{
-    FacultySupport, HARNESS_ADAPTER_SDK_VERSION, HarnessAdmissionAdapter,
-    HarnessAdmissionDescriptor, HarnessEditionKind, HarnessFaculty, HarnessFacultyObservation,
+    FacultySupport, HarnessAdmissionAdapter, HarnessAdmissionDescriptor, HarnessEditionKind,
+    HarnessFaculty, HarnessFacultyObservation, HARNESS_ADAPTER_SDK_VERSION,
 };
 use aikit_core::platform::TargetId;
 use aikit_core::projection::{
     ActivationEffect, ProjectionItem, ProjectionPlan, ResolvedContext, TargetAdapter,
     TargetCapabilities,
 };
+use aikit_core::Result;
 
 pub const CLIENT: &str = "goose";
 pub const PRODUCT: &str = "Goose";

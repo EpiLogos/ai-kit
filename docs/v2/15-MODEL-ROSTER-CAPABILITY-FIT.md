@@ -56,6 +56,10 @@ Actualisation composes a selected `(ModelRef, route)` into an `actuation.instant
 
 Ranking, below, is the policy layer inside selection. It does not mint Models, prove routes, or record usage as availability.
 
+## Modality surfaces
+
+What a resolved body can hear, say and do — input/output modalities, transform capabilities, interaction forms (streaming, full-duplex realtime, barge-in, turn detection, structured tool requests), transport and connection facts — is a contract each model surface declares on `model_surface.modality` (`aikit.model-modality/v1`). Queries answer four explicit states (supported / degraded / unsupported / unknown); realtime, cascade STT→text→TTS and hybrid bodies resolve through the ordinary composition resolver with per-stage relations and provenance. See `24-MODEL-MODALITY-AND-REALTIME-SURFACES.md`.
+
 ## Ownership
 
 - **Actuation** defines what situated model-bearing conditions mean, including the inference/control/interior distinctions represented by its `ModelAccessProfile` contract, and owns the instantiation evidence gate. The harness catalog r6 `model_dispatch` descriptor is Actuation's; AIKit consumes it as route evidence.

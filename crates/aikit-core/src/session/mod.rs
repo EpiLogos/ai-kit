@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::context::Isolation;
-use crate::error::{AikitError, Result, err};
+use crate::error::{err, AikitError, Result};
 use crate::platform::PlaceTechnology;
 use crate::profile::{ConfigTable, PoolPatch};
 
@@ -836,13 +836,11 @@ mod tests {
             capabilities: PoolPatch::default(),
         };
         assert!(!shared.is_isolated());
-        assert!(
-            TaskSpec {
-                isolation: Isolation::Directory,
-                ..shared
-            }
-            .is_isolated()
-        );
+        assert!(TaskSpec {
+            isolation: Isolation::Directory,
+            ..shared
+        }
+        .is_isolated());
     }
 
     #[test]

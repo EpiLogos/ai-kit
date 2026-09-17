@@ -137,7 +137,10 @@ impl PiRpcConnectionAdapter {
             if data["model"]["provider"].as_str() != Some(provider.as_str())
                 || data["model"]["id"].as_str() != Some(model.as_str())
             {
-                return Err(error("connection.pi_rpc.model_mismatch", "Pi native state does not confirm the selected provider/model; no default or fallback is admitted"));
+                return Err(error(
+                    "connection.pi_rpc.model_mismatch",
+                    "Pi native state does not confirm the selected provider/model; no default or fallback is admitted",
+                ));
             }
             self.model_observation = Some(NativeModelObservation {
                 current_model_id: model.clone(),
@@ -147,7 +150,9 @@ impl PiRpcConnectionAdapter {
                     description: None,
                 }],
                 reasoning_effort: None,
-                standing: format!("Pi native get_state; provider={provider}; configuration, not an inference receipt"),
+                standing: format!(
+                    "Pi native get_state; provider={provider}; configuration, not an inference receipt"
+                ),
             });
         }
         self.observed_session = Some(id.into());
@@ -180,7 +185,10 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
 
     fn open_session(&mut self, request: SessionOpenRequest) -> Result<ConnectionCommand> {
         if request.mode != SessionOpenMode::Attach {
-            return Err(error("connection.pi_rpc.unsupported_open", "Pi RPC adapter attaches to its process's observed session; create/load/resume are not claimed"));
+            return Err(error(
+                "connection.pi_rpc.unsupported_open",
+                "Pi RPC adapter attaches to its process's observed session; create/load/resume are not claimed",
+            ));
         }
         if self.binding.is_some()
             || self
@@ -188,13 +196,19 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                 .values()
                 .any(|p| matches!(p, Pending::Attach(_)))
         {
-            return Err(error("connection.pi_rpc.single_session", "A Pi process carries one resident session; use a separate native connection for another encounter"));
+            return Err(error(
+                "connection.pi_rpc.single_session",
+                "A Pi process carries one resident session; use a separate native connection for another encounter",
+            ));
         }
         if request.cwd != self.cwd
             || !request.additional_directories.is_empty()
             || !request.mcp_servers.is_empty()
         {
-            return Err(error("connection.pi_rpc.unsupported_context", "Pi context belongs to its native process launch; this adapter cannot change directories or MCP configuration"));
+            return Err(error(
+                "connection.pi_rpc.unsupported_context",
+                "Pi context belongs to its native process launch; this adapter cannot change directories or MCP configuration",
+            ));
         }
         if self.observed_session.is_none() {
             return Err(error(
@@ -305,7 +319,10 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                         if result["provider"].as_str() != Some(provider.as_str())
                             || result["model"].as_str() != Some(model.as_str())
                         {
-                            return Err(error("connection.pi_rpc.response_model_mismatch", "Assistant result does not name the selected native provider/model; response remains failed, not attributed to the requested Model"));
+                            return Err(error(
+                                "connection.pi_rpc.response_model_mismatch",
+                                "Assistant result does not name the selected native provider/model; response remains failed, not attributed to the requested Model",
+                            ));
                         }
                     }
                     self.stop = Some((
@@ -413,7 +430,10 @@ impl InteractiveAgentConnectionAdapter for PiRpcConnectionAdapter {
         ))
     }
     fn reconnect(&mut self) -> Result<ConnectionCommand> {
-        Err(error("connection.pi_rpc.reconnect_unsupported", "Pi session continuity must be established by its owner before another connection is attached"))
+        Err(error(
+            "connection.pi_rpc.reconnect_unsupported",
+            "Pi session continuity must be established by its owner before another connection is attached",
+        ))
     }
 }
 

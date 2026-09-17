@@ -27,8 +27,11 @@ fn world() -> (tempfile::TempDir, CentralTaskRequest) {
             "recorded_at_unix_seconds":1}]
     }).to_string()).unwrap();
     let request = CentralTaskRequest {
-        ctrl_bin: PathBuf::from(std::env::var("AIKIT_CAW_CTRL_BIN").expect("exact source-built ctrl required")),
-        central_root: root, project: None,
+        ctrl_bin: PathBuf::from(
+            std::env::var("AIKIT_CAW_CTRL_BIN").expect("exact source-built ctrl required"),
+        ),
+        central_root: root,
+        project: None,
         task_ref: ResourceRef::parse("task:native-joined").unwrap(),
         purpose: "Controlled native joined placement".into(),
         participant_refs: vec![ResourceRef::parse("agent:no-profile").unwrap()],
@@ -48,21 +51,45 @@ fn native_policy_now_validation_and_workcell_prepare_are_connected() {
     assert_eq!(task.allocation["revision"], again.allocation["revision"]);
     assert_eq!(again.allocation["created"], false);
     let source = request.central_root.join("Work/demo/src");
-    let result = owner.validate_write(&task, &source.join("answer.txt")).unwrap();
+    let result = owner
+        .validate_write(&task, &source.join("answer.txt"))
+        .unwrap();
     assert_eq!(result["allowed"], true);
-    assert!(owner.validate_write(&task, &request.central_root.join("Work/loose.txt")).is_err());
+    assert!(owner
+        .validate_write(&task, &request.central_root.join("Work/loose.txt"))
+        .is_err());
     let authority = ResourceRef::parse("authority:controlled-native-test").unwrap();
-    let requirements = owner.write_boundary_requirements(&task, &authority, std::slice::from_ref(&source)).unwrap();
-    assert_eq!(requirements["protected_paths"], task.allocation["policy"]["protected_paths"]);
-    assert_eq!(requirements["required_coverage"], task.allocation["policy"]["required_coverage"]);
-    assert_eq!(requirements["writable_paths"], json!([task.now_directory().unwrap(), source]));
+    let requirements = owner
+        .write_boundary_requirements(&task, &authority, std::slice::from_ref(&source))
+        .unwrap();
+    assert_eq!(
+        requirements["protected_paths"],
+        task.allocation["policy"]["protected_paths"]
+    );
+    assert_eq!(
+        requirements["required_coverage"],
+        task.allocation["policy"]["required_coverage"]
+    );
+    assert_eq!(
+        requirements["writable_paths"],
+        json!([task.now_directory().unwrap(), source])
+    );
     assert_eq!(task.storage_requirement().unwrap()["retention"], "preserve");
-    assert_eq!(task.storage_declaration().unwrap()["directories"][0]["logical_ref"], task.allocation["now_ref"]);
+    assert_eq!(
+        task.storage_declaration().unwrap()["directories"][0]["logical_ref"],
+        task.allocation["now_ref"]
+    );
     let file = tempfile::NamedTempFile::new().unwrap();
     fs::write(file.path(), requirements.to_string()).unwrap();
     let binary = std::env::var("AIKIT_CAW_WORKCELL_BOUNDARY_BIN").expect("exact Workcell required");
-    let inspected = SystemRunner::new().run(&[binary, "inspect".into(), file.path().display().to_string(),
-        requirements["policy_revision"].as_str().unwrap().into()]).unwrap();
+    let inspected = SystemRunner::new()
+        .run(&[
+            binary,
+            "inspect".into(),
+            file.path().display().to_string(),
+            requirements["policy_revision"].as_str().unwrap().into(),
+        ])
+        .unwrap();
     assert!(inspected.ok(), "{} {}", inspected.stdout, inspected.stderr);
     let native: Value = serde_json::from_str(&inspected.stdout).unwrap();
     assert_eq!(native["schema"], "workcell.prepared-write-boundary/v1");
@@ -78,11 +105,18 @@ fn removing_native_policy_or_allocated_now_breaks_readmission() {
         let (_dir, request) = world();
         let owner = NativeCentralPlacement::new(SystemRunner::new());
         let task = owner.allocate(&request).unwrap();
-        let path = if remove_policy { request.central_root.join("Control/user/placement.json") }
-            else { request.central_root.join(task.allocation["source"]["path"].as_str().unwrap()) };
+        let path = if remove_policy {
+            request.central_root.join("Control/user/placement.json")
+        } else {
+            request
+                .central_root
+                .join(task.allocation["source"]["path"].as_str().unwrap())
+        };
         fs::remove_file(path).unwrap();
         assert!(owner.revalidate(&task).is_err());
-        assert!(owner.validate_write(&task, &task.now_directory().unwrap().join("return.txt")).is_err());
+        assert!(owner
+            .validate_write(&task, &task.now_directory().unwrap().join("return.txt"))
+            .is_err());
     }
 }
 
@@ -97,9 +131,19 @@ fn policy_changes_do_not_silently_rebase_or_renew_a_task() {
     policy["protected"] = json!(["Work/demo/src"]);
     fs::write(&path, policy.to_string()).unwrap();
     assert!(owner.revalidate(&task).is_err());
-    assert!(owner.write_boundary_requirements(&task, &ResourceRef::parse("authority:test").unwrap(), &[]).is_err());
+    assert!(owner
+        .write_boundary_requirements(&task, &ResourceRef::parse("authority:test").unwrap(), &[])
+        .is_err());
     let next = owner.allocate(&request).unwrap();
     assert_eq!(task.allocation["now_ref"], next.allocation["now_ref"]);
-    assert_ne!(task.allocation["policy"]["revision"], next.allocation["policy"]["revision"]);
-    assert!(owner.validate_write(&next, &request.central_root.join("Work/demo/src/blocked.txt")).is_err());
+    assert_ne!(
+        task.allocation["policy"]["revision"],
+        next.allocation["policy"]["revision"]
+    );
+    assert!(owner
+        .validate_write(
+            &next,
+            &request.central_root.join("Work/demo/src/blocked.txt")
+        )
+        .is_err());
 }

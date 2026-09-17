@@ -47,9 +47,10 @@ use crate::events::{Event, EventAction, Outcome, Timestamp};
 use crate::registry::RegistryLoad;
 
 /// Schema steps, applied in order. Append only — never edit one that shipped.
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001-initial",
-    r#"
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001-initial",
+        r#"
 CREATE TABLE capsules (
     id           TEXT PRIMARY KEY,
     kind         TEXT NOT NULL,
@@ -183,14 +184,14 @@ CREATE TABLE promotion_queue (
     queued_ns     INTEGER NOT NULL
 );
 "#,
-),
-// The Inbox as the system's own channel (Spec II §2): drift notices, version
-// conflicts, procedure reports and agent proposals the system addresses to the
-// user. Operational — these records exist nowhere else — so it must never enter
-// DERIVED_TABLES or a reindex would silently discard the system's messages.
-(
-    "0002-inbox-items",
-    r#"
+    ),
+    // The Inbox as the system's own channel (Spec II §2): drift notices, version
+    // conflicts, procedure reports and agent proposals the system addresses to the
+    // user. Operational — these records exist nowhere else — so it must never enter
+    // DERIVED_TABLES or a reindex would silently discard the system's messages.
+    (
+        "0002-inbox-items",
+        r#"
 CREATE TABLE inbox_items (
     inbox_id     TEXT PRIMARY KEY,
     kind         TEXT NOT NULL,
@@ -444,8 +445,12 @@ impl ProjectActivityEvidence {
         touched_path: Option<PathBuf>,
     ) -> Self {
         Self {
-            evidence_id: EventId::generate(), project_root: project_root.into(),
-            occurred_at, context_id, tool, touched_path,
+            evidence_id: EventId::generate(),
+            project_root: project_root.into(),
+            occurred_at,
+            context_id,
+            tool,
+            touched_path,
         }
     }
 }
@@ -517,9 +522,11 @@ impl Index {
             .map_err(|e| sql_error("index.migrate_failed", &e))?;
 
         let applied: u32 = transaction
-            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .map_err(|e| sql_error("index.migrate_failed", &e))?;
 
         if applied as usize > MIGRATIONS.len() {
@@ -548,14 +555,18 @@ impl Index {
                 )
                 .map_err(|e| sql_error("index.migrate_failed", &e))?;
         }
-        transaction.commit().map_err(|e| sql_error("index.migrate_failed", &e))
+        transaction
+            .commit()
+            .map_err(|e| sql_error("index.migrate_failed", &e))
     }
 
     pub fn schema_version(&self) -> Result<u32> {
         self.conn
-            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .map_err(|e| sql_error("index.query_failed", &e))
     }
 
@@ -648,11 +659,13 @@ impl Index {
                 params![
                     profile.id.to_string(),
                     profile.description,
-                    join(&profile
-                        .extends
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()),
+                    join(
+                        &profile
+                            .extends
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                    ),
                     RegistrySource::PERSONAL,
                     now,
                 ],
@@ -665,7 +678,8 @@ impl Index {
             profiles: profiles.len(),
             problems: load.problems.len(),
         };
-        tx.commit().map_err(|e| sql_error("index.write_failed", &e))?;
+        tx.commit()
+            .map_err(|e| sql_error("index.write_failed", &e))?;
         Ok(report)
     }
 
@@ -910,7 +924,10 @@ impl Index {
                     binding.mux.as_str(),
                     binding.mux_session,
                     binding.mux_surface,
-                    binding.project_root.as_ref().map(|p| p.display().to_string()),
+                    binding
+                        .project_root
+                        .as_ref()
+                        .map(|p| p.display().to_string()),
                     binding.isolation.as_str(),
                     Timestamp::now().as_nanos(),
                 ],
@@ -1145,35 +1162,62 @@ impl Index {
 
     /// Append a completed project activity receipt. Evidence is never overwritten.
     pub fn record_project_activity(&self, evidence: &ProjectActivityEvidence) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO project_activity_events
+        self.conn
+            .execute(
+                "INSERT INTO project_activity_events
              (evidence_id, project_root, occurred_ns, context_id, tool, touched_path)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                evidence.evidence_id.to_string(), evidence.project_root.to_string_lossy(),
-                evidence.occurred_at.as_nanos(), evidence.context_id.to_string(), evidence.tool,
-                evidence.touched_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            ],
-        ).map_err(|e| sql_error("activity.write_failed", &e))?;
+                params![
+                    evidence.evidence_id.to_string(),
+                    evidence.project_root.to_string_lossy(),
+                    evidence.occurred_at.as_nanos(),
+                    evidence.context_id.to_string(),
+                    evidence.tool,
+                    evidence
+                        .touched_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned()),
+                ],
+            )
+            .map_err(|e| sql_error("activity.write_failed", &e))?;
         Ok(())
     }
 
     /// Latest completed activity for exactly this project identity.
-    pub fn project_last_activity(&self, project_root: &Path) -> Result<Option<ProjectActivityEvidence>> {
-        self.conn.query_row(
-            "SELECT evidence_id, project_root, occurred_ns, context_id, tool, touched_path
+    pub fn project_last_activity(
+        &self,
+        project_root: &Path,
+    ) -> Result<Option<ProjectActivityEvidence>> {
+        self.conn
+            .query_row(
+                "SELECT evidence_id, project_root, occurred_ns, context_id, tool, touched_path
              FROM project_activity_events WHERE project_root = ?1
              ORDER BY occurred_ns DESC, evidence_id DESC LIMIT 1",
-            params![project_root.to_string_lossy()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?,
-                      row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?,
-                      row.get::<_, Option<String>>(5)?)),
-        ).optional().map_err(|e| sql_error("activity.read_failed", &e))?
-            .map(|(eid, root, ns, cid, tool, path)| Ok(ProjectActivityEvidence {
-                evidence_id: EventId::parse(&eid)?, project_root: PathBuf::from(root),
-                occurred_at: Timestamp::from_nanos(ns), context_id: ContextId::parse(&cid)?,
-                tool, touched_path: path.map(PathBuf::from),
-            })).transpose()
+                params![project_root.to_string_lossy()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| sql_error("activity.read_failed", &e))?
+            .map(|(eid, root, ns, cid, tool, path)| {
+                Ok(ProjectActivityEvidence {
+                    evidence_id: EventId::parse(&eid)?,
+                    project_root: PathBuf::from(root),
+                    occurred_at: Timestamp::from_nanos(ns),
+                    context_id: ContextId::parse(&cid)?,
+                    tool,
+                    touched_path: path.map(PathBuf::from),
+                })
+            })
+            .transpose()
     }
 }
 

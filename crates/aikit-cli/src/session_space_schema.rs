@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 use aikit_core::session_space_application::SessionSpaceMutation;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// One operation's documented template: the `intent` value to pass to
 /// `stage --intent-json`, plus field notes that stay outside the intent so

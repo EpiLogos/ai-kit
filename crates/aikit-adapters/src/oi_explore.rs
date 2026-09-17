@@ -75,8 +75,8 @@ pub struct ExploreDiscoveryReading {
 /// malformed content — every refusal is disclosed as an absence, and every
 /// disclosed row is skipped, never silently invented.
 pub fn read_explore_discovery(path: &Path) -> Result<ExploreDiscoveryReading, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("{} ({error})", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("{} ({error})", path.display()))?;
     let seed: Value = serde_json::from_str(&text)
         .map_err(|error| format!("{} is not valid JSON ({error})", path.display()))?;
     Ok(materialise_explore_discovery(&seed))
@@ -104,18 +104,25 @@ pub fn materialise_explore_discovery(seed: &Value) -> ExploreDiscoveryReading {
                 continue;
             };
             let Ok(resource) = ResourceRef::parse(reference) else {
-                absences.push(format!("Explore entry ref {reference:?} is not a valid resource ref; skipped"));
+                absences.push(format!(
+                    "Explore entry ref {reference:?} is not a valid resource ref; skipped"
+                ));
                 continue;
             };
             if nodes.contains_key(reference) {
-                absences.push(format!("Duplicate explore entry ref {reference}; first kept"));
+                absences.push(format!(
+                    "Duplicate explore entry ref {reference}; first kept"
+                ));
                 continue;
             }
             let label = entry
                 .get("label")
                 .and_then(Value::as_str)
                 .unwrap_or(reference);
-            let kind = entry.get("kind").and_then(Value::as_str).unwrap_or("object");
+            let kind = entry
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("object");
             let world_ref = entry
                 .get("world_ref")
                 .and_then(Value::as_str)
@@ -195,9 +202,18 @@ pub fn materialise_explore_discovery(seed: &Value) -> ExploreDiscoveryReading {
     let mut seen_edges: BTreeSet<String> = BTreeSet::new();
     if let Some(relations) = seed.get("relations").and_then(Value::as_array) {
         for relation in relations {
-            let from = relation.get("from").and_then(Value::as_str).unwrap_or_default();
-            let to = relation.get("to").and_then(Value::as_str).unwrap_or_default();
-            let name = relation.get("relation").and_then(Value::as_str).unwrap_or_default();
+            let from = relation
+                .get("from")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let to = relation
+                .get("to")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let name = relation
+                .get("relation")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             if from.is_empty() || to.is_empty() || name.is_empty() {
                 absences.push("Explore relation without endpoints or a name is skipped".into());
                 continue;
@@ -218,7 +234,9 @@ pub fn materialise_explore_discovery(seed: &Value) -> ExploreDiscoveryReading {
             }
             let (Ok(from_ref), Ok(to_ref)) = (ResourceRef::parse(from), ResourceRef::parse(to))
             else {
-                absences.push(format!("Explore relation {name} has an invalid endpoint ref; edge omitted"));
+                absences.push(format!(
+                    "Explore relation {name} has an invalid endpoint ref; edge omitted"
+                ));
                 continue;
             };
             let origin = relation
@@ -261,7 +279,8 @@ pub fn materialise_explore_discovery(seed: &Value) -> ExploreDiscoveryReading {
     // subject the presentation's own bindings name.
     if let Some(presentations) = seed.get("presentations").and_then(Value::as_array) {
         for presentation in presentations {
-            let Some(presentation_ref) = presentation.get("presentation_ref").and_then(Value::as_str)
+            let Some(presentation_ref) =
+                presentation.get("presentation_ref").and_then(Value::as_str)
             else {
                 absences.push("Explore presentation without a presentation_ref is skipped".into());
                 continue;
@@ -327,7 +346,10 @@ pub fn materialise_explore_discovery(seed: &Value) -> ExploreDiscoveryReading {
             let mut presented: Vec<(String, Value)> = Vec::new();
             if let Some(world_ref) = presentation.get("world_ref").and_then(Value::as_str) {
                 if world_ref != presentation_ref {
-                    presented.push((world_ref.to_owned(), serde_json::json!({"role": Value::Null})));
+                    presented.push((
+                        world_ref.to_owned(),
+                        serde_json::json!({"role": Value::Null}),
+                    ));
                 }
             }
             if let Some(subjects) = presentation.get("subjects").and_then(Value::as_array) {
@@ -418,7 +440,9 @@ pub fn materialise_explore_discovery(seed: &Value) -> ExploreDiscoveryReading {
     }
     for (field_ref, members) in &memberships {
         let Ok(field_resource) = ResourceRef::parse(field_ref) else {
-            absences.push(format!("SharedField ref {field_ref:?} is not a valid resource ref; membership omitted"));
+            absences.push(format!(
+                "SharedField ref {field_ref:?} is not a valid resource ref; membership omitted"
+            ));
             continue;
         };
         if !nodes.contains_key(field_ref) {

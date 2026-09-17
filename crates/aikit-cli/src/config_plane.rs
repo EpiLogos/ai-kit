@@ -47,7 +47,8 @@ use aikit_store::config_plane::{ConfigReceiptStore, ExecutedKey};
 use crate::app::{AikitApplication, ApplyRequest, Service};
 use crate::cli::ConfigCmd;
 use crate::json;
-use aikit_tui::backend::Toggle;pub const CONTRIBUTION_SCHEMA: &str = "oi.configuration-contribution/v1";
+use aikit_tui::backend::Toggle;
+pub const CONTRIBUTION_SCHEMA: &str = "oi.configuration-contribution/v1";
 pub const VALIDATION_SCHEMA: &str = "oi.config-validation/v1";
 pub const PLAN_SCHEMA: &str = "oi.config-plan/v1";
 pub const RECEIPT_SCHEMA: &str = "oi.config-receipt/v1";
@@ -129,123 +130,123 @@ impl Setting {
 
 fn settings() -> Vec<Setting> {
     vec![
-    Setting {
-        setting_ref: "ai-kit:resolution:resolution.profiles",
-        section_ref: "resolution",
-        key: "resolution.profiles",
-        title: "Native profile selection",
-        description: "Which native AIKit profile the scope declares (the resolution basis). \
+        Setting {
+            setting_ref: "ai-kit:resolution:resolution.profiles",
+            section_ref: "resolution",
+            key: "resolution.profiles",
+            title: "Native profile selection",
+            description: "Which native AIKit profile the scope declares (the resolution basis). \
                       Values are AIKit's own profile ids, passed by reference and resolved \
                       natively; profile internals are never copied into the plane.",
-        value_schema: json!({ "type": "reference", "subject_kind": "aikit.profile-id" }),
-        allowed_scopes: &["machine", "project", "agent-session"],
-        writable: true,
-        profileable: true,
-        sensitive: false,
-        default: None,
-        default_semantics: "computed",
-        effect_kind: "session-restart-required",
-        effect_summary: "New sessions compose with the new profile; harness sessions already \
+            value_schema: json!({ "type": "reference", "subject_kind": "aikit.profile-id" }),
+            allowed_scopes: &["machine", "project", "agent-session"],
+            writable: true,
+            profileable: true,
+            sensitive: false,
+            default: None,
+            default_semantics: "computed",
+            effect_kind: "session-restart-required",
+            effect_summary: "New sessions compose with the new profile; harness sessions already \
                          running keep their composition until they are relaunched.",
-        effect_ref: Some("aikit diff --json"),
-        operations: (true, true, true, true),
-        native_ref: "aikit:scope:profiles",
-    },
-    Setting {
-        setting_ref: "ai-kit:skills:skills.capabilities",
-        section_ref: "skills",
-        key: "skills.capabilities",
-        title: "Capability toggles",
-        description: "The scope's declared capability enable/disable deltas, as an object \
+            effect_ref: Some("aikit diff --json"),
+            operations: (true, true, true, true),
+            native_ref: "aikit:scope:profiles",
+        },
+        Setting {
+            setting_ref: "ai-kit:skills:skills.capabilities",
+            section_ref: "skills",
+            key: "skills.capabilities",
+            title: "Capability toggles",
+            description: "The scope's declared capability enable/disable deltas, as an object \
                       mapping capability id to boolean. Applied through AIKit's native \
                       toggle pipeline, which re-materialises the scope's generation.",
-        value_schema: json!({
-            "type": "table",
-            "columns": [
-                { "name": "capability", "type": "scalar" },
-                { "name": "enabled", "type": "boolean" }
-            ]
-        }),
-        allowed_scopes: &["machine", "project", "agent-session"],
-        writable: true,
-        profileable: false,
-        sensitive: false,
-        default: None,
-        default_semantics: "computed",
-        effect_kind: "session-restart-required",
-        effect_summary: "The next compose resolves the new capability horizon; sessions \
+            value_schema: json!({
+                "type": "table",
+                "columns": [
+                    { "name": "capability", "type": "scalar" },
+                    { "name": "enabled", "type": "boolean" }
+                ]
+            }),
+            allowed_scopes: &["machine", "project", "agent-session"],
+            writable: true,
+            profileable: false,
+            sensitive: false,
+            default: None,
+            default_semantics: "computed",
+            effect_kind: "session-restart-required",
+            effect_summary: "The next compose resolves the new capability horizon; sessions \
                          already running keep the horizon they were launched with.",
-        effect_ref: Some("aikit diff --json"),
-        operations: (true, true, true, true),
-        native_ref: "aikit:scope:toggles",
-    },
-    Setting {
-        setting_ref: "ai-kit:resolution:skill-sets.default",
-        section_ref: "resolution",
-        key: "skill-sets.default",
-        title: "Default skill-sets",
-        description: "The skill-sets an unconfigured project inherits by default (AIKit home \
+            effect_ref: Some("aikit diff --json"),
+            operations: (true, true, true, true),
+            native_ref: "aikit:scope:toggles",
+        },
+        Setting {
+            setting_ref: "ai-kit:resolution:skill-sets.default",
+            section_ref: "resolution",
+            key: "skill-sets.default",
+            title: "Default skill-sets",
+            description: "The skill-sets an unconfigured project inherits by default (AIKit home \
                       `config.toml`). No v2 disclosure axis exists for this setting yet, so \
                       reconciliation reads `unknown` while mutation still works.",
-        value_schema: json!({ "type": "list", "items": { "type": "scalar" } }),
-        allowed_scopes: &["machine"],
-        writable: true,
-        profileable: false,
-        sensitive: false,
-        default: Some(json!([])),
-        default_semantics: "constant",
-        effect_kind: "value-change",
-        effect_summary: "The next project match inherits the new default skill-sets; \
+            value_schema: json!({ "type": "list", "items": { "type": "scalar" } }),
+            allowed_scopes: &["machine"],
+            writable: true,
+            profileable: false,
+            sensitive: false,
+            default: Some(json!([])),
+            default_semantics: "constant",
+            effect_kind: "value-change",
+            effect_summary: "The next project match inherits the new default skill-sets; \
                          already-resolved contexts keep theirs.",
-        effect_ref: Some("aikit project defaults --json"),
-        operations: (true, true, true, true),
-        native_ref: "aikit:config:default-skill-sets",
-    },
-    Setting {
-        setting_ref: "ai-kit:models:models.candidates",
-        section_ref: "models",
-        key: "models.candidates",
-        title: "Model candidates",
-        description: "The model candidates a launch composes from. AIKit authors no \
+            effect_ref: Some("aikit project defaults --json"),
+            operations: (true, true, true, true),
+            native_ref: "aikit:config:default-skill-sets",
+        },
+        Setting {
+            setting_ref: "ai-kit:models:models.candidates",
+            section_ref: "models",
+            key: "models.candidates",
+            title: "Model candidates",
+            description: "The model candidates a launch composes from. AIKit authors no \
                       default-model setting: the model is resolved per session launch \
                       (`aikit compose --model`), so this subject is disclosure-only — there \
                       is nothing native for the plane to write.",
-        value_schema: json!({ "type": "reference", "subject_kind": "model.stable-id" }),
-        allowed_scopes: &["world"],
-        writable: false,
-        profileable: false,
-        sensitive: false,
-        default: None,
-        default_semantics: "computed",
-        effect_kind: "none",
-        effect_summary: "Model choice resolves per launch; there is no restart axis.",
-        effect_ref: Some("aikit compose --json"),
-        operations: (false, false, false, false),
-        native_ref: "aikit:model-catalogue",
-    },
-    Setting {
-        setting_ref: "ai-kit:models:models.credentials",
-        section_ref: "models",
-        key: "models.credentials",
-        title: "Provider credential reference",
-        description: "Presence and reference for provider credentials. The material is bound \
+            value_schema: json!({ "type": "reference", "subject_kind": "model.stable-id" }),
+            allowed_scopes: &["world"],
+            writable: false,
+            profileable: false,
+            sensitive: false,
+            default: None,
+            default_semantics: "computed",
+            effect_kind: "none",
+            effect_summary: "Model choice resolves per launch; there is no restart axis.",
+            effect_ref: Some("aikit compose --json"),
+            operations: (false, false, false, false),
+            native_ref: "aikit:model-catalogue",
+        },
+        Setting {
+            setting_ref: "ai-kit:models:models.credentials",
+            section_ref: "models",
+            key: "models.credentials",
+            title: "Provider credential reference",
+            description: "Presence and reference for provider credentials. The material is bound \
                       only through AIKit's own native mechanism (`aikit credential setup`); \
                       this plane never carries or mutates a value.",
-        value_schema: json!({ "type": "secret" }),
-        allowed_scopes: &["world"],
-        writable: false,
-        profileable: false,
-        sensitive: true,
-        default: None,
-        default_semantics: "none",
-        effect_kind: "provider-reconnect-required",
-        effect_summary: "When a credential is re-bound owner-natively, providers reconnect \
+            value_schema: json!({ "type": "secret" }),
+            allowed_scopes: &["world"],
+            writable: false,
+            profileable: false,
+            sensitive: true,
+            default: None,
+            default_semantics: "none",
+            effect_kind: "provider-reconnect-required",
+            effect_summary: "When a credential is re-bound owner-natively, providers reconnect \
                          with it.",
-        effect_ref: Some("aikit credential setup --json"),
-        operations: (true, false, false, false),
-        native_ref: "aikit:credentials",
-    },
-]
+            effect_ref: Some("aikit credential setup --json"),
+            operations: (true, false, false, false),
+            native_ref: "aikit:credentials",
+        },
+    ]
 }
 
 fn find_setting(setting_ref: &str) -> Option<Setting> {
@@ -297,7 +298,12 @@ fn fail(code: &str, message: impl std::fmt::Display) -> Failure {
     }
 }
 
-fn fail_with(mut doc: Value, code: &str, message: impl std::fmt::Display, setting: &str) -> Failure {
+fn fail_with(
+    mut doc: Value,
+    code: &str,
+    message: impl std::fmt::Display,
+    setting: &str,
+) -> Failure {
     doc["error_code"] = json!(code);
     doc["message"] = json!(message.to_string());
     doc["setting_ref"] = json!(setting);
@@ -392,10 +398,11 @@ impl ScopeAddress {
                     Ok(ScopeAddress::AgentSession(reference.to_string()))
                 }
             }
-            other if matches!(
-                other,
-                "ground" | "workcell" | "agency" | "agent" | "provider" | "connector-relation"
-            ) =>
+            other
+                if matches!(
+                    other,
+                    "ground" | "workcell" | "agency" | "agent" | "provider" | "connector-relation"
+                ) =>
             {
                 Err(fail(
                     "unsupported_scope",
@@ -417,17 +424,13 @@ impl ScopeAddress {
             ScopeAddress::Project(reference) => {
                 let matched = crate::projects::resolve(service.home(), cwd)
                     .map_err(|error| fail("owner_unavailable", error.message()))?;
-                let bound = matched
-                    .as_ref()
-                    .map(|m| m.spec.id.clone())
-                    .ok_or_else(|| {
-                        fail(
-                            "unsupported_scope",
-                            "no project is bound for this directory: the config plane addresses \
+                let bound = matched.as_ref().map(|m| m.spec.id.clone()).ok_or_else(|| {
+                    fail(
+                        "unsupported_scope",
+                        "no project is bound for this directory: the config plane addresses \
                              projects by their bound identity (`aikit project bind <id> <dir>`)",
-                        )
-                    })?
-                    ;
+                    )
+                })?;
                 if bound != *reference {
                     return Err(fail(
                         "unsupported_scope",
@@ -621,15 +624,10 @@ fn now_ms() -> i64 {
 
 /// Check one requested value against one setting's native validation. Returns
 /// the violations list; empty means valid.
-fn validate_value(
-    service: &Service,
-    setting: &Setting,
-    value: &Value,
-) -> Vec<Value> {
+fn validate_value(service: &Service, setting: &Setting, value: &Value) -> Vec<Value> {
     let mut violations: Vec<Value> = Vec::new();
-    let violation = |code: &str, message: String| {
-        json!({ "code": code, "message": message, "path": null })
-    };
+    let violation =
+        |code: &str, message: String| json!({ "code": code, "message": message, "path": null });
     match setting.value_kind() {
         "secret" => {
             // Representation law: the only acceptable value shape is a
@@ -668,7 +666,10 @@ fn validate_value(
                 }
                 Err(error) => violations.push(violation(
                     "invalid_profile_ref",
-                    format!("profile ids look like `profile/<group>/<name>`: {}", error.message()),
+                    format!(
+                        "profile ids look like `profile/<group>/<name>`: {}",
+                        error.message()
+                    ),
                 )),
             }
         }
@@ -676,8 +677,7 @@ fn validate_value(
             let Some(map) = value.as_object() else {
                 violations.push(violation(
                     "invalid_table",
-                    "capability toggles are an object mapping capability id to boolean"
-                        .to_string(),
+                    "capability toggles are an object mapping capability id to boolean".to_string(),
                 ));
                 return violations;
             };
@@ -807,8 +807,9 @@ fn read_value(value: Option<String>, value_file: Option<String>) -> Result<Value
         (None, Some(path)) => match path.as_str() {
             "-" => {
                 let mut buffer = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
-                    .map_err(|error| fail("invalid_value", format!("could not read stdin: {error}")))?;
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer).map_err(
+                    |error| fail("invalid_value", format!("could not read stdin: {error}")),
+                )?;
                 buffer
             }
             real => std::fs::read_to_string(real).map_err(|error| {
@@ -833,11 +834,19 @@ fn read_value(value: Option<String>, value_file: Option<String>) -> Result<Value
             "the value is empty: pass --value <json> or --value-file <path|->",
         ));
     }
-    serde_json::from_str(trimmed)
-        .map_err(|error| fail("invalid_value", format!("the value is not valid JSON: {error}")))
+    serde_json::from_str(trimmed).map_err(|error| {
+        fail(
+            "invalid_value",
+            format!("the value is not valid JSON: {error}"),
+        )
+    })
 }
 
-pub fn validate(service: &Service, cwd: &Path, args: crate::cli::ConfigValidateArgs) -> Result<Value, Failure> {
+pub fn validate(
+    service: &Service,
+    cwd: &Path,
+    args: crate::cli::ConfigValidateArgs,
+) -> Result<Value, Failure> {
     let value = read_value(args.value, args.value_file)?;
     let request = resolve_request(service, cwd, &args.setting, args.scope, value)?;
     if !request.setting.operations.0 {
@@ -891,8 +900,12 @@ fn canonical_plan_body(plan: &Value) -> Value {
 }
 
 fn plan_digest(plan: &Value) -> Result<String, Failure> {
-    let bytes = serde_json::to_vec(&canonical_plan_body(plan))
-        .map_err(|error| fail("internal", format!("could not encode plan for digest: {error}")))?;
+    let bytes = serde_json::to_vec(&canonical_plan_body(plan)).map_err(|error| {
+        fail(
+            "internal",
+            format!("could not encode plan for digest: {error}"),
+        )
+    })?;
     Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
 
@@ -918,7 +931,11 @@ fn change_summary(setting: &Setting, value: &Value, scope: &ScopeAddress) -> Str
                 }
                 parts.sort();
             }
-            format!("capability toggles at {}: {}", scope.compact(), parts.join(", "))
+            format!(
+                "capability toggles at {}: {}",
+                scope.compact(),
+                parts.join(", ")
+            )
         }
         "list" => format!(
             "default skill-sets become {:?} at {}",
@@ -929,7 +946,11 @@ fn change_summary(setting: &Setting, value: &Value, scope: &ScopeAddress) -> Str
     }
 }
 
-pub fn plan(service: &Service, cwd: &Path, args: crate::cli::ConfigPlanArgs) -> Result<Value, Failure> {
+pub fn plan(
+    service: &Service,
+    cwd: &Path,
+    args: crate::cli::ConfigPlanArgs,
+) -> Result<Value, Failure> {
     let value = read_value(args.value, args.value_file)?;
     let request = resolve_request(service, cwd, &args.setting, args.scope, value)?;
     if !request.setting.operations.1 {
@@ -1020,7 +1041,12 @@ fn executed_key(
 
 /// Execute one validated change through AIKit's own services. The value has
 /// already passed native validation; the services still own the write.
-fn execute(service: &mut Service, setting: &Setting, address: &ScopeAddress, value: &Value) -> Result<(), Failure> {
+fn execute(
+    service: &mut Service,
+    setting: &Setting,
+    address: &ScopeAddress,
+    value: &Value,
+) -> Result<(), Failure> {
     let scope_kind = address
         .aikit_kind()
         .expect("writable settings always map to an AIKit scope");
@@ -1062,24 +1088,40 @@ fn execute(service: &mut Service, setting: &Setting, address: &ScopeAddress, val
         }
         other => unreachable!("no executor for kind {other}"),
     };
-    result.map_err(|error| fail("internal", format!("the native mutation failed: {}", error.message())))
+    result.map_err(|error| {
+        fail(
+            "internal",
+            format!("the native mutation failed: {}", error.message()),
+        )
+    })
 }
 
 /// Restore the owner baseline for one setting at one scope: remove the scope's
 /// own declarations so lower scopes decide again.
-fn execute_reset(service: &mut Service, setting: &Setting, address: &ScopeAddress) -> Result<(), Failure> {
+fn execute_reset(
+    service: &mut Service,
+    setting: &Setting,
+    address: &ScopeAddress,
+) -> Result<(), Failure> {
     let scope_kind = address
         .aikit_kind()
         .expect("writable settings always map to an AIKit scope");
     let result = match setting.setting_ref {
-        "ai-kit:resolution:resolution.profiles" => service.reset_scope_profiles(scope_kind).map(|_| ()),
+        "ai-kit:resolution:resolution.profiles" => {
+            service.reset_scope_profiles(scope_kind).map(|_| ())
+        }
         "ai-kit:skills:skills.capabilities" => service.clear_scope_toggles(scope_kind).map(|_| ()),
         "ai-kit:resolution:skill-sets.default" => {
             crate::projects::set_defaults(service.home(), &[]).map(|_| ())
         }
         other => unreachable!("no reset executor for {other}"),
     };
-    result.map_err(|error| fail("internal", format!("the native reset failed: {}", error.message())))
+    result.map_err(|error| {
+        fail(
+            "internal",
+            format!("the native reset failed: {}", error.message()),
+        )
+    })
 }
 
 pub fn apply(service: &mut Service, args: crate::cli::ConfigApplyArgs) -> Result<Value, Failure> {
@@ -1097,8 +1139,12 @@ pub fn apply(service: &mut Service, args: crate::cli::ConfigApplyArgs) -> Result
             )
         })?,
     };
-    let plan: Value = serde_json::from_str(text.trim())
-        .map_err(|error| fail("validation_failed", format!("the plan is not valid JSON: {error}")))?;
+    let plan: Value = serde_json::from_str(text.trim()).map_err(|error| {
+        fail(
+            "validation_failed",
+            format!("the plan is not valid JSON: {error}"),
+        )
+    })?;
     if plan["schema"] != json!(PLAN_SCHEMA) {
         return Err(fail(
             "unsupported_schema",
@@ -1159,7 +1205,10 @@ pub fn apply(service: &mut Service, args: crate::cli::ConfigApplyArgs) -> Result
         return Err(fail_with(
             error_doc("unsupported_scope", String::new()),
             "unsupported_scope",
-            format!("the plan addresses `{}` outside the setting's allowed scopes", address.compact()),
+            format!(
+                "the plan addresses `{}` outside the setting's allowed scopes",
+                address.compact()
+            ),
             setting_ref,
         ));
     }
@@ -1172,9 +1221,18 @@ pub fn apply(service: &mut Service, args: crate::cli::ConfigApplyArgs) -> Result
     // original receipt. The mutation never runs twice under one key.
     let store = ConfigReceiptStore::new(service.home());
     let key = executed_key(&changeset_id, &setting, &address, Some(digest.to_string()));
-    if let Some(original) = store.find_executed(&key).map_err(|error| fail("internal", error.message()))? {
-        let original_id = original["receipt_id"].as_str().unwrap_or_default().to_string();
-        let native_ref = original["native_ref"].as_str().unwrap_or_default().to_string();
+    if let Some(original) = store
+        .find_executed(&key)
+        .map_err(|error| fail("internal", error.message()))?
+    {
+        let original_id = original["receipt_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let native_ref = original["native_ref"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         let replay = receipt(
             &setting,
             &address,
@@ -1199,7 +1257,10 @@ pub fn apply(service: &mut Service, args: crate::cli::ConfigApplyArgs) -> Result
         return Err(fail_with(
             error_doc("validation_failed", String::new()),
             "validation_failed",
-            format!("the plan's value no longer validates: {}", messages.join("; ")),
+            format!(
+                "the plan's value no longer validates: {}",
+                messages.join("; ")
+            ),
             setting_ref,
         ));
     }
@@ -1215,7 +1276,10 @@ pub fn apply(service: &mut Service, args: crate::cli::ConfigApplyArgs) -> Result
         String::new(),
         None,
     );
-    let receipt_id = document["receipt_id"].as_str().unwrap_or_default().to_string();
+    let receipt_id = document["receipt_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     document["native_ref"] = json!(format!("aikit:config:receipts/{receipt_id}"));
     store
         .record(&document)
@@ -1223,7 +1287,11 @@ pub fn apply(service: &mut Service, args: crate::cli::ConfigApplyArgs) -> Result
     Ok(document)
 }
 
-pub fn reset(service: &mut Service, cwd: &Path, args: crate::cli::ConfigResetArgs) -> Result<Value, Failure> {
+pub fn reset(
+    service: &mut Service,
+    cwd: &Path,
+    args: crate::cli::ConfigResetArgs,
+) -> Result<Value, Failure> {
     let setting = find_setting(&args.setting).ok_or_else(|| {
         fail(
             "unsupported_setting",
@@ -1257,9 +1325,18 @@ pub fn reset(service: &mut Service, cwd: &Path, args: crate::cli::ConfigResetArg
 
     let store = ConfigReceiptStore::new(service.home());
     let key = executed_key(&changeset_id, &setting, &address, None);
-    if let Some(original) = store.find_executed(&key).map_err(|error| fail("internal", error.message()))? {
-        let original_id = original["receipt_id"].as_str().unwrap_or_default().to_string();
-        let native_ref = original["native_ref"].as_str().unwrap_or_default().to_string();
+    if let Some(original) = store
+        .find_executed(&key)
+        .map_err(|error| fail("internal", error.message()))?
+    {
+        let original_id = original["receipt_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let native_ref = original["native_ref"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         return Ok(receipt(
             &setting,
             &address,
@@ -1283,7 +1360,10 @@ pub fn reset(service: &mut Service, cwd: &Path, args: crate::cli::ConfigResetArg
         String::new(),
         None,
     );
-    let receipt_id = document["receipt_id"].as_str().unwrap_or_default().to_string();
+    let receipt_id = document["receipt_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     document["native_ref"] = json!(format!("aikit:config:receipts/{receipt_id}"));
     store
         .record(&document)
@@ -1315,6 +1395,13 @@ pub fn dispatch(cwd: &Path, command: ConfigCmd) -> Result<Value, Failure> {
 }
 
 fn discover(cwd: &Path) -> Result<Service, Failure> {
-    Service::discover(cwd)
-        .map_err(|error| fail("owner_unavailable", format!("the AIKit owner context is unavailable: {}", error.message())))
+    Service::discover(cwd).map_err(|error| {
+        fail(
+            "owner_unavailable",
+            format!(
+                "the AIKit owner context is unavailable: {}",
+                error.message()
+            ),
+        )
+    })
 }

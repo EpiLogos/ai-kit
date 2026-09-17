@@ -184,18 +184,17 @@ fn credential(
         error("No eligible current credential provider; an inventory reference is not key material")
     })?;
     let secret = if materialise {
-        let source: &dyn SecretProvider = if native.descriptor(&use_.credential_ref).provider_ref
-            == *provider
-        {
-            &native
-        } else {
-            environment
+        let source: &dyn SecretProvider =
+            if native.descriptor(&use_.credential_ref).provider_ref == *provider {
+                &native
+            } else {
+                environment
                 .as_ref()
                 .filter(|e| e.descriptor(&use_.credential_ref).provider_ref == *provider)
                 .ok_or_else(|| {
                     error("Selected credential provider is not materialisable by this native path")
                 })?
-        };
+            };
         Some(source.materialise(&use_.credential_ref, SecretMaterialisationClass::ProcessEnv)?
             .ok_or_else(|| error("Selected credential provider did not return material; refusing provider execution"))?)
     } else {

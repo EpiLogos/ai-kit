@@ -172,7 +172,9 @@ impl TerminalWorkingField {
 /// Project the same UI-neutral SessionSpace runtime that desktop/other consumers
 /// can read into the existing TUI field. No SessionSpace semantics are rebuilt in
 /// the terminal layer.
-pub fn working_field_from_session_space(model: &SessionSpaceReadModel) -> Result<TerminalWorkingField> {
+pub fn working_field_from_session_space(
+    model: &SessionSpaceReadModel,
+) -> Result<TerminalWorkingField> {
     let aikit = r("ai-kit")?;
     let tui_surface = r("surface/aikit/tui")?;
     let mut items = Vec::new();
@@ -285,7 +287,9 @@ pub fn working_field_from_session_space(model: &SessionSpaceReadModel) -> Result
         ) {
             (true, false, _, _) => "connection available; capability is visible but not granted",
             (true, true, Some(_), false) => "capability granted; Action remains unauthorised",
-            (true, true, Some(_), true) => "capability granted and named Action authorised by its owning policy",
+            (true, true, Some(_), true) => {
+                "capability granted and named Action authorised by its owning policy"
+            }
             (true, true, None, _) => "capability granted; no Action authorisation is implied",
             _ => "connection presence supplies no capability or Action authority",
         };
@@ -332,7 +336,10 @@ pub fn select_working_field_subject(
     if field.item(&subject).is_none() {
         return Err(AikitError::new(
             "tui.working_field.subject_absent",
-            format!("{subject} is not in working-field revision {}", field.revision),
+            format!(
+                "{subject} is not in working-field revision {}",
+                field.revision
+            ),
         ));
     }
     Ok(reduce_tui(state, UiAction::Select(subject)))
@@ -347,11 +354,13 @@ fn component_availability(
         SessionSpaceActivationState::Activating
         | SessionSpaceActivationState::Degraded
         | SessionSpaceActivationState::Eligible => WorkingFieldAvailability::Degraded {
-            reason: reason.unwrap_or(match state {
-                SessionSpaceActivationState::Eligible => "eligible but not live-active",
-                SessionSpaceActivationState::Activating => "live activation in progress",
-                _ => "live provider/component degraded",
-            }).into(),
+            reason: reason
+                .unwrap_or(match state {
+                    SessionSpaceActivationState::Eligible => "eligible but not live-active",
+                    SessionSpaceActivationState::Activating => "live activation in progress",
+                    _ => "live provider/component degraded",
+                })
+                .into(),
         },
         SessionSpaceActivationState::Declared => WorkingFieldAvailability::Degraded {
             reason: "declared but not eligible/active".into(),
@@ -379,7 +388,9 @@ fn connection_availability(
         SessionSpaceConnectionState::Connecting
         | SessionSpaceConnectionState::Degraded
         | SessionSpaceConnectionState::Disconnected => WorkingFieldAvailability::Degraded {
-            reason: reason.unwrap_or("connection is not currently healthy/connected").into(),
+            reason: reason
+                .unwrap_or("connection is not currently healthy/connected")
+                .into(),
         },
         SessionSpaceConnectionState::Unavailable | SessionSpaceConnectionState::Closed => {
             WorkingFieldAvailability::Unavailable {

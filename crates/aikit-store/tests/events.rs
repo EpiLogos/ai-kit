@@ -89,14 +89,23 @@ fn a_recorded_run_event_contains_no_secret_argument() {
         line.contains("crates.io"),
         "a non-secret argument is still worth recording"
     );
-    assert_eq!(event.arguments.get("token").map(String::as_str), Some("••••••"));
-    assert_eq!(event.arguments.get("webhook").map(String::as_str), Some("••••••"));
+    assert_eq!(
+        event.arguments.get("token").map(String::as_str),
+        Some("••••••")
+    );
+    assert_eq!(
+        event.arguments.get("webhook").map(String::as_str),
+        Some("••••••")
+    );
 }
 
 #[test]
 fn an_argument_nobody_declared_is_masked_rather_than_trusted() {
     let mut values = ArgValues::new();
-    values.insert("mystery".into(), ArgValue::String("possibly-a-token".into()));
+    values.insert(
+        "mystery".into(),
+        ArgValue::String("possibly-a-token".into()),
+    );
     let event = Event::new(EventAction::Run).with_arguments(&[], &values);
     assert_eq!(
         event.arguments.get("mystery").map(String::as_str),
@@ -116,7 +125,12 @@ fn an_event_has_no_field_that_prompt_or_transcript_text_could_live_in() {
         .with_bypass_reason("the gate is wrong about generated code");
 
     let json: serde_json::Value = serde_json::from_str(&event.to_json_line().unwrap()).unwrap();
-    let keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+    let keys: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
 
     for forbidden in [
         "prompt",
@@ -175,7 +189,10 @@ fn the_log_is_appended_to_rather_than_replaced() {
             .unwrap();
     }
     assert_eq!(
-        std::fs::read_to_string(home.event_log()).unwrap().lines().count(),
+        std::fs::read_to_string(home.event_log())
+            .unwrap()
+            .lines()
+            .count(),
         3
     );
     assert_eq!(index.event_count().unwrap(), 3);

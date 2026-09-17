@@ -269,7 +269,9 @@ fn pi_faculties() -> Vec<HarnessFacultyObservation> {
             HarnessFaculty::Surfaces,
             FacultySupport::Supported,
             &[EV_HELP, EV_USAGE_DOC, EV_REPO, EV_VERSION],
-            Some("interactive TUI, --print non-interactive, --mode text|json|rpc, HTML session export"),
+            Some(
+                "interactive TUI, --print non-interactive, --mode text|json|rpc, HTML session export",
+            ),
         ),
         faculty(
             HarnessFaculty::LiveRetraction,

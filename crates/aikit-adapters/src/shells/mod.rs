@@ -93,7 +93,7 @@ impl FromStr for Shell {
                          the contextual bin directory can still be put on PATH by hand"
                     ),
                 )
-                .with("shell", other))
+                .with("shell", other));
             }
         })
     }

@@ -359,10 +359,9 @@ mod tests {
             == WikiSearchAddress::AuthoredSource {
                 source: SourceRef::parse("source:test:one").unwrap()
             }));
-        assert!(!hits
-            .iter()
-            .any(|hit| hit.address.as_curated().is_some_and(
-                |resource| resource.as_str() == "source:test:one"
-            )));
+        assert!(!hits.iter().any(|hit| hit
+            .address
+            .as_curated()
+            .is_some_and(|resource| resource.as_str() == "source:test:one")));
     }
 }

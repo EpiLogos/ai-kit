@@ -79,10 +79,7 @@ fn refresh_preserves_selection_by_resource_ref_when_rows_reorder() {
 #[test]
 fn refresh_explains_selection_invalidation_instead_of_falling_to_a_row_index() {
     let selected = id("factory:capability:beta");
-    let mut state = state_with_model(&[
-        "factory:capability:alpha",
-        "factory:capability:beta",
-    ]);
+    let mut state = state_with_model(&["factory:capability:alpha", "factory:capability:beta"]);
     state.selected = Some(selected.clone());
 
     let next = reduce_tui(
@@ -101,14 +98,9 @@ fn refresh_explains_selection_invalidation_instead_of_falling_to_a_row_index() {
 fn presentation_resize_relation_views_and_navigation_do_not_own_semantic_state() {
     let selected = id("factory:capability:alpha");
     let staged = id("factory:capability:beta");
-    let mut state = state_with_model(&[
-        "factory:capability:alpha",
-        "factory:capability:beta",
-    ]);
+    let mut state = state_with_model(&["factory:capability:alpha", "factory:capability:beta"]);
     state.selected = Some(selected.clone());
-    state
-        .staged
-        .stage(staged.clone(), ActivationIntent::Enable);
+    state.staged.stage(staged.clone(), ActivationIntent::Enable);
 
     let state = reduce_tui(
         state,
@@ -130,10 +122,7 @@ fn presentation_resize_relation_views_and_navigation_do_not_own_semantic_state()
 #[test]
 fn staged_intent_survives_refresh_even_when_the_resource_temporarily_disappears() {
     let staged = id("factory:capability:beta");
-    let mut state = state_with_model(&[
-        "factory:capability:alpha",
-        "factory:capability:beta",
-    ]);
+    let mut state = state_with_model(&["factory:capability:alpha", "factory:capability:beta"]);
     state
         .staged
         .stage(staged.clone(), ActivationIntent::Disable);
@@ -153,9 +142,7 @@ fn staged_intent_survives_refresh_even_when_the_resource_temporarily_disappears(
 fn dismiss_and_back_never_discard_staged_state_scope_or_request_exit() {
     let staged = id("factory:capability:alpha");
     let mut state = state_with_model(&["factory:capability:alpha"]);
-    state
-        .staged
-        .stage(staged.clone(), ActivationIntent::Enable);
+    state.staged.stage(staged.clone(), ActivationIntent::Enable);
     state.overlay = Some(Overlay::Help);
 
     let state = reduce_tui(state, UiAction::Dismiss).state;
@@ -174,9 +161,7 @@ fn dismiss_and_back_never_discard_staged_state_scope_or_request_exit() {
 fn exit_is_explicit_but_cannot_implicitly_discard_staged_intent() {
     let staged = id("factory:capability:alpha");
     let mut state = state_with_model(&["factory:capability:alpha"]);
-    state
-        .staged
-        .stage(staged.clone(), ActivationIntent::Enable);
+    state.staged.stage(staged.clone(), ActivationIntent::Enable);
 
     let state = reduce_tui(state, UiAction::Exit).state;
     assert!(!state.exit_requested);
@@ -193,9 +178,7 @@ fn exit_is_explicit_but_cannot_implicitly_discard_staged_intent() {
 fn discard_and_exit_are_explicit_actions() {
     let staged = id("factory:capability:alpha");
     let mut state = state_with_model(&["factory:capability:alpha"]);
-    state
-        .staged
-        .stage(staged, ActivationIntent::Enable);
+    state.staged.stage(staged, ActivationIntent::Enable);
 
     let state = reduce_tui(state, UiAction::DiscardStaged).state;
     assert!(state.staged.is_empty());
@@ -215,9 +198,7 @@ fn discard_and_exit_are_explicit_actions() {
 fn apply_requires_scoped_preview_and_separate_confirmation() {
     let staged = id("factory:capability:alpha");
     let mut state = state_with_model(&["factory:capability:alpha"]);
-    state
-        .staged
-        .stage(staged.clone(), ActivationIntent::Enable);
+    state.staged.stage(staged.clone(), ActivationIntent::Enable);
 
     let reduction = reduce_tui(state, UiAction::RequestApply);
     assert_eq!(
@@ -260,9 +241,7 @@ fn apply_requires_scoped_preview_and_separate_confirmation() {
 fn changing_scope_invalidates_preview_and_requires_a_new_one() {
     let staged = id("factory:capability:alpha");
     let mut state = state_with_model(&["factory:capability:alpha"]);
-    state
-        .staged
-        .stage(staged, ActivationIntent::Enable);
+    state.staged.stage(staged, ActivationIntent::Enable);
     state.preview = Some(CompositionPreview {
         revision: "preview-project".into(),
         scope: ScopeKind::Project,

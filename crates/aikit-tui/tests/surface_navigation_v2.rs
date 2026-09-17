@@ -42,10 +42,7 @@ fn escape_at_rest_is_back_only_and_ctrl_u_is_explicit_query_clear() {
     assert!(!surface.semantic().exit_requested);
 
     surface
-        .handle(
-            &mut backend,
-            key(KeyCode::Char('u'), KeyModifiers::CONTROL),
-        )
+        .handle(&mut backend, key(KeyCode::Char('u'), KeyModifiers::CONTROL))
         .unwrap();
     assert!(surface.semantic().query.is_empty());
 }
@@ -63,19 +60,13 @@ fn explicit_exit_is_refused_while_staged_intent_remains() {
         .unwrap();
 
     surface
-        .handle(
-            &mut backend,
-            key(KeyCode::Char(' '), KeyModifiers::CONTROL),
-        )
+        .handle(&mut backend, key(KeyCode::Char(' '), KeyModifiers::CONTROL))
         .unwrap();
     assert!(!surface.semantic().staged.is_empty());
 
     assert_eq!(
         surface
-            .handle(
-                &mut backend,
-                key(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            )
+            .handle(&mut backend, key(KeyCode::Char('c'), KeyModifiers::CONTROL),)
             .unwrap(),
         ApplicationSurfaceStep::Continue
     );
@@ -101,10 +92,7 @@ fn ctrl_q_is_an_explicit_exit_when_nothing_is_staged() {
 
     assert_eq!(
         surface
-            .handle(
-                &mut backend,
-                key(KeyCode::Char('q'), KeyModifiers::CONTROL),
-            )
+            .handle(&mut backend, key(KeyCode::Char('q'), KeyModifiers::CONTROL),)
             .unwrap(),
         ApplicationSurfaceStep::Outcome(PaletteOutcome::Closed)
     );

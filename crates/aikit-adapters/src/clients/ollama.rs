@@ -66,8 +66,7 @@ const EV_API: &str = "doc:github.com/ollama/ollama/main/docs/api/openai-compatib
 const EV_README: &str = "doc:github.com/ollama/ollama/main/README.md";
 const EV_MODELS_DIR: &str =
     "native:/Users/admin/.ollama/models (blobs+manifests; detection facet models:3)";
-const EV_CAPABILITY_UNDECLARED: &str =
-    "native:actuation harness capability ollama -> undeclared (declared: claude-code, codex, zcode)";
+const EV_CAPABILITY_UNDECLARED: &str = "native:actuation harness capability ollama -> undeclared (declared: claude-code, codex, zcode)";
 /// Actuation owns detection; AIKit consumes the record. Cited per the
 /// `actuation.harness-detection/v1` schema (catalog r4); this is the record my
 /// own `actuation harness detect --json --versions` run produced.

@@ -6,7 +6,7 @@ use aikit_core::platform::{MuxKind, PlaceTechnology};
 use aikit_core::Result;
 
 use aikit_adapters::place_technology::{
-    PlaceTechnologyAdapter, PlaceTechnologyReading, PlaceTechnologyRegistry, MuxAdapterHandle,
+    MuxAdapterHandle, PlaceTechnologyAdapter, PlaceTechnologyReading, PlaceTechnologyRegistry,
 };
 
 /// A fake technology with a scripted detection answer, so these tests pin the
@@ -54,7 +54,9 @@ impl PlaceTechnologyAdapter for FakeTechnology {
 #[test]
 fn the_builtin_registry_detects_tmux_cmux_herdr_and_registers_plain() {
     let registry = PlaceTechnologyRegistry::builtin();
-    let readings = registry.detect_all().expect("detection never fails the read");
+    let readings = registry
+        .detect_all()
+        .expect("detection never fails the read");
     let names: Vec<&str> = readings
         .iter()
         .map(|reading| reading.technology.as_str())
@@ -146,7 +148,11 @@ fn a_registered_absent_technology_reports_its_reason_not_a_failure() {
     assert_eq!(ghost.detail.as_deref(), Some("`fake` is not on PATH"));
     // It also takes its place in the field enumeration (installed filtering is
     // the field's business, not the registry's).
-    assert!(registry.detect_field().unwrap().iter().any(|r| r.technology.as_str() == "ghost"));
+    assert!(registry
+        .detect_field()
+        .unwrap()
+        .iter()
+        .any(|r| r.technology.as_str() == "ghost"));
 }
 
 #[test]

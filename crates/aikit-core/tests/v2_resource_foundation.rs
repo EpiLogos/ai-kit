@@ -119,13 +119,15 @@ fn legacy_context_becomes_a_binding_only_with_external_project_identity() {
 
 #[test]
 fn factory_cr001_fixture_is_consumed_as_external_resource_views_without_identity_translation() {
-    let view = FactoryInteropView::from_fixture_json(include_str!(
-        "fixtures/factory-interop-v1.json"
-    ))
-    .expect("Factory CR-001 fixture");
+    let view =
+        FactoryInteropView::from_fixture_json(include_str!("fixtures/factory-interop-v1.json"))
+            .expect("Factory CR-001 fixture");
 
     let action = view.action_resource().expect("Factory Action view");
-    assert_eq!(action.record.descriptor.id.as_str(), "factory:action:update");
+    assert_eq!(
+        action.record.descriptor.id.as_str(),
+        "factory:action:update"
+    );
     assert_eq!(action.record.descriptor.kind, ResourceKind::Action);
     assert_eq!(
         action.record.descriptor.owner.as_ref().unwrap().as_str(),
@@ -143,26 +145,27 @@ fn factory_cr001_fixture_is_consumed_as_external_resource_views_without_identity
             .as_str(),
         "rev:3"
     );
-    assert_eq!(action.record.descriptor.sources[0].state, SourceState::Unresolved);
+    assert_eq!(
+        action.record.descriptor.sources[0].state,
+        SourceState::Unresolved
+    );
     assert!(action.declared_provider.is_none());
 
-    let capability = view
-        .capability_resource()
-        .expect("Factory Capability view");
+    let capability = view.capability_resource().expect("Factory Capability view");
     assert_eq!(
         capability.record.descriptor.id.as_str(),
         "factory:capability:browser"
     );
     assert_eq!(capability.record.descriptor.kind, ResourceKind::Capability);
-    assert_ne!(
-        action.record.descriptor.id,
-        capability.record.descriptor.id
-    );
+    assert_ne!(action.record.descriptor.id, capability.record.descriptor.id);
     assert_eq!(
         capability.declared_provider.as_ref().unwrap().as_str(),
         "provider:browser"
     );
-    assert_eq!(capability.record.providers[0].state, ProviderState::Unresolved);
+    assert_eq!(
+        capability.record.providers[0].state,
+        ProviderState::Unresolved
+    );
     assert_eq!(
         capability.record.providers[0].provider.as_str(),
         "provider:browser"
@@ -184,16 +187,18 @@ fn factory_cr001_fixture_is_consumed_as_external_resource_views_without_identity
             path: PathBuf::from("/work/factory"),
         },
     );
-    assert_eq!(operational_binding.project.as_str(), "factory:project:factory");
+    assert_eq!(
+        operational_binding.project.as_str(),
+        "factory:project:factory"
+    );
     assert!(operational_binding.legacy_aikit_project_id.is_none());
 }
 
 #[test]
 fn imported_factory_provider_and_source_state_can_degrade_without_rewriting_external_identity() {
-    let view = FactoryInteropView::from_fixture_json(include_str!(
-        "fixtures/factory-interop-v1.json"
-    ))
-    .unwrap();
+    let view =
+        FactoryInteropView::from_fixture_json(include_str!("fixtures/factory-interop-v1.json"))
+            .unwrap();
     let mut capability = view.capability_resource().unwrap().record;
     let original = capability.descriptor.id.clone();
 

@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "case-19-tags-241-answered-it-2026-09-09",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "central-e5-tui-followup-2026-09-09",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1788947956,
+  "subject": "CASE 19 tags: #241 answered it properly and my earlier corpus reading was half wrong; test set removed",
+  "result": "CORRECTION TO MY OWN EARLIER RETURN. I reported that zero of 291 corpus records declare tags and framed that as the corpus having no tags. The count was accurate for files carrying record_id, but the conclusion was wrong: #241 (771dc91, knowledge: a tag is a property of a Source, not a curated node) found an authored tag vocabulary — source-bank/..., argument-map/... — living in the files that carry corpus metadata WITHOUT a record identity, which select_ingestable_records reported as a bare integer and walked past in silence. Its PR names that reporting exactly as how a reader concluded the corpus declared no tags at all. That reader was me. #241 also supersedes the model my test set was exercising: tag nodes and tagged edges are gone; tags compile into SourceMaterial and SourceBinding::tags, a record effective tags are its own plus those of every source it cites, and the PR explicitly rejects generating vocabulary from record_type — which is precisely what my synthetic symbolon/<record_type> tags did. Keeping the test set would have contaminated the model that replaced it. REMOVED: the 36-record test set is gone from the corpus (verified: zero records carry a tags: key, zero carry the injected type-tags, zero carry the inline form). Note the removal script refused all 36 on its sha guard because the files had drifted under another session — the guard worked as designed and I verified the residue directly rather than forcing it. Control/agents/now/agents/case19-tags-testset-2026-09-08 retired. WHAT STANDS: the mechanism proof from that test set was real — ingest turned declared tags into 15 tag nodes and 108 edges with clean source_ids — but it proved a facility #241 has since replaced. No owner decision on taggability is outstanding any more; the vocabulary is read off the register and bibliography that author it.",
+  "status": "resolved"
+}

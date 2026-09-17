@@ -86,8 +86,8 @@ pub use composition_application::{
     apply_skillset_relation_mutation, preview_skillset_relation_mutation,
     SkillSetRelationProcedurePreview, SkillSetRelationProcedureReceipt,
 };
-pub use credentials::{CredentialBindingStore, CREDENTIAL_BINDING_STORE_VERSION};
 pub use config_plane::{ConfigReceiptStore, ExecutedKey};
+pub use credentials::{CredentialBindingStore, CREDENTIAL_BINDING_STORE_VERSION};
 pub use curator::{curate, detect_drift, report_drift, CurationReport, Drift};
 pub use edit::{OverlayDocument, ProfileDocument};
 pub use events::{Event, EventAction, EventRecorder, Outcome, Timestamp};

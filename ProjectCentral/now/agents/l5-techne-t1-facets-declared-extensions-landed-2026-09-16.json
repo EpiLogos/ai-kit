@@ -1,0 +1,11 @@
+{
+ "schema": "central.project-now.handoff/v1",
+ "id": "l5-techne-t1-facets-declared-extensions-landed-2026-09-16",
+ "provenance": "agent-authored-bounded-return",
+ "actor": "zcode-session-2026-09-16-l5-techne-execution",
+ "kind": "handoff",
+ "recorded_at_unix_seconds": 1789552600,
+ "subject": "L5 Techne T1: aikit.techne-facet/v1 declared facets on techne/t1-facets",
+ "result": "Lane T1 landed on branch techne/t1-facets (925f720, from beedb50): aikit-core knowledge_facets.rs (temporal/place/selector declared extensions mirroring ql.techne/v1 semantics, ql-stance validate-but-preserve discipline), aikit-adapters techne_temporal.rs (Central DAY/NOW -> facets, handoff recorded_at as occurrence, horizon observed_at as receipt). cargo test -p aikit-core -p aikit-adapters green (21 new tests); clippy clean. The unrelated in-flight aikit-cli working tree was not touched, staged or committed. Open: Factory run-interval facets and real spatial producers (G3's second case).",
+ "status": "active"
+}

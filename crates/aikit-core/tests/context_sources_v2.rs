@@ -10,9 +10,10 @@ use aikit_core::scope::ScopeKind;
 use aikit_core::{
     AbsenceKind, AgentVisibility, Availability, ContextSourceEntry, ContextSourceIndex,
     ContextSourceOperation, ContextSourcePrivacy, ContextSourceProvider,
-    ContextSourceProviderCapabilities, ContextSourceProviderDescriptor, ContextSourceProviderStatus,
-    ContextSourceReadOutcome, ContextSourceReadRequest, DisclosureState, ExternalEgress, Freshness,
-    HorizonRequest, ProviderReadResult, RetrievalTarget, StructuredAbsence,
+    ContextSourceProviderCapabilities, ContextSourceProviderDescriptor,
+    ContextSourceProviderStatus, ContextSourceReadOutcome, ContextSourceReadRequest,
+    DisclosureState, ExternalEgress, Freshness, HorizonRequest, ProviderReadResult,
+    RetrievalTarget, StructuredAbsence,
 };
 
 fn provider_ref() -> ProviderRef {
@@ -226,11 +227,12 @@ fn canonical_identity_survives_provider_loss_degradation_reappearance_and_rebuil
     unavailable.insert(unavailable_entry);
     let first = unavailable.explain(&canonical).unwrap();
     assert_eq!(first.resource, canonical);
-    assert!(matches!(first.availability, Availability::Unavailable { .. }));
+    assert!(matches!(
+        first.availability,
+        Availability::Unavailable { .. }
+    ));
     assert_eq!(
-        unavailable
-            .search(&HorizonRequest::human(Some(project_ref())), "architecture")[0]
-            .resource,
+        unavailable.search(&HorizonRequest::human(Some(project_ref())), "architecture")[0].resource,
         canonical
     );
 
@@ -385,7 +387,10 @@ fn privacy_excludes_never_agent_visible_material_and_denies_external_egress_befo
         },
         &mut provider,
     );
-    assert!(matches!(local_outcome, ContextSourceReadOutcome::Retrieved(_)));
+    assert!(matches!(
+        local_outcome,
+        ContextSourceReadOutcome::Retrieved(_)
+    ));
     assert_eq!(provider.read_count, 1);
 
     let external_outcome = index.retrieve(

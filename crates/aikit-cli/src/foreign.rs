@@ -86,12 +86,25 @@ pub fn projected_generation(
     let mut parent: Option<PathBuf> = None;
     for entry in std::fs::read_dir(path).ok()? {
         let entry = entry.ok()?.path();
-        if !entry.is_dir() && !entry.is_symlink() { continue; }
-        if !entry.is_symlink() || !entry.join("SKILL.md").is_file() { return None; }
+        if !entry.is_dir() && !entry.is_symlink() {
+            continue;
+        }
+        if !entry.is_symlink() || !entry.join("SKILL.md").is_file() {
+            return None;
+        }
         let link = std::fs::read_link(&entry).ok()?;
-        let target = if link.is_absolute() { link } else { path.join(link) };
+        let target = if link.is_absolute() {
+            link
+        } else {
+            path.join(link)
+        };
         let candidate = target.parent()?.to_path_buf();
-        if parent.as_ref().is_some_and(|previous| previous != &candidate) { return None; }
+        if parent
+            .as_ref()
+            .is_some_and(|previous| previous != &candidate)
+        {
+            return None;
+        }
         parent = Some(candidate);
     }
     direct_projected_generation(home, &parent?)
@@ -107,19 +120,23 @@ fn direct_projected_generation(
     if ![
         Path::new("projections/codex/.agents/skills"),
         Path::new("projections/claude/.claude/skills"),
-    ].contains(&suffix) {
+    ]
+    .contains(&suffix)
+    {
         return None;
     }
     let generations = generation.parent()?;
     let context = generations.parent()?;
     if generations.file_name()? != "generations"
-        || context.parent()? != std::fs::canonicalize(home.contexts()).ok()? {
+        || context.parent()? != std::fs::canonicalize(home.contexts()).ok()?
+    {
         return None;
     }
     let metadata = aikit_store::generation::read_metadata(generation).ok()?;
     if metadata.generation_format < 1
         || generation.file_name()?.to_str()? != metadata.generation_id.to_string()
-        || context.file_name()?.to_str()? != metadata.context_id {
+        || context.file_name()?.to_str()? != metadata.context_id
+    {
         return None;
     }
     Some(metadata)

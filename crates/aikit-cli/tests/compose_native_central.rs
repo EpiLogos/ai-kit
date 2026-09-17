@@ -133,7 +133,10 @@ fn explicit_compose_discloses_authored_basis_and_refuses_broken_source() {
     let repeated = project_context(&root, &home, &project);
     succeeded(&repeated);
     let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
-    assert_eq!(first, repeated, "unchanged native input has a stable receipt");
+    assert_eq!(
+        first, repeated,
+        "unchanged native input has a stable receipt"
+    );
 
     // Change actual source bytes without changing the declared owner revision.
     // The next Context receipt must bind the new bytes, not merely the old label.
@@ -143,7 +146,10 @@ fn explicit_compose_discloses_authored_basis_and_refuses_broken_source() {
     let changed = project_context(&root, &home, &project);
     succeeded(&changed);
     let changed: Value = serde_json::from_slice(&changed.stdout).unwrap();
-    assert_ne!(first["context"]["reference"], changed["context"]["reference"]);
+    assert_ne!(
+        first["context"]["reference"],
+        changed["context"]["reference"]
+    );
     assert_eq!(
         first["context"]["basis"]["resolver_hash"],
         changed["context"]["basis"]["resolver_hash"]

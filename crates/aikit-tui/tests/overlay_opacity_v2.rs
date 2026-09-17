@@ -147,7 +147,10 @@ fn relations_panel_is_opaque_over_a_resource_list_taller_than_itself() {
     );
 
     surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
-    assert!(surface.semantic().selected.is_some(), "Down must select the first result");
+    assert!(
+        surface.semantic().selected.is_some(),
+        "Down must select the first result"
+    );
     assert_eq!(surface.semantic().relation_view, RelationView::Tree);
 
     let interior = relations_panel_interior(&draw(&surface));

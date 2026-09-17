@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use aikit_adapters::clients::bootstrap::render_managed_bootstrap;
 use aikit_core::actor_bootstrap::{ActorBootstrap, ResourceSetSummary, ACTOR_BOOTSTRAP_VERSION};
 use aikit_core::platform::TargetId;
-use aikit_core::project::{ProjectBinding, ProjectBindingLocator, ProjectConstituentRef, ProjectRef};
+use aikit_core::project::{
+    ProjectBinding, ProjectBindingLocator, ProjectConstituentRef, ProjectRef,
+};
 use aikit_core::resource::ResourceRef;
 use aikit_core::session_space::SessionSpaceRef;
 
@@ -42,8 +44,8 @@ fn actor_bootstrap() -> ActorBootstrap {
         host: None,
         harness: None,
         model: None,
-    harness_candidates: Vec::new(),
-    model_candidates: Vec::new(),
+        harness_candidates: Vec::new(),
+        model_candidates: Vec::new(),
         agent_session: Some("session/alpha".into()),
         session_space: Some(SessionSpaceRef::parse("session-space/test").unwrap()),
         capabilities: empty_summary(),
@@ -80,7 +82,13 @@ fn renders_engineering_ground_provenance_line_when_resolved() {
     ));
     assert!(rendered.contains("retrieve on demand"));
     // Named, not copied: the payload must not be inlined.
-    assert!(rendered.lines().filter(|line| line.contains("You branch small")).count() == 0);
+    assert!(
+        rendered
+            .lines()
+            .filter(|line| line.contains("You branch small"))
+            .count()
+            == 0
+    );
 }
 
 #[test]

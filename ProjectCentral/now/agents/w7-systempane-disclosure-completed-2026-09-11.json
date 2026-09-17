@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "w7-systempane-disclosure-completed-2026-09-11",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "claude-opus-4-8-tui-w7-2026-09-11",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1789092769,
+  "subject": "W7 System-pane disclosure completed: health/gateway/workcell/adapters as PR #292 (stacked on #290)",
+  "result": "Continued W7 past the credential producer (#290). The System pane now discloses the whole installation, through the same boundary seam. PR #292 (base = agent/wave7-system-producer, stacked on #290) carries two commits. (1) doctor/health: aikit_core::doctor_world::DoctorDisclosure (I/O-free findings read model, fix reduced to a fixable flag), Service::doctor_world() runs doctor::run and caches it (spawns actuation several times, so re-running per world-change would be the #279 lag), PaletteBackend::doctor_world() attached + forwarded, System pane gains a Health section + an always-present Gateway row pulled from the gateway.service finding — which is also how gateway inspection reaches the TUI (doctor already probes it). (2) workcell/adapters: wired the previously-uncalled aikit_adapters intake_workcell_instances via WorkcellDisclosure + Service::workcell_world() (cached), replacing the Workcell placeholder; the Adapters row is a roll-call synthesised from the git/secret/workcell provider disclosures already on the reading. Every disclosure keeps nobody-looked (NotAttempted) distinct from unavailable and from observed-empty. Verified on the real machine: Health reads 0 error/18 warning/5 note with Gateway not running; Workcell reads unavailable because the installed workcell predates the instances protocol (a real finding a fixture would hide). Full cargo test -p aikit-core -p aikit-tui -p aikit-cli green; clippy clean. Remaining W7, all one interactive cluster (action-lane, not disclosure): reaching the credential-setup panel and the model-roster matrix from inside the running palette, and applying a doctor repair from there — a new Overlay/UiAction plus interactive secret entry in the event loop. Left for a focused follow-up; awaiting a call on scope/approach. Worktree wt-w7b + its target dir kept for that follow-up.",
+  "status": "active"
+}

@@ -161,3 +161,9 @@ Successful experimental findings may later land as:
 Promotion is evidence-driven. AIKit does not predeclare where every QL experiment must end up.
 
 ---
+
+## 56. Technē facets
+
+Temporal, spatial and source-selector richness ride AIKit knowledge objects as the declared extension `aikit.techne-facet/v1` (module `aikit-core/src/knowledge_facets.rs`), with Central's temporal readings mapped into temporal facets by `aikit-adapters/src/techne_temporal.rs`. The canonical semantic authority is Quaternal-Logic's language-neutral `ql.techne/v1` reading (`schemas/techne/ql-techne-reading-v1.schema.json` and `docs/L5-TECHNE-INSTRUMENT-WAYFINDER.md` §2 in the Quaternal-Logic repository); AIKit mirrors its semantics and adds no cross-repo dependency and no parallel temporal or spatial ontology. Facets are optional — absence is data, not an error; occurrence, receipt and validity stay distinct kinds; DAY/NOW/Session/Run continuity refs are carried verbatim, never collapsed; exact source selectors attach to provenance entries; malformed declared facet data is a namespaced `knowledge.facet_*` error while everything else on the object is preserved.
+
+---

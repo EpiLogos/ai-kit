@@ -113,8 +113,11 @@ fn search_json_finds_a_capability_by_name() {
 #[test]
 fn an_unknown_capability_is_a_resolution_failure_with_exit_code_three() {
     let (home, project) = scene();
-    let (output, value) =
-        run_json(home.path(), project.path(), &["explain", "script/no/such", "--json"]);
+    let (output, value) = run_json(
+        home.path(),
+        project.path(),
+        &["explain", "script/no/such", "--json"],
+    );
 
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "resolution.unknown_capability");
@@ -144,7 +147,13 @@ fn a_bad_scope_argument_is_a_usage_error_with_exit_code_two() {
     let (_output, value) = run_json(
         home.path(),
         project.path(),
-        &["enable", "script/demo/greet", "--scope", "nonsense", "--json"],
+        &[
+            "enable",
+            "script/demo/greet",
+            "--scope",
+            "nonsense",
+            "--json",
+        ],
     );
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "cli.usage");
@@ -245,7 +254,9 @@ fn system_emits_the_wave5_owner_disclosure_descriptor() {
     );
     assert_eq!(value["owner"]["owner_id"], "ai-kit");
     // The canonical reading digest is a real SHA-256 hex fingerprint, not null.
-    let digest = value["owner"]["reading_digest"].as_str().expect("digest present");
+    let digest = value["owner"]["reading_digest"]
+        .as_str()
+        .expect("digest present");
     assert_eq!(digest.len(), 64);
     assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
 
@@ -258,7 +269,9 @@ fn system_emits_the_wave5_owner_disclosure_descriptor() {
         for setting in section["settings"].as_array().unwrap() {
             for axis in ["declared", "effective", "active", "staged"] {
                 assert!(
-                    setting["axes"][axis]["provenance"]["owner_ref"].as_str().is_some(),
+                    setting["axes"][axis]["provenance"]["owner_ref"]
+                        .as_str()
+                        .is_some(),
                     "axis {axis} must carry provenance in {setting}"
                 );
             }
@@ -283,7 +296,9 @@ fn system_emits_the_wave5_owner_disclosure_descriptor() {
     // Actions are disclosed or named as obligations, never rendered disabled.
     let actions = value["actions"].as_array().expect("actions present");
     assert!(actions.iter().any(|a| a["action_ref"] == "aikit.explain"));
-    assert!(actions.iter().any(|a| a["action_ref"] == "aikit.session.attach"));
+    assert!(actions
+        .iter()
+        .any(|a| a["action_ref"] == "aikit.session.attach"));
 
     // Presence-only: the reading must never carry a secret value or marker.
     let raw = value.to_string();

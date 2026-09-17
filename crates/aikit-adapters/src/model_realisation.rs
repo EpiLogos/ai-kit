@@ -189,7 +189,7 @@ pub fn realise(
         Err(error) => {
             return RealisationOutcome::Refused {
                 reason: error.to_string(),
-            }
+            };
         }
     };
     let file = match tempfile::Builder::new()
@@ -201,7 +201,7 @@ pub fn realise(
         Err(error) => {
             return RealisationOutcome::Unavailable {
                 reason: format!("could not stage the instantiation receipt: {error}"),
-            }
+            };
         }
     };
     if let Err(error) = std::fs::write(file.path(), receipt.to_string()) {
@@ -228,7 +228,7 @@ pub fn realise(
         Err(error) => {
             return RealisationOutcome::Unavailable {
                 reason: format!("could not run {actuation_bin}: {error}"),
-            }
+            };
         }
     };
     if output.status != 0 {
@@ -246,7 +246,7 @@ pub fn realise(
         Err(error) => {
             return RealisationOutcome::Unavailable {
                 reason: format!("instantiation output unparsable: {error}"),
-            }
+            };
         }
     };
     match validate_bound_receipt(&bound, &receipt, request.harness_ref.is_some()) {
@@ -421,7 +421,7 @@ pub fn material_body_plan(
         Err(error) => {
             return MaterialBodyOutcome::Unavailable {
                 reason: format!("could not run {workcell_bin}: {error}"),
-            }
+            };
         }
     };
     // Workcell exits non-zero on an unsatisfiable plan, and still prints one.
@@ -442,7 +442,10 @@ pub fn material_body_plan(
     };
     match plan.get("status").and_then(Value::as_str) {
         Some("satisfiable") => MaterialBodyOutcome::Satisfiable {
-            plan_ref: plan.get("plan_ref").and_then(Value::as_str).map(str::to_string),
+            plan_ref: plan
+                .get("plan_ref")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         },
         Some("unsatisfiable") => MaterialBodyOutcome::Unsatisfiable {
             omissions: plan
@@ -457,7 +460,9 @@ pub fn material_body_plan(
                                 item.get("requirement")
                                     .and_then(Value::as_str)
                                     .unwrap_or("requirement"),
-                                item.get("reason").and_then(Value::as_str).unwrap_or("no reason")
+                                item.get("reason")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("no reason")
                             )
                         })
                         .collect()
@@ -474,9 +479,7 @@ pub fn material_body_plan(
 mod tests {
     use super::*;
     use crate::runner::Output;
-    use aikit_core::resource::{
-        CredentialCondition, ModelRoute, ProviderRef, RouteAvailability,
-    };
+    use aikit_core::resource::{CredentialCondition, ModelRoute, ProviderRef, RouteAvailability};
 
     fn route(kind: ModelRouteKind, provider: &str, native: &str, observed: bool) -> ModelRoute {
         ModelRoute {
@@ -515,7 +518,12 @@ mod tests {
     #[test]
     fn the_receipt_names_the_model_canonically_and_the_route_as_route_metadata() {
         let receipt = instantiation_receipt(&request(
-            route(ModelRouteKind::LocalServing, "provider:ollama", "smollm2:135m", true),
+            route(
+                ModelRouteKind::LocalServing,
+                "provider:ollama",
+                "smollm2:135m",
+                true,
+            ),
             Some("harness/claude-code"),
         ))
         .unwrap();
@@ -541,7 +549,12 @@ mod tests {
     #[test]
     fn a_remote_route_is_placed_remote_and_a_harness_route_stays_opaque() {
         let remote = instantiation_receipt(&request(
-            route(ModelRouteKind::RouterRoute, "provider:openrouter", "openai/gpt-5.4", true),
+            route(
+                ModelRouteKind::RouterRoute,
+                "provider:openrouter",
+                "openai/gpt-5.4",
+                true,
+            ),
             None,
         ))
         .unwrap();
@@ -551,7 +564,12 @@ mod tests {
             "contract:router-inference"
         );
         let harness = instantiation_receipt(&request(
-            route(ModelRouteKind::HarnessNative, "provider:anthropic", "claude-opus-5", true),
+            route(
+                ModelRouteKind::HarnessNative,
+                "provider:anthropic",
+                "claude-opus-5",
+                true,
+            ),
             Some("harness/claude-code"),
         ))
         .unwrap();
@@ -561,7 +579,12 @@ mod tests {
     #[test]
     fn an_unobserved_route_is_never_actualised() {
         let error = instantiation_receipt(&request(
-            route(ModelRouteKind::LocalServing, "provider:ollama", "smollm2:135m", false),
+            route(
+                ModelRouteKind::LocalServing,
+                "provider:ollama",
+                "smollm2:135m",
+                false,
+            ),
             None,
         ))
         .unwrap_err();
@@ -574,8 +597,9 @@ mod tests {
             Ok(Output {
                 status: 1,
                 stdout: String::new(),
-                stderr: "instantiation refused: harness harness/ghost is not detected with receipts"
-                    .into(),
+                stderr:
+                    "instantiation refused: harness harness/ghost is not detected with receipts"
+                        .into(),
             })
         }
     }
@@ -586,7 +610,12 @@ mod tests {
             &Refusing,
             "actuation",
             &request(
-                route(ModelRouteKind::LocalServing, "provider:ollama", "smollm2:135m", true),
+                route(
+                    ModelRouteKind::LocalServing,
+                    "provider:ollama",
+                    "smollm2:135m",
+                    true,
+                ),
                 Some("harness/ghost"),
             ),
         );
@@ -617,7 +646,12 @@ mod tests {
             &Unsatisfiable,
             "workcell",
             &ResourceRef::parse("model:smollm2-135m").unwrap(),
-            &route(ModelRouteKind::LocalServing, "provider:ollama", "smollm2:135m", true),
+            &route(
+                ModelRouteKind::LocalServing,
+                "provider:ollama",
+                "smollm2:135m",
+                true,
+            ),
         );
         assert!(matches!(outcome, MaterialBodyOutcome::NotRequired { .. }));
     }
@@ -628,7 +662,12 @@ mod tests {
             &Unsatisfiable,
             "workcell",
             &ResourceRef::parse("model:gpt-5.4").unwrap(),
-            &route(ModelRouteKind::RouterRoute, "provider:openrouter", "openai/gpt-5.4", false),
+            &route(
+                ModelRouteKind::RouterRoute,
+                "provider:openrouter",
+                "openai/gpt-5.4",
+                false,
+            ),
         );
         assert!(matches!(outcome, MaterialBodyOutcome::NotRequired { .. }));
     }
@@ -639,7 +678,12 @@ mod tests {
             &Unsatisfiable,
             "workcell",
             &ResourceRef::parse("model:smollm2-135m").unwrap(),
-            &route(ModelRouteKind::LocalServing, "provider:ollama", "smollm2:135m", false),
+            &route(
+                ModelRouteKind::LocalServing,
+                "provider:ollama",
+                "smollm2:135m",
+                false,
+            ),
         );
         match outcome {
             MaterialBodyOutcome::Unsatisfiable { omissions } => {

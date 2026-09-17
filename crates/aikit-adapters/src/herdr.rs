@@ -128,7 +128,10 @@ fn agent_status_field(agent: &Value) -> Result<HerdrAgentStatus> {
 
 fn parse_json(raw: &str, code: &'static str, subject: &str) -> Result<Value> {
     serde_json::from_str(raw).map_err(|error| {
-        AikitError::new(code, format!("could not parse Herdr {subject} response: {error}"))
+        AikitError::new(
+            code,
+            format!("could not parse Herdr {subject} response: {error}"),
+        )
     })
 }
 
@@ -158,13 +161,14 @@ pub fn parse_herdr_snapshot(raw: &str) -> Result<HerdrSnapshot> {
             "Herdr session_snapshot result has no snapshot",
         )
     })?;
-    let version = string_field(snapshot, "version").ok_or_else(|| {
-        AikitError::new("herdr.missing_version", "Herdr snapshot has no version")
-    })?;
+    let version = string_field(snapshot, "version")
+        .ok_or_else(|| AikitError::new("herdr.missing_version", "Herdr snapshot has no version"))?;
     let protocol = snapshot
         .get("protocol")
         .and_then(Value::as_u64)
-        .ok_or_else(|| AikitError::new("herdr.missing_protocol", "Herdr snapshot has no protocol"))?;
+        .ok_or_else(|| {
+            AikitError::new("herdr.missing_protocol", "Herdr snapshot has no protocol")
+        })?;
     let agents = snapshot
         .get("agents")
         .and_then(Value::as_array)
@@ -239,9 +243,7 @@ pub fn herdr_recorded_surface_keys(plan: &SessionPlan) -> Vec<(String, String)> 
     };
     surfaces
         .iter()
-        .filter_map(|(logical, pane)| {
-            pane.as_str().map(|pane| (logical.clone(), pane.to_owned()))
-        })
+        .filter_map(|(logical, pane)| pane.as_str().map(|pane| (logical.clone(), pane.to_owned())))
         .collect()
 }
 
@@ -260,12 +262,9 @@ pub fn created_place_bindings(
     if observation.provider.as_str() != herdr_provider_ref_uri() {
         return None;
     }
-    let session = observation
-        .bindings
-        .iter()
-        .find(|binding| {
-            binding.kind == NativeBindingKind::Session && binding.canonical_ref.is_none()
-        })?;
+    let session = observation.bindings.iter().find(|binding| {
+        binding.kind == NativeBindingKind::Session && binding.canonical_ref.is_none()
+    })?;
     if herdr_recorded_workspace(plan).as_deref() == Some(session.native_id.as_str()) {
         return None;
     }
@@ -333,10 +332,7 @@ impl<R> HerdrWorkingEnvironment<R> {
     ) -> Self {
         let mut environment = Self::new(runner, provider);
         environment.create_label = Some(plan.name.clone());
-        environment.create_cwd = plan
-            .root
-            .as_ref()
-            .map(|root| root.display().to_string());
+        environment.create_cwd = plan.root.as_ref().map(|root| root.display().to_string());
         environment.open_subject = subject.cloned();
         if let Some(workspace_id) = herdr_recorded_workspace(plan) {
             environment.workspace_id = Some(workspace_id);
@@ -390,7 +386,7 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
     }
 
     pub fn snapshot(&self) -> Result<HerdrSnapshot> {
-        parse_herdr_snapshot(&self.run(&["api", "snapshot"])? )
+        parse_herdr_snapshot(&self.run(&["api", "snapshot"])?)
     }
 
     pub fn create_workspace(&mut self) -> Result<HerdrWorkspaceCreation> {
@@ -412,11 +408,7 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
             argv.extend(["--label".to_string(), label.clone()]);
         }
         let raw = self.run_argv(argv, "herdr.workspace_create_failed")?;
-        let envelope = parse_json(
-            &raw,
-            "herdr.invalid_create_response",
-            "workspace create",
-        )?;
+        let envelope = parse_json(&raw, "herdr.invalid_create_response", "workspace create")?;
         let result = envelope.get("result").ok_or_else(|| {
             AikitError::new(
                 "herdr.create_missing_result",
@@ -582,7 +574,10 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
             )
         })?;
         let returned_name = string_field(agent, "name");
-        if returned_name.as_deref().is_some_and(|returned| returned != name) {
+        if returned_name
+            .as_deref()
+            .is_some_and(|returned| returned != name)
+        {
             return Err(AikitError::new(
                 "herdr.agent_name_drift",
                 format!("Herdr returned agent name {returned_name:?}, expected {name:?}"),
@@ -591,7 +586,9 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
         let status = agent_status_field(agent)?;
         self.agent_session_bindings.insert(
             agent_session,
-            returned_name.clone().unwrap_or_else(|| returned_pane.clone()),
+            returned_name
+                .clone()
+                .unwrap_or_else(|| returned_pane.clone()),
         );
         Ok(HerdrStartedAgent {
             terminal_id,
@@ -602,12 +599,17 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
     }
 
     pub fn focus_agent_session(&self, agent_session: &ResourceRef) -> Result<()> {
-        let native = self.agent_session_bindings.get(agent_session).ok_or_else(|| {
-            AikitError::new(
-                "herdr.agent_session_unbound",
-                format!("AgentSession {agent_session} has no explicit Herdr agent/pane binding"),
-            )
-        })?;
+        let native = self
+            .agent_session_bindings
+            .get(agent_session)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "herdr.agent_session_unbound",
+                    format!(
+                        "AgentSession {agent_session} has no explicit Herdr agent/pane binding"
+                    ),
+                )
+            })?;
         self.run(&["agent", "focus", native])?;
         Ok(())
     }
@@ -664,14 +666,18 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
                 provenance: vec!["explicit ProjectRef -> Herdr workspace binding".into()],
             }
         }));
-        bindings.extend(self.agent_session_bindings.iter().map(|(canonical, native)| {
-            ProviderNativeBinding {
-                kind: NativeBindingKind::AgentSession,
-                native_id: native.clone(),
-                canonical_ref: Some(canonical.clone()),
-                provenance: vec!["explicit AgentSessionRef -> Herdr live Agent/pane binding".into()],
-            }
-        }));
+        bindings.extend(
+            self.agent_session_bindings
+                .iter()
+                .map(|(canonical, native)| ProviderNativeBinding {
+                    kind: NativeBindingKind::AgentSession,
+                    native_id: native.clone(),
+                    canonical_ref: Some(canonical.clone()),
+                    provenance: vec![
+                        "explicit AgentSessionRef -> Herdr live Agent/pane binding".into()
+                    ],
+                }),
+        );
         let mut provenance = vec![
             format!("Herdr public API snapshot protocol={}", snapshot.protocol),
             format!("herdrdev/herdr@{HERDR_UPSTREAM_REVISION}"),

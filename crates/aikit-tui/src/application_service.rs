@@ -13,9 +13,10 @@ use aikit_core::composition_mutation::{changed_ground, CompositionBasis};
 use aikit_core::id::{CapsuleId, EventId};
 use aikit_core::resource::{
     action_semantic_profile, parse_or_search_expression, resolve_action_candidates,
-    resolve_expression, resolve_path_identity, resolve_subjects, ContextualActionDescriptor, NavigationEvidence,
-    NavigationEvidenceClass, ResolveExpression, ResolvePath, ResolvePathStep, ResourceDescriptor,
-    ResourceIndex, ResourceKind, ResourceRecord, ResourceRef, ResourceSearchIndex,
+    resolve_expression, resolve_path_identity, resolve_subjects, ContextualActionDescriptor,
+    NavigationEvidence, NavigationEvidenceClass, ResolveExpression, ResolvePath, ResolvePathStep,
+    ResourceDescriptor, ResourceIndex, ResourceKind, ResourceRecord, ResourceRef,
+    ResourceSearchIndex,
 };
 use aikit_core::{
     explain_history_actions_for, install_explain_history_actions, AikitError, FamiliarityContext,
@@ -35,8 +36,8 @@ use crate::application::{
 };
 use crate::backend::{FactoryWorkEntry, PaletteBackend, Toggle};
 use crate::live_field::{
-    live_working_field, parse_action_ref, reach_for, working_environment_actions,
-    LiveWorkingField, WorkingEnvironmentOperation, WorkingEnvironmentOutcome,
+    live_working_field, parse_action_ref, reach_for, working_environment_actions, LiveWorkingField,
+    WorkingEnvironmentOperation, WorkingEnvironmentOutcome,
 };
 use crate::session_space_service::install_session_space_navigation_resources;
 use crate::staging::is_on;
@@ -444,7 +445,11 @@ impl<'a> ApplicationService<'a> {
     /// intrinsic one-hop set with no deeper resolver traversal to request,
     /// so its `RelationQuery` still records the requested depth (for Inspector
     /// honesty about what was asked) without pretending to have walked it.
-    fn relations_at_depth_impl(&self, resource: &ResourceRef, depth: u8) -> Result<RelationReadModel> {
+    fn relations_at_depth_impl(
+        &self,
+        resource: &ResourceRef,
+        depth: u8,
+    ) -> Result<RelationReadModel> {
         if let Some(address) = self.backend.knowledge_address(resource)? {
             if let Some(view) = self
                 .backend
@@ -978,9 +983,11 @@ impl TuiApplicationService for ApplicationService<'_> {
             let field = live_working_field(&observations, &projectable);
             if let Some((provider, operation)) = parse_action_ref(&action.action, &field) {
                 reach_for(&field, &provider, &action.subject, operation)?;
-                let outcome =
-                    self.backend
-                        .act_in_working_environment(&provider, &action.subject, operation)?;
+                let outcome = self.backend.act_in_working_environment(
+                    &provider,
+                    &action.subject,
+                    operation,
+                )?;
                 return Ok(ActionOutcome::Status {
                     summary: outcome.summary(),
                 });
@@ -1021,15 +1028,16 @@ impl TuiApplicationService for ApplicationService<'_> {
                 summary: format!("opened {}", action.subject),
             },
             WORKSPACE_DESTINATION_ACTION_REF => {
-                let section = workspace_section_for_destination(&action.subject).ok_or_else(|| {
-                    AikitError::new(
-                        "application.unknown_workspace_destination",
-                        format!(
-                            "{} is not a known Workspace destination Surface",
-                            action.subject
-                        ),
-                    )
-                })?;
+                let section =
+                    workspace_section_for_destination(&action.subject).ok_or_else(|| {
+                        AikitError::new(
+                            "application.unknown_workspace_destination",
+                            format!(
+                                "{} is not a known Workspace destination Surface",
+                                action.subject
+                            ),
+                        )
+                    })?;
                 ActionOutcome::NavigatedTo {
                     section,
                     summary: format!("opened {}", action.subject),
@@ -1080,7 +1088,6 @@ impl TuiApplicationService for ApplicationService<'_> {
         Ok(outcome)
     }
 }
-
 
 fn familiarity_context(context: &aikit_core::ContextDescriptor) -> FamiliarityContext {
     FamiliarityContext {
@@ -1388,7 +1395,10 @@ root = "payload"
         let relation = service.relations(&subject).unwrap();
 
         assert_eq!(relation.subject, subject);
-        assert_eq!(relation.view, view, "the typed view must pass through unchanged");
+        assert_eq!(
+            relation.view, view,
+            "the typed view must pass through unchanged"
+        );
         assert!(
             relation
                 .view
@@ -1447,10 +1457,18 @@ root = "payload"
             "the fallback must be honest about where the edge came from"
         );
         assert!(
-            relation.view.nodes.iter().any(|node| node.resource == edge.from),
+            relation
+                .view
+                .nodes
+                .iter()
+                .any(|node| node.resource == edge.from),
             "push_edge already enforces this, but the view must never carry a \
              dangling endpoint"
         );
-        assert!(relation.view.nodes.iter().any(|node| node.resource == edge.to));
+        assert!(relation
+            .view
+            .nodes
+            .iter()
+            .any(|node| node.resource == edge.to));
     }
 }

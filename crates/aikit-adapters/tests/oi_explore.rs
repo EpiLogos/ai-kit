@@ -131,10 +131,12 @@ fn entries_materialise_as_nodes_carrying_their_own_stable_refs() {
         })
         .expect("expression node");
     assert_eq!(expression.node_type, "expression");
-    let extension = expression.extensions.get(EXPLORE_EXTENSION).expect("extension");
+    let extension = expression
+        .extensions
+        .get(EXPLORE_EXTENSION)
+        .expect("extension");
     assert_eq!(
-        extension["projection_ref"],
-        "projection:harbour:quay-light",
+        extension["projection_ref"], "projection:harbour:quay-light",
         "the Projection identity an entry names stays disclosed"
     );
 }
@@ -146,10 +148,12 @@ fn an_admitted_alias_is_searchable_over_the_canonical_entry_ref() {
         .expect("materialised seed rebuilds into the SemanticWiki");
 
     let hits = index.search("quay-wall", 10);
-    assert_eq!(hits.len(), 1, "exactly the canonical entry matches: {:?}", hits
-        .iter()
-        .map(|hit| hit.label.clone())
-        .collect::<Vec<_>>());
+    assert_eq!(
+        hits.len(),
+        1,
+        "exactly the canonical entry matches: {:?}",
+        hits.iter().map(|hit| hit.label.clone()).collect::<Vec<_>>()
+    );
     assert_eq!(
         hits[0].address.as_curated().expect("curated hit").as_str(),
         SUBJECT,
@@ -200,7 +204,11 @@ fn shared_field_membership_becomes_field_nodes_and_projected_in_edges() {
         .into_iter()
         .filter(|edge| edge.relation == RELATION_PROJECTED_IN)
         .collect::<Vec<_>>();
-    assert_eq!(membership.len(), 3, "one projected-in edge per hosted entry");
+    assert_eq!(
+        membership.len(),
+        3,
+        "one projected-in edge per hosted entry"
+    );
     assert!(membership.iter().all(|edge| edge.to_ref.as_str() == FIELD));
     let field = reading
         .objects
@@ -230,13 +238,16 @@ fn unavailable_or_malformed_material_is_disclosed_never_invented() {
         reading.absences
     );
     assert!(
-        !node_refs(&reading.objects).iter().any(|r| r == "wiki:node:ghost"),
+        !node_refs(&reading.objects)
+            .iter()
+            .any(|r| r == "wiki:node:ghost"),
         "a ghost subject is never materialised"
     );
     assert!(
         !edges(&reading.objects)
             .iter()
-            .any(|edge| edge.relation == RELATION_PRESENTS && edge.to_ref.as_str() == "wiki:node:ghost"),
+            .any(|edge| edge.relation == RELATION_PRESENTS
+                && edge.to_ref.as_str() == "wiki:node:ghost"),
         "the ghost presents-edge is omitted"
     );
 }

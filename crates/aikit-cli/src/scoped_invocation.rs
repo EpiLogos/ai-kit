@@ -68,13 +68,8 @@ impl ScopedActionApplication for Service {
         provider: &P,
     ) -> Result<ScopedRunOutcome> {
         let (resources, context) = invocation_context(self)?;
-        let scoped = compose_scoped_context(
-            &request.expression,
-            &resources,
-            &context,
-            128,
-            provider,
-        )?;
+        let scoped =
+            compose_scoped_context(&request.expression, &resources, &context, 128, provider)?;
         let action_ref = ResourceRef::parse(NATIVE_CAPABILITY_RUN_ACTION)?;
         let candidate = scoped.action(&action_ref, &resources)?;
 
@@ -177,7 +172,8 @@ impl ScopedActionApplication for Service {
 fn invocation_context(service: &Service) -> Result<(ResourceSearchIndex, ContextResolution)> {
     let mut resources = resource_index(service)?;
     resources.insert_resource(native_run_action(), Vec::new());
-    let context = context_resolution_from_resources(service, RequestedActors::default(), &resources)?;
+    let context =
+        context_resolution_from_resources(service, RequestedActors::default(), &resources)?;
     Ok((resources, context))
 }
 
@@ -216,7 +212,11 @@ fn digest_run(run: &RunHandle) -> String {
     hasher.update(&[0]);
     hasher.update(run.report.status.to_string().as_bytes());
     hasher.update(&[0]);
-    hasher.update(if run.report.detached { b"detached" } else { b"joined" });
+    hasher.update(if run.report.detached {
+        b"detached"
+    } else {
+        b"joined"
+    });
     for line in &run.report.output {
         hasher.update(&[0]);
         hasher.update(line.as_bytes());

@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "adr-0005-harnessmodel-routing-portal-alias-2026-09-15",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode-session",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1789497680,
+  "subject": "ADR 0005 harness-model routing portal + alias families; agents flagship proven live on omarchy",
+  "result": "Portal design landed as PR ai-kit#319 (branch agent/alias-family-portal-adr, docs/examples only, pre-integration with C3): docs/adr/0005 names four primitives (harness, model route, profile, alias family) and fixes ownership (ai-kit registries/catalogue/credential/alias verbs; Actuation route realisation + AgentRef law; Workcell place grants; O-I config plane owner verbs for refs only; keychain the only key home; UI07 the only key path). Flagship example examples/alias-families/agents/ = the live omarchy agents command (herdr-default room over pi 0.85.1 / hermes 0.19.0 / codex 0.154.0, persistence via workcell places #83, opt-in herdr-server unit; disconnect/reconnect/server-restart/reboot semantics proven; evidence Work/O-I/campaign-evidence/2026-09-15-launcher-portal/TESTS.md). Mac parity path: epi successor expressed as an alias family (sesh-to-room, code-to-route launchers, slot-to-catalogue). Discovery found UI07 exposure on the Mac: claude-reset in ~/.zshrc exports a literal API key and ~/.claude/profiles/*.conf carry token literals — migration to keychain refs is ADR Stage 2, owner decision, untouched by us. Stage 1 = aikit alias verbs (to be built).",
+  "status": "active"
+}

@@ -33,12 +33,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use aikit_core::{KnowledgeRelationView, RelationDirection, RelationEdge, RelationNode, ResourceRef};
+use aikit_core::{
+    KnowledgeRelationView, RelationDirection, RelationEdge, RelationNode, ResourceRef,
+};
 use ratatui::text::{Line, Span};
 
 use crate::graph_layout::{
-    choose_label_rung, GraphGlyphs, GraphLayout, GraphPoint, GraphViewport, LabelRung,
-    LaidOutNode, RelationBand,
+    choose_label_rung, GraphGlyphs, GraphLayout, GraphPoint, GraphViewport, LabelRung, LaidOutNode,
+    RelationBand,
 };
 use crate::theme::Theme;
 
@@ -70,7 +72,8 @@ pub fn filtered_relation_view(view: &KnowledgeRelationView, filter: &str) -> Kno
         })
         .cloned()
         .collect();
-    let kept: std::collections::BTreeSet<&ResourceRef> = nodes.iter().map(|n| &n.resource).collect();
+    let kept: std::collections::BTreeSet<&ResourceRef> =
+        nodes.iter().map(|n| &n.resource).collect();
     let edges: Vec<RelationEdge> = view
         .edges
         .iter()
@@ -125,7 +128,11 @@ pub fn move_selection(
         .position;
 
     let axis_is_horizontal = direction.0 != 0;
-    let axis_sign = if axis_is_horizontal { direction.0 } else { direction.1 };
+    let axis_sign = if axis_is_horizontal {
+        direction.0
+    } else {
+        direction.1
+    };
 
     let mut best: Option<(i32, ResourceRef)> = None;
     for node in &layout.nodes {
@@ -134,7 +141,11 @@ pub fn move_selection(
         }
         let ddx = node.position.x - current_position.x;
         let ddy = node.position.y - current_position.y;
-        let (primary, perpendicular) = if axis_is_horizontal { (ddx, ddy) } else { (ddy, ddx) };
+        let (primary, perpendicular) = if axis_is_horizontal {
+            (ddx, ddy)
+        } else {
+            (ddy, ddx)
+        };
         if primary * axis_sign <= 0 {
             continue; // not on the requested side, or exactly level
         }
@@ -353,9 +364,17 @@ fn canvas_lines(
 
     for node in &layout.nodes {
         let is_selected = selected == Some(&node.resource) && !node.is_focus;
-        let style = if is_selected { CellStyle::Selected } else { CellStyle::Node };
+        let style = if is_selected {
+            CellStyle::Selected
+        } else {
+            CellStyle::Node
+        };
         if node.is_focus {
-            put(node.position, &glyphs.focus_marker().to_string(), CellStyle::Node);
+            put(
+                node.position,
+                &glyphs.focus_marker().to_string(),
+                CellStyle::Node,
+            );
         } else if let Some(text) = node_text(node, glyphs) {
             put(node.position, &text, style);
         } else {
@@ -380,7 +399,11 @@ fn row_to_line(row: Vec<char>, style_row: Vec<CellStyle>, theme: &Theme) -> Line
             current_style = style;
             first = false;
         } else if style != current_style {
-            spans.push(styled_span(std::mem::take(&mut current), current_style, theme));
+            spans.push(styled_span(
+                std::mem::take(&mut current),
+                current_style,
+                theme,
+            ));
             current_style = style;
         }
         current.push(ch);
@@ -447,10 +470,7 @@ fn legend_lines(
         RelationBand::Context,
         RelationBand::Contained,
     ] {
-        let groups: Vec<_> = by_group
-            .iter()
-            .filter(|((b, _), _)| *b == band)
-            .collect();
+        let groups: Vec<_> = by_group.iter().filter(|((b, _), _)| *b == band).collect();
         if groups.is_empty() {
             continue;
         }
@@ -459,18 +479,20 @@ fn legend_lines(
             theme.heading(),
         )));
         for ((_, lane), members) in groups {
-            let lane_label = if lane.is_empty() { "(direct)" } else { lane.as_str() };
+            let lane_label = if lane.is_empty() {
+                "(direct)"
+            } else {
+                lane.as_str()
+            };
             lines.push(Line::from(Span::styled(
                 format!("  {lane_label}"),
                 theme.dim(),
             )));
             for member in members {
                 let text = match markers.get(&member.resource) {
-                    Some(marker) => format!(
-                        "    {marker}  {} ({})",
-                        member.label,
-                        member.kind.as_str()
-                    ),
+                    Some(marker) => {
+                        format!("    {marker}  {} ({})", member.label, member.kind.as_str())
+                    }
                     None => format!("    {} ({})", member.label, member.kind.as_str()),
                 };
                 let style = if selected == Some(&member.resource) {
@@ -500,10 +522,7 @@ pub fn inspector_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled("Inspector", theme.heading()))];
     let Some(selected) = selected else {
-        lines.push(Line::from(Span::styled(
-            "nothing selected",
-            theme.dim(),
-        )));
+        lines.push(Line::from(Span::styled("nothing selected", theme.dim())));
         return lines;
     };
     let Some(node) = layout.nodes.iter().find(|n| &n.resource == selected) else {
@@ -598,7 +617,11 @@ fn route_kind(edge: &crate::graph_layout::LaidOutEdge) -> &'static str {
 /// Built from [`crate::graph_layout::grouped_projection`] so narrow and
 /// spatial rendering can never disagree about which nodes/edges survived the
 /// viewport budget.
-pub fn grouped_lines(layout: &GraphLayout, glyphs: &GraphGlyphs, theme: &Theme) -> Vec<Line<'static>> {
+pub fn grouped_lines(
+    layout: &GraphLayout,
+    glyphs: &GraphGlyphs,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let focus_label = layout
         .nodes
         .iter()
@@ -624,7 +647,9 @@ pub fn grouped_lines(layout: &GraphLayout, glyphs: &GraphGlyphs, theme: &Theme) 
             RelationBand::Context,
             RelationBand::Contained,
         ] {
-            let Some(members) = by_band.get(&band) else { continue };
+            let Some(members) = by_band.get(&band) else {
+                continue;
+            };
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
                 format!("{} {}", band.label(), glyphs.band_connector(band)),

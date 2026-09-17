@@ -6,8 +6,8 @@ use serde::Serialize;
 
 use aikit_core::project::{ProjectBinding, ProjectBindingLocator, ProjectConstituentRef};
 use aikit_core::resource::{
-    Eligibility, MemoryResourceIndex, ResourceDescriptor, ResourceKind, ResourceRecord, ResourceRef,
-    ResourceSource, SourceRef, SourceRevision, SourceState,
+    Eligibility, MemoryResourceIndex, ResourceDescriptor, ResourceKind, ResourceRecord,
+    ResourceRef, ResourceSource, SourceRef, SourceRevision, SourceState,
 };
 use aikit_core::scope::ScopeKind;
 use aikit_core::session_space_application::{ContextResolutionBasis, ContextResolutionEvidence};
@@ -48,7 +48,9 @@ fn context_source(id: &str, path: &str, role: &str, provenance: &str) -> Resourc
         path,
         format!("Project context source {path}"),
     );
-    descriptor.annotations.insert("source-role".into(), role.into());
+    descriptor
+        .annotations
+        .insert("source-role".into(), role.into());
     descriptor
         .annotations
         .insert("provenance".into(), provenance.into());
@@ -149,7 +151,10 @@ fn ambient_codex_activation_does_not_imply_aikit_selection_or_source_authority()
     );
     assert!(!explained.activations[0].ai_kit_selected);
     assert!(explained.activations[0].materially_active);
-    assert_eq!(explained.activations[0].precedence_owner, "codex-native-precedence");
+    assert_eq!(
+        explained.activations[0].precedence_owner,
+        "codex-native-precedence"
+    );
 }
 
 #[test]
@@ -204,9 +209,15 @@ fn aikit_selection_and_material_activation_are_independent_states() {
     attach_context_activations(&mut resolution, [retrieved, selected]).unwrap();
     let explained = explain_context_activation(&resolution, &source).unwrap();
     assert_eq!(explained.activations.len(), 2);
-    assert_eq!(explained.activations[0].mode, ContextActivationMode::AikitSelected);
+    assert_eq!(
+        explained.activations[0].mode,
+        ContextActivationMode::AikitSelected
+    );
     assert!(!explained.activations[0].materially_active);
-    assert_eq!(explained.activations[1].mode, ContextActivationMode::Retrieved);
+    assert_eq!(
+        explained.activations[1].mode,
+        ContextActivationMode::Retrieved
+    );
     assert!(explained.activations[1].materially_active);
 }
 
@@ -276,7 +287,10 @@ fn activation_truth_changes_the_persisted_context_resolution_ref_but_not_by_arri
 
     assert_ne!(base_evidence.reference, left_evidence.reference);
     assert_eq!(left_evidence.reference, right_evidence.reference);
-    assert_eq!(left_evidence.basis.context_activations, right_evidence.basis.context_activations);
+    assert_eq!(
+        left_evidence.basis.context_activations,
+        right_evidence.basis.context_activations
+    );
     assert_eq!(left_evidence.basis.context_activations.len(), 2);
     assert!(left_evidence
         .reference

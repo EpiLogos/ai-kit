@@ -362,10 +362,10 @@ mod tests {
 
     #[test]
     fn seam_rejects_foreign_schemas_truncation_and_incomplete_rows() {
-        assert!(
-            NowFixturesSeam::parse("{\"schema\":\"aikit.flow-cognition/v1\",\"now_ref\":\"x\"}")
-                .is_err()
-        );
+        assert!(NowFixturesSeam::parse(
+            "{\"schema\":\"aikit.flow-cognition/v1\",\"now_ref\":\"x\"}"
+        )
+        .is_err());
         let mut truncated = serde_json::to_string(&serde_json::json!({
             "schema": THOUGHTS_READING_SCHEMA, "now_ref": "central:now:control:root:abc",
             "total": 5, "truncated": true, "fixtures": []
@@ -403,12 +403,10 @@ mod tests {
                 "legacy-2026-09-12.md".to_owned()
             ]
         );
-        assert!(
-            first
-                .invocation_ref
-                .to_string()
-                .starts_with("now-contemplate/")
-        );
+        assert!(first
+            .invocation_ref
+            .to_string()
+            .starts_with("now-contemplate/"));
         assert!(!first.automatic_agent_or_model_invocation);
     }
 

@@ -125,7 +125,9 @@ pub fn entity_disclosure_in<R: CommandRunner>(
             }
             "agent-set" => {
                 let members = extra["members"].as_array().map(Vec::len).unwrap_or(0);
-                lines.push(format!("- agent-set: {subject} — {members} authored member(s)"));
+                lines.push(format!(
+                    "- agent-set: {subject} — {members} authored member(s)"
+                ));
             }
             other => lines.push(format!("- {other}: {subject}")),
         }
@@ -160,7 +162,11 @@ pub fn entity_disclosure_in<R: CommandRunner>(
         lines.push(format!(
             "- context binding: {} ({} source(s) effective{})",
             binding.world_ref,
-            binding.sources.iter().filter(|s| s.state == "available").count(),
+            binding
+                .sources
+                .iter()
+                .filter(|s| s.state == "available")
+                .count(),
             if binding.inherited_root_lineage {
                 ", root lineage by convention"
             } else {

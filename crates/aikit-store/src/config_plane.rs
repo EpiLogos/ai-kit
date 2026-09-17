@@ -79,20 +79,22 @@ impl ConfigReceiptStore {
                     format!("could not open {}: {error}", self.path.display()),
                 )
             })?;
-        file.write_all(line.as_bytes())
-            .map_err(|error| {
-                AikitError::new(
-                    "config.receipt_unwritable",
-                    format!("could not append to {}: {error}", self.path.display()),
-                )
-            })?;
+        file.write_all(line.as_bytes()).map_err(|error| {
+            AikitError::new(
+                "config.receipt_unwritable",
+                format!("could not append to {}: {error}", self.path.display()),
+            )
+        })?;
         Ok(())
     }
 
     /// The executed receipt for this key, if a mutation already ran under it.
     /// Replays of replays answer with the same original: `no_op` receipts are
     /// not recorded as executed keys.
-    pub fn find_executed(&self, key: &ExecutedKey) -> Result<Option<serde_json::Value>, AikitError> {
+    pub fn find_executed(
+        &self,
+        key: &ExecutedKey,
+    ) -> Result<Option<serde_json::Value>, AikitError> {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -116,9 +118,12 @@ impl ConfigReceiptStore {
                 .and_then(|s| s.get("scope_ref"))
                 .and_then(|r| r.as_str())
                 .map(str::to_string);
-            let matches = receipt.get("owner_ref").and_then(|v| v.as_str()) == Some(key.owner_ref.as_str())
-                && receipt.get("changeset_id").and_then(|v| v.as_str()) == Some(key.changeset_id.as_str())
-                && receipt.get("setting_ref").and_then(|v| v.as_str()) == Some(key.setting_ref.as_str())
+            let matches = receipt.get("owner_ref").and_then(|v| v.as_str())
+                == Some(key.owner_ref.as_str())
+                && receipt.get("changeset_id").and_then(|v| v.as_str())
+                    == Some(key.changeset_id.as_str())
+                && receipt.get("setting_ref").and_then(|v| v.as_str())
+                    == Some(key.setting_ref.as_str())
                 && scope
                     .and_then(|s| s.get("scope_kind"))
                     .and_then(|v| v.as_str())

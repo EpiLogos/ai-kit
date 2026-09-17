@@ -460,7 +460,7 @@ fn read_dotenv_value(path: &Path, name: &str) -> Result<Option<String>> {
             return Err(provider_error(
                 "credential.project_env_unreadable",
                 format!("could not read {}: {error}", path.display()),
-            ))
+            ));
         }
     };
     for raw in text.lines() {
@@ -579,7 +579,7 @@ mod encrypted_fallback {
                     return Err(provider_error(
                         "credential.encrypted_fallback_read_failed",
                         format!("could not read {}: {error}", path.display()),
-                    ))
+                    ));
                 }
             };
             let envelope: EncryptedCredentialEnvelope =

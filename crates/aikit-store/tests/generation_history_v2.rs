@@ -56,11 +56,7 @@ fn comparison_reads_two_committed_locks_and_reports_real_capability_change() {
 
     let context = ContextDescriptor::for_project(tmp.path().join("project"));
     let before_view = resolve_with(&fixture, &context, &["script/test/nt"]);
-    let after_view = resolve_with(
-        &fixture,
-        &context,
-        &["script/test/nt", "skill/rust/review"],
-    );
+    let after_view = resolve_with(&fixture, &context, &["script/test/nt", "skill/rust/review"]);
     assert_ne!(before_view.hash, after_view.hash);
 
     let context_dir = home.context_dir(&context.context_id);
