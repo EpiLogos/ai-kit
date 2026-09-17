@@ -222,15 +222,23 @@ fn match_segment(parts: &[GlobPart], segment: &str) -> bool {
     match parts {
         [] => segment.is_empty(),
         [GlobPart::AnyDepth, rest @ ..] => {
-            (0..=segment.len()).any(|cut| match_segment(rest, &segment[cut..]))
+            boundary_suffixes(segment).any(|suffix| match_segment(rest, suffix))
         }
         [GlobPart::Literal(literal), rest @ ..] => {
             segment.starts_with(literal.as_str()) && match_segment(rest, &segment[literal.len()..])
         }
         [GlobPart::AnyWithin, rest @ ..] => {
-            (0..=segment.len()).any(|cut| match_segment(rest, &segment[cut..]))
+            boundary_suffixes(segment).any(|suffix| match_segment(rest, suffix))
         }
     }
+}
+
+/// Path components can carry any character the filesystem allows, so a
+/// wildcard cut may only land on a character boundary.
+fn boundary_suffixes(segment: &str) -> impl Iterator<Item = &str> {
+    (0..=segment.len())
+        .filter(|cut| segment.is_char_boundary(*cut))
+        .map(|cut| &segment[cut..])
 }
 
 pub fn glob_match(glob: &str, path: &str) -> bool {
@@ -715,6 +723,18 @@ mod tests {
         assert!(!scope.is_authorised(Path::new(
             "Work/Factory/ProjectCentral/now/sealed/secret.json"
         )));
+    }
+
+    #[test]
+    fn glob_matching_survives_multi_byte_path_components() {
+        assert!(glob_match(
+            "Work/*/ProjectCentral/now/**/*.json",
+            "Work/\u{1d70b}-logic/ProjectCentral/now/agents/handoff.json"
+        ));
+        assert!(glob_match(
+            "Work/*/ProjectCentral/now/**/*.json",
+            "Work/\u{03c0}/ProjectCentral/now/.archive/old.json"
+        ));
     }
 
     #[test]
