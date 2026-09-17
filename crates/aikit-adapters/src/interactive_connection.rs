@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agent_connection::{
-    AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest,
-    ClassicProcessConnectionAdapter, ConnectionCommand, ConnectionDegradation,
-    ConnectionDescriptor, ConnectionSignal, ConnectionSignalKind, NativeModelObservation,
-    NativePermissionChoice, NativePermissionRequest, PromptRequest, SessionOpenRequest,
+    AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest, ClassicProcessConnectionAdapter,
+    ConnectionCommand, ConnectionDegradation, ConnectionDescriptor, ConnectionSignal,
+    ConnectionSignalKind, NativeModelObservation, NativePermissionChoice, NativePermissionRequest,
+    PromptRequest, SessionOpenRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,7 +194,10 @@ impl AcpStableConnectionAdapter {
             .filter_map(|option| {
                 Some(NativePermissionChoice {
                     option_id: option.get("optionId")?.as_str()?.to_string(),
-                    kind: option.get("kind").and_then(Value::as_str).map(ToOwned::to_owned),
+                    kind: option
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
                     label: option.get("name")?.as_str()?.to_string(),
                 })
             })
@@ -225,14 +228,24 @@ impl AcpStableConnectionAdapter {
         Ok(vec![signal])
     }
 
-    fn remember_open_model_options(&mut self, message: &Value, signals: &mut [ConnectionSignal]) -> Result<()> {
-        let Some(result) = message.get("result") else { return Ok(()); };
+    fn remember_open_model_options(
+        &mut self,
+        message: &Value,
+        signals: &mut [ConnectionSignal],
+    ) -> Result<()> {
+        let Some(result) = message.get("result") else {
+            return Ok(());
+        };
         let Some(observation) = NativeModelObservation::from_acp_model_config_options(
             result.get("configOptions").unwrap_or(&Value::Null),
-        )? else { return Ok(()); };
+        )?
+        else {
+            return Ok(());
+        };
         for signal in signals {
             if let ConnectionSignalKind::SessionOpened { binding } = &mut signal.kind {
-                self.model_options.insert(binding.native_session_id.clone(), observation.clone());
+                self.model_options
+                    .insert(binding.native_session_id.clone(), observation.clone());
                 binding.model_observation = Some(observation.clone());
             }
         }
@@ -261,37 +274,80 @@ impl AcpStableConnectionAdapter {
             }
         } else if let Some(requested_model_id) = pending.requested_model_id {
             let observed = NativeModelObservation::from_acp_model_config_options(
-                message.pointer("/result/configOptions").unwrap_or(&Value::Null),
+                message
+                    .pointer("/result/configOptions")
+                    .unwrap_or(&Value::Null),
             )?;
             match observed {
                 Some(observation) if observation.current_model_id == requested_model_id => {
                     if let Some(native) = native_session_id.as_ref() {
-                        self.model_options.insert(native.clone(), observation.clone());
+                        self.model_options
+                            .insert(native.clone(), observation.clone());
                     }
-                    ConnectionSignalKind::ModelConfigured { model_observation: observation }
+                    ConnectionSignalKind::ModelConfigured {
+                        model_observation: observation,
+                    }
                 }
                 Some(observation) => ConnectionSignalKind::Degraded {
                     degradation: ConnectionDegradation {
-                        reason: format!("ACP model configuration read back {} instead of requested {requested_model_id}", observation.current_model_id),
+                        reason: format!(
+                            "ACP model configuration read back {} instead of requested {requested_model_id}",
+                            observation.current_model_id
+                        ),
                         unavailable: vec!["session/set_config_option".into()],
                     },
                 },
                 None => ConnectionSignalKind::Degraded {
                     degradation: ConnectionDegradation {
-                        reason: "ACP model configuration response omitted the advertised model selector".into(),
+                        reason:
+                            "ACP model configuration response omitted the advertised model selector"
+                                .into(),
                         unavailable: vec!["session/set_config_option".into()],
                     },
                 },
             }
         } else if let Some(requested_effort) = pending.requested_reasoning_effort {
-            let observed = NativeModelObservation::from_acp_model_config_options(message.pointer("/result/configOptions").unwrap_or(&Value::Null))?;
+            let observed = NativeModelObservation::from_acp_model_config_options(
+                message
+                    .pointer("/result/configOptions")
+                    .unwrap_or(&Value::Null),
+            )?;
             match observed {
-                Some(observation) if observation.reasoning_effort.as_ref().is_some_and(|selector| selector.current_value == requested_effort) => {
-                    if let Some(native) = native_session_id.as_ref() { self.model_options.insert(native.clone(), observation.clone()); }
-                    ConnectionSignalKind::ModelConfigured { model_observation: observation }
+                Some(observation)
+                    if observation
+                        .reasoning_effort
+                        .as_ref()
+                        .is_some_and(|selector| selector.current_value == requested_effort) =>
+                {
+                    if let Some(native) = native_session_id.as_ref() {
+                        self.model_options
+                            .insert(native.clone(), observation.clone());
+                    }
+                    ConnectionSignalKind::ModelConfigured {
+                        model_observation: observation,
+                    }
                 }
-                Some(observation) => ConnectionSignalKind::Degraded { degradation: ConnectionDegradation { reason: format!("ACP reasoning effort configuration did not read back requested {requested_effort}; observed {}", observation.reasoning_effort.as_ref().map(|selector|selector.current_value.as_str()).unwrap_or("no selector")), unavailable: vec!["session/set_config_option".into()] } },
-                None => ConnectionSignalKind::Degraded { degradation: ConnectionDegradation { reason: "ACP reasoning effort response omitted model configuration selectors".into(), unavailable: vec!["session/set_config_option".into()] } },
+                Some(observation) => ConnectionSignalKind::Degraded {
+                    degradation: ConnectionDegradation {
+                        reason: format!(
+                            "ACP reasoning effort configuration did not read back requested {requested_effort}; observed {}",
+                            observation
+                                .reasoning_effort
+                                .as_ref()
+                                .map(|selector| selector.current_value.as_str())
+                                .unwrap_or("no selector")
+                        ),
+                        unavailable: vec!["session/set_config_option".into()],
+                    },
+                },
+                None => ConnectionSignalKind::Degraded {
+                    degradation: ConnectionDegradation {
+                        reason:
+                            "ACP reasoning effort response omitted model configuration selectors"
+                                .into(),
+                        unavailable: vec!["session/set_config_option".into()],
+                    },
+                },
             }
         } else {
             ConnectionSignalKind::Status {
@@ -333,10 +389,12 @@ impl AgentConnectionAdapter for AcpStableConnectionAdapter {
 
     fn open_session(&mut self, request: SessionOpenRequest) -> Result<ConnectionCommand> {
         if request.mode == crate::agent_connection::SessionOpenMode::Load {
-            let native = request.native_session_id.clone().ok_or_else(|| AikitError::new(
-                "connection.native_session_id_required",
-                "ACP load has no requested native session identity",
-            ))?;
+            let native = request.native_session_id.clone().ok_or_else(|| {
+                AikitError::new(
+                    "connection.native_session_id_required",
+                    "ACP load has no requested native session identity",
+                )
+            })?;
             self.loading_native_sessions.insert(native);
         }
         self.inner.open_session(request)
@@ -364,15 +422,19 @@ impl AgentConnectionAdapter for AcpStableConnectionAdapter {
         {
             return self.ingest_permission_request(&message);
         }
-        let historic_load_replay = message.get("method").and_then(Value::as_str) == Some("session/update")
-            && message.pointer("/params/sessionId").and_then(Value::as_str)
+        let historic_load_replay = message.get("method").and_then(Value::as_str)
+            == Some("session/update")
+            && message
+                .pointer("/params/sessionId")
+                .and_then(Value::as_str)
                 .is_some_and(|native| self.loading_native_sessions.contains(native));
         let mut signals = self.inner.ingest(message.clone())?;
         self.remember_open_model_options(&message, &mut signals)?;
         for signal in &signals {
             if let ConnectionSignalKind::SessionOpened { binding } = &signal.kind {
                 if binding.opened_as == crate::agent_connection::SessionOpenMode::Load {
-                    self.loading_native_sessions.remove(&binding.native_session_id);
+                    self.loading_native_sessions
+                        .remove(&binding.native_session_id);
                 }
             }
         }
@@ -380,12 +442,20 @@ impl AgentConnectionAdapter for AcpStableConnectionAdapter {
             // Preserve the native history update as evidence. Do not project it
             // as a fresh live event or identify it by its text/chunking: Codex
             // can replay the same assistant message with different chunks.
-            let update = message.pointer("/params/update").cloned().unwrap_or(Value::Null);
+            let update = message
+                .pointer("/params/update")
+                .cloned()
+                .unwrap_or(Value::Null);
             for signal in &mut signals {
-                signal.kind = ConnectionSignalKind::HistoryReplay { update: update.clone() };
+                signal.kind = ConnectionSignalKind::HistoryReplay {
+                    update: update.clone(),
+                };
             }
         }
-        Ok(signals.into_iter().map(|signal| self.resequence(signal)).collect())
+        Ok(signals
+            .into_iter()
+            .map(|signal| self.resequence(signal))
+            .collect())
     }
 }
 
@@ -491,25 +561,36 @@ impl InteractiveAgentConnectionAdapter for AcpStableConnectionAdapter {
         native_session_id: &str,
         provider_model_id: &str,
     ) -> Result<ConnectionCommand> {
-        let offered = self.model_options.get(native_session_id).ok_or_else(|| AikitError::new(
-            "connection.acp.model_selection_unsupported",
-            "ACP target did not advertise a model selector for this resident native session",
-        ))?;
-        if !offered.available_models.iter().any(|model| model.model_id == provider_model_id) {
+        let offered = self.model_options.get(native_session_id).ok_or_else(|| {
+            AikitError::new(
+                "connection.acp.model_selection_unsupported",
+                "ACP target did not advertise a model selector for this resident native session",
+            )
+        })?;
+        if !offered
+            .available_models
+            .iter()
+            .any(|model| model.model_id == provider_model_id)
+        {
             return Err(AikitError::new(
                 "connection.acp.model_not_advertised",
-                format!("model {provider_model_id} was not advertised by native session {native_session_id}"),
+                format!(
+                    "model {provider_model_id} was not advertised by native session {native_session_id}"
+                ),
             ));
         }
         let id = Value::String(format!("aikit-control-{}", self.next_control_id));
         self.next_control_id += 1;
         let token = request_id_token(&id)?;
-        self.pending_control.insert(token, PendingAcpControl {
-            operation: "session/set_config_option".into(),
-            native_session_id: Some(native_session_id.to_owned()),
-            requested_model_id: Some(provider_model_id.to_owned()),
-            requested_reasoning_effort: None,
-        });
+        self.pending_control.insert(
+            token,
+            PendingAcpControl {
+                operation: "session/set_config_option".into(),
+                native_session_id: Some(native_session_id.to_owned()),
+                requested_model_id: Some(provider_model_id.to_owned()),
+                requested_reasoning_effort: None,
+            },
+        );
         Ok(ConnectionCommand {
             operation: "session/set_config_option".into(),
             payload: json!({
@@ -528,13 +609,34 @@ impl InteractiveAgentConnectionAdapter for AcpStableConnectionAdapter {
             "connection.acp.reasoning_effort_selection_unsupported",
             "ACP target did not advertise a reasoning-effort selector for this resident native session",
         ))?;
-        if !offered.options.iter().any(|option| option.value == provider_reasoning_effort) {
-            return Err(AikitError::new("connection.acp.reasoning_effort_not_advertised", format!("reasoning effort {provider_reasoning_effort} was not advertised by native session {native_session_id}")));
+        if !offered
+            .options
+            .iter()
+            .any(|option| option.value == provider_reasoning_effort)
+        {
+            return Err(AikitError::new(
+                "connection.acp.reasoning_effort_not_advertised",
+                format!(
+                    "reasoning effort {provider_reasoning_effort} was not advertised by native session {native_session_id}"
+                ),
+            ));
         }
-        let id = Value::String(format!("aikit-control-{}", self.next_control_id)); self.next_control_id += 1;
+        let id = Value::String(format!("aikit-control-{}", self.next_control_id));
+        self.next_control_id += 1;
         let token = request_id_token(&id)?;
-        self.pending_control.insert(token, PendingAcpControl { operation:"session/set_config_option".into(), native_session_id:Some(native_session_id.to_owned()), requested_model_id:None, requested_reasoning_effort:Some(provider_reasoning_effort.to_owned()) });
-        Ok(ConnectionCommand { operation:"session/set_config_option".into(), payload:json!({"jsonrpc":"2.0","id":id,"method":"session/set_config_option","params":{"sessionId":native_session_id,"configId":"reasoning_effort","value":provider_reasoning_effort}}) })
+        self.pending_control.insert(
+            token,
+            PendingAcpControl {
+                operation: "session/set_config_option".into(),
+                native_session_id: Some(native_session_id.to_owned()),
+                requested_model_id: None,
+                requested_reasoning_effort: Some(provider_reasoning_effort.to_owned()),
+            },
+        );
+        Ok(ConnectionCommand {
+            operation: "session/set_config_option".into(),
+            payload: json!({"jsonrpc":"2.0","id":id,"method":"session/set_config_option","params":{"sessionId":native_session_id,"configId":"reasoning_effort","value":provider_reasoning_effort}}),
+        })
     }
 
     fn disconnect(&mut self) -> Result<ConnectionCommand> {

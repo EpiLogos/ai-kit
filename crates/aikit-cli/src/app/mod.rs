@@ -66,11 +66,11 @@ use aikit_adapters::factory_developmental::{
 use aikit_adapters::runner::SystemRunner;
 
 use aikit_core::working_environment::WorkingEnvironmentObservation;
-use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
 use aikit_tui::backend::{
     ClientEffect, FactoryWorkEntry, FactoryWorkStartReceipt, JobOutput, PaletteBackend, Projected,
     PromotionDraft, RunIntent, Toggle,
 };
+use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
 pub use aikit_tui::staging::StagedDiff;
 
 use crate::discover::{self, DiscoveredProject};
@@ -1120,12 +1120,16 @@ impl Service {
             // projections resolve to defaults — never guessed; a fetch failure
             // is fail-soft (no projection), never a resolution failure.
             let composed = match self.descriptor.project_root.as_deref() {
-                Some(root) => self.central_meta_root.clone().or_else(|| process_central_root(Some(root))).and_then(|central| {
-                    let runner = SystemRunner::new();
-                    compose_live_actor_inputs(&runner, &central, root)
-                        .ok()
-                        .flatten()
-                }),
+                Some(root) => self
+                    .central_meta_root
+                    .clone()
+                    .or_else(|| process_central_root(Some(root)))
+                    .and_then(|central| {
+                        let runner = SystemRunner::new();
+                        compose_live_actor_inputs(&runner, &central, root)
+                            .ok()
+                            .flatten()
+                    }),
                 None => None,
             };
 
@@ -1244,13 +1248,18 @@ impl Service {
             .project_root
             .as_deref()
             .unwrap_or(&self.invocation_cwd);
-        let central_root = self.central_meta_root.clone()
+        let central_root = self
+            .central_meta_root
+            .clone()
             .or_else(|| process_central_root(Some(project_root)));
         let native_binding = if self.descriptor.project_root.is_none() {
             admission.map(|a| a.context_binding()).transpose()?
-        } else { None };
+        } else {
+            None
+        };
         if admission.is_some_and(|a| a.scope_ref.as_str() == "scope:root")
-            && self.descriptor.project_root.is_some() && self.central_meta_root.is_none()
+            && self.descriptor.project_root.is_some()
+            && self.central_meta_root.is_none()
         {
             return Err(AikitError::new(
                 "compose.root_world_child_context",
@@ -1347,17 +1356,29 @@ impl Service {
                 .map(|c| c.source_resources.clone())
                 .unwrap_or_default(),
         )?;
-        let actors = composed.as_ref().map(|c| c.requested_actors.clone()).unwrap_or_default();
+        let actors = composed
+            .as_ref()
+            .map(|c| c.requested_actors.clone())
+            .unwrap_or_default();
         let mut resolution = if self.descriptor.project_root.is_none() {
             if let Some(binding) = native_binding {
                 aikit_core::application_context_resolution_with_binding(
-                    &self.descriptor, &self.view, &self.layers, &resources, actors, binding,
+                    &self.descriptor,
+                    &self.view,
+                    &self.layers,
+                    &resources,
+                    actors,
+                    binding,
                 )?
             } else {
-                aikit_tui::project_world_service::context_resolution_from_resources(self, actors, &resources)?
+                aikit_tui::project_world_service::context_resolution_from_resources(
+                    self, actors, &resources,
+                )?
             }
         } else {
-            aikit_tui::project_world_service::context_resolution_from_resources(self, actors, &resources)?
+            aikit_tui::project_world_service::context_resolution_from_resources(
+                self, actors, &resources,
+            )?
         };
         // Harness detection is owned by Actuation and consumed here — one
         // live `actuation harness detect` run discloses which operative
@@ -2176,6 +2197,11 @@ impl Service {
 
         let mut effects = Vec::new();
         for target in &self.descriptor.targets {
+            // The single-roster law: every harness arm below has its row in
+            // client.rs's REGISTRY (qwen-code and ollama included). The guard
+            // test `every_harness_client_effects_dispatches_has_a_registry_row`
+            // in client.rs fails when the dispatch grows a harness arm the
+            // roster does not carry.
             let effect = match target.as_str() {
                 TargetId::SHELL => Some(ActivationEffect::immediate("shell bin/")),
                 TargetId::CLAUDE_CODE => {
@@ -2511,7 +2537,10 @@ impl AikitApplication for Service {
         let committed = staged.commit(base.as_ref())?;
         let mut warnings = self.view.warnings.clone();
         warnings.extend(crate::skill_sources::report_central_generation(
-            &self.home, &committed.id.to_string(), &committed.path));
+            &self.home,
+            &committed.id.to_string(),
+            &committed.path,
+        ));
         let effects = self.client_effects(&self.view);
 
         Ok(AppliedGeneration {
@@ -2707,7 +2736,11 @@ impl PaletteBackend for Service {
         let Some(project) = self.descriptor.project_root.as_deref() else {
             return Ok(Vec::new());
         };
-        let mut records = if let Some(central) = self.central_meta_root.clone().or_else(|| process_central_root(Some(project))) {
+        let mut records = if let Some(central) = self
+            .central_meta_root
+            .clone()
+            .or_else(|| process_central_root(Some(project)))
+        {
             match compose_live_actor_inputs(&SystemRunner::new(), &central, project) {
                 Ok(composed) => composed
                     .map(|inputs| inputs.source_resources)
@@ -3010,7 +3043,9 @@ impl PaletteBackend for Service {
     /// `Unavailable` arms; only identity and observed liveness cross the
     /// boundary. Cached per session for the same reason as the health reading.
     fn workcell_world(&self) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
-        use aikit_adapters::workcell_instance_intake::{intake_workcell_instances, InstancesOutcome};
+        use aikit_adapters::workcell_instance_intake::{
+            intake_workcell_instances, InstancesOutcome,
+        };
         use aikit_core::workcell_world::{WorkcellDisclosure, WorkcellInstanceDisclosure};
 
         if let Some(cached) = self.workcell_reading.borrow().as_ref() {
@@ -3536,4 +3571,3 @@ fn model_roster_candidate_for(
         provenance: Vec::new(),
     }
 }
-

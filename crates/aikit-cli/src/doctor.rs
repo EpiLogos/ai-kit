@@ -230,19 +230,22 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
         ("codex", "aikit hook dispatch codex"),
         ("zcode", "aikit hook dispatch zcode"),
     ] {
-        let detection_leg =
-            match &detection {
-                aikit_adapters::actuation_harness_detection::DetectionOutcome::Record(record) => {
-                    match record.harnesses.iter().find(|entry| entry.slug == slug).map(|e| e.state)
-                    {
-                        Some(state) => format!("{state:?}"),
-                        None => "absent-from-catalog".to_string(),
-                    }
+        let detection_leg = match &detection {
+            aikit_adapters::actuation_harness_detection::DetectionOutcome::Record(record) => {
+                match record
+                    .harnesses
+                    .iter()
+                    .find(|entry| entry.slug == slug)
+                    .map(|e| e.state)
+                {
+                    Some(state) => format!("{state:?}"),
+                    None => "absent-from-catalog".to_string(),
                 }
-                aikit_adapters::actuation_harness_detection::DetectionOutcome::Unavailable {
-                    reason,
-                } => format!("unavailable ({reason})"),
-            };
+            }
+            aikit_adapters::actuation_harness_detection::DetectionOutcome::Unavailable {
+                reason,
+            } => format!("unavailable ({reason})"),
+        };
         let capability_leg =
             match aikit_adapters::actuation_harness_capability::intake_actuation_capability(
                 &aikit_adapters::runner::SystemRunner::new(),
@@ -321,8 +324,9 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
                 None,
             ) {
                 Ok(response) => {
-                    if let aikit_adapters::GatewayResponse::Protocol { gateway_version, .. } =
-                        response
+                    if let aikit_adapters::GatewayResponse::Protocol {
+                        gateway_version, ..
+                    } = response
                     {
                         findings.push(
                             Finding::new(
@@ -343,9 +347,7 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
                             Severity::Warning,
                             "the default agency gateway socket is present but not answering",
                         )
-                        .with_detail(format!(
-                            "{error}; restart it with `aikit gateway serve`"
-                        )),
+                        .with_detail(format!("{error}; restart it with `aikit gateway serve`")),
                     );
                 }
             }

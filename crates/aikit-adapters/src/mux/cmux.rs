@@ -84,7 +84,7 @@ impl Grouping {
                     "mux.invalid_grouping",
                     format!("`{other}` is not a grouping mode (auto, always, never)"),
                 )
-                .with("grouping", other))
+                .with("grouping", other));
             }
         })
     }
@@ -443,12 +443,14 @@ impl<R: CommandRunner> Cmux<R> {
         })?;
 
         let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).map_err(|error| {
-            AikitError::new(
-                "mux.cmux_socket_read_failed",
-                format!("could not read cmux `{method}` response: {error}"),
-            )
-        })?;
+        BufReader::new(stream)
+            .read_line(&mut line)
+            .map_err(|error| {
+                AikitError::new(
+                    "mux.cmux_socket_read_failed",
+                    format!("could not read cmux `{method}` response: {error}"),
+                )
+            })?;
         let response: serde_json::Value = serde_json::from_str(line.trim()).map_err(|error| {
             AikitError::new(
                 "mux.cmux_socket_decode_failed",
@@ -467,7 +469,10 @@ impl<R: CommandRunner> Cmux<R> {
                 format!("cmux `{method}` failed: {response}"),
             ));
         }
-        Ok(response.get("result").cloned().unwrap_or(serde_json::Value::Null))
+        Ok(response
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 
     #[cfg(not(unix))]
@@ -992,7 +997,7 @@ impl<R: CommandRunner> MuxAdapter for Cmux<R> {
             Ok(out) if out.ok() => Some(out.line().trim().to_string()),
             Ok(_) => None,
             Err(e) if e.code() == "mux.command_spawn_failed" => {
-                return Ok(MuxPresence::absent(MuxKind::Cmux, "`cmux` is not on PATH"))
+                return Ok(MuxPresence::absent(MuxKind::Cmux, "`cmux` is not on PATH"));
             }
             Err(e) => return Err(e),
         };

@@ -23,8 +23,8 @@ use aikit_core::working_environment::{
     WORKING_ENVIRONMENT_PROVIDER_VERSION,
 };
 use aikit_core::Result;
-use serde::Serialize;
 use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
+use serde::Serialize;
 
 /// Provider-owned terminal client attachment material. It is intentionally
 /// narrower than `open`: attachment never creates or reconciles a session.
@@ -228,7 +228,10 @@ pub fn terminal_attachment(
         return Ok(WorkingEnvironmentTerminalAttachment::NotExposed {
             provider: provider.clone(),
             subject: subject.clone(),
-            reason: format!("{subject} is not a canonical Surface in persisted plan {}", plan.id),
+            reason: format!(
+                "{subject} is not a canonical Surface in persisted plan {}",
+                plan.id
+            ),
         });
     };
     let tmux_provider = provider_ref(MuxKind::Tmux)?;

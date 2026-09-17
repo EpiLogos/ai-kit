@@ -186,7 +186,10 @@ pub fn read_world_binding<R: CommandRunner>(
 /// `project_id` from its ProjectCentral manifest when readable, else the
 /// `project:<name>` convention.
 pub fn project_world_ref(central_root: &Path, project: &str) -> String {
-    let manifest = central_root.join("Work").join(project).join("ProjectCentral/project.json");
+    let manifest = central_root
+        .join("Work")
+        .join(project)
+        .join("ProjectCentral/project.json");
     if let Ok(text) = fs::read_to_string(&manifest) {
         if let Ok(value) = serde_json::from_str::<Value>(&text) {
             if let Some(project_id) = value["project_id"].as_str() {
@@ -216,11 +219,24 @@ pub fn read_project_binding<R: CommandRunner>(
     absences: &mut Vec<String>,
 ) -> Option<WorldBinding> {
     let world_ref = project_world_ref(central_root, project);
-    match read_world_binding(runner, executable, central_root, "project", Some(project), &world_ref) {
+    match read_world_binding(
+        runner,
+        executable,
+        central_root,
+        "project",
+        Some(project),
+        &world_ref,
+    ) {
         Ok(binding) => Some(binding),
         Err(error) if error.code() == WORLD_DECLARATION_ABSENT => {
-            match read_world_binding(runner, executable, central_root, "root", None, ROOT_WORLD_REF)
-            {
+            match read_world_binding(
+                runner,
+                executable,
+                central_root,
+                "root",
+                None,
+                ROOT_WORLD_REF,
+            ) {
                 Ok(mut binding) => {
                     binding.inherited_root_lineage = true;
                     absences.push(format!(
@@ -470,7 +486,9 @@ fn annotate_entity(object: &mut WikiObject, binding: &WorldBinding) {
     let WikiObject::Node(node) = object else {
         return;
     };
-    let is_entity = node.extensions.contains_key(super::central_entities::PASU_EXTENSION)
+    let is_entity = node
+        .extensions
+        .contains_key(super::central_entities::PASU_EXTENSION)
         || node.node_type == "pasu";
     if !is_entity {
         return;

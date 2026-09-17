@@ -68,24 +68,17 @@ const EV_CONFIG: &str = "native:/Users/admin/.openclaw/openclaw.json";
 const EV_AGENTS_MD: &str = "native:/Users/admin/.openclaw/workspace/AGENTS.md";
 const EV_WORKSPACE: &str =
     "native:/Users/admin/.openclaw/workspace (IDENTITY.md, hooks/, knowledge/, memory/)";
-const EV_SKILLS: &str =
-    "native:openclaw skills list (54 skills, 17 ready, openclaw-bundled; ClawHub) + doc:docs.openclaw.ai/cli/skills";
-const EV_HOOKS: &str =
-    "native:openclaw hooks list (boot-md, command-logger, session-memory; enable/disable/install) + doc:docs.openclaw.ai/cli/hooks";
+const EV_SKILLS: &str = "native:openclaw skills list (54 skills, 17 ready, openclaw-bundled; ClawHub) + doc:docs.openclaw.ai/cli/skills";
+const EV_HOOKS: &str = "native:openclaw hooks list (boot-md, command-logger, session-memory; enable/disable/install) + doc:docs.openclaw.ai/cli/hooks";
 const EV_MCP: &str =
     "native:/Users/admin/.openclaw/mcp.json (mcpServers: bimba-mcp, linear-server)";
 const EV_PLUGINS: &str = "native:openclaw plugins --help (list/info/enable/disable in config)";
-const EV_SESSIONS: &str =
-    "native:/Users/admin/.openclaw/agents/main/sessions (*.jsonl + sessions.json) + openclaw sessions --help";
-const EV_AGENTS: &str =
-    "native:openclaw agents --help (isolated agents: workspaces + auth + routing) + doc:docs.openclaw.ai/cli/agents";
-const EV_SUBAGENTS: &str =
-    "native:openclaw.json agents.defaults.subagents.maxConcurrent=8 + /Users/admin/.openclaw/subagents";
-const EV_SURFACES: &str =
-    "native:openclaw --help (tui, dashboard, message, channels, acp) + /Users/admin/.openclaw/telegram";
+const EV_SESSIONS: &str = "native:/Users/admin/.openclaw/agents/main/sessions (*.jsonl + sessions.json) + openclaw sessions --help";
+const EV_AGENTS: &str = "native:openclaw agents --help (isolated agents: workspaces + auth + routing) + doc:docs.openclaw.ai/cli/agents";
+const EV_SUBAGENTS: &str = "native:openclaw.json agents.defaults.subagents.maxConcurrent=8 + /Users/admin/.openclaw/subagents";
+const EV_SURFACES: &str = "native:openclaw --help (tui, dashboard, message, channels, acp) + /Users/admin/.openclaw/telegram";
 const EV_MEMORY: &str = "native:/Users/admin/.openclaw/memory/main.sqlite (session-memory hook)";
-const EV_CAPABILITY_UNDECLARED: &str =
-    "native:actuation harness capability openclaw -> undeclared (declared: claude-code, codex, zcode)";
+const EV_CAPABILITY_UNDECLARED: &str = "native:actuation harness capability openclaw -> undeclared (declared: claude-code, codex, zcode)";
 /// Actuation owns detection; AIKit consumes the record. Cited per the
 /// `actuation.harness-detection/v1` schema (catalog r4); this is the record my
 /// own `actuation harness detect --json --versions` run produced.

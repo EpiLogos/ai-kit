@@ -10,15 +10,14 @@ use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
     SessionSpaceAuthoredState, SessionSpaceWorkingSurfaceBinding,
 };
-use aikit_core::{AikitError, Result};
 use aikit_core::working_environment::WorkingEnvironmentObservation;
+use aikit_core::{AikitError, Result};
 use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
 use serde::Serialize;
 
 use crate::working_environment_field;
 
-pub const SESSION_SPACE_WORKING_SURFACE_VERSION: &str =
-    "aikit.session-space-working-surface/v1";
+pub const SESSION_SPACE_WORKING_SURFACE_VERSION: &str = "aikit.session-space-working-surface/v1";
 
 #[derive(Debug, Clone, Copy)]
 pub enum WorkingSurfaceOperation {
@@ -116,7 +115,11 @@ pub fn observe(
 ) -> Result<WorkingSurfaceResult> {
     let binding = binding(state, binding_ref)?;
     Ok(WorkingSurfaceResult {
-        reading: read(state, binding, WorkingSurfaceNativeStanding::ReobservedUnproven)?,
+        reading: read(
+            state,
+            binding,
+            WorkingSurfaceNativeStanding::ReobservedUnproven,
+        )?,
         outcome: None,
     })
 }
@@ -155,7 +158,11 @@ pub fn focus(
     binding_ref: &ResourceRef,
 ) -> Result<WorkingSurfaceResult> {
     let binding = binding(state, binding_ref)?;
-    let before = read(state, binding, WorkingSurfaceNativeStanding::ReobservedUnproven)?;
+    let before = read(
+        state,
+        binding,
+        WorkingSurfaceNativeStanding::ReobservedUnproven,
+    )?;
     let outcome = if before.live_native_id.is_some() {
         working_environment_field::act(
             &binding.plan,
@@ -171,7 +178,11 @@ pub fn focus(
         }
     };
     Ok(WorkingSurfaceResult {
-        reading: read(state, binding, WorkingSurfaceNativeStanding::ReobservedUnproven)?,
+        reading: read(
+            state,
+            binding,
+            WorkingSurfaceNativeStanding::ReobservedUnproven,
+        )?,
         outcome: Some(outcome),
     })
 }

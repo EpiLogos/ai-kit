@@ -86,7 +86,9 @@ fn the_cli_backend_runs_the_health_checks_and_projects_them() {
 
     // The native credential provider is probed too.
     assert!(
-        findings.iter().any(|f| f.check == "credential.native-provider"),
+        findings
+            .iter()
+            .any(|f| f.check == "credential.native-provider"),
         "the native credential provider check is present"
     );
 }

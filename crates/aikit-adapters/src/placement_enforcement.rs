@@ -213,7 +213,10 @@ pub fn guard(
         } => (false, policy_revision, reason.clone()),
     };
     if revision != &basis.policy_revision {
-        return Err(AikitError::new("placement.policy_changed","Native policy changed between allocation and validation; resolve the current basis and retry"));
+        return Err(AikitError::new(
+            "placement.policy_changed",
+            "Native policy changed between allocation and validation; resolve the current basis and retry",
+        ));
     }
     Ok(GuardOutcome {
         allowed,

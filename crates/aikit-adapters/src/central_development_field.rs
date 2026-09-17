@@ -60,37 +60,79 @@ fn project_reading_resources(project_root: &Path, reading: &Value) -> Result<Vec
 
     if let Some(aperture) = reading.get("self_aperture") {
         for source in array(aperture, "linked_sources") {
-            register_resolved_source(project_root, &owner, source, false, &mut sources, &mut source_records)?;
+            register_resolved_source(
+                project_root,
+                &owner,
+                source,
+                false,
+                &mut sources,
+                &mut source_records,
+            )?;
         }
         for source in array(aperture, "unbound_sources") {
-            register_resolved_source(project_root, &owner, source, true, &mut sources, &mut source_records)?;
+            register_resolved_source(
+                project_root,
+                &owner,
+                source,
+                true,
+                &mut sources,
+                &mut source_records,
+            )?;
         }
     }
     for tier in array(reading, "tier_bindings") {
         for source in array(tier, "sources") {
             if !source.is_null() {
-                register_resolved_source(project_root, &owner, source, false, &mut sources, &mut source_records)?;
+                register_resolved_source(
+                    project_root,
+                    &owner,
+                    source,
+                    false,
+                    &mut sources,
+                    &mut source_records,
+                )?;
             }
         }
     }
     for ux in array(reading, "ux") {
         if let Some(source) = ux.get("source").filter(|value| !value.is_null()) {
-            register_resolved_source(project_root, &owner, source, false, &mut sources, &mut source_records)?;
+            register_resolved_source(
+                project_root,
+                &owner,
+                source,
+                false,
+                &mut sources,
+                &mut source_records,
+            )?;
         }
     }
     for ex in array(reading, "ex") {
         if let Some(source) = ex.get("source").filter(|value| !value.is_null()) {
-            register_resolved_source(project_root, &owner, source, false, &mut sources, &mut source_records)?;
+            register_resolved_source(
+                project_root,
+                &owner,
+                source,
+                false,
+                &mut sources,
+                &mut source_records,
+            )?;
         }
     }
 
     let mut records = source_records.into_values().collect::<Vec<_>>();
 
     if let Some(aperture) = reading.get("self_aperture") {
-        let exists = aperture.get("exists").and_then(Value::as_bool).unwrap_or(false);
-        let status = aperture.get("status").and_then(Value::as_str).unwrap_or("unknown");
+        let exists = aperture
+            .get("exists")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let status = aperture
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         if exists && status == "present" {
-            let mut binding = DevelopmentFieldBinding::new(DevelopmentFieldCarrierKind::SelfDescription);
+            let mut binding =
+                DevelopmentFieldBinding::new(DevelopmentFieldCarrierKind::SelfDescription);
             let linked = array(aperture, "linked_sources");
             binding.relations = source_relations(&linked, "central:self-source")?;
             let mut descriptor = carrier_descriptor(
@@ -102,11 +144,23 @@ fn project_reading_resources(project_root: &Path, reading: &Value) -> Result<Vec
             descriptor.sources = resolved_sources(&linked, &sources);
             annotate(&mut descriptor, "central.schema", schema);
             annotate(&mut descriptor, "central.scope_ref", scope_ref);
-            annotate(&mut descriptor, "central.self.path", value_str(aperture, "path"));
+            annotate(
+                &mut descriptor,
+                "central.self.path",
+                value_str(aperture, "path"),
+            );
             annotate(&mut descriptor, "central.self.status", status);
-            annotate_json(&mut descriptor, "central.self.issues", aperture.get("issues"));
+            annotate_json(
+                &mut descriptor,
+                "central.self.issues",
+                aperture.get("issues"),
+            );
             records.push(
-                DevelopmentFieldCarrierProjection { descriptor, binding }.into_record()?,
+                DevelopmentFieldCarrierProjection {
+                    descriptor,
+                    binding,
+                }
+                .into_record()?,
             );
         }
     }
@@ -131,14 +185,24 @@ fn project_reading_resources(project_root: &Path, reading: &Value) -> Result<Vec
         annotate(&mut descriptor, "central.schema", schema);
         annotate(&mut descriptor, "central.scope_ref", scope_ref);
         annotate(&mut descriptor, "central.tier", number.to_string());
-        annotate(&mut descriptor, "central.semantic_office", value_str(tier, "semantic_office"));
+        annotate(
+            &mut descriptor,
+            "central.semantic_office",
+            value_str(tier, "semantic_office"),
+        );
         if let Some(value) = tier.get("canonical_label").and_then(Value::as_str) {
             annotate(&mut descriptor, "central.canonical_label", value);
         }
         if let Some(value) = tier.get("canonical_path").and_then(Value::as_str) {
             annotate(&mut descriptor, "central.canonical_path", value);
         }
-        records.push(DevelopmentFieldCarrierProjection { descriptor, binding }.into_record()?);
+        records.push(
+            DevelopmentFieldCarrierProjection {
+                descriptor,
+                binding,
+            }
+            .into_record()?,
+        );
     }
 
     let mut ux_ids = BTreeMap::<String, ResourceRef>::new();
@@ -165,7 +229,13 @@ fn project_reading_resources(project_root: &Path, reading: &Value) -> Result<Vec
         annotate(&mut descriptor, "central.scope_ref", scope_ref);
         annotate(&mut descriptor, "central.ux_ref", ux_ref);
         annotate_json(&mut descriptor, "central.ux.flags", Some(ux));
-        records.push(DevelopmentFieldCarrierProjection { descriptor, binding }.into_record()?);
+        records.push(
+            DevelopmentFieldCarrierProjection {
+                descriptor,
+                binding,
+            }
+            .into_record()?,
+        );
     }
 
     for ex in array(reading, "ex") {
@@ -175,7 +245,8 @@ fn project_reading_resources(project_root: &Path, reading: &Value) -> Result<Vec
             .filter(|value| !value.is_null())
             .into_iter()
             .collect::<Vec<_>>();
-        let mut binding = DevelopmentFieldBinding::new(DevelopmentFieldCarrierKind::ExperienceMetadata);
+        let mut binding =
+            DevelopmentFieldBinding::new(DevelopmentFieldCarrierKind::ExperienceMetadata);
         binding.relations = source_relations(&source_values, "central:ex-source")?;
         for ux_ref in string_array(ex, "ux_refs") {
             if let Some(target) = ux_ids.get(&ux_ref) {
@@ -196,7 +267,13 @@ fn project_reading_resources(project_root: &Path, reading: &Value) -> Result<Vec
         annotate(&mut descriptor, "central.scope_ref", scope_ref);
         annotate(&mut descriptor, "central.ex_ref", ex_ref);
         annotate_json(&mut descriptor, "central.ex.metadata", Some(ex));
-        records.push(DevelopmentFieldCarrierProjection { descriptor, binding }.into_record()?);
+        records.push(
+            DevelopmentFieldCarrierProjection {
+                descriptor,
+                binding,
+            }
+            .into_record()?,
+        );
     }
 
     records.sort_by(|left, right| left.descriptor.id.cmp(&right.descriptor.id));
@@ -256,13 +333,25 @@ fn register_resolved_source(
     );
     descriptor.owner = Some(owner.clone());
     descriptor.sources.push(observed.clone());
-    annotate(&mut descriptor, "central.provenance", value_str(source, "provenance"));
-    annotate(&mut descriptor, "central.standing", value_str(source, "standing"));
+    annotate(
+        &mut descriptor,
+        "central.provenance",
+        value_str(source, "provenance"),
+    );
+    annotate(
+        &mut descriptor,
+        "central.standing",
+        value_str(source, "standing"),
+    );
     if let Some(value) = source.get("treatment").and_then(Value::as_str) {
         annotate(&mut descriptor, "central.treatment", value);
     }
     if let Some(value) = source.pointer("/revision/byte_len").and_then(Value::as_u64) {
-        annotate(&mut descriptor, "central.source_byte_len", value.to_string());
+        annotate(
+            &mut descriptor,
+            "central.source_byte_len",
+            value.to_string(),
+        );
     }
     annotate_json(&mut descriptor, "central.roles", source.get("roles"));
     if unbound_self_source {
@@ -344,11 +433,9 @@ fn central_action<R: CommandRunner>(
             .pointer("/error/message")
             .and_then(Value::as_str)
             .unwrap_or("Central Action failed");
-        return Err(AikitError::new(
-            "central_development_field.action_failed",
-            message,
-        )
-        .with("action", id));
+        return Err(
+            AikitError::new("central_development_field.action_failed", message).with("action", id),
+        );
     }
     envelope.get("data").cloned().ok_or_else(|| {
         AikitError::new(
@@ -404,7 +491,9 @@ fn annotate(descriptor: &mut ResourceDescriptor, key: &str, value: impl Into<Str
 
 fn annotate_json(descriptor: &mut ResourceDescriptor, key: &str, value: Option<&Value>) {
     if let Some(value) = value {
-        descriptor.annotations.insert(key.to_owned(), value.to_string());
+        descriptor
+            .annotations
+            .insert(key.to_owned(), value.to_string());
     }
 }
 
@@ -434,7 +523,11 @@ mod tests {
 
     fn reading() -> Value {
         let vision = source("central:source:vision", "VISION.md", "design-commitment");
-        let return_source = source("central:source:return", "ProjectCentral/self/return.md", "observed-evidence");
+        let return_source = source(
+            "central:source:return",
+            "ProjectCentral/self/return.md",
+            "observed-evidence",
+        );
         json!({
             "schema": CENTRAL_DEVELOPMENT_FIELD_READING,
             "scope_ref": "project:demo",
@@ -491,10 +584,19 @@ mod tests {
         assert!(by_id.contains_key("central:ex:project:demo:ex:returned"));
         assert!(by_id.contains_key("central:source:vision"));
         let ux = by_id["central:ux:project:demo:ux:build"];
-        assert_eq!(ux.descriptor.owner.as_ref().unwrap().as_str(), "central:project:demo");
+        assert_eq!(
+            ux.descriptor.owner.as_ref().unwrap().as_str(),
+            "central:project:demo"
+        );
         let binding = development_field_binding(ux).unwrap().unwrap();
-        assert_eq!(binding.carrier_kind, DevelopmentFieldCarrierKind::UserExperience);
-        assert_eq!(binding.relations[0].target.as_str(), "central:source:vision");
+        assert_eq!(
+            binding.carrier_kind,
+            DevelopmentFieldCarrierKind::UserExperience
+        );
+        assert_eq!(
+            binding.relations[0].target.as_str(),
+            "central:source:vision"
+        );
         let ex = by_id["central:ex:project:demo:ex:returned"];
         let binding = development_field_binding(ex).unwrap().unwrap();
         assert!(binding.relations.iter().any(|relation| {
@@ -510,9 +612,9 @@ mod tests {
         let central = Path::new("/tmp/Central");
         let project = Path::new("/tmp/Central/Work/demo");
         let records = project_development_field_resources(&runner, central, project).unwrap();
-        assert!(records.iter().any(|record| {
-            record.descriptor.id.as_str() == "central:self:project:demo"
-        }));
+        assert!(records
+            .iter()
+            .any(|record| { record.descriptor.id.as_str() == "central:self:project:demo" }));
     }
 
     #[test]
@@ -521,9 +623,10 @@ mod tests {
         value["self_aperture"]["status"] = Value::String("legacy-migratable-absence".into());
         value["self_aperture"]["exists"] = Value::Bool(false);
         value["self_aperture"]["linked_sources"] = Value::Array(Vec::new());
-        let records = project_reading_resources(Path::new("/tmp/Central/Work/demo"), &value).unwrap();
-        assert!(!records.iter().any(|record| {
-            record.descriptor.id.as_str() == "central:self:project:demo"
-        }));
+        let records =
+            project_reading_resources(Path::new("/tmp/Central/Work/demo"), &value).unwrap();
+        assert!(!records
+            .iter()
+            .any(|record| { record.descriptor.id.as_str() == "central:self:project:demo" }));
     }
 }

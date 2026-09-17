@@ -26,9 +26,7 @@ use aikit_store::index::Index;
 /// These tests assert on what a session actually sees, which is the rendered
 /// block — the classification itself is asserted separately, from the
 /// declaration.
-fn rendered(
-    result: (Vec<aikit_core::pressure::Block>, Vec<String>),
-) -> (Vec<String>, Vec<String>) {
+fn rendered(result: (Vec<aikit_core::pressure::Block>, Vec<String>)) -> (Vec<String>, Vec<String>) {
     (
         result
             .0
@@ -39,11 +37,9 @@ fn rendered(
     )
 }
 
-
 /// The shipped declaration, read from this repository's project layer.
 fn declaration_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.aikit/domains/wiki-inhabitation.toml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.aikit/domains/wiki-inhabitation.toml")
 }
 
 fn declaration() -> KnowledgeDomain {
@@ -82,9 +78,14 @@ fn the_shipped_declaration_is_valid_path_addressed_and_carries_provenance() {
     }
     // PROGRAMME §6: a domain cannot address material outside its horizon
     // range. Wiki authoring is @2 readings in @3 document form.
-    let range = domain.horizon_range.expect("the domain declares its horizon");
+    let range = domain
+        .horizon_range
+        .expect("the domain declares its horizon");
     assert!(range.admits(2) && range.admits(3));
-    assert!(!range.admits(1), "@1 personal ground is out of this domain's reach");
+    assert!(
+        !range.admits(1),
+        "@1 personal ground is out of this domain's reach"
+    );
     assert!(!range.admits(5));
 }
 
@@ -150,7 +151,9 @@ fn a_write_to_wiki_markdown_arrives_with_the_authoring_conventions() {
     );
     assert!(block.contains("horizon: @2–@3"), "{block}");
     assert!(
-        block.contains("source: central:source:project:ai-kit:.aikit/domains/wiki-inhabitation.toml"),
+        block.contains(
+            "source: central:source:project:ai-kit:.aikit/domains/wiki-inhabitation.toml"
+        ),
         "{block}"
     );
     assert!(block.contains("standing rules reasserted"), "{block}");
@@ -187,7 +190,11 @@ fn the_now_field_and_direct_children_are_addressed_as_well() {
             Vec::new(),
         ));
         assert_eq!(blocks.len(), 1, "{relative}: {blocks:?}");
-        assert!(blocks[0].contains(&format!("armed for {relative}")), "{:?}", blocks[0]);
+        assert!(
+            blocks[0].contains(&format!("armed for {relative}")),
+            "{:?}",
+            blocks[0]
+        );
     }
 }
 
@@ -241,7 +248,11 @@ fn the_conventions_dedup_but_the_authorship_boundary_reasserts() {
 
     let (second, _) = rendered(run(&index, scope, &root, &path, &domains, Vec::new()));
     assert_eq!(second.len(), 1, "{second:?}");
-    assert!(second[0].contains("ordinary payload deduped"), "{:?}", second[0]);
+    assert!(
+        second[0].contains("ordinary payload deduped"),
+        "{:?}",
+        second[0]
+    );
     assert!(!second[0].contains("[ordinary]"), "{:?}", second[0]);
     assert!(
         second[0].contains("becomes authored source only through human Recognition"),

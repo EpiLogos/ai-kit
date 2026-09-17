@@ -3,10 +3,10 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use assert_cmd::cargo::cargo_bin;
 use aikit_cli::session_space_working_surface::{
     focus, observe, open, terminal_attachment, WorkingSurfaceNativeStanding,
 };
+use aikit_cli::working_environment_field::WorkingEnvironmentTerminalAttachment;
 use aikit_core::resource::ResourceRef;
 use aikit_core::session::SessionSpec;
 use aikit_core::session_space::SessionSpaceRef;
@@ -17,7 +17,7 @@ use aikit_core::session_space_application::{
 };
 use aikit_store::{AikitHome, SessionSpaceApplicationStore};
 use aikit_tui::live_field::WorkingEnvironmentOutcome;
-use aikit_cli::working_environment_field::WorkingEnvironmentTerminalAttachment;
+use assert_cmd::cargo::cargo_bin;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -63,7 +63,11 @@ command = ["sh"]
     .unwrap()
 }
 
-fn apply(store: &SessionSpaceApplicationStore, space: &SessionSpaceRef, intent: SessionSpaceMutation) {
+fn apply(
+    store: &SessionSpaceApplicationStore,
+    space: &SessionSpaceRef,
+    intent: SessionSpaceMutation,
+) {
     let preview = store.stage(Some(space), intent).unwrap();
     store.apply(&preview).unwrap();
 }
@@ -81,9 +85,15 @@ fn attach_through_public_cli(
         return Vec::new();
     }
     let binary = cargo_bin("aikit-session-space");
-    let argv = vec![binary.to_str().unwrap().to_owned(), "-C".into(),
-        home.to_str().unwrap().to_owned(), "working-surface".into(), "attach".into(),
-        space.to_string(), binding.as_str().to_owned()];
+    let argv = vec![
+        binary.to_str().unwrap().to_owned(),
+        "-C".into(),
+        home.to_str().unwrap().to_owned(),
+        "working-surface".into(),
+        "attach".into(),
+        space.to_string(),
+        binding.as_str().to_owned(),
+    ];
     let mut script = Command::new("/usr/bin/script");
     // util-linux uses -c; BSD script accepts a command argv. Do not depend on
     // the recent util-linux positional-command extension absent on CI hosts.
@@ -102,20 +112,33 @@ fn attach_through_public_cli(
         .spawn()
         .expect("public owner command attaches a terminal client through a PTY");
     let mut input = client.stdin.take().unwrap();
-    input.write_all(format!("printf '{marker}\\n'\n").as_bytes()).unwrap();
+    input
+        .write_all(format!("printf '{marker}\\n'\n").as_bytes())
+        .unwrap();
     input.flush().unwrap();
     // Verify shell execution in the exact native pane, not merely input echoed
     // by the outer PTY. The owner-resolved pane remains the same throughout.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let capture = Command::new("tmux").args(["-L", socket, "capture-pane", "-p", "-t", native]).output().unwrap();
-        if capture.status.success() && String::from_utf8_lossy(&capture.stdout).lines().any(|line| line.trim() == marker) {
+        let capture = Command::new("tmux")
+            .args(["-L", socket, "capture-pane", "-p", "-t", native])
+            .output()
+            .unwrap();
+        if capture.status.success()
+            && String::from_utf8_lossy(&capture.stdout)
+                .lines()
+                .any(|line| line.trim() == marker)
+        {
             break;
         }
         if client.try_wait().unwrap().is_some() || Instant::now() >= deadline {
             let _ = client.kill();
             let output = client.wait_with_output().unwrap();
-            panic!("public PTY command did not execute in exact pane: stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            panic!(
+                "public PTY command did not execute in exact pane: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -242,7 +265,10 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
         }
         other => panic!("expected real tmux open, got {other:?}"),
     };
-    assert_eq!(opened.reading.live_native_id.as_deref(), Some(native.as_str()));
+    assert_eq!(
+        opened.reading.live_native_id.as_deref(),
+        Some(native.as_str())
+    );
 
     let attachment = terminal_attachment(&store.load(&space).unwrap(), &binding).unwrap();
     match attachment {
@@ -258,8 +284,16 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
             assert_eq!(
                 argv,
                 vec![
-                    "tmux", "-L", socket.as_str(), "attach-session", "-t",
-                    "aikit-persisted-surface", ";", "select-pane", "-t", native.as_str(),
+                    "tmux",
+                    "-L",
+                    socket.as_str(),
+                    "attach-session",
+                    "-t",
+                    "aikit-persisted-surface",
+                    ";",
+                    "select-pane",
+                    "-t",
+                    native.as_str(),
                 ]
             );
         }
@@ -267,14 +301,8 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
     }
 
     let marker_one = "PERSISTED_WORKING_SURFACE_ONE";
-    let output_one = attach_through_public_cli(
-        home.root(),
-        &socket,
-        &space,
-        &binding,
-        marker_one,
-        &native,
-    );
+    let output_one =
+        attach_through_public_cli(home.root(), &socket, &space, &binding, marker_one, &native);
     if !output_one.is_empty() {
         assert!(
             String::from_utf8_lossy(&output_one).contains(marker_one),
@@ -283,17 +311,14 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
         );
     }
     let after_detach = observe(&store.load(&space).unwrap(), &binding).unwrap();
-    assert_eq!(after_detach.reading.live_native_id.as_deref(), Some(native.as_str()));
+    assert_eq!(
+        after_detach.reading.live_native_id.as_deref(),
+        Some(native.as_str())
+    );
 
     let marker_two = "PERSISTED_WORKING_SURFACE_TWO";
-    let output_two = attach_through_public_cli(
-        home.root(),
-        &socket,
-        &space,
-        &binding,
-        marker_two,
-        &native,
-    );
+    let output_two =
+        attach_through_public_cli(home.root(), &socket, &space, &binding, marker_two, &native);
     if !output_two.is_empty() {
         assert!(
             String::from_utf8_lossy(&output_two).contains(marker_two),
@@ -320,7 +345,10 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
         other => panic!("expected real tmux focus, got {other:?}"),
     }
     assert_eq!(focused.reading.agent_session, agent);
-    assert_eq!(focused.reading.live_native_id.as_deref(), Some(native.as_str()));
+    assert_eq!(
+        focused.reading.live_native_id.as_deref(),
+        Some(native.as_str())
+    );
 
     // A provider session with the same plan name after destruction is a new
     // provider fact. The owner marks the explicit open as rebound rather than

@@ -215,7 +215,9 @@ impl<R> RecordingRunner<R> {
 
     /// Did any recorded call contain this subcommand?
     pub fn ran(&self, subcommand: &str) -> bool {
-        self.calls().iter().any(|c| c.iter().any(|a| a == subcommand))
+        self.calls()
+            .iter()
+            .any(|c| c.iter().any(|a| a == subcommand))
     }
 
     pub fn inner(&self) -> &R {

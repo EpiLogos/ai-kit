@@ -79,7 +79,10 @@ fn method_list_detects_prefixed_skills_and_only_prefixed_skills() {
     let envelope = run(home.path(), project.path(), &["method", "list"]);
 
     assert_eq!(envelope["data"]["method_prefix"], "METHOD:");
-    assert_eq!(envelope["data"]["count"], 1, "only the prefixed skill is a Method");
+    assert_eq!(
+        envelope["data"]["count"], 1,
+        "only the prefixed skill is a Method"
+    );
     let method = &envelope["data"]["methods"][0];
     assert_eq!(method["id"], "script/wiki-inhabitation/inhabit");
     assert_eq!(method["name"], "inhabit");
@@ -99,9 +102,19 @@ fn method_list_filter_matches_name_and_payload() {
     let hit = run(home.path(), project.path(), &["method", "list", "inhabit"]);
     assert_eq!(hit["data"]["count"], 1);
 
-    let payload_hit = run(home.path(), project.path(), &["method", "list", "cognition"]);
-    assert_eq!(payload_hit["data"]["count"], 1, "filter reaches the payload");
+    let payload_hit = run(
+        home.path(),
+        project.path(),
+        &["method", "list", "cognition"],
+    );
+    assert_eq!(
+        payload_hit["data"]["count"], 1,
+        "filter reaches the payload"
+    );
 
     let miss = run(home.path(), project.path(), &["method", "list", "greet"]);
-    assert_eq!(miss["data"]["count"], 0, "an ordinary skill is not a Method");
+    assert_eq!(
+        miss["data"]["count"], 0,
+        "an ordinary skill is not a Method"
+    );
 }

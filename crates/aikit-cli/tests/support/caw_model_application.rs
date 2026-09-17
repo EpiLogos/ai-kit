@@ -127,11 +127,26 @@ fn compose_cli_realisation_uses_the_same_existing_resident_target() {
         String::from_utf8_lossy(&output.stderr)
     );
     let reading: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(reading["data"]["project_binding"]["project"], "central:root");
-    assert_eq!(reading["data"]["project_binding"]["locator"]["kind"], "native-world");
-    assert_eq!(reading["data"]["project_binding"]["locator"]["binding"], "binding:root");
-    assert_eq!(reading["data"]["project_binding"]["locator"]["scope"], "scope:root");
-    assert_eq!(reading["data"]["plan"]["project"], reading["data"]["project_binding"]);
+    assert_eq!(
+        reading["data"]["project_binding"]["project"],
+        "central:root"
+    );
+    assert_eq!(
+        reading["data"]["project_binding"]["locator"]["kind"],
+        "native-world"
+    );
+    assert_eq!(
+        reading["data"]["project_binding"]["locator"]["binding"],
+        "binding:root"
+    );
+    assert_eq!(
+        reading["data"]["project_binding"]["locator"]["scope"],
+        "scope:root"
+    );
+    assert_eq!(
+        reading["data"]["plan"]["project"],
+        reading["data"]["project_binding"]
+    );
     assert_eq!(reading["data"]["root_meta_project"], true);
     assert_eq!(reading["data"]["local_project_directory_present"], false);
     assert!(!w.temp.path().join(".aikit").exists());
@@ -151,18 +166,33 @@ fn compose_cli_realisation_uses_the_same_existing_resident_target() {
     println!("MODEL_COMPOSE_NATIVE_CONNECTION_EXECUTED");
 }
 
-
 #[test]
 #[ignore = "requires pinned Central and Actuation; mandatory CAW lane"]
 fn native_central_root_composes_without_a_profile_or_child_project() {
     let w = World::new();
     let central = w.temp.path().join("Central");
-    let ctrl = PathBuf::from(std::env::var_os("AIKIT_CAW_CTRL_BIN").expect("pinned native Central"));
-    let initialized = Command::new(&ctrl).args(["--json", "--root"]).arg(&central).arg("init").output().unwrap();
-    assert!(initialized.status.success(), "{} {}", String::from_utf8_lossy(&initialized.stdout), String::from_utf8_lossy(&initialized.stderr));
+    let ctrl =
+        PathBuf::from(std::env::var_os("AIKIT_CAW_CTRL_BIN").expect("pinned native Central"));
+    let initialized = Command::new(&ctrl)
+        .args(["--json", "--root"])
+        .arg(&central)
+        .arg("init")
+        .output()
+        .unwrap();
+    assert!(
+        initialized.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
     let native = actuation();
-    let mut paths = vec![native.parent().unwrap().to_path_buf(), ctrl.parent().unwrap().to_path_buf()];
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    let mut paths = vec![
+        native.parent().unwrap().to_path_buf(),
+        ctrl.parent().unwrap().to_path_buf(),
+    ];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
     for cwd in [&central, &central.join("Control"), &central.join("Work")] {
         let out = Command::new(env!("CARGO_BIN_EXE_aikit"))
             .env("AIKIT_HOME", w.home.root())
@@ -170,12 +200,28 @@ fn native_central_root_composes_without_a_profile_or_child_project() {
             .env("CENTRAL_ROOT", &central)
             .env("CENTRAL_CTRL_BIN", &ctrl)
             .env("PATH", std::env::join_paths(&paths).unwrap())
-            .arg("--json").arg("-C").arg(cwd).arg("compose").output().unwrap();
-        assert!(out.status.success(), "{} {}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            .arg("--json")
+            .arg("-C")
+            .arg(cwd)
+            .arg("compose")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         let reading: Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(reading["data"]["project_binding"]["project"], "control:root");
+        assert_eq!(
+            reading["data"]["project_binding"]["project"],
+            "control:root"
+        );
         assert_eq!(reading["data"]["root_meta_project"], true);
-        assert_eq!(reading["data"]["plan"]["project"], reading["data"]["project_binding"]);
+        assert_eq!(
+            reading["data"]["plan"]["project"],
+            reading["data"]["project_binding"]
+        );
         assert!(reading["data"]["model_routes"].is_array());
     }
     assert!(!central.join(".aikit").exists());

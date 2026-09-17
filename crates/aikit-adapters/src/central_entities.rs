@@ -119,7 +119,10 @@ pub fn materialise_central_entities(root: &Path) -> CentralEntityReading {
 
     // Member edges only target entities that exist in this same pass, so the
     // compiled graph never dangles; unresolved members are disclosed.
-    let mut known_refs: BTreeSet<String> = agent_nodes.iter().map(|n| n.ref_id.as_str().to_owned()).collect();
+    let mut known_refs: BTreeSet<String> = agent_nodes
+        .iter()
+        .map(|n| n.ref_id.as_str().to_owned())
+        .collect();
     known_refs.extend(set_nodes.iter().map(|n| n.ref_id.as_str().to_owned()));
     if let Some(WikiObject::Node(nara)) = objects.first() {
         known_refs.insert(nara.ref_id.as_str().to_owned());
@@ -209,10 +212,7 @@ fn pasu_extension(form: &str, subject_ref: &str, extra: Value) -> BTreeMap<Strin
     );
     // W10 rev 3: the paśu identity grammar is the first typed family of
     // 0/1 anchors — stance is declared data, never an engine kind.
-    extensions.insert(
-        "aikit.ql-stance/v1".to_owned(),
-        json!({"stance": "0/1"}),
-    );
+    extensions.insert("aikit.ql-stance/v1".to_owned(), json!({"stance": "0/1"}));
     extensions
 }
 
@@ -281,7 +281,9 @@ fn read_canonical(root: &Path, relative: &str) -> Result<Vec<u8>, String> {
     let metadata =
         fs::metadata(&expected).map_err(|error| format!("carrier `{relative}`: {error}"))?;
     if metadata.len() > 1024 * 1024 {
-        return Err(format!("carrier `{relative}` exceeds the bounded read size"));
+        return Err(format!(
+            "carrier `{relative}` exceeds the bounded read size"
+        ));
     }
     fs::read(&expected).map_err(|error| format!("carrier `{relative}`: {error}"))
 }
@@ -460,7 +462,8 @@ fn read_agent_entities(root: &Path, absences: &mut Vec<String>) -> Result<Vec<Wi
             generation_ref: None,
             extensions: BTreeMap::new(),
         });
-        node.source_refs.push(source_ref(central_source_ref(&relative)));
+        node.source_refs
+            .push(source_ref(central_source_ref(&relative)));
         if let Some(profiles) = node
             .extensions
             .get_mut(PASU_EXTENSION)
@@ -538,7 +541,10 @@ fn read_agent_set_entities(
             absences.push(format!("AgentSet {} carries no ref", path.display()));
             continue;
         };
-        let revision = record["revision"].as_str().unwrap_or("unversioned").to_owned();
+        let revision = record["revision"]
+            .as_str()
+            .unwrap_or("unversioned")
+            .to_owned();
         let relative = path
             .strip_prefix(root)
             .map(|value| value.to_string_lossy().replace('\\', "/"))

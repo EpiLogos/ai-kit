@@ -68,7 +68,10 @@ impl OrientationConfig {
         let Some(config) = config else {
             return tuned;
         };
-        if let Some(value) = config.get("include_human_scratch").and_then(|v| v.as_bool()) {
+        if let Some(value) = config
+            .get("include_human_scratch")
+            .and_then(|v| v.as_bool())
+        {
             tuned.include_human_scratch = value;
         }
         if let Some(value) = config.get("max_items").and_then(|v| v.as_integer()) {
@@ -148,7 +151,12 @@ pub fn inspect_project_now<R: CommandRunner>(
     central_root: &Path,
     project: &str,
 ) -> Result<Value, String> {
-    inspect_project_now_for(runner, central_root, project, "continuity/orientation-packet")
+    inspect_project_now_for(
+        runner,
+        central_root,
+        project,
+        "continuity/orientation-packet",
+    )
 }
 
 /// The same call, with the caller's own name on any failure it reports.

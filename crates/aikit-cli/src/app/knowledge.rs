@@ -61,8 +61,8 @@ impl KnowledgeRuntime {
         self.central.as_ref().map(|p| p as &dyn SourcePoolProvider)
     }
     fn application(&self, context: FamiliarityContext) -> KnowledgeApplication<'_> {
-        let mut application = KnowledgeApplication::new(context)
-            .with_project_map(&self.project_map);
+        let mut application =
+            KnowledgeApplication::new(context).with_project_map(&self.project_map);
         if let Some(provider) = &self.wiki {
             application = application.with_wiki(provider);
         }
@@ -106,7 +106,10 @@ impl Service {
         &self,
         operation: impl FnOnce(&KnowledgeRuntime, KnowledgeApplication<'_>) -> Result<T>,
     ) -> Result<T> {
-        let owner_backed = self.knowledge_runtime.borrow().as_ref()
+        let owner_backed = self
+            .knowledge_runtime
+            .borrow()
+            .as_ref()
             .is_some_and(|r| r.central_expected);
         if owner_backed {
             self.invalidate_knowledge_runtime();
@@ -547,21 +550,34 @@ impl Service {
         let central = if let Some(central_root) = central_root {
             let project = root.strip_prefix(central_root).ok().and_then(|relative| {
                 let mut parts = relative.components();
-                if parts.next()?.as_os_str() != "Work" { return None; }
+                if parts.next()?.as_os_str() != "Work" {
+                    return None;
+                }
                 parts.next()?.as_os_str().to_str()
             });
             // A missing map degrades this lens, not independent Wiki/code
             // faculties. Its absence never activates a disposable substitute.
-            match CentralFileMapProvider::connect(SystemRunner::new(),
-                aikit_adapters::central_file_map::executable(), central_root, project) {
+            match CentralFileMapProvider::connect(
+                SystemRunner::new(),
+                aikit_adapters::central_file_map::executable(),
+                central_root,
+                project,
+            ) {
                 Ok(provider) => Some(provider),
-                Err(error) => { absences.push(format!("Central file map unavailable: {}", error.message())); None }
+                Err(error) => {
+                    absences.push(format!("Central file map unavailable: {}", error.message()));
+                    None
+                }
             }
-        } else { None };
+        } else {
+            None
+        };
         // Filesystem source shards are a standalone discovery mechanism. In a
         // Central World their copied bodies must not bypass the live source owner
         // (including a source withheld since an earlier cached corpus was written).
-        if central_root.is_some() { discovered.sources.clear(); }
+        if central_root.is_some() {
+            discovered.sources.clear();
+        }
         let mut material = Vec::new();
         let mut bindings = Vec::new();
         for item in discovered.sources.into_values() {
@@ -575,41 +591,44 @@ impl Service {
 
         let mut bkmr = None;
         if central_root.is_none() {
-        if let Some(config) = self.active_provider_config("tool/search/bkmr") {
-            let db = config.get("db").and_then(|value| value.as_str());
-            if let Some(db) = db {
-                if config.get("disposable").and_then(|v|v.as_bool()) != Some(true) {
-                    return Err(aikit_core::AikitError::new("knowledge.bkmr_adoption_required", "standalone bkmr rebuild requires disposable=true; existing native databases must be adopted by Central"));
-                }
-                let db_path = resolve_provider_path(root, db);
-                let embeddings = config
-                    .get("embeddings")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false);
-                let mut provider = BkmrSourcePoolProvider::new(
-                    SystemRunner::new().with_cwd(root),
-                    db_path,
-                    embeddings,
-                );
-                if provider.status().available {
-                    if let Err(error) = provider.rebuild(&material) {
-                        absences.push(format!("bkmr SourcePool degraded: {}", error.message()));
+            if let Some(config) = self.active_provider_config("tool/search/bkmr") {
+                let db = config.get("db").and_then(|value| value.as_str());
+                if let Some(db) = db {
+                    if config.get("disposable").and_then(|v| v.as_bool()) != Some(true) {
+                        return Err(aikit_core::AikitError::new("knowledge.bkmr_adoption_required", "standalone bkmr rebuild requires disposable=true; existing native databases must be adopted by Central"));
                     }
-                } else {
-                    absences.push(
-                        "bkmr SourcePool configured but provider executable is unavailable".into(),
+                    let db_path = resolve_provider_path(root, db);
+                    let embeddings = config
+                        .get("embeddings")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    let mut provider = BkmrSourcePoolProvider::new(
+                        SystemRunner::new().with_cwd(root),
+                        db_path,
+                        embeddings,
                     );
+                    if provider.status().available {
+                        if let Err(error) = provider.rebuild(&material) {
+                            absences.push(format!("bkmr SourcePool degraded: {}", error.message()));
+                        }
+                    } else {
+                        absences.push(
+                            "bkmr SourcePool configured but provider executable is unavailable"
+                                .into(),
+                        );
+                    }
+                    bkmr = Some(provider);
+                } else {
+                    absences
+                        .push("bkmr is active but has no resolved `db` provider binding".into());
                 }
-                bkmr = Some(provider);
-            } else {
-                absences.push("bkmr is active but has no resolved `db` provider binding".into());
             }
-        }
-
         }
         // Only descriptors join the map; payloads are fetched by the live
         // source owner at read/context/Flow time, not copied into this cache.
-        if let Some(provider) = &central { material.extend(provider.descriptors().iter().cloned()); }
+        if let Some(provider) = &central {
+            material.extend(provider.descriptors().iter().cloned());
+        }
         let mut code = None;
         if let Some(project_id) = self.descriptor.project_id.as_ref() {
             let source = SourceRef::parse(format!("source:project-code:{project_id}"))?;

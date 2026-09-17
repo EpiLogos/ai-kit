@@ -51,6 +51,7 @@ pub mod now_contemplation;
 pub mod frecency;
 pub mod guidance;
 pub mod harness_admission;
+pub mod harness_profile;
 pub mod hooks;
 pub mod id;
 pub mod knowledge;
@@ -76,6 +77,7 @@ pub mod knowledge_wiki_write;
 pub mod lifecycle;
 pub mod live_activation_history;
 pub mod method;
+pub mod model_harness_binding;
 pub mod model_runtime;
 pub mod platform;
 pub mod policy;
@@ -238,6 +240,13 @@ pub use harness_admission::{
     HarnessCompatibilityGap, HarnessEditionKind, HarnessFaculty, HarnessFacultyObservation,
     HarnessLifecyclePhase, HARNESS_ADAPTER_AUTHORING_SKILL, HARNESS_ADAPTER_SDK_VERSION,
 };
+pub use harness_profile::{
+    ActivationEffectName, GuidanceLayer, HookObserveDeclaration, HookProjectDeclaration, HooksLayer,
+    HarnessPresence, HarnessProfile, HarnessProfileError, LayerPosture, MergeGrammar, MergePolicy,
+    ModelDispatchPosture, SessionCapabilityFlags, SessionProtocol, SettingsLayer, SkillsLayer,
+    SkillsObserveDeclaration, ToolObserveDeclaration, ToolProjectDeclaration, ToolsLayer,
+    HARNESS_PROFILE_SCHEMA,
+};
 pub use hooks::{
     build_chains, matches as hook_matches, BypassScope, BypassToken, Denial, Dispatcher,
     ExecutionGroup, HookChain, HookDecision, HookEvent, HookEventKind, HookStep, StepOutcome,
@@ -360,6 +369,7 @@ pub use method::{
     MethodResolvedRef, MethodSkillRef, SituatedSkillRef, SkillPraxisMetadata,
     SkillPraxisMetadataResolution, SkillPraxisResolvedRef, UsageOverlayRef, METHOD_VERSION,
 };
+pub use model_harness_binding::{HarnessModelDemand, HarnessProviderGate};
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;
 pub use praxis::{resolve_praxis, PraxisResolution, SelectedMethod, PRAXIS_RESOLUTION_VERSION};

@@ -217,9 +217,9 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),
         Some(Command::Status(a)) => cmd_status(cwd, a, json_mode),
         Some(Command::System(_)) => cmd_system(cwd),
-        Some(Command::ConfigContribution(_)) => {
-            Ok(Reply::RawJson(aikit_cli::config_plane::contribution_document(cwd)))
-        }
+        Some(Command::ConfigContribution(_)) => Ok(Reply::RawJson(
+            aikit_cli::config_plane::contribution_document(cwd),
+        )),
         Some(Command::Config(c)) => match aikit_cli::config_plane::dispatch(cwd, c) {
             Ok(document) => Ok(Reply::RawJsonWithStatus(document, json::EXIT_OK)),
             Err(failure) => Ok(Reply::RawJsonWithStatus(failure.doc, failure.exit)),
@@ -737,8 +737,11 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
     };
     match command.command {
         SourceSub::BindCentral(args) => {
-            let spec=skill_sources::bind_central(home,&args.id,&args.root,&args.source_ref)?;
-            Ok(source_reply(jval!({"id":spec.id,"kind":"central","source_ref":args.source_ref,"next":"sync and promote"}),vec![]))
+            let spec = skill_sources::bind_central(home, &args.id, &args.root, &args.source_ref)?;
+            Ok(source_reply(
+                jval!({"id":spec.id,"kind":"central","source_ref":args.source_ref,"next":"sync and promote"}),
+                vec![],
+            ))
         }
         SourceSub::AddDirectory(args) => {
             let spec =
@@ -774,7 +777,8 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
             let spec = skill_sources::set_revision(home, &args.id, &args.revision)?;
             let revision = match spec.kind {
                 skill_sources::SourceKind::Git { revision, .. } => revision,
-                skill_sources::SourceKind::Directory { .. } | skill_sources::SourceKind::Central { .. } => unreachable!(),
+                skill_sources::SourceKind::Directory { .. }
+                | skill_sources::SourceKind::Central { .. } => unreachable!(),
             };
             Ok(source_reply(
                 jval!({
@@ -1677,7 +1681,9 @@ fn open_surface(
         // The palette left to hand an interactive flow to the restored terminal
         // (the launcher idiom, like `Run`). The alternate screen is already torn
         // down by the time we are here, so these run against the real terminal.
-        aikit_tui::PaletteOutcome::RunCredentialSetup => run_credential_setup_from_palette(&service),
+        aikit_tui::PaletteOutcome::RunCredentialSetup => {
+            run_credential_setup_from_palette(&service)
+        }
         aikit_tui::PaletteOutcome::RunDoctorFix => run_doctor_fix_from_palette(&service),
         aikit_tui::PaletteOutcome::Closed
         | aikit_tui::PaletteOutcome::Tree
@@ -1695,11 +1701,15 @@ fn run_credential_setup_from_palette(service: &Service) -> Result<Reply> {
     use aikit_core::resource::ModelRouteSet;
 
     let composed = service.compose_plan()?;
-    let route_sets: Vec<ModelRouteSet> =
-        serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
-            .map_err(|error| {
-                AikitError::new("palette.credential_setup_routes_unreadable", error.to_string())
-            })?;
+    let route_sets: Vec<ModelRouteSet> = serde_json::from_value(
+        composed.get("model_routes").cloned().unwrap_or_default(),
+    )
+    .map_err(|error| {
+        AikitError::new(
+            "palette.credential_setup_routes_unreadable",
+            error.to_string(),
+        )
+    })?;
     let requirements = credential_requirements_for_model_routes(&route_sets);
 
     let store = aikit_store::CredentialBindingStore::new(service.home());
@@ -1730,16 +1740,25 @@ fn run_credential_setup_from_palette(service: &Service) -> Result<Reply> {
         use std::io::Write;
         std::io::stderr().flush().ok();
         let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .map_err(|error| AikitError::new("palette.credential_setup_prompt", error.to_string()))?;
+        std::io::stdin().read_line(&mut line).map_err(|error| {
+            AikitError::new("palette.credential_setup_prompt", error.to_string())
+        })?;
         let choice = line.trim();
         if choice.eq_ignore_ascii_case("q") {
             return Ok(Reply::Status(0));
         }
-        match choice.parse::<usize>().ok().filter(|n| *n >= 1 && *n <= unresolved.len()) {
+        match choice
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n >= 1 && *n <= unresolved.len())
+        {
             Some(n) => &unresolved[n - 1],
-            None => return Err(AikitError::new("palette.credential_setup_choice", "not a listed option")),
+            None => {
+                return Err(AikitError::new(
+                    "palette.credential_setup_choice",
+                    "not a listed option",
+                ))
+            }
         }
     };
 
@@ -1958,9 +1977,7 @@ fn flow_subject(a: &FlowContemplateArgs) -> Result<aikit_core::resource::Resourc
     aikit_core::resource::ResourceRef::parse(flow_ref)
 }
 
-fn now_subject(
-    a: &FlowContemplateArgs,
-) -> Result<Option<(String, aikit_core::NowFixturesSeam)>> {
+fn now_subject(a: &FlowContemplateArgs) -> Result<Option<(String, aikit_core::NowFixturesSeam)>> {
     let Some(now_ref) = &a.now_ref else {
         return Ok(None);
     };
@@ -1982,7 +1999,10 @@ fn now_subject(
             format!("cannot read {}: {error}", fixtures_path.display()),
         )
     })?;
-    Ok(Some((now_ref.clone(), aikit_core::NowFixturesSeam::parse(&body)?)))
+    Ok(Some((
+        now_ref.clone(),
+        aikit_core::NowFixturesSeam::parse(&body)?,
+    )))
 }
 
 fn cmd_flow(cwd: &std::path::Path, c: FlowCmd) -> Result<Reply> {
@@ -2446,7 +2466,11 @@ fn status_summary(
         "Catalogued: {} capabilities",
         view.catalog_index.len()
     ));
-    lines.push(format!("Active capabilities: {} ({})", view.active.len(), counts));
+    lines.push(format!(
+        "Active capabilities: {} ({})",
+        view.active.len(),
+        counts
+    ));
 
     let hash = view.hash.to_string();
     let generation = match generation_label {

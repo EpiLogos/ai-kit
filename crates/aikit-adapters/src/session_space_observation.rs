@@ -5,14 +5,15 @@
 //! read model for another first-party process to observe. It cannot restore or
 //! mutate SessionSpace.
 
-use aikit_core::session_space::{SessionSpaceReadModel, SessionSpaceRuntime, SESSION_SPACE_VERSION};
+use aikit_core::session_space::{
+    SessionSpaceReadModel, SessionSpaceRuntime, SESSION_SPACE_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub const SESSION_SPACE_OBSERVATION_FILE_VERSION: &str =
-    "aikit.session-space-observation-file/v1";
+pub const SESSION_SPACE_OBSERVATION_FILE_VERSION: &str = "aikit.session-space-observation-file/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSessionSpaceObservation {
@@ -49,7 +50,9 @@ impl SessionSpaceFileObservationProvider {
         let bytes = fs::read(&self.path)?;
         let stored: StoredSessionSpaceObservation = serde_json::from_slice(&bytes)?;
         if stored.schema != SESSION_SPACE_OBSERVATION_FILE_VERSION {
-            return Err(SessionSpaceObservationError::UnsupportedSchema(stored.schema));
+            return Err(SessionSpaceObservationError::UnsupportedSchema(
+                stored.schema,
+            ));
         }
         if stored.read_model.version != SESSION_SPACE_VERSION {
             return Err(SessionSpaceObservationError::UnsupportedReadModel(

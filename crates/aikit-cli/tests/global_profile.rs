@@ -80,7 +80,10 @@ fn a_user_baseline_persists_and_a_project_can_override_it() {
     assert_eq!(reply["data"]["scope"], "global");
     assert!(home.join("scopes/global/profile.toml").is_file());
 
-    assert!(active(&home, &first), "a fresh process must load the baseline");
+    assert!(
+        active(&home, &first),
+        "a fresh process must load the baseline"
+    );
     assert!(active(&home, &sibling));
 
     let (disabled, reply) = run(
@@ -97,9 +100,10 @@ fn a_user_baseline_persists_and_a_project_can_override_it() {
 
     let (_output, explanation) = run(&home, &sibling, &["explain", CAPABILITY]);
     let selected = explanation["data"]["selected_by"].as_array().unwrap();
-    assert!(selected
-        .iter()
-        .any(|reason| reason.as_str().unwrap().contains("scopes/global/profile.toml")));
+    assert!(selected.iter().any(|reason| reason
+        .as_str()
+        .unwrap()
+        .contains("scopes/global/profile.toml")));
 }
 
 #[test]
@@ -108,9 +112,7 @@ fn a_named_profile_can_be_used_from_the_user_baseline() {
     let (home, first, _) = scene(temp.path());
     write(
         &home.join("registries/personal/profiles/personal/foundation.toml"),
-        &format!(
-            "schema = 1\nid = \"profile/personal/foundation\"\nenable = [\"{CAPABILITY}\"]\n"
-        ),
+        &format!("schema = 1\nid = \"profile/personal/foundation\"\nenable = [\"{CAPABILITY}\"]\n"),
     );
 
     let (used, reply) = run(
@@ -130,11 +132,10 @@ fn malformed_user_baseline_is_reported_without_being_replaced() {
     let malformed = "schema = 1\nenable = [\"unterminated\n";
     write(&path, malformed);
 
-    let (output, reply) = run(
-        &home,
-        &first,
-        &["enable", CAPABILITY, "--scope", "user"],
+    let (output, reply) = run(&home, &first, &["enable", CAPABILITY, "--scope", "user"]);
+    assert!(
+        !output.status.success(),
+        "malformed input was accepted: {reply}"
     );
-    assert!(!output.status.success(), "malformed input was accepted: {reply}");
     assert_eq!(fs::read_to_string(path).unwrap(), malformed);
 }
