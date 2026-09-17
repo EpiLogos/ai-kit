@@ -6,12 +6,12 @@ mod common;
 use aikit_cli::working_environment_field::{
     act, observe, plan_surfaces, provider_ref, surface_ref,
 };
-use aikit_core::SessionPlan;
 use aikit_core::platform::{MuxKind, PlaceTechnology};
 use aikit_core::session::SessionSpec;
 use aikit_core::working_environment::WorkingEnvironmentHealth;
+use aikit_core::SessionPlan;
 use aikit_tui::live_field::{
-    WorkingEnvironmentOperation, WorkingEnvironmentOutcome, live_working_field,
+    live_working_field, WorkingEnvironmentOperation, WorkingEnvironmentOutcome,
 };
 
 fn plan() -> SessionPlan {
@@ -288,12 +288,8 @@ mod herdr_place_technology {
         // names (found live — a hardcoded `provider/herdr/current` left a
         // binding addressed at `provider/herdr/w6` unprojectable).
         let addressed = aikit_core::resource::ResourceRef::parse("provider/herdr/w6").unwrap();
-        let driven = entry.working_environment(
-            &plan,
-            &addressed,
-            &plan_surfaces(&plan),
-            Some(&subject),
-        );
+        let driven =
+            entry.working_environment(&plan, &addressed, &plan_surfaces(&plan), Some(&subject));
         assert!(
             driven.is_some(),
             "a registered herdr must hand back the plan-scoped provider"
@@ -312,7 +308,10 @@ mod herdr_place_technology {
             .expect("detection must observe, never assume");
         assert_eq!(reading.technology, PlaceTechnology::herdr());
         if herdr_installed() {
-            assert!(reading.installed, "an installed herdr is reported installed");
+            assert!(
+                reading.installed,
+                "an installed herdr is reported installed"
+            );
             assert!(
                 reading.version.is_some(),
                 "the version probe result is carried: {:?}",
@@ -330,9 +329,9 @@ mod herdr_place_technology {
     #[test]
     fn herdr_answers_in_the_field_exactly_when_installed() {
         let observations = observe(&plan()).expect("observation must not fail on any host");
-        let herdr_row = observations
-            .iter()
-            .find(|observation| observation.provider == provider_ref(PlaceTechnology::herdr()).unwrap());
+        let herdr_row = observations.iter().find(|observation| {
+            observation.provider == provider_ref(PlaceTechnology::herdr()).unwrap()
+        });
         if herdr_installed() {
             let row = herdr_row.expect("an installed herdr must answer in the field");
             assert!(row.provider_version.is_some());

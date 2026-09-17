@@ -7,7 +7,9 @@ mod unix {
     use aikit_core::ql::{
         QlClientSubject, QlOperation, QlProviderClient, QlProviderState, QlRefractionRequest,
     };
-    use aikit_core::resource::{OperativeSemanticProvider, OperativeSemanticProviderStatus, ResourceRef};
+    use aikit_core::resource::{
+        OperativeSemanticProvider, OperativeSemanticProviderStatus, ResourceRef,
+    };
     use tempfile::TempDir;
 
     fn ql_fixture() -> (TempDir, std::path::PathBuf) {
@@ -45,7 +47,9 @@ exit 2
         assert_eq!(capabilities.health.state, QlProviderState::Available);
         assert_eq!(capabilities.provider.version, "8.0.0-test");
         assert!(capabilities.operations.contains(&QlOperation::Refract));
-        assert!(capabilities.deterministic_operations.contains(&QlOperation::Refract));
+        assert!(capabilities
+            .deterministic_operations
+            .contains(&QlOperation::Refract));
         assert_eq!(capabilities.supported_forms, vec!["C", "CPrime"]);
 
         let provider = QlOperativeProvider::new(client);
@@ -60,7 +64,10 @@ exit 2
         let (_temp, path) = ql_fixture();
         let client = QlCliClient::new(path);
         let request = QlRefractionRequest::new(
-            QlClientSubject::new(ResourceRef::parse("project/one").unwrap(), Some("r1".into())),
+            QlClientSubject::new(
+                ResourceRef::parse("project/one").unwrap(),
+                Some("r1".into()),
+            ),
             "ql/interpretation/c-prime",
         );
         let failure = client.refract(&request).unwrap_err();

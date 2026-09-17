@@ -13,8 +13,8 @@
 use aikit_core::hooks::HookEventKind;
 
 use super::{
-    LayerMergeError, MatcherPolicy, MergeReport, document_for_merging, hooks_block_of,
-    merge_hook_entries,
+    document_for_merging, hooks_block_of, merge_hook_entries, LayerMergeError, MatcherPolicy,
+    MergeReport,
 };
 
 /// Merge AIKit's dispatch entries into a zcode configuration document.

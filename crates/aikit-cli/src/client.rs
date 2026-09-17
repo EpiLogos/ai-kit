@@ -586,12 +586,14 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
                 });
             }
             // An install emits configuration, never payload links.
-            other => return Err(AikitError::new(
-                "client.unexpected_install_item",
-                format!(
+            other => {
+                return Err(AikitError::new(
+                    "client.unexpected_install_item",
+                    format!(
                     "the {client} adapter asked for an install item AIKit cannot stage: {other:?}"
                 ),
-            )),
+                ))
+            }
         }
     }
 

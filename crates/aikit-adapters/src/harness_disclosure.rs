@@ -29,7 +29,7 @@ use aikit_core::harness_profile::{
     ActivationEffectName, HarnessProfile, HooksLayer, LayerPosture, ToolsLayer,
 };
 
-use crate::tool_sources::{TOOLS_PROJECTION_OWNERSHIP, ToolSourceEntry};
+use crate::tool_sources::{ToolSourceEntry, TOOLS_PROJECTION_OWNERSHIP};
 
 /// One entry the harness natively carries: its name and, where the caller
 /// redacted one, the command detail. `detail` is what the ownership-marker
@@ -464,8 +464,8 @@ mod tests {
     }
 
     #[test]
-    fn a_brokered_tools_layer_discloses_no_composed_entries_and_no_drift_even_when_composition_exists()
-     {
+    fn a_brokered_tools_layer_discloses_no_composed_entries_and_no_drift_even_when_composition_exists(
+    ) {
         let profile = for_slug("pi").expect("pi carries an embedded profile");
         let native = observation(vec![foreign_linear()]);
 
@@ -540,8 +540,8 @@ mod tests {
     }
 
     #[test]
-    fn detection_only_layers_disclose_their_observed_paths_and_the_hook_seam_fact_as_native_entries()
-     {
+    fn detection_only_layers_disclose_their_observed_paths_and_the_hook_seam_fact_as_native_entries(
+    ) {
         let profile = for_slug("claude-code").expect("claude-code carries an embedded profile");
         let native = NativeObservation {
             mcp_servers: vec![],

@@ -12,13 +12,13 @@
 //! naming the technology and what would support it. Nothing here normalises an
 //! unknown name into some other technology, and nothing crashes on it.
 
-use aikit_core::Result;
 use aikit_core::platform::{MuxKind, PlaceTechnology};
 use aikit_core::resource::ResourceRef;
 use aikit_core::session::SessionPlan;
+use aikit_core::Result;
 
 use crate::herdr::HerdrWorkingEnvironment;
-use crate::mux::{MuxAdapter, MuxPresence, cmux::Cmux, plain::Plain, tmux::Tmux};
+use crate::mux::{cmux::Cmux, plain::Plain, tmux::Tmux, MuxAdapter, MuxPresence};
 use crate::runner::{CommandRunner, SystemRunner};
 use crate::working_environment::WorkingEnvironmentProvider;
 

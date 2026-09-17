@@ -243,9 +243,7 @@ pub fn herdr_recorded_surface_keys(plan: &SessionPlan) -> Vec<(String, String)> 
     };
     surfaces
         .iter()
-        .filter_map(|(logical, pane)| {
-            pane.as_str().map(|pane| (logical.clone(), pane.to_owned()))
-        })
+        .filter_map(|(logical, pane)| pane.as_str().map(|pane| (logical.clone(), pane.to_owned())))
         .collect()
 }
 
@@ -264,12 +262,9 @@ pub fn created_place_bindings(
     if observation.provider.as_str() != herdr_provider_ref_uri() {
         return None;
     }
-    let session = observation
-        .bindings
-        .iter()
-        .find(|binding| {
-            binding.kind == NativeBindingKind::Session && binding.canonical_ref.is_none()
-        })?;
+    let session = observation.bindings.iter().find(|binding| {
+        binding.kind == NativeBindingKind::Session && binding.canonical_ref.is_none()
+    })?;
     if herdr_recorded_workspace(plan).as_deref() == Some(session.native_id.as_str()) {
         return None;
     }
@@ -337,10 +332,7 @@ impl<R> HerdrWorkingEnvironment<R> {
     ) -> Self {
         let mut environment = Self::new(runner, provider);
         environment.create_label = Some(plan.name.clone());
-        environment.create_cwd = plan
-            .root
-            .as_ref()
-            .map(|root| root.display().to_string());
+        environment.create_cwd = plan.root.as_ref().map(|root| root.display().to_string());
         environment.open_subject = subject.cloned();
         if let Some(workspace_id) = herdr_recorded_workspace(plan) {
             environment.workspace_id = Some(workspace_id);
@@ -674,14 +666,18 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
                 provenance: vec!["explicit ProjectRef -> Herdr workspace binding".into()],
             }
         }));
-        bindings.extend(self.agent_session_bindings.iter().map(|(canonical, native)| {
-            ProviderNativeBinding {
-                kind: NativeBindingKind::AgentSession,
-                native_id: native.clone(),
-                canonical_ref: Some(canonical.clone()),
-                provenance: vec!["explicit AgentSessionRef -> Herdr live Agent/pane binding".into()],
-            }
-        }));
+        bindings.extend(
+            self.agent_session_bindings
+                .iter()
+                .map(|(canonical, native)| ProviderNativeBinding {
+                    kind: NativeBindingKind::AgentSession,
+                    native_id: native.clone(),
+                    canonical_ref: Some(canonical.clone()),
+                    provenance: vec![
+                        "explicit AgentSessionRef -> Herdr live Agent/pane binding".into()
+                    ],
+                }),
+        );
         let mut provenance = vec![
             format!("Herdr public API snapshot protocol={}", snapshot.protocol),
             format!("herdrdev/herdr@{HERDR_UPSTREAM_REVISION}"),

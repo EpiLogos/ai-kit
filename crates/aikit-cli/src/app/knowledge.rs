@@ -470,8 +470,7 @@ impl Service {
             // membership — so Search/Resolve reveals eligible presentations
             // without a second store. An absent seed is ordinary (nothing
             // projected yet); it never gates addressability.
-            if let Some(seed_path) = aikit_adapters::oi_explore::discovery_seed_path(central_root)
-            {
+            if let Some(seed_path) = aikit_adapters::oi_explore::discovery_seed_path(central_root) {
                 match aikit_adapters::oi_explore::read_explore_discovery(&seed_path) {
                     Ok(reading) => {
                         absences.extend(reading.absences);
@@ -480,9 +479,9 @@ impl Service {
                             reading.objects,
                         );
                     }
-                    Err(error) => absences.push(format!(
-                        "Explore discovery seed unreadable: {error}"
-                    )),
+                    Err(error) => {
+                        absences.push(format!("Explore discovery seed unreadable: {error}"))
+                    }
                 }
             }
             // W10 V5: a project context binds the same entity refs through

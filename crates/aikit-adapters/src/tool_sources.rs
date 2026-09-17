@@ -27,7 +27,7 @@ use aikit_core::projection::ProjectionItem;
 
 pub use aikit_core::capsule::ToolServerRecord;
 
-use crate::layers::{LayerMergeError, MergeArgs, MergeReport, apply_merge};
+use crate::layers::{apply_merge, LayerMergeError, MergeArgs, MergeReport};
 
 /// The ownership marker every AIKit-projected tool record carries. The
 /// record-map grammar matches it in a record's `command`, `args` or `url`

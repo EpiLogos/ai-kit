@@ -34,8 +34,14 @@ fn a_wide_terminal_shows_the_list_and_the_preview_at_once() {
     let panes = layout.split(Rect::new(0, 0, 120, 20));
     let preview = panes.preview.expect("a wide layout has a preview pane");
 
-    assert!(panes.list.width >= 50, "the list must stay readable: {panes:?}");
-    assert!(preview.width >= 18, "a preview narrower than this explains nothing");
+    assert!(
+        panes.list.width >= 50,
+        "the list must stay readable: {panes:?}"
+    );
+    assert!(
+        preview.width >= 18,
+        "a preview narrower than this explains nothing"
+    );
     assert_eq!(
         panes.list.x + panes.list.width,
         preview.x,
@@ -55,9 +61,14 @@ fn a_wide_terminal_also_reserves_a_persistent_inspector_column() {
     let layout = Layout::for_width(120);
     let panes = layout.split(Rect::new(0, 0, 120, 20));
     let preview = panes.preview.expect("a wide layout has a preview pane");
-    let inspector = panes.inspector.expect("a wide layout has an Inspector column");
+    let inspector = panes
+        .inspector
+        .expect("a wide layout has an Inspector column");
 
-    assert!(inspector.width >= 18, "an Inspector narrower than this explains nothing");
+    assert!(
+        inspector.width >= 18,
+        "an Inspector narrower than this explains nothing"
+    );
     assert_eq!(
         preview.x + preview.width,
         inspector.x,
@@ -77,7 +88,10 @@ fn medium_and_narrow_terminals_never_carry_an_inspector_column() {
     // Inspector existed.
     for cols in [40u16, 59, 60, 80, 99] {
         let panes = Layout::for_width(cols).split(Rect::new(0, 0, cols, 20));
-        assert!(panes.inspector.is_none(), "{cols} columns must not carry an Inspector column");
+        assert!(
+            panes.inspector.is_none(),
+            "{cols} columns must not carry an Inspector column"
+        );
     }
 }
 
@@ -167,7 +181,10 @@ fn a_capability_active_only_through_a_dependency_is_not_shown_as_declared() {
         g.declared(Declared::Undeclared),
         g.declared(Declared::Enabled)
     );
-    assert_eq!(g.effective(DocStatus::Active), g.effective(DocStatus::Active));
+    assert_eq!(
+        g.effective(DocStatus::Active),
+        g.effective(DocStatus::Active)
+    );
 }
 
 #[test]
@@ -181,11 +198,21 @@ fn every_glyph_in_a_set_is_distinct_so_no_two_states_look_alike() {
     for set in [Glyphs::unicode(), Glyphs::ascii()] {
         let mut seen = std::collections::BTreeSet::new();
         for d in [Declared::Enabled, Declared::Disabled, Declared::Undeclared] {
-            assert!(seen.insert(set.declared(d)), "duplicate declared glyph for {d:?}");
+            assert!(
+                seen.insert(set.declared(d)),
+                "duplicate declared glyph for {d:?}"
+            );
         }
         let mut seen = std::collections::BTreeSet::new();
-        for s in [DocStatus::Active, DocStatus::Inactive, DocStatus::Unavailable] {
-            assert!(seen.insert(set.effective(s)), "duplicate effective glyph for {s:?}");
+        for s in [
+            DocStatus::Active,
+            DocStatus::Inactive,
+            DocStatus::Unavailable,
+        ] {
+            assert!(
+                seen.insert(set.effective(s)),
+                "duplicate effective glyph for {s:?}"
+            );
         }
     }
 }
@@ -197,7 +224,11 @@ fn the_ascii_fallback_carries_the_same_information_without_a_single_non_ascii_by
     for d in [Declared::Enabled, Declared::Disabled, Declared::Undeclared] {
         glyphs.push(ascii.declared(d));
     }
-    for s in [DocStatus::Active, DocStatus::Inactive, DocStatus::Unavailable] {
+    for s in [
+        DocStatus::Active,
+        DocStatus::Inactive,
+        DocStatus::Unavailable,
+    ] {
         glyphs.push(ascii.effective(s));
     }
     glyphs.push(ascii.staged());

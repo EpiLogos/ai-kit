@@ -469,12 +469,10 @@ mod tests {
             .find(|entry| entry.model == bound.model)
             .unwrap();
         assert!(bound_entry.explanation.eligible);
-        assert!(
-            bound_entry
-                .explanation
-                .hard_gates
-                .contains(&"harness-compatible".to_string())
-        );
+        assert!(bound_entry
+            .explanation
+            .hard_gates
+            .contains(&"harness-compatible".to_string()));
     }
 
     #[test]
@@ -499,11 +497,9 @@ mod tests {
             "ungated is not refused: {:?}",
             entry.explanation.failed_gates
         );
-        assert!(
-            entry
-                .explanation
-                .hard_gates
-                .contains(&"harness-compatible".to_string())
-        );
+        assert!(entry
+            .explanation
+            .hard_gates
+            .contains(&"harness-compatible".to_string()));
     }
 }

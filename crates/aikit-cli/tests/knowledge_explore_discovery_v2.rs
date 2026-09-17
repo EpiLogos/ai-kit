@@ -92,8 +92,8 @@ fn open_service_with_projected_world() -> (Service, TempDir) {
     // context whose owner policy is unavailable withholds central-adopted
     // material instead — the pre-existing withhold law stays in force; the
     // discovery seed is adopted inside it, not around it.
-    let service = Service::open(home, temp.path(), |_| None)
-        .expect("open production application service");
+    let service =
+        Service::open(home, temp.path(), |_| None).expect("open production application service");
     (service, temp)
 }
 
@@ -148,7 +148,11 @@ fn search_reveals_presentations_and_history_returns_through_the_same_refs() {
         relations.contains(&"oi.explore/projected-in"),
         "the live SharedField occurrence traverses as a typed relation: {relations:?}"
     );
-    let nodes: Vec<String> = view.nodes.iter().map(|node| node.resource.to_string()).collect();
+    let nodes: Vec<String> = view
+        .nodes
+        .iter()
+        .map(|node| node.resource.to_string())
+        .collect();
     assert!(
         nodes.iter().any(|ref_id| ref_id == PRESENTATION),
         "the WorldPresentation is a node of the bounded whole: {nodes:?}"

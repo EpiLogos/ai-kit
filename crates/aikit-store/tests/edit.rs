@@ -92,7 +92,9 @@ fn disabling_something_that_was_enabled_moves_it_rather_than_listing_it_twice() 
 
     let patch = ProfileDocument::parse(&after).unwrap().patch().unwrap();
     assert!(!patch.enable.contains(&cid("skill/project/payments-domain")));
-    assert!(patch.disable.contains(&cid("skill/project/payments-domain")));
+    assert!(patch
+        .disable
+        .contains(&cid("skill/project/payments-domain")));
     assert!(
         patch.validate().is_ok(),
         "a capsule may never end up in both lists"
@@ -122,7 +124,11 @@ fn an_enable_list_that_does_not_exist_yet_is_created() {
     assert!(text.contains("# nothing here yet"));
     assert!(text.contains("script/test/nt"));
     assert_eq!(
-        ProfileDocument::parse(&text).unwrap().patch().unwrap().enable,
+        ProfileDocument::parse(&text)
+            .unwrap()
+            .patch()
+            .unwrap()
+            .enable,
         vec![cid("script/test/nt")]
     );
 }
@@ -174,7 +180,11 @@ fn opening_a_missing_project_profile_creates_a_minimal_valid_one() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("schema = 1"));
     assert_eq!(
-        ProfileDocument::parse(&text).unwrap().patch().unwrap().enable,
+        ProfileDocument::parse(&text)
+            .unwrap()
+            .patch()
+            .unwrap()
+            .enable,
         vec![cid("script/test/nt")]
     );
 }
@@ -189,7 +199,9 @@ fn saving_replaces_the_file_atomically_and_leaves_no_debris() {
     doc.enable(&cid("script/test/nt"));
     doc.save().unwrap();
 
-    assert!(std::fs::read_to_string(&path).unwrap().contains("script/test/nt"));
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("script/test/nt"));
     let leftovers: Vec<String> = std::fs::read_dir(tmp.path())
         .unwrap()
         .filter_map(std::result::Result::ok)
@@ -205,8 +217,11 @@ fn a_local_profile_is_edited_the_same_way_as_a_shared_one() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join(".aikit/profile.local.toml");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, "# my machine only\nschema = 1\nenable = [\"script/local/tail\"]\n")
-        .unwrap();
+    std::fs::write(
+        &path,
+        "# my machine only\nschema = 1\nenable = [\"script/local/tail\"]\n",
+    )
+    .unwrap();
 
     let mut doc = ProfileDocument::open(&path).unwrap();
     doc.disable(&cid("hook/gate/secrets"));
@@ -281,7 +296,9 @@ fn an_overlays_patch_reads_back_through_the_overlay_parser_not_the_project_one()
     // Reopen from disk (session_id and base_generation now on disk) and read the
     // patch: this is exactly what resolution does.
     let reopened = OverlayDocument::open(&path, &session).unwrap();
-    let patch = reopened.patch().expect("an overlay with session_id must still parse");
+    let patch = reopened
+        .patch()
+        .expect("an overlay with session_id must still parse");
     assert_eq!(patch.enable, vec![cid("skill/rust/rust-review")]);
     assert_eq!(patch.disable, vec![cid("hook/verify/full-regression")]);
 }

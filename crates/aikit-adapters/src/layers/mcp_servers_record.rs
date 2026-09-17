@@ -165,9 +165,9 @@ mod tests {
 
     use aikit_core::harness_profile::MergeGrammar;
 
-    use crate::layers::{MergeArgs, apply_merge};
+    use crate::layers::{apply_merge, MergeArgs};
 
-    use super::{MergeReport, mcp_servers_record};
+    use super::{mcp_servers_record, MergeReport};
 
     fn managed_bimba() -> serde_json::Value {
         serde_json::json!({

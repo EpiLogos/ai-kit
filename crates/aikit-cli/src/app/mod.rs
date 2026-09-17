@@ -27,19 +27,19 @@ use aikit_core::profile::{PoolPatch, SkillUsageOverlayPatch};
 use aikit_core::projection::{
     ActivationEffect, ProjectionItem, ProjectionPlan, ResolvedContext, TargetAdapter,
 };
-use aikit_core::resolve::{ResolveRequest as CoreResolveRequest, ResolvedView, resolve_diagnostic};
+use aikit_core::resolve::{resolve_diagnostic, ResolveRequest as CoreResolveRequest, ResolvedView};
 use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
 use aikit_core::trust::TrustOracle;
 use aikit_core::{AikitError, Result};
 
-use aikit_store::SessionSpaceApplicationStore;
 use aikit_store::edit::{OverlayDocument, ProfileDocument};
 use aikit_store::generation::{self, GenerationBuilder};
 use aikit_store::home::AikitHome;
 use aikit_store::index::Index;
-use aikit_store::registry::{RegistryProblem, Snapshot, load_project_local, load_registry};
+use aikit_store::registry::{load_project_local, load_registry, RegistryProblem, Snapshot};
 use aikit_store::trust::{TrustSnapshot, TrustStore};
+use aikit_store::SessionSpaceApplicationStore;
 
 use aikit_adapters::actor_composition::compose_live_actor_inputs;
 use aikit_adapters::clients::agent_skills;
@@ -61,7 +61,7 @@ use aikit_adapters::clients::pi::PiAdapter;
 use aikit_adapters::clients::qwen::QwenAdapter;
 use aikit_adapters::clients::zcode::ZcodeAdapter;
 use aikit_adapters::factory_developmental::{
-    FactoryDevelopmentalBinding, read_factory_developmental, start_factory_work,
+    read_factory_developmental, start_factory_work, FactoryDevelopmentalBinding,
 };
 use aikit_adapters::runner::SystemRunner;
 
@@ -623,7 +623,7 @@ impl Service {
         plan: &aikit_core::SessionPlan,
     ) -> Result<(aikit_adapters::mux::stack::MuxStack, SessionId)> {
         use aikit_adapters::mux::{
-            SessionIdentity, cmux::Cmux, plain::Plain, stack::MuxStack, tmux::Tmux,
+            cmux::Cmux, plain::Plain, stack::MuxStack, tmux::Tmux, SessionIdentity,
         };
         use aikit_store::state::StateStore;
 
@@ -1028,7 +1028,7 @@ impl Service {
     /// separable from the credential half ("what can I use today").
     pub fn refresh_model_catalogue(&self, provider: &str) -> Result<serde_json::Value> {
         use aikit_adapters::provider_catalog_source::{
-            OPENROUTER_PROVIDER, ProviderCatalogOutcome, fetch_openrouter_catalog,
+            fetch_openrouter_catalog, ProviderCatalogOutcome, OPENROUTER_PROVIDER,
         };
         if provider != "openrouter" {
             return Err(AikitError::new(
@@ -1798,7 +1798,7 @@ impl Service {
         &self,
         event: &aikit_core::hooks::HookEvent,
     ) -> Result<aikit_core::hooks::HookDecision> {
-        use aikit_core::hooks::{HookChain, build_chains};
+        use aikit_core::hooks::{build_chains, HookChain};
         let chains = build_chains(&self.view, &self.catalog)?;
         let chain = match chains.get(event.kind.as_str()) {
             Some(chain) => chain.clone(),
@@ -2961,8 +2961,8 @@ impl PaletteBackend for Service {
         &self,
     ) -> Result<Option<aikit_core::credential_world::CredentialWorldDisclosure>> {
         use aikit_core::credential_world::{
-            ProviderRosterKnowledge, credential_requirements_for_model_routes,
-            disclose_credential_world,
+            credential_requirements_for_model_routes, disclose_credential_world,
+            ProviderRosterKnowledge,
         };
 
         let (catalogue, _notes) = aikit_store::model_catalogue::resolved_catalogue(&self.home);
@@ -3064,7 +3064,6 @@ impl PaletteBackend for Service {
     /// boundary. Cached per session for the same reason as the health reading.
     fn workcell_world(&self) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
         use aikit_adapters::workcell_instance_intake::{
-            InstancesOutcome, intake_workcell_instances,
             intake_workcell_instances, InstancesOutcome,
         };
         use aikit_core::workcell_world::{WorkcellDisclosure, WorkcellInstanceDisclosure};
@@ -3107,7 +3106,7 @@ impl PaletteBackend for Service {
     /// Cached per session.
     fn model_roster(&self) -> Result<Option<aikit_core::resource::ModelRoster>> {
         use aikit_core::resource::{
-            ModelRankingPolicy, ModelRouteSet, candidates_from_routes, rank_model_roster,
+            candidates_from_routes, rank_model_roster, ModelRankingPolicy, ModelRouteSet,
         };
 
         if self.project_binding()?.is_none() && self.descriptor.project_root.is_none() {

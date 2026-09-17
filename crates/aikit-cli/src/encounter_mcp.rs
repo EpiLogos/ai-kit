@@ -24,7 +24,7 @@ use aikit_adapters::agent_connection::{SessionOpenMode, SessionOpenRequest};
 use aikit_adapters::tool_sources::ToolSourceEntry;
 use aikit_core::{AikitError, ResourceRef, Result};
 use aikit_store::AikitHome;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// Shape resolved `tool-protocol` entries into the ACP `session/new`
 /// `mcpServers` array, in the exact form the connection adapter passes
@@ -223,9 +223,9 @@ mod tests {
     use aikit_adapters::{AcpV1ConnectionAdapter, AgentConnectionAdapter};
     use aikit_core::capsule::ToolServerRecord;
     use aikit_core::{CapsuleId, ResourceRef, TrustKey, TrustState};
-    use aikit_store::AikitHome;
     use aikit_store::trust::TrustStore;
-    use serde_json::{Value, json};
+    use aikit_store::AikitHome;
+    use serde_json::{json, Value};
     use tempfile::TempDir;
 
     use super::*;

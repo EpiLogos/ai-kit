@@ -190,9 +190,18 @@ fn a_query_matching_no_destination_and_no_history_renders_only_the_resources_hea
     let surface = navigator(&mut backend, "only9", Glyphs::unicode());
     let text = rendered_rows(&draw(&surface, 120, 30));
 
-    assert!(text.contains("RESOURCES"), "the one matching resource must still render:\n{text}");
-    assert!(!text.contains("DESTINATIONS"), "no Surface matched this query:\n{text}");
-    assert!(!text.contains("RECENT ROUTES"), "nothing has been navigated yet:\n{text}");
+    assert!(
+        text.contains("RESOURCES"),
+        "the one matching resource must still render:\n{text}"
+    );
+    assert!(
+        !text.contains("DESTINATIONS"),
+        "no Surface matched this query:\n{text}"
+    );
+    assert!(
+        !text.contains("RECENT ROUTES"),
+        "nothing has been navigated yet:\n{text}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +214,10 @@ fn keyboard_selection_walks_every_resource_across_group_boundaries_and_never_sel
     let mut surface = navigator(&mut backend, "system", Glyphs::unicode());
 
     let total = surface.semantic().read_model.resources.len();
-    assert!(total >= 2, "fixture must expose more than one hit to cross a group boundary");
+    assert!(
+        total >= 2,
+        "fixture must expose more than one hit to cross a group boundary"
+    );
 
     for expected in &surface.semantic().read_model.resources.clone() {
         surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
@@ -268,10 +280,14 @@ fn mouse_click_on_a_group_header_is_a_no_op_but_a_click_on_a_resource_row_select
     let before = surface.semantic().selected.clone();
 
     surface
-        .handle(&mut backend, mouse(list.x + 1, list.y + header_offset as u16))
+        .handle(
+            &mut backend,
+            mouse(list.x + 1, list.y + header_offset as u16),
+        )
         .unwrap();
     assert_eq!(
-        surface.semantic().selected, before,
+        surface.semantic().selected,
+        before,
         "clicking a group header must not change the selection"
     );
 
@@ -303,15 +319,26 @@ fn a_resource_the_viewer_already_navigated_through_reappears_under_recent_routes
         .find(|item| item.resource.as_str() == "skill/ops/system-check")
         .expect("the fixture skill must be present for query \"system\"")
         .clone();
-    let index = surface.semantic().read_model.position(&system_check.resource).unwrap();
+    let index = surface
+        .semantic()
+        .read_model
+        .position(&system_check.resource)
+        .unwrap();
     for _ in 0..=index {
         surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
     }
-    assert_eq!(surface.semantic().selected.as_ref(), Some(&system_check.resource));
+    assert_eq!(
+        surface.semantic().selected.as_ref(),
+        Some(&system_check.resource)
+    );
 
-    surface.handle(&mut backend, key(KeyCode::Char(':'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char(':')))
+        .unwrap();
     for ch in "history".chars() {
-        surface.handle(&mut backend, key(KeyCode::Char(ch))).unwrap();
+        surface
+            .handle(&mut backend, key(KeyCode::Char(ch)))
+            .unwrap();
     }
     surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
 

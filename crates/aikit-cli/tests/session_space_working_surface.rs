@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use aikit_cli::session_space_working_surface::{
-    WorkingSurfaceNativeStanding, focus, observe, open, terminal_attachment,
+    focus, observe, open, terminal_attachment, WorkingSurfaceNativeStanding,
 };
 use aikit_cli::working_environment_field::WorkingEnvironmentTerminalAttachment;
 use aikit_core::resource::ResourceRef;
@@ -322,9 +322,16 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
     }
 
     let marker_one = "PERSISTED_WORKING_SURFACE_ONE";
-    let output_one =
-        attach_through_public_cli(home.root(), &socket, "aikit-persisted-surface", &space, &binding, marker_one, &native);
-        attach_through_public_cli(home.root(), &socket, &space, &binding, marker_one, &native);
+    let output_one = attach_through_public_cli(
+        home.root(),
+        &socket,
+        "aikit-persisted-surface",
+        &space,
+        &binding,
+        marker_one,
+        &native,
+    );
+    attach_through_public_cli(home.root(), &socket, &space, &binding, marker_one, &native);
     if !output_one.is_empty() {
         assert!(
             String::from_utf8_lossy(&output_one).contains(marker_one),
@@ -339,9 +346,16 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
     );
 
     let marker_two = "PERSISTED_WORKING_SURFACE_TWO";
-    let output_two =
-        attach_through_public_cli(home.root(), &socket, "aikit-persisted-surface", &space, &binding, marker_two, &native);
-        attach_through_public_cli(home.root(), &socket, &space, &binding, marker_two, &native);
+    let output_two = attach_through_public_cli(
+        home.root(),
+        &socket,
+        "aikit-persisted-surface",
+        &space,
+        &binding,
+        marker_two,
+        &native,
+    );
+    attach_through_public_cli(home.root(), &socket, &space, &binding, marker_two, &native);
     if !output_two.is_empty() {
         assert!(
             String::from_utf8_lossy(&output_two).contains(marker_two),
@@ -548,13 +562,11 @@ command = ["sh"]
     // names the declared place technology.
     let observed = observe(&state, &binding).unwrap();
     assert!(observed.outcome.is_none());
-    assert!(
-        observed
-            .reading
-            .provenance
-            .iter()
-            .any(|line| line.contains("herdr") && line.contains("place technology"))
-    );
+    assert!(observed
+        .reading
+        .provenance
+        .iter()
+        .any(|line| line.contains("herdr") && line.contains("place technology")));
     if herdr_installed() {
         assert!(
             observed.reading.provider_observation.is_some(),
@@ -694,9 +706,7 @@ fn herdr_working_surface_open_persists_evidence_and_reobserves_the_same_pane() {
     let opened = open(&store.load(&space).unwrap(), &binding_ref).unwrap();
     let opened_pane = match &opened.outcome {
         Some(WorkingEnvironmentOutcome::Opened {
-            native_id,
-            created,
-            ..
+            native_id, created, ..
         }) => {
             assert!(
                 created.is_some(),

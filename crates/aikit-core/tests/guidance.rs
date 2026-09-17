@@ -58,11 +58,7 @@ fn fragments_are_ordered_by_declared_order_then_capsule_id() {
 
     assert_eq!(
         included(&composition),
-        vec![
-            "guidance/m/first",
-            "guidance/a/also-ten",
-            "guidance/z/last"
-        ]
+        vec!["guidance/m/first", "guidance/a/also-ten", "guidance/z/last"]
     );
 }
 
@@ -258,7 +254,11 @@ fn estimation_is_roughly_four_characters_per_token_and_never_rounds_to_zero() {
     assert_eq!(estimate_tokens(""), 0);
     assert_eq!(estimate_tokens("    "), 0);
     assert_eq!(estimate_tokens("abcd"), 1);
-    assert_eq!(estimate_tokens("abcde"), 2, "a partial token still costs one");
+    assert_eq!(
+        estimate_tokens("abcde"),
+        2,
+        "a partial token still costs one"
+    );
     assert_eq!(estimate_tokens(&"x".repeat(400)), 100);
 }
 

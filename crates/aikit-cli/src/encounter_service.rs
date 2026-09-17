@@ -1,9 +1,7 @@
 //! Resident, provider-neutral ACP encounters. The UI reads cursor pages and
 //! submits owner actions; disconnecting an IPC client never drops a provider.
 use aikit_adapters::{
-    agent_connection::{
-        ConnectionSignalKind, NativePermissionRequest, SessionOpenMode,
-    },
+    agent_connection::{ConnectionSignalKind, NativePermissionRequest, SessionOpenMode},
     agent_session_host::{
         AgentSessionHost, AgentSessionHostLimits, HostEvent, SessionEventJournal, SessionLane,
     },
@@ -694,7 +692,9 @@ impl EncounterService {
         // resolved entries are carried is decided by the negotiated capability
         // after the provider handshake below.
         let mcp_entries = match configured.protocol {
-            EncounterProtocol::Acp => crate::encounter_mcp::active_tool_source_entries(&self.home, &cwd)?,
+            EncounterProtocol::Acp => {
+                crate::encounter_mcp::active_tool_source_entries(&self.home, &cwd)?
+            }
             EncounterProtocol::PiRpc => Vec::new(),
         };
         let generation = ulid::Ulid::generate().to_string();

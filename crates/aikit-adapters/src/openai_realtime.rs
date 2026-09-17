@@ -283,9 +283,7 @@ mod tests {
         HarnessCompositionRequest, LifetimeOwner, LifetimeOwnerKind, ResolutionScope,
         SurfaceDescriptor, SurfaceKind, TargetNativeComponentBinding,
     };
-    use aikit_core::composition::{
-        ComponentContribution, ContributionKind, RetractionMode,
-    };
+    use aikit_core::composition::{ComponentContribution, ContributionKind, RetractionMode};
     use aikit_core::model_runtime::{
         disclose_model_runtime, InferenceEngineForm, InferenceEngineReading, ModelRuntimeRelation,
         ModelSurfaceReading, ModelVariantReading, PlacementObservation, RuntimeChangeApplication,

@@ -170,14 +170,20 @@ impl ModelRouteSet {
     }
 
     pub fn viable(&self) -> Vec<&ModelRoute> {
-        self.routes.iter().filter(|route| route.is_viable()).collect()
+        self.routes
+            .iter()
+            .filter(|route| route.is_viable())
+            .collect()
     }
 
     /// Viable routes whose credential condition is also met. A Model with
     /// viable-but-unusable routes is a real and useful state: it is reachable
     /// the moment a key is bound, which is different from unreachable.
     pub fn usable(&self) -> Vec<&ModelRoute> {
-        self.routes.iter().filter(|route| route.is_usable()).collect()
+        self.routes
+            .iter()
+            .filter(|route| route.is_usable())
+            .collect()
     }
 
     pub fn is_usable(&self) -> bool {
@@ -256,8 +262,10 @@ mod tests {
     #[test]
     fn one_model_carries_several_routes_without_fusing_identity() {
         let mut set = ModelRouteSet::new(ResourceRef::parse("model:stable").unwrap());
-        set.routes.push(route("llama3.2:latest", "provider:ollama", true));
-        set.routes.push(route("meta/llama-3.2", "provider:ninerouter", true));
+        set.routes
+            .push(route("llama3.2:latest", "provider:ollama", true));
+        set.routes
+            .push(route("meta/llama-3.2", "provider:ninerouter", true));
         assert_eq!(set.viable().len(), 2);
         assert_eq!(set.providers().len(), 2);
         // One identity, two ways to reach it.
@@ -267,7 +275,8 @@ mod tests {
     #[test]
     fn a_catalogued_model_with_no_observed_route_is_known_but_unavailable() {
         let mut set = ModelRouteSet::new(ResourceRef::parse("model:stable").unwrap());
-        set.routes.push(route("llama3.2:latest", "provider:ollama", false));
+        set.routes
+            .push(route("llama3.2:latest", "provider:ollama", false));
         assert!(!set.is_available());
         assert!(set.viable().is_empty());
         // Known-but-unavailable is not absence: the route is still described.
@@ -277,10 +286,13 @@ mod tests {
     #[test]
     fn losing_one_route_leaves_the_model_and_its_other_route_intact() {
         let mut set = ModelRouteSet::new(ResourceRef::parse("model:stable").unwrap());
-        set.routes.push(route("llama3.2:latest", "provider:ollama", true));
-        set.routes.push(route("meta/llama-3.2", "provider:ninerouter", true));
+        set.routes
+            .push(route("llama3.2:latest", "provider:ollama", true));
+        set.routes
+            .push(route("meta/llama-3.2", "provider:ninerouter", true));
         let before = set.model.clone();
-        set.routes.retain(|route| route.provider.as_str() != "provider:ollama");
+        set.routes
+            .retain(|route| route.provider.as_str() != "provider:ollama");
         assert_eq!(set.model, before);
         assert!(set.is_available());
         assert_eq!(set.viable()[0].provider.as_str(), "provider:ninerouter");
@@ -289,8 +301,10 @@ mod tests {
     #[test]
     fn pinning_a_provider_narrows_routes_without_changing_the_model() {
         let mut set = ModelRouteSet::new(ResourceRef::parse("model:stable").unwrap());
-        set.routes.push(route("llama3.2:latest", "provider:ollama", true));
-        set.routes.push(route("meta/llama-3.2", "provider:ninerouter", true));
+        set.routes
+            .push(route("llama3.2:latest", "provider:ollama", true));
+        set.routes
+            .push(route("meta/llama-3.2", "provider:ninerouter", true));
         let pinned = set.viable_pinned(&ProviderRef::parse("provider:ollama").unwrap());
         assert_eq!(pinned.len(), 1);
         assert_eq!(pinned[0].model, set.model);

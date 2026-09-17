@@ -34,9 +34,9 @@ use std::sync::Arc;
 use aikit_adapters::herdr::HerdrSplitDirection;
 use aikit_adapters::runner::ScriptedRunner;
 use aikit_adapters::{
-    HERDR_PROVIDER_VERSION, HERDR_UPSTREAM_REVISION, HerdrAgentStatus, HerdrSnapshot,
-    HerdrWorkingEnvironment, NativeBindingKind, WORKING_ENVIRONMENT_PROVIDER_VERSION,
-    WorkingEnvironmentHealth, WorkingEnvironmentProvider, parse_herdr_snapshot,
+    parse_herdr_snapshot, HerdrAgentStatus, HerdrSnapshot, HerdrWorkingEnvironment,
+    NativeBindingKind, WorkingEnvironmentHealth, WorkingEnvironmentProvider,
+    HERDR_PROVIDER_VERSION, HERDR_UPSTREAM_REVISION, WORKING_ENVIRONMENT_PROVIDER_VERSION,
 };
 use aikit_core::resource::ResourceRef;
 
@@ -239,12 +239,10 @@ fn workspace_create_sends_the_no_focus_command_and_adopts_only_returned_ids() {
 
     // The adopted workspace id is provider evidence: focusing later uses it.
     provider.focus_workspace().unwrap();
-    assert!(
-        runner
-            .call_lines()
-            .iter()
-            .any(|call| call == "herdr workspace focus w7")
-    );
+    assert!(runner
+        .call_lines()
+        .iter()
+        .any(|call| call == "herdr workspace focus w7"));
 }
 
 #[test]
@@ -342,12 +340,10 @@ fn a_split_uses_herdr_direction_words_and_binds_the_returned_pane_only() {
         )
         .unwrap();
     assert_eq!(pane, "w7:p2");
-    assert!(
-        runner
-            .call_lines()
-            .iter()
-            .any(|call| call == "herdr pane split w7:p1 --direction down --no-focus")
-    );
+    assert!(runner
+        .call_lines()
+        .iter()
+        .any(|call| call == "herdr pane split w7:p1 --direction down --no-focus"));
 
     let observation = provider.observe().unwrap();
     assert_eq!(observation.canonical_native_id(&review), Some("w7:p2"));
@@ -560,12 +556,10 @@ fn agent_start_binds_the_name_when_returned_and_the_pane_when_it_is_not() {
         .start_agent_session(session.clone(), &surface, "reviewer", "codex", None, &[])
         .unwrap();
     provider.focus_agent_session(&session).unwrap();
-    assert!(
-        runner
-            .call_lines()
-            .iter()
-            .any(|call| call == "herdr agent focus reviewer")
-    );
+    assert!(runner
+        .call_lines()
+        .iter()
+        .any(|call| call == "herdr agent focus reviewer"));
 
     let runner = Arc::new(
         ScriptedRunner::new()
@@ -957,8 +951,8 @@ fn the_provider_participates_through_the_public_trait_object_seam() {
 /// closed place, never a stale read, and pane churn is disclosed rather than
 /// treated as identity.
 mod plan_route {
-    use aikit_core::SessionPlan;
     use aikit_core::session::SessionSpec;
+    use aikit_core::SessionPlan;
 
     use super::*;
 
@@ -1067,7 +1061,8 @@ id = "shell"
         assert!(
             calls
                 .iter()
-                .any(|call| call == "herdr workspace create --cwd /repo --no-focus --label reference"),
+                .any(|call| call
+                    == "herdr workspace create --cwd /repo --no-focus --label reference"),
             "creation must carry the plan root and the plan name as label: {calls:?}"
         );
         assert_eq!(
@@ -1081,18 +1076,19 @@ id = "shell"
         // The created evidence is exactly what the caller must persist.
         let created = aikit_adapters::herdr::created_place_bindings(&plan, &opened)
             .expect("a first open mints evidence the plan does not yet record");
-        assert!(created
-            .iter()
-            .any(|binding| binding.kind == NativeBindingKind::Session
-                && binding.native_id == "w7"));
+        assert!(
+            created
+                .iter()
+                .any(|binding| binding.kind == NativeBindingKind::Session
+                    && binding.native_id == "w7")
+        );
     }
 
     #[test]
     fn an_open_attaches_to_the_recorded_workspace_without_creating_anything() {
-        let runner = Arc::new(ScriptedRunner::new().on(
-            "api snapshot",
-            &fixture("session-snapshot-wide.json"),
-        ));
+        let runner = Arc::new(
+            ScriptedRunner::new().on("api snapshot", &fixture("session-snapshot-wide.json")),
+        );
         let subject = surface();
         let mut plan = plan();
         record(&mut plan, Some("w7"), &[("main/shell", "w7:p1")]);
@@ -1217,10 +1213,8 @@ id = "shell"
 
     #[test]
     fn an_open_with_no_recorded_place_and_no_plan_root_refuses_creation() {
-        let runner = Arc::new(ScriptedRunner::new().on(
-            "api snapshot",
-            &fixture("session-snapshot.json"),
-        ));
+        let runner =
+            Arc::new(ScriptedRunner::new().on("api snapshot", &fixture("session-snapshot.json")));
         let subject = surface();
         let mut plan = plan();
         plan.root = None;

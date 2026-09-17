@@ -23,11 +23,11 @@ pub mod cmux;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use aikit_core::Result;
 use aikit_core::context::Isolation;
 use aikit_core::id::{ContextId, SessionId};
 use aikit_core::platform::MuxKind;
 use aikit_core::session::{Direction, Placement, SessionPlan};
+use aikit_core::Result;
 
 // ---------------------------------------------------------------------------
 // Identity

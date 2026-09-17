@@ -60,7 +60,8 @@ fn resource_action_compose_explain_and_relations_share_one_identity_path() {
                 UiAction::SetActionQuery("toggle".into()),
             )
             .unwrap();
-        let action = selected_contextual_action(&state).expect("toggle Action should be searchable");
+        let action =
+            selected_contextual_action(&state).expect("toggle Action should be searchable");
         assert_eq!(action.action.as_str(), "action/capability/toggle");
         state = runtime
             .step(

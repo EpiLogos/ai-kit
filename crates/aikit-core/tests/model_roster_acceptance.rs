@@ -70,9 +70,7 @@ fn unavailable_candidate_cannot_win_even_if_role_fit_is_highest() {
         .role_fitness
         .insert("agency:builder".into(), 1.0);
     let mut available = candidate("model:available");
-    available
-        .role_fitness
-        .insert("agency:builder".into(), 0.4);
+    available.role_fitness.insert("agency:builder".into(), 0.4);
 
     let roster = rank_model_roster(
         demand("agency:builder"),

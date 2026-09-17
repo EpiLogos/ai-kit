@@ -8,7 +8,7 @@
 
 use aikit_core::context::Isolation;
 use aikit_core::platform::{MuxKind, PlaceTechnology};
-use aikit_core::session::{Attach, Direction, Lifecycle, Placement, Restart, SessionSpec, compile};
+use aikit_core::session::{compile, Attach, Direction, Lifecycle, Placement, Restart, SessionSpec};
 
 const FULL: &str = r#"
 schema = 1
@@ -611,11 +611,9 @@ fn a_task_carries_its_own_capability_patch() {
 
 #[test]
 fn a_spec_with_no_task_table_declares_no_task() {
-    assert!(
-        spec(&with_views(
-            "[[views]]\nid = \"a\"\n[[views.panes]]\nid = \"p\"\n"
-        ))
-        .task
-        .is_none()
-    );
+    assert!(spec(&with_views(
+        "[[views]]\nid = \"a\"\n[[views.panes]]\nid = \"p\"\n"
+    ))
+    .task
+    .is_none());
 }

@@ -425,9 +425,9 @@ mod golden_tests {
     use aikit_core::harness_profile::MergeGrammar;
     use aikit_core::hooks::HookEventKind;
 
-    use crate::clients::hook_map::{MatcherPolicy, merge_hook_map_entries};
+    use crate::clients::hook_map::{merge_hook_map_entries, MatcherPolicy};
     use crate::clients::zcode::merge_dispatcher_entries;
-    use crate::layers::{MergeArgs, MergeReport, apply_merge};
+    use crate::layers::{apply_merge, MergeArgs, MergeReport};
 
     fn claude_events(pairs: &[(&str, &str)]) -> Vec<(HookEventKind, String)> {
         pairs
@@ -445,8 +445,8 @@ mod golden_tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn golden_a_fresh_claude_settings_file_gains_one_entry_per_event_with_matchers_on_tool_events_only()
-     {
+    fn golden_a_fresh_claude_settings_file_gains_one_entry_per_event_with_matchers_on_tool_events_only(
+    ) {
         let merged = merge_hook_map_entries(
             None,
             &claude_events(&[

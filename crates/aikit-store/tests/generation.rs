@@ -59,8 +59,11 @@ fn plans(context: &ResolvedContext, marker: &str) -> Vec<ProjectionPlan> {
                 ProjectionItem::link(skill_root.join("payload"), ".claude/skills/review").unwrap(),
             )
             .with_item(
-                ProjectionItem::write(".claude/settings.json", format!("{{\"marker\":\"{marker}\"}}"))
-                    .unwrap(),
+                ProjectionItem::write(
+                    ".claude/settings.json",
+                    format!("{{\"marker\":\"{marker}\"}}"),
+                )
+                .unwrap(),
             ),
         ProjectionPlan::new(TargetId::new(TargetId::HOOKS), ActivationEffect::live()).with_item(
             ProjectionItem::copy(hook_root.join("payload/check"), "10-gate-secrets").unwrap(),
@@ -72,9 +75,8 @@ fn plans(context: &ResolvedContext, marker: &str) -> Vec<ProjectionPlan> {
             )
             .unwrap(),
         ),
-        ProjectionPlan::new(TargetId::shell(), ActivationEffect::live()).with_item(
-            ProjectionItem::shim("nt", cid("script/test/nt"), "nt").unwrap(),
-        ),
+        ProjectionPlan::new(TargetId::shell(), ActivationEffect::live())
+            .with_item(ProjectionItem::shim("nt", cid("script/test/nt"), "nt").unwrap()),
     ]
 }
 
@@ -159,24 +161,36 @@ fn each_projection_item_kind_lands_as_the_thing_it_says_it_is() {
 
     let linked = root.join("projections/claude/.claude/skills/review");
     assert!(
-        fs::symlink_metadata(&linked).unwrap().file_type().is_symlink(),
+        fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
         "a Link item should be a symlink in link mode"
     );
     assert!(linked.join("SKILL.md").is_file(), "the link must resolve");
 
     let written = root.join("projections/claude/.claude/settings.json");
-    assert_eq!(fs::read_to_string(&written).unwrap(), "{\"marker\":\"one\"}");
+    assert_eq!(
+        fs::read_to_string(&written).unwrap(),
+        "{\"marker\":\"one\"}"
+    );
 
     let copied = root.join("hooks/10-gate-secrets");
     assert!(
-        !fs::symlink_metadata(&copied).unwrap().file_type().is_symlink(),
+        !fs::symlink_metadata(&copied)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
         "a Copy item is a copy even in link mode"
     );
     assert!(fs::read_to_string(&copied).unwrap().contains("exit 0"));
 
     let shim = root.join("bin/nt");
     let body = fs::read_to_string(&shim).unwrap();
-    assert!(body.contains("script/test/nt"), "the shim names its capsule");
+    assert!(
+        body.contains("script/test/nt"),
+        "the shim names its capsule"
+    );
     assert!(body.starts_with("#!"), "a shim has to be executable text");
     #[cfg(unix)]
     {
@@ -317,7 +331,10 @@ fn relabelling_an_identical_generation_updates_the_label_without_minting_a_new_o
         .commit(Some(&first.id))
         .unwrap();
 
-    assert_eq!(first.id, again.id, "identical content is the same generation");
+    assert_eq!(
+        first.id, again.id,
+        "identical content is the same generation"
+    );
     assert_eq!(
         generation::list(&ctx).unwrap().len(),
         1,
@@ -325,8 +342,7 @@ fn relabelling_an_identical_generation_updates_the_label_without_minting_a_new_o
     );
     assert_eq!(generation::current(&ctx).unwrap(), Some(first.id.clone()));
 
-    let view =
-        generation::read_lock(&ctx.join("generations").join(again.id.as_str())).unwrap();
+    let view = generation::read_lock(&ctx.join("generations").join(again.id.as_str())).unwrap();
     assert_eq!(
         view.properties.get("label").map(String::as_str),
         Some("known-good"),
@@ -355,7 +371,10 @@ fn relabelling_replaces_the_lock_atomically_and_leaves_no_temp_file() {
 
     // The lock is complete and re-readable, and the label is there.
     let view = generation::read_lock(&dir).unwrap();
-    assert_eq!(view.properties.get("label").map(String::as_str), Some("known-good"));
+    assert_eq!(
+        view.properties.get("label").map(String::as_str),
+        Some("known-good")
+    );
     assert_eq!(
         view.active.len(),
         resolved.view.active.len(),
@@ -411,11 +430,17 @@ fn a_brokered_fallback_is_written_into_the_generation_rather_than_lost() {
     let metadata = generation::read_metadata(&committed.path).unwrap();
     assert_eq!(metadata.isolation, aikit_core::Isolation::Shared);
     assert!(
-        metadata.notes.iter().any(|n| n.contains("shared working tree")),
+        metadata
+            .notes
+            .iter()
+            .any(|n| n.contains("shared working tree")),
         "the stated reason must be recorded, not dropped: {:?}",
         metadata.notes
     );
-    assert!(metadata.targets.iter().any(|t| t.effect.contains("brokered")));
+    assert!(metadata
+        .targets
+        .iter()
+        .any(|t| t.effect.contains("brokered")));
 }
 
 // ---------------------------------------------------------------------------
@@ -491,13 +516,15 @@ fn a_failure_during_materialization_leaves_the_previous_generation_current() {
 
     // A plan naming a payload that is not there: exactly what a half-synced
     // registry or a capsule deleted underneath you produces.
-    let broken = vec![ProjectionPlan::new(
-        TargetId::claude_code(),
-        ActivationEffect::live(),
-    )
-    .with_item(
-        ProjectionItem::link(fixture.root().join("does/not/exist"), ".claude/skills/ghost").unwrap(),
-    )];
+    let broken = vec![
+        ProjectionPlan::new(TargetId::claude_code(), ActivationEffect::live()).with_item(
+            ProjectionItem::link(
+                fixture.root().join("does/not/exist"),
+                ".claude/skills/ghost",
+            )
+            .unwrap(),
+        ),
+    ];
 
     let error = GenerationBuilder::new()
         .build(&ctx, &resolved.view, &broken)
@@ -711,8 +738,14 @@ fn link_mode_and_copy_mode_produce_the_same_logical_projection() {
     // …and they really were materialized differently.
     let link_target = linked.path.join("projections/claude/.claude/skills/review");
     let copy_target = copied.path.join("projections/claude/.claude/skills/review");
-    assert!(fs::symlink_metadata(&link_target).unwrap().file_type().is_symlink());
-    assert!(!fs::symlink_metadata(&copy_target).unwrap().file_type().is_symlink());
+    assert!(fs::symlink_metadata(&link_target)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(!fs::symlink_metadata(&copy_target)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 }
 
 #[test]
@@ -730,8 +763,13 @@ fn a_platform_without_symlinks_degrades_to_copies_and_says_so_in_the_metadata() 
         .commit(None)
         .unwrap();
 
-    let target = committed.path.join("projections/claude/.claude/skills/review");
-    assert!(!fs::symlink_metadata(&target).unwrap().file_type().is_symlink());
+    let target = committed
+        .path
+        .join("projections/claude/.claude/skills/review");
+    assert!(!fs::symlink_metadata(&target)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 
     let metadata = generation::read_metadata(&committed.path).unwrap();
     assert_eq!(metadata.materialization, MaterializationMode::Copy);

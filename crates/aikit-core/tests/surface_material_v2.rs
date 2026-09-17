@@ -209,11 +209,7 @@ fn material_rebinding_preserves_surface_actor_and_agent_session_identity() {
     assert_eq!(first_surface.surface, second_surface.surface);
     assert_eq!(first_surface.action_refs, second_surface.action_refs);
     assert_eq!(
-        first_surface
-            .material
-            .as_ref()
-            .unwrap()
-            .logical_service_ref,
+        first_surface.material.as_ref().unwrap().logical_service_ref,
         second_surface
             .material
             .as_ref()
@@ -243,7 +239,8 @@ fn agent_session_replacement_is_not_gateway_or_material_restart() {
         "provider:workcell-local",
         "tcp://127.0.0.1:9001",
     );
-    let before = disclose_surface_material(&body("agent-session-before"), [material.clone()]).unwrap();
+    let before =
+        disclose_surface_material(&body("agent-session-before"), [material.clone()]).unwrap();
     let after = disclose_surface_material(&body("agent-session-after"), [material]).unwrap();
 
     assert_ne!(before.agent_session, after.agent_session);
@@ -340,7 +337,10 @@ fn invalid_material_observations_fail_closed() {
         ],
     )
     .unwrap_err();
-    assert_eq!(duplicate.code(), "surface_material.duplicate_surface_binding");
+    assert_eq!(
+        duplicate.code(),
+        "surface_material.duplicate_surface_binding"
+    );
 }
 
 #[test]
@@ -350,13 +350,29 @@ fn source_pinned_targets_keep_native_management_meanings_distinct() {
         "8184f9ba95c5efc0077701a4b58c1abb2943bd6e"
     );
     let fixtures = persistent_service_target_fixtures();
-    assert_eq!(fixtures[0].upstream_revision, HERMES_GATEWAY_CONFORMANCE_REVISION);
-    assert_eq!(fixtures[1].upstream_revision, OPENCLAW_GATEWAY_CONFORMANCE_REVISION);
-    assert_ne!(fixtures[0].management_entrypoint, fixtures[1].management_entrypoint);
-    assert_ne!(fixtures[0].lifecycle_operations, fixtures[1].lifecycle_operations);
+    assert_eq!(
+        fixtures[0].upstream_revision,
+        HERMES_GATEWAY_CONFORMANCE_REVISION
+    );
+    assert_eq!(
+        fixtures[1].upstream_revision,
+        OPENCLAW_GATEWAY_CONFORMANCE_REVISION
+    );
+    assert_ne!(
+        fixtures[0].management_entrypoint,
+        fixtures[1].management_entrypoint
+    );
+    assert_ne!(
+        fixtures[0].lifecycle_operations,
+        fixtures[1].lifecycle_operations
+    );
     assert_ne!(fixtures[0].native_surfaces, fixtures[1].native_surfaces);
-    assert!(fixtures[0].native_surfaces.contains(&"messaging-platform-gateway"));
-    assert!(fixtures[1].native_surfaces.contains(&"websocket-control-rpc"));
+    assert!(fixtures[0]
+        .native_surfaces
+        .contains(&"messaging-platform-gateway"));
+    assert!(fixtures[1]
+        .native_surfaces
+        .contains(&"websocket-control-rpc"));
     assert!(fixtures[1].native_surfaces.contains(&"hooks"));
 
     assert_eq!(

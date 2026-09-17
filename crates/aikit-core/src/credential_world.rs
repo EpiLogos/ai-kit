@@ -199,7 +199,9 @@ impl CredentialStatusKnowledge {
     pub fn requirement_ref(&self) -> &SecretRequirementRef {
         match self {
             Self::Resolved(resolution) => &resolution.requirement_ref,
-            Self::Unresolved { requirement_ref, .. } => requirement_ref,
+            Self::Unresolved {
+                requirement_ref, ..
+            } => requirement_ref,
         }
     }
 
@@ -249,7 +251,10 @@ impl CredentialWorldDisclosure {
         }
     }
 
-    pub fn status(&self, requirement_ref: &SecretRequirementRef) -> Option<&CredentialStatusKnowledge> {
+    pub fn status(
+        &self,
+        requirement_ref: &SecretRequirementRef,
+    ) -> Option<&CredentialStatusKnowledge> {
         self.credentials.get(requirement_ref)
     }
 
@@ -296,9 +301,9 @@ pub fn disclose_credential_world(
                     headless,
                     allow_from_env,
                 }) {
-                    Ok(resolution) => {
-                        CredentialStatusKnowledge::Resolved(CredentialResolutionDisclosure::from(&resolution))
-                    }
+                    Ok(resolution) => CredentialStatusKnowledge::Resolved(
+                        CredentialResolutionDisclosure::from(&resolution),
+                    ),
                     Err(error) => CredentialStatusKnowledge::Unresolved {
                         requirement_ref: requirement.requirement_ref.clone(),
                         credential_ref: requirement.credential_ref.clone(),
@@ -380,8 +385,7 @@ pub fn credential_requirements_for_model_routes(
                 }
                 Some(_) => {}
                 None => {
-                    by_provider
-                        .insert(provider.to_string(), (credential_ref, hint.clone(), bound));
+                    by_provider.insert(provider.to_string(), (credential_ref, hint.clone(), bound));
                 }
             }
         }
@@ -498,7 +502,10 @@ mod tests {
         let status = disclosure
             .status(&SecretRequirementRef::new("secret-requirement:openai").unwrap())
             .unwrap();
-        assert!(matches!(status, CredentialStatusKnowledge::Unresolved { .. }));
+        assert!(matches!(
+            status,
+            CredentialStatusKnowledge::Unresolved { .. }
+        ));
         assert!(!status.is_selected());
         assert!(!disclosure.fully_observed());
     }
@@ -594,7 +601,10 @@ mod tests {
         let status = disclosure
             .status(&SecretRequirementRef::new("secret-requirement:openai").unwrap())
             .unwrap();
-        assert!(matches!(status, CredentialStatusKnowledge::Unresolved { .. }));
+        assert!(matches!(
+            status,
+            CredentialStatusKnowledge::Unresolved { .. }
+        ));
     }
 
     #[test]
@@ -627,7 +637,11 @@ mod tests {
     fn credentials_are_ordered_deterministically_by_requirement_ref() {
         let disclosure = disclose_credential_world(
             ProviderRosterKnowledge::Observed { providers: vec![] },
-            &[requirement("zeta"), requirement("alpha"), requirement("mid")],
+            &[
+                requirement("zeta"),
+                requirement("alpha"),
+                requirement("mid"),
+            ],
             false,
             false,
         );
@@ -702,7 +716,11 @@ mod tests {
     fn a_route_that_needs_no_credential_declares_no_requirement() {
         let routes = vec![set_with(
             "model:local",
-            vec![route("model:local", "provider:ollama", CredentialCondition::NotRequired)],
+            vec![route(
+                "model:local",
+                "provider:ollama",
+                CredentialCondition::NotRequired,
+            )],
         )];
         assert!(credential_requirements_for_model_routes(&routes).is_empty());
     }
@@ -726,7 +744,10 @@ mod tests {
             requirements[0].requirement_ref.as_str(),
             "secret-requirement:credential:openai"
         );
-        assert_eq!(requirements[0].purpose, "provider:openai inference credential");
+        assert_eq!(
+            requirements[0].purpose,
+            "provider:openai inference credential"
+        );
     }
 
     #[test]
@@ -761,7 +782,9 @@ mod tests {
                 vec![route(
                     "model:a",
                     "provider:openai",
-                    CredentialCondition::Required { hint: "openai".into() },
+                    CredentialCondition::Required {
+                        hint: "openai".into(),
+                    },
                 )],
             ),
             set_with(
@@ -769,7 +792,9 @@ mod tests {
                 vec![route(
                     "model:b",
                     "provider:openai",
-                    CredentialCondition::Required { hint: "openai".into() },
+                    CredentialCondition::Required {
+                        hint: "openai".into(),
+                    },
                 )],
             ),
             set_with(
@@ -777,7 +802,9 @@ mod tests {
                 vec![route(
                     "model:c",
                     "provider:anthropic",
-                    CredentialCondition::Required { hint: "anthropic".into() },
+                    CredentialCondition::Required {
+                        hint: "anthropic".into(),
+                    },
                 )],
             ),
         ];
@@ -801,7 +828,9 @@ mod tests {
                 vec![route(
                     "model:a",
                     "provider:openai",
-                    CredentialCondition::Required { hint: "openai".into() },
+                    CredentialCondition::Required {
+                        hint: "openai".into(),
+                    },
                 )],
             ),
             set_with(

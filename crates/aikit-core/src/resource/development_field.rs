@@ -658,7 +658,7 @@ mod tests {
     use crate::project::ProjectRef;
     use crate::resource::{
         GitRepositoryRelation, GitWorkingState, MemoryResourceIndex, SourceAuthority, SourceState,
-        VERSIONED_WORLD_VERSION, VersionedWorldProviderDescriptor, VersionedWorldProviderStatus,
+        VersionedWorldProviderDescriptor, VersionedWorldProviderStatus, VERSIONED_WORLD_VERSION,
     };
 
     fn source() -> ResourceSource {
@@ -944,15 +944,13 @@ mod tests {
             reading.central_self_description.availability.state,
             DevelopmentFieldAvailabilityState::Unknown
         );
-        assert!(
-            reading
-                .central_self_description
-                .availability
-                .reason
-                .as_deref()
-                .unwrap()
-                .contains("does not guess ProjectCentral/self paths")
-        );
+        assert!(reading
+            .central_self_description
+            .availability
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("does not guess ProjectCentral/self paths"));
     }
 
     #[test]

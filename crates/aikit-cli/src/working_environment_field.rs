@@ -15,16 +15,15 @@
 //! back is that provider's own business and stays provenance.
 
 use aikit_adapters::herdr::created_place_bindings;
-use aikit_adapters::mux::{MuxAdapter, tmux::Tmux};
+use aikit_adapters::mux::{tmux::Tmux, MuxAdapter};
 use aikit_adapters::place_technology::{PlaceTechnologyReading, PlaceTechnologyRegistry};
 use aikit_adapters::{MuxWorkingEnvironment, WorkingEnvironmentProvider};
-use aikit_core::Result;
 use aikit_core::platform::PlaceTechnology;
 use aikit_core::resource::ResourceRef;
 use aikit_core::session::SessionPlan;
 use aikit_core::working_environment::{
-    WORKING_ENVIRONMENT_PROVIDER_VERSION, WorkingEnvironmentCapabilities, WorkingEnvironmentHealth,
-    WorkingEnvironmentObservation,
+    WorkingEnvironmentCapabilities, WorkingEnvironmentHealth, WorkingEnvironmentObservation,
+    WORKING_ENVIRONMENT_PROVIDER_VERSION,
 };
 use aikit_core::Result;
 use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
@@ -130,18 +129,18 @@ pub fn observe(plan: &SessionPlan) -> Result<Vec<WorkingEnvironmentObservation>>
         let Some(entry) = registry.resolve(&reading.technology) else {
             continue;
         };
-        let mut observed_environment: Box<dyn WorkingEnvironmentProvider> = if let Some(adapter) =
-            entry.mux_adapter()
-        {
-            Box::new(environment(adapter, plan, provider.clone(), &surfaces))
-        } else {
-            // A technology driven without the mux contract hands back its own
-            // plan-scoped provider through the same registry entry.
-            let Some(registered) = entry.working_environment(plan, &provider, &surfaces, None) else {
-                continue;
+        let mut observed_environment: Box<dyn WorkingEnvironmentProvider> =
+            if let Some(adapter) = entry.mux_adapter() {
+                Box::new(environment(adapter, plan, provider.clone(), &surfaces))
+            } else {
+                // A technology driven without the mux contract hands back its own
+                // plan-scoped provider through the same registry entry.
+                let Some(registered) = entry.working_environment(plan, &provider, &surfaces, None)
+                else {
+                    continue;
+                };
+                registered
             };
-            registered
-        };
         let observed = observed_environment.observe();
         match observed {
             Ok(mut observation) => {
@@ -201,14 +200,10 @@ pub fn act(
     // (`provider/herdr/current`) or an instance ref a commissioned place
     // carries (`provider/herdr/w6`): both name herdr, and both are answered
     // by herdr's own entry — never laundered into an unknown.
-    let Some(reading) = registry
-        .detect_field()?
-        .into_iter()
-        .find(|reading| {
-            provider_ref(reading.technology.clone()).ok().as_ref() == Some(provider)
-                || technology_from_provider(provider).as_ref() == Some(&reading.technology)
-        })
-    else {
+    let Some(reading) = registry.detect_field()?.into_iter().find(|reading| {
+        provider_ref(reading.technology.clone()).ok().as_ref() == Some(provider)
+            || technology_from_provider(provider).as_ref() == Some(&reading.technology)
+    }) else {
         return Ok(WorkingEnvironmentOutcome::NotExposed {
             provider: provider.clone(),
             subject: subject.clone(),
@@ -242,20 +237,15 @@ pub fn act(
     // The technology is driven without the mux contract: the registry hands
     // back its own plan-scoped provider, addressed through the same public
     // outcome vocabulary.
-    let Some(mut registered) = entry.working_environment(plan, provider, &surfaces, Some(subject)) else {
+    let Some(mut registered) = entry.working_environment(plan, provider, &surfaces, Some(subject))
+    else {
         return Ok(WorkingEnvironmentOutcome::NotExposed {
             provider: provider.clone(),
             subject: subject.clone(),
             reason: format!("{provider} has no working-environment projection in this build"),
         });
     };
-    act_via_registered(
-        registered.as_mut(),
-        plan,
-        provider,
-        subject,
-        operation,
-    )
+    act_via_registered(registered.as_mut(), plan, provider, subject, operation)
 }
 
 /// Why a provider ref cannot be acted on, stated so the operator can act on it.
