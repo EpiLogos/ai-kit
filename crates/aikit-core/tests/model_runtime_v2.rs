@@ -83,6 +83,7 @@ fn runtime(
                 material_control: AccessFieldReading::unavailable("provider owns lifecycle"),
                 interior: AccessFieldReading::unavailable("no model-interior seam"),
             },
+            modality: None,
         },
         change_application: RuntimeChangeApplication::NextSession,
     }

@@ -143,7 +143,11 @@ impl ModelCatalogueEntry {
         if !self.superseded_refs.is_empty() {
             descriptor.annotations.insert(
                 "superseded_refs".into(),
-                self.superseded_refs.iter().cloned().collect::<Vec<_>>().join(", "),
+                self.superseded_refs
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
             );
         }
         ResourceRecord::new(descriptor)
@@ -216,9 +220,7 @@ impl ModelCatalogue {
     pub fn first_party_seed() -> Self {
         let mut catalogue = Self::default();
         for entry in seed_entries() {
-            catalogue
-                .entries
-                .insert(entry.model.to_string(), entry);
+            catalogue.entries.insert(entry.model.to_string(), entry);
         }
         catalogue
     }
@@ -254,7 +256,12 @@ fn local(ids: &[&str]) -> DeclaredRoute {
     }
 }
 
-fn entry(model: &str, name: &str, description: &str, routes: Vec<DeclaredRoute>) -> ModelCatalogueEntry {
+fn entry(
+    model: &str,
+    name: &str,
+    description: &str,
+    routes: Vec<DeclaredRoute>,
+) -> ModelCatalogueEntry {
     ModelCatalogueEntry {
         model: canonical_model_ref(model).expect("seed model ref"),
         name: name.to_string(),
@@ -293,6 +300,24 @@ fn seed_entries() -> Vec<ModelCatalogueEntry> {
             vec![hosted("provider:openai", &["gpt-5.4"])],
         ),
         entry(
+            "model:gpt-realtime",
+            "GPT Realtime",
+            "OpenAI realtime speech-to-speech model (speech/audio in, speech/audio/text out)",
+            vec![hosted("provider:openai", &["gpt-realtime"])],
+        ),
+        entry(
+            "model:gpt-4o-transcribe",
+            "GPT-4o Transcribe",
+            "OpenAI speech-to-text model",
+            vec![hosted("provider:openai", &["gpt-4o-transcribe"])],
+        ),
+        entry(
+            "model:gpt-4o-mini-tts",
+            "GPT-4o mini TTS",
+            "OpenAI text-to-speech model",
+            vec![hosted("provider:openai", &["gpt-4o-mini-tts"])],
+        ),
+        entry(
             "model:deepseek-chat",
             "DeepSeek Chat",
             "DeepSeek hosted chat model",
@@ -308,7 +333,12 @@ fn seed_entries() -> Vec<ModelCatalogueEntry> {
             "model:llama3.2",
             "Llama 3.2",
             "Meta Llama 3.2, locally served",
-            vec![local(&["llama3.2:latest", "llama3.2", "llama3.2:3b", "llama3.2:1b"])],
+            vec![local(&[
+                "llama3.2:latest",
+                "llama3.2",
+                "llama3.2:3b",
+                "llama3.2:1b",
+            ])],
         ),
         entry(
             "model:qwen2.5-coder",
@@ -493,7 +523,9 @@ mod tests {
     #[test]
     fn canonical_grammar_accepts_model_colon_and_refuses_the_stale_slash_form() {
         assert_eq!(
-            canonical_model_ref("model:deepseek-v4-flash").unwrap().as_str(),
+            canonical_model_ref("model:deepseek-v4-flash")
+                .unwrap()
+                .as_str(),
             "model:deepseek-v4-flash"
         );
         let error = canonical_model_ref("model/deepseek-v4-flash").unwrap_err();
@@ -526,7 +558,9 @@ mod tests {
     fn an_unknown_provider_native_id_is_claimed_by_nobody() {
         let catalogue = ModelCatalogue::first_party_seed();
         let ollama = ProviderRef::parse("provider:ollama").unwrap();
-        assert!(catalogue.claiming(&ollama, "some-model-nobody-catalogued:7b").is_none());
+        assert!(catalogue
+            .claiming(&ollama, "some-model-nobody-catalogued:7b")
+            .is_none());
     }
 
     #[test]
@@ -600,7 +634,11 @@ mod tests {
     fn the_seed_is_canonical_throughout() {
         for entry in ModelCatalogue::first_party_seed().entries() {
             canonical_model_ref(entry.model.as_str()).unwrap();
-            assert!(!entry.routes.is_empty(), "{} declares no route", entry.model);
+            assert!(
+                !entry.routes.is_empty(),
+                "{} declares no route",
+                entry.model
+            );
             for route in &entry.routes {
                 assert!(!route.provider_native_ids.is_empty());
                 for native in &route.provider_native_ids {
@@ -610,6 +648,24 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_seed_carries_the_speech_surface_models_the_realtime_adapter_serves() {
+        let catalogue = ModelCatalogue::first_party_seed();
+        let openai = ProviderRef::parse("provider:openai").unwrap();
+        for (model_ref, native_id) in [
+            ("model:gpt-realtime", "gpt-realtime"),
+            ("model:gpt-4o-transcribe", "gpt-4o-transcribe"),
+            ("model:gpt-4o-mini-tts", "gpt-4o-mini-tts"),
+        ] {
+            let (entry, route) = catalogue
+                .claiming(&openai, native_id)
+                .unwrap_or_else(|| panic!("seed must declare {native_id}"));
+            assert_eq!(entry.model.as_str(), model_ref);
+            assert_eq!(route.kind, ModelRouteKind::ProviderNative);
+            assert!(route.credential.requires_credential());
         }
     }
 }

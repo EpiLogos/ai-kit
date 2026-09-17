@@ -75,6 +75,7 @@ pub mod knowledge_wiki_write;
 pub mod lifecycle;
 pub mod live_activation_history;
 pub mod method;
+pub mod model_modality;
 pub mod model_runtime;
 pub mod platform;
 pub mod policy;
@@ -350,6 +351,14 @@ pub use method::{
     resolve_method, resolve_skill_praxis_metadata, Method, MethodResolution,
     MethodResolvedRef, MethodSkillRef, SituatedSkillRef, SkillPraxisMetadata,
     SkillPraxisMetadataResolution, SkillPraxisResolvedRef, UsageOverlayRef, METHOD_VERSION,
+};
+pub use model_modality::{
+    compose_stage_modalities, diff_modality_contracts, explain_model_modality,
+    surface_interaction_support, surface_modality_support, ComposedModalityView,
+    ConnectionSemantics, CredentialScope, DeclaredSupport, InteractionCapability,
+    MaterialConstraints, ModalityContractDelta, ModalityDirection, ModalitySupport, ModelModality,
+    ModelModalityContract, ReconnectSupport, SurfaceAvailability, TransformCapability,
+    TransportKind, MODEL_MODALITY_VERSION,
 };
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;

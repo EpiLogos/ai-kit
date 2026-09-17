@@ -43,6 +43,7 @@ pub mod local_source_discovery;
 pub mod model_realisation;
 pub mod mux;
 pub mod native_git;
+pub mod openai_realtime;
 pub mod okf;
 pub mod place_technology;
 pub mod projectcentral;
