@@ -1227,6 +1227,23 @@ fn walk_corpus(root: &Path, extension: &str) -> Result<WalkedCorpus> {
             continue;
         }
         let path = entry.path();
+        // The owner's `.no-agent-retrieval` marker prunes a subtree before
+        // any descendant is read — the same law the ProjectCentral binding
+        // and the NOW-field reader honour. Ingest is a read; a room the
+        // owner withheld from agent retrieval must not enter the wiki
+        // through the back door of a corpus walk.
+        let withheld = path
+            .ancestors()
+            .skip(1)
+            .take_while(|ancestor| *ancestor != root)
+            .any(|ancestor| {
+                ancestor
+                    .join(aikit_core::projectcentral::NO_AGENT_RETRIEVAL_MARKER)
+                    .exists()
+            });
+        if withheld {
+            continue;
+        }
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())

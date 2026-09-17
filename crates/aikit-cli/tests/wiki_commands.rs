@@ -1096,6 +1096,67 @@ fn anchor_project_names_the_root_node_from_the_project() {
 // live corpus carries in `working/…/snapshots/…/before/`.
 // ---------------------------------------------------------------------------
 
+/// A room the owner marked `.no-agent-retrieval` must never reach the wiki:
+/// ingest is a read, and the marker prunes the subtree before anything in it
+/// is read — the same law the ProjectCentral binding and the NOW-field
+/// reader honour. Regression from the 2026-09-17 knowledge-fitness round:
+/// ingest copied a withheld room's record into the wiki and the faculty then
+/// disclosed it.
+#[test]
+fn ingest_never_reads_a_room_the_owner_withheld_from_agent_retrieval() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    write(
+        &corpus.join("open/record.md"),
+        "---\nrecord_id: open-record\nrecord_type: note\n---\n\n# Open record\n",
+    );
+    write(
+        &corpus.join("private/.no-agent-retrieval"),
+        "This room is withheld from agent retrieval by its owner.\n",
+    );
+    write(
+        &corpus.join("private/endpoint.md"),
+        "---\nrecord_id: withheld-record\nrecord_type: note\n---\n\n# Withheld record\n",
+    );
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\n  \"objects\": []\n}\n");
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "ingest",
+            corpus.to_str().unwrap(),
+            "--file",
+            wiki_json.to_str().unwrap(),
+            "--apply",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["records_selected"], Value::from(1));
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "query",
+            "search",
+            "--file",
+            wiki_json.to_str().unwrap(),
+            "Withheld record",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let hits = envelope["data"]["hits"].as_array().unwrap();
+    assert!(
+        !hits.iter().any(|hit| hit["address"]["resource"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("withheld-record")),
+        "the withheld room's record is not in the wiki: {hits:?}"
+    );
+}
+
 fn ingest_corpus_fixture(root: &Path) {
     write(
         &root.join("README.md"),
