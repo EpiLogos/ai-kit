@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aikit_adapters::bkmr::BkmrSourcePoolProvider;
 use aikit_adapters::central_file_map::CentralFileMapProvider;
 use aikit_adapters::gitnexus::GitNexusCodeIndexProvider;
+use aikit_adapters::now_field::{NowFieldScope, NowFieldSourcePoolProvider};
 use aikit_adapters::runner::SystemRunner;
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
 use aikit_core::knowledge_code::CodeIndexProvider;
@@ -41,6 +42,8 @@ pub(super) struct KnowledgeRuntime {
     native_source: NativeSourcePoolProvider,
     bkmr: Option<BkmrSourcePoolProvider<SystemRunner>>,
     central: Option<CentralFileMapProvider<SystemRunner>>,
+    now_field: Option<NowFieldSourcePoolProvider<SystemRunner>>,
+    now_field_roster: Vec<SourceMaterial>,
     central_expected: bool,
     code: Option<GitNexusCodeIndexProvider<SystemRunner>>,
     project_map: ProjectMap,
@@ -68,6 +71,11 @@ impl KnowledgeRuntime {
         }
         if let Some(provider) = &self.central {
             application = application.with_source_pool(provider, provider.descriptors());
+        }
+        if let Some(provider) = &self.now_field {
+            // The NOW field is live owner ground searched in place; its
+            // roster carries identity only, and reads go back to the file.
+            application = application.with_source_pool(provider, &self.now_field_roster);
         }
         application = application.with_source_pool(&self.native_source, &self.material);
         if let Some(provider) = &self.bkmr {
@@ -592,6 +600,26 @@ impl Service {
         } else {
             None
         };
+        let now_field = if let Some(central_root) = central_root {
+            if std::env::var_os("AIKIT_NOW_FIELD_SEARCH").is_some_and(|v| v == "off") {
+                absences.push("NOW-field search disabled by AIKIT_NOW_FIELD_SEARCH=off".into());
+                None
+            } else {
+                match NowFieldSourcePoolProvider::connect(
+                    aikit_adapters::now_field::default_runner(central_root),
+                    aikit_adapters::ripgrep::executable(),
+                    NowFieldScope::standard(central_root),
+                ) {
+                    Ok(provider) => Some(provider),
+                    Err(error) => {
+                        absences.push(format!("NOW-field search unavailable: {}", error.message()));
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        };
         // Filesystem source shards are a standalone discovery mechanism. In a
         // Central World their copied bodies must not bypass the live source owner
         // (including a source withheld since an earlier cached corpus was written).
@@ -674,12 +702,18 @@ impl Service {
         let project_map =
             self.build_project_map(wiki.as_ref().map(SqliteWikiProvider::index), &material)?;
 
+        let now_field_roster = now_field
+            .as_ref()
+            .map(NowFieldSourcePoolProvider::descriptors)
+            .unwrap_or_default();
         Ok(KnowledgeRuntime {
             wiki,
             material,
             native_source,
             bkmr,
             central,
+            now_field,
+            now_field_roster,
             central_expected: central_root.is_some(),
             code,
             project_map,

@@ -136,15 +136,11 @@ type CapabilityAdapterBuild =
 enum Reach {
     /// AIKit's own client: the config home is AIKit's, and no Actuation
     /// descriptor is needed or consulted.
-    SelfOwned {
-        build: AdapterBuild,
-    },
+    SelfOwned { build: AdapterBuild },
     /// A dispatch client: launch and install ride the descriptor's seam when
     /// one resolved, and the adapter's default home is the read-model fallback
     /// when it did not.
-    Client {
-        build: CapabilityAdapterBuild,
-    },
+    Client { build: CapabilityAdapterBuild },
     /// Admitted through the harness-adapter contract only: there is no launch
     /// or install seam yet, and `client install|launch` says so rather than
     /// pretending the harness is unknown.
