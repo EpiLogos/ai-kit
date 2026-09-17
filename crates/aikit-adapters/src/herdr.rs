@@ -689,18 +689,6 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
                 churned.join(", ")
             ));
         }
-        bindings.extend(
-            self.agent_session_bindings
-                .iter()
-                .map(|(canonical, native)| ProviderNativeBinding {
-                    kind: NativeBindingKind::AgentSession,
-                    native_id: native.clone(),
-                    canonical_ref: Some(canonical.clone()),
-                    provenance: vec![
-                        "explicit AgentSessionRef -> Herdr live Agent/pane binding".into()
-                    ],
-                }),
-        );
         WorkingEnvironmentObservation {
             schema: WORKING_ENVIRONMENT_PROVIDER_VERSION.into(),
             provider: self.provider.clone(),
