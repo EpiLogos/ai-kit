@@ -269,6 +269,12 @@ pub fn disclose_model_runtime(
         if let Err(error) = modality.validate() {
             return Err(error.with("surface", relation.model_surface.protocol.clone()));
         }
+        if let crate::resource::CredentialCondition::Required { hint } = &modality.credential {
+            unavailable.push(RuntimeUnavailability {
+                field: "modality-credential".to_string(),
+                reason: format!("the surface needs a credential it does not have bound: {hint}"),
+            });
+        }
         match &modality.availability {
             crate::model_modality::SurfaceAvailability::Available => {}
             crate::model_modality::SurfaceAvailability::Degraded { reason } => {
@@ -383,6 +389,19 @@ impl ModelRuntimeReadModel {
     /// Explicit state of one interaction capability on this body.
     pub fn interaction_support(&self, capability: InteractionCapability) -> ModalitySupport {
         surface_interaction_support(self.modality(), capability)
+    }
+
+    /// Explicit state of one transform capability on this body.
+    pub fn transform_support(
+        &self,
+        capability: crate::model_modality::TransformCapability,
+    ) -> ModalitySupport {
+        match self.modality() {
+            Some(contract) => contract.transform_support(capability),
+            None => ModalitySupport::Unknown {
+                reason: "no modality contract was declared for this surface".to_string(),
+            },
+        }
     }
 
     /// Explicit state of one input/output modality on this body.
@@ -541,6 +560,12 @@ pub fn disclose_staged_model_runtime(
             }
         }
         if let Some(modality) = &stage.relation.model_surface.modality {
+            if let crate::resource::CredentialCondition::Required { hint } = &modality.credential {
+                unavailable.push(RuntimeUnavailability {
+                    field: format!("{prefix}:modality-credential"),
+                    reason: format!("the stage needs a credential it does not have bound: {hint}"),
+                });
+            }
             match &modality.availability {
                 crate::model_modality::SurfaceAvailability::Available => {}
                 crate::model_modality::SurfaceAvailability::Degraded { reason } => {

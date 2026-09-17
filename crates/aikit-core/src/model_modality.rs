@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::explain_history::{EvidenceProvenance, ExplainEvidence, ExplainFact};
-use crate::model_runtime::ModelRuntimeReadModel;
+use crate::model_runtime::{ModelRuntimeReadModel, StagedModelRuntimeReadModel};
 use crate::resource::{CredentialCondition, ProviderRef, ResourceRef};
 use crate::{AikitError, Result};
 
@@ -909,6 +909,127 @@ pub fn explain_model_modality(read_model: &ModelRuntimeReadModel) -> ExplainEvid
             ),
             canonical_refs: Vec::new(),
             provenance: provenance.clone(),
+        });
+    }
+
+    ExplainEvidence {
+        schema: crate::EXPLAIN_HISTORY_VERSION.into(),
+        subject,
+        facts,
+    }
+}
+
+/// Explain why a resolved multi-stage body reads as it does: one fact per
+/// stage's model/provider/materialisation relation, the stage's declared
+/// modalities, the derived body-level basis, and every honest absence.
+/// Provider-native spellings stay in provenance; canonical refs carry the
+/// stage Component and Model identities.
+pub fn explain_staged_model_runtime(read_model: &StagedModelRuntimeReadModel) -> ExplainEvidence {
+    let subject = read_model.harness.clone();
+    let mut facts = Vec::new();
+
+    for stage in &read_model.stages {
+        let relation = &stage.relation;
+        let mut canonical_refs = vec![stage.component.clone(), relation.model.model.clone()];
+        if let Some(engine_contract) = relation.model_surface.contract.as_ref() {
+            canonical_refs.push(engine_contract.clone());
+        }
+        facts.push(ExplainFact {
+            relation: "stage-model-relation".into(),
+            authority: Some(crate::resource::SourceAuthority::Observed),
+            summary: format!(
+                "stage {} runs model {} as `{}` on engine {} via {} ({:?}), materialised at `{}` ({:?}), change application {:?}",
+                stage.component,
+                relation.model.model,
+                relation.model.variant,
+                relation.engine.engine,
+                relation.engine.provider,
+                relation.engine.form,
+                relation.materialisation.binding_ref,
+                relation.materialisation.placement,
+                relation.change_application
+            ),
+            canonical_refs,
+            provenance: vec![EvidenceProvenance {
+                provider: ResourceRef::parse(relation.engine.provider.as_str()).ok(),
+                native_id: Some(relation.model.variant.clone()),
+                revision: relation.engine.revision.clone(),
+                ..EvidenceProvenance::default()
+            }],
+        });
+        if let Some(modality) = &relation.model_surface.modality {
+            let inputs = modality
+                .input_modalities
+                .iter()
+                .map(|m| m.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let outputs = modality
+                .output_modalities
+                .iter()
+                .map(|m| m.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            facts.push(ExplainFact {
+                relation: "stage-modality".into(),
+                authority: Some(crate::resource::SourceAuthority::Observed),
+                summary: format!(
+                    "stage {} declares input [{inputs}] and output [{outputs}] over {} (surface {}, transport {})",
+                    stage.component,
+                    modality.provider,
+                    modality.provider_native_surface,
+                    modality.transport.as_str()
+                ),
+                canonical_refs: vec![stage.component.clone()],
+                provenance: vec![EvidenceProvenance {
+                    provider: ResourceRef::parse(modality.provider.as_str()).ok(),
+                    native_id: Some(modality.provider_native_surface.clone()),
+                    revision: modality.provider_revision.clone(),
+                    ..EvidenceProvenance::default()
+                }],
+            });
+            if modality.credential.is_unsatisfied() {
+                facts.push(ExplainFact {
+                    relation: "stage-credential-missing".into(),
+                    authority: Some(crate::resource::SourceAuthority::Observed),
+                    summary: format!(
+                        "stage {} needs a credential it does not have bound",
+                        stage.component
+                    ),
+                    canonical_refs: vec![stage.component.clone()],
+                    provenance: Vec::new(),
+                });
+            }
+        }
+    }
+
+    for line in &read_model.composed_modality.basis {
+        facts.push(ExplainFact {
+            relation: "body-modality-basis".into(),
+            authority: Some(crate::resource::SourceAuthority::Derived),
+            summary: line.clone(),
+            canonical_refs: Vec::new(),
+            provenance: Vec::new(),
+        });
+    }
+    facts.push(ExplainFact {
+        relation: "body-speech-capability".into(),
+        authority: Some(crate::resource::SourceAuthority::Derived),
+        summary: if read_model.composed_modality.speech_capable {
+            "the body carries speech in and out through its declared stages".to_string()
+        } else {
+            "the body does not carry speech in and out through its declared stages".to_string()
+        },
+        canonical_refs: Vec::new(),
+        provenance: Vec::new(),
+    });
+    for absence in &read_model.unavailable {
+        facts.push(ExplainFact {
+            relation: "body-unavailable".into(),
+            authority: Some(crate::resource::SourceAuthority::Derived),
+            summary: format!("{}: {}", absence.field, absence.reason),
+            canonical_refs: Vec::new(),
+            provenance: Vec::new(),
         });
     }
 
