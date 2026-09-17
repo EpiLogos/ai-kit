@@ -8,3 +8,7 @@
 
 # Local recovery receipts for reviewed documentation changes.
 /.central/documentation-transactions/
+
+# Agent/tool state directories (AIKit tasks, Central native locks).
+/.aikit/
+/.central/
