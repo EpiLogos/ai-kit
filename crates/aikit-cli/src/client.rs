@@ -126,19 +126,24 @@ enum SemanticBasis {
     AllActive,
 }
 
+/// One harness adapter builder: the client dirs in, a live adapter plus its
+/// storage path out.
+type AdapterBuild = fn(&ClientDirs) -> Result<(Box<dyn ClientAdapter>, PathBuf)>;
+type CapabilityAdapterBuild =
+    fn(&ClientDirs, Option<HarnessCapability>) -> Result<(Box<dyn ClientAdapter>, PathBuf)>;
+
 /// How AIKit reaches this harness.
 enum Reach {
     /// AIKit's own client: the config home is AIKit's, and no Actuation
     /// descriptor is needed or consulted.
     SelfOwned {
-        build: fn(&ClientDirs) -> Result<(Box<dyn ClientAdapter>, PathBuf)>,
+        build: AdapterBuild,
     },
     /// A dispatch client: launch and install ride the descriptor's seam when
     /// one resolved, and the adapter's default home is the read-model fallback
     /// when it did not.
     Client {
-        build:
-            fn(&ClientDirs, Option<HarnessCapability>) -> Result<(Box<dyn ClientAdapter>, PathBuf)>,
+        build: CapabilityAdapterBuild,
     },
     /// Admitted through the harness-adapter contract only: there is no launch
     /// or install seam yet, and `client install|launch` says so rather than
