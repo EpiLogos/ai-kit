@@ -1393,6 +1393,7 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
 
     let update = args.update;
     let file_display = args.file.display().to_string();
+    let mut unchanged = 0usize;
     let outcome = mutate_file(&args.file, |doc, ledger| {
         for object in objects {
             let ref_id = object.ref_id().clone();
@@ -1407,6 +1408,13 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
                     )
                     .with("ref", ref_id.to_string()));
                 }
+                // An unchanged corpus re-ingested must not masquerade as new
+                // knowledge: identical content, revision aside, keeps the
+                // held revision instead of advancing it.
+                if doc.holds_equivalent(&object) {
+                    unchanged += 1;
+                    continue;
+                }
                 doc.update_object(object)?
             } else {
                 doc.create_object(object)?
@@ -1417,6 +1425,7 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
     })?;
     let written = write_source_pool(&pool_dir, &material)?;
     summary["applied"] = jval!(true);
+    summary["unchanged"] = jval!(unchanged);
     summary["source_pool_files"] = jval!(written);
     summary["outcome"] = mutation_outcome(&outcome);
     let mut reply = WikiOutcome::wrote(summary, &outcome);

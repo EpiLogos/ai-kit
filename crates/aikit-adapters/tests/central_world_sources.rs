@@ -153,20 +153,26 @@ impl CommandRunner for WorldRunner {
             .and_then(|input| serde_json::from_str::<Value>(input).ok())
             .and_then(|input| input["world_ref"].as_str().map(str::to_owned))
             .unwrap_or_default();
-        let stdout = if let Some(message) = self.unreadable_on.get(&world_ref) {
-            unreadable_envelope(message)
+        let (stdout, failure) = if let Some(message) = self.unreadable_on.get(&world_ref) {
+            (unreadable_envelope(message), true)
         } else if self.coded_absent.contains_key(&world_ref) {
-            coded_absent_envelope(&world_ref)
+            (coded_absent_envelope(&world_ref), true)
         } else if self.fail_on.contains_key(&world_ref) {
-            absent_envelope(&world_ref)
+            (absent_envelope(&world_ref), true)
         } else {
-            self.answers
-                .get(&world_ref)
-                .map(|sources| self.envelope(&world_ref, sources.clone()))
-                .unwrap_or_else(|| absent_envelope(&world_ref))
+            match self.answers.get(&world_ref) {
+                Some(sources) => (self.envelope(&world_ref, sources.clone()), false),
+                None => (absent_envelope(&world_ref), true),
+            }
         };
+        // Central's real contract (ctrl/src/cli.rs `exit_code`): a structured
+        // envelope rides stdout even on failure, and `invalid_input` exits 2.
+        // The mock models that contract; an adapter that demanded exit 0
+        // before reading the envelope would misread every absence below as an
+        // unavailability and withhold the inherited root lineage.
+        let status = if failure { 2 } else { 0 };
         Ok(Output {
-            status: 0,
+            status,
             stdout,
             stderr: String::new(),
         })
@@ -444,6 +450,75 @@ fn absence_is_read_from_the_error_code_when_central_names_it() {
     .expect("the code alone establishes absence");
     assert!(world.inherited_root_lineage);
     assert_eq!(world.sources[0].effective_revision, "1");
+}
+
+/// Regression (2026-09-17 knowledge-fitness round): the real ctrl answers
+/// "no authored record for this world" with a structured `ok:false` envelope
+/// AND exit status 2 (`invalid_input`, ctrl/src/cli.rs `exit_code`). The
+/// adapter used to `require` exit 0 before reading the envelope, so every
+/// real absence was misread as `world_sources_unavailable` — the binding came
+/// back None, the inherited Central graph was withheld, and the whole
+/// SemanticWiki faculty went dark for any project that declares no world.
+/// The envelope, not the exit status, is the answer.
+#[test]
+fn a_nonzero_exit_never_hides_a_structured_absence() {
+    let runner = WorldRunner::with_answer(
+        "control:root",
+        json!([{"ref": "central:source:control:root:Control/user/identity",
+                "state": "available", "effective_revision": "1",
+                "propagation_path": ["control:root"]}]),
+    )
+    .coded_absent_on("project:Zeta");
+    let mut absences = Vec::new();
+    let world = read_project_binding(
+        &runner,
+        Path::new("ctrl"),
+        &PathBuf::from("/tmp/central"),
+        "Zeta",
+        &mut absences,
+    )
+    .expect("a structured absence with a non-zero exit is still an absence");
+    assert!(
+        world.inherited_root_lineage,
+        "the convention discloses the inherited lineage"
+    );
+    assert_eq!(world.sources[0].effective_revision, "1");
+    assert!(
+        absences.iter().any(|a| a.contains("root lineage applies")),
+        "{absences:?}"
+    );
+}
+
+/// The other half of the contract: a non-zero exit with NO readable envelope
+/// is a genuine unavailability — it must not inherit the root lineage and
+/// must not be mistaken for absence.
+#[test]
+fn a_nonzero_exit_without_an_envelope_is_unavailable_not_absent() {
+    struct Garbled;
+    impl CommandRunner for Garbled {
+        fn run(&self, _argv: &[String]) -> aikit_core::Result<Output> {
+            Ok(Output {
+                status: 2,
+                stdout: "panic: not an envelope".into(),
+                stderr: String::new(),
+            })
+        }
+    }
+    let mut absences = Vec::new();
+    let world = read_project_binding(
+        &Garbled,
+        Path::new("ctrl"),
+        &PathBuf::from("/tmp/central"),
+        "Eta",
+        &mut absences,
+    );
+    assert!(world.is_none(), "unavailable degrades to uncontextualised");
+    assert!(
+        absences
+            .iter()
+            .any(|a| a.contains("could not be read or validated")),
+        "no root lineage is assumed: {absences:?}"
+    );
 }
 
 #[test]
