@@ -126,6 +126,11 @@ impl<T: CommandRunner + ?Sized> CommandRunner for std::sync::Arc<T> {
 pub struct SystemRunner {
     cwd: Option<PathBuf>,
     env: BTreeMap<String, String>,
+    /// Environment keys explicitly withheld from the child. An external tool
+    /// must answer the argv it was given, not a configuration file the parent
+    /// shell happened to carry (e.g. `RIPGREP_CONFIG_PATH`).
+    env_removed: Vec<String>,
+    timeout: Option<std::time::Duration>,
 }
 
 impl SystemRunner {
@@ -143,6 +148,107 @@ impl SystemRunner {
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.insert(key.into(), value.into());
         self
+    }
+
+    #[must_use]
+    pub fn with_env_removed(mut self, key: impl Into<String>) -> Self {
+        let key = key.into();
+        self.env.retain(|existing, _| existing != &key);
+        self.env_removed.push(key);
+        self
+    }
+
+    /// Kill the child if it has not finished within the budget. A timed-out
+    /// command is a runner error, not a failed command: there is no status
+    /// data to hand back.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    fn spawn_bounded(
+        &self,
+        command: &mut std::process::Command,
+        argv: &[String],
+    ) -> Result<Output> {
+        use std::io::Read;
+        use std::process::Stdio;
+        use std::time::Instant;
+
+        command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
+        let mut child = command.spawn().map_err(|e| {
+            AikitError::new(
+                "mux.command_spawn_failed",
+                format!("could not run `{}`: {e}", argv.join(" ")),
+            )
+            .with("command", argv.join(" "))
+            .with("program", argv.first().cloned().unwrap_or_default())
+        })?;
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
+        let stdout_reader = std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            if let Some(pipe) = stdout_pipe.as_mut() {
+                let _ = pipe.read_to_end(&mut buffer);
+            }
+            buffer
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            if let Some(pipe) = stderr_pipe.as_mut() {
+                let _ = pipe.read_to_end(&mut buffer);
+            }
+            buffer
+        });
+        let deadline = self
+            .timeout
+            .map(|budget| Instant::now() + budget)
+            .unwrap_or_else(Instant::now);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => {
+                    return Err(AikitError::new(
+                        "mux.command_spawn_failed",
+                        format!("could not wait on `{}`: {error}", argv.join(" ")),
+                    )
+                    .with("command", argv.join(" ")));
+                }
+            }
+        };
+        let Some(status) = status else {
+            // Drain the readers so the killed child's threads retire cleanly.
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(AikitError::new(
+                "mux.command_timeout",
+                format!(
+                    "`{}` did not finish within {:?} and was killed",
+                    argv.join(" "),
+                    self.timeout.unwrap_or_default()
+                ),
+            )
+            .with("command", argv.join(" ")));
+        };
+        let stdout = stdout_reader.join().unwrap_or_default();
+        let stderr = stderr_reader.join().unwrap_or_default();
+        Ok(Output {
+            status: status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        })
     }
 }
 
@@ -162,6 +268,13 @@ impl CommandRunner for SystemRunner {
         }
         for (key, value) in &self.env {
             command.env(key, value);
+        }
+        for key in &self.env_removed {
+            command.env_remove(key);
+        }
+
+        if self.timeout.is_some() {
+            return self.spawn_bounded(&mut command, argv);
         }
 
         let output = command.output().map_err(|e| {
@@ -346,4 +459,43 @@ fn record(log: &Mutex<Vec<Vec<String>>>, argv: &[String]) {
 
 fn recorded(log: &Mutex<Vec<Vec<String>>>) -> Vec<Vec<String>> {
     log.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wall_clock_budget_kills_a_runaway_child_as_a_runner_error() {
+        let runner = SystemRunner::new().with_timeout(std::time::Duration::from_millis(120));
+        let error = runner
+            .run(&["sleep".into(), "30".into()])
+            .expect_err("a 30s sleep cannot finish inside a 120ms budget");
+        assert_eq!(error.code(), "mux.command_timeout");
+    }
+
+    #[test]
+    fn a_child_that_finishes_inside_the_budget_keeps_its_real_status() {
+        let runner = SystemRunner::new().with_timeout(std::time::Duration::from_secs(10));
+        let output = runner
+            .run(&["sh".into(), "-c".into(), "echo bounded && exit 3".into()])
+            .expect("a fast command runs inside the budget");
+        assert_eq!(output.status, 3);
+        assert_eq!(output.stdout.trim_end(), "bounded");
+    }
+
+    #[test]
+    fn a_withheld_environment_key_never_reaches_the_child() {
+        let runner = SystemRunner::new()
+            .with_env("SENTINEL", "absent")
+            .with_env_removed("SENTINEL");
+        let output = runner
+            .run(&[
+                "sh".into(),
+                "-c".into(),
+                "printenv SENTINEL || echo withheld".into(),
+            ])
+            .expect("printenv runs");
+        assert_eq!(output.stdout.trim_end(), "withheld");
+    }
 }
