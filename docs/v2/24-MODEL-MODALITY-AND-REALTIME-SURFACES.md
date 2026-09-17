@@ -41,7 +41,7 @@ A body-level interaction capability is carried only where every fully-declared s
 
 ## Identity law
 
-Component, provider, engine, materialisation and surface changes change facts and fingerprints. They never change Project, Agent, Agency, Harness or AgentSession identity — the same law the composition body already enforces, now proven for provider replacement inside a speech body. A model's structured tool request is an interaction capability: a channel on which proposals arrive, adjudicated by the caller through its own authority path. It cannot project itself onto a native Action surface (`RuntimeSurfaceReading.non_action_refs`, never `action_refs`).
+Component, provider, engine, materialisation and surface changes change facts and fingerprints. They never change Project, Agent, Agency, Harness or AgentSession identity — the same law the composition body already enforces, now proven for provider replacement inside a speech body. `diff_modality_contracts` produces the exact capability change across a replacement (`ModalityContractDelta`: gained/lost interaction, transforms, input/output modalities, availability movement, with basis lines). A model's structured tool request is an interaction capability: a channel on which proposals arrive, adjudicated by the caller through its own authority path. It cannot project itself onto a native Action surface (`RuntimeSurfaceReading.non_action_refs`, never `action_refs`).
 
 ## Provider adapters
 
