@@ -146,12 +146,6 @@ pub use gateway_runtime::{
     GatewayReplay, GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope,
     GatewaySnapshot, GatewayStatus, GatewayStreamEvent, GatewayStreamJournal, connector_descriptor,
     execute_gateway_command, text_send,
-    GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency,
-    GatewayEcologySession, GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope,
-    GatewayForkOrigin, GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult,
-    GatewayInvocationMode, GatewayReplay, GatewayRequestEnvelope, GatewayResponse,
-    GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
-    GatewayStreamJournal, connector_descriptor, execute_gateway_command, text_send,
 };
 pub use gateway_service::{
     DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION, GatewayServiceConfig,
