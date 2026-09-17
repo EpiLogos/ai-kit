@@ -47,26 +47,7 @@ fn stage_actuation(home: &Path) -> PathBuf {
     let script = bin_dir.join("actuation");
     fs::write(
         &script,
-        format!(
-            "#!/bin/sh\n\
-             mode=\"$1 $2\"\n\
-             slug=\"$3\"\n\
-             if [ \"$mode\" = \"harness detect\" ]; then\n\
-             \x20 cat \"$FIXTURES/detection.json\"\n\
-             \x20 exit 0\n\
-             fi\n\
-             if [ \"$mode\" = \"harness capability\" ]; then\n\
-             \x20 if [ -f \"$FIXTURES/descriptors/$slug.json\" ]; then\n\
-             \x20   cat \"$FIXTURES/descriptors/$slug.json\"\n\
-             \x20   exit 0\n\
-             \x20 fi\n\
-             \x20 echo \"actuation: no capability descriptor declared for harness $slug; \
-             declared: fixture\" >&2\n\
-             \x20 exit 2\n\
-             fi\n\
-             echo \"unexpected argv: $*\" >&2\n\
-             exit 3\n"
-        ),
+        "#!/bin/sh\nmode=\"$1 $2\"\nslug=\"$3\"\nif [ \"$mode\" = \"harness detect\" ]; then\n\x20 cat \"$FIXTURES/detection.json\"\n\x20 exit 0\nfi\nif [ \"$mode\" = \"harness capability\" ]; then\n\x20 if [ -f \"$FIXTURES/descriptors/$slug.json\" ]; then\n\x20   cat \"$FIXTURES/descriptors/$slug.json\"\n\x20   exit 0\n\x20 fi\n\x20 echo \"actuation: no capability descriptor declared for harness $slug; declared: fixture\" >&2\n\x20 exit 2\nfi\necho \"unexpected argv: $*\" >&2\nexit 3\n",
     )
     .unwrap();
     #[cfg(unix)]
