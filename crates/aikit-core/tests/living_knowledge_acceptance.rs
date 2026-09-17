@@ -68,6 +68,7 @@ fn runtime() -> ModelRuntimeReadModel {
                     material_control: AccessFieldReading::unavailable("not required"),
                     interior: AccessFieldReading::unavailable("not required"),
                 },
+            modality: None,
             },
             change_application: RuntimeChangeApplication::Live,
         },
