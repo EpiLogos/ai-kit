@@ -2724,12 +2724,29 @@ fn cmd_apply(cwd: &std::path::Path, a: ApplyArgs) -> Result<Reply> {
         toggles: vec![],
         label: a.label.clone(),
     })?;
+    // Materialising a project keeps its own managed hook seams current
+    // (codex's per-project `.codex/hooks.json`): the seam belongs to the
+    // working tree apply is materialising. A harness whose descriptor cannot
+    // be read is disclosed as a warning — never a failed apply.
+    let hook_seams = aikit_cli::client::install_project_hook_seams(&service);
+    let warnings: Vec<String> = hook_seams
+        .iter()
+        .filter(|outcome| outcome.state == "refused")
+        .map(|outcome| {
+            format!(
+                "{} hook seam not installed: {}",
+                outcome.client,
+                outcome.reason.as_deref().unwrap_or("reason unavailable")
+            )
+        })
+        .collect();
     let data = jval!({
         "generation": applied.id.to_string(),
         "replaced": applied.replaced.as_ref().map(|g| g.to_string()),
         "label": a.label,
+        "hook_seams": hook_seams,
     });
-    Ok(reply(&service, data, applied.warnings))
+    Ok(reply(&service, data, warnings))
 }
 
 fn cmd_rollback(cwd: &std::path::Path) -> Result<Reply> {
