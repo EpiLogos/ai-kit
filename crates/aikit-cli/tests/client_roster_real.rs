@@ -138,9 +138,7 @@ fn every_real_descriptor_yields_a_row_with_a_coherent_state() {
 
     // The broker closes the surface, exactly once.
     assert_eq!(
-        rows.iter()
-            .filter(|row| row["client"] == "broker")
-            .count(),
+        rows.iter().filter(|row| row["client"] == "broker").count(),
         1,
         "exactly one broker row"
     );
@@ -183,12 +181,14 @@ fn every_real_descriptor_yields_a_row_with_a_coherent_state() {
         if row["client"] == "broker" {
             continue;
         }
-        let slug = row["harness"].as_str().expect("every harness row names its slug");
+        let slug = row["harness"]
+            .as_str()
+            .expect("every harness row names its slug");
         let in_record = record_harnesses
             .iter()
             .any(|entry| entry["slug"].as_str() == Some(slug));
-        let overlaid = aikit_adapters::profiles::slug_for_target(&aikit_core::TargetId::new(slug))
-            .is_some();
+        let overlaid =
+            aikit_adapters::profiles::slug_for_target(&aikit_core::TargetId::new(slug)).is_some();
         assert!(
             in_record || overlaid,
             "row {slug} is neither in the detection record nor an overlay slug"
