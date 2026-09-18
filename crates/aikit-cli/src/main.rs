@@ -3137,6 +3137,18 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
     let decision = service.dispatch_hook(&event)?;
 
     let tuning = service.continuity_tuning();
+    let steps: Vec<Value> = decision
+        .steps
+        .iter()
+        .map(|step| {
+            jval!({
+                "capability": step.capsule.to_string(),
+                "phase": step.phase.as_str(),
+                "outcome": step.outcome.as_str(),
+                "bypassed": step.bypassed,
+            })
+        })
+        .collect();
     let data = jval!({
         "event": a.event,
         "client": a.client,
@@ -3146,6 +3158,11 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
         "bypassed": decision.was_bypassed(),
         "warnings": decision.warnings,
         "continuity": tuning.describe(),
+        // The chain, as dispatched: every planned step with its outcome.
+        // Guidance delivery is visible here as an `injected` step, so a
+        // guidance capsule that resolves but never delivers can no longer
+        // pass silently.
+        "steps": steps,
     });
     Ok(reply(&service, data, vec![]))
 }

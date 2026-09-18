@@ -34,13 +34,13 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::capsule::{BypassPolicy, FailurePolicy, HookPhase, Kind};
+use crate::capsule::{BypassPolicy, FailurePolicy, GuidanceSection, HookPhase, Kind};
 use crate::catalog::Catalog;
 use crate::duration::HumanDuration;
 use crate::error::{AikitError, Result};
 use crate::id::CapsuleId;
 use crate::profile::ConfigTable;
-use crate::resolve::ResolvedView;
+use crate::resolve::{ResolvedView, SelectionOrigin};
 
 // ---------------------------------------------------------------------------
 // Events
@@ -468,18 +468,26 @@ fn topological_order(
 // Building chains from a resolved view
 // ---------------------------------------------------------------------------
 
-/// Build one chain per event from the active hook capsules in a resolved view.
+/// Build one chain per event from the active hook and guidance capsules in a
+/// resolved view.
 ///
-/// Deviates from a plain `BTreeMap` return by yielding a `Result`: a chain whose
-/// dependencies cannot be ordered, or whose matcher does not compile, must fail
-/// visibly when the generation is built rather than at the first tool call of a
-/// session.
+/// Hook capsules contribute the executable phases; guidance capsules contribute
+/// content, joining only the events their manifest declares as inject-phase
+/// steps (see below). Deviates from a plain `BTreeMap` return by yielding a
+/// `Result`: a chain whose dependencies cannot be ordered, or whose matcher does
+/// not compile, must fail visibly when the generation is built rather than at
+/// the first tool call of a session.
 pub fn build_chains(
     view: &ResolvedView,
     capsules: &dyn Catalog,
 ) -> Result<BTreeMap<String, HookChain>> {
     let mut by_event: BTreeMap<String, (HookEventKind, Vec<HookStep>)> = BTreeMap::new();
     let mut dependencies: BTreeMap<CapsuleId, Vec<CapsuleId>> = BTreeMap::new();
+    // The dedup key each guidance capsule declares, kept beside the steps so the
+    // per-event dedup pass below can read it without re-opening the catalog.
+    let mut dedup_keys: BTreeMap<CapsuleId, String> = BTreeMap::new();
+    // The rank of the scope that enabled each guidance capsule; breaks dedup ties.
+    let mut precedence: BTreeMap<CapsuleId, i32> = BTreeMap::new();
 
     for active in view.active_of_kind(Kind::Hook) {
         // The view and the catalog disagreeing means the catalog moved under us.
@@ -535,11 +543,141 @@ pub fn build_chains(
         }
     }
 
+    // Guidance capsules deliver content, not processes: each active one joins
+    // the chains of the events its `[guidance] inject` declares, as an
+    // inject-phase step whose entry is the fragment file itself. Resolution has
+    // already applied the gates that matter — enablement, trust, platform,
+    // targets — so a capsule outside the active view composes nothing, silently
+    // at its own gates, exactly like any other kind.
+    for active in view.active_of_kind(Kind::Guidance) {
+        // The view and the catalog disagreeing means the catalog moved under us.
+        // Skipping is honest; inventing a step from stale metadata is not.
+        let Some(section) = capsules.get(&active.id).and_then(|c| c.guidance().cloned()) else {
+            continue;
+        };
+
+        if let Some(key) = &section.dedup_key {
+            dedup_keys.insert(active.id.clone(), key.clone());
+        }
+        precedence.insert(active.id.clone(), origin_rank(&active.origin));
+        dependencies.insert(
+            active.id.clone(),
+            active
+                .dependencies
+                .iter()
+                .filter(|d| d.kind() == Kind::Guidance)
+                .cloned()
+                .collect(),
+        );
+
+        let step = guidance_step(&active.id, &section, &active.config);
+        for declared in &section.inject {
+            let kind = HookEventKind::parse(declared);
+            by_event
+                .entry(kind.as_str().to_string())
+                .or_insert_with(|| (kind, Vec::new()))
+                .1
+                .push(step.clone());
+        }
+    }
+
+    for (_, steps) in by_event.values_mut() {
+        drop_dedup_losers(steps, &dedup_keys, &precedence);
+    }
+
     let mut chains = BTreeMap::new();
     for (key, (kind, steps)) in by_event {
         chains.insert(key, HookChain::plan(kind, steps, &dependencies)?);
     }
     Ok(chains)
+}
+
+/// The inject-phase step by which one guidance capsule joins a chain.
+///
+/// The entry is the fragment file the dispatcher reads as content — there is no
+/// process to time out, so no timeout; the phase cannot deny, so the honest
+/// failure policy is `warn`, which records a delivery failure without ever
+/// letting content masquerade as a gate; and fragments always fold in chain
+/// order, so the step is serial.
+fn guidance_step(capsule: &CapsuleId, section: &GuidanceSection, config: &ConfigTable) -> HookStep {
+    HookStep {
+        capsule: capsule.clone(),
+        entry: section.entry.clone(),
+        phase: HookPhase::Inject,
+        order: section.order,
+        timeout: None,
+        failure: FailurePolicy::Warn,
+        serial: true,
+        matcher: None,
+        bypass: BypassPolicy::default(),
+        config: config.clone(),
+    }
+}
+
+/// The dedup precedence of an enablement: the rank of the scope that selected
+/// the capsule, so a session-scoped selection outranks the global default it
+/// was written to replace. Non-layer origins carry no scope and rank zero.
+fn origin_rank(origin: &SelectionOrigin) -> i32 {
+    match origin {
+        SelectionOrigin::Layer { scope, .. } => i32::from(scope.rank()),
+        _ => 0,
+    }
+}
+
+/// Resolve the `dedup_key` contests inside one event's steps by dropping the
+/// losing guidance steps.
+///
+/// Guidance sharing a dedup key says the same thing; injecting both copies
+/// would spend the session's attention twice for one instruction. The winner is
+/// the contender enabled by the highest-precedence scope, ties going to the
+/// first in `(order, capsule)` order — the same rule
+/// [`crate::guidance::compose`] applies to bodies, applied here at plan time
+/// because the chain, not the composer, is what dispatch executes. Hook steps
+/// declare no dedup key and are never dropped by this pass.
+fn drop_dedup_losers(
+    steps: &mut Vec<HookStep>,
+    dedup_keys: &BTreeMap<CapsuleId, String>,
+    precedence: &BTreeMap<CapsuleId, i32>,
+) {
+    #[derive(Clone)]
+    struct Contender {
+        capsule: CapsuleId,
+        precedence: i32,
+        order: i32,
+    }
+
+    let mut contenders: BTreeMap<&str, Vec<Contender>> = BTreeMap::new();
+    for step in steps.iter().filter(|s| s.capsule.kind() == Kind::Guidance) {
+        let Some(key) = dedup_keys.get(&step.capsule) else {
+            continue;
+        };
+        contenders.entry(key.as_str()).or_default().push(Contender {
+            capsule: step.capsule.clone(),
+            precedence: precedence.get(&step.capsule).copied().unwrap_or(0),
+            order: step.order,
+        });
+    }
+
+    let losers: Vec<CapsuleId> = contenders
+        .into_values()
+        .filter_map(|mut group| {
+            if group.len() < 2 {
+                return None;
+            }
+            group.sort_by(|a, b| {
+                b.precedence
+                    .cmp(&a.precedence)
+                    .then((a.order, &a.capsule).cmp(&(b.order, &b.capsule)))
+            });
+            Some(group.into_iter().skip(1).map(|c| c.capsule))
+        })
+        .flatten()
+        .collect();
+
+    if losers.is_empty() {
+        return;
+    }
+    steps.retain(|step| !losers.contains(&step.capsule));
 }
 
 // ---------------------------------------------------------------------------
