@@ -1074,40 +1074,77 @@ impl Service {
 
     /// Read the resolved catalogue back: the first-party seed, whatever
     /// Provider Sources published, and the owner's own entries, layered by
-    /// canonical ModelRef. This reports identity only — whether any of it is
-    /// reachable is the join's answer, and it lives on `compose`.
+    /// canonical ModelRef — joined against the adapter instances' declared
+    /// modality surfaces and this machine's credential bindings. A listing
+    /// therefore shows speech as a class of model (input/output modalities,
+    /// transforms, interaction, transport) with each option's credential
+    /// gap named when no key is bound. Declared is still not observed: route
+    /// observation stays the `compose` join, and no entry here claims a
+    /// route was seen.
     pub fn show_model_catalogue(&self, filter: Option<&str>) -> Result<serde_json::Value> {
-        let (catalogue, notes) = aikit_store::model_catalogue::resolved_catalogue(&self.home);
+        let (catalogue, mut notes) = aikit_store::model_catalogue::resolved_catalogue(&self.home);
+        let bound_refs = bound_credential_refs(&self.home, &mut notes);
+        let surfaces = aikit_adapters::openai_realtime::declared_surfaces();
+        let disclosures =
+            aikit_core::resource::disclose_catalogue_modalities(&catalogue, &surfaces, &bound_refs);
         let needle = filter.map(str::to_lowercase);
-        let entries: Vec<serde_json::Value> = catalogue
-            .entries()
-            .filter(|entry| match &needle {
+        let shown: Vec<&aikit_core::resource::CatalogueModelDisclosure> = disclosures
+            .iter()
+            .filter(|disclosure| match &needle {
                 None => true,
                 Some(needle) => {
-                    entry.model.as_str().to_lowercase().contains(needle)
-                        || entry.name.to_lowercase().contains(needle)
+                    disclosure.model.as_str().to_lowercase().contains(needle)
+                        || disclosure.name.to_lowercase().contains(needle)
                 }
             })
-            .map(|entry| {
+            .collect();
+        let entries: Vec<serde_json::Value> = shown
+            .iter()
+            .map(|disclosure| {
+                // The disclosure was built from this catalogue, so the entry
+                // is present; the routes render with presence-resolved
+                // credential conditions (ref/presence only).
+                let entry = catalogue.get(&disclosure.model).expect("catalogued entry");
                 serde_json::json!({
-                    "model": entry.model,
-                    "name": entry.name,
-                    "source": entry.source,
-                    "declared_routes": entry.routes.iter().map(|route| serde_json::json!({
-                        "provider": route.provider,
-                        "kind": route.kind.as_str(),
-                        "provider_native_ids": route.provider_native_ids,
-                        "credential_required": route.credential.requires_credential(),
-                    })).collect::<Vec<_>>(),
+                    "model": disclosure.model,
+                    "name": disclosure.name,
+                    "description": entry.description,
+                    "source": disclosure.source,
+                    "availability": disclosure.availability,
+                    "modality_classes": disclosure.modality_classes,
+                    "declared_routes": entry.routes.iter().map(|route| {
+                        let credential = aikit_core::credential_world::resolve_credential_presence(
+                            &route.credential,
+                            &route.provider,
+                            &bound_refs,
+                        );
+                        serde_json::json!({
+                            "provider": route.provider,
+                            "kind": route.kind.as_str(),
+                            "provider_native_ids": route.provider_native_ids,
+                            "credential_required": route.credential.requires_credential(),
+                            "credential": credential,
+                        })
+                    }).collect::<Vec<_>>(),
                 })
             })
+            .collect();
+        let speech_class: Vec<String> = shown
+            .iter()
+            .filter(|disclosure| disclosure.carries_speech())
+            .map(|disclosure| disclosure.model.to_string())
             .collect();
         Ok(serde_json::json!({
             "catalogued": catalogue.len(),
             "shown": entries.len(),
             "notes": notes,
-            "standing": "catalogue identity only — a catalogued Model is not thereby available; \
-                         see `aikit compose --json` for route availability",
+            "classes": {
+                "speech": speech_class,
+            },
+            "standing": "catalogued options with declared modality facts and this machine's \
+                         credential presence — credential-gated names the credential that is \
+                         not bound; a catalogued Model is not thereby observed, and route \
+                         availability stays the `aikit compose --json` join",
             "entries": entries,
         }))
     }
@@ -3381,6 +3418,28 @@ fn observe_credential_roster(
     };
 
     Ok(ProviderRosterKnowledge::Observed { providers })
+}
+
+/// The machine's non-revoked credential binding refs — the presence evidence
+/// the catalogue disclosure resolves route conditions against. Presence and
+/// refs only: a binding record has no secret field, so no secret value can
+/// enter a listing through this read. A store read failure is disclosed as a
+/// note and reads as "nothing bound": a listing must never invent a
+/// satisfied credential it could not verify.
+fn bound_credential_refs(home: &AikitHome, notes: &mut Vec<String>) -> std::collections::BTreeSet<String> {
+    match aikit_store::credentials::CredentialBindingStore::new(home).list() {
+        Ok(bindings) => bindings
+            .into_iter()
+            .filter(|binding| !binding.revoked)
+            .map(|binding| binding.credential_ref.as_str().to_string())
+            .collect(),
+        Err(error) => {
+            notes.push(format!(
+                "credential bindings unreadable, presence reads unbound: {error}"
+            ));
+            std::collections::BTreeSet::new()
+        }
+    }
 }
 
 /// Load every registry under the home plus the project-local `.aikit/` registry,
