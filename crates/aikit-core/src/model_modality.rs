@@ -152,14 +152,19 @@ impl InteractionCapability {
 
 /// The transport a surface is reached over. This is a surface fact, not the
 /// surface's identity: the same body may expose several surfaces with
-/// different transports.
+/// different transports. The serde spellings are exactly [`Self::as_str`],
+/// so every document carries the one vocabulary spelling (`websocket`,
+/// `webrtc`) the disclosure and the docs use — never a second kebab-compound
+/// spelling of the same fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TransportKind {
     InProcess,
     Cli,
     Http,
+    #[serde(rename = "websocket")]
     WebSocket,
+    #[serde(rename = "webrtc")]
     WebRtc,
     Sip,
     /// A provider-owned transport AIKit does not model generically. The
@@ -1440,6 +1445,28 @@ mod tests {
             !capabilities.contains("text"),
             "modalities are not capabilities"
         );
+    }
+
+    #[test]
+    fn transport_serialises_as_the_one_vocabulary_spelling() {
+        for transport in [
+            TransportKind::InProcess,
+            TransportKind::Cli,
+            TransportKind::Http,
+            TransportKind::WebSocket,
+            TransportKind::WebRtc,
+            TransportKind::Sip,
+            TransportKind::ProviderNative,
+        ] {
+            let rendered = serde_json::to_string(&transport).unwrap();
+            assert_eq!(
+                rendered,
+                format!("\"{}\"", transport.as_str()),
+                "the document spelling and the vocabulary spelling must be one spelling"
+            );
+            let round_trip: TransportKind = serde_json::from_str(&rendered).unwrap();
+            assert_eq!(round_trip, transport);
+        }
     }
 
     #[test]
