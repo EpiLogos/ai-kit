@@ -2,7 +2,7 @@ schema = 1
 id = "skill/aikit/profile-skillset"
 kind = "skill"
 name = "AIKit Profile and SkillSet management"
-description = "Inspect, stage, preview and apply Profile/SkillSet changes through AIKit's existing resolution machinery."
+description = "Manage Profile and SkillSet source state through previewable AIKit resolution rather than editing generated projections."
 maturity = "stable"
 tags = ["aikit", "profile", "skillset"]
 

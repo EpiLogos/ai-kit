@@ -2,7 +2,7 @@ schema = 1
 id = "skill/aikit/operation"
 kind = "skill"
 name = "AIKit operation and Wayfinder"
-description = "Orient and operate AIKit from application state, never UI-private steps: proactively run aikit status and aikit explain before assuming a capability is usable, and route why-is-this-withheld questions through explain instead of guessing from configs. Covers context, resolution, Wayfinder and projection surfaces without bypassing trust or authority."
+description = "Orient and operate AIKit from application state, never UI-private steps. Proactively run aikit status and aikit explain at the start of work in an AIKit-governed context, and route every question about why a capability is active, withheld, or degraded through aikit explain rather than guessing from config files; near-miss: knowledge-navigation answers recorded-knowledge questions, operation establishes AIKit's own state."
 maturity = "stable"
 tags = ["aikit", "operation", "wayfinder"]
 

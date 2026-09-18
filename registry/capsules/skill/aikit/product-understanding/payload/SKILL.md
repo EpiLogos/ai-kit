@@ -1,6 +1,6 @@
 ---
 name: aikit-product-understanding
-description: Develop product understanding only as far as the task requires, preserving the authority and provenance of human positions, product intent, design, architecture, implementation, evidence and current work.
+description: Develop provenance-aware product understanding from authored intent through design, implementation and current evidence, stopping at the smallest sufficient depth for the task.
 ---
 
 # Product Understanding

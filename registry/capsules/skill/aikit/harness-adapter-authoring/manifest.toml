@@ -2,7 +2,7 @@ schema = 1
 id = "skill/aikit/harness-adapter-authoring"
 kind = "skill"
 name = "AIKit Harness Adapter Authoring"
-description = "Admit an unsupported harness by preserving its native faculties, source ownership and activation truth through AIKit's public adapter contract."
+description = "Admit an unsupported or newly encountered harness/edition by preserving its least-distorting native faculties, source ownership, lifecycle truth and activation evidence through AIKit's public adapter contract."
 tags = ["aikit", "harness", "adapter", "projection", "conformance", "provenance"]
 
 [skill]
