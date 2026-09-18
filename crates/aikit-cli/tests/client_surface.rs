@@ -118,6 +118,10 @@ fn write_descriptor_fixture(fixtures: &Path, slug: &str) {
 fn catalog_slug_of(name: &str) -> Option<&str> {
     match name {
         "claude" => Some("claude-code"),
+        // The gemini client keeps the client name gemini-cli and joins by
+        // the catalog slug gemini (the same contract TargetId::GEMINI
+        // carries); fixtures stage descriptors under the join key.
+        "gemini-cli" => Some("gemini"),
         "broker" => None,
         other => Some(other),
     }

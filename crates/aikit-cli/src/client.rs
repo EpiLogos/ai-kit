@@ -302,7 +302,11 @@ static REGISTRY: &[RegisteredClient] = &[
     RegisteredClient {
         name: TargetId::GEMINI_CLI,
         aliases: &["gemini"],
-        catalog_slug: Some(TargetId::GEMINI_CLI),
+        // The catalog slug is `gemini` (Round 4, TargetId::GEMINI): the
+        // client keeps the name `gemini-cli` with its `gemini` alias, and the
+        // detection/capability intakes ask the catalog what it actually
+        // declares — the claude/claude-code precedent on the join key.
+        catalog_slug: Some(TargetId::GEMINI),
         semantic: SemanticBasis::None,
         reach: Reach::AdapterOnly {
             build: |dirs| Box::new(GeminiAdapter::new(projection_dir(dirs, "gemini"))),
