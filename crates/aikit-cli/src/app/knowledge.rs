@@ -647,7 +647,11 @@ impl Service {
             if let Some(project) = self.invocation_project_member(central_root, root) {
                 // Scoping does not depend on a manifest or a populated wiki: a
                 // Work member with no ProjectCentral at all still scopes, as
-                // `project:<name>`, and says so.
+                // `project:<name>`, and says so. No manifest also means no
+                // project record, so the root lineage applies by convention —
+                // the binding read below confirms it against Central and
+                // discloses the inheritance (or withholds, if Central is
+                // unreachable).
                 if !central_root
                     .join("Work")
                     .join(&project)
@@ -655,7 +659,7 @@ impl Service {
                     .exists()
                 {
                     absences.push(format!(
-                        "Project Work/{project} has no ProjectCentral manifest; this context scopes as {} without a project wiki",
+                        "Project Work/{project} has no ProjectCentral manifest; this context scopes as {} without a project wiki, and with no project record the root lineage applies",
                         aikit_adapters::central_world_sources::project_world_ref(
                             central_root, &project
                         )
