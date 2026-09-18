@@ -650,10 +650,18 @@ impl SemanticWikiIndex {
             );
         }
         if let Some(edge) = self.edges.get(resource) {
+            // An authored edge's own link spelling (`raw_target`, display) is
+            // part of its evidence: a relative link resolved to a stable
+            // hashed file address must still be findable by what its author
+            // actually wrote.
+            let authored = extension_authored_text(&edge.extensions);
             return (
                 "edge",
                 edge.relation.clone(),
-                format!("{} {} {}", edge.relation, edge.from_ref, edge.to_ref),
+                format!(
+                    "{} {} {} {}",
+                    edge.relation, edge.from_ref, edge.to_ref, authored
+                ),
                 format!("{} → {} · {:?}", edge.from_ref, edge.to_ref, edge.origin),
             );
         }
@@ -771,6 +779,23 @@ fn extension_aliases(
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// The authored link spelling carried in an edge's `authored_relation`
+/// evidence, when present: the raw target and its display text.
+fn extension_authored_text(
+    extensions: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> String {
+    let Some(value) = extensions.get("authored_relation") else {
+        return String::new();
+    };
+    ["raw_target", "display"]
+        .into_iter()
+        .filter_map(|key| value.get(key).and_then(serde_json::Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn score(tokens: &[String], id: &str, label: &str, searchable: &str) -> Option<u32> {

@@ -10,6 +10,7 @@ use aikit_adapters::now_field::{NowFieldScope, NowFieldSourcePoolProvider};
 use aikit_adapters::runner::SystemRunner;
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
 use aikit_core::knowledge_code::CodeIndexProvider;
+use aikit_core::knowledge_navigation::ProjectAuthoredPending;
 use aikit_core::knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider,
 };
@@ -17,8 +18,8 @@ use aikit_core::knowledge_wiki::{parse_wiki_objects, OkfWikiBundle, WikiObject};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
 use aikit_core::resource::{
-    parse_or_search_expression, resolve_subjects, ProviderRef, ResolveExpression, ResourceIndex,
-    ResourceKind, ResourceRef, SourceAuthority, SourceRef,
+    expression_scope_project, parse_or_search_expression_in_scope, resolve_subjects, ProviderRef,
+    ResolveExpression, ResourceIndex, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
 };
 use aikit_core::{
     FamiliarityContext, ForgetScope, KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation,
@@ -48,6 +49,16 @@ pub(super) struct KnowledgeRuntime {
     code: Option<GitNexusCodeIndexProvider<SystemRunner>>,
     project_map: ProjectMap,
     absences: Vec<String>,
+    /// Per-project rollups of pending authored relations. Search/resolve/frame
+    /// replies carry at most their own scope's rollup; status carries every
+    /// project plus per-target detail.
+    authored_pending: Vec<ProjectAuthoredPending>,
+    /// Authored edge ref → Work-relative project display, for scoped queries
+    /// to keep another project's authored edges out of their results.
+    authored_edge_projects: BTreeMap<String, String>,
+    /// This invocation's own project in Work-relative display (`Work/demo`),
+    /// when the invocation root sits in a Central Work project.
+    current_project: Option<String>,
 }
 
 impl KnowledgeRuntime {
@@ -55,6 +66,37 @@ impl KnowledgeRuntime {
     /// same owners; it creates no second wiki or source-pool access path.
     pub(super) fn wiki_index(&self) -> Option<&SemanticWikiIndex> {
         self.wiki.as_ref().map(SqliteWikiProvider::index)
+    }
+
+    /// The Work-relative project display a reply's scope resolves to. An
+    /// explicit scope key matches a pending project (display, project id or
+    /// bare Work name) or this invocation's own project; a bare unknown name
+    /// names `Work/<name>` directly. Without ground for a key, nothing is
+    /// claimed and nothing is narrowed.
+    fn scoped_project_display(&self, explicit_scope: Option<&str>) -> Option<String> {
+        let Some(key) = explicit_scope else {
+            return self.current_project.clone();
+        };
+        if let Some(pending) = self
+            .authored_pending
+            .iter()
+            .find(|pending| pending.matches_key(key))
+        {
+            return Some(pending.project.clone());
+        }
+        if let Some(current) = &self.current_project {
+            if display_matches_key(current, key) {
+                return Some(current.clone());
+            }
+        }
+        let key = key.trim();
+        if key.contains("..") {
+            return None;
+        }
+        if let Some(rest) = key.strip_prefix("Work/") {
+            return (!rest.is_empty() && !rest.contains('/')).then(|| key.to_owned());
+        }
+        (!key.contains('/')).then(|| format!("Work/{key}"))
     }
 
     pub(super) fn source_material(&self) -> &[SourceMaterial] {
@@ -135,7 +177,10 @@ impl Service {
     }
 
     pub fn knowledge_search(&self, query: &str, limit: usize) -> Result<KnowledgeSearchResult> {
-        let expression = parse_or_search_expression(query)?;
+        // A query asked inside a project stands in that project's world
+        // through the grammar itself (`: demo (@# @ text)`) — never a flag.
+        let expression =
+            parse_or_search_expression_in_scope(query, self.knowledge_scope_project().as_deref())?;
         let mut result = self.knowledge_resolve(&expression, limit)?;
         result.query = query.into();
         Ok(result)
@@ -147,9 +192,37 @@ impl Service {
         limit: usize,
     ) -> Result<KnowledgeSearchResult> {
         let candidate_limit = if limit == 0 { 0 } else { limit.max(256) };
+        // The scope that governs this reply's disclosure: an explicit `:`
+        // scope in the expression, else the invocation's own project.
+        let explicit_scope = expression_scope_project(expression).map(str::to_owned);
         let mut result = self.with_knowledge(|runtime, application| {
+            let scoped_display = runtime.scoped_project_display(explicit_scope.as_deref());
             let mut result = application.resolve(expression, candidate_limit);
             result.absences.extend(runtime.absences.clone());
+            // Pending authored relations are scoped: a query sees its own
+            // scope's rollup; other projects' pendings stay with
+            // `knowledge status`.
+            if let Some(pending) = scoped_display.as_deref().and_then(|display| {
+                runtime
+                    .authored_pending
+                    .iter()
+                    .find(|pending| pending.project == display)
+            }) {
+                result.absences.push(pending.rollup_line());
+            }
+            // A scoped query keeps another project's compiled authored edges
+            // out of its results; unattributable material passes through.
+            if explicit_scope.is_some() {
+                if let Some(display) = &scoped_display {
+                    result.hits.retain(|hit| match &hit.address {
+                        aikit_core::KnowledgeAddress::Wiki(resource) => runtime
+                            .authored_edge_projects
+                            .get(resource.as_str())
+                            .is_none_or(|edge_project| edge_project == display),
+                        _ => true,
+                    });
+                }
+            }
             Ok(result)
         })?;
         self.apply_learned_accessibility(&resolve_subjects(expression), &mut result)?;
@@ -273,6 +346,37 @@ impl Service {
         Ok(())
     }
 
+    /// The invocation's own project in Work-relative display, when the
+    /// invocation root sits inside a Central Work project.
+    fn current_project_display(&self) -> Option<String> {
+        let root = self
+            .descriptor
+            .project_root
+            .as_deref()
+            .unwrap_or(&self.invocation_cwd);
+        let central_root = root.ancestors().find(|candidate| {
+            candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
+        })?;
+        let relative = root.strip_prefix(central_root).ok()?;
+        let mut parts = relative.components();
+        if parts.next()?.as_os_str() != "Work" {
+            return None;
+        }
+        Some(format!("Work/{}", parts.next()?.as_os_str().to_str()?))
+    }
+
+    /// The bare Work name used as the lowered scope key (`demo` for
+    /// `Work/demo`) — the readable spelling of the project world.
+    fn knowledge_scope_project(&self) -> Option<String> {
+        self.current_project_display().and_then(|display| {
+            display
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        })
+    }
+
     pub fn knowledge_address(&self, resource: &ResourceRef) -> Result<Option<KnowledgeAddress>> {
         if let Some(address) = self.knowledge_store().address(resource)? {
             return Ok(Some(address));
@@ -351,6 +455,17 @@ impl Service {
         let mut frame = self.with_knowledge(|runtime, application| {
             let mut frame = application.context_pack(query, addresses);
             frame.absences.extend(runtime.absences.clone());
+            // A frame carries its own project's pending rollup, never other
+            // projects'.
+            if let Some(current) = &runtime.current_project {
+                if let Some(pending) = runtime
+                    .authored_pending
+                    .iter()
+                    .find(|pending| &pending.project == current)
+                {
+                    frame.absences.push(pending.rollup_line());
+                }
+            }
             Ok(frame)
         })?;
         frame.derive_uncertainty();
@@ -397,6 +512,12 @@ impl Service {
         self.with_knowledge(|runtime, application| {
             let mut status = application.status();
             status.absences.extend(runtime.absences.clone());
+            // Status is the only surface that carries every project's pending
+            // rollup and the full per-target detail.
+            for pending in &runtime.authored_pending {
+                status.absences.push(pending.rollup_line());
+            }
+            status.authored_pending = runtime.authored_pending.clone();
             Ok(status)
         })
     }
@@ -413,6 +534,8 @@ impl Service {
             .unwrap_or(&self.invocation_cwd);
         let mut absences = Vec::new();
         let mut wiki_registers = Vec::new();
+        let mut authored_pending = Vec::new();
+        let mut authored_edge_projects = BTreeMap::new();
         let central_root = root.ancestors().find(|candidate| {
             candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
         });
@@ -458,12 +581,14 @@ impl Service {
             // ProjectCentral/user/** compiles its explicit [[wikilinks]]
             // into the same SemanticWiki as ordinary Compiled edges — never
             // as new WikiNodes. Unresolved links stay disclosed as
-            // absences, never as synthetic edges.
+            // per-project rollups, never as synthetic edges.
             let authored_wiki =
                 aikit_adapters::projectcentral_authored_wiki::compile_world_authored_wiki(
                     central_root,
                 );
             absences.extend(authored_wiki.absences);
+            authored_pending = authored_wiki.pending;
+            authored_edge_projects = authored_wiki.edge_projects;
             aikit_adapters::central_entities::adopt_into(
                 &mut discovered.wiki,
                 authored_wiki
@@ -529,17 +654,40 @@ impl Service {
                     // binding still enforces agent-readable source descriptors
                     // and .no-agent-retrieval; no World inheritance is assumed.
                     let project_root = central_root.join("Work").join(&project);
+                    let project_display = format!("Work/{project}");
                     let local_authored = aikit_adapters::ProjectCentralFilesystemBinding::inspect(
                         &project_root,
                         None,
                     )
                     .and_then(|binding| {
+                        let project_id = binding.semantic.project_id.clone();
                         aikit_adapters::projectcentral_authored_wiki::projectcentral_authored_wiki(
                             &binding,
                         )
+                        .map(|authored| (project_id, authored))
                     });
                     match local_authored {
-                        Ok(authored) => {
+                        Ok((project_id, authored)) => {
+                            // The world compile may already carry this
+                            // project's rollup; the local rebuild replaces it
+                            // so a project discloses exactly one.
+                            if let Some(rollup) =
+                                aikit_adapters::projectcentral_authored_wiki::pending_rollup(
+                                    project_display.clone(),
+                                    Some(project_id),
+                                    &authored.compilation.pending,
+                                )
+                            {
+                                authored_pending
+                                    .retain(|pending| pending.project != project_display);
+                                authored_pending.push(rollup);
+                            }
+                            for edge in &authored.compilation.edges {
+                                authored_edge_projects.insert(
+                                    edge.ref_id.as_str().to_owned(),
+                                    project_display.clone(),
+                                );
+                            }
                             discovered.wiki.extend(
                                 authored.compilation.edges.into_iter().map(WikiObject::Edge),
                             );
@@ -706,6 +854,18 @@ impl Service {
             .as_ref()
             .map(NowFieldSourcePoolProvider::descriptors)
             .unwrap_or_default();
+        let current_project = central_root.and_then(|central_root| {
+            let relative = root.strip_prefix(central_root).ok()?;
+            let mut parts = relative.components();
+            if parts.next()?.as_os_str() != "Work" {
+                return None;
+            }
+            parts
+                .next()?
+                .as_os_str()
+                .to_str()
+                .map(|name| format!("Work/{name}"))
+        });
         Ok(KnowledgeRuntime {
             wiki,
             material,
@@ -718,6 +878,9 @@ impl Service {
             code,
             project_map,
             absences,
+            authored_pending,
+            authored_edge_projects,
+            current_project,
         })
     }
 
@@ -983,4 +1146,18 @@ fn exact_knowledge_hit(hit: &aikit_core::KnowledgeSearchHit, subjects: &[&str]) 
             && (hit.resource.as_str().eq_ignore_ascii_case(subject)
                 || hit.label.eq_ignore_ascii_case(subject))
     })
+}
+
+/// Whether a Work-relative project display answers a scope key exactly or by
+/// its bare Work name (`demo` answers `Work/demo`).
+fn display_matches_key(display: &str, key: &str) -> bool {
+    let key = key.trim().to_lowercase();
+    if key.is_empty() {
+        return false;
+    }
+    display.to_lowercase() == key
+        || display
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| segment.eq_ignore_ascii_case(&key))
 }

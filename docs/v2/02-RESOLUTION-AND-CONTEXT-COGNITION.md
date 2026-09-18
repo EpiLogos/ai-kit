@@ -98,6 +98,26 @@ Lifetime owner
 
 These must not be collapsed. A Component can be selected because of Project scope, activated only for one AgentSession, and have its actual registration lifetime owned by a target-native plugin/runtime context.
 
+### Operative project scope atoms (Vāk)
+
+Scope precedence has a native surface in the operative Resolve grammar. A query may name the project world it stands in:
+
+```text
+: demo ( authentication )
+: Work/Actuation @# @ harness
+: "my project" beta
+```
+
+The scope sigil `:` is read only where an expression (or a frame body) begins; ordinary text with " : " inside stays literal. The project is one atom — bare, path-spelled (`Work/Actuation`) or quoted — and matching is the consumer's law: a project's Work-relative display, its project id, or its bare Work name are the accepted keys.
+
+Ordinary language is lowered, not flagged. A query asked inside a project resolves as `: project (@# @ text)` through the same grammar; there is no parallel flag surface for scoping.
+
+Ontology mapping. The scope is the @4 whole — world/context — within which the operand's distinctions are resolved. It is a structural node beside Address and Frame: the six horizons and six relation operators are the ontology and are not extended. It is also not an `OperativeScope` provider binding (which attaches exact owner/source revisions to AST nodes); it names no revision and confers no authority.
+
+Resolution law. The Resource field narrows a scope only where it carries project-partition ground; without that ground the candidates pass through and the scope is recorded on the resolved path. A guessed exclusion would fabricate an absence, so the resolver never guesses.
+
+Disclosure law. Authored-relation pendings (unresolved links) roll up per project. A scoped search/resolve/frame reply carries its own scope's rollup line; every project's rollup plus per-target detail lives in `knowledge status`. Another project's compiled authored edges stay out of a scoped query's results; unattributable material passes through.
+
 ---
 
 ## 14. Eligibility versus preference

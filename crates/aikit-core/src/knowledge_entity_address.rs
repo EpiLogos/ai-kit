@@ -74,6 +74,9 @@ fn collect_addresses(expression: &ResolveExpression) -> Vec<String> {
         ResolveExpression::Address { expression, .. } => {
             addresses.extend(collect_addresses(expression));
         }
+        ResolveExpression::Scope { expression, .. } => {
+            addresses.extend(collect_addresses(expression));
+        }
         ResolveExpression::Unary { expression, .. } => {
             addresses.extend(collect_addresses(expression));
         }

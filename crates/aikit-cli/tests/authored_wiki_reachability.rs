@@ -97,15 +97,33 @@ fn authored_markdown_wikilinks_reach_the_knowledge_surface() {
     let project = temp.path().join("Work/demo");
     let service = open_service(&temp, &project);
 
-    // status: the pending [[Future Concept]] link stays disclosed as an
-    // absence, never a synthetic edge.
+    // status: the pending [[Future Concept]] link is disclosed as this
+    // project's structured rollup — one line in absences, per-target detail
+    // in the structured field — never a synthetic edge.
     let status = service.knowledge_status().expect("status materialises");
+    assert_eq!(status.authored_pending.len(), 1, "{:?}", status.absences);
+    assert_eq!(status.authored_pending[0].project, "Work/demo");
+    assert_eq!(status.authored_pending[0].unresolved_targets, 1);
+    assert_eq!(status.authored_pending[0].occurrences, 1);
+    assert_eq!(
+        status.authored_pending[0].targets[0].target,
+        "Future Concept"
+    );
     assert!(
         status
             .absences
             .iter()
-            .any(|absence| absence.contains("Future Concept") && absence.contains("pending")),
-        "expected a disclosed pending relation, got {:?}",
+            .any(|absence| absence.contains("Work/demo")
+                && absence.contains("1 unresolved target across 1 occurrence pending")),
+        "expected the pending rollup line, got {:?}",
+        status.absences
+    );
+    assert!(
+        status
+            .absences
+            .iter()
+            .all(|absence| !absence.contains("Future Concept")),
+        "per-target detail is status-structured, not absence noise: {:?}",
         status.absences
     );
 
@@ -167,6 +185,128 @@ fn authored_markdown_wikilinks_reach_the_knowledge_surface() {
         "expected the authored source among disclosed sources, got {:?}",
         sources.sources
     );
+}
+
+#[test]
+fn relative_links_resolve_and_scoped_searches_see_only_their_scope() {
+    let temp = central_world_with_one_project();
+    let project = temp.path().join("Work/demo");
+    // A repo file outside the ProjectCentral register, cited by the note via
+    // an ordinary relative Markdown link, and repeated identical pendings.
+    fs::write(project.join("README.md"), "# demo repo\n").unwrap();
+    fs::write(
+        project.join("ProjectCentral/user/alpha.md"),
+        "Alpha links [[Beta]], cites [the README](../../README.md) and pends [[Future Concept]], [[Future Concept]], [[Future Concept]].\n",
+    )
+    .unwrap();
+    let service = open_service(&temp, &project);
+
+    // The relative link to the real repo file resolves to a real authored
+    // edge; the identical pendings collapse into one counted rollup.
+    let status = service.knowledge_status().expect("status materialises");
+    assert_eq!(status.authored_pending.len(), 1, "{:?}", status.absences);
+    assert_eq!(status.authored_pending[0].unresolved_targets, 1);
+    assert_eq!(status.authored_pending[0].occurrences, 3);
+    assert!(
+        status
+            .absences
+            .iter()
+            .any(|absence| absence.contains("3 occurrences pending")),
+        "{:?}",
+        status.absences
+    );
+    let search = service.knowledge_search("readme", 50).unwrap();
+    assert!(
+        search.hits.iter().any(|hit| matches!(
+            &hit.address,
+            KnowledgeAddress::Wiki(resource)
+                if resource.as_str().starts_with("wiki:edge:authored:")
+        )),
+        "expected a resolved edge to the repo README, got {:?}",
+        search.hits
+    );
+    // A search reply carries its own scope's rollup — not noise per
+    // occurrence.
+    assert_eq!(
+        search
+            .absences
+            .iter()
+            .filter(|absence| absence.contains("pending"))
+            .count(),
+        1,
+        "{:?}",
+        search.absences
+    );
+}
+
+#[test]
+fn a_scoped_query_hides_other_projects_absences_and_edges() {
+    let temp = central_world_with_one_project();
+    // A second project whose note pends on its own target and links a real
+    // sibling file.
+    let sibling = temp.path().join("Work/other");
+    fs::create_dir_all(sibling.join("ProjectCentral/user")).unwrap();
+    fs::write(
+        sibling.join("ProjectCentral/project.json"),
+        r#"{
+          "schema":"central.project/v1",
+          "project_id":"epilogos/other",
+          "human_source":"ProjectCentral/user",
+          "wiki":{
+            "profile":"okf-wiki/v1",
+            "source":"ProjectCentral/agents/wiki/wiki.json",
+            "adopted_sources":[]
+          }
+        }"#,
+    )
+    .unwrap();
+    write(
+        &sibling.join("ProjectCentral/agents/wiki/wiki.json"),
+        r#"{ "profile":"okf-wiki/v1", "objects":[] }"#,
+    );
+    fs::write(
+        sibling.join("ProjectCentral/user/note.md"),
+        "Sibling pends [[Other Future]] and cites [sibling readme](../../README.md).\n",
+    )
+    .unwrap();
+    fs::write(sibling.join("README.md"), "# other repo\n").unwrap();
+
+    let project = temp.path().join("Work/demo");
+    let service = open_service(&temp, &project);
+
+    // A demo-scoped search (the lowered cwd scope) sees only demo's rollup:
+    // one pending line, and it names demo's target — not the sibling's.
+    let scoped = service.knowledge_search("alpha", 50).unwrap();
+    let pending_lines: Vec<&String> = scoped
+        .absences
+        .iter()
+        .filter(|absence| absence.contains("pending"))
+        .collect();
+    assert_eq!(pending_lines.len(), 1, "{:?}", scoped.absences);
+    assert!(
+        pending_lines[0].starts_with("Work/demo:"),
+        "{:?}",
+        scoped.absences
+    );
+    assert!(
+        !scoped
+            .absences
+            .iter()
+            .any(|absence| absence.contains("Work/other")),
+        "other projects' pendings stay out of a scoped reply: {:?}",
+        scoped.absences
+    );
+
+    // status is the diagnostic surface that carries every project.
+    let status = service.knowledge_status().unwrap();
+    assert_eq!(status.authored_pending.len(), 2, "{:?}", status.absences);
+    assert!(status.authored_pending.iter().any(|pending| {
+        pending.project == "Work/other"
+            && pending
+                .targets
+                .iter()
+                .any(|target| target.target == "Other Future")
+    }));
 }
 
 #[test]

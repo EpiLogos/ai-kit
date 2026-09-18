@@ -101,6 +101,18 @@ pub enum ResolveExpression {
         horizon: Option<AddressHorizon>,
         expression: Box<ResolveExpression>,
     },
+    /// The project world a query stands in — the @4 whole within which the
+    /// operand's distinctions are resolved. This is a structural node beside
+    /// Address/Frame, not a seventh relation: the six relations and six
+    /// horizons are the ontology and are not extended by scoping. It names a
+    /// project by its Work name (`demo`), Work-relative path (`Work/demo`) or
+    /// project id (`epilogos/demo`); matching is the consumer's law. It is not
+    /// an `OperativeScope` provider binding — those attach exact owner/source
+    /// revisions to AST nodes and remain their own layer.
+    Scope {
+        project: String,
+        expression: Box<ResolveExpression>,
+    },
     Unary {
         op: RelationOp,
         expression: Box<ResolveExpression>,
@@ -136,6 +148,14 @@ impl ResolveExpression {
         }
     }
 
+    /// Resolve the expression inside one project's world.
+    pub fn scope(project: impl Into<String>, expression: Self) -> Self {
+        Self::Scope {
+            project: project.into(),
+            expression: Box::new(expression),
+        }
+    }
+
     pub fn potential(expression: Self) -> Self {
         Self::Unary {
             op: RelationOp::Potential,
@@ -161,6 +181,12 @@ impl ResolveExpression {
                 horizon.map_or_else(|| "@".to_string(), |value| value.to_string()),
                 render_child(expression)
             ),
+            Self::Scope {
+                project,
+                expression,
+            } => {
+                format!(": {} {}", render_subject(project), render_child(expression))
+            }
             Self::Unary { op, expression } => {
                 format!("{} {}", op.symbol(), render_child(expression))
             }
@@ -197,6 +223,7 @@ fn render_subject(value: &str) -> String {
             | "x"
             | "/"
             | "="
+            | ":"
             | "("
             | ")"
     );
@@ -215,6 +242,7 @@ fn render_subject(value: &str) -> String {
 enum Token {
     Address(Option<AddressHorizon>),
     Relation(RelationOp),
+    Scope,
     LParen,
     RParen,
     Atom(String),
@@ -267,6 +295,10 @@ fn has_operative_syntax(raw: &str) -> bool {
         return true;
     };
     tokens.iter().any(|token| !matches!(token, Token::Atom(_)))
+}
+
+fn scope_allowed(tokens: &[Token]) -> bool {
+    tokens.is_empty() || matches!(tokens.last(), Some(Token::LParen))
 }
 
 fn lex(raw: &str) -> Result<Vec<Token>> {
@@ -359,6 +391,14 @@ fn lex(raw: &str) -> Result<Vec<Token>> {
                 i += 1;
                 continue;
             }
+        }
+
+        // The project-scope sigil is recognised only where an expression or a
+        // frame body begins. Ordinary text with " : " inside stays literal.
+        if ch == ':' && previous_boundary && boundary_after(1) && scope_allowed(&tokens) {
+            tokens.push(Token::Scope);
+            i += 1;
+            continue;
         }
 
         if previous_boundary && boundary_after(1) {
@@ -472,6 +512,30 @@ impl Parser {
 
     fn parse_unary(&mut self) -> Result<ResolveExpression> {
         match self.peek().cloned() {
+            Some(Token::Scope) => {
+                self.next();
+                let project = match self.next() {
+                    Some(Token::Atom(value)) => value,
+                    _ => {
+                        return Err(AikitError::new(
+                            "resolve.scope_missing_project",
+                            "operative Resolve scope ':' must name a project subject",
+                        ))
+                    }
+                };
+                let expression =
+                    if self.peek().is_none() || matches!(self.peek(), Some(Token::RParen)) {
+                        ResolveExpression::Subject {
+                            value: String::new(),
+                        }
+                    } else {
+                        self.parse_unary()?
+                    };
+                Ok(ResolveExpression::Scope {
+                    project,
+                    expression: Box::new(expression),
+                })
+            }
             Some(Token::Address(horizon)) => {
                 self.next();
                 let expression =
@@ -533,6 +597,7 @@ impl Parser {
                 "resolve.unexpected_relation",
                 format!("unexpected relation operator {}", op.symbol()),
             )),
+            Some(Token::Scope) => unreachable!("scopes are consumed by parse_unary"),
             Some(Token::Address(_)) => unreachable!("addresses are consumed by parse_unary"),
             None => Err(AikitError::new(
                 "resolve.missing_subject",
@@ -565,6 +630,10 @@ pub enum ResolvePathStep {
     Address {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         horizon: Option<AddressHorizon>,
+        candidates: Vec<ResourceRef>,
+    },
+    Scope {
+        project: String,
         candidates: Vec<ResourceRef>,
     },
     Relation {
@@ -738,6 +807,29 @@ fn evaluate(
             });
             candidates
         }
+        ResolveExpression::Scope {
+            project,
+            expression,
+        } => {
+            let mut candidates = evaluate(expression, resources, path_identity, steps);
+            // The field itself decides scope participation when it carries the
+            // project ground (`in_scope`); without that ground the candidates
+            // pass through and the scope stays recorded on the path — a
+            // guessed exclusion would be a fabricated absence.
+            candidates.retain(|candidate| {
+                resources
+                    .in_scope(project, &candidate.resource)
+                    .unwrap_or(true)
+            });
+            steps.push(ResolvePathStep::Scope {
+                project: project.clone(),
+                candidates: candidates
+                    .iter()
+                    .map(|candidate| candidate.resource.clone())
+                    .collect(),
+            });
+            candidates
+        }
         ResolveExpression::Unary { op, expression } => {
             let candidates = evaluate(expression, resources, path_identity, steps);
             steps.push(ResolvePathStep::Relation { op: *op });
@@ -880,7 +972,10 @@ pub fn resolve_subjects(expression: &ResolveExpression) -> Vec<&str> {
 fn collect_resolve_subjects<'a>(expression: &'a ResolveExpression, subjects: &mut Vec<&'a str>) {
     match expression {
         ResolveExpression::Subject { value } => subjects.push(value.as_str()),
-        ResolveExpression::Address { expression, .. }
+        // A scope's project names the world the query stands in, not a sought
+        // subject; only the operand's subjects are collected.
+        ResolveExpression::Scope { expression, .. }
+        | ResolveExpression::Address { expression, .. }
         | ResolveExpression::Unary { expression, .. }
         | ResolveExpression::Frame { expression } => {
             collect_resolve_subjects(expression, subjects);
@@ -888,6 +983,53 @@ fn collect_resolve_subjects<'a>(expression: &'a ResolveExpression, subjects: &mu
         ResolveExpression::Binary { left, right, .. } => {
             collect_resolve_subjects(left, subjects);
             collect_resolve_subjects(right, subjects);
+        }
+    }
+}
+
+/// Human-shell entry point with the caller's current project: plain text is
+/// lowered into `: project (@# @ text)` so a query asked inside a project
+/// stands in that project's world through the one grammar — no flag lane. An
+/// expression that already carries an explicit `:` scope keeps its own world.
+pub fn parse_or_search_expression_in_scope(
+    raw: &str,
+    project: Option<&str>,
+) -> Result<ResolveExpression> {
+    let expression = parse_or_search_expression(raw)?;
+    match project
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !expression_has_scope(&expression))
+    {
+        Some(project) => Ok(ResolveExpression::scope(project, expression)),
+        None => Ok(expression),
+    }
+}
+
+/// Whether any node of the expression names its own project scope.
+pub fn expression_has_scope(expression: &ResolveExpression) -> bool {
+    match expression {
+        ResolveExpression::Scope { .. } => true,
+        ResolveExpression::Subject { .. } => false,
+        ResolveExpression::Address { expression, .. }
+        | ResolveExpression::Unary { expression, .. }
+        | ResolveExpression::Frame { expression } => expression_has_scope(expression),
+        ResolveExpression::Binary { left, right, .. } => {
+            expression_has_scope(left) || expression_has_scope(right)
+        }
+    }
+}
+
+/// The project named by the outermost explicit scope, when the expression
+/// carries one.
+pub fn expression_scope_project(expression: &ResolveExpression) -> Option<&str> {
+    match expression {
+        ResolveExpression::Scope { project, .. } => Some(project),
+        ResolveExpression::Subject { .. } => None,
+        ResolveExpression::Address { expression, .. }
+        | ResolveExpression::Unary { expression, .. }
+        | ResolveExpression::Frame { expression } => expression_scope_project(expression),
+        ResolveExpression::Binary { left, right, .. } => {
+            expression_scope_project(left).or_else(|| expression_scope_project(right))
         }
     }
 }
@@ -1227,6 +1369,8 @@ mod tests {
             "@4 project:demo / @5 method:operate",
             "@ subject:a = @ subject:b",
             "( + @0 knowledge:ground / + @5 action:verify )",
+            ": demo ( @# @ search terms )",
+            "( : demo beta )",
         ];
         for raw in cases {
             let parsed = parse_resolve_expression(raw).unwrap();
@@ -1234,6 +1378,84 @@ mod tests {
             let reparsed = parse_resolve_expression(&rendered).unwrap();
             assert_eq!(parsed, reparsed, "{raw} -> {rendered}");
         }
+    }
+
+    #[test]
+    fn scope_atom_names_the_project_world_and_lowers_ordinary_language() {
+        let parsed = parse_resolve_expression(": demo ( search terms )").unwrap();
+        assert_eq!(
+            parsed,
+            ResolveExpression::scope(
+                "demo",
+                ResolveExpression::Frame {
+                    expression: Box::new(ResolveExpression::Subject {
+                        value: "search terms".into(),
+                    }),
+                }
+            )
+        );
+
+        // The scope project is one atom; the operand is the rest of the unary
+        // expression. Quoted projects carry spaces.
+        let quoted = parse_resolve_expression(": \"my project\" beta").unwrap();
+        assert_eq!(
+            quoted,
+            ResolveExpression::scope("my project", ResolveExpression::subject("beta"))
+        );
+
+        // Ordinary language lowers into the caller's current project scope.
+        let lowered = parse_or_search_expression_in_scope("authentication", Some("demo")).unwrap();
+        assert_eq!(lowered.render(), ": demo @# @ authentication");
+        assert_eq!(expression_scope_project(&lowered), Some("demo"));
+        assert_eq!(resolve_subjects(&lowered), vec!["authentication"]);
+
+        // An explicit scope in the text keeps its own world; no project means
+        // the expression stands unscoped, exactly as before.
+        let explicit = parse_or_search_expression_in_scope(": other beta", Some("demo")).unwrap();
+        assert_eq!(expression_scope_project(&explicit), Some("other"));
+        let unscoped = parse_or_search_expression_in_scope("beta", None).unwrap();
+        assert_eq!(unscoped, ResolveExpression::ordinary_search("beta"));
+    }
+
+    #[test]
+    fn interior_colons_stay_literal_text() {
+        // The scope sigil is read only where an expression or frame body
+        // begins; ordinary " : " text is unchanged.
+        let literal = parse_or_search_expression("a : b").unwrap();
+        assert_eq!(literal, ResolveExpression::ordinary_search("a : b"));
+        let path = parse_or_search_expression("source:repo/path").unwrap();
+        assert_eq!(path, ResolveExpression::ordinary_search("source:repo/path"));
+    }
+
+    #[test]
+    fn scope_without_an_operand_is_an_open_scoped_aperture() {
+        // Like a bare `@5`, a scope with no operand resolves everything the
+        // named world makes addressable.
+        let parsed = parse_resolve_expression(": demo").unwrap();
+        assert_eq!(
+            parsed,
+            ResolveExpression::scope("demo", ResolveExpression::subject(""))
+        );
+        assert_eq!(
+            parse_resolve_expression(": ( beta )").unwrap_err().code(),
+            "resolve.scope_missing_project"
+        );
+    }
+
+    #[test]
+    fn scope_narrows_only_when_the_field_carries_project_ground() {
+        let mut resources = MemoryResourceIndex::default();
+        resources.insert(record("wiki:node:demo-edge", ResourceKind::KnowledgeNode));
+        resources.insert(record("wiki:node:other-edge", ResourceKind::KnowledgeNode));
+
+        // No partition ground: every candidate passes through.
+        let expression = parse_resolve_expression(": demo ( edge )").unwrap();
+        let path = resolve_expression(&expression, &resources, 10);
+        assert_eq!(path.candidates.len(), 2);
+        assert!(path.steps.iter().any(|step| matches!(
+            step,
+            ResolvePathStep::Scope { project, .. } if project == "demo"
+        )));
     }
 
     #[test]
