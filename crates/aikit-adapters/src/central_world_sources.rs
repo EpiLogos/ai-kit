@@ -19,7 +19,10 @@
 //!   materialised entity keeps the subject.
 //! * An unavailable World-relations carrier is not an unconstrained context.
 //!   Consumers withhold Central material instead of widening disclosure. Only
-//!   explicit declaration absence may select the documented root lineage.
+//!   explicit declaration absence may select the documented root lineage —
+//!   including a Work member with no ProjectCentral manifest at all, whose
+//!   declaration is structurally non-existent (there is no project record to
+//!   read), not merely unreadable.
 
 use crate::runner::CommandRunner;
 use aikit_core::{AikitError, Result, WikiObject};
@@ -39,6 +42,21 @@ pub const WORLD_DECLARATION_ABSENT: &str = "central.world_declaration_absent";
 /// ctrl/src/world.rs:583). Kept as a fallback only: Central now names absence
 /// in the error code, which is what a consumer should read.
 const MISSING_WORLD_MARKER: &str = "missing World ";
+
+/// The message Central answers for a Work member with **no ProjectCentral
+/// manifest at all**: the io not-found error for the absent
+/// `ProjectCentral/project.json` (ctrl/src/projectcentral.rs
+/// `read_project_manifest`) wrapped as `Project does not expose a valid
+/// ProjectCentral source: ...` (ctrl/src/agent_set_actions.rs). This is
+/// structural non-existence — the world has no record because the project
+/// itself has no manifest — so by the one-world convention it is
+/// absence-equivalent and the root lineage applies. The marker includes the
+/// not-found text on purpose: a manifest that *exists* but cannot be read or
+/// parsed answers with the same prefix but a different cause (`<path> is not
+/// a valid ProjectCentral manifest: ...`, or another io error such as
+/// permission denied) — an unreadable declaration, which must still withhold.
+const MISSING_PROJECTCENTRAL_MARKER: &str =
+    "Project does not expose a valid ProjectCentral source: No such file or directory";
 
 /// The effective-source reading Central returned for one world.
 #[derive(Debug, Clone, Default)]
@@ -113,12 +131,19 @@ pub fn read_world_binding<R: CommandRunner>(
     if envelope["ok"] != true {
         let code = envelope["error"]["code"].as_str().unwrap_or_default();
         let message = envelope["error"]["message"].as_str().unwrap_or("unknown");
-        // Prefer the code: Central names absence explicitly. The marker check
-        // stays for a Central that has not yet been rebuilt with it, and the
-        // two must agree — a code that says absent on some other message would
-        // widen what a turn receives on a failure that is not absence.
+        // Prefer the code: Central names absence explicitly. The marker checks
+        // stay for a Central that has not yet been rebuilt with it, and the
+        // answers must agree — a code that says absent on some other message
+        // would widen what a turn receives on a failure that is not absence.
+        // A member with no ProjectCentral manifest has no project record at
+        // all (MISSING_PROJECTCENTRAL_MARKER): its declaration is structurally
+        // absent, so the root lineage applies. A manifest that exists but
+        // cannot be read or parsed shares the prefix but not the not-found
+        // cause and stays unavailable.
         let absent = code == WORLD_DECLARATION_ABSENT
-            || (code.ends_with("invalid_input") && message.contains(MISSING_WORLD_MARKER));
+            || (code.ends_with("invalid_input")
+                && (message.contains(MISSING_WORLD_MARKER)
+                    || message.contains(MISSING_PROJECTCENTRAL_MARKER)));
         return Err(AikitError::new(
             if absent {
                 WORLD_DECLARATION_ABSENT
@@ -223,14 +248,19 @@ pub fn project_world_ref(central_root: &Path, project: &str) -> String {
 }
 
 /// Read a project's effective binding, inheriting the root lineage **only**
-/// when the project genuinely declares no world of its own (Central answers
-/// `missing World <ref>` for a world ref with no authored record).
+/// when the project genuinely has no declaration of its own: Central answers
+/// `missing World <ref>` for a world ref with no authored record, or — for a
+/// Work member with no ProjectCentral manifest at all — `Project does not
+/// expose a valid ProjectCentral source: No such file or directory`. Both are
+/// structural non-existence: there is no project record to read.
 ///
-/// The two failure modes are kept apart deliberately. "No Project-specific
-/// declaration" is convention: one world, one human, so the root lineage
-/// applies and is disclosed as inherited. "The declaration could not be read
-/// or validated" is a source-level failure, and the answer to it is *no
-/// binding* — an unreadable exclusion must never broaden what a turn receives.
+/// The failure modes are kept apart deliberately. "No project-specific
+/// declaration" (including the manifest-less member) is convention: one
+/// world, one human, so the root lineage applies and is disclosed as
+/// inherited. "The declaration could not be read or validated" — a malformed
+/// or unreadable manifest — is a source-level failure, and the answer to it
+/// is *no binding*; an unreadable exclusion must never broaden what a turn
+/// receives.
 pub fn read_project_binding<R: CommandRunner>(
     runner: &R,
     executable: &Path,
@@ -905,6 +935,54 @@ mod tests {
                 .any(|absence| absence.contains("no root lineage is assumed")),
             "{absences:?}"
         );
+    }
+
+    /// A Work member with no ProjectCentral manifest at all: the world has no
+    /// record because the project itself has no manifest — structural
+    /// non-existence, classified as absence, never as an unavailability.
+    #[test]
+    fn a_manifest_less_member_is_classified_absent_not_unavailable() {
+        let runner = EnvelopeRunner {
+            project: error_envelope(
+                "invalid_input",
+                "Project does not expose a valid ProjectCentral source: No such file or directory (os error 2)",
+            ),
+            root: ok_envelope(ROOT_WORLD_REF, root_sources()),
+        };
+        let error = read_world_binding(
+            &runner,
+            Path::new("ctrl"),
+            Path::new("/central"),
+            "project",
+            Some("bare"),
+            "project:bare",
+        )
+        .expect_err("the envelope is a structured absence");
+        assert_eq!(error.code(), WORLD_DECLARATION_ABSENT);
+    }
+
+    /// The distinction beside the marker: a manifest that exists but cannot
+    /// be parsed answers with the same prefix and a different cause — an
+    /// unreadable declaration, which stays unavailable and must withhold.
+    #[test]
+    fn a_malformed_manifest_stays_unavailable_not_absent() {
+        let runner = EnvelopeRunner {
+            project: error_envelope(
+                "invalid_input",
+                "Project does not expose a valid ProjectCentral source: /central/Work/demo/ProjectCentral/project.json is not a valid ProjectCentral manifest: expected ident at line 1 column 2",
+            ),
+            root: ok_envelope(ROOT_WORLD_REF, root_sources()),
+        };
+        let error = read_world_binding(
+            &runner,
+            Path::new("ctrl"),
+            Path::new("/central"),
+            "project",
+            Some("demo"),
+            "project:demo",
+        )
+        .expect_err("an unreadable declaration is not absence");
+        assert_eq!(error.code(), "central.world_sources_unavailable");
     }
 
     #[test]
