@@ -101,6 +101,84 @@ pub struct KnowledgeProviderStatus {
     pub project_map: bool,
     #[serde(default)]
     pub absences: Vec<String>,
+    /// Per-project rollups of pending authored relations. Status is the only
+    /// surface that carries every project; search/resolve/frame replies keep
+    /// their own scope's rollup line only.
+    #[serde(default)]
+    pub authored_pending: Vec<ProjectAuthoredPending>,
+}
+
+/// One project's rollup of pending authored relations (unresolved `[[links]]`
+/// and path targets). Identical pending targets collapse into one row; the
+/// full per-occurrence evidence stays in the compile that disclosed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectAuthoredPending {
+    /// Work-relative project display, e.g. `Work/Actuation`.
+    pub project: String,
+    /// The project's own manifest id, e.g. `epilogos/actuation`, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub unresolved_targets: usize,
+    pub occurrences: usize,
+    pub targets: Vec<PendingAuthoredTarget>,
+}
+
+/// One distinct pending target and how many authored occurrences carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAuthoredTarget {
+    pub subject_ref: String,
+    pub target: String,
+    pub relation: String,
+    pub occurrences: usize,
+}
+
+impl ProjectAuthoredPending {
+    /// The one disclosure line a reply carries for this project.
+    pub fn rollup_line(&self) -> String {
+        let targets = if self.unresolved_targets == 1 {
+            "target"
+        } else {
+            "targets"
+        };
+        let occurrences = if self.occurrences == 1 {
+            "occurrence"
+        } else {
+            "occurrences"
+        };
+        format!(
+            "{}: {} unresolved {} across {} {} pending (per-target detail: knowledge status)",
+            self.project, self.unresolved_targets, targets, self.occurrences, occurrences
+        )
+    }
+
+    /// Whether a scope key names this project. The canonical keys are the
+    /// Work-relative display and the project id; the bare Work name is read
+    /// as a convenience (`demo` for `Work/demo`).
+    pub fn matches_key(&self, key: &str) -> bool {
+        let key = key.trim().to_lowercase();
+        if key.is_empty() {
+            return false;
+        }
+        if let Some(project_id) = &self.project_id {
+            if project_id.to_lowercase() == key {
+                return true;
+            }
+            if project_id
+                .rsplit('/')
+                .next()
+                .is_some_and(|segment| segment.eq_ignore_ascii_case(&key))
+            {
+                return true;
+            }
+        }
+        if self.project.to_lowercase() == key {
+            return true;
+        }
+        self.project
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| segment.eq_ignore_ascii_case(&key))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -224,6 +302,7 @@ impl<'a> KnowledgeApplication<'a> {
             code,
             project_map: self.project_map.is_some(),
             absences,
+            authored_pending: Vec::new(),
         }
     }
 
@@ -335,7 +414,10 @@ impl<'a> KnowledgeApplication<'a> {
                 hits
             }
             ResolveExpression::Unary { expression, .. }
-            | ResolveExpression::Frame { expression } => self.evaluate(expression, limit, absences),
+            | ResolveExpression::Frame { expression }
+            | ResolveExpression::Scope { expression, .. } => {
+                self.evaluate(expression, limit, absences)
+            }
             ResolveExpression::Binary { left, right, .. } => {
                 let mut hits = self.evaluate(left, limit, absences);
                 hits.extend(self.evaluate(right, limit, absences));

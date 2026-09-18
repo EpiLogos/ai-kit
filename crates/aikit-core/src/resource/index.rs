@@ -45,6 +45,14 @@ pub trait ResourceIndex {
     fn resource(&self, id: &ResourceRef) -> Option<&ResourceRecord>;
     fn resources(&self) -> Vec<&ResourceRecord>;
 
+    /// Whether one resource participates in the named project scope. `None`
+    /// means the field carries no project-partition ground and can claim a
+    /// resource neither in nor out of scope; scope narrowing then passes the
+    /// candidate through rather than guessing.
+    fn in_scope(&self, _project: &str, _resource: &ResourceRef) -> Option<bool> {
+        None
+    }
+
     fn resolve_ranking(&self, _id: &ResourceRef) -> ResolveRankingSignals {
         ResolveRankingSignals::default()
     }

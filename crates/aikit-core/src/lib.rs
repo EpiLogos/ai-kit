@@ -296,8 +296,8 @@ pub use knowledge_living_relations::{
 pub use knowledge_living_transport::{parse_contemplate_generated, CONTEMPLATE_RETURN_VERSION};
 pub use knowledge_navigation::{
     KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation, KnowledgeProviderStatus,
-    KnowledgeRankingEvidence, KnowledgeSearchHit, KnowledgeSearchResult, SourcePoolBinding,
-    KNOWLEDGE_APPLICATION_VERSION,
+    KnowledgeRankingEvidence, KnowledgeSearchHit, KnowledgeSearchResult, PendingAuthoredTarget,
+    ProjectAuthoredPending, SourcePoolBinding, KNOWLEDGE_APPLICATION_VERSION,
 };
 pub use knowledge_okf::{validate_okf, OkfDocument, OKF_VERSION};
 pub use knowledge_operations::{
