@@ -347,7 +347,11 @@ impl Service {
     }
 
     /// The invocation's own project in Work-relative display, when the
-    /// invocation root sits inside a Central Work project.
+    /// invocation stands inside a Central Work project. The member comes from
+    /// directory shape — the project root's Work member when the resolved root
+    /// sits under one, else the invocation cwd's member — so a Work directory
+    /// whose profile discovery collapsed onto the world root still scopes to
+    /// its own project.
     fn current_project_display(&self) -> Option<String> {
         let root = self
             .descriptor
@@ -357,12 +361,31 @@ impl Service {
         let central_root = root.ancestors().find(|candidate| {
             candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
         })?;
-        let relative = root.strip_prefix(central_root).ok()?;
-        let mut parts = relative.components();
-        if parts.next()?.as_os_str() != "Work" {
-            return None;
-        }
-        Some(format!("Work/{}", parts.next()?.as_os_str().to_str()?))
+        Some(format!(
+            "Work/{}",
+            self.invocation_project_member(central_root, root)?
+        ))
+    }
+
+    /// The Work member this invocation's project context belongs to, read from
+    /// directory shape alone. The resolved project root decides when it sits
+    /// under `Work/<member>` itself (a discovered, rescued or specified
+    /// project); otherwise the invocation cwd decides, which is exactly the
+    /// collapse case — a Work directory with no marker of its own under a world
+    /// root that carries one resolves its project root to the world root, and
+    /// only the cwd still names the project. A root outside `Work/` (the world
+    /// root itself, a Control location) contributes nothing, so a
+    /// Control-location invocation keeps world-root behaviour and nothing is
+    /// ever guessed from shape the ground does not carry. The cwd comparison
+    /// canonicalises both sides because a resolved project root can be
+    /// canonical while the cwd keeps its invoked spelling (or the reverse);
+    /// an unreadable path names nothing rather than guessing.
+    fn invocation_project_member(&self, central_root: &Path, root: &Path) -> Option<String> {
+        work_member(central_root, root).or_else(|| {
+            let cwd = std::fs::canonicalize(&self.invocation_cwd).ok()?;
+            let central = std::fs::canonicalize(central_root).ok()?;
+            work_member(&central, &cwd)
+        })
     }
 
     /// The bare Work name used as the lowered scope key (`demo` for
@@ -620,13 +643,27 @@ impl Service {
             // W10 V5: a project context binds the same entity refs through
             // Central's effective world sources — never a second subject;
             // declared exclusions withhold, per-hop provenance is recorded.
-            if let Some(project) = root.strip_prefix(central_root).ok().and_then(|relative| {
-                let mut parts = relative.components();
-                if parts.next()?.as_os_str() != "Work" {
-                    return None;
+            // The project is read from directory shape (the project root's
+            // Work member, else the invocation cwd's), so a Work directory
+            // whose discovery collapsed onto the world root still becomes a
+            // scoped context instead of running uncontextualised.
+            if let Some(project) = self.invocation_project_member(central_root, root) {
+                // Scoping does not depend on a manifest or a populated wiki: a
+                // Work member with no ProjectCentral at all still scopes, as
+                // `project:<name>`, and says so.
+                if !central_root
+                    .join("Work")
+                    .join(&project)
+                    .join("ProjectCentral/project.json")
+                    .exists()
+                {
+                    absences.push(format!(
+                        "Project Work/{project} has no ProjectCentral manifest; this context scopes as {} without a project wiki",
+                        aikit_adapters::central_world_sources::project_world_ref(
+                            central_root, &project
+                        )
+                    ));
                 }
-                parts.next()?.as_os_str().to_str().map(str::to_owned)
-            }) {
                 let world_binding = aikit_adapters::central_world_sources::read_project_binding(
                     &SystemRunner::new(),
                     &executable,
@@ -688,6 +725,12 @@ impl Service {
                                     project_display.clone(),
                                 );
                             }
+                            // The project's OWN authored wiki objects come
+                            // back with its edges: nodes and spaces restored
+                            // beside them, so the withheld context keeps the
+                            // project's own graph — a restored edge must not
+                            // point at a target the rebuild dropped.
+                            discovered.wiki.extend(authored.wiki_objects);
                             discovered.wiki.extend(
                                 authored.compilation.edges.into_iter().map(WikiObject::Edge),
                             );
@@ -724,20 +767,14 @@ impl Service {
         };
 
         let central = if let Some(central_root) = central_root {
-            let project = root.strip_prefix(central_root).ok().and_then(|relative| {
-                let mut parts = relative.components();
-                if parts.next()?.as_os_str() != "Work" {
-                    return None;
-                }
-                parts.next()?.as_os_str().to_str()
-            });
+            let project = self.invocation_project_member(central_root, root);
             // A missing map degrades this lens, not independent Wiki/code
             // faculties. Its absence never activates a disposable substitute.
             match CentralFileMapProvider::connect(
                 SystemRunner::new(),
                 aikit_adapters::central_file_map::executable(),
                 central_root,
-                project,
+                project.as_deref(),
             ) {
                 Ok(provider) => Some(provider),
                 Err(error) => {
@@ -855,16 +892,10 @@ impl Service {
             .map(NowFieldSourcePoolProvider::descriptors)
             .unwrap_or_default();
         let current_project = central_root.and_then(|central_root| {
-            let relative = root.strip_prefix(central_root).ok()?;
-            let mut parts = relative.components();
-            if parts.next()?.as_os_str() != "Work" {
-                return None;
-            }
-            parts
-                .next()?
-                .as_os_str()
-                .to_str()
-                .map(|name| format!("Work/{name}"))
+            Some(format!(
+                "Work/{}",
+                self.invocation_project_member(central_root, root)?
+            ))
         });
         Ok(KnowledgeRuntime {
             wiki,
@@ -1160,4 +1191,19 @@ fn display_matches_key(display: &str, key: &str) -> bool {
             .rsplit('/')
             .next()
             .is_some_and(|segment| segment.eq_ignore_ascii_case(&key))
+}
+
+/// The Work member a path sits in, from directory shape alone:
+/// `<central_root>/Work/<member>/…` names `<member>`; anything else — the
+/// world root itself, a Control location, a path outside the Central root —
+/// names nothing. No marker, registration or manifest timing participates:
+/// the directory shape is the scoping basis, so a project is scoped by where
+/// it stands, not by what it has been registered as.
+fn work_member(central_root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(central_root).ok()?;
+    let mut parts = relative.components();
+    if parts.next()?.as_os_str() != "Work" {
+        return None;
+    }
+    parts.next()?.as_os_str().to_str().map(str::to_owned)
 }
