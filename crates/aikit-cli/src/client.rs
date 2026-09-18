@@ -39,9 +39,9 @@ use aikit_adapters::actuation_harness_detection::{
 };
 use aikit_adapters::clients::{
     antigravity::AntigravityAdapter, broker::BrokerAdapter, claude::ClaudeAdapter,
-    codex::CodexAdapter, gemini::GeminiAdapter, grokbot::GrokbotAdapter, kimi::KimiAdapter,
-    ollama::OllamaAdapter, openclaw::OpenclawAdapter, pi::PiAdapter, zcode::ZcodeAdapter,
-    ClientAdapter,
+    codex::CodexAdapter, gemini::GeminiAdapter, grokbot::GrokbotAdapter, hermes::HermesAdapter,
+    kimi::KimiAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter, pi::PiAdapter,
+    zcode::ZcodeAdapter, ClientAdapter,
 };
 use aikit_adapters::runner::SystemRunner;
 
@@ -136,9 +136,7 @@ enum Reach {
     /// A dispatch client: launch and install ride the descriptor's seam when
     /// one resolved, and the adapter's default home is the read-model fallback
     /// when it did not.
-    Client {
-        build: CapabilityAdapterBuild,
-    },
+    Client { build: CapabilityAdapterBuild },
     /// Admitted through the harness-adapter contract only: there is no launch
     /// or install seam yet, and `client install|launch` says so rather than
     /// pretending the harness is unknown.
@@ -281,9 +279,7 @@ static OVERLAYS: &[ClientOverlay] = &[
         reach: Reach::AdapterOnly {
             build: |dirs| Box::new(AntigravityAdapter::new(projection_dir(dirs, "antigravity"))),
         },
-        admission: |dirs| {
-            AntigravityAdapter::new(projection_dir(dirs, "antigravity")).admission()
-        },
+        admission: |dirs| AntigravityAdapter::new(projection_dir(dirs, "antigravity")).admission(),
     },
     ClientOverlay {
         name: TargetId::GROK_BOT,
@@ -325,16 +321,34 @@ static OVERLAYS: &[ClientOverlay] = &[
         },
         admission: |dirs| OllamaAdapter::new(projection_dir(dirs, "ollama")).admission(),
     },
+    ClientOverlay {
+        name: TargetId::HERMES,
+        aliases: &[],
+        catalog_slug: TargetId::HERMES,
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(HermesAdapter::new(projection_dir(dirs, "hermes"))),
+        },
+        admission: |dirs| HermesAdapter::new(projection_dir(dirs, "hermes")).admission(),
+    },
+    ClientOverlay {
+        name: TargetId::HERMES_ACP,
+        aliases: &[],
+        catalog_slug: TargetId::HERMES_ACP,
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(HermesAdapter::acp(projection_dir(dirs, "hermes-acp"))),
+        },
+        admission: |dirs| HermesAdapter::acp(projection_dir(dirs, "hermes-acp")).admission(),
+    },
 ];
 
 fn client_overlay(client: &str) -> Option<&'static ClientOverlay> {
-    OVERLAYS
-        .iter()
-        .find(|overlay| {
-            overlay.name == client
-                || overlay.aliases.contains(&client)
-                || overlay.catalog_slug == client
-        })
+    OVERLAYS.iter().find(|overlay| {
+        overlay.name == client
+            || overlay.aliases.contains(&client)
+            || overlay.catalog_slug == client
+    })
 }
 
 fn unknown_client_error(client: &str) -> AikitError {
@@ -414,8 +428,9 @@ fn roster_members(detection: &DetectionOutcome) -> Vec<RosterMember> {
     match detection {
         DetectionOutcome::Record(record) => {
             for entry in &record.harnesses {
-                let overlay =
-                    OVERLAYS.iter().find(|o| o.catalog_slug == entry.slug.as_str());
+                let overlay = OVERLAYS
+                    .iter()
+                    .find(|o| o.catalog_slug == entry.slug.as_str());
                 members.push(RosterMember::Descriptor {
                     entry: Box::new(entry.clone()),
                     overlay,
@@ -1092,7 +1107,10 @@ mod tests {
             derive_generic_kind(&DetectionLeg::Detected { config_dir: None }),
             SurfaceKind::Gap
         );
-        assert_eq!(derive_generic_kind(&DetectionLeg::NotInstalled), SurfaceKind::Absent);
+        assert_eq!(
+            derive_generic_kind(&DetectionLeg::NotInstalled),
+            SurfaceKind::Absent
+        );
     }
 
     fn detection_record(json: &str) -> DetectionOutcome {
@@ -1208,9 +1226,9 @@ mod tests {
         // pi joins its overlay by catalog slug; the record's name for the row
         // is the overlay's CLI-facing name, not the slug.
         let pi = members.iter().find_map(|m| match m {
-            RosterMember::Descriptor { overlay: Some(o), .. } if o.catalog_slug == "pi" => {
-                Some(o.name)
-            }
+            RosterMember::Descriptor {
+                overlay: Some(o), ..
+            } if o.catalog_slug == "pi" => Some(o.name),
             _ => None,
         });
         assert_eq!(pi, Some("pi"));
@@ -1241,7 +1259,10 @@ mod tests {
             .iter()
             .all(|m| matches!(m, RosterMember::Unrecorded { .. } | RosterMember::Broker)));
         assert_eq!(
-            members.iter().filter(|m| matches!(m, RosterMember::Broker)).count(),
+            members
+                .iter()
+                .filter(|m| matches!(m, RosterMember::Broker))
+                .count(),
             1,
             "exactly one broker row"
         );
@@ -1255,7 +1276,11 @@ mod tests {
             let count = checked.len();
             checked.sort_unstable();
             checked.dedup();
-            assert_eq!(checked.len(), count, "overlay names and slugs must be unique");
+            assert_eq!(
+                checked.len(),
+                count,
+                "overlay names and slugs must be unique"
+            );
         }
         for overlay in OVERLAYS {
             assert!(
@@ -1290,6 +1315,8 @@ mod tests {
             TargetId::OLLAMA,
             TargetId::OPENCLAW,
             TargetId::PI,
+            TargetId::HERMES,
+            TargetId::HERMES_ACP,
         ];
         for target in dispatched {
             let slug = aikit_adapters::profiles::slug_for_target(&TargetId::new(*target))

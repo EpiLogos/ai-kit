@@ -36,6 +36,8 @@ const OVERLAY_NAMES: &[&str] = &[
     "kimi",
     "openclaw",
     "ollama",
+    "hermes",
+    "hermes-acp",
 ];
 
 /// A stand-in `actuation` binary: serves fixture descriptors for the slugs a
@@ -247,7 +249,10 @@ fn a_registered_adapter_with_a_descriptor_fixture_gets_its_row() {
     assert_eq!(generic["state"], "gap");
     assert_eq!(generic["dispatch"], "adapter-only");
     assert_eq!(generic["effect"], Value::Null);
-    assert_eq!(generic["gap"]["missing_contract"], "aikit.harness-adapter/v1");
+    assert_eq!(
+        generic["gap"]["missing_contract"],
+        "aikit.harness-adapter/v1"
+    );
     assert_eq!(generic["detection"], "detected");
 
     // Detection's absence evidence is honoured even though capability refuses.

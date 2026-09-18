@@ -53,6 +53,7 @@ use aikit_adapters::clients::dsh::DshAdapter;
 use aikit_adapters::clients::gemini::GeminiAdapter;
 use aikit_adapters::clients::goose::GooseAdapter;
 use aikit_adapters::clients::grokbot::GrokbotAdapter;
+use aikit_adapters::clients::hermes::HermesAdapter;
 use aikit_adapters::clients::kimi::KimiAdapter;
 use aikit_adapters::clients::ollama::OllamaAdapter;
 use aikit_adapters::clients::openclaw::OpenclawAdapter;
@@ -2268,6 +2269,13 @@ impl Service {
                 ),
                 TargetId::GROK_BOT => plan_effect(
                     &GrokbotAdapter::new(ctx_dir.join("projections/grokbot")),
+                    &rc,
+                ),
+                TargetId::HERMES => {
+                    plan_effect(&HermesAdapter::new(ctx_dir.join("projections/hermes")), &rc)
+                }
+                TargetId::HERMES_ACP => plan_effect(
+                    &HermesAdapter::acp(ctx_dir.join("projections/hermes-acp")),
                     &rc,
                 ),
                 TargetId::KIMI => {

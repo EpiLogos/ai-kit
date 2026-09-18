@@ -638,6 +638,8 @@ pub fn slug_for_target(target: &TargetId) -> Option<&'static str> {
         TargetId::GROK_BOT => Some("grok-bot"),
         TargetId::ANTIGRAVITY => Some("gemini-antigravity"),
         TargetId::OPENCODE => Some("opencode"),
+        TargetId::HERMES => Some("hermes"),
+        TargetId::HERMES_ACP => Some("hermes-acp"),
         _ => None,
     }
 }
@@ -810,6 +812,8 @@ mod tests {
             TargetId::pi(),
             TargetId::qwen_code(),
             TargetId::ollama(),
+            TargetId::hermes(),
+            TargetId::hermes_acp(),
         ];
         for target in targets {
             let slug = slug_for_target(&target)

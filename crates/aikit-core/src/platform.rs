@@ -70,6 +70,10 @@ impl TargetId {
     // `GEMINI` is the Actuation catalog slug the intakes ask for.
     pub const GEMINI: &'static str = "gemini";
     pub const GROK_BOT: &'static str = "grok-bot";
+    // The hermes pair joins by the catalog slugs Actuation declares
+    // (hermes, hermes-acp); the client names are the slugs themselves.
+    pub const HERMES: &'static str = "hermes";
+    pub const HERMES_ACP: &'static str = "hermes-acp";
     pub const KIMI: &'static str = "kimi";
     pub const OLLAMA: &'static str = "ollama";
     pub const OPENCLAW: &'static str = "openclaw";
@@ -123,6 +127,12 @@ impl TargetId {
     }
     pub fn grok_bot() -> Self {
         Self::new(Self::GROK_BOT)
+    }
+    pub fn hermes() -> Self {
+        Self::new(Self::HERMES)
+    }
+    pub fn hermes_acp() -> Self {
+        Self::new(Self::HERMES_ACP)
     }
     pub fn kimi() -> Self {
         Self::new(Self::KIMI)
