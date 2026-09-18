@@ -119,9 +119,11 @@ impl TargetAdapter for ZcodeAdapter {
 
     fn capabilities(&self) -> TargetCapabilities {
         TargetCapabilities {
-            // The dispatch entries are read once at session start, and no native
-            // skill projection exists yet — capabilities are reached through the
-            // broker, which is also the honest isolation story.
+            // The dispatch entries are read once at session start, and AIKit
+            // projects no zcode skill seam: zcode loads skills natively from
+            // the codex-managed `~/.agents/skills` shared tree (codex's
+            // managed projection is zcode's delivery) and from plugin-shipped
+            // skills; the broker remains the isolation story.
             live_reload: false,
             symlinks: false,
             isolated_per_context: false,
@@ -135,8 +137,9 @@ impl TargetAdapter for ZcodeAdapter {
         Ok(ProjectionPlan::new(
             self.target(),
             ActivationEffect::brokered(
-                "no native skill projection is built for zcode; capabilities are reached \
-                 through AIKit's broker surfaces",
+                "zcode loads skills natively from the codex-managed ~/.agents/skills shared \
+                 tree, so AIKit projects no separate zcode skill seam; the broker is the \
+                 isolation path",
             ),
         )
         .with_note(

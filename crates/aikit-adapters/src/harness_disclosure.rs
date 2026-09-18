@@ -540,6 +540,35 @@ mod tests {
     }
 
     #[test]
+    fn the_zcode_skills_layer_discloses_the_native_tree_it_loads_without_drift_or_composition() {
+        // Posture honesty: zcode loads the codex-managed ~/.agents/skills
+        // shared tree natively, so the disclosure renders an observed layer
+        // naming that tree — never a brokered "never projected" claim, and
+        // never composed entries or drift for a layer AIKit does not write.
+        let profile = for_slug("zcode").expect("zcode carries an embedded profile");
+        let disclosure = disclose(profile, &NativeObservation::default(), &[]);
+
+        let skills = disclosure
+            .layers
+            .iter()
+            .find(|layer| layer.layer == "skills")
+            .expect("zcode declares a skills layer");
+        assert_eq!(skills.posture, LayerPosture::Observed);
+        assert!(
+            skills
+                .native
+                .iter()
+                .any(|entry| entry.name == "~/.agents/skills"),
+            "the shared tree zcode demonstrably loads is disclosed as native: {:?}",
+            skills.native
+        );
+        assert!(
+            skills.composed.is_empty() && skills.drift.is_empty(),
+            "AIKit writes no zcode skill seam, so nothing composes or drifts there"
+        );
+    }
+
+    #[test]
     fn detection_only_layers_disclose_their_observed_paths_and_the_hook_seam_fact_as_native_entries(
     ) {
         let profile = for_slug("claude-code").expect("claude-code carries an embedded profile");

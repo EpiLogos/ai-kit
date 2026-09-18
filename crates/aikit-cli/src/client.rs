@@ -614,6 +614,102 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
     )
 }
 
+/// The registered harnesses whose managed hooks seam is **project-relative** —
+/// a seam of the working tree, not of the machine. `aikit apply` keeps these
+/// current, because applying a project is what materialises that tree's
+/// declarations; machine-level seams (`~/.claude/settings.json`,
+/// `~/.zcode/cli/config.json`) stay with the explicit `aikit client install`
+/// procedure. Selection is derived, never a list: a harness qualifies when its
+/// profile declares a managed hooks layer whose project file is neither
+/// home-relative nor absolute.
+pub fn project_scoped_hook_clients() -> Vec<&'static str> {
+    REGISTRY
+        .iter()
+        .filter_map(|entry| {
+            let slug = entry.catalog_slug?;
+            let profile = aikit_adapters::profiles::slug_for_target(&TargetId::new(slug))
+                .and_then(aikit_adapters::profiles::for_slug)?;
+            let hooks = profile.hooks.as_ref()?;
+            if hooks.posture != aikit_core::harness_profile::LayerPosture::Managed {
+                return None;
+            }
+            let file = &hooks.project.as_ref()?.file;
+            if file.starts_with('~') || Path::new(file).is_absolute() {
+                None
+            } else {
+                Some(entry.name)
+            }
+        })
+        .collect()
+}
+
+/// One project-scoped hook-seam install, as `apply` reports it. `refused`
+/// carries the plain reason nothing was written — a missing descriptor is a
+/// disclosure, never a failed apply.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HookSeamOutcome {
+    pub client: &'static str,
+    /// `installed` (edits applied), `satisfied` (already in place), or
+    /// `refused` (nothing written; `reason` says why).
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub procedure: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub undo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edits: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Plan and run every project-scoped managed hook seam (`aikit apply`'s tail).
+/// Each client installs through the same `plan_install` procedure pipeline the
+/// explicit command uses — descriptor intake, transport-filtered events, the
+/// profile-declared merge grammar with foreign entries preserved and owned
+/// entries swept — so apply's seam write is diffable and reversible exactly
+/// like `aikit client install`. A refusal is an outcome, not an error: apply
+/// must not fail because one harness's descriptor is unreachable.
+pub fn install_project_hook_seams(service: &Service) -> Vec<HookSeamOutcome> {
+    project_scoped_hook_clients()
+        .into_iter()
+        .map(|client| match plan_install(service, client) {
+            Ok(procedure) => {
+                let runner = aikit_store::procedure::ProcedureRunner::new(service.home());
+                match runner.run(&procedure) {
+                    Ok(outcome) => HookSeamOutcome {
+                        client,
+                        state: if outcome.already_satisfied {
+                            "satisfied"
+                        } else {
+                            "installed"
+                        },
+                        procedure: Some(procedure.id.to_string()),
+                        undo: Some(format!("aikit procedure undo {}", procedure.id)),
+                        edits: Some(outcome.applied),
+                        reason: None,
+                    },
+                    Err(error) => HookSeamOutcome {
+                        client,
+                        state: "refused",
+                        procedure: None,
+                        undo: None,
+                        edits: None,
+                        reason: Some(error.message().to_string()),
+                    },
+                }
+            }
+            Err(error) => HookSeamOutcome {
+                client,
+                state: "refused",
+                procedure: None,
+                undo: None,
+                edits: None,
+                reason: Some(error.message().to_string()),
+            },
+        })
+        .collect()
+}
+
 /// The argv that starts a client against this context's projection.
 pub fn launch_command(service: &Service, client: &str) -> Result<Vec<String>> {
     let (adapter, _, _) = adapter_for(service, client)?;
@@ -1035,6 +1131,20 @@ mod tests {
             detection_leg(&outcome, pi),
             DetectionLeg::AbsentFromRecord
         ));
+    }
+
+    #[test]
+    fn the_project_scoped_hook_seam_surface_is_derived_from_the_profiles() {
+        // Codex's managed hooks seam is the working tree's `.codex/hooks.json`,
+        // so `aikit apply` keeps it current. Claude and zcode name home-level
+        // seams — machine state that stays with the explicit
+        // `aikit client install` — and must never be swept into apply.
+        assert_eq!(
+            project_scoped_hook_clients(),
+            vec!["codex"],
+            "selection is derived from profile facts: managed hooks layers whose \
+             project file is neither home-relative nor absolute"
+        );
     }
 
     #[test]
