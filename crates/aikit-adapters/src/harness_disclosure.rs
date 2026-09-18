@@ -595,4 +595,57 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn pi_hooks_disclose_the_extension_event_census_as_observed_without_drift() {
+        let profile = for_slug("pi").expect("pi carries an embedded profile");
+        let disclosure = disclose(profile, &NativeObservation::default(), &[]);
+
+        let hooks = disclosure
+            .layers
+            .iter()
+            .find(|layer| layer.layer == "hooks")
+            .expect("the 2026-09-18 census gives pi a declared hooks layer");
+        assert_eq!(hooks.posture, LayerPosture::Observed);
+        assert_eq!(
+            hooks.native,
+            vec![
+                NativeEntry {
+                    name: "session-start".to_string(),
+                    detail: None
+                },
+                NativeEntry {
+                    name: "user-prompt-submit".to_string(),
+                    detail: None
+                },
+                NativeEntry {
+                    name: "pre-tool-use".to_string(),
+                    detail: None
+                },
+                NativeEntry {
+                    name: "post-tool-use".to_string(),
+                    detail: None
+                },
+                NativeEntry {
+                    name: "session-end".to_string(),
+                    detail: None
+                },
+                NativeEntry {
+                    name: "pre-compact".to_string(),
+                    detail: None
+                },
+            ],
+            "the census events render as the layer's native entries"
+        );
+        assert!(
+            hooks.composed.is_empty(),
+            "an observed layer takes no composed entries: {:?}",
+            hooks.composed
+        );
+        assert!(
+            hooks.drift.is_empty(),
+            "AIKit writes no pi hooks, so nothing of AIKit's can drift: {:?}",
+            hooks.drift
+        );
+    }
 }
