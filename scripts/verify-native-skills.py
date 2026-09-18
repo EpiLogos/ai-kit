@@ -30,6 +30,22 @@ EXPECTED_GUIDANCE = {
     "guidance/aikit/world-situated-agency",
 }
 
+
+def normalised_description(description: str) -> str:
+    return " ".join(description.split())
+
+
+def frontmatter_description(body: Path, text: str) -> str:
+    closing = text.index("\n---", 4)
+    for line in text[4:closing].splitlines():
+        if line.startswith("description:"):
+            value = line[len("description:"):].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            return value
+    raise SystemExit(f"{body}: frontmatter carries no description")
+
+
 seen_skills: set[str] = set()
 seen_guidance: set[str] = set()
 seen_hooks: set[str] = set()
@@ -48,6 +64,26 @@ for manifest in REGISTRY.glob("**/manifest.toml"):
         text = body.read_text(encoding="utf-8")
         if not text.startswith("---\n") or "\ndescription:" not in text:
             raise SystemExit(f"{body}: invalid Agent Skill frontmatter")
+        # One Skill, one description: the manifest description (search /
+        # explain / broker index) and the payload frontmatter description
+        # (what the harness model sees) must state the same thing, so a
+        # capsule cannot describe itself differently per surface.
+        manifest_description = data.get("description")
+        if not isinstance(manifest_description, str) or not manifest_description.strip():
+            raise SystemExit(f"{manifest}: Skill capsule needs a manifest description")
+        payload_description = frontmatter_description(body, text)
+        if normalised_description(manifest_description) != normalised_description(
+            payload_description
+        ):
+            raise SystemExit(
+                f"{capsule_id}: manifest and payload SKILL.md descriptions disagree\n"
+                f"  manifest.toml:      {manifest_description!r}\n"
+                f"  payload/SKILL.md:   {payload_description!r}"
+            )
+        if manifest_description.startswith("METHOD:") != payload_description.startswith("METHOD:"):
+            raise SystemExit(
+                f"{capsule_id}: METHOD: classification must match on both description surfaces"
+            )
         seen_skills.add(capsule_id)
     elif kind == "guidance":
         guidance = data.get("guidance", {})

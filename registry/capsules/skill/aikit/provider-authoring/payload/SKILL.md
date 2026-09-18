@@ -1,6 +1,6 @@
 ---
 name: aikit-provider-authoring
-description: Extend AIKit with provider/adaptor implementations through accepted public provider and registry seams rather than private resolution mutation.
+description: Author AIKit providers/adapters through public contracts with registry, trust and conformance evidence.
 ---
 
 # Provider SDK authoring

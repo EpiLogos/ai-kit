@@ -1,6 +1,6 @@
 ---
 name: aikit-skill-authoring
-description: Author executable procedural knowledge as managed Skills, including METHOD:-classified situated praxis, with explicit source, triggers, operations, authority assumptions and verification.
+description: Use when creating, reviewing or simplifying managed Skills/Methods, including trigger, invocation and progressive-disclosure design; do not select merely to use an existing Skill.
 ---
 
 # Skill and Method authoring
