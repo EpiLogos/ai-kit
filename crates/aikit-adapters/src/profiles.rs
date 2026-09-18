@@ -1,10 +1,28 @@
 //! The harness profile instances: one `aikit.harness-profile/v1` document per
 //! supported harness, embedded as TOML and parsed+validated once. The
-//! documents carry only what the 2026-09-16 per-harness census evidenced —
-//! an absent layer says nothing, a `none` model dispatch carries its reason,
-//! and machine-specific paths are home-relative so the data survives
-//! machines. Actuation's catalog stays the detection authority; these
-//! documents are AIKit's handling declarations joined to it by slug.
+//! documents carry only what the per-harness censuses evidenced (2026-09-16,
+//! pi hooks added 2026-09-18) — an absent layer says nothing, a `none` model
+//! dispatch carries its reason, and machine-specific paths are home-relative
+//! so the data survives machines. Actuation's catalog stays the detection
+//! authority; these documents are AIKit's handling declarations joined to it
+//! by slug.
+//!
+//! ## Pi hooks (2026-09-18 census)
+//!
+//! Pi 0.84.4 carries hooks as TypeScript extension events, not shell commands
+//! in a settings map: an extension module subscribes with
+//! `pi.on("session_start", ...)` (pi's `packages/coding-agent/docs/extensions.md`),
+//! and extensions are declared through the `extensions` array of
+//! `~/.pi/agent/settings.json` or discovered in `~/.pi/agent/extensions/`
+//! (global) and trust-gated `.pi/extensions/` (project-local). The managed
+//! hook grammars (claude-hook-map, zcode-hook-wrapper) project
+//! `aikit hook dispatch <client> <event>` shell-command entries into native
+//! config; pi has no such seam. The pi profile therefore declares its hooks
+//! layer `observed` — the event census feeds disclosure, and no projection is
+//! claimed. A managed pi hooks layer would need a new carrier vehicle (an
+//! owned TS extension file that spawns the dispatcher from each mapped
+//! handler), deliberately not built in this pass; the dispatcher side
+//! (`aikit hook dispatch pi <Event>`) is already client-agnostic and works.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -128,6 +146,13 @@ protocol = "process"
 "#,
     ),
     (
+        // Hooks census 2026-09-18 (pi 0.84.4, docs/extensions.md): hooks are
+        // TypeScript extension events — `session_start`, `input` (user prompt,
+        // can transform), `tool_call` (pre-tool, can block), `tool_result`,
+        // `session_shutdown`, `session_before_compact` — declared via the
+        // settings `extensions` array or discovery dirs. No shell-command
+        // seam exists for the managed hook grammars, so this layer stays
+        // observed; `stop` and `notification` are omitted (no pi equivalent).
         "pi",
         r#"
 schema = "aikit.harness-profile/v1"
@@ -147,6 +172,10 @@ shared-tree = "Reloads skills on /reload; isolated tree required for isolation."
 [guidance]
 posture = "observed"
 observe = ["~/.pi/agent/AGENTS.md"]
+
+[hooks]
+posture = "observed"
+observe = [{ events = ["session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "session-end", "pre-compact"], transports = ["extension-events"] }]
 
 [tools]
 posture = "brokered"
@@ -485,6 +514,42 @@ mod tests {
         assert!(!sessions.capabilities.mcp_servers);
         assert!(!sessions.capabilities.additional_directories);
         assert!(!sessions.capabilities.reconnect);
+    }
+
+    #[test]
+    fn pi_hooks_declare_the_extension_event_census_without_a_projection_claim() {
+        let pi = for_slug("pi").unwrap();
+        let hooks = pi
+            .hooks
+            .as_ref()
+            .expect("the 2026-09-18 census gives pi a hooks layer");
+        assert_eq!(
+            hooks.posture,
+            aikit_core::harness_profile::LayerPosture::Observed,
+            "pi has no shell-command hook seam, so the layer must not claim writes"
+        );
+        assert!(
+            hooks.project.is_none(),
+            "an observed hooks layer refuses a project declaration"
+        );
+        let declaration = hooks.observe.first().expect("one event census entry");
+        assert_eq!(
+            declaration.events,
+            vec![
+                "session-start".to_string(),
+                "user-prompt-submit".to_string(),
+                "pre-tool-use".to_string(),
+                "post-tool-use".to_string(),
+                "session-end".to_string(),
+                "pre-compact".to_string(),
+            ],
+            "the six pi events the census proved, in AIKit kind spelling"
+        );
+        assert_eq!(
+            declaration.transports.as_deref(),
+            Some(["extension-events".to_string()].as_slice()),
+            "pi's transport is extension events, not a settings hook map"
+        );
     }
 
     #[test]
