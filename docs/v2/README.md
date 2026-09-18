@@ -119,6 +119,8 @@ Current numbered route:
 20. `20-PRAXIS-METHODS-AND-SKILL-COMPOSITION.md`
 21. `21-PROJECT-REFLECTION-AND-LOCAL-ARTICULATION.md`
 22. `22-PROJECT-PRAXIS-REFLECTION-ACCEPTANCE-EVIDENCE.md`
+23. `23-TUI-HUMAN-EXPERIENCE-SPEC.md`
+24. `24-MODEL-MODALITY-AND-REALTIME-SURFACES.md`
 
 The numeric filename prefixes are historical programme sequence identifiers rather than a promise that every integer is occupied; do not renumber existing accepted files merely to remove a gap.
 

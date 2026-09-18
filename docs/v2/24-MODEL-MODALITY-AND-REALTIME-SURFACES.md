@@ -63,6 +63,26 @@ The frozen recording is session configuration only, and the adapter declares exa
 
 `aikit model-modality show --document <read-model.json>` is the machine user's read over a resolved body: it takes a `aikit.model-runtime/v1` or `aikit.model-stage-runtime/v1` read model (document-in), and returns a `aikit.model-modality-disclosure/v1` document (document-out) carrying the resolved identity, the surface and per-stage facts, the four-state answer for **every** vocabulary member (absence is a rendered unsupported/unknown answer with its reason, never a missing key), the stage-named basis for staged bodies, and the explanation evidence. It re-resolves nothing and touches no network.
 
+## Seeing the class before any key exists: the catalogue listing
+
+`aikit model-catalogue show` is where speech is visible as a **class of model**, before any provider credential exists. The listing joins the resolved catalogue against the adapter instances' declared surfaces (`aikit-adapters::openai_realtime::declared_surfaces`, each stating its credential condition as required-and-unbound) and this machine's non-revoked credential binding records, and per model discloses:
+
+- the declared modality class facts — input/output modalities, transforms, interaction forms, transport, speech capability — whenever a declared surface joins the entry's routes (a plain text model carries none, and nothing is claimed for it);
+- the credential condition presence-resolved (ref/presence only — a binding record has no secret field, so no secret can enter a listing);
+- honest availability: `catalogued` (the option exists; no gating fact at this plane), `credential-gated` with the absent credential **named** from the declaring surface's own hint, `degraded` with the declarer's reason, or `unavailable` with the declarer's reason;
+- a top-level `classes.speech` index — membership derived from declared facts (`carries_speech`), never from a consumer knowing model names.
+
+Declared is still not observed: route observation stays the `compose` join, and a listing entry never claims a route was seen. A missing credential deliberately outranks a degradation while it is missing — the listing answers what stands between the caller and the surface.
+
+## Swapping models is a data-and-adapter act, never a core change
+
+The generic contract (`aikit.model-modality/v1`) does not know any model or provider name. Swapping in a better model is therefore:
+
+- **same provider, better model**: one new catalogue seed entry (or owner entry) plus the adapter's recorded session fixture (or one new declared-surface function following `transcription_surface`/`speech_synthesis_surface`). Zero core changes; the listing, the disclosure, and the class index pick it up by the ordinary (provider, provider-native id) join.
+- **new provider wire**: one adapter instance following the `openai_realtime` pattern — recorded fixture or declared surfaces in, generic `ModelModalityContract` out, provider-private vocabulary validated and dropped, `declared_surfaces()` the inventory the catalogue joins against. The contract, the read models and the catalogue join are untouched.
+
+No consumer may branch on model or provider names: the audit rule is that names live only in the adapter instances and the catalogue data, and every consumer question is answered through the vocabulary or the join keys.
+
 ## Consumers reduce the raw relation
 
 A consumer building an Actuation constitution from AIKit resolution must **reduce** the raw model relation before submission: AIKit's shape owners here are `ModelRuntimeRelation` and `ModelStageRelation` (the `aikit.model-runtime/v1` and `aikit.model-stage-runtime/v1` documents in `aikit-core::model_runtime`), and the raw relation includes the modality contract's `credential` field, which Actuation's admission secret-scan refuses. The Actuation-admitted shapes are its own speech-constitution admission grammar's `model_relation` and `access_profile`; mapping the AIKit relation into those admitted shapes — dropping what admission refuses — is the consumer's reduction duty, not a leniency expected of admission. AIKit owns the raw shapes and their honesty; Actuation owns the admitted shapes and their refusal; neither owns the other's.
