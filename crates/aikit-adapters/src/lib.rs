@@ -218,6 +218,7 @@ pub mod central_entities;
 pub mod central_wiki;
 pub mod central_world_sources;
 pub mod oi_explore;
+pub mod projectcentral_folder_subjects;
 mod session_event_queue;
 pub mod techne_temporal;
 

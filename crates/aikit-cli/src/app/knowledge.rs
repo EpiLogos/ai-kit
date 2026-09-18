@@ -57,6 +57,10 @@ pub(super) struct KnowledgeRuntime {
     /// Authored edge ref → Work-relative project display, for scoped queries
     /// to keep another project's authored edges out of their results.
     authored_edge_projects: BTreeMap<String, String>,
+    /// Compiled folder-subject ref (folder node or its parent/contains edge)
+    /// → Work-relative project display, for scoped queries to keep another
+    /// project's folder basis out of their results.
+    folder_subject_projects: BTreeMap<String, String>,
     /// This invocation's own project in Work-relative display (`Work/demo`),
     /// when the invocation root sits in a Central Work project.
     current_project: Option<String>,
@@ -212,14 +216,26 @@ impl Service {
                 result.absences.push(pending.rollup_line());
             }
             // A scoped query keeps another project's compiled authored edges
-            // out of its results; unattributable material passes through.
+            // — and its compiled folder subjects — out of its results;
+            // unattributable material passes through.
             if explicit_scope.is_some() {
                 if let Some(display) = &scoped_display {
+                    let attributed_to_other_project =
+                        |attribution: &BTreeMap<String, String>, resource: &str| {
+                            attribution
+                                .get(resource)
+                                .is_some_and(|project| project != display)
+                        };
                     result.hits.retain(|hit| match &hit.address {
-                        aikit_core::KnowledgeAddress::Wiki(resource) => runtime
-                            .authored_edge_projects
-                            .get(resource.as_str())
-                            .is_none_or(|edge_project| edge_project == display),
+                        aikit_core::KnowledgeAddress::Wiki(resource) => {
+                            !attributed_to_other_project(
+                                &runtime.authored_edge_projects,
+                                resource.as_str(),
+                            ) && !attributed_to_other_project(
+                                &runtime.folder_subject_projects,
+                                resource.as_str(),
+                            )
+                        }
                         _ => true,
                     });
                 }
@@ -559,6 +575,7 @@ impl Service {
         let mut wiki_registers = Vec::new();
         let mut authored_pending = Vec::new();
         let mut authored_edge_projects = BTreeMap::new();
+        let mut folder_subject_projects = BTreeMap::new();
         let central_root = root.ancestors().find(|candidate| {
             candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
         });
@@ -741,6 +758,41 @@ impl Service {
                     }
                 }
             }
+
+            // Folder subjects: each project's ProjectCentral register
+            // compiles as the directory BASIS of this context's graph —
+            // folder nodes under the project-root anchor, `contains`-wired
+            // to the file-level subjects already in this materialised set.
+            // A materialisation-time construct: nothing is written into
+            // Central's wiki. A project context (the shape-derived scoping)
+            // compiles its own project's folder basis only; a world context
+            // keeps every project's.
+            let materialised_refs: BTreeSet<String> = discovered
+                .wiki
+                .iter()
+                .map(|object| object.ref_id().as_str().to_owned())
+                .chain(discovered.wiki.iter().filter_map(|object| match object {
+                    WikiObject::Edge(edge) => Some(edge.to_ref.as_str().to_owned()),
+                    _ => None,
+                }))
+                .chain(discovered.wiki.iter().filter_map(|object| match object {
+                    WikiObject::Edge(edge) => Some(edge.from_ref.as_str().to_owned()),
+                    _ => None,
+                }))
+                .collect();
+            let folder_subjects =
+                aikit_adapters::projectcentral_folder_subjects::compile_world_folder_subjects(
+                    central_root,
+                    &materialised_refs,
+                    self.invocation_project_member(central_root, root)
+                        .as_deref(),
+                );
+            absences.extend(folder_subjects.absences);
+            folder_subject_projects = folder_subjects.subject_projects;
+            aikit_adapters::central_entities::adopt_into(
+                &mut discovered.wiki,
+                folder_subjects.objects,
+            );
         }
 
         let wiki = if discovered.wiki.is_empty() {
@@ -913,6 +965,7 @@ impl Service {
             absences,
             authored_pending,
             authored_edge_projects,
+            folder_subject_projects,
             current_project,
         })
     }
