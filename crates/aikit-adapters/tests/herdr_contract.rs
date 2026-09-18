@@ -9,14 +9,22 @@
 //! cmux's.
 //!
 //! The JSON fixtures in `tests/fixtures/herdr/` are the recorded shapes of the
-//! protocol this build understands, captured against the pinned upstream
-//! revision `herdrdev/herdr@94f6d9c0d9bb9cf9ffae99d8bbfb09e9bf2fc9e0`
-//! (`HERDR_UPSTREAM_REVISION`). `session-snapshot.json` and the create/split/
-//! start responses are the recorded shapes verbatim; `session-snapshot-wide.json`
-//! is a structural variation inside the same recorded grammar (more entries in
-//! the same arrays, every status of the agent vocabulary, and the field
-//! fallbacks the parser is documented to tolerate) — it is not a new capture.
-//! Error envelopes are inline and assert only what the parser actually reads.
+//! protocol this build understands. `session-snapshot.json` was captured
+//! verbatim from the live herdr 0.8.2 server on this host (API protocol 20,
+//! 2026-09-18; the conformance pass proved the live wire field-compatible with
+//! the shapes first recorded against upstream revision
+//! `herdrdev/herdr@94f6d9c0d9bb9cf9ffae99d8bbfb09e9bf2fc9e0`,
+//! `HERDR_UPSTREAM_REVISION`, at protocol 7), and `pane-split.json` is the live
+//! protocol-20 split response recorded during that pass.
+//! `workspace-created.json` and `agent-started.json` remain the
+//! pinned-revision (protocol-7-era) recordings: both verbs mutate live state,
+//! so no protocol-20 capture exists for them; the live pass proved the
+//! mutation shapes field-identical. `session-snapshot-wide.json` is a
+//! structural variation inside the recorded grammar at the live protocol
+//! generation (more entries in the same arrays, every status of the agent
+//! vocabulary, and the field fallbacks the parser is documented to tolerate) —
+//! it is not a new capture. Error envelopes are inline and assert only what
+//! the parser actually reads.
 //!
 //! Two honest boundaries of this suite:
 //!
@@ -69,25 +77,31 @@ fn parse_fixture(name: &str) -> HerdrSnapshot {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_recorded_pinned_revision_snapshot_parses_without_collapsing_native_ids() {
+fn a_recorded_live_protocol_snapshot_parses_without_collapsing_native_ids() {
     let snapshot = parse_fixture("session-snapshot.json");
 
-    assert_eq!(snapshot.version, "0.9.0");
-    assert_eq!(snapshot.protocol, 7);
-    assert_eq!(snapshot.workspace_ids, vec!["w1"]);
-    assert_eq!(snapshot.pane_ids, vec!["w1:p1", "w1:p2"]);
-    assert_eq!(snapshot.focused_workspace_id.as_deref(), Some("w1"));
-    assert_eq!(snapshot.focused_tab_id.as_deref(), Some("w1:t1"));
-    assert_eq!(snapshot.focused_pane_id.as_deref(), Some("w1:p2"));
+    assert_eq!(snapshot.version, "0.8.2");
+    assert_eq!(snapshot.protocol, 20);
+    assert_eq!(
+        snapshot.workspace_ids.len(),
+        13,
+        "the live capture records every workspace on this host verbatim"
+    );
+    assert!(snapshot.workspace_ids.contains(&"wY".to_owned()));
+    assert_eq!(snapshot.pane_ids.len(), 19);
+    assert_eq!(snapshot.focused_workspace_id.as_deref(), Some("w5"));
+    assert_eq!(snapshot.focused_tab_id.as_deref(), Some("w5:t1"));
+    assert_eq!(snapshot.focused_pane_id.as_deref(), Some("w5:p1"));
 
+    assert_eq!(snapshot.agents.len(), 3);
     let agent = &snapshot.agents[0];
     assert_eq!(
-        agent.native_id, "term-2",
+        agent.native_id, "term_65b89c48f810d9",
         "the terminal id is the native id"
     );
-    assert_eq!(agent.pane_id, "w1:p2", "the pane stays distinct evidence");
-    assert_eq!(agent.name.as_deref(), Some("reviewer"));
-    assert_eq!(agent.status, HerdrAgentStatus::Blocked);
+    assert_eq!(agent.pane_id, "w5:p1", "the pane stays distinct evidence");
+    assert_eq!(agent.name.as_deref(), Some("agents-pi"));
+    assert_eq!(agent.status, HerdrAgentStatus::Idle);
 }
 
 #[test]
@@ -317,17 +331,17 @@ fn a_split_uses_herdr_direction_words_and_binds_the_returned_pane_only() {
     let root = r("surface/reference/root");
     let review = r("surface/reference/review");
     let mut provider = HerdrWorkingEnvironment::new(runner.clone(), r("provider/herdr"))
-        .bind_surface(root.clone(), "w7:p1");
+        .bind_surface(root.clone(), "wY:p1");
 
     let pane = provider
         .split_surface(&root, review.clone(), HerdrSplitDirection::Right)
         .unwrap();
-    assert_eq!(pane, "w7:p2", "only the pane herdr returned is adopted");
+    assert_eq!(pane, "wY:p2", "only the pane herdr returned is adopted");
     assert!(
         runner
             .call_lines()
             .iter()
-            .any(|call| call == "herdr pane split w7:p1 --direction right --no-focus"),
+            .any(|call| call == "herdr pane split wY:p1 --direction right --no-focus"),
         "{:?}",
         runner.call_lines()
     );
@@ -339,14 +353,14 @@ fn a_split_uses_herdr_direction_words_and_binds_the_returned_pane_only() {
             HerdrSplitDirection::Down,
         )
         .unwrap();
-    assert_eq!(pane, "w7:p2");
+    assert_eq!(pane, "wY:p2");
     assert!(runner
         .call_lines()
         .iter()
-        .any(|call| call == "herdr pane split w7:p1 --direction down --no-focus"));
+        .any(|call| call == "herdr pane split wY:p1 --direction down --no-focus"));
 
     let observation = provider.observe().unwrap();
-    assert_eq!(observation.canonical_native_id(&review), Some("w7:p2"));
+    assert_eq!(observation.canonical_native_id(&review), Some("wY:p2"));
 }
 
 #[test]
@@ -481,18 +495,15 @@ fn a_split_response_without_a_pane_is_refused() {
 
 #[test]
 fn agent_start_argv_carries_kind_pane_timeout_and_passthrough_args() {
-    let runner = Arc::new(
-        ScriptedRunner::new()
-            .on("agent start", &fixture("agent-started.json"))
-            .on("pane split", &fixture("pane-split.json")),
-    );
-    let review = r("surface/reference/review");
+    // The agent-start fixture is the pinned-revision recording of a start in
+    // pane `w7:p2`; the surface is bound straight to that recorded pane. (The
+    // live split recording answers in `wY:p2`, and the provider rightly
+    // refuses a start response that drifts from the bound pane — chaining the
+    // two recordings here would manufacture exactly that drift.)
+    let runner = Arc::new(ScriptedRunner::new().on("agent start", &fixture("agent-started.json")));
     let agent_surface = r("surface/reference/agent");
     let mut provider = HerdrWorkingEnvironment::new(runner.clone(), r("provider/herdr"))
-        .bind_surface(review.clone(), "w7:p1");
-    provider
-        .split_surface(&review, agent_surface.clone(), HerdrSplitDirection::Right)
-        .unwrap();
+        .bind_surface(agent_surface.clone(), "w7:p2");
 
     let started = provider
         .start_agent_session(
@@ -734,14 +745,14 @@ fn herdr_pane_and_agent_bindings_carry_canonical_refs_only_where_explicitly_boun
 #[test]
 fn a_snapshot_where_every_bound_id_is_present_is_healthy_and_reports_focus() {
     let mut provider = HerdrWorkingEnvironment::new(snapshot_runner(), r("provider/herdr"))
-        .with_workspace("w1")
-        .bind_surface(r("surface/reference/root"), "w1:p1")
-        .bind_surface(r("surface/reference/review"), "w1:p2");
+        .with_workspace("w5")
+        .bind_surface(r("surface/reference/root"), "w5:p1")
+        .bind_surface(r("surface/reference/review"), "w5:p2");
 
     let observation = provider.observe().unwrap();
     assert_eq!(observation.health, WorkingEnvironmentHealth::Healthy);
-    assert_eq!(observation.focused_native_id.as_deref(), Some("w1:p2"));
-    assert_eq!(observation.provider_version.as_deref(), Some("0.9.0"));
+    assert_eq!(observation.focused_native_id.as_deref(), Some("w5:p1"));
+    assert_eq!(observation.provider_version.as_deref(), Some("0.8.2"));
 }
 
 #[test]
@@ -751,7 +762,7 @@ fn a_workspace_that_vanished_from_the_snapshot_degrades_the_observation() {
 
     let observation = provider.observe().unwrap();
     assert_eq!(observation.health, WorkingEnvironmentHealth::Degraded);
-    assert_eq!(observation.focused_native_id.as_deref(), Some("w1:p2"));
+    assert_eq!(observation.focused_native_id.as_deref(), Some("w5:p1"));
 }
 
 #[test]
@@ -907,7 +918,7 @@ fn observation_provenance_carries_the_pinned_revision_protocol_and_schema() {
         "every observation discloses the pinned upstream revision: {provenance}"
     );
     assert!(
-        provenance.contains("Herdr public API snapshot protocol=8"),
+        provenance.contains("Herdr public API snapshot protocol=20"),
         "the snapshot protocol is disclosed so drift from the pin is discoverable: {provenance}"
     );
     assert!(
@@ -931,7 +942,7 @@ fn the_provider_participates_through_the_public_trait_object_seam() {
 
     let opened = provider.open().unwrap();
     assert_eq!(opened.health, WorkingEnvironmentHealth::Healthy);
-    assert_eq!(opened.provider_version.as_deref(), Some("0.9.1"));
+    assert_eq!(opened.provider_version.as_deref(), Some("0.8.2"));
     assert_eq!(provider.provider_ref(), &r("provider/herdr"));
     provider.focus_surface(&root).unwrap_err();
     let observed = provider.observe().unwrap();

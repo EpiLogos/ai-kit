@@ -19,6 +19,11 @@ use crate::working_environment::{
     WORKING_ENVIRONMENT_PROVIDER_VERSION,
 };
 
+/// The upstream herdr source revision whose wire shapes this adapter was
+/// first written against (fixtures captured at its API protocol 7). The live
+/// herdr 0.8.2 server speaks API protocol 20 and proved field-compatible on
+/// 2026-09-18; the observation provenance below still records this pin so
+/// drift between the pin and a live daemon stays discoverable.
 pub const HERDR_UPSTREAM_REVISION: &str = "94f6d9c0d9bb9cf9ffae99d8bbfb09e9bf2fc9e0";
 pub const HERDR_PROVIDER_VERSION: &str = "aikit.herdr-working-environment/v1";
 
