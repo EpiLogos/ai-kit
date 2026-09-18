@@ -79,6 +79,7 @@ if seen_skills != EXPECTED_SKILLS:
 if seen_guidance != EXPECTED_GUIDANCE:
     raise SystemExit(f"first-party guidance corpus mismatch: {seen_guidance ^ EXPECTED_GUIDANCE}")
 EXPECTED_HOOKS = {
+    "hook/aikit/knowledge-route",
     "hook/continuity/turn-ledger",
     "hook/continuity/entity-disclosure",
     "hook/continuity/domain-activation",
