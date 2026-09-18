@@ -2218,11 +2218,12 @@ impl Service {
 
         let mut effects = Vec::new();
         for target in &self.descriptor.targets {
-            // The single-roster law: every harness arm below has its row in
-            // client.rs's REGISTRY (qwen-code and ollama included). The guard
-            // test `every_harness_client_effects_dispatches_has_a_registry_row`
-            // in client.rs fails when the dispatch grows a harness arm the
-            // roster does not carry.
+            // The detail law: every harness arm below resolves through
+            // profiles::slug_for_target to an embedded harness profile — the
+            // guard test `every_harness_client_effects_arm_resolves_detail_ground`
+            // in client.rs fails when the dispatch grows a harness arm without
+            // detail ground. (The client-status roster is a different surface:
+            // it derives from the live detection record, not from these arms.)
             let effect = match target.as_str() {
                 TargetId::SHELL => Some(ActivationEffect::immediate("shell bin/")),
                 TargetId::CLAUDE_CODE => {
