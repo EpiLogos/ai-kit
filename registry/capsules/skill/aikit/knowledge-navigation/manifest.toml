@@ -2,7 +2,7 @@ schema = 1
 id = "skill/aikit/knowledge-navigation"
 kind = "skill"
 name = "AIKit Context and Knowledge Navigation"
-description = "Operate AIKit Context, knowledge-source pools, navigation, ProjectMap/wiki and progressive retrieval."
+description = "First route for any question about what the project knows, decided or maintains: proactively run aikit knowledge search/resolve/open/read/route/explain/history and aikit wiki query before raw find/grep/Read. Raw file search is not a substitute for recorded-knowledge questions; fall back only for code-local lookups or after the faculty returns nothing."
 maturity = "stable"
 tags = ["aikit", "context", "knowledge"]
 

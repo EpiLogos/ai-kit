@@ -1,0 +1,37 @@
+#!/bin/sh
+# Knowledge route steering — the knowledge-route capsule's inject-phase payload.
+#
+# The dispatcher (aikit hook dispatch <client> <event>) feeds the event JSON on
+# stdin and, for a step in the inject phase, turns non-empty stdout into
+# injected context. So the whole contract is: read the event, find the session's
+# working directory, and when it stands inside an AIKit project (the `.aikit`
+# project marker, the same marker the CLI's own project discovery walks), print
+# exactly one steering line and exit 0. Anywhere else — or on any doubt — print
+# nothing and exit 0: a steering hint must never gate, warn, or block a prompt.
+#
+# Failure policy is open and the phase is inject, so even a crash of this
+# script can only ever be a recorded non-event, never a denial.
+input=$(cat)
+
+# The event's cwd field (Claude Code spells it `cwd`); fall back to the
+# process working directory, which is where the client runs the dispatcher.
+dir=$(printf '%s' "$input" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+if [ -z "$dir" ]; then
+    dir=${PWD:-.}
+fi
+case $dir in
+    /*) ;;
+    *) dir=${PWD:-.}/$dir ;;
+esac
+
+# Walk up to the project root. Silence outside AIKit projects is the design,
+# not an oversight: the line is only meaningful where the faculty exists.
+while :; do
+    if [ -d "$dir/.aikit" ]; then
+        printf '%s\n' '[aikit knowledge-route] This session stands in an AIKit project: for any question about what this project knows, decided, or maintains, you must proactively run the native knowledge route first — aikit knowledge search, resolve, open, read, route, explain, history, and aikit wiki query — before raw find/grep/Read. Raw file search is not a substitute for recorded knowledge; fall back to it only for code-local lookups, or after the faculty has returned nothing.'
+        exit 0
+    fi
+    [ "$dir" = "/" ] && break
+    dir=$(dirname "$dir")
+done
+exit 0
