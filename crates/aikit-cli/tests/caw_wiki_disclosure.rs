@@ -121,13 +121,24 @@ fn unavailable_world_keeps_only_the_current_projects_independently_bound_authore
         .is_empty());
     // Independently readable does not mean all local files: the native
     // no-retrieval marker must still take effect on the next materialisation.
+    // The marker sits on `ProjectCentral/user/`, so the marked note's authored
+    // relations drop out; the project's own canonical wiki
+    // (`ProjectCentral/agents/wiki/wiki.json`, declared in the manifest and
+    // not under the marker) stays binding-disclosed, so its node remains
+    // addressable — the marker never widens into erasing the project's own
+    // unmarked wiki, and the sibling still never leaks.
     write(&project.join("ProjectCentral/user/.no-agent-retrieval"), "");
     let service = open_service(&temp, &project);
+    let marked = service.knowledge_search("beta", 50).unwrap().hits;
+    assert!(marked.iter().all(|hit| matches!(&hit.address,
+        KnowledgeAddress::Wiki(reference) if !reference.as_str().starts_with("wiki:edge:authored:"))),
+    "the marked note's authored relation must be gone, got {marked:?}");
     assert!(service
-        .knowledge_search("beta", 50)
+        .knowledge_search("PrivateTarget", 50)
         .unwrap()
         .hits
         .is_empty());
+    // The marker withholds retrieval; it never touches the source file.
     assert_eq!(
         fs::read_to_string(project.join("ProjectCentral/user/alpha.md")).unwrap(),
         "Alpha explicitly links [[Beta]] and [[Future Concept]].\n"

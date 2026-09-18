@@ -550,3 +550,422 @@ fn annotate_entity(object: &mut WikiObject, binding: &WorldBinding) {
         }),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use aikit_core::knowledge_wiki::{
+        WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject, WikiProvenanceRef, WikiSpace,
+        OKF_WIKI_PROFILE,
+    };
+    use aikit_core::resource::{ResourceRef, SourceRef};
+
+    use crate::central_entities::{ENTITY_PRODUCER_REF, PASU_EXTENSION};
+    use crate::runner::{CommandRunner, Output};
+
+    use super::*;
+
+    fn r(raw: &str) -> ResourceRef {
+        ResourceRef::parse(raw).unwrap()
+    }
+
+    fn s(raw: &str) -> SourceRef {
+        SourceRef::parse(raw).unwrap()
+    }
+
+    /// A materialised pasu entity: the only object kind that claims a subject.
+    fn entity(ref_raw: &str, subject: &str, sources: &[&str]) -> WikiObject {
+        let mut extensions = BTreeMap::new();
+        extensions.insert(PASU_EXTENSION.to_owned(), json!({ "subject_ref": subject }));
+        WikiObject::Node(WikiNode {
+            profile: OKF_WIKI_PROFILE.into(),
+            ref_id: r(ref_raw),
+            revision: 1,
+            provenance: vec![WikiProvenanceRef {
+                source_ref: s(sources
+                    .first()
+                    .copied()
+                    .unwrap_or("central:source:control:root:x")),
+                source_revision: None,
+                producer_ref: Some(r(ENTITY_PRODUCER_REF)),
+                generation_ref: None,
+                extensions: BTreeMap::new(),
+            }],
+            node_type: "pasu".into(),
+            title: Some(subject.to_owned()),
+            space_refs: Vec::new(),
+            source_refs: sources.iter().map(|raw| s(raw)).collect(),
+            local_space_ref: None,
+            extensions,
+        })
+    }
+
+    /// An ordinary authored wiki node: no subject claim, no entity producer.
+    fn node(ref_raw: &str, sources: &[&str]) -> WikiObject {
+        WikiObject::Node(WikiNode {
+            profile: OKF_WIKI_PROFILE.into(),
+            ref_id: r(ref_raw),
+            revision: 1,
+            provenance: Vec::new(),
+            node_type: "Concept".into(),
+            title: Some(ref_raw.to_owned()),
+            space_refs: Vec::new(),
+            source_refs: sources.iter().map(|raw| s(raw)).collect(),
+            local_space_ref: None,
+            extensions: BTreeMap::new(),
+        })
+    }
+
+    fn edge(ref_raw: &str, from: &str, to: &str) -> WikiObject {
+        WikiObject::Edge(WikiEdge {
+            profile: OKF_WIKI_PROFILE.into(),
+            ref_id: r(ref_raw),
+            revision: 1,
+            provenance: Vec::new(),
+            from_ref: r(from),
+            to_ref: r(to),
+            relation: "relates-to".into(),
+            origin: WikiEdgeOrigin::Compiled,
+            origin_ref: None,
+            extensions: BTreeMap::new(),
+        })
+    }
+
+    fn space(ref_raw: &str, anchor: Option<&str>, members: &[&str]) -> WikiObject {
+        WikiObject::Space(WikiSpace {
+            profile: OKF_WIKI_PROFILE.into(),
+            ref_id: r(ref_raw),
+            revision: 1,
+            provenance: Vec::new(),
+            title: Some(ref_raw.to_owned()),
+            parent_space_refs: Vec::new(),
+            child_space_refs: Vec::new(),
+            node_refs: members.iter().map(|raw| r(raw)).collect(),
+            anchor_ref: anchor.map(r),
+            extensions: BTreeMap::new(),
+        })
+    }
+
+    fn binding(world_ref: &str, sources: &[(&str, &str)]) -> WorldBinding {
+        WorldBinding {
+            world_ref: world_ref.into(),
+            inherited_root_lineage: false,
+            sources: sources
+                .iter()
+                .map(|(source_ref, state)| EffectiveSource {
+                    source_ref: (*source_ref).into(),
+                    state: (*state).into(),
+                    effective_revision: "rev-1".into(),
+                    propagation_path: vec!["control:root".into(), world_ref.into()],
+                })
+                .collect(),
+        }
+    }
+
+    fn refs(objects: &[WikiObject]) -> Vec<String> {
+        objects
+            .iter()
+            .map(|object| object.ref_id().as_str().to_owned())
+            .collect()
+    }
+
+    // --- the withholding rule (absolute: withhold, never broaden) ---
+
+    #[test]
+    fn a_declared_exclusion_withholds_the_entity_its_edges_and_its_space() {
+        let mut objects = vec![
+            entity(
+                "wiki:node:identity",
+                "central:pasu:identity",
+                &["central:source:control:root:Control/user/identity"],
+            ),
+            node(
+                "wiki:node:ordinary",
+                &["central:source:control:root:Control/agents"],
+            ),
+            edge("wiki:edge:one", "wiki:node:identity", "wiki:node:ordinary"),
+            // Anchored on the withheld entity: the space leaves with it.
+            space(
+                "central:wiki:root",
+                Some("wiki:node:identity"),
+                &["wiki:node:identity", "wiki:node:ordinary"],
+            ),
+            // Anchored on a kept entity with the withheld one as a mere
+            // member: the space survives with its membership repaired.
+            space(
+                "central:wiki:project:epilogos/demo",
+                Some("wiki:node:ordinary"),
+                &["wiki:node:identity", "wiki:node:ordinary"],
+            ),
+        ];
+        let world = binding(
+            "epilogos/demo",
+            &[
+                ("central:source:control:root:Control/user", "excluded"),
+                ("central:source:control:root:Control/agents", "available"),
+            ],
+        );
+        let mut absences = Vec::new();
+        bind_project_context(&mut objects, &world, &mut absences);
+
+        // The excluded entity, the edge naming it as an endpoint, and the
+        // space anchored on it all leave the context together.
+        assert_eq!(
+            refs(&objects),
+            vec![
+                "wiki:node:ordinary".to_owned(),
+                "central:wiki:project:epilogos/demo".to_owned(),
+            ],
+            "{absences:?}"
+        );
+        // The surviving space's membership was repaired in place.
+        match objects.last() {
+            Some(WikiObject::Space(space)) => {
+                assert_eq!(space.node_refs, vec![r("wiki:node:ordinary")])
+            }
+            other => panic!("expected the repaired space, got {other:?}"),
+        }
+        // Every withholding is disclosed, nothing is silent.
+        assert_eq!(absences.len(), 4, "{absences:?}");
+        assert!(absences.iter().all(|absence| absence.contains("withheld")));
+    }
+
+    #[test]
+    fn an_available_binding_annotates_kept_entities_and_touches_nothing_else() {
+        let mut objects = vec![
+            entity(
+                "wiki:node:identity",
+                "central:pasu:identity",
+                &["central:source:control:root:Control/user/identity"],
+            ),
+            node(
+                "wiki:node:ordinary",
+                &["central:source:control:root:Control/agents"],
+            ),
+        ];
+        let world = binding(
+            "epilogos/demo",
+            &[("central:source:control:root:Control/user", "available")],
+        );
+        let mut absences = Vec::new();
+        bind_project_context(&mut objects, &world, &mut absences);
+        assert!(absences.is_empty(), "{absences:?}");
+        assert_eq!(objects.len(), 2);
+        match &objects[0] {
+            WikiObject::Node(node) => {
+                let extension = &node.extensions[BINDING_EXTENSION];
+                assert_eq!(extension["world_ref"], "epilogos/demo");
+                assert_eq!(extension["bindings"][0]["state"], "available");
+                assert_eq!(extension["bindings"][0]["effective_revision"], "rev-1");
+            }
+            other => panic!("expected the annotated entity, got {other:?}"),
+        }
+        // A non-entity keeps no binding extension: the binding governs
+        // entities, it does not rewrite authored wiki objects.
+        match &objects[1] {
+            WikiObject::Node(node) => assert!(!node.extensions.contains_key(BINDING_EXTENSION)),
+            other => panic!("expected the untouched node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stand_in_redeclaration_of_an_entity_subject_is_refused() {
+        let mut objects = vec![
+            entity(
+                "wiki:node:identity",
+                "central:pasu:identity",
+                &["central:source:control:root:Control/user/identity"],
+            ),
+            // A discovered object re-declaring the same subject under another
+            // ref: the materialised entity keeps the subject.
+            node("wiki:node:stand-in", &["central:source:project:other:x"]),
+        ];
+        // Make the stand-in claim the subject directly.
+        if let WikiObject::Node(node) = &mut objects[1] {
+            node.extensions.insert(
+                PASU_EXTENSION.to_owned(),
+                json!({ "subject_ref": "central:pasu:identity" }),
+            );
+        }
+        let world = binding(
+            "epilogos/demo",
+            &[("central:source:control:root:Control", "available")],
+        );
+        let mut absences = Vec::new();
+        bind_project_context(&mut objects, &world, &mut absences);
+        assert_eq!(refs(&objects), vec!["wiki:node:identity".to_owned()]);
+        assert!(
+            absences
+                .iter()
+                .any(|absence| absence.contains("re-declares entity subject")),
+            "{absences:?}"
+        );
+    }
+
+    // --- the binding read (absence inherits, failure never widens) ---
+
+    /// Answers each `central.world.effective-sources` call from a canned
+    /// envelope keyed by the requested scope.
+    struct EnvelopeRunner {
+        project: String,
+        root: String,
+    }
+
+    impl CommandRunner for EnvelopeRunner {
+        fn run(&self, argv: &[String]) -> aikit_core::Result<Output> {
+            let input: Value = serde_json::from_str(argv.last().expect("argv has the input"))
+                .expect("the last argument is the Action input");
+            let stdout = if input["scope"] == "project" {
+                &self.project
+            } else {
+                &self.root
+            };
+            Ok(Output::success(stdout.clone()))
+        }
+    }
+
+    fn ok_envelope(world_ref: &str, sources: Value) -> String {
+        json!({
+            "ok": true,
+            "data": { "world_ref": world_ref, "sources": sources }
+        })
+        .to_string()
+    }
+
+    fn error_envelope(code: &str, message: &str) -> String {
+        json!({
+            "ok": false,
+            "error": { "code": code, "message": message }
+        })
+        .to_string()
+    }
+
+    fn root_sources() -> Value {
+        json!([{
+            "ref": "central:source:control:root:Control",
+            "state": "available",
+            "effective_revision": "root-rev-1",
+            "propagation_path": ["control:root"]
+        }])
+    }
+
+    #[test]
+    fn an_absent_project_declaration_inherits_the_root_lineage_and_discloses_it() {
+        let runner = EnvelopeRunner {
+            project: error_envelope(WORLD_DECLARATION_ABSENT, "missing World project:bare"),
+            root: ok_envelope(ROOT_WORLD_REF, root_sources()),
+        };
+        let mut absences = Vec::new();
+        let binding = read_project_binding(
+            &runner,
+            Path::new("ctrl"),
+            Path::new("/central"),
+            "bare",
+            &mut absences,
+        )
+        .expect("absence selects the documented root lineage");
+        assert!(binding.inherited_root_lineage);
+        assert_eq!(binding.world_ref, ROOT_WORLD_REF);
+        assert_eq!(binding.sources.len(), 1);
+        assert_eq!(binding.sources[0].state, "available");
+        assert_eq!(binding.sources[0].propagation_path, vec!["control:root"]);
+        assert!(
+            absences
+                .iter()
+                .any(|absence| absence.contains("declares no world relations")),
+            "{absences:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_project_declaration_never_widens_to_the_root_lineage() {
+        let runner = EnvelopeRunner {
+            project: error_envelope(
+                "central.world_sources_unavailable",
+                "the world relations file is corrupt",
+            ),
+            root: ok_envelope(ROOT_WORLD_REF, root_sources()),
+        };
+        let mut absences = Vec::new();
+        let binding = read_project_binding(
+            &runner,
+            Path::new("ctrl"),
+            Path::new("/central"),
+            "demo",
+            &mut absences,
+        );
+        assert!(
+            binding.is_none(),
+            "a source-level failure yields no binding"
+        );
+        assert!(
+            absences
+                .iter()
+                .any(|absence| absence.contains("no root lineage is assumed")),
+            "{absences:?}"
+        );
+    }
+
+    #[test]
+    fn a_readable_project_declaration_is_answered_as_declared() {
+        let runner = EnvelopeRunner {
+            // No ProjectCentral manifest in the fixture root, so the effective
+            // world ref is the `project:<name>` convention — the envelope must
+            // echo exactly the world that was asked about.
+            project: ok_envelope(
+                "project:demo",
+                json!([{
+                    "ref": "central:source:control:root:Control/user",
+                    "state": "excluded",
+                    "effective_revision": "proj-rev-1",
+                    "propagation_path": ["control:root", "project:demo"]
+                }]),
+            ),
+            root: ok_envelope(ROOT_WORLD_REF, root_sources()),
+        };
+        let mut absences = Vec::new();
+        let binding = read_project_binding(
+            &runner,
+            Path::new("ctrl"),
+            Path::new("/central"),
+            "demo",
+            &mut absences,
+        )
+        .expect("a readable declaration is a binding");
+        assert!(!binding.inherited_root_lineage);
+        assert_eq!(binding.world_ref, "project:demo");
+        assert_eq!(binding.sources[0].state, "excluded");
+        assert!(absences.is_empty(), "{absences:?}");
+    }
+
+    // --- the world ref convention (manifest id, else the Work name) ---
+
+    #[test]
+    fn the_world_ref_uses_the_manifest_project_id_and_falls_back_to_the_work_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = temp.path().join("Work/demo/ProjectCentral/project.json");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            r#"{"schema":"central.project/v1","project_id":"epilogos/demo"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            project_world_ref(temp.path(), "demo"),
+            "epilogos/demo",
+            "a readable manifest supplies the declared project id"
+        );
+        assert_eq!(
+            project_world_ref(temp.path(), "bare"),
+            "project:bare",
+            "a member with no manifest scopes by its Work name"
+        );
+        std::fs::write(&manifest, "not json at all").unwrap();
+        assert_eq!(
+            project_world_ref(temp.path(), "demo"),
+            "project:demo",
+            "an unreadable manifest never invents an identity"
+        );
+    }
+}
