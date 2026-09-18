@@ -713,17 +713,17 @@ mod tests {
             .find(|surface| surface.provider_native_surface == "gpt-realtime")
             .unwrap();
         assert!(realtime.is_speech_capable());
-        assert!(realtime
-            .interaction_support(InteractionCapability::FullDuplexRealtime)
-            .is_supported());
+        assert!(
+            realtime
+                .interaction_support(InteractionCapability::FullDuplexRealtime)
+                .is_supported()
+        );
 
         let stt = surfaces
             .iter()
             .find(|surface| surface.provider_native_surface == "gpt-4o-transcribe")
             .unwrap();
-        assert!(stt
-            .input_support(ModelModality::Speech)
-            .is_supported());
+        assert!(stt.input_support(ModelModality::Speech).is_supported());
         assert!(
             !stt.output_support(ModelModality::Speech).is_supported(),
             "transcription listens; it does not speak"
@@ -733,9 +733,7 @@ mod tests {
             .iter()
             .find(|surface| surface.provider_native_surface == "gpt-4o-mini-tts")
             .unwrap();
-        assert!(tts
-            .output_support(ModelModality::Speech)
-            .is_supported());
+        assert!(tts.output_support(ModelModality::Speech).is_supported());
         assert!(
             !tts.input_support(ModelModality::Speech).is_supported(),
             "synthesis speaks; it does not listen"

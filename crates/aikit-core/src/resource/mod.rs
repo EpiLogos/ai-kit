@@ -35,11 +35,11 @@ pub use model::{
     SourceAuthority, SourceState,
 };
 pub use model_catalogue::{
-    canonical_model_ref, catalogue_from_observations, disclose_catalogue_modalities,
-    migrate_model_ref, CatalogueAvailability, CatalogueModalityClass, CatalogueModelDisclosure,
-    DeclaredRoute, ModelCatalogue, ModelCatalogueEntry, ProviderCatalogDocument,
-    ProviderCatalogObservation, FIRST_PARTY_CATALOGUE_SOURCE, MODEL_CATALOGUE_VERSION,
-    MODEL_REF_PREFIX, PROVIDER_CATALOG_OBSERVATION_SCHEMA, PROVIDER_CATALOG_SOURCE,
+    CatalogueAvailability, CatalogueModalityClass, CatalogueModelDisclosure, DeclaredRoute,
+    FIRST_PARTY_CATALOGUE_SOURCE, MODEL_CATALOGUE_VERSION, MODEL_REF_PREFIX, ModelCatalogue,
+    ModelCatalogueEntry, PROVIDER_CATALOG_OBSERVATION_SCHEMA, PROVIDER_CATALOG_SOURCE,
+    ProviderCatalogDocument, ProviderCatalogObservation, canonical_model_ref,
+    catalogue_from_observations, disclose_catalogue_modalities, migrate_model_ref,
     speech_class_models,
 };
 pub use model_route::{

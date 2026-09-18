@@ -96,8 +96,7 @@ fn a_keyless_machine_sees_speech_as_a_class_with_each_gap_named() {
     let realtime = entry(&data, "model:gpt-realtime");
     assert_eq!(realtime["availability"]["state"], "credential-gated");
     assert_eq!(
-        realtime["availability"]["missing"],
-        "openai realtime credential",
+        realtime["availability"]["missing"], "openai realtime credential",
         "the gap is named: which credential is absent"
     );
     let class = &realtime["modality_classes"][0];
@@ -113,27 +112,31 @@ fn a_keyless_machine_sees_speech_as_a_class_with_each_gap_named() {
             "{field} must declare speech"
         );
     }
-    assert_eq!(
+    assert!(
         class["transforms"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|t| t == "speech-to-speech"),
-        true
+            .any(|t| t == "speech-to-speech")
     );
     assert_eq!(
-        class["credential"]["condition"],
-        "required",
+        class["credential"]["condition"], "required",
         "presence stays ref-only: required, never a secret"
     );
 
     // The cascade endpoints are visible options with their own gaps named.
     let transcribe = entry(&data, "model:gpt-4o-transcribe");
     assert_eq!(transcribe["availability"]["state"], "credential-gated");
-    assert_eq!(transcribe["availability"]["missing"], "openai transcription credential");
+    assert_eq!(
+        transcribe["availability"]["missing"],
+        "openai transcription credential"
+    );
     let synthesis = entry(&data, "model:gpt-4o-mini-tts");
     assert_eq!(synthesis["availability"]["state"], "credential-gated");
-    assert_eq!(synthesis["availability"]["missing"], "openai speech credential");
+    assert_eq!(
+        synthesis["availability"]["missing"],
+        "openai speech credential"
+    );
 
     // A plain text model stays catalogued with nothing claimed about speech.
     let text_model = entry(&data, "model:llama3.2");
@@ -144,9 +147,7 @@ fn a_keyless_machine_sees_speech_as_a_class_with_each_gap_named() {
         "no declared surface joined: nothing is claimed"
     );
     assert!(
-        !speech
-            .iter()
-            .any(|listed| listed == "model:llama3.2"),
+        !speech.iter().any(|listed| listed == "model:llama3.2"),
         "a text-only model is not in the speech class"
     );
 }
@@ -159,8 +160,7 @@ fn a_bound_credential_resolves_the_same_option_and_a_revoked_one_does_not() {
 
     let realtime = entry(&data, "model:gpt-realtime");
     assert_eq!(
-        realtime["availability"]["state"],
-        "catalogued",
+        realtime["availability"]["state"], "catalogued",
         "with the credential bound, the option is no longer gated"
     );
     let class = &realtime["modality_classes"][0];

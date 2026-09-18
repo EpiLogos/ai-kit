@@ -579,18 +579,12 @@ pub enum CatalogueAvailability {
     /// on this machine. The option is visible and unusable until the named
     /// credential is bound; `missing` is the declaring surface's own hint
     /// for which credential that is.
-    CredentialGated {
-        missing: String,
-    },
+    CredentialGated { missing: String },
     /// The declared surface is offered in a reduced form; the reason is the
     /// declarer's own words.
-    Degraded {
-        reason: String,
-    },
+    Degraded { reason: String },
     /// The declared surface states itself not offered.
-    Unavailable {
-        reason: String,
-    },
+    Unavailable { reason: String },
 }
 
 impl CatalogueAvailability {
@@ -667,7 +661,8 @@ pub fn disclose_catalogue_modalities(
             let mut availability = CatalogueAvailability::Catalogued;
             for route in &entry.routes {
                 for surface in declared_surfaces {
-                    if &surface.provider != &route.provider || !route.claims(&surface.provider_native_surface)
+                    if surface.provider != route.provider
+                        || !route.claims(&surface.provider_native_surface)
                     {
                         continue;
                     }
@@ -923,10 +918,8 @@ mod tests {
         transforms: &[TransformCapability],
         credential: CredentialCondition,
     ) -> ModelModalityContract {
-        let mut contract = ModelModalityContract::new(
-            ProviderRef::parse(provider).unwrap(),
-            native,
-        );
+        let mut contract =
+            ModelModalityContract::new(ProviderRef::parse(provider).unwrap(), native);
         contract.input_modalities = inputs.iter().copied().collect();
         contract.output_modalities = outputs.iter().copied().collect();
         for transform in transforms {
@@ -953,8 +946,16 @@ mod tests {
         declared_surface(
             "provider:openai",
             "gpt-realtime",
-            &[ModelModality::Audio, ModelModality::Speech, ModelModality::Text],
-            &[ModelModality::Audio, ModelModality::Speech, ModelModality::Text],
+            &[
+                ModelModality::Audio,
+                ModelModality::Speech,
+                ModelModality::Text,
+            ],
+            &[
+                ModelModality::Audio,
+                ModelModality::Speech,
+                ModelModality::Text,
+            ],
             &[TransformCapability::SpeechToSpeech],
             credential,
         )
@@ -989,10 +990,16 @@ mod tests {
         assert!(class.speech_capable);
         assert!(class.input_modalities.contains(&ModelModality::Speech));
         assert!(class.output_modalities.contains(&ModelModality::Speech));
-        assert!(class.transforms.contains(&TransformCapability::SpeechToSpeech));
-        assert!(class
-            .interaction
-            .contains(&InteractionCapability::StreamingInput));
+        assert!(
+            class
+                .transforms
+                .contains(&TransformCapability::SpeechToSpeech)
+        );
+        assert!(
+            class
+                .interaction
+                .contains(&InteractionCapability::StreamingInput)
+        );
         assert_eq!(class.provider_native_surface, "gpt-realtime");
 
         // The gap is named, from the declaring surface's own hint.
@@ -1087,7 +1094,11 @@ mod tests {
             disclosure.availability,
             CatalogueAvailability::CredentialGated { .. }
         ));
-        let disclosure = disclosure_for(std::slice::from_ref(&degraded), &openai_bound(), "model:gpt-realtime");
+        let disclosure = disclosure_for(
+            std::slice::from_ref(&degraded),
+            &openai_bound(),
+            "model:gpt-realtime",
+        );
         assert_eq!(
             disclosure.availability,
             CatalogueAvailability::Degraded {
@@ -1156,8 +1167,10 @@ mod tests {
         let disclosures = disclose_catalogue_modalities(&catalogue, &[orphan], &BTreeSet::new());
         assert_eq!(disclosures.len(), catalogue.len());
         assert!(speech_class_models(&disclosures).is_empty());
-        assert!(disclosures
-            .iter()
-            .all(|disclosure| disclosure.modality_classes.is_empty()));
+        assert!(
+            disclosures
+                .iter()
+                .all(|disclosure| disclosure.modality_classes.is_empty())
+        );
     }
 }

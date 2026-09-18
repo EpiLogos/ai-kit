@@ -3426,7 +3426,10 @@ fn observe_credential_roster(
 /// enter a listing through this read. A store read failure is disclosed as a
 /// note and reads as "nothing bound": a listing must never invent a
 /// satisfied credential it could not verify.
-fn bound_credential_refs(home: &AikitHome, notes: &mut Vec<String>) -> std::collections::BTreeSet<String> {
+fn bound_credential_refs(
+    home: &AikitHome,
+    notes: &mut Vec<String>,
+) -> std::collections::BTreeSet<String> {
     match aikit_store::credentials::CredentialBindingStore::new(home).list() {
         Ok(bindings) => bindings
             .into_iter()
