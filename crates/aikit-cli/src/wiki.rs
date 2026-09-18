@@ -484,6 +484,8 @@ fn space_link(args: &WikiSpaceLinkArgs) -> Result<WikiOutcome> {
 /// Resolve every `child_space_refs` entry of the root Space against the
 /// filesystem. Read-only: a dangling child is a finding to act on with
 /// `wiki root prune` or `wiki root adopt`, never something rewritten here.
+/// The exit is non-zero when anything dangles, so a scheduled or scripted run
+/// that finds a broken federation is loud in the shell, not only in its JSON.
 fn root_doctor(cwd: &Path, args: &WikiRootArgs) -> Result<WikiOutcome> {
     let root = resolve_root_wiki(cwd, args.root.as_deref())?;
     let document = WikiDocument::parse(&read(&root)?)?;
@@ -535,6 +537,11 @@ fn root_doctor(cwd: &Path, args: &WikiRootArgs) -> Result<WikiOutcome> {
         }
     }
 
+    let exit_code = if dangling.is_empty() {
+        json::EXIT_OK
+    } else {
+        json::EXIT_GENERIC
+    };
     Ok(WikiOutcome::reported(
         jval!({
             "root": root.display().to_string(),
@@ -548,7 +555,7 @@ fn root_doctor(cwd: &Path, args: &WikiRootArgs) -> Result<WikiOutcome> {
             "dangling": dangling,
         }),
         Vec::new(),
-        json::EXIT_OK,
+        exit_code,
     ))
 }
 

@@ -326,9 +326,10 @@ pub use knowledge_wiki::{
     ROOT_WIKI_SPACE_REF,
 };
 pub use knowledge_wiki_index::{
-    SemanticWikiIndex, WikiIndexStatus, WikiLocalWhole, WikiMutationProposal, WikiNeighbour,
-    WikiObjectEnvelope, WikiRelationDirection, WikiSearchAddress, WikiSearchHit, WikiSearchHitKind,
-    DEFAULT_WIKI_NEIGHBOUR_LIMIT, DEFAULT_WIKI_SEARCH_LIMIT, SEMANTIC_WIKI_INDEX_VERSION,
+    repair_absence_lines, SemanticWikiIndex, WikiIndexRepair, WikiIndexStatus, WikiLocalWhole,
+    WikiMutationProposal, WikiNeighbour, WikiObjectEnvelope, WikiRelationDirection,
+    WikiSearchAddress, WikiSearchHit, WikiSearchHitKind, DEFAULT_WIKI_NEIGHBOUR_LIMIT,
+    DEFAULT_WIKI_SEARCH_LIMIT, SEMANTIC_WIKI_INDEX_VERSION,
 };
 pub use knowledge_wiki_provider::{
     SemanticWikiProvider, SemanticWikiProviderStatus, WikiExplanation,
