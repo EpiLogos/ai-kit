@@ -975,7 +975,7 @@ fn an_active_guidance_capsule_joins_the_chains_of_the_events_it_declares() {
     );
 
     // And only the declared events: no other chain exists to receive it.
-    assert!(chains(&f).get("UserPromptSubmit").is_none());
+    assert!(!chains(&f).contains_key("UserPromptSubmit"));
 }
 
 #[test]
