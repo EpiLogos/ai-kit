@@ -630,6 +630,10 @@ pub struct ComposedModalityView {
     /// The last declared stage's output modalities: what leaves the body.
     pub output_modalities: BTreeSet<ModelModality>,
     pub interaction: BTreeMap<InteractionCapability, ModalitySupport>,
+    /// The derived body-level transform answers, under the same strict law
+    /// as `interaction`: only derivable capabilities appear in the map.
+    #[serde(default)]
+    pub transforms: BTreeMap<TransformCapability, ModalitySupport>,
     pub speech_capable: bool,
     /// True when every stage declared a modality contract. When false,
     /// body-level claims about capabilities outside the derived map answer
@@ -769,6 +773,59 @@ impl ComposedModalityView {
         }
     }
 
+    /// Body-level answer for one transform capability, under the same law
+    /// as [`Self::interaction_support`].
+    pub fn transform_support(&self, capability: TransformCapability) -> ModalitySupport {
+        if let Some(support) = self.transforms.get(&capability) {
+            return support.clone();
+        }
+        if !self.complete {
+            return ModalitySupport::Unknown {
+                reason: "at least one stage of this body declares no modality contract, so \
+                         absence cannot be proven"
+                    .to_string(),
+            };
+        }
+        ModalitySupport::Unsupported {
+            reason: format!(
+                "no stage of this body declares transform `{}`",
+                capability.as_str()
+            ),
+        }
+    }
+
+    /// Body-level answer for one input/output modality. Pipeline
+    /// semantics: what enters the first declared stage and what leaves the
+    /// last. Membership in the derived sets is the supported fact; absence
+    /// is proven only once every stage has spoken.
+    pub fn modality_support(
+        &self,
+        direction: ModalityDirection,
+        modality: ModelModality,
+    ) -> ModalitySupport {
+        let declared = match direction {
+            ModalityDirection::Input => &self.input_modalities,
+            ModalityDirection::Output => &self.output_modalities,
+        };
+        if declared.contains(&modality) {
+            return ModalitySupport::Supported;
+        }
+        if !self.complete {
+            return ModalitySupport::Unknown {
+                reason: "at least one stage of this body declares no modality contract, so \
+                         absence cannot be proven"
+                    .to_string(),
+            };
+        }
+        ModalitySupport::Unsupported {
+            reason: format!(
+                "no declared stage of this body carries {} modality `{}`",
+                direction.as_str(),
+                modality.as_str()
+            ),
+        }
+    }
+
     /// What enters the first stage and what leaves the last, for bodies
     /// whose stages form a pipeline.
     pub fn pipeline_modalities(&self) -> (BTreeSet<ModelModality>, BTreeSet<ModelModality>) {
@@ -891,12 +948,68 @@ pub fn compose_stage_modalities(
         // let `interaction_support` answer unknown.
     }
 
+    // Body-level transforms derive under exactly the same strict law: one
+    // declared stage withholding a transform refutes the body claim and
+    // names itself; an opaque stage turns the claim unproven.
+    let mut transforms = BTreeMap::new();
+    let mut declared_transforms: BTreeSet<TransformCapability> = BTreeSet::new();
+    for (_, contract) in stages {
+        if let Some(contract) = contract {
+            declared_transforms.extend(contract.transforms.keys().copied());
+        }
+    }
+    for capability in declared_transforms {
+        let mut supporting = Vec::new();
+        let mut degraded_reasons = Vec::new();
+        let mut withholding = Vec::new();
+        for (stage, contract) in stages {
+            let Some(contract) = contract else {
+                continue;
+            };
+            match contract.transform_support(capability) {
+                ModalitySupport::Supported => supporting.push(stage.to_string()),
+                ModalitySupport::Degraded { reason } => {
+                    supporting.push(stage.to_string());
+                    degraded_reasons.push(format!("{stage}: {reason}"));
+                }
+                ModalitySupport::Unsupported { .. } => withholding.push(stage.to_string()),
+                ModalitySupport::Unknown { .. } => {}
+            }
+        }
+        if !withholding.is_empty() {
+            transforms.insert(
+                capability,
+                ModalitySupport::Unsupported {
+                    reason: format!(
+                        "not carried by every stage; withheld by {}",
+                        withholding.join(", ")
+                    ),
+                },
+            );
+        } else if opaque_stages.is_empty() {
+            let support = if degraded_reasons.is_empty() {
+                ModalitySupport::Supported
+            } else {
+                ModalitySupport::Degraded {
+                    reason: degraded_reasons.join("; "),
+                }
+            };
+            basis.push(format!(
+                "transform `{}` rests on stages {}",
+                capability.as_str(),
+                supporting.join(", ")
+            ));
+            transforms.insert(capability, support);
+        }
+    }
+
     let speech_in = input_modalities.contains(&ModelModality::Speech);
     let speech_out = output_modalities.contains(&ModelModality::Speech);
     ComposedModalityView {
         input_modalities,
         output_modalities,
         interaction,
+        transforms,
         speech_capable: speech_in && speech_out,
         complete: opaque_stages.is_empty(),
         basis,
@@ -1506,6 +1619,123 @@ mod tests {
             view.interaction_support(InteractionCapability::PartialTranscripts),
             ModalitySupport::Unsupported { .. }
         ));
+    }
+
+    #[test]
+    fn a_staged_body_derives_transform_and_modality_answers_under_the_same_law() {
+        let mut stt = ModelModalityContract::new(
+            ProviderRef::parse("provider:example-stt").unwrap(),
+            "transcribe-v2",
+        );
+        stt.input_modalities = BTreeSet::from([ModelModality::Audio, ModelModality::Speech]);
+        stt.output_modalities = BTreeSet::from([ModelModality::Text]);
+        stt.transforms.insert(
+            TransformCapability::SpeechToText,
+            DeclaredSupport::Supported,
+        );
+        stt.transforms.insert(
+            TransformCapability::AudioUnderstanding,
+            DeclaredSupport::Supported,
+        );
+        stt.interaction
+            .insert(InteractionCapability::FinalTranscripts);
+        let mut tts = ModelModalityContract::new(
+            ProviderRef::parse("provider:example-tts").unwrap(),
+            "speak-v1",
+        );
+        tts.input_modalities = BTreeSet::from([ModelModality::Audio, ModelModality::Text]);
+        tts.output_modalities = BTreeSet::from([ModelModality::Audio, ModelModality::Speech]);
+        tts.transforms.insert(
+            TransformCapability::TextToSpeech,
+            DeclaredSupport::Supported,
+        );
+        tts.transforms.insert(
+            TransformCapability::AudioUnderstanding,
+            DeclaredSupport::Supported,
+        );
+
+        let view = compose_stage_modalities(&[
+            (&r("component/stt"), Some(&stt)),
+            (&r("component/tts"), Some(&tts)),
+        ]);
+        assert!(view.complete);
+
+        // Both declared stages would have to carry a transform for the body
+        // to claim it; each withholds the other's transform and names itself.
+        match view.transform_support(TransformCapability::SpeechToText) {
+            ModalitySupport::Unsupported { reason } => {
+                assert!(reason.contains("component/tts"), "who withheld: {reason}");
+            }
+            other => panic!("body speech-to-text must not read as {other:?}"),
+        }
+        match view.transform_support(TransformCapability::TextToSpeech) {
+            ModalitySupport::Unsupported { reason } => {
+                assert!(reason.contains("component/stt"), "who withheld: {reason}");
+            }
+            other => panic!("body text-to-speech must not read as {other:?}"),
+        }
+        match view.transform_support(TransformCapability::SpeechToSpeech) {
+            ModalitySupport::Unsupported { .. } => {}
+            other => panic!("no stage is a speech-to-speech surface: {other:?}"),
+        }
+        // Audio-understanding is carried by both declared stages, so the
+        // body derives it — the one positive body-level transform here.
+        assert!(view
+            .transform_support(TransformCapability::AudioUnderstanding)
+            .is_supported());
+        assert!(view
+            .basis
+            .iter()
+            .any(|line| line.contains("transform `audio-understanding` rests on stages")));
+
+        // Pipeline modalities: text is an interior fact of this body, not
+        // something it takes in or emits.
+        match view.modality_support(ModalityDirection::Input, ModelModality::Text) {
+            ModalitySupport::Unsupported { .. } => {}
+            other => panic!("body input is the first stage's input: {other:?}"),
+        }
+        match view.modality_support(ModalityDirection::Output, ModelModality::Text) {
+            ModalitySupport::Unsupported { .. } => {}
+            other => panic!("body output is the last stage's output: {other:?}"),
+        }
+        assert!(view
+            .modality_support(ModalityDirection::Input, ModelModality::Speech)
+            .is_supported());
+        assert!(view
+            .modality_support(ModalityDirection::Output, ModelModality::Speech)
+            .is_supported());
+
+        // With an opaque stage between them, claims every declared stage
+        // carried become unproven rather than granted — and a claim a
+        // declared stage withholds stays refuted: one explicit refusal
+        // outweighs any opaque stage's silence.
+        let text_stage: Option<&ModelModalityContract> = None;
+        let view = compose_stage_modalities(&[
+            (&r("component/stt"), Some(&stt)),
+            (&r("component/text"), text_stage),
+            (&r("component/tts"), Some(&tts)),
+        ]);
+        assert!(!view.complete);
+        assert!(matches!(
+            view.transform_support(TransformCapability::AudioUnderstanding),
+            ModalitySupport::Unknown { .. }
+        ));
+        match view.transform_support(TransformCapability::SpeechToText) {
+            ModalitySupport::Unsupported { reason } => {
+                assert!(reason.contains("component/tts"), "who withheld: {reason}");
+            }
+            other => panic!("a declared refusal must survive an opaque stage: {other:?}"),
+        }
+        assert!(matches!(
+            view.modality_support(ModalityDirection::Output, ModelModality::Text),
+            ModalitySupport::Unknown { .. }
+        ));
+
+        // Older serialised views without the transforms map still load.
+        let mut rendered = serde_json::to_value(&view).unwrap();
+        rendered.as_object_mut().unwrap().remove("transforms");
+        let recovered: ComposedModalityView = serde_json::from_value(rendered).unwrap();
+        assert!(recovered.transforms.is_empty());
     }
 
     #[test]
