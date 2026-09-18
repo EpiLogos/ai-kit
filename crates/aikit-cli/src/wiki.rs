@@ -1227,6 +1227,23 @@ fn walk_corpus(root: &Path, extension: &str) -> Result<WalkedCorpus> {
             continue;
         }
         let path = entry.path();
+        // The owner's `.no-agent-retrieval` marker prunes a subtree before
+        // any descendant is read — the same law the ProjectCentral binding
+        // and the NOW-field reader honour. Ingest is a read; a room the
+        // owner withheld from agent retrieval must not enter the wiki
+        // through the back door of a corpus walk.
+        let withheld = path
+            .ancestors()
+            .skip(1)
+            .take_while(|ancestor| *ancestor != root)
+            .any(|ancestor| {
+                ancestor
+                    .join(aikit_core::projectcentral::NO_AGENT_RETRIEVAL_MARKER)
+                    .exists()
+            });
+        if withheld {
+            continue;
+        }
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -1393,6 +1410,7 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
 
     let update = args.update;
     let file_display = args.file.display().to_string();
+    let mut unchanged = 0usize;
     let outcome = mutate_file(&args.file, |doc, ledger| {
         for object in objects {
             let ref_id = object.ref_id().clone();
@@ -1407,6 +1425,13 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
                     )
                     .with("ref", ref_id.to_string()));
                 }
+                // An unchanged corpus re-ingested must not masquerade as new
+                // knowledge: identical content, revision aside, keeps the
+                // held revision instead of advancing it.
+                if doc.holds_equivalent(&object) {
+                    unchanged += 1;
+                    continue;
+                }
                 doc.update_object(object)?
             } else {
                 doc.create_object(object)?
@@ -1417,6 +1442,7 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
     })?;
     let written = write_source_pool(&pool_dir, &material)?;
     summary["applied"] = jval!(true);
+    summary["unchanged"] = jval!(unchanged);
     summary["source_pool_files"] = jval!(written);
     summary["outcome"] = mutation_outcome(&outcome);
     let mut reply = WikiOutcome::wrote(summary, &outcome);

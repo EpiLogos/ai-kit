@@ -85,11 +85,31 @@ pub fn read_world_binding<R: CommandRunner>(
         "central.world.effective-sources".into(),
         input.to_string(),
     ];
-    let output = runner
-        .run(&argv)?
-        .require(&argv, "central.world_sources_unavailable")?;
-    let envelope: Value = serde_json::from_str(&output.stdout)
-        .map_err(|e| AikitError::new("central.world_sources_invalid", e.to_string()))?;
+    // This call *asks a question* Central answers with a structured envelope:
+    // the `central.world_declaration_absent` answer — the one case where the
+    // root lineage applies by convention — arrives as an `ok:false` envelope
+    // with a non-zero exit (ctrl maps `invalid_input` to exit 2,
+    // ctrl/src/cli.rs `exit_code`). `CommandRunner::run` returns `Ok` for a
+    // command that ran and failed, so the envelope is read first and only a
+    // command that could not run at all (or produced no envelope) is an
+    // unavailability. Demanding exit 0 before reading would turn Central's
+    // explicit "no authored record" into a source-level failure and withhold
+    // the inherited graph from every project that declares no world.
+    let output = runner.run(&argv)?;
+    let envelope: Value = serde_json::from_str(&output.stdout).map_err(|e| {
+        if output.ok() {
+            AikitError::new("central.world_sources_invalid", e.to_string())
+        } else {
+            AikitError::new(
+                "central.world_sources_unavailable",
+                format!(
+                    "`{}` exited with status {}: {e}",
+                    argv.join(" "),
+                    output.status
+                ),
+            )
+        }
+    })?;
     if envelope["ok"] != true {
         let code = envelope["error"]["code"].as_str().unwrap_or_default();
         let message = envelope["error"]["message"].as_str().unwrap_or("unknown");
