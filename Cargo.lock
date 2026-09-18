@@ -119,6 +119,7 @@ dependencies = [
 name = "aikit-store"
 version = "0.1.0"
 dependencies = [
+ "aikit-adapters",
  "aikit-core",
  "blake3",
  "fs4",

@@ -1,0 +1,22 @@
+schema = 1
+id = "hook/aikit/pi-extension-carrier"
+kind = "hook"
+name = "Pi extension carrier"
+description = "The managed pi hooks projection vehicle: a first-party TypeScript extension, content-addressed at projection time and registered through the `extensions` array of ~/.pi/agent/settings.json, whose handlers translate pi's native extension events (session_start, input, tool_call, tool_result, session_shutdown, session_before_compact) into `aikit hook dispatch pi <AIKitEvent>` with pi's event JSON on stdin, and forward the dispatcher's verdicts back — tool_call blocks, input handled/transform, compaction cancel, injected context via input transform or the before_agent_start message seam. Fail-open everywhere: an absent binary, a timeout or a crash is a no-op, never a blocked session. Its [hook] events are deliberately empty: the carrier FEEDS the dispatcher, and joining a chain it feeds would double-fire and recurse — the trust gate binds on kind, not on chain membership."
+tags = ["aikit", "pi", "hooks", "extension", "carrier", "dispatcher"]
+
+[hook]
+entry = "payload/pi-extension-carrier.ts"
+# Deliberately empty. The carrier is the pi-side transport that spawns the
+# dispatcher; a declared event would put it in the very chains it feeds —
+# each dispatch would re-run the carrier, doubling every hook and recursing
+# once the carrier spawned the dispatcher again. Projection (and therefore
+# what pi loads) is gated by kind-level trust, which an empty event list
+# does not bypass.
+events = []
+# Never dispatched as a chain step, so the phase is a declaration of
+# least authority rather than a live role: observe is terminal — it cannot
+# deny and its failure can never block an event.
+phase = "observe"
+timeout = "15s"
+failure = "open"

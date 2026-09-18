@@ -63,6 +63,11 @@ pub enum MergeGrammar {
     ClaudeHookMap,
     ZcodeHookWrapper,
     McpServersRecord,
+    /// pi's `extensions` string array (settings `extensions`): the seam the
+    /// extension carrier is registered through. One managed entry — the
+    /// content-addressed carrier path — swept and re-added by ownership
+    /// marker on re-projection; foreign extension paths preserved.
+    PiExtensionsRecord,
 }
 
 /// How projected entries combine with entries the harness's other writers
@@ -152,6 +157,11 @@ pub struct HooksLayer {
     pub observe: Vec<HookObserveDeclaration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<HookProjectDeclaration>,
+    /// When the harness sees a projected hooks change, declared like the
+    /// tools layer's. pi reads its extensions at session start, so the
+    /// carrier declares `next-session-only` (a running TUI can /reload).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation: Option<ActivationEffectName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -590,6 +600,7 @@ mcp-servers = false
                 transports: None,
             }],
             project: None,
+            activation: None,
         });
         let error = profile.validate().unwrap_err();
         assert_eq!(error.code, "harness_profile.managed_without_project");
@@ -626,6 +637,7 @@ mcp-servers = false
                 format: MergeGrammar::ZcodeHookWrapper,
                 ownership_identity: "aikit-hook-dispatcher".to_string(),
             }),
+            activation: None,
         });
         let error = profile.validate().unwrap_err();
         assert_eq!(error.code, "harness_profile.unmanaged_project");
