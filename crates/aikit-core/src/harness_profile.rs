@@ -288,13 +288,161 @@ pub struct SessionsLayer {
 }
 
 /// Install/config seams of the harness itself. Carried by the layers above;
-/// this section records them where no layer-specific declaration fits.
+/// this section records them where no layer-specific declaration fits —
+/// including the harness's own trust/permissions settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SettingsLayer {
     pub posture: LayerPosture,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observe: Vec<String>,
+    /// The harness's own trust/permissions settings, one declaration per
+    /// addressable setting. This is the general SDK pattern for harness
+    /// trust: a harness declares what its own config natively supports, and
+    /// ai-kit's configuration contribution surfaces each declaration as
+    /// `ai-kit:<slug>:<key>` so an authored `oi.profile/v1` can carry the
+    /// machine's trust posture. The next harness plugs in by declaring its
+    /// settings here — the plane derives its sections from these
+    /// declarations and needs no per-harness code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trust_settings: Vec<TrustSettingDeclaration>,
+}
+
+/// One trust/permissions setting of a harness's own configuration. The
+/// declaration carries the harness-native location and value grammar; the
+/// configuration plane adds the owner/scope/effect framing around it.
+/// Declarations are disclosure-only (`writable: false` on the plane): AIKit
+/// reads and desires these entries, the harness owns the native write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct TrustSettingDeclaration {
+    /// Dotted lowercase key under the harness's section, mirroring the
+    /// harness-native entry (for example `projects.trust_level`). With the
+    /// slug it forms the plane identity `ai-kit:<slug>:<key>`.
+    pub key: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Where the harness natively stores the entry, in plain words
+    /// (home-relative path plus the native key), so the declaration can be
+    /// checked against the live config.
+    pub config: String,
+    pub value_schema: TrustValueSchema,
+    /// The scopes the setting can be desired at (`machine`, `project`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<TrustSettingScope>,
+}
+
+/// The value grammar of a declared trust/permissions setting — the subset of
+/// the plane's frozen schema kinds a harness config actually uses. `enum`
+/// carries the options the harness documents or is observed to accept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct TrustValueSchema {
+    #[serde(rename = "type")]
+    pub kind: TrustValueKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrustValueKind {
+    Boolean,
+    Scalar,
+    Enum,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrustSettingScope {
+    Machine,
+    Project,
+}
+
+impl TrustSettingDeclaration {
+    /// The dotted key must stay inside the configuration plane's setting-key
+    /// grammar (`[a-z0-9_][a-z0-9_-]*(\.[a-z0-9_][a-z0-9_-]*)*`) so the
+    /// derived `ai-kit:<slug>:<key>` identity parses there unchanged.
+    fn validate_key(&self) -> Result<(), HarnessProfileError> {
+        let ok_segment = |segment: &str| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first)
+                    if first.is_ascii_lowercase() || first.is_ascii_digit() || first == '_' => {}
+                _ => return false,
+            }
+            chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        };
+        if self.key.split('.').any(|segment| !ok_segment(segment)) {
+            return Err(HarnessProfileError::new(
+                "harness_profile.trust_setting_key",
+                format!(
+                    "trust setting key {:?} is not a dotted lowercase key; the derived \
+                     plane identity `ai-kit:<slug>:{}` must parse as `owner:section:key`, \
+                     so use segments of [a-z0-9_] joined by dots",
+                    self.key, self.key
+                ),
+            )
+            .with("field", "key")
+            .with("key", self.key.clone()));
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), HarnessProfileError> {
+        self.validate_key()?;
+        if self.title.trim().is_empty() {
+            return Err(HarnessProfileError::new(
+                "harness_profile.trust_setting_title",
+                format!(
+                    "trust setting {:?} declares no title; a title is the human surface \
+                     the plane renders — add a short `title`",
+                    self.key
+                ),
+            )
+            .with("field", "title")
+            .with("key", self.key.clone()));
+        }
+        if self.config.trim().is_empty() {
+            return Err(HarnessProfileError::new(
+                "harness_profile.trust_setting_config",
+                format!(
+                    "trust setting {:?} names no native config location; add `config` \
+                     naming the file and key the harness actually stores the entry in, \
+                     so the declaration can be checked against the live config",
+                    self.key
+                ),
+            )
+            .with("field", "config")
+            .with("key", self.key.clone()));
+        }
+        if self.value_schema.kind == TrustValueKind::Enum && self.value_schema.options.is_empty() {
+            return Err(HarnessProfileError::new(
+                "harness_profile.trust_setting_enum_without_options",
+                format!(
+                    "trust setting {:?} is enum-valued but declares no options; the plane \
+                     refuses an enum with no options — list the values the harness accepts",
+                    self.key
+                ),
+            )
+            .with("field", "value-schema.options")
+            .with("key", self.key.clone()));
+        }
+        if self.scopes.is_empty() {
+            return Err(HarnessProfileError::new(
+                "harness_profile.trust_setting_scopes",
+                format!(
+                    "trust setting {:?} declares no scopes; a desired entry is desired AT a \
+                     scope — list the scopes the setting can be desired at (machine, project)",
+                    self.key
+                ),
+            )
+            .with("field", "scopes")
+            .with("key", self.key.clone()));
+        }
+        Ok(())
+    }
 }
 
 /// One `aikit.harness-profile/v1` document. Every layer section is optional;
@@ -409,6 +557,15 @@ impl HarnessProfile {
         }
         if let Some(hooks) = &self.hooks {
             validate_layer_project("hooks", hooks.posture, hooks.project.as_ref())?;
+        }
+        if let Some(settings) = &self.settings {
+            for declaration in &settings.trust_settings {
+                declaration.validate().map_err(|error| {
+                    error
+                        .with("layer", "settings")
+                        .with("slug", self.slug.clone())
+                })?;
+            }
         }
         Ok(())
     }
@@ -676,5 +833,93 @@ mcp-servers = false
         profile.slug = "   ".to_string();
         let error = profile.validate().unwrap_err();
         assert_eq!(error.code, "harness_profile.empty_slug");
+    }
+
+    fn codex_trust_settings_layer() -> SettingsLayer {
+        SettingsLayer {
+            posture: LayerPosture::Observed,
+            observe: vec!["~/.codex/config.toml".to_string()],
+            trust_settings: vec![
+                TrustSettingDeclaration {
+                    key: "projects.trust_level".to_string(),
+                    title: "Project workspace trust".to_string(),
+                    description: "Which project roots codex trusts.".to_string(),
+                    config: "~/.codex/config.toml [projects.\"<root>\"] trust_level".to_string(),
+                    value_schema: TrustValueSchema {
+                        kind: TrustValueKind::Enum,
+                        options: vec!["trusted".to_string()],
+                    },
+                    scopes: vec![TrustSettingScope::Project],
+                },
+                TrustSettingDeclaration {
+                    key: "home.trust_level".to_string(),
+                    title: "Home wholesale trust".to_string(),
+                    description: "Whether $HOME is ever trusted wholesale (never).".to_string(),
+                    config: "~/.codex/config.toml (absence is the law)".to_string(),
+                    value_schema: TrustValueSchema {
+                        kind: TrustValueKind::Boolean,
+                        options: vec![],
+                    },
+                    scopes: vec![TrustSettingScope::Machine],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_settings_layer_with_trust_declarations_parses_from_toml_and_validates() {
+        let mut profile = openclaw_profile();
+        profile.settings = Some(codex_trust_settings_layer());
+        profile.validate().expect("trust declarations validate");
+        let text = toml::to_string_pretty(&profile).expect("serialises");
+        let from_toml: HarnessProfile = toml::from_str(&text).expect("reparses");
+        assert_eq!(from_toml, profile);
+        let layer = from_toml.settings.as_ref().unwrap();
+        assert_eq!(layer.trust_settings[0].key, "projects.trust_level");
+        assert_eq!(
+            layer.trust_settings[0].scopes,
+            vec![TrustSettingScope::Project]
+        );
+        assert_eq!(
+            layer.trust_settings[1].value_schema.kind,
+            TrustValueKind::Boolean
+        );
+    }
+
+    #[test]
+    fn an_underscore_free_but_malformed_trust_key_is_refused_with_a_fix() {
+        let mut profile = openclaw_profile();
+        let mut layer = codex_trust_settings_layer();
+        layer.trust_settings[0].key = "projects/Trust Level".to_string();
+        profile.settings = Some(layer);
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.trust_setting_key");
+        assert!(
+            error.to_string().contains("ai-kit:<slug>"),
+            "error must name the derived identity it would break: {error}"
+        );
+    }
+
+    #[test]
+    fn an_enum_trust_setting_without_options_is_refused() {
+        let mut profile = openclaw_profile();
+        let mut layer = codex_trust_settings_layer();
+        layer.trust_settings[0].value_schema.options = vec![];
+        profile.settings = Some(layer);
+        let error = profile.validate().unwrap_err();
+        assert_eq!(
+            error.code,
+            "harness_profile.trust_setting_enum_without_options"
+        );
+    }
+
+    #[test]
+    fn a_trust_setting_without_scopes_is_refused() {
+        let mut profile = openclaw_profile();
+        let mut layer = codex_trust_settings_layer();
+        layer.trust_settings[1].scopes = vec![];
+        profile.settings = Some(layer);
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.trust_setting_scopes");
     }
 }

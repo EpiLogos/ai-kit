@@ -26,6 +26,12 @@
 //!   (`state/config/receipts.jsonl`); a replay returns `no_op` naming the
 //!   original receipt and never re-executes.
 //!
+//! Harness trust/permissions settings ride the same contract as the general
+//! pattern: each harness's embedded profile (`aikit.harness-profile/v1`,
+//! `settings.trust-settings`) declares what its own config supports, and
+//! `harness_sections` below derives the per-harness sections from those
+//! declarations — disclosure-only, `ai-kit:<slug>:<key>`.
+//!
 //! One additive extension beyond the frozen `oi.config-plan/v1` properties:
 //! plans carry the requested `value` as a top-level field, so that the
 //! `plan_digest` (computed over the plan body) genuinely pins the change it
@@ -39,6 +45,7 @@ use sha2::{Digest, Sha256};
 use ulid::Ulid;
 
 use aikit_core::catalog::Catalog;
+use aikit_core::harness_profile::{TrustSettingScope, TrustValueKind};
 use aikit_core::id::{CapsuleId, ProfileId};
 use aikit_core::scope::ScopeKind;
 use aikit_core::AikitError;
@@ -530,6 +537,100 @@ fn sections() -> Vec<Value> {
     sections
 }
 
+/// The harness trust/permissions sections, derived from the embedded
+/// harness profiles (`aikit.harness-profile/v1`): every profile whose
+/// `settings.trust-settings` declares entries yields one section keyed by
+/// the harness slug, and every declaration becomes a disclosure-only plane
+/// setting `ai-kit:<slug>:<key>`. This is the general pattern the owner
+/// commissioned: a harness's trust surface is declared in the harness's own
+/// profile and the plane surfaces it — the next harness plugs in by
+/// declaring its settings, with no new code here.
+///
+/// Declarations are disclosed `writable: false` with no plan/apply/reset:
+/// the harness owns the native write, AIKit reads and desires. That is the
+/// `models.candidates` precedent (disclosure-only), applied to harness
+/// trust.
+fn harness_sections() -> Vec<Value> {
+    let scope_wire = |scope: TrustSettingScope| match scope {
+        TrustSettingScope::Machine => "machine",
+        TrustSettingScope::Project => "project",
+    };
+    let mut sections: Vec<Value> = Vec::new();
+    for (slug, profile) in aikit_adapters::profiles::all() {
+        let Some(settings) = &profile.settings else {
+            continue;
+        };
+        if settings.trust_settings.is_empty() {
+            continue;
+        }
+        let disclosed: Vec<Value> = settings
+            .trust_settings
+            .iter()
+            .map(|declaration| {
+                let value_schema = match declaration.value_schema.kind {
+                    TrustValueKind::Enum => json!({
+                        "type": "enum",
+                        "options": declaration
+                            .value_schema
+                            .options
+                            .iter()
+                            .map(|option| json!({ "value": option }))
+                            .collect::<Vec<_>>(),
+                    }),
+                    TrustValueKind::Boolean => json!({ "type": "boolean" }),
+                    TrustValueKind::Scalar => json!({ "type": "scalar" }),
+                };
+                json!({
+                    "setting_ref": format!("{OWNER_REF}:{slug}:{}", declaration.key),
+                    "section_ref": slug,
+                    "title": declaration.title,
+                    "description": declaration.description,
+                    "value_schema": value_schema,
+                    "allowed_scopes": declaration
+                        .scopes
+                        .iter()
+                        .map(|scope| json!({
+                            "scope_kind": scope_wire(*scope),
+                            "scope_ref": null,
+                        }))
+                        .collect::<Vec<_>>(),
+                    "writable": false,
+                    "profileable": true,
+                    "sensitive": false,
+                    "default_semantics": "none",
+                    "effect": {
+                        "kind": "none",
+                        "summary": "The harness owns this entry natively; AIKit reads and \
+                                    desires it, and writes no trust change through this plane.",
+                        "ref": declaration.config,
+                    },
+                    "operations": {
+                        "validate": true,
+                        "plan": false,
+                        "apply": false,
+                        "reset": false,
+                    },
+                    "native_ref": declaration.config,
+                })
+            })
+            .collect();
+        sections.push(json!({
+            "id": slug,
+            "title": format!("{slug} — the harness's own trust/permissions surface"),
+            "settings": disclosed,
+        }));
+    }
+    sections
+}
+
+/// Every section the contribution discloses: the owner's own static
+/// settings plus the derived per-harness trust sections.
+fn all_sections() -> Vec<Value> {
+    let mut all = sections();
+    all.extend(harness_sections());
+    all
+}
+
 /// The full contribution for a resolvable context. Availability is probed, not
 /// asserted: the document degrades honestly when the owner context cannot be
 /// resolved rather than failing the read (the Wave-5 convention).
@@ -550,10 +651,12 @@ pub fn contribution_document(cwd: &Path) -> Value {
                 },
                 "about": "Resolution and composition: which native profiles, capability \
                           toggles, default skill-sets and credential references the composed \
-                          World may address. Models are resolved per launch and credentials \
-                          are bound owner-natively, so both are disclosed without a write \
-                          path through this plane.",
-                "sections": sections(),
+                          World may address, plus each declared harness's own \
+                          trust/permissions surface. Models are resolved per launch, \
+                          credentials are bound owner-natively, and harness trust is \
+                          harness-owned, so all three are disclosed without a write path \
+                          through this plane.",
+                "sections": all_sections(),
                 "operations": {
                     "transport": "cli/v1",
                     "validate": { "availability": "disclosed", "reason": null },

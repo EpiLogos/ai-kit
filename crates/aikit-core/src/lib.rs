@@ -238,7 +238,8 @@ pub use harness_profile::{
     HookObserveDeclaration, HookProjectDeclaration, HooksLayer, LayerPosture, MergeGrammar,
     MergePolicy, ModelDispatchPosture, SessionCapabilityFlags, SessionProtocol, SettingsLayer,
     SkillsLayer, SkillsObserveDeclaration, ToolObserveDeclaration, ToolProjectDeclaration,
-    ToolsLayer, HARNESS_PROFILE_SCHEMA,
+    ToolsLayer, TrustSettingDeclaration, TrustSettingScope, TrustValueKind, TrustValueSchema,
+    HARNESS_PROFILE_SCHEMA,
 };
 pub use hooks::{
     build_chains, matches as hook_matches, BypassScope, BypassToken, Denial, Dispatcher,

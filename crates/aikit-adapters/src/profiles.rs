@@ -55,6 +55,23 @@ dispatch = { native-provider-binding = { provider-ref = "provider:anthropic", se
 [sessions]
 posture = "observed"
 protocol = "process"
+
+[settings]
+posture = "observed"
+observe = ["~/.claude/settings.json"]
+
+# The harness's own enforcement surface, declared for the configuration plane
+# as ai-kit:claude:<key>. Grounded in the live config: the PreToolUse entry is
+# the Central filesystem guardrail riding the AIKit hook chain (aikit hook
+# dispatch claude PreToolUse); herdr's SessionStart stays foreign and is not
+# AIKit's to declare.
+[[settings.trust-settings]]
+key = "hooks.fs-guardrail"
+title = "PreToolUse filesystem guardrail"
+description = "The PreToolUse enforcement entry Central ground law (filesystem-guardrails.md) requires in this harness; it rides the AIKit hook chain and blocks out-of-bounds writes with exit 2."
+config = "~/.claude/settings.json hooks.PreToolUse[].hooks[].command"
+value-schema = { type = "scalar" }
+scopes = ["machine"]
 "#,
     ),
     (
@@ -95,6 +112,30 @@ dispatch = { native-provider-binding = { provider-ref = "provider:openai", selec
 posture = "observed"
 protocol = "process"
 open-modes = ["resume"]
+
+[settings]
+posture = "observed"
+observe = ["~/.codex/config.toml"]
+
+# The harness's own trust surface, declared for the configuration plane as
+# ai-kit:codex:<key> (the general trust pattern: declare what the harness's
+# own config supports; the plane derives the disclosure). Grounded in the
+# live config and Control/agents/governance/filesystem-guardrails.md.
+[[settings.trust-settings]]
+key = "projects.trust_level"
+title = "Project workspace trust"
+description = "Which project roots codex marks trusted. This ground trusts exactly the declared project roots, never $HOME wholesale."
+config = '~/.codex/config.toml [projects."<root>"] trust_level'
+value-schema = { type = "enum", options = ["trusted"] }
+scopes = ["project"]
+
+[[settings.trust-settings]]
+key = "home.trust_level"
+title = "Home wholesale trust"
+description = "Whether $HOME is ever trusted wholesale. The 2026-09-16 narrowing removed ~/Work and tm02-field-test trust; absence is the declaration — HOME is a dwelling, not a workspace."
+config = "~/.codex/config.toml (absence is the declaration)"
+value-schema = { type = "boolean" }
+scopes = ["machine"]
 "#,
     ),
     (
@@ -129,6 +170,22 @@ dispatch = { none = { reason = "The catalog declares no native provider binding 
 [sessions]
 posture = "observed"
 protocol = "process"
+
+[settings]
+posture = "observed"
+observe = ["~/.zcode/cli/config.json"]
+
+# The harness's own enforcement surface, declared for the configuration plane
+# as ai-kit:zcode:<key>. Grounded in the live config: the PreToolUse entry is
+# the Central filesystem guardrail riding the AIKit hook chain (aikit hook
+# dispatch zcode PreToolUse); hooks.enabled true is its master switch.
+[[settings.trust-settings]]
+key = "hooks.fs-guardrail"
+title = "PreToolUse filesystem guardrail"
+description = "The PreToolUse enforcement entry Central ground law (filesystem-guardrails.md) requires in this harness; it rides the AIKit hook chain and blocks out-of-bounds writes with exit 2."
+config = "~/.zcode/cli/config.json hooks.events.PreToolUse[].hooks[].command"
+value-schema = { type = "scalar" }
+scopes = ["machine"]
 "#,
     ),
     (
@@ -647,6 +704,7 @@ pub fn slug_for_target(target: &TargetId) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aikit_core::harness_profile::{TrustSettingScope, TrustValueKind};
 
     #[test]
     fn every_embedded_profile_parses_validates_and_resolves_by_slug() {
@@ -750,6 +808,79 @@ mod tests {
         assert!(!sessions.capabilities.mcp_servers);
         assert!(!sessions.capabilities.additional_directories);
         assert!(!sessions.capabilities.reconnect);
+    }
+
+    #[test]
+    fn trust_declaring_profiles_declare_their_trust_settings_as_data() {
+        // The general harness-trust pattern: each declaring profile carries
+        // its trust/permissions declarations in its own settings layer, and
+        // every declaration is plane-ready (key grammar, scopes, enum
+        // options) so the configuration plane can surface it unchanged.
+        let expected: &[(
+            &str,
+            &[(&str, aikit_core::harness_profile::TrustSettingScope)],
+        )] = &[
+            (
+                "claude-code",
+                &[("hooks.fs-guardrail", TrustSettingScope::Machine)],
+            ),
+            (
+                "codex",
+                &[
+                    ("projects.trust_level", TrustSettingScope::Project),
+                    ("home.trust_level", TrustSettingScope::Machine),
+                ],
+            ),
+            (
+                "zcode",
+                &[("hooks.fs-guardrail", TrustSettingScope::Machine)],
+            ),
+        ];
+        for (slug, keys) in expected {
+            let profile = for_slug(slug).expect("embedded profile");
+            let layer = profile
+                .settings
+                .as_ref()
+                .unwrap_or_else(|| panic!("{slug} declares trust settings but no settings layer"));
+            assert_eq!(
+                layer.posture,
+                aikit_core::harness_profile::LayerPosture::Observed,
+                "trust declarations are disclosure-only: {slug}"
+            );
+            let declared: Vec<_> = layer
+                .trust_settings
+                .iter()
+                .map(|t| (t.key.as_str(), t.scopes[0]))
+                .collect();
+            assert_eq!(&declared[..], *keys, "declared keys/scopes for {slug}");
+            for declaration in &layer.trust_settings {
+                assert!(
+                    !declaration.config.is_empty(),
+                    "{slug} {} names its config",
+                    declaration.key
+                );
+                if declaration.value_schema.kind == TrustValueKind::Enum {
+                    assert!(
+                        !declaration.value_schema.options.is_empty(),
+                        "{slug} {} enum carries options",
+                        declaration.key
+                    );
+                }
+            }
+        }
+        // The posture truth cuts both ways: profiles that declare no trust
+        // surface carry no trust declarations.
+        for (slug, profile) in all() {
+            if slug == "claude-code" || slug == "codex" || slug == "zcode" {
+                continue;
+            }
+            let declared = profile
+                .settings
+                .as_ref()
+                .map(|layer| layer.trust_settings.len())
+                .unwrap_or(0);
+            assert_eq!(declared, 0, "{slug} declares no trust settings yet");
+        }
     }
 
     #[test]
