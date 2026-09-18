@@ -175,9 +175,9 @@ pub use credential::{
     SecretRequirementRef, SecretValue, CREDENTIAL_RESOLUTION_VERSION,
 };
 pub use credential_world::{
-    disclose_credential_world, CredentialResolutionDisclosure, CredentialStatusKnowledge,
-    CredentialWorldDisclosure, ProviderResolutionDisclosure, ProviderRosterKnowledge,
-    CREDENTIAL_WORLD_VERSION,
+    derived_credential_ref, disclose_credential_world, resolve_credential_presence,
+    CredentialResolutionDisclosure, CredentialStatusKnowledge, CredentialWorldDisclosure,
+    ProviderResolutionDisclosure, ProviderRosterKnowledge, CREDENTIAL_WORLD_VERSION,
 };
 pub use doctor_world::{
     DoctorDisclosure, DoctorFinding, DoctorKnowledge, DoctorSeverity, DOCTOR_WORLD_VERSION,

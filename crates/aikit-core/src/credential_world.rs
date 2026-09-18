@@ -46,7 +46,7 @@
 //! neither `Serialize` nor `Clone`, and nothing declared here is typed to
 //! hold one; only identity, provenance and status cross this boundary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +56,7 @@ use crate::credential::{
     SecretProviderDescriptor, SecretProviderRef, SecretProviderTier, SecretRequirement,
     SecretRequirementRef,
 };
-use crate::resource::{CredentialCondition, ModelRouteSet};
+use crate::resource::{CredentialCondition, ModelRouteSet, ProviderRef};
 
 pub const CREDENTIAL_WORLD_VERSION: &str = "aikit.credential-world/v1";
 
@@ -415,9 +415,44 @@ pub fn credential_requirements_for_model_routes(
 /// but has no binding naming one yet. Keyed to the provider so it stays stable
 /// and readable (`provider:openai` -> `credential:openai`); the exact ref does
 /// not affect the outcome, which is a genuine "no binding" either way.
-fn derived_credential_ref(provider: &str) -> String {
+pub fn derived_credential_ref(provider: &str) -> String {
     let vendor = provider.strip_prefix("provider:").unwrap_or(provider);
     format!("credential:{vendor}")
+}
+
+/// Presence-resolve a declared credential condition against the machine's
+/// binding records, given the refs that are bound. A required-and-unbound
+/// condition reads as satisfied exactly when a binding exists for the
+/// provider's [`derived_credential_ref`] — the same derivation
+/// [`credential_requirements_for_model_routes`] uses — so a disclosure names
+/// a credential gap only when the gap is real on this machine. Refs and
+/// presence only: no secret value can enter through this seam, and an
+/// already-satisfied condition passes through untouched.
+pub fn resolve_credential_presence(
+    condition: &CredentialCondition,
+    provider: &ProviderRef,
+    bound_credential_refs: &BTreeSet<String>,
+) -> CredentialCondition {
+    match condition {
+        CredentialCondition::NotRequired => CredentialCondition::NotRequired,
+        CredentialCondition::Satisfied { hint, binding_ref } => CredentialCondition::Satisfied {
+            hint: hint.clone(),
+            binding_ref: binding_ref.clone(),
+        },
+        CredentialCondition::Required { hint } => {
+            let derived = derived_credential_ref(provider.as_str());
+            if bound_credential_refs.contains(&derived) {
+                CredentialCondition::Satisfied {
+                    hint: hint.clone(),
+                    binding_ref: derived,
+                }
+            } else {
+                CredentialCondition::Required {
+                    hint: hint.to_string(),
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -822,5 +857,59 @@ mod tests {
             requirements[0].credential_ref.as_str(),
             "credential:openai/api-key"
         );
+    }
+
+    fn presence_condition() -> CredentialCondition {
+        CredentialCondition::Required {
+            hint: "openai realtime credential".into(),
+        }
+    }
+
+    fn provider() -> ProviderRef {
+        ProviderRef::parse("provider:openai").unwrap()
+    }
+
+    #[test]
+    fn a_required_condition_names_a_gap_only_while_the_gap_is_real() {
+        let unbound = BTreeSet::new();
+        match resolve_credential_presence(&presence_condition(), &provider(), &unbound) {
+            CredentialCondition::Required { hint } => {
+                assert_eq!(hint, "openai realtime credential");
+            }
+            other => panic!("an unbound credential must stay required, got {other:?}"),
+        }
+
+        let bound = BTreeSet::from(["credential:openai".to_string()]);
+        match resolve_credential_presence(&presence_condition(), &provider(), &bound) {
+            CredentialCondition::Satisfied { hint, binding_ref } => {
+                assert_eq!(hint, "openai realtime credential");
+                assert_eq!(binding_ref, "credential:openai");
+            }
+            other => panic!("a bound credential must read satisfied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn presence_resolution_never_touches_conditions_that_already_speak() {
+        let bound = BTreeSet::from(["credential:openai".to_string()]);
+        assert_eq!(
+            resolve_credential_presence(&CredentialCondition::NotRequired, &provider(), &bound),
+            CredentialCondition::NotRequired
+        );
+        let satisfied = CredentialCondition::Satisfied {
+            hint: "openai realtime credential".into(),
+            binding_ref: "credential-binding/openai-1".into(),
+        };
+        assert_eq!(
+            resolve_credential_presence(&satisfied, &provider(), &bound),
+            satisfied,
+            "a declared binding is the declarer's fact; presence never rewrites it"
+        );
+        // A different provider's binding does not satisfy this provider's gap.
+        let elsewhere = ProviderRef::parse("provider:elsewhere").unwrap();
+        match resolve_credential_presence(&presence_condition(), &elsewhere, &bound) {
+            CredentialCondition::Required { .. } => {}
+            other => panic!("another provider's binding must not satisfy, got {other:?}"),
+        }
     }
 }

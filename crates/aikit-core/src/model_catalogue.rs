@@ -19,6 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::model_modality::{
+    InteractionCapability, ModelModality, ModelModalityContract, TransformCapability, TransportKind,
+};
 use crate::resource::{
     CredentialCondition, ModelRouteKind, ProviderRef, ResourceDescriptor, ResourceKind,
     ResourceRecord, ResourceRef, ResourceSource, SourceAuthority, SourceRef, SourceState,
@@ -273,6 +276,14 @@ fn entry(
     }
 }
 
+/// The seed's speech entries (`model:gpt-realtime`, `model:gpt-4o-transcribe`,
+/// `model:gpt-4o-mini-tts`) are how speech is visible as a class of model in
+/// every listing. Swapping in a better model never touches the generic
+/// modality contract: a same-provider replacement is one new entry here plus
+/// the adapter's recorded session fixture — zero core changes; a new provider
+/// wire is one adapter instance following the `openai_realtime` pattern,
+/// whose surfaces this catalogue already knows how to join by
+/// (provider, provider-native id).
 fn seed_entries() -> Vec<ModelCatalogueEntry> {
     vec![
         entry(
@@ -516,6 +527,232 @@ pub fn catalogue_from_observations(
     Ok(catalogue)
 }
 
+// ---------------------------------------------------------------------------
+// Catalogue modality disclosure
+// ---------------------------------------------------------------------------
+
+/// The declared modality class facts one adapter-declared surface contributes
+/// to a catalogued Model. This is the read a listing needs to show speech as
+/// a class of model: what the surface hears and says, what it converts,
+/// which interaction forms it offers, and the transport it is reached over —
+/// exactly the facts the surface's [`ModelModalityContract`] declares, with
+/// the credential condition presence-resolved (ref/presence only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogueModalityClass {
+    pub input_modalities: BTreeSet<ModelModality>,
+    pub output_modalities: BTreeSet<ModelModality>,
+    /// Declared positive transform supports; an absent capability is the
+    /// surface's explicit unsupported fact, never a flattening.
+    pub transforms: BTreeSet<TransformCapability>,
+    /// Declared interaction capabilities.
+    pub interaction: BTreeSet<InteractionCapability>,
+    pub transport: TransportKind,
+    /// Interactive speech in both directions on this surface.
+    pub speech_capable: bool,
+    pub provider: ProviderRef,
+    pub provider_native_surface: String,
+    /// The surface's credential condition, presence-resolved against the
+    /// bound refs the reader supplied. Presence and refs only — a secret has
+    /// no representation here.
+    pub credential: CredentialCondition,
+    /// Where the declared facts came from (adapter fixture revisions,
+    /// documentation pins), verbatim from the declaring surface.
+    #[serde(default)]
+    pub provenance: Vec<String>,
+}
+
+/// Honest availability of a catalogued option at the catalogue plane. The
+/// classes keep three facts apart that a listing must never collapse: the
+/// option exists (catalogued), the option is real but a named credential is
+/// absent (credential-gated), the option is real but reduced (degraded). A
+/// surface that declares itself not offered stays its own state rather than
+/// being flattened into any of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum CatalogueAvailability {
+    /// Catalogued identity with nothing gating it at this plane: either no
+    /// modality surface declared for it (a plain text model) or the joined
+    /// surface's facts hold with its credential bound. This is never a claim
+    /// that a route was observed — route observation stays the compose join.
+    Catalogued,
+    /// A declared surface joins this Model and its credential is not bound
+    /// on this machine. The option is visible and unusable until the named
+    /// credential is bound; `missing` is the declaring surface's own hint
+    /// for which credential that is.
+    CredentialGated {
+        missing: String,
+    },
+    /// The declared surface is offered in a reduced form; the reason is the
+    /// declarer's own words.
+    Degraded {
+        reason: String,
+    },
+    /// The declared surface states itself not offered.
+    Unavailable {
+        reason: String,
+    },
+}
+
+impl CatalogueAvailability {
+    /// How restrictive a state is, for combining several joined surfaces
+    /// into one entry-level answer: the most restrictive surface wins, so a
+    /// listing never reads more usable than its least usable surface.
+    fn restrictiveness(&self) -> u8 {
+        match self {
+            Self::Unavailable { .. } => 0,
+            Self::CredentialGated { .. } => 1,
+            Self::Degraded { .. } => 2,
+            Self::Catalogued => 3,
+        }
+    }
+}
+
+/// One catalogued Model's disclosure: identity plus every declared modality
+/// class joined to its routes, plus the entry-level availability answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogueModelDisclosure {
+    pub model: ResourceRef,
+    pub name: String,
+    pub description: String,
+    pub source: SourceRef,
+    /// One entry per distinct adapter-declared surface joined through this
+    /// entry's routes. Empty when no surface declares this Model — which is
+    /// itself the honest "nothing is known here" fact.
+    pub modality_classes: Vec<CatalogueModalityClass>,
+    pub availability: CatalogueAvailability,
+}
+
+impl CatalogueModelDisclosure {
+    /// Whether any joined surface declares speech in either direction. This
+    /// is the class membership test: speech is visible as a class of model
+    /// because membership is derived from declared facts, never from a
+    /// consumer knowing model names.
+    pub fn carries_speech(&self) -> bool {
+        self.modality_classes.iter().any(|class| {
+            class.input_modalities.contains(&ModelModality::Speech)
+                || class.output_modalities.contains(&ModelModality::Speech)
+        })
+    }
+}
+
+/// The speech class over a set of disclosures: the catalogued Models a
+/// listing should show under "speech", in catalogue order.
+pub fn speech_class_models(disclosures: &[CatalogueModelDisclosure]) -> Vec<ResourceRef> {
+    disclosures
+        .iter()
+        .filter(|disclosure| disclosure.carries_speech())
+        .map(|disclosure| disclosure.model.clone())
+        .collect()
+}
+
+/// Join the resolved catalogue against adapter-declared surfaces and the
+/// machine's bound credential refs. Pure: catalogue entries and declared
+/// surfaces are the recorded facts, `bound_credential_refs` is the reader's
+/// presence evidence (the credential binding store's non-revoked refs); no
+/// re-resolution, no network, no secret material.
+///
+/// The join key is (route provider, provider-native id) on both sides — the
+/// catalogue's own claim key — so nothing here branches on a model or
+/// provider name. A declared surface no entry claims appears nowhere: it is
+/// not a Model, and inventing an entry for it would mint identity.
+pub fn disclose_catalogue_modalities(
+    catalogue: &ModelCatalogue,
+    declared_surfaces: &[ModelModalityContract],
+    bound_credential_refs: &BTreeSet<String>,
+) -> Vec<CatalogueModelDisclosure> {
+    catalogue
+        .entries()
+        .map(|entry| {
+            let mut classes: Vec<CatalogueModalityClass> = Vec::new();
+            let mut availability = CatalogueAvailability::Catalogued;
+            for route in &entry.routes {
+                for surface in declared_surfaces {
+                    if &surface.provider != &route.provider || !route.claims(&surface.provider_native_surface)
+                    {
+                        continue;
+                    }
+                    let already_joined = classes.iter().any(|class| {
+                        class.provider == surface.provider
+                            && class.provider_native_surface == surface.provider_native_surface
+                    });
+                    if already_joined {
+                        continue;
+                    }
+                    classes.push(class_from_surface(surface, bound_credential_refs));
+                    let surface_state = availability_from_surface(surface, bound_credential_refs);
+                    if surface_state.restrictiveness() < availability.restrictiveness() {
+                        availability = surface_state;
+                    }
+                }
+            }
+            CatalogueModelDisclosure {
+                model: entry.model.clone(),
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                source: entry.source.clone(),
+                modality_classes: classes,
+                availability,
+            }
+        })
+        .collect()
+}
+
+fn class_from_surface(
+    surface: &ModelModalityContract,
+    bound_credential_refs: &BTreeSet<String>,
+) -> CatalogueModalityClass {
+    CatalogueModalityClass {
+        input_modalities: surface.input_modalities.clone(),
+        output_modalities: surface.output_modalities.clone(),
+        transforms: surface.transforms.keys().copied().collect(),
+        interaction: surface.interaction.iter().copied().collect(),
+        transport: surface.transport,
+        speech_capable: surface.is_speech_capable(),
+        provider: surface.provider.clone(),
+        provider_native_surface: surface.provider_native_surface.clone(),
+        credential: crate::credential_world::resolve_credential_presence(
+            &surface.credential,
+            &surface.provider,
+            bound_credential_refs,
+        ),
+        provenance: surface.provenance.clone(),
+    }
+}
+
+/// One surface's availability answer. The credential gap outranks a
+/// degradation deliberately: the question the listing answers is "what
+/// stands between me and using this", and while the credential is absent
+/// that is the gap — the reduction becomes the visible fact as soon as the
+/// credential is bound.
+fn availability_from_surface(
+    surface: &ModelModalityContract,
+    bound_credential_refs: &BTreeSet<String>,
+) -> CatalogueAvailability {
+    let credential = crate::credential_world::resolve_credential_presence(
+        &surface.credential,
+        &surface.provider,
+        bound_credential_refs,
+    );
+    if let CredentialCondition::Required { hint } = &credential {
+        return CatalogueAvailability::CredentialGated {
+            missing: hint.clone(),
+        };
+    }
+    match &surface.availability {
+        crate::model_modality::SurfaceAvailability::Available => CatalogueAvailability::Catalogued,
+        crate::model_modality::SurfaceAvailability::Degraded { reason } => {
+            CatalogueAvailability::Degraded {
+                reason: reason.clone(),
+            }
+        }
+        crate::model_modality::SurfaceAvailability::Unavailable { reason } => {
+            CatalogueAvailability::Unavailable {
+                reason: reason.clone(),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,5 +904,260 @@ mod tests {
             assert_eq!(route.kind, ModelRouteKind::ProviderNative);
             assert!(route.credential.requires_credential());
         }
+    }
+
+    // -- catalogue modality disclosure -------------------------------------
+
+    use crate::model_modality::{
+        ConnectionSemantics, DeclaredSupport, InteractionCapability, ReconnectSupport,
+        SurfaceAvailability,
+    };
+
+    /// A declared speech-to-speech surface, shaped like an adapter instance
+    /// would declare it, joined by the seed's own (provider, native id) key.
+    fn declared_surface(
+        provider: &str,
+        native: &str,
+        inputs: &[ModelModality],
+        outputs: &[ModelModality],
+        transforms: &[TransformCapability],
+        credential: CredentialCondition,
+    ) -> ModelModalityContract {
+        let mut contract = ModelModalityContract::new(
+            ProviderRef::parse(provider).unwrap(),
+            native,
+        );
+        contract.input_modalities = inputs.iter().copied().collect();
+        contract.output_modalities = outputs.iter().copied().collect();
+        for transform in transforms {
+            contract
+                .transforms
+                .insert(*transform, DeclaredSupport::Supported);
+        }
+        contract.interaction = BTreeSet::from([
+            InteractionCapability::StreamingInput,
+            InteractionCapability::StreamingOutput,
+        ]);
+        contract.transport = crate::model_modality::TransportKind::WebSocket;
+        contract.connection = ConnectionSemantics::Connected {
+            reconnect: ReconnectSupport::ReconnectWithoutSession,
+        };
+        contract.credential = credential;
+        contract
+            .provenance
+            .push("fixture:test/declared-surface".into());
+        contract
+    }
+
+    fn realtime_seed_surface(credential: CredentialCondition) -> ModelModalityContract {
+        declared_surface(
+            "provider:openai",
+            "gpt-realtime",
+            &[ModelModality::Audio, ModelModality::Speech, ModelModality::Text],
+            &[ModelModality::Audio, ModelModality::Speech, ModelModality::Text],
+            &[TransformCapability::SpeechToSpeech],
+            credential,
+        )
+    }
+
+    fn openai_bound() -> BTreeSet<String> {
+        BTreeSet::from(["credential:openai".to_string()])
+    }
+
+    fn disclosure_for(
+        surfaces: &[ModelModalityContract],
+        bound: &BTreeSet<String>,
+        model: &str,
+    ) -> CatalogueModelDisclosure {
+        let catalogue = ModelCatalogue::first_party_seed();
+        disclose_catalogue_modalities(&catalogue, surfaces, bound)
+            .into_iter()
+            .find(|disclosure| disclosure.model.as_str() == model)
+            .unwrap_or_else(|| panic!("the seed catalogues {model}"))
+    }
+
+    #[test]
+    fn a_keyless_speech_model_is_a_visible_option_with_its_gap_named() {
+        let surface = realtime_seed_surface(CredentialCondition::Required {
+            hint: "openai realtime credential".into(),
+        });
+        let disclosure = disclosure_for(&[surface], &BTreeSet::new(), "model:gpt-realtime");
+
+        // The class is visible: modalities, transforms, interaction, transport.
+        assert_eq!(disclosure.modality_classes.len(), 1);
+        let class = &disclosure.modality_classes[0];
+        assert!(class.speech_capable);
+        assert!(class.input_modalities.contains(&ModelModality::Speech));
+        assert!(class.output_modalities.contains(&ModelModality::Speech));
+        assert!(class.transforms.contains(&TransformCapability::SpeechToSpeech));
+        assert!(class
+            .interaction
+            .contains(&InteractionCapability::StreamingInput));
+        assert_eq!(class.provider_native_surface, "gpt-realtime");
+
+        // The gap is named, from the declaring surface's own hint.
+        match &disclosure.availability {
+            CatalogueAvailability::CredentialGated { missing } => {
+                assert_eq!(missing, "openai realtime credential");
+            }
+            other => panic!("a keyless surface must read credential-gated, got {other:?}"),
+        }
+        assert!(matches!(
+            class.credential,
+            CredentialCondition::Required { .. }
+        ));
+        // And membership in the speech class is derived, not declared.
+        assert!(disclosure.carries_speech());
+    }
+
+    #[test]
+    fn a_bound_credential_resolves_the_same_option_to_catalogued() {
+        let surface = realtime_seed_surface(CredentialCondition::Required {
+            hint: "openai realtime credential".into(),
+        });
+        let disclosure = disclosure_for(&[surface], &openai_bound(), "model:gpt-realtime");
+        assert_eq!(disclosure.availability, CatalogueAvailability::Catalogued);
+        match &disclosure.modality_classes[0].credential {
+            CredentialCondition::Satisfied { binding_ref, .. } => {
+                assert_eq!(binding_ref, "credential:openai");
+            }
+            other => panic!("a bound credential must read satisfied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_entry_with_no_joined_surface_stays_catalogued_with_nothing_claimed() {
+        let disclosure = disclosure_for(&[], &openai_bound(), "model:llama3.2");
+        assert!(disclosure.modality_classes.is_empty());
+        assert_eq!(disclosure.availability, CatalogueAvailability::Catalogued);
+        assert!(!disclosure.carries_speech());
+    }
+
+    #[test]
+    fn degraded_and_unavailable_surfaces_keep_their_own_words() {
+        let mut degraded = realtime_seed_surface(CredentialCondition::NotRequired);
+        degraded.availability = SurfaceAvailability::Degraded {
+            reason: "region failover active".into(),
+        };
+        let disclosure = disclosure_for(
+            std::slice::from_ref(&degraded),
+            &openai_bound(),
+            "model:gpt-realtime",
+        );
+        assert_eq!(
+            disclosure.availability,
+            CatalogueAvailability::Degraded {
+                reason: "region failover active".into()
+            }
+        );
+
+        let mut gone = realtime_seed_surface(CredentialCondition::NotRequired);
+        gone.availability = SurfaceAvailability::Unavailable {
+            reason: "provider decommitted the surface".into(),
+        };
+        let disclosure = disclosure_for(
+            std::slice::from_ref(&gone),
+            &openai_bound(),
+            "model:gpt-realtime",
+        );
+        assert_eq!(
+            disclosure.availability,
+            CatalogueAvailability::Unavailable {
+                reason: "provider decommitted the surface".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_missing_credential_outranks_a_degradation_while_it_is_missing() {
+        let mut degraded = realtime_seed_surface(CredentialCondition::Required {
+            hint: "openai realtime credential".into(),
+        });
+        degraded.availability = SurfaceAvailability::Degraded {
+            reason: "region failover active".into(),
+        };
+        let disclosure = disclosure_for(
+            std::slice::from_ref(&degraded),
+            &BTreeSet::new(),
+            "model:gpt-realtime",
+        );
+        // The gap is what stands between the caller and the surface; the
+        // reduction becomes the visible fact once the credential is bound.
+        assert!(matches!(
+            disclosure.availability,
+            CatalogueAvailability::CredentialGated { .. }
+        ));
+        let disclosure = disclosure_for(std::slice::from_ref(&degraded), &openai_bound(), "model:gpt-realtime");
+        assert_eq!(
+            disclosure.availability,
+            CatalogueAvailability::Degraded {
+                reason: "region failover active".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_speech_class_is_derived_membership_across_the_whole_listing() {
+        let surfaces = vec![
+            realtime_seed_surface(CredentialCondition::Required {
+                hint: "openai realtime credential".into(),
+            }),
+            declared_surface(
+                "provider:openai",
+                "gpt-4o-transcribe",
+                &[ModelModality::Audio, ModelModality::Speech],
+                &[ModelModality::Text],
+                &[TransformCapability::SpeechToText],
+                CredentialCondition::Required {
+                    hint: "openai transcription credential".into(),
+                },
+            ),
+            declared_surface(
+                "provider:openai",
+                "gpt-4o-mini-tts",
+                &[ModelModality::Text],
+                &[ModelModality::Audio, ModelModality::Speech],
+                &[TransformCapability::TextToSpeech],
+                CredentialCondition::Required {
+                    hint: "openai speech credential".into(),
+                },
+            ),
+        ];
+        let catalogue = ModelCatalogue::first_party_seed();
+        let disclosures = disclose_catalogue_modalities(&catalogue, &surfaces, &BTreeSet::new());
+        let speech = speech_class_models(&disclosures);
+        assert_eq!(
+            speech
+                .iter()
+                .map(|model| model.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "model:gpt-4o-mini-tts",
+                "model:gpt-4o-transcribe",
+                "model:gpt-realtime",
+            ],
+            "exactly the seed's speech models, in catalogue order"
+        );
+        // Every entry stayed in the listing — nothing silently dropped.
+        assert_eq!(disclosures.len(), catalogue.len());
+    }
+
+    #[test]
+    fn a_surface_no_entry_claims_appears_nowhere() {
+        let orphan = declared_surface(
+            "provider:unheard-of",
+            "phantom-model",
+            &[ModelModality::Speech],
+            &[ModelModality::Speech],
+            &[TransformCapability::SpeechToSpeech],
+            CredentialCondition::NotRequired,
+        );
+        let catalogue = ModelCatalogue::first_party_seed();
+        let disclosures = disclose_catalogue_modalities(&catalogue, &[orphan], &BTreeSet::new());
+        assert_eq!(disclosures.len(), catalogue.len());
+        assert!(speech_class_models(&disclosures).is_empty());
+        assert!(disclosures
+            .iter()
+            .all(|disclosure| disclosure.modality_classes.is_empty()));
     }
 }
