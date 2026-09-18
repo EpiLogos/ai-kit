@@ -38,8 +38,8 @@ impl NativeHost {
         if managed_owner {
             fs::write(state.join("services.json"), json!({"schema":"workcell.service-declaration/v1", "services":[{
                 "logical_ref":"service:caw-native-encounter", "endpoint":format!("unix://{}",w.socket.display()),
-                "lifetime":"provider-process-scoped", "program":env!("CARGO_BIN_EXE_aikit-session-space"),
-                "args":["-C",w.root.to_str().unwrap(),"encounter-serve","--socket",w.socket.to_str().unwrap()],
+                "lifetime":"provider-process-scoped", "program":env!("CARGO_BIN_EXE_aikit"),
+                "args":["session-space","-C",w.root.to_str().unwrap(),"encounter-serve","--socket",w.socket.to_str().unwrap()],
                 "cwd":w.root, "env":{"AIKIT_HOME":w.home.root(), "WORKCELL_CONTROL_TOKEN":TOKEN,
                     "CENTRAL_NATIVE_TOKEN":"CONTROLLED_MUST_NOT_REACH_PROVIDER"}
             }]}).to_string()).unwrap();
@@ -154,7 +154,8 @@ impl NativeHost {
 impl Drop for NativeHost {
     fn drop(&mut self) {
         if let Some(pid) = self.managed_pid.take() {
-            let _ = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+            let _ = Command::new(env!("CARGO_BIN_EXE_aikit"))
+                .arg("session-space")
                 .env("AIKIT_HOME", &self.home)
                 .arg("-C")
                 .arg(&self.root)

@@ -18,7 +18,9 @@ use aikit_cli::app::{
 };
 use aikit_cli::cli::*;
 use aikit_cli::json::{self, EnvelopeContext};
-use aikit_cli::{credential, hook, multicall, run, ui, SessionLifecycleServiceOps};
+use aikit_cli::{
+    credential, hook, multicall, run, ui, SessionLifecycleServiceOps, SessionSpaceServiceOps,
+};
 use aikit_tui::{application_service::ApplicationService, ExplainHistoryApplicationService};
 
 use aikit_core::hooks::HookEvent;
@@ -240,6 +242,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Hook(c)) => cmd_hook(cwd, c, json_mode),
         Some(Command::Capabilities(c)) => cmd_capabilities(cwd, c),
         Some(Command::Session(c)) => cmd_session(cwd, c),
+        Some(Command::SessionSpace(c)) => cmd_session_space(cwd, c, json_mode),
         Some(Command::Compose(a)) => cmd_compose(cwd, a),
         Some(Command::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
@@ -4004,6 +4007,381 @@ fn cmd_log(cwd: &std::path::Path, c: LogCmd) -> Result<Reply> {
         .collect();
     let data = jval!({ "events": events, "count": events.len(), "limit": a.limit });
     Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit session-space` — the folded SessionSpace/encounter verb family
+/// (formerly the `aikit-session-space` companion binary, O-I #376). The
+/// companion's output contract is preserved: each verb's bare document on
+/// stdout in human mode (envelope-wrapped only under the global `--json`),
+/// and its human failure contract `<code>: <message>` on stderr with exit 1,
+/// which machine consumers such as O-I's cradle kernel parse.
+fn cmd_session_space(cwd: &std::path::Path, c: SessionSpaceCmd, json_mode: bool) -> Result<Reply> {
+    match cmd_session_space_inner(cwd, c) {
+        Ok(reply) => Ok(reply),
+        Err(error) => {
+            if json_mode {
+                Err(error)
+            } else {
+                eprintln!("{}: {}", error.code(), error.message());
+                Ok(Reply::Status(json::EXIT_GENERIC))
+            }
+        }
+    }
+}
+
+fn cmd_session_space_inner(cwd: &std::path::Path, c: SessionSpaceCmd) -> Result<Reply> {
+    use aikit_core::project::ProjectRef;
+    use aikit_core::session_space_application::{
+        ContextResolutionEvidence, SessionSpaceMutation, SessionSpacePreview,
+        SessionSpaceProjectContextBinding,
+    };
+
+    /// One typed result, serialized into the standard reply exactly as the
+    /// companion binary emitted it (bare on stdout in human mode; warnings
+    /// stay empty so machine consumers read one clean document).
+    fn data<T: serde::Serialize>(service: &Service, value: &T) -> Result<Reply> {
+        let value = serde_json::to_value(value).map_err(|error| {
+            AikitError::new(
+                "cli.session_space_json_failed",
+                format!("could not encode SessionSpace result: {error}"),
+            )
+        })?;
+        Ok(reply(service, value, vec![]))
+    }
+
+    fn space_ref(raw: &str) -> Result<aikit_core::session_space::SessionSpaceRef> {
+        aikit_core::session_space::SessionSpaceRef::parse(raw)
+    }
+
+    fn parse_json_arg<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
+        let text = if let Some(path) = raw.strip_prefix('@') {
+            std::fs::read_to_string(path).map_err(|error| {
+                AikitError::new(
+                    "cli.session_space_json_unreadable",
+                    format!("could not read {path}: {error}"),
+                )
+            })?
+        } else {
+            raw.to_string()
+        };
+        serde_json::from_str(&text).map_err(|error| {
+            AikitError::new(
+                "cli.session_space_json_invalid",
+                format!("invalid SessionSpace JSON: {error}"),
+            )
+        })
+    }
+
+    #[cfg(unix)]
+    fn attach_terminal_client(argv: Vec<String>) -> Result<Reply> {
+        use std::os::unix::process::CommandExt;
+
+        let Some((program, args)) = argv.split_first() else {
+            return Err(AikitError::new(
+                "session_space.working_surface_attach_invalid",
+                "working-environment provider returned an empty terminal attachment command",
+            ));
+        };
+        let error = std::process::Command::new(program).args(args).exec();
+        Err(AikitError::new(
+            "session_space.working_surface_attach_failed",
+            format!("could not attach terminal client through persisted working Surface: {error}"),
+        ))
+    }
+
+    #[cfg(not(unix))]
+    fn attach_terminal_client(_argv: Vec<String>) -> Result<Reply> {
+        Err(AikitError::new(
+            "session_space.working_surface_attach_unsupported",
+            "terminal attachment through a persisted working Surface is unsupported on this platform",
+        ))
+    }
+
+    let service = Service::discover(cwd)?;
+    match c.command {
+        SessionSpaceCommand::EncounterModelExec {
+            agent_session,
+            provider,
+            expected_model_basis,
+        } => {
+            aikit_cli::encounter_service::EncounterService::exec_model(
+                service.home(),
+                &aikit_core::ResourceRef::parse(agent_session)?,
+                &provider,
+                &expected_model_basis,
+            )?;
+            Ok(Reply::Silent)
+        }
+        SessionSpaceCommand::EncounterTaskConfigure {
+            agent_session,
+            request_json,
+            expected_revision,
+        } => {
+            let expected = expected_revision
+                .as_deref()
+                .map(aikit_core::SourceRevision::parse)
+                .transpose()?;
+            data(
+                &service,
+                &aikit_cli::encounter_service::EncounterService::configure_task(
+                    service.home(),
+                    &aikit_core::ResourceRef::parse(agent_session)?,
+                    parse_json_arg(&request_json)?,
+                    expected.as_ref(),
+                )?,
+            )
+        }
+        SessionSpaceCommand::EncounterTaskRead { agent_session } => data(
+            &service,
+            &aikit_cli::encounter_service::EncounterService::read_task(
+                service.home(),
+                &aikit_core::ResourceRef::parse(agent_session)?,
+            )?,
+        ),
+        SessionSpaceCommand::EncounterTaskExec {
+            agent_session,
+            expected_revision,
+        } => {
+            aikit_cli::encounter_service::EncounterService::exec_task(
+                service.home(),
+                &aikit_core::ResourceRef::parse(agent_session)?,
+                &aikit_core::SourceRevision::parse(expected_revision)?,
+            )?;
+            Ok(Reply::Silent)
+        }
+        #[cfg(unix)]
+        SessionSpaceCommand::EncounterStart => data(
+            &service,
+            &aikit_cli::encounter_service::start(service.home(), cwd)?,
+        ),
+        #[cfg(unix)]
+        SessionSpaceCommand::EncounterServe { socket } => {
+            aikit_cli::encounter_service::serve(
+                service.home().clone(),
+                &socket
+                    .unwrap_or_else(|| aikit_cli::encounter_service::socket_path(service.home())),
+            )?;
+            Ok(Reply::Silent)
+        }
+        SessionSpaceCommand::EncounterConfigure { provider_json } => {
+            aikit_cli::encounter_service::EncounterService::configure(
+                service.home(),
+                parse_json_arg(&provider_json)?,
+            )?;
+            data(&service, &jval!({"configured": true}))
+        }
+        SessionSpaceCommand::EncounterAgencyConfigure {
+            agent_session,
+            binding_json,
+            expected_revision,
+        } => {
+            let expected = expected_revision
+                .as_deref()
+                .map(aikit_core::SourceRevision::parse)
+                .transpose()?;
+            aikit_cli::encounter_service::EncounterService::configure_agency(
+                service.home(),
+                &aikit_core::ResourceRef::parse(agent_session)?,
+                &parse_json_arg(&binding_json)?,
+                expected.as_ref(),
+            )?;
+            data(
+                &service,
+                &jval!({"configured": true, "standing": "native-owner-provisioning-not-default-selection"}),
+            )
+        }
+        SessionSpaceCommand::EncounterDeliveryReconcile {
+            agent_session,
+            delivery_ref,
+            evidence_ref,
+            expected_phase,
+        } => data(
+            &service,
+            &aikit_store::encounter::EncounterStore::open(service.home())?.reconcile_delivery(
+                &aikit_core::ResourceRef::parse(agent_session)?,
+                &aikit_core::ResourceRef::parse(delivery_ref)?,
+                &aikit_core::ResourceRef::parse(evidence_ref)?,
+                &expected_phase,
+            )?,
+        ),
+        #[cfg(unix)]
+        SessionSpaceCommand::Encounter {
+            request_json,
+            socket,
+        } => data(
+            &service,
+            &aikit_cli::encounter_service::request(
+                &socket
+                    .unwrap_or_else(|| aikit_cli::encounter_service::socket_path(service.home())),
+                &parse_json_arg(&request_json)?,
+            )?,
+        ),
+        SessionSpaceCommand::ProjectContext => {
+            let resolution = aikit_tui::project_world_service::context_resolution(&service)?;
+            let context = ContextResolutionEvidence::from_resolution(&resolution)?;
+            let binding =
+                SessionSpaceProjectContextBinding::new(context.project().clone(), context)?;
+            data(&service, &binding)
+        }
+        SessionSpaceCommand::List => data(&service, &service.session_space_list()?),
+        SessionSpaceCommand::Show { space } => {
+            data(&service, &service.session_space_show(&space_ref(&space)?)?)
+        }
+        SessionSpaceCommand::Open { space } => {
+            data(&service, &service.session_space_open(&space_ref(&space)?)?)
+        }
+        SessionSpaceCommand::WorkingSurface { command } => match command {
+            SessionSpaceWorkingSurfaceCommand::Observe { space, binding } => {
+                let state = service.session_space_show(&space_ref(&space)?)?;
+                data(
+                    &service,
+                    &aikit_cli::session_space_working_surface::observe(
+                        &state,
+                        &aikit_core::ResourceRef::parse(binding)?,
+                    )?,
+                )
+            }
+            SessionSpaceWorkingSurfaceCommand::Open { space, binding } => {
+                let state = service.session_space_show(&space_ref(&space)?)?;
+                let result = aikit_cli::session_space_working_surface::open(
+                    &state,
+                    &aikit_core::ResourceRef::parse(binding)?,
+                )?;
+                // An open that created provider-native material (a Herdr
+                // workspace and its root pane) returns the binding carrying
+                // it; persisting that evidence is this operation's separate
+                // write, through the same staged mutation path as every
+                // other SessionSpace change.
+                if let Some(updated) = result.refreshed_binding.clone() {
+                    let preview = service.session_space_stage(
+                        Some(&space_ref(&space)?),
+                        SessionSpaceMutation::BindWorkingSurface {
+                            binding: Box::new(updated),
+                        },
+                    )?;
+                    service.session_space_apply(&preview)?;
+                }
+                data(&service, &result)
+            }
+            SessionSpaceWorkingSurfaceCommand::Focus { space, binding } => {
+                let state = service.session_space_show(&space_ref(&space)?)?;
+                data(
+                    &service,
+                    &aikit_cli::session_space_working_surface::focus(
+                        &state,
+                        &aikit_core::ResourceRef::parse(binding)?,
+                    )?,
+                )
+            }
+            SessionSpaceWorkingSurfaceCommand::Attach { space, binding } => {
+                let state = service.session_space_show(&space_ref(&space)?)?;
+                match aikit_cli::session_space_working_surface::terminal_attachment(
+                    &state,
+                    &aikit_core::ResourceRef::parse(binding)?,
+                )? {
+                    aikit_cli::working_environment_field::WorkingEnvironmentTerminalAttachment::Attach {
+                        argv,
+                        ..
+                    } => attach_terminal_client(argv),
+                    aikit_cli::working_environment_field::WorkingEnvironmentTerminalAttachment::NotExposed {
+                        reason,
+                        ..
+                    } => Err(AikitError::new(
+                        "session_space.working_surface_attach_unavailable",
+                        reason,
+                    )),
+                }
+            }
+        },
+        SessionSpaceCommand::Discover { project } => {
+            let project = project.as_deref().map(ProjectRef::parse).transpose()?;
+            data(&service, &service.session_space_discover(project.as_ref())?)
+        }
+        SessionSpaceCommand::Create { id, label } => {
+            let preview = service.session_space_stage(
+                None,
+                SessionSpaceMutation::Create {
+                    id: space_ref(&id)?,
+                    label,
+                },
+            )?;
+            data(&service, &preview)
+        }
+        SessionSpaceCommand::Stage {
+            space,
+            print_schema,
+            operation,
+            intent_json,
+        } => {
+            if print_schema {
+                return match operation.as_deref() {
+                    Some(operation) => data(
+                        &service,
+                        &aikit_cli::session_space_schema::operation_schema(operation).ok_or_else(
+                            || {
+                                AikitError::new(
+                                    "cli.session_space_operation_unknown",
+                                    format!(
+                                        "`{operation}` is not a SessionSpace mutation operation; \
+                                         run stage --print-schema with no --operation to list them"
+                                    ),
+                                )
+                            },
+                        )?,
+                    ),
+                    None => data(&service, &aikit_cli::session_space_schema::schema()),
+                };
+            }
+            let Some(intent_json) = intent_json.as_deref() else {
+                return Err(AikitError::new(
+                    "cli.session_space_intent_missing",
+                    "stage needs --intent-json, or --print-schema to print the templates",
+                ));
+            };
+            let intent: SessionSpaceMutation = parse_json_arg(intent_json)?;
+            let space = space.as_deref().map(space_ref).transpose()?;
+            data(
+                &service,
+                &service.session_space_stage(space.as_ref(), intent)?,
+            )
+        }
+        SessionSpaceCommand::Apply { preview_json } => {
+            let preview: SessionSpacePreview = parse_json_arg(&preview_json)?;
+            data(&service, &service.session_space_apply(&preview)?)
+        }
+        SessionSpaceCommand::History { space } => data(
+            &service,
+            &service.session_space_history(&space_ref(&space)?)?,
+        ),
+        SessionSpaceCommand::Compare {
+            space,
+            from_sequence,
+            to_sequence,
+        } => data(
+            &service,
+            &service.session_space_compare_history(
+                &space_ref(&space)?,
+                from_sequence,
+                to_sequence,
+            )?,
+        ),
+        SessionSpaceCommand::RestorePreview { space, sequence } => data(
+            &service,
+            &service.session_space_stage_restore(&space_ref(&space)?, sequence)?,
+        ),
+        SessionSpaceCommand::Reconstruct { space } => data(
+            &service,
+            &service.session_space_reconstruct(&space_ref(&space)?, None, &[], &[])?,
+        ),
+        SessionSpaceCommand::Reconcile { space } => data(
+            &service,
+            &service.session_space_reconcile(&space_ref(&space)?, None, &[], &[])?,
+        ),
+        SessionSpaceCommand::Explain { space } => data(
+            &service,
+            &service.session_space_explain(&space_ref(&space)?, None)?,
+        ),
+    }
 }
 
 /// `aikit client install|launch|status`.

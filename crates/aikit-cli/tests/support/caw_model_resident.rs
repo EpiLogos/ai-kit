@@ -113,8 +113,9 @@ fn model_setup(w: &World, mode: &str, authority: bool) -> Value {
 }
 
 fn start_model(w: &mut World, key: bool) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aikit"));
     command
+        .arg("session-space")
         .env("AIKIT_HOME", w.home.root())
         .env("UNRELATED_API_KEY", "MUST_NOT_LEAK")
         .env("CENTRAL_NATIVE_TOKEN", "MUST_NOT_LEAK")
