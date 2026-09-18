@@ -537,7 +537,9 @@ fn the_root_doctor_reports_the_dangling_and_healthy_sets_and_writes_nothing() {
             central.path().to_str().unwrap(),
         ],
     );
-    assert_eq!(code, 0, "{envelope}");
+    // A dangling federation is a finding ops must not be able to miss: the
+    // report still lands, and the exit is non-zero.
+    assert_eq!(code, 1, "{envelope}");
     let healthy = envelope["data"]["healthy"].as_array().unwrap();
     let dangling = envelope["data"]["dangling"].as_array().unwrap();
     assert_eq!(healthy.len(), 1, "{envelope}");
@@ -545,6 +547,49 @@ fn the_root_doctor_reports_the_dangling_and_healthy_sets_and_writes_nothing() {
     assert_eq!(dangling.len(), 1, "{envelope}");
     assert_eq!(dangling[0]["project"], "beta");
     assert_eq!(read(&root), before, "the doctor is read-only");
+}
+
+#[test]
+fn the_root_doctor_exits_zero_when_every_child_resolves() {
+    let central = TempDir::new().unwrap();
+    let scratch = TempDir::new().unwrap();
+
+    write(
+        &central.path().join("Control/agents/wiki/wiki.json"),
+        &root_document(&["central:wiki:project:alpha"]),
+    );
+    write(
+        &central
+            .path()
+            .join("Work/alpha/ProjectCentral/agents/wiki/wiki.json"),
+        &format!(
+            "{{\n  \"objects\": [\n    {}\n  ]\n}}\n",
+            project_space("central:wiki:project:alpha", 1, "central:wiki:root"),
+        ),
+    );
+    write(
+        &central
+            .path()
+            .join("Work/alpha/ProjectCentral/project.json"),
+        "{\"schema\": 1, \"project_id\": \"alpha\"}",
+    );
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "root",
+            "doctor",
+            "--root",
+            central.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(
+        envelope["data"]["dangling"].as_array().unwrap().len(),
+        0,
+        "{envelope}"
+    );
 }
 
 #[test]

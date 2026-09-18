@@ -17,6 +17,7 @@ use aikit_core::knowledge_source_pool::{
 use aikit_core::knowledge_wiki::{parse_wiki_objects, OkfWikiBundle, WikiObject};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
+use aikit_core::repair_absence_lines;
 use aikit_core::resource::{
     expression_scope_project, parse_or_search_expression_in_scope, resolve_subjects, ProviderRef,
     ResolveExpression, ResourceIndex, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
@@ -229,8 +230,7 @@ impl Service {
         result.hits.truncate(limit);
         if let Err(error) = self.knowledge_store().remember_search_hits(&result.hits) {
             result.absences.push(format!(
-                "Knowledge address cache unavailable; live search results remain valid: {}",
-                error.message()
+                "Knowledge address cache unavailable; live search results remain valid: {error}"
             ));
         }
         Ok(result)
@@ -560,10 +560,7 @@ impl Service {
                     wiki_registers = reading.registers;
                     absences.extend(reading.absences);
                 }
-                Err(error) => absences.push(format!(
-                    "Central wiki discovery unavailable: {}",
-                    error.message()
-                )),
+                Err(error) => absences.push(format!("Central wiki discovery unavailable: {error}")),
             }
             // W10 V3: compiled entity materialisation joins the discovered
             // wiki before the index rebuild; colliding stand-in nodes adopt
@@ -692,10 +689,8 @@ impl Service {
                                 authored.compilation.edges.into_iter().map(WikiObject::Edge),
                             );
                         }
-                        Err(error) => absences.push(format!(
-                            "Project-local authored graph unavailable: {}",
-                            error.message()
-                        )),
+                        Err(error) => absences
+                            .push(format!("Project-local authored graph unavailable: {error}")),
                     }
                 }
             }
@@ -712,12 +707,15 @@ impl Service {
                 .join("knowledge/wiki")
                 .join(format!("{horizon}.sqlite3"));
             match SqliteWikiProvider::rebuild(&path, discovered.wiki, wiki_registers.clone()) {
-                Ok(provider) => Some(provider),
+                Ok(provider) => {
+                    // The read index materialised past dangling references;
+                    // every repair is disclosed as a named absence, one line
+                    // per distinct fault. Strict write gates are untouched.
+                    absences.extend(repair_absence_lines(provider.repairs()));
+                    Some(provider)
+                }
                 Err(error) => {
-                    absences.push(format!(
-                        "SemanticWiki materialisation degraded: {}",
-                        error.message()
-                    ));
+                    absences.push(format!("SemanticWiki materialisation degraded: {error}"));
                     None
                 }
             }
@@ -741,7 +739,7 @@ impl Service {
             ) {
                 Ok(provider) => Some(provider),
                 Err(error) => {
-                    absences.push(format!("Central file map unavailable: {}", error.message()));
+                    absences.push(format!("Central file map unavailable: {error}"));
                     None
                 }
             }
@@ -760,7 +758,7 @@ impl Service {
                 ) {
                     Ok(provider) => Some(provider),
                     Err(error) => {
-                        absences.push(format!("NOW-field search unavailable: {}", error.message()));
+                        absences.push(format!("NOW-field search unavailable: {error}"));
                         None
                     }
                 }
@@ -805,7 +803,7 @@ impl Service {
                     );
                     if provider.status().available {
                         if let Err(error) = provider.rebuild(&material) {
-                            absences.push(format!("bkmr SourcePool degraded: {}", error.message()));
+                            absences.push(format!("bkmr SourcePool degraded: {error}"));
                         }
                     } else {
                         absences.push(
@@ -837,7 +835,7 @@ impl Service {
             let status = provider.status();
             if status.available && status.capabilities.index {
                 if let Err(error) = provider.index(root, false) {
-                    absences.push(format!("GitNexus CodeIndex degraded: {}", error.message()));
+                    absences.push(format!("GitNexus CodeIndex degraded: {error}"));
                 }
             } else {
                 absences.push("GitNexus CodeIndex unavailable for this Project".into());
@@ -1086,9 +1084,8 @@ fn discover_material(
                     Err(collection_error) => match OkfWikiBundle::parse_json(&text) {
                         Ok(bundle) => discovered.wiki.push(bundle.wiki),
                         Err(_) => absences.push(format!(
-                            "self-identified SemanticWiki material at {} is invalid: {}",
-                            path.display(),
-                            collection_error.message()
+                            "self-identified SemanticWiki material at {} is invalid: {collection_error}",
+                            path.display()
                         )),
                     },
                 }
