@@ -39,6 +39,12 @@ pub const OPENAI_REALTIME_WS_ENDPOINT: &str = "wss://api.openai.com/v1/realtime"
 /// `model_runtime`, it is an evidence pin, never provider or Model identity.
 pub const OPENAI_REALTIME_ADAPTER_REVISION: &str = "fixture:openai-realtime-session/2026-09-17";
 
+/// The frozen recorded session this adapter instance is conformed against.
+/// One recording, one truth: the conformance tests, the resolution fixtures
+/// and [`declared_surfaces`] all read the same document.
+pub const FROZEN_SESSION_DOCUMENT: &str =
+    include_str!("../tests/fixtures/openai-realtime/session.json");
+
 fn openai_provider() -> ProviderRef {
     ProviderRef::parse(OPENAI_REALTIME_PROVIDER).expect("openai provider ref")
 }
@@ -274,6 +280,43 @@ pub fn speech_synthesis_surface(credential: CredentialCondition) -> ModelModalit
     contract
 }
 
+/// Every model surface this adapter instance declares, with each route's
+/// credential condition stated as required-and-unbound: declared facts about
+/// what the surface needs, never a claim that a key exists. Presence is a
+/// fact of the machine, resolved by the reader (the catalogue disclosure
+/// joins these surfaces against the resolved catalogue and the machine's
+/// binding records).
+///
+/// This inventory is the adapter-instance half of the catalogue join: a
+/// consumer asks what surfaces exist and joins them to catalogue entries by
+/// (provider, provider-native surface) — it never learns model or provider
+/// names from anywhere but this declaration and the catalogue itself.
+///
+/// Swapping in a better model never touches the generic contract: a
+/// same-provider replacement is a new surface function (or a new recorded
+/// session fixture) here plus a catalogue seed entry; a new provider wire is
+/// a new adapter instance following this one's pattern.
+pub fn declared_surfaces() -> Vec<ModelModalityContract> {
+    let realtime_credential = CredentialCondition::Required {
+        hint: "openai realtime credential".into(),
+    };
+    let transcription_credential = CredentialCondition::Required {
+        hint: "openai transcription credential".into(),
+    };
+    let synthesis_credential = CredentialCondition::Required {
+        hint: "openai speech credential".into(),
+    };
+    vec![
+        // The frozen recording is authored in-tree and conformed by this
+        // module's tests; if it ever stopped parsing, that is a build-time
+        // fault to be loud about, exactly like the catalogue seed refs.
+        parse_realtime_session(FROZEN_SESSION_DOCUMENT, realtime_credential)
+            .expect("frozen session fixture must conform to this adapter's own parser"),
+        transcription_surface(transcription_credential),
+        speech_synthesis_surface(synthesis_credential),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,7 +334,7 @@ mod tests {
         ModelSurfaceReading, ModelVariantReading, PlacementObservation, RuntimeChangeApplication,
     };
 
-    const FROZEN_SESSION: &str = include_str!("../tests/fixtures/openai-realtime/session.json");
+    const FROZEN_SESSION: &str = FROZEN_SESSION_DOCUMENT;
 
     fn bound_credential() -> CredentialCondition {
         CredentialCondition::Satisfied {
@@ -633,5 +676,69 @@ mod tests {
                 "session document {broken:?} must be refused with the adapter's code"
             );
         }
+    }
+
+    #[test]
+    fn every_declared_surface_joins_to_a_catalogued_model_and_names_its_gap() {
+        // The adapter-instance half of the catalogue join must actually join:
+        // each declared surface is claimed by the resolved catalogue under
+        // its (provider, provider-native surface) key, or the surface is an
+        // option the catalogue would never show.
+        let catalogue = aikit_core::resource::ModelCatalogue::first_party_seed();
+        let surfaces = declared_surfaces();
+        assert_eq!(surfaces.len(), 3, "realtime, transcription, synthesis");
+        for surface in &surfaces {
+            assert!(
+                surface.credential.is_unsatisfied(),
+                "the inventory states the declared need; presence is the reader's fact"
+            );
+            let (entry, route) = catalogue
+                .claiming(&surface.provider, &surface.provider_native_surface)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "catalogue must claim declared surface {}",
+                        surface.provider_native_surface
+                    )
+                });
+            assert_eq!(route.provider, surface.provider);
+            assert!(entry.model.as_str().starts_with("model:"));
+        }
+    }
+
+    #[test]
+    fn the_declared_inventory_covers_both_speech_directions_and_the_full_duplex_route() {
+        let surfaces = declared_surfaces();
+        let realtime = surfaces
+            .iter()
+            .find(|surface| surface.provider_native_surface == "gpt-realtime")
+            .unwrap();
+        assert!(realtime.is_speech_capable());
+        assert!(realtime
+            .interaction_support(InteractionCapability::FullDuplexRealtime)
+            .is_supported());
+
+        let stt = surfaces
+            .iter()
+            .find(|surface| surface.provider_native_surface == "gpt-4o-transcribe")
+            .unwrap();
+        assert!(stt
+            .input_support(ModelModality::Speech)
+            .is_supported());
+        assert!(
+            !stt.output_support(ModelModality::Speech).is_supported(),
+            "transcription listens; it does not speak"
+        );
+
+        let tts = surfaces
+            .iter()
+            .find(|surface| surface.provider_native_surface == "gpt-4o-mini-tts")
+            .unwrap();
+        assert!(tts
+            .output_support(ModelModality::Speech)
+            .is_supported());
+        assert!(
+            !tts.input_support(ModelModality::Speech).is_supported(),
+            "synthesis speaks; it does not listen"
+        );
     }
 }
