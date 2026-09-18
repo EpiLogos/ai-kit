@@ -38,6 +38,7 @@ pub mod gitnexus;
 pub mod harness_disclosure;
 pub mod herdr;
 pub mod home_agent_profile;
+pub mod hook_sources;
 pub mod hyprland;
 pub mod interactive_connection;
 pub mod layers;
@@ -161,6 +162,11 @@ pub use herdr::{
     parse_herdr_snapshot, HerdrAgentObservation, HerdrAgentStatus, HerdrSnapshot,
     HerdrWorkingEnvironment, HERDR_PROVIDER_VERSION, HERDR_UPSTREAM_REVISION,
 };
+pub use hook_sources::{
+    plan_hooks_projection, HookCarrierSource, HookSourceError, HooksProjectionOutcome,
+    HooksProjectionPlan, HooksSweepPlan, ProjectionDir, CARRIER_CAPSULE_ID,
+    HOOKS_PROJECTION_OWNERSHIP,
+};
 pub use hyprland::{
     parse_hyprland_clients, HyprlandWindowObservation, HyprlandWorkingEnvironment,
     HYPRLAND_PROVIDER_VERSION, HYPRLAND_UPSTREAM_REVISION,
@@ -170,8 +176,8 @@ pub use interactive_connection::{
     PermissionDecision,
 };
 pub use layers::{
-    apply_merge, claude_hook_map, mcp_servers_record, zcode_hook_wrapper, LayerMergeError,
-    MatcherPolicy, MergeArgs, MergeReport,
+    apply_merge, claude_hook_map, mcp_servers_record, pi_extensions_record, zcode_hook_wrapper,
+    LayerMergeError, MatcherPolicy, MergeArgs, MergeReport,
 };
 pub use local_source_discovery::{
     discover_local_sources, DiscoveredLocalSource, LocalSourceDiscovery,

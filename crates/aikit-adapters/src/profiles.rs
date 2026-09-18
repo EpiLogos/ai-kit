@@ -7,7 +7,7 @@
 //! authority; these documents are AIKit's handling declarations joined to it
 //! by slug.
 //!
-//! ## Pi hooks (2026-09-18 census)
+//! ## Pi hooks (2026-09-18 census; carrier commissioned same day)
 //!
 //! Pi 0.84.4 carries hooks as TypeScript extension events, not shell commands
 //! in a settings map: an extension module subscribes with
@@ -17,12 +17,18 @@
 //! (global) and trust-gated `.pi/extensions/` (project-local). The managed
 //! hook grammars (claude-hook-map, zcode-hook-wrapper) project
 //! `aikit hook dispatch <client> <event>` shell-command entries into native
-//! config; pi has no such seam. The pi profile therefore declares its hooks
-//! layer `observed` — the event census feeds disclosure, and no projection is
-//! claimed. A managed pi hooks layer would need a new carrier vehicle (an
-//! owned TS extension file that spawns the dispatcher from each mapped
-//! handler), deliberately not built in this pass; the dispatcher side
-//! (`aikit hook dispatch pi <Event>`) is already client-agnostic and works.
+//! config; pi has no such seam. The managed seam pi does have is the
+//! `extensions` array, so the pi hooks layer projects through it — one
+//! first-party extension carrier (`hook/aikit/pi-extension-carrier`)
+//! whose handlers spawn the dispatcher per event and forward its verdicts
+//! back into pi. The carrier is content-addressed at projection time, the
+//! single owned entry in the array, swept and replaced by the
+//! `pi-extensions-record` grammar; individual hook capsules are never
+//! projected into pi — they ride the dispatcher chains the carrier feeds.
+//! The carrier is a `hook` capsule, so a new revision is Unseen until
+//! `aikit trust record` reviews it: an untrusted revision is never
+//! projected and a swept one is removed whole — pi never loads a revision
+//! the owner has not reviewed.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -152,8 +158,11 @@ protocol = "process"
         // can transform), `tool_call` (pre-tool, can block), `tool_result`,
         // `session_shutdown`, `session_before_compact` — declared via the
         // settings `extensions` array or discovery dirs. No shell-command
-        // seam exists for the managed hook grammars, so this layer stays
-        // observed; `stop` and `notification` are omitted (no pi equivalent).
+        // seam exists for the managed hook grammars, so the carrier vehicle
+        // (hook/aikit/pi-extension-carrier) projects through the `extensions`
+        // array: one content-addressed, trust-gated extension whose handlers
+        // spawn `aikit hook dispatch pi <Event>`. `stop` and `notification`
+        // are omitted (no pi equivalent).
         "pi",
         r#"
 schema = "aikit.harness-profile/v1"
@@ -175,8 +184,10 @@ posture = "observed"
 observe = ["~/.pi/agent/AGENTS.md"]
 
 [hooks]
-posture = "observed"
+posture = "managed"
 observe = [{ events = ["session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "session-end", "pre-compact"], transports = ["extension-events"] }]
+project = { file = "~/.pi/agent/settings.json", format = "pi-extensions-record", ownership-identity = "aikit-hook-carrier" }
+activation = "next-session-only"
 
 [tools]
 posture = "brokered"
@@ -574,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_hooks_declare_the_extension_event_census_without_a_projection_claim() {
+    fn pi_hooks_declare_the_extension_event_census_and_the_carrier_seam() {
         let pi = for_slug("pi").unwrap();
         let hooks = pi
             .hooks
@@ -582,12 +593,28 @@ mod tests {
             .expect("the 2026-09-18 census gives pi a hooks layer");
         assert_eq!(
             hooks.posture,
-            aikit_core::harness_profile::LayerPosture::Observed,
-            "pi has no shell-command hook seam, so the layer must not claim writes"
+            aikit_core::harness_profile::LayerPosture::Managed,
+            "the extension carrier is a real seam: pi's settings `extensions` array"
         );
-        assert!(
-            hooks.project.is_none(),
-            "an observed hooks layer refuses a project declaration"
+        let project = hooks
+            .project
+            .as_ref()
+            .expect("a managed hooks layer names the seam it projects into");
+        assert_eq!(project.file, "~/.pi/agent/settings.json");
+        assert_eq!(
+            project.format,
+            aikit_core::harness_profile::MergeGrammar::PiExtensionsRecord,
+            "the carrier registers through the extensions array, not a hook map"
+        );
+        assert_eq!(
+            project.ownership_identity,
+            crate::hook_sources::HOOKS_PROJECTION_OWNERSHIP,
+            "the sweep identity is the carrier file-name marker"
+        );
+        assert_eq!(
+            hooks.activation,
+            Some(aikit_core::harness_profile::ActivationEffectName::NextSessionOnly),
+            "pi reads extensions at session start; a running TUI can /reload"
         );
         let declaration = hooks.observe.first().expect("one event census entry");
         assert_eq!(

@@ -29,6 +29,13 @@ EXPECTED_GUIDANCE = {
     "guidance/aikit/living-project-collaboration",
     "guidance/aikit/world-situated-agency",
 }
+# Extension carriers: hook-kind capsules whose payload is a TypeScript
+# extension module a harness loads natively (pi's jiti), not an executable
+# chain step. They must declare no [hook] events — they feed the dispatcher,
+# they never join the chains they feed — and they fail open.
+EXPECTED_CARRIERS = {
+    "hook/aikit/pi-extension-carrier",
+}
 
 
 def normalised_description(description: str) -> str:
@@ -49,6 +56,7 @@ def frontmatter_description(body: Path, text: str) -> str:
 seen_skills: set[str] = set()
 seen_guidance: set[str] = set()
 seen_hooks: set[str] = set()
+seen_carriers: set[str] = set()
 for manifest in REGISTRY.glob("**/manifest.toml"):
     data = tomllib.loads(manifest.read_text(encoding="utf-8"))
     capsule_id = data["id"]
@@ -99,14 +107,37 @@ for manifest in REGISTRY.glob("**/manifest.toml"):
         hook = data.get("hook", {})
         entry = hook.get("entry")
         events = hook.get("events")
-        if not entry or not events:
+        if not entry:
             raise SystemExit(f"{manifest}: first-party hook capsule must declare entry and events")
         body = manifest.parent / entry
         if not body.is_file() or not body.read_text(encoding="utf-8").strip():
             raise SystemExit(f"{manifest}: hook entry is missing or empty")
-        if not os.access(body, os.X_OK):
-            raise SystemExit(f"{manifest}: hook entry is not executable")
-        seen_hooks.add(capsule_id)
+        if capsule_id in EXPECTED_CARRIERS:
+            # Extension carriers: the payload is a TypeScript extension module
+            # pi loads through jiti, not an executable chain step. Their law is
+            # the inverse of a chain hook's: events are deliberately EMPTY (the
+            # carrier FEEDS the dispatcher; chain membership would double-fire
+            # and recurse) and the payload must carry the dispatcher seam it
+            # exists to drive.
+            if events:
+                raise SystemExit(
+                    f"{manifest}: extension carrier must declare no [hook] events; "
+                    "chain membership would double-fire the dispatcher it feeds"
+                )
+            if hook.get("failure") != "open":
+                raise SystemExit(f"{manifest}: extension carrier must fail open")
+            payload_text = body.read_text(encoding="utf-8")
+            if "aikit" not in payload_text or "dispatch" not in payload_text:
+                raise SystemExit(
+                    f"{manifest}: extension carrier payload must spawn the aikit dispatcher"
+                )
+            seen_carriers.add(capsule_id)
+        else:
+            if not events:
+                raise SystemExit(f"{manifest}: first-party hook capsule must declare entry and events")
+            if not os.access(body, os.X_OK):
+                raise SystemExit(f"{manifest}: hook entry is not executable")
+            seen_hooks.add(capsule_id)
     else:
         raise SystemExit(f"{manifest}: unexpected first-party capsule kind {kind!r}")
 
@@ -114,6 +145,8 @@ if seen_skills != EXPECTED_SKILLS:
     raise SystemExit(f"first-party Skill corpus mismatch: {seen_skills ^ EXPECTED_SKILLS}")
 if seen_guidance != EXPECTED_GUIDANCE:
     raise SystemExit(f"first-party guidance corpus mismatch: {seen_guidance ^ EXPECTED_GUIDANCE}")
+if seen_carriers != EXPECTED_CARRIERS:
+    raise SystemExit(f"first-party extension carrier corpus mismatch: {seen_carriers ^ EXPECTED_CARRIERS}")
 EXPECTED_HOOKS = {
     "hook/aikit/knowledge-route",
     "hook/continuity/turn-ledger",

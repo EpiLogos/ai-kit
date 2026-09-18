@@ -163,7 +163,7 @@ pub fn disclose(
             posture: hooks.posture,
             native: hooks_native_entries(hooks, native),
             composed: Vec::new(),
-            activation: None,
+            activation: hooks.activation,
             drift: Vec::new(),
         });
     }
@@ -626,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_hooks_disclose_the_extension_event_census_as_observed_without_drift() {
+    fn pi_hooks_disclose_the_extension_event_census_as_managed_without_drift() {
         let profile = for_slug("pi").expect("pi carries an embedded profile");
         let disclosure = disclose(profile, &NativeObservation::default(), &[]);
 
@@ -635,7 +635,11 @@ mod tests {
             .iter()
             .find(|layer| layer.layer == "hooks")
             .expect("the 2026-09-18 census gives pi a declared hooks layer");
-        assert_eq!(hooks.posture, LayerPosture::Observed);
+        assert_eq!(
+            hooks.posture,
+            LayerPosture::Managed,
+            "the extension carrier makes the pi hooks layer a managed projection"
+        );
         assert_eq!(
             hooks.native,
             vec![
@@ -668,13 +672,18 @@ mod tests {
         );
         assert!(
             hooks.composed.is_empty(),
-            "an observed layer takes no composed entries: {:?}",
+            "the hooks layer's composed concept is the carrier plan, not tool sources: {:?}",
             hooks.composed
         );
         assert!(
             hooks.drift.is_empty(),
-            "AIKit writes no pi hooks, so nothing of AIKit's can drift: {:?}",
+            "drift is the tools layer's concept; the carrier's truth lives in its plan: {:?}",
             hooks.drift
+        );
+        assert_eq!(
+            hooks.activation,
+            Some(ActivationEffectName::NextSessionOnly),
+            "pi reads extensions at session start; a running TUI can /reload"
         );
     }
 }

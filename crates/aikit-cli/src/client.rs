@@ -546,6 +546,27 @@ fn adapter_for(
 /// Plan the install as a Procedure.
 pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
     let entry = lookup(client).ok_or_else(|| unknown_client_error(client))?;
+    // The extension-carrier seam: a harness whose profile declares a managed
+    // hooks layer through the pi-extensions-record grammar has no dispatcher
+    // entries to install — its managed install is the carrier itself,
+    // projected through the settings `extensions` array and gated by capsule
+    // trust. The reach stays AdapterOnly for launch: pi is launched through
+    // its own per-invocation CLI, not through AIKit's projection.
+    let carrier_profile = entry
+        .catalog_slug
+        .and_then(aikit_adapters::profiles::for_slug)
+        .filter(|profile| {
+            profile.hooks.as_ref().is_some_and(|hooks| {
+                hooks.posture == aikit_core::harness_profile::LayerPosture::Managed
+                    && hooks.project.as_ref().is_some_and(|project| {
+                        project.format
+                            == aikit_core::harness_profile::MergeGrammar::PiExtensionsRecord
+                    })
+            })
+        });
+    if let Some(profile) = carrier_profile {
+        return plan_carrier_install(service, client, profile);
+    }
     let (adapter, capability, config_dir) = adapter_for(service, client)?;
     // The law is unchanged: AIKit installs only what Actuation declares the
     // harness to be. The broker is the one exception, because AIKit owns its
@@ -1320,5 +1341,243 @@ mod tests {
             !source.contains(&roster_needle),
             "the client roster literal must not return"
         );
+    }
+}
+
+/// Plan the carrier install for a profile whose managed hooks layer projects
+/// through the settings `extensions` array (pi, today).
+///
+/// The trust gate is not re-implemented here: the resolver only yields the
+/// carrier capsule as active for a trust-recorded revision, so an untrusted
+/// or blocked carrier plans as a sweep — every owned registration entry and
+/// carrier file leaves, and pi loads no AIKit extension at all.
+fn plan_carrier_install(
+    service: &Service,
+    client: &str,
+    profile: &'static aikit_core::harness_profile::HarnessProfile,
+) -> Result<Procedure> {
+    // Actuation still declares what the harness is before AIKit writes its
+    // native configuration — the same law the dispatcher-entry installs keep.
+    let entry = lookup(client).ok_or_else(|| unknown_client_error(client))?;
+    let capability = match entry.catalog_slug {
+        Some(slug) => {
+            match intake_actuation_capability(&SystemRunner::new(), ACTUATION_BIN, slug) {
+                CapabilityOutcome::Descriptor(capability) => Some(*capability),
+                CapabilityOutcome::Unavailable { .. } => None,
+            }
+        }
+        None => None,
+    };
+    if capability.is_none() {
+        return Err(AikitError::new(
+            "client.capability_unavailable",
+            format!(
+                "cannot install for {client}: Actuation's capability descriptor is unreachable, \
+                 and AIKit installs only what Actuation declares the harness to be"
+            ),
+        )
+        .with("client", client.to_string()));
+    }
+
+    // The carrier payload comes from the catalogued capsule, not from this
+    // working tree: what gets projected is exactly the revision that was
+    // reviewed.
+    let carrier_id = aikit_adapters::CARRIER_CAPSULE_ID;
+    let carrier_capsule = {
+        use aikit_core::catalog::Catalog;
+        use aikit_core::CapsuleId;
+        let snapshot = service.snapshot();
+        CapsuleId::parse(carrier_id)
+            .ok()
+            .and_then(|id| Catalog::get(snapshot, &id).cloned())
+    };
+    let payload = match &carrier_capsule {
+        Some(capsule) => {
+            let hook = capsule.hook().ok_or_else(|| {
+                AikitError::new(
+                    "client.carrier_not_a_hook",
+                    format!("{carrier_id} is not a hook capsule; the carrier projection                              cannot proceed"),
+                )
+            })?;
+            let path = capsule
+                .root
+                .as_ref()
+                .ok_or_else(|| {
+                    AikitError::new(
+                        "client.carrier_unrooted",
+                        format!("{carrier_id} has no payload root on this machine"),
+                    )
+                })?
+                .join(&hook.entry);
+            std::fs::read_to_string(&path).map_err(|error| {
+                AikitError::new(
+                    "client.carrier_unreadable",
+                    format!(
+                        "could not read the carrier payload at {}: {error}",
+                        path.display()
+                    ),
+                )
+                .with("path", path.display().to_string())
+            })?
+        }
+        None => String::new(),
+    };
+    let carrier_active = service
+        .resolved()
+        .active_of_kind(Kind::Hook)
+        .iter()
+        .any(|active| active.id.to_string() == carrier_id);
+    if carrier_active && carrier_capsule.is_none() {
+        return Err(AikitError::new(
+            "client.carrier_unrooted",
+            format!("{carrier_id} is active but has no payload root on this machine"),
+        ));
+    }
+
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let project = profile
+        .hooks
+        .as_ref()
+        .and_then(|hooks| hooks.project.as_ref())
+        .ok_or_else(|| {
+            AikitError::new(
+                "client.carrier_without_seam",
+                format!(
+                    "the {client} profile's hooks layer declares no project seam; the                      carrier cannot be installed"
+                ),
+            )
+            .with("client", client.to_string())
+        })?;
+    let settings_target = expand_home(&project.file, &home);
+    let projection_absolute = service.context_projection_root().join("projections/pi");
+    let projection = aikit_adapters::ProjectionDir::new(
+        &projection_absolute,
+        declared_home_relative(&projection_absolute, &home),
+    );
+
+    let outcome = aikit_adapters::plan_hooks_projection(
+        carrier_active.then(|| aikit_adapters::HookCarrierSource {
+            payload: payload.clone(),
+        }),
+        profile,
+        &projection,
+        |asked| {
+            let seeded = expand_home(asked, &home);
+            if seeded.is_file() {
+                std::fs::read_to_string(&seeded).map(Some)
+            } else {
+                Ok(None)
+            }
+        },
+        |dir| {
+            Ok(std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok())
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default())
+        },
+    )?;
+
+    let mut plan = Plan::new().with_note(format!(
+        "install AIKit's {client} integration: the extension carrier registered through {}",
+        project.file
+    ));
+    let outcome = match outcome {
+        aikit_adapters::HooksProjectionOutcome::NotProjected { reason } => {
+            return Err(AikitError::new("client.nothing_to_install", reason)
+                .with("client", client.to_string()));
+        }
+        other => other,
+    };
+    let (settings_item, carrier_item, stale_files, activation_note) = match &outcome {
+        aikit_adapters::HooksProjectionOutcome::Projected(plan) => (
+            Some(&plan.settings_item),
+            Some(&plan.carrier_item),
+            plan.stale_carrier_files.as_slice(),
+            "active: pi loads the carrier at the next session (a running TUI can /reload)"
+                .to_string(),
+        ),
+        aikit_adapters::HooksProjectionOutcome::Swept(plan) => (
+            Some(&plan.settings_item),
+            None,
+            plan.stale_carrier_files.as_slice(),
+            "inactive: the carrier is not trust-active, so every owned registration              and file was swept"
+                .to_string(),
+        ),
+        aikit_adapters::HooksProjectionOutcome::NotProjected { .. } => unreachable!(),
+    };
+    if let Some(aikit_core::projection::ProjectionItem::Write { contents, .. }) = settings_item {
+        plan = plan.with_edit(WorldEdit::WriteFile {
+            path: settings_target.clone(),
+            contents: contents.clone().into_bytes(),
+            inverse: if settings_target.exists() {
+                Inverse::Restore {
+                    blob: aikit_core::procedure::BlobId::deferred(),
+                }
+            } else {
+                Inverse::Remove
+            },
+        });
+    }
+    if let Some(aikit_core::projection::ProjectionItem::Write { contents, .. }) = carrier_item {
+        plan = plan.with_edit(WorldEdit::WriteFile {
+            path: projection.absolute.join(
+                aikit_adapters::HookCarrierSource {
+                    payload: payload.clone(),
+                }
+                .file_name(),
+            ),
+            contents: contents.clone().into_bytes(),
+            inverse: Inverse::Remove,
+        });
+    }
+    for stale in stale_files {
+        plan = plan.with_edit(WorldEdit::DeleteFile {
+            path: stale.clone(),
+            inverse: Inverse::Restore {
+                blob: aikit_core::procedure::BlobId::deferred(),
+            },
+        });
+    }
+    let _ = activation_note;
+
+    if plan.is_empty() {
+        return Err(AikitError::new(
+            "client.nothing_to_install",
+            format!(
+                "the {client} carrier is inactive and nothing AIKit owns is registered;                  there is nothing to install or sweep"
+            ),
+            )
+            .with("client", client.to_string()));
+    }
+    aikit_store::procedure::plan_procedure(
+        service.home(),
+        ProcedureKind::ClientInstall {
+            client: aikit_core::TargetId::new(client),
+        },
+        plan,
+    )
+}
+
+/// Expand a leading `~/` against `home`, the spelling profile declarations
+/// and plan write items use.
+fn expand_home(path: &str, home: &Path) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None => PathBuf::from(path),
+    }
+}
+
+/// The home-relative spelling of an absolute path under `home`, for plan
+/// write destinations; an unrelated absolute path passes through untouched.
+fn declared_home_relative(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(rest) => format!("~/{}", rest.to_string_lossy()),
+        Err(_) => path.to_string_lossy().into_owned(),
     }
 }
