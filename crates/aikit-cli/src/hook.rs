@@ -2,9 +2,10 @@
 //!
 //! One permanent entry per client event routes into `aikit hook dispatch <client>
 //! <event>`. This module normalises the client's event, runs the immutable chain
-//! with **real subprocesses** honouring per-step timeouts, spends a bypass token
-//! if one applied, and hands back the decision for the caller to translate into
-//! the client's protocol.
+//! — hook steps as **real subprocesses** honouring per-step timeouts, guidance
+//! steps as content reads of their fragment file — spends a bypass token if one
+//! applied, and hands back the decision for the caller to translate into the
+//! client's protocol.
 //!
 //! The decision logic itself is not here — it is [`aikit_core::hooks::Dispatcher`],
 //! which folds the chain deterministically and decides bypass application. This
@@ -19,7 +20,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use aikit_adapters::runner::SystemRunner;
-use aikit_core::capsule::HookPhase;
+use aikit_core::capsule::{HookPhase, Kind};
 use aikit_core::hooks::{
     BypassScope, BypassToken, Dispatcher, HookChain, HookDecision, HookEvent, HookEventKind,
     HookStep, StepResult,
@@ -53,6 +54,9 @@ pub fn dispatch(
 
     let mut runner = |step: &HookStep, ev: &HookEvent| -> StepResult {
         match roots.get(&step.capsule) {
+            Some(root) if step.capsule.kind() == Kind::Guidance => {
+                read_guidance_fragment(step, root)
+            }
             Some(root) => run_hook_step(step, ev, root),
             None => StepResult::system_failure(format!(
                 "no payload on this machine for {}",
@@ -82,6 +86,28 @@ pub fn dispatch(
     }
 
     Ok(decision)
+}
+
+/// Deliver one guidance step: the entry file's content *is* the fragment.
+///
+/// Guidance is prose, not a process — there is nothing to spawn, feed or time
+/// out, so delivery is a read mapped onto the same verdicts an inject-phase
+/// hook produces: non-empty content rides `decision.injected`, empty content
+/// injects nothing, and an unreadable fragment is a system failure (the inject
+/// phase cannot deny, so this surfaces as a warning, never as a gate).
+pub fn read_guidance_fragment(step: &HookStep, root: &Path) -> StepResult {
+    let entry = root.join(&step.entry);
+    match std::fs::read_to_string(&entry) {
+        Ok(body) => {
+            let text = body.trim();
+            if text.is_empty() {
+                StepResult::allow()
+            } else {
+                StepResult::inject(text)
+            }
+        }
+        Err(e) => StepResult::system_failure(format!("could not read {}: {e}", entry.display())),
+    }
 }
 
 /// Execute one hook step as a real child process.

@@ -928,3 +928,228 @@ fn a_step_carries_the_effective_config_the_resolver_produced_for_its_capsule() {
         Some("changed-crates")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Guidance delivery
+//
+// Guidance capsules are content, not processes: an active one joins the chains
+// of the events its `[guidance] inject` declares, as an inject-phase step whose
+// entry is the fragment file. These tests pin the planning side of that
+// delivery — who joins, who is withheld, how fragments order and dedup —
+// through the same resolve-then-build path production dispatch uses.
+// ---------------------------------------------------------------------------
+
+/// A guidance capsule declared the way the conformance contract requires
+/// first parties to declare them: an explicit inject event and a non-empty entry.
+fn guidance_fixture(layers: Vec<aikit_core::scope::ScopeLayer>) -> Fixture {
+    Fixture::new(vec![guidance_table(
+        "guidance/mode/orientation",
+        "",
+        "entry = \"payload/guidance.md\"\ninject = [\"SessionStart\"]\norder = 15",
+    )])
+    .with_layers(layers)
+}
+
+#[test]
+fn an_active_guidance_capsule_joins_the_chains_of_the_events_it_declares() {
+    let f = guidance_fixture(vec![layer(
+        ScopeKind::Project,
+        &["guidance/mode/orientation"],
+        &[],
+    )]);
+    let session = chain(&f, "SessionStart");
+
+    assert_eq!(step_ids(&session), vec!["guidance/mode/orientation"]);
+    let step = session.step(&cid("guidance/mode/orientation")).unwrap();
+    assert_eq!(
+        step.phase,
+        HookPhase::Inject,
+        "guidance is content: it composes with inject-phase semantics only"
+    );
+    assert_eq!(step.entry, "payload/guidance.md");
+    assert_eq!(step.order, 15);
+    assert!(step.matcher.is_none(), "prose has no tool name to match");
+    assert!(
+        step.timeout.is_none(),
+        "delivery is a file read, not a process to time out"
+    );
+
+    // And only the declared events: no other chain exists to receive it.
+    assert!(chains(&f).get("UserPromptSubmit").is_none());
+}
+
+#[test]
+fn a_disabled_guidance_capsule_composes_nothing() {
+    let f = guidance_fixture(vec![layer(
+        ScopeKind::Project,
+        &[],
+        &["guidance/mode/orientation"],
+    )]);
+    assert!(chains(&f).is_empty());
+}
+
+#[test]
+fn an_untrusted_guidance_revision_is_withheld_from_the_chain() {
+    let f = guidance_fixture(vec![layer(
+        ScopeKind::Project,
+        &["guidance/mode/orientation"],
+        &[],
+    )])
+    .untrust("guidance/mode/orientation");
+    assert!(
+        chains(&f).is_empty(),
+        "guidance changes agent behaviour, so an unreviewed revision is withheld at resolution \
+         and the chain never sees it"
+    );
+}
+
+#[test]
+fn guidance_joins_no_chain_until_its_manifest_declares_an_event() {
+    let f = Fixture::new(vec![guidance_table(
+        "guidance/mode/silent",
+        "",
+        "entry = \"payload/guidance.md\"\norder = 10",
+    )])
+    .with_layers(vec![layer(
+        ScopeKind::Project,
+        &["guidance/mode/silent"],
+        &[],
+    )]);
+    assert!(chains(&f).is_empty(), "no declared event, no delivery");
+}
+
+#[test]
+fn guidance_fragments_fold_alongside_hook_inject_steps_in_chain_order() {
+    let f = Fixture::new(vec![
+        hook_table(
+            "hook/gate/boundary",
+            "",
+            "entry = \"payload/check\"\nevents = [\"SessionStart\"]\nphase = \"gate\"",
+        ),
+        hook_table(
+            "hook/inject/steer",
+            "",
+            "entry = \"payload/x\"\nevents = [\"SessionStart\"]\nphase = \"inject\"\norder = 10",
+        ),
+        guidance_table(
+            "guidance/mode/orientation",
+            "",
+            "entry = \"payload/guidance.md\"\ninject = [\"SessionStart\"]\norder = 20",
+        ),
+    ])
+    .with_layers(vec![layer(
+        ScopeKind::Project,
+        &[
+            "hook/gate/boundary",
+            "hook/inject/steer",
+            "guidance/mode/orientation",
+        ],
+        &[],
+    )]);
+    let chain = chain(&f, "SessionStart");
+    assert_eq!(
+        step_ids(&chain),
+        vec![
+            "hook/gate/boundary",
+            "hook/inject/steer",
+            "guidance/mode/orientation"
+        ]
+    );
+
+    let event = HookEvent::new("claude", HookEventKind::SessionStart, serde_json::json!({}));
+    let mut runner = |step: &HookStep, _: &HookEvent| {
+        if step.capsule.kind() == aikit_core::capsule::Kind::Guidance {
+            StepResult::inject("orient before acting")
+        } else if step.phase == HookPhase::Inject {
+            StepResult::inject("hook note")
+        } else {
+            StepResult::allow()
+        }
+    };
+    let decision = Dispatcher::new().run(&chain, &event, &mut runner);
+    assert!(decision.allowed);
+    assert_eq!(
+        decision.injected,
+        vec!["hook note", "orient before acting"],
+        "guidance rides the composed injection alongside hook capsules, in chain order"
+    );
+
+    // The same chain with the gate denying: guidance, like every inject step,
+    // is short-circuited — a refused session never receives its guidance.
+    let mut denying = |step: &HookStep, _: &HookEvent| {
+        if step.capsule.kind() == aikit_core::capsule::Kind::Guidance {
+            panic!("guidance must not be consulted after a denial");
+        }
+        if step.phase == HookPhase::Gate {
+            StepResult::deny("outside the boundary")
+        } else {
+            StepResult::allow()
+        }
+    };
+    let refused = Dispatcher::new().run(&chain, &event, &mut denying);
+    assert!(!refused.allowed);
+    assert!(refused.injected.is_empty());
+}
+
+#[test]
+fn guidance_sharing_a_dedup_key_is_planned_once_and_the_higher_scope_wins() {
+    let body = "entry = \"payload/guidance.md\"\ninject = [\"SessionStart\"]\norder = 10\ndedup_key = \"orientation\"";
+    let f = Fixture::new(vec![
+        guidance_table("guidance/mode/global-copy", "", body),
+        guidance_table("guidance/mode/session-copy", "", body),
+    ])
+    .with_layers(vec![
+        layer(ScopeKind::Global, &["guidance/mode/global-copy"], &[]),
+        layer(ScopeKind::Session, &["guidance/mode/session-copy"], &[]),
+    ]);
+
+    let session = chain(&f, "SessionStart");
+    assert_eq!(
+        step_ids(&session),
+        vec!["guidance/mode/session-copy"],
+        "the session-scoped selection outranks the global default it was written to replace"
+    );
+}
+
+#[test]
+fn a_dedup_tie_goes_to_the_first_declared_order() {
+    let f = Fixture::new(vec![
+        guidance_table(
+            "guidance/mode/later",
+            "",
+            "entry = \"payload/guidance.md\"\ninject = [\"SessionStart\"]\norder = 30\ndedup_key = \"orientation\"",
+        ),
+        guidance_table(
+            "guidance/mode/earlier",
+            "",
+            "entry = \"payload/guidance.md\"\ninject = [\"SessionStart\"]\norder = 20\ndedup_key = \"orientation\"",
+        ),
+    ])
+    .with_layers(vec![layer(
+        ScopeKind::Project,
+        &["guidance/mode/later", "guidance/mode/earlier"],
+        &[],
+    )]);
+
+    assert_eq!(
+        step_ids(&chain(&f, "SessionStart")),
+        vec!["guidance/mode/earlier"],
+        "same scope, so the composer's own tie rule applies: first in (order, capsule) order"
+    );
+}
+
+#[test]
+fn guidance_without_a_dedup_key_is_never_deduplicated() {
+    let body = "entry = \"payload/guidance.md\"\ninject = [\"SessionStart\"]\norder = 10";
+    let f = Fixture::new(vec![
+        guidance_table("guidance/mode/one", "", body),
+        guidance_table("guidance/mode/two", "", body),
+    ])
+    .with_layers(vec![layer(
+        ScopeKind::Project,
+        &["guidance/mode/one", "guidance/mode/two"],
+        &[],
+    )]);
+
+    assert_eq!(chain(&f, "SessionStart").steps.len(), 2);
+}
