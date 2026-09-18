@@ -229,9 +229,12 @@ fn harness_trust_settings_surface_as_disclosure_only_plane_settings() {
         json!([{ "scope_kind": "machine", "scope_ref": null }])
     );
 
-    for reference in [
-        "ai-kit:claude-code:hooks.fs-guardrail",
-        "ai-kit:zcode:hooks.fs-guardrail",
+    // Each declaration names its own harness's native config file: Claude
+    // Code keeps settings in `settings.json`, zcode in `config.json` — the
+    // location named is the harness's, not a shared filename convention.
+    for (reference, native_config) in [
+        ("ai-kit:claude-code:hooks.fs-guardrail", "settings.json"),
+        ("ai-kit:zcode:hooks.fs-guardrail", "config.json"),
     ] {
         let guardrail = setting(reference);
         assert_eq!(guardrail["value_schema"]["type"], "scalar");
@@ -240,8 +243,13 @@ fn harness_trust_settings_surface_as_disclosure_only_plane_settings() {
             json!([{ "scope_kind": "machine", "scope_ref": null }])
         );
         assert!(
-            guardrail["native_ref"].as_str().unwrap().contains("config"),
-            "the declaration names the harness-native config location"
+            guardrail["native_ref"]
+                .as_str()
+                .unwrap()
+                .contains(native_config),
+            "the declaration names the harness-native config location \
+             ({native_config}): {}",
+            guardrail["native_ref"]
         );
     }
 }
