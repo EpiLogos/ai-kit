@@ -2265,6 +2265,13 @@ pub struct HookDispatchArgs {
     /// The event name, e.g. `PreToolUse`.
     #[arg(value_name = "EVENT")]
     pub event: String,
+    /// Speak claude-code's `hookSpecificOutput.permissionDecision` JSON on
+    /// stdout instead of exit codes alone. The default exit-code flavor is the
+    /// common denominator of claude-code and zcode and keeps stdout empty,
+    /// which zcode's strict hook-output schema requires; use this flag only
+    /// where the calling harness consumes the JSON protocol.
+    #[arg(long = "decision-json")]
+    pub decision_json: bool,
 }
 
 // ---------------------------------------------------------------------------

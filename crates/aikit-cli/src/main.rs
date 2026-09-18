@@ -237,7 +237,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Task(c)) => cmd_task(cwd, c),
         Some(Command::Bypass(c)) => cmd_bypass(cwd, c),
         Some(Command::Bypasses(_)) => cmd_bypasses(cwd),
-        Some(Command::Hook(c)) => cmd_hook(cwd, c),
+        Some(Command::Hook(c)) => cmd_hook(cwd, c, json_mode),
         Some(Command::Capabilities(c)) => cmd_capabilities(cwd, c),
         Some(Command::Session(c)) => cmd_session(cwd, c),
         Some(Command::Compose(a)) => cmd_compose(cwd, a),
@@ -3128,7 +3128,7 @@ fn cmd_bypasses(cwd: &std::path::Path) -> Result<Reply> {
     ))
 }
 
-fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
+fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply> {
     let HookSub::Dispatch(a) = c.command;
     let service = Service::discover(cwd)?;
 
@@ -3147,7 +3147,37 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
         "warnings": decision.warnings,
         "continuity": tuning.describe(),
     });
-    Ok(reply(&service, data, vec![]))
+
+    // The dispatch boundary is where AIKit's verdict becomes the calling
+    // harness's protocol. The harness sees only this process's streams and
+    // exit status, so a denial must reach it as exit 2 (the block code both
+    // claude-code and zcode act on); the folded envelope alone would read as
+    // an allowance. `--json` keeps the machine envelope and now carries the
+    // verdict in its exit status; plain mode speaks the harness protocol
+    // itself (see `hook::translate_verdict`).
+    let denial_message = decision.denial.as_ref().map(|d| d.describe());
+    let verdict = hook::translate_verdict(
+        decision.allowed,
+        denial_message.as_deref(),
+        a.decision_json,
+        &a.event,
+    );
+
+    if json_mode {
+        Ok(Reply::Data {
+            context: EnvelopeContext::from_descriptor(service.descriptor()),
+            data,
+            warnings: vec![],
+            exit_code: verdict.exit_code,
+        })
+    } else if let Some(document) = verdict.stdout {
+        Ok(Reply::Text(document))
+    } else {
+        if let Some(message) = verdict.stderr {
+            eprintln!("{message}");
+        }
+        Ok(Reply::Status(verdict.exit_code))
+    }
 }
 
 fn cmd_capabilities(cwd: &std::path::Path, c: CapabilitiesCmd) -> Result<Reply> {
