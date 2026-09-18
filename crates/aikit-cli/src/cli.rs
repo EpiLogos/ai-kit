@@ -117,6 +117,8 @@ pub enum Command {
     Compose(ComposeArgs),
     /// Read a Provider Source into the canonical Model catalogue, and read the catalogue back.
     ModelCatalogue(ModelCatalogueCmd),
+    /// Disclose what a resolved body resolved about modalities, interaction and transport.
+    ModelModality(ModelModalityCmd),
     /// Spawn, list and close agent tasks.
     Task(TaskCmd),
     /// Show the capture inbox.
@@ -346,6 +348,31 @@ pub struct ModelCatalogueShowArgs {
     /// Only show entries whose ModelRef or name contains this text.
     #[arg(long)]
     pub filter: Option<String>,
+}
+
+/// `aikit model-modality` — the modality/interaction/transport disclosure.
+#[derive(Debug, Args)]
+pub struct ModelModalityCmd {
+    #[command(subcommand)]
+    pub command: ModelModalitySub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ModelModalitySub {
+    /// Disclose a resolved read-model document: which modalities, interaction
+    /// capabilities and transports resolved, the four-state answer (supported,
+    /// degraded, unsupported, unknown) for every vocabulary member, and the
+    /// explanation evidence behind the answers. Document in, document out.
+    Show(ModelModalityShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ModelModalityShowArgs {
+    /// Path to a resolved read-model document: a `aikit.model-runtime/v1`
+    /// read model (single-model body) or a `aikit.model-stage-runtime/v1`
+    /// read model (staged cascade body).
+    #[arg(long = "document", value_name = "FILE")]
+    pub document: std::path::PathBuf,
 }
 
 #[derive(Debug, Args)]

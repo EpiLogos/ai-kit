@@ -242,6 +242,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Session(c)) => cmd_session(cwd, c),
         Some(Command::Compose(a)) => cmd_compose(cwd, a),
         Some(Command::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
+        Some(Command::ModelModality(c)) => cmd_model_modality(cwd, c),
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
         Some(Command::Inbox(a)) => cmd_inbox(cwd, a),
         Some(Command::Capture(a)) => cmd_capture(cwd, a),
@@ -617,6 +618,24 @@ fn cmd_model_catalogue(cwd: &std::path::Path, args: ModelCatalogueCmd) -> Result
         ModelCatalogueSub::Show(args) => service.show_model_catalogue(args.filter.as_deref())?,
     };
     Ok(reply(&service, data, diagnostic_warnings(&service)))
+}
+
+/// `aikit model-modality show --document <read-model.json>` — the machine
+/// user's read over a resolved body's modality/interaction/transport facts.
+/// Document in (a `aikit.model-runtime/v1` or `aikit.model-stage-runtime/v1`
+/// read model), document out (the disclosure with the four-state answers and
+/// their explanation evidence). Nothing here re-resolves or touches a network.
+fn cmd_model_modality(cwd: &std::path::Path, args: ModelModalityCmd) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let ModelModalitySub::Show(args) = args.command;
+    let raw = std::fs::read_to_string(&args.document).map_err(|error| {
+        AikitError::new(
+            "model_modality_disclosure.unreadable_document",
+            format!("could not read {}: {error}", args.document.display()),
+        )
+    })?;
+    let data = aikit_cli::model_modality_disclosure::disclose_document(&raw)?;
+    Ok(reply(&service, data, vec![]))
 }
 
 fn require_agent_skill(service: &Service, id: &CapsuleId) -> Result<()> {

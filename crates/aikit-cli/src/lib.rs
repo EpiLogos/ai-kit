@@ -33,6 +33,7 @@ pub mod gateway_ops;
 pub mod hook;
 pub mod json;
 pub mod jump;
+pub mod model_modality_disclosure;
 pub mod model_roster;
 pub mod multicall;
 pub mod mux_install;
