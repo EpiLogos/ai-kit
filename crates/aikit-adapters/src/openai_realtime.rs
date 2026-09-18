@@ -584,6 +584,46 @@ mod tests {
     }
 
     #[test]
+    fn the_recording_proves_no_partials_or_timestamps_so_none_are_claimed() {
+        // The frozen session document is session configuration: it proves
+        // finals (a transcription model is configured), but carries no
+        // partial-transcript or timestamp vocabulary of its own. The honest
+        // declaration is silence — unsupported, with the surface named.
+        let contract = parse_realtime_session(FROZEN_SESSION, bound_credential()).unwrap();
+        assert!(contract
+            .interaction_support(InteractionCapability::FinalTranscripts)
+            .is_supported());
+        for unproven in [
+            InteractionCapability::PartialTranscripts,
+            InteractionCapability::Timestamps,
+        ] {
+            match contract.interaction_support(unproven) {
+                aikit_core::model_modality::ModalitySupport::Unsupported { reason } => {
+                    assert!(
+                        reason.contains("gpt-realtime"),
+                        "the reason names the surface: {reason}"
+                    );
+                }
+                other => panic!(
+                    "the recording proves no `{}`; it must not read as {other:?}",
+                    unproven.as_str()
+                ),
+            }
+        }
+        // The same silence holds for the transcription surface: it is
+        // declared from the same recording.
+        let stt = transcription_surface(bound_credential());
+        assert!(matches!(
+            stt.interaction_support(InteractionCapability::PartialTranscripts),
+            aikit_core::model_modality::ModalitySupport::Unsupported { .. }
+        ));
+        assert!(matches!(
+            stt.interaction_support(InteractionCapability::Timestamps),
+            aikit_core::model_modality::ModalitySupport::Unsupported { .. }
+        ));
+    }
+
+    #[test]
     fn unparsable_session_documents_are_refused_with_a_reason() {
         for broken in ["", "not json", "{}", r#"{"session":{}}"#] {
             let error = parse_realtime_session(broken, CredentialCondition::NotRequired);

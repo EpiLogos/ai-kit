@@ -47,6 +47,8 @@ Component, provider, engine, materialisation and surface changes change facts an
 
 `aikit-adapters::openai_realtime` is the first realtime adapter instance, deliberately an adapter: a frozen session fixture (`crates/aikit-adapters/tests/fixtures/openai-realtime/session.json`, pinned by `OPENAI_REALTIME_ADAPTER_REVISION`) is translated into the generic contract, and provider-private session configuration — voices, audio formats, tool definitions, instructions — is validated and dropped, so none of it can leak into generic types, logs or history. Unrecognised provider vocabulary is refused, never coerced. Declared STT/TTS surfaces (`transcription_surface`, `speech_synthesis_surface`) cover the cascade endpoints. The seed catalogue carries the matching Models (`model:gpt-realtime`, `model:gpt-4o-transcribe`, `model:gpt-4o-mini-tts`); route observation stays Actuation's join, and credential conditions stay ref/presence only.
 
+The frozen recording is session configuration only, and the adapter declares exactly what it proves: it proves `final-transcripts` (a transcription model is configured), but it carries no partial-transcript or timestamp vocabulary, so both stay undeclared — a future recording proves `partial-transcripts` when the recorded document itself carries the partial-delivery vocabulary (an input-audio-transcription delta/partial event type or an equivalent session configuration field), and proves `timestamps` when it carries timestamp-bearing transcription configuration or events.
+
 ## Honest degradation
 
 - a required-but-unbound credential surfaces as a `modality-credential` unavailability in the read model;
@@ -56,6 +58,14 @@ Component, provider, engine, materialisation and surface changes change facts an
 ## Explanations
 
 `explain_model_modality` and `explain_staged_model_runtime` emit `ExplainEvidence` through the existing Explain/History seam: per-stage model relations with provider-native provenance, declared modalities per stage, the derived body basis, and every honest absence. Provider-native spellings travel in provenance only; canonical refs carry identity.
+
+## Reading the facts back: the CLI disclosure
+
+`aikit model-modality show --document <read-model.json>` is the machine user's read over a resolved body: it takes a `aikit.model-runtime/v1` or `aikit.model-stage-runtime/v1` read model (document-in), and returns a `aikit.model-modality-disclosure/v1` document (document-out) carrying the resolved identity, the surface and per-stage facts, the four-state answer for **every** vocabulary member (absence is a rendered unsupported/unknown answer with its reason, never a missing key), the stage-named basis for staged bodies, and the explanation evidence. It re-resolves nothing and touches no network.
+
+## Consumers reduce the raw relation
+
+A consumer building an Actuation constitution from AIKit resolution must **reduce** the raw model relation before submission: AIKit's shape owners here are `ModelRuntimeRelation` and `ModelStageRelation` (the `aikit.model-runtime/v1` and `aikit.model-stage-runtime/v1` documents in `aikit-core::model_runtime`), and the raw relation includes the modality contract's `credential` field, which Actuation's admission secret-scan refuses. The Actuation-admitted shapes are its own speech-constitution admission grammar's `model_relation` and `access_profile`; mapping the AIKit relation into those admitted shapes — dropping what admission refuses — is the consumer's reduction duty, not a leniency expected of admission. AIKit owns the raw shapes and their honesty; Actuation owns the admitted shapes and their refusal; neither owns the other's.
 
 ## Explicitly not built here
 
