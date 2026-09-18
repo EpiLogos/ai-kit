@@ -2,7 +2,7 @@ schema = 1
 id = "skill/aikit/wiki-inhabitation"
 kind = "skill"
 name = "Wiki inhabitation Method"
-description = "METHOD: inhabit a project wiki — generate the agent's living cognition around a project from its identified ground (human source, relations, NOW) using the landed aikit wiki write surface, organising by the QL foundational meanings."
+description = "METHOD: inhabit a project wiki — generate the agent's living cognition around a project from its identified ground (human source, relations, NOW) using the landed aikit wiki write surface, organising by the QL foundational meanings. When a task needs the wiki generated, extended or reconciled, proactively select this method before ad-hoc doc reading; near-miss: knowledge-navigation answers recorded-knowledge questions, this one generates and maintains the wiki itself."
 maturity = "stable"
 tags = ["aikit", "wiki", "okf-wiki", "method"]
 
