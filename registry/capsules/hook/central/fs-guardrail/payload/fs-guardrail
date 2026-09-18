@@ -1,0 +1,19 @@
+#!/bin/sh
+# Delegating payload for the Central filesystem guardrail.
+#
+# The guard's author is the Central ground, never AIKit: every decision lives
+# in the ground-owned script, and this payload only carries the event to it
+# and returns its verdict unchanged. Ownership marker: the command resolves to
+# the Central ground.
+#
+# Interim: the live harness entries call the ground script directly, so
+# composing this capsule before the dispatch boundary can carry a block would
+# double-fire without adding protection. It exists so the handover to the
+# AIKit hook chain is a composition change, not an authorship change.
+set -eu
+GUARD="${CENTRAL_FS_GUARDRAIL:-/home/frank/Central/.agents/hooks/central-fs-guardrail.sh}"
+if [ ! -x "$GUARD" ]; then
+  echo "hook/central/fs-guardrail: the Central ground guardrail is missing or not executable at $GUARD; failing closed" >&2
+  exit 2
+fi
+exec bash "$GUARD"
