@@ -916,14 +916,18 @@ impl Service {
             aikit_store::model_catalogue::load_provider_catalogs(&self.home);
         notes.extend(problems);
         for document in documents {
+            let listed_by = document.listed_by.as_str().to_string();
             let outcome =
                 aikit_adapters::provider_catalog_source::ProviderCatalogOutcome::Observed {
                     observations: document.observations,
                     source: document.source,
                     observed_at: document.observed_at,
                 };
-            observed
-                .extend(aikit_adapters::provider_catalog_source::observed_router_routes(&outcome));
+            observed.extend(
+                aikit_adapters::provider_catalog_source::observed_routes_for_catalog(
+                    &listed_by, &outcome,
+                ),
+            );
         }
 
         // Harness workability: a harness that is actually installed here and
@@ -1029,16 +1033,27 @@ impl Service {
     /// separable from the credential half ("what can I use today").
     pub fn refresh_model_catalogue(&self, provider: &str) -> Result<serde_json::Value> {
         use aikit_adapters::provider_catalog_source::{
-            fetch_openrouter_catalog, ProviderCatalogOutcome, OPENROUTER_PROVIDER,
+            fetch_openrouter_catalog, ProviderCatalogOutcome, OPENROUTER_PROVIDER, ZAI_PROVIDER,
         };
-        if provider != "openrouter" {
-            return Err(AikitError::new(
-                "model_catalogue.unknown_provider_source",
-                format!("no Provider Source is implemented for {provider:?} (have: openrouter)"),
-            ));
-        }
         let observed_at = jiff::Timestamp::now().to_string();
-        let outcome = fetch_openrouter_catalog(&SystemRunner::new(), &observed_at);
+        let (provider_ref, outcome) = match provider {
+            "openrouter" => (
+                OPENROUTER_PROVIDER,
+                fetch_openrouter_catalog(&SystemRunner::new(), &observed_at),
+            ),
+            "z-ai" => (
+                ZAI_PROVIDER,
+                self.refresh_zai_coding_catalogue(&observed_at)?,
+            ),
+            other => {
+                return Err(AikitError::new(
+                    "model_catalogue.unknown_provider_source",
+                    format!(
+                        "no Provider Source is implemented for {other:?} (have: openrouter, z-ai)"
+                    ),
+                ));
+            }
+        };
         match outcome {
             ProviderCatalogOutcome::Observed {
                 observations,
@@ -1046,7 +1061,7 @@ impl Service {
                 observed_at,
             } => {
                 let document = aikit_core::resource::ProviderCatalogDocument::new(
-                    aikit_core::resource::ProviderRef::parse(OPENROUTER_PROVIDER)?,
+                    aikit_core::resource::ProviderRef::parse(provider_ref)?,
                     source.clone(),
                     observed_at.clone(),
                     observations,
@@ -1056,7 +1071,7 @@ impl Service {
                 let folded =
                     aikit_core::resource::catalogue_from_observations(&document.observations)?;
                 Ok(serde_json::json!({
-                    "provider": OPENROUTER_PROVIDER,
+                    "provider": provider_ref,
                     "source": source,
                     "observed_at": observed_at,
                     "listings_read": document.observations.len(),
@@ -1071,6 +1086,82 @@ impl Service {
                 reason,
             )),
         }
+    }
+
+    /// Resolve the `z-ai` credential through the credential world and read the
+    /// GLM Coding-Plan model list with it. The secret is materialised straight
+    /// into the fetch (a private `curl --config` file) and is never returned
+    /// here, held, or logged — the same guarded path model dispatch uses.
+    fn refresh_zai_coding_catalogue(
+        &self,
+        observed_at: &str,
+    ) -> Result<aikit_adapters::provider_catalog_source::ProviderCatalogOutcome> {
+        use aikit_adapters::credential_provider::EnvironmentImportProvider;
+        use aikit_adapters::provider_catalog_source::fetch_zai_coding_catalog;
+        use aikit_adapters::NativeSecureStoreProvider;
+        use aikit_core::credential::{
+            resolve_credential, CredentialRef, CredentialResolutionRequest,
+            SecretMaterialisationClass, SecretProvider, SecretRequirement, SecretRequirementRef,
+        };
+
+        // z-ai resolves from whichever store the field actually holds it in: the
+        // OS keyring (the reference host) or an explicit `ZAI_API_KEY` import (a
+        // machine or CI that keeps it in the environment). The secret is never
+        // returned to this scope — only materialised straight into the fetch.
+        let credential_ref = CredentialRef::new("z-ai")?;
+        let binding = aikit_store::credentials::CredentialBindingStore::new(&self.home)
+            .load(&credential_ref)?;
+        let native = NativeSecureStoreProvider::with_binding(binding.as_ref());
+        let environment =
+            EnvironmentImportProvider::from_process(credential_ref.clone(), "ZAI_API_KEY", None)
+                .ok();
+
+        let mut descriptors = vec![native.descriptor(&credential_ref)];
+        if let Some(environment) = &environment {
+            descriptors.push(environment.descriptor(&credential_ref));
+        }
+        let resolution = resolve_credential(CredentialResolutionRequest {
+            requirement: SecretRequirement {
+                requirement_ref: SecretRequirementRef::new(
+                    "secret-requirement:model-catalogue/z-ai",
+                )?,
+                credential_ref: credential_ref.clone(),
+                consumer_ref: "operator:aikit/model-catalogue-refresh".to_string(),
+                purpose: "read the z.ai Coding-Plan model list".to_string(),
+                permitted_materialisation: [SecretMaterialisationClass::ProcessEnv].into(),
+            },
+            providers: descriptors,
+            headless: true,
+            allow_from_env: environment.is_some(),
+        })?;
+        let provider = resolution.selected_provider_ref.as_ref().ok_or_else(|| {
+            AikitError::new(
+                "model_catalogue.credential_unavailable",
+                "the z-ai credential is not available on this machine; bind it with \
+                 `aikit credential setup z-ai` or export ZAI_API_KEY, then refresh again",
+            )
+        })?;
+        let secret = if native.descriptor(&credential_ref).provider_ref == *provider {
+            native.materialise(&credential_ref, SecretMaterialisationClass::ProcessEnv)?
+        } else if let Some(environment) = environment
+            .as_ref()
+            .filter(|env| env.descriptor(&credential_ref).provider_ref == *provider)
+        {
+            environment.materialise(&credential_ref, SecretMaterialisationClass::ProcessEnv)?
+        } else {
+            None
+        }
+        .ok_or_else(|| {
+            AikitError::new(
+                "model_catalogue.credential_unavailable",
+                "the selected z-ai provider returned no key material",
+            )
+        })?;
+        Ok(fetch_zai_coding_catalog(
+            &SystemRunner::new(),
+            secret.expose(),
+            observed_at,
+        ))
     }
 
     /// Read the resolved catalogue back: the first-party seed, whatever
