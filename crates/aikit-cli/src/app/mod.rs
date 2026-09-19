@@ -3126,7 +3126,11 @@ impl PaletteBackend for Service {
         let mut candidates = Vec::new();
         for set in &route_sets {
             let base = model_roster_candidate_for(&set.model);
-            candidates.extend(candidates_from_routes(set, &base));
+            let built = candidates_from_routes(set, &base);
+            for (mut candidate, route) in built.into_iter().zip(set.viable()) {
+                stamp_harness_gate(&mut candidate, route);
+                candidates.push(candidate);
+            }
         }
         let roster = rank_model_roster(
             model_roster_demand(),
@@ -3551,6 +3555,46 @@ fn model_roster_demand() -> aikit_core::resource::ModelRosterDemand {
     }
 }
 
+/// Stamp the harness provider gate onto a candidate served through a
+/// detected harness-native route. The route's endpoint carries the harness it
+/// was observed through (`… via harness/<slug>`); the embedded profile for
+/// that slug decides, through the shared `model_harness_binding` gate,
+/// whether the candidate's provider may serve that harness at all, and the
+/// roster's `harness_compatible`/`harness_composition` facts stop being
+/// stubs. Routes of every other kind carry no harness relation, and the base
+/// candidate's unfilled gate stands.
+fn stamp_harness_gate(
+    candidate: &mut aikit_core::resource::ModelRosterCandidate,
+    route: &aikit_core::resource::ModelRoute,
+) {
+    use aikit_core::model_harness_binding::{fitness_scope, gate_candidate, provider_gate};
+    use aikit_core::resource::ModelRouteKind;
+
+    if route.kind != ModelRouteKind::HarnessNative {
+        return;
+    }
+    let Some((_selector, through)) = route
+        .endpoint
+        .as_deref()
+        .and_then(|endpoint| endpoint.rsplit_once(" via "))
+    else {
+        return;
+    };
+    let Some(slug) = through.strip_prefix("harness/") else {
+        return;
+    };
+    let Some(profile) = aikit_adapters::profiles::for_slug(slug) else {
+        return;
+    };
+    let Some(models) = profile.models.as_ref() else {
+        return;
+    };
+    let gate = provider_gate(models);
+    let (compatible, _why) = gate_candidate(&gate, Some(candidate.provider.as_str()));
+    candidate.harness_compatible = compatible;
+    candidate.harness_composition = Some(fitness_scope(slug));
+}
+
 /// The model-level facts a compose-time candidate carries. Route-level facts
 /// are filled in per route by `candidates_from_routes`; nothing here asserts
 /// fitness, price or authorisation that has not been observed.
@@ -3589,5 +3633,103 @@ fn model_roster_candidate_for(
         observed_fitness: Vec::new(),
         access: Default::default(),
         provenance: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod roster_gate_tests {
+    use super::stamp_harness_gate;
+    use aikit_core::resource::ModelRosterCandidate;
+    use aikit_core::resource::{
+        CredentialCondition, ModelRoute, ModelRouteKind, ProviderRef, ResourceRef,
+        RouteAvailability,
+    };
+
+    use crate::app::model_roster_candidate_for;
+
+    fn route(kind: ModelRouteKind, endpoint: Option<&str>) -> ModelRoute {
+        ModelRoute {
+            model: ResourceRef::parse("model:claude-sonnet-5").unwrap(),
+            provider: ProviderRef::parse("provider:anthropic").unwrap(),
+            kind,
+            provider_native_id: "claude-sonnet-5".into(),
+            endpoint: endpoint.map(str::to_string),
+            availability: RouteAvailability::Observed {
+                detection_ref: "detection:fixture".into(),
+            },
+            credential: CredentialCondition::NotRequired,
+            provenance: Vec::new(),
+        }
+    }
+
+    fn candidate(provider: &str) -> ModelRosterCandidate {
+        let mut candidate =
+            model_roster_candidate_for(&ResourceRef::parse("model:claude-sonnet-5").unwrap());
+        candidate.provider = ProviderRef::parse(provider).unwrap();
+        candidate
+    }
+
+    #[test]
+    fn harness_native_route_stamps_the_profile_gate() {
+        // claude-code natively binds provider:anthropic.
+        let route = route(
+            ModelRouteKind::HarnessNative,
+            Some("config-key model via harness/claude-code"),
+        );
+
+        let mut matching = candidate("provider:anthropic");
+        stamp_harness_gate(&mut matching, &route);
+        assert!(matching.harness_compatible);
+        assert_eq!(
+            matching.harness_composition.as_deref(),
+            Some("harness-profile/claude-code")
+        );
+
+        let mut foreign = candidate("provider:openai");
+        stamp_harness_gate(&mut foreign, &route);
+        assert!(!foreign.harness_compatible);
+        // The composition is still named: the verdict carries its scope.
+        assert_eq!(
+            foreign.harness_composition.as_deref(),
+            Some("harness-profile/claude-code")
+        );
+    }
+
+    #[test]
+    fn provider_plural_and_unknown_slugs_do_not_stamp() {
+        // pi is provider-plural: the gate passes, and the scope is stamped.
+        let pi_route = route(
+            ModelRouteKind::HarnessNative,
+            Some("--provider argv via harness/pi"),
+        );
+        let mut plural = candidate("provider:zai");
+        stamp_harness_gate(&mut plural, &pi_route);
+        assert!(plural.harness_compatible);
+        assert_eq!(
+            plural.harness_composition.as_deref(),
+            Some("harness-profile/pi")
+        );
+
+        // A harness with no embedded profile carries no gate; the base
+        // candidate's unfilled facts stand.
+        let mut unstamped = candidate("provider:anthropic");
+        stamp_harness_gate(
+            &mut unstamped,
+            &route(
+                ModelRouteKind::HarnessNative,
+                Some("config-key model via harness/not-a-profile"),
+            ),
+        );
+        assert!(!unstamped.harness_compatible);
+        assert_eq!(unstamped.harness_composition, None);
+
+        // Non-harness routes never stamp.
+        let mut native = candidate("provider:anthropic");
+        stamp_harness_gate(
+            &mut native,
+            &route(ModelRouteKind::ProviderNative, Some("https://api")),
+        );
+        assert!(!native.harness_compatible);
+        assert_eq!(native.harness_composition, None);
     }
 }

@@ -73,3 +73,33 @@ names the remediation instead of silently trying another store.
 4. **Detection stays fingerprint-only.** Scanners emit env names and SHA-256
    fingerprints, never values — a detector that can emit a value is itself a
    leak source.
+
+## Provider credential lifecycle
+
+Model-route credentials use the same grammar. A provider key is bound
+owner-natively and carries only safe state (`aikit.credential-bindings/v1`):
+the provider, the declared ref when one exists, and lifecycle timestamps.
+
+```text
+aikit credential discover                    # candidate keys on this machine, presence only
+aikit credential setup <ref> --ref op://…    # declare an external location (no material read)
+aikit credential setup <ref>                 # bind material into the OS secure store
+aikit credential rotate <ref> --ref op://…   # new material or location, same credential ref
+aikit credential revoke <ref>                # refuse at next use; operator stores stay put
+```
+
+Laws this surface keeps:
+
+* A declared ref (`--ref`) is a location. AIKit never reads or stores the
+  material behind it; a resolver (`op`, `varlock`, `pass`, the OS keychain)
+  materialises at the one moment of use, and `env://` is refused — import
+  explicitly with `--from-env --env-var` instead.
+* Discovery findings are presence-only: variable names and locations, never
+  values. Harness auth files contribute key names only.
+* Rotation changes the material or its location while the credential ref and
+  first-bound timestamp stay stable; the routing join and the settings
+  inventory read those facts, so availability follows the binding, and a
+  revoked binding makes the route unusable at the next check.
+* The settings disclosure (`aikit system --json`, section `models`) renders
+  the inventory as presence, refs and timestamps — there is no field a
+  secret value could occupy.

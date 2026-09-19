@@ -139,15 +139,58 @@ fn setting(
 fn credential_world(service: &Service) -> Result<CredentialWorldDisclosure> {
     use aikit_adapters::NativeSecureStoreProvider;
     use aikit_core::credential::{
-        SecretMaterialisationClass, SecretRequirement, SecretRequirementRef,
+        SecretMaterialisationClass, SecretProviderDescriptor, SecretProviderTier,
+        SecretRequirement, SecretRequirementRef,
     };
 
     let bindings = aikit_store::CredentialBindingStore::new(service.home()).list()?;
     let mut providers = Vec::new();
     let mut requirements = Vec::new();
     for binding in &bindings {
-        let native = NativeSecureStoreProvider::with_binding(Some(binding));
-        providers.push(native.descriptor(&binding.credential_ref));
+        let descriptor = if binding.provider_tier == SecretProviderTier::OsSecureStore {
+            NativeSecureStoreProvider::with_binding(Some(binding))
+                .descriptor(&binding.credential_ref)
+        } else {
+            // For every tier the native adapter does not own (declared secret
+            // refs, explicit environment import, the Linux encrypted
+            // fallback), the binding record is itself the provider fact.
+            // Projecting it through the native adapter's unbound descriptor
+            // would call a bound credential unbound.
+            SecretProviderDescriptor {
+                provider_ref: binding.provider_ref.clone(),
+                provider_kind: binding
+                    .metadata
+                    .get("provider_kind")
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        binding
+                            .provider_ref
+                            .as_str()
+                            .trim_start_matches("provider:")
+                            .to_string()
+                    }),
+                tier: binding.provider_tier,
+                available: !binding.revoked,
+                headless_capable: true,
+                assurance: "persisted binding record; the material is retained by the named provider"
+                    .into(),
+                degradation: (binding.provider_tier == SecretProviderTier::ExplicitEnvironmentImport)
+                    .then(|| {
+                        "environment import is the lowest-assurance credential tier and is never promoted"
+                            .to_string()
+                    }),
+                supported_credentials: (!binding.revoked)
+                    .then(|| binding.credential_ref.clone())
+                    .into_iter()
+                    .collect(),
+                supported_materialisation: [binding.materialisation.clone()]
+                    .into_iter()
+                    .collect(),
+                binding_provenance: binding.binding_provenance.clone(),
+                revision_or_lease_class: binding.revision_or_lease_class.clone(),
+            }
+        };
+        providers.push(descriptor);
         let requirement_ref = SecretRequirementRef::new(format!(
             "secret-requirement:{}",
             binding.credential_ref.as_str()
@@ -171,6 +214,34 @@ fn credential_world(service: &Service) -> Result<CredentialWorldDisclosure> {
         true,
         false,
     ))
+}
+
+/// The credential inventory the settings page renders as lifecycle rows: one
+/// row per persisted binding with its declared location and lifecycle
+/// timestamps. Presence, refs and timestamps only — there is no field a
+/// secret value could occupy.
+fn credential_inventory(service: &Service) -> Result<Value> {
+    let bindings = aikit_store::CredentialBindingStore::new(service.home()).list()?;
+    let rows: Vec<Value> = bindings
+        .iter()
+        .map(|binding| {
+            json!({
+                "credential": binding.credential_ref.as_str(),
+                "provider": binding.provider_ref.as_str(),
+                "tier": binding.provider_tier,
+                "materialisation": binding.materialisation,
+                "declared_secret_ref": binding
+                    .declared_secret_ref
+                    .as_ref()
+                    .map(|secret_ref| secret_ref.to_string()),
+                "bound_at_unix_seconds": binding.bound_at_unix_seconds,
+                "last_rotated_at_unix_seconds": binding.last_rotated_at_unix_seconds,
+                "revoked": binding.revoked,
+                "provenance": binding.binding_provenance,
+            })
+        })
+        .collect();
+    Ok(json!(rows))
 }
 
 /// The usage overlays the active composition carries, one entry per active
@@ -510,6 +581,7 @@ pub fn disclose(service: &Service) -> Result<Value> {
     let actors_json = tv(&world.actor_runtime);
     let providers_json = tv(&world.credential_world.providers);
     let credentials_json = tv(&world.credential_world.credentials);
+    let inventory_json = credential_inventory(service)?;
     let overlays_json = usage_overlays(service);
 
     // Authored (declared) half of the resolution chain. These come from the
@@ -696,6 +768,16 @@ pub fn disclose(service: &Service) -> Result<Value> {
                     Value::Null, "none",
                     "presence and ref only; selected provider and tier, never a value",
                     "aikit credential list", "ai-kit:credential:requirements", observed_at,
+                    materialisation_ref.clone(),
+                ),
+                setting(
+                    "models.inventory", "Credential inventory and lifecycle", "table",
+                    Value::Null, "ai-kit:credential:authored",
+                    inventory_json.clone(),
+                    inventory_json,
+                    Value::Null, "none",
+                    "one row per binding: provider, declared location, added and last-rotated timestamps; never a value",
+                    "aikit credential list", "ai-kit:credential:inventory", observed_at,
                     materialisation_ref.clone(),
                 ),
             ],
