@@ -3396,6 +3396,13 @@ pub fn load_catalog(
     project_root: Option<&Path>,
 ) -> Result<aikit_store::registry::RegistryLoad> {
     use aikit_core::id::RegistrySource;
+
+    // The first-party registry ships inside this binary. On a fresh home it is
+    // materialised here, before anything reads the catalogue, so the product's
+    // own declared skills exist on every machine. An existing directory or
+    // symlink of the same name is always left exactly as the operator made it.
+    crate::first_party::ensure_materialized(home)?;
+
     let mut load = aikit_store::registry::RegistryLoad::default();
 
     if let Ok(entries) = std::fs::read_dir(home.registries()) {

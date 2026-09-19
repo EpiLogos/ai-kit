@@ -126,3 +126,42 @@ fn the_pi_extension_carrier_declares_a_transport_not_a_chain_step() {
         );
     }
 }
+
+#[test]
+fn every_capability_this_repo_declares_ships_in_the_committed_registry() {
+    // The checkout's own `.aikit/profile.toml` is the product's statement of
+    // its default skillsets (ADR 0002's `mattpocock/wayfinder-foundation`).
+    // A declared id that exists in no registry is the install defect this
+    // corpus exists to prevent: every `aikit` command inside the checkout
+    // would fail with `resolution.unknown_capability` on a fresh home. So the
+    // committed registry must carry every declared id, and
+    // `scripts/verify-native-skills.py` pins the same corpus from the other
+    // side — removing one while it stays declared fails here, in CI.
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let registry_root = repo_root.join("registry");
+
+    let profile_text = std::fs::read_to_string(repo_root.join(".aikit/profile.toml"))
+        .expect("the repo declares its default skill surface in .aikit/profile.toml");
+    let profile: toml::Value =
+        toml::from_str(&profile_text).expect(".aikit/profile.toml is valid TOML");
+    let enabled = profile
+        .get("enable")
+        .and_then(|value| value.as_array())
+        .expect(".aikit/profile.toml declares an `enable` list");
+    assert!(
+        !enabled.is_empty(),
+        "the repo declares at least one default skill"
+    );
+
+    let load = load_registry(&registry_root, RegistrySource::personal()).unwrap();
+    for value in enabled {
+        let declared = value.as_str().expect("enable entries are capsule ids");
+        let id = CapsuleId::parse(declared).expect("declared id parses");
+        assert!(
+            load.catalog.get(&id).is_some(),
+            "{id} is enabled by .aikit/profile.toml but does not ship in the \
+             committed registry — a fresh install would fail with \
+             resolution.unknown_capability"
+        );
+    }
+}

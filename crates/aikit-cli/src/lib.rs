@@ -28,6 +28,7 @@ pub mod doctor;
 pub mod domain_activation;
 pub mod env;
 pub mod file_context;
+pub mod first_party;
 pub mod foreign;
 pub mod gateway_ops;
 pub mod hook;

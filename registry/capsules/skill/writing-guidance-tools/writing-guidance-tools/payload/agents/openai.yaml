@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frank Taylor Writing Guidance"
+  short_description: "Draft and audit Frank Taylor philosophical prose"
+  default_prompt: "Use $writing-guidance-tools to draft or audit this Frank Taylor essay passage while keeping calibration examples cold until independent review."
