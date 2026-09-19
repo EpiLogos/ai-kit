@@ -174,6 +174,11 @@ mod tests {
             expires_at: None,
             revoked: false,
             metadata: BTreeMap::new(),
+            declared_secret_ref: Some(
+                aikit_core::secret_ref::SecretRef::parse("op://Vault/openai/key").unwrap(),
+            ),
+            bound_at_unix_seconds: Some(1_700_000_000),
+            last_rotated_at_unix_seconds: None,
         };
 
         store.save(&state).unwrap();

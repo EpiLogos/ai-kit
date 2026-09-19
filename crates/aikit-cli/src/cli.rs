@@ -1529,6 +1529,12 @@ pub enum CredentialSub {
     Explain(CredentialExplainArgs),
     /// List safe persisted binding metadata.
     List(CredentialListArgs),
+    /// Replace a credential's material or location; the ref stays stable.
+    Rotate(CredentialRotateArgs),
+    /// Mark a binding revoked so resolution and dispatch refuse it.
+    Revoke(CredentialRevokeArgs),
+    /// Surface candidate keys already on this machine (presence only).
+    Discover(CredentialDiscoverArgs),
 }
 
 #[derive(Debug, Args)]
@@ -1553,6 +1559,43 @@ pub struct CredentialSetupArgs {
     /// Never prompt. Existing binding or explicit --from-env must resolve.
     #[arg(long)]
     pub headless: bool,
+    /// Declare where the material already lives (op://, varlock://, pass://,
+    /// keychain://) instead of binding material. No secret is read or stored.
+    #[arg(long = "ref", value_name = "SECRET_REF")]
+    pub declared_ref: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CredentialRotateArgs {
+    #[arg(value_name = "CREDENTIAL")]
+    pub credential: String,
+    #[arg(long, value_name = "CONSUMER", default_value = "operator:aikit")]
+    pub consumer: String,
+    #[arg(long, value_name = "PURPOSE", default_value = "credential rotation")]
+    pub purpose: String,
+    #[arg(long, value_name = "NAME")]
+    pub env_var: Option<String>,
+    #[arg(long, value_name = "FILE", requires = "env_var")]
+    pub project_env: Option<std::path::PathBuf>,
+    /// Import fresh material from the named variable into the OS secure store.
+    #[arg(long, requires = "env_var")]
+    pub from_env: bool,
+    /// Declare a new external location for the material (op://, varlock://…).
+    #[arg(long = "ref", value_name = "SECRET_REF")]
+    pub declared_ref: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CredentialRevokeArgs {
+    #[arg(value_name = "CREDENTIAL")]
+    pub credential: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CredentialDiscoverArgs {
+    /// An additional dotenv-shaped file to scan by name.
+    #[arg(long, value_name = "FILE")]
+    pub env_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]
