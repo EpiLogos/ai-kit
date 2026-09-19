@@ -14,6 +14,30 @@
 //! The catalogue is carried by the resource system: every entry projects to a
 //! `ResourceKind::Model` `ResourceRecord`. This module creates no second
 //! registry — it is the authored half of the catalogue -> availability join.
+//!
+//! # The owner's model book
+//!
+//! An owner entry may carry an [`OwnerModelBook`]: the owner's authored
+//! judgement about one Model — its class facets, its quirks (testable
+//! conditional claims), what work it is good for, a preference signal, and, if
+//! the owner decides so, an exclusion. The law of the book:
+//!
+//! * every record carries its own source and date; the loader refuses a record
+//!   that cannot say where it came from;
+//! * authored judgements ride explanations and never become observational task
+//!   fitness, availability or trust — the roster keeps them in
+//!   `ModelRosterCandidate::authored_preference` and in the ranking
+//!   explanation's components, never in `task_fitness` / `observed_fitness`;
+//! * an exclusion is the only authored authorisation surface: it is what makes
+//!   a candidate fail the `authorised` / `policy-allowed` gates. There is no
+//!   separate permission system;
+//! * no secret ever belongs in a book record — keys are none of the book's
+//!   business. Model identity stays the canonical `ModelRef`; provider-native
+//!   ids mentioned in a quirk's conditions are route metadata, never promoted.
+//!
+//! The file format is the catalogue's own owner overlay
+//! (`<home>/model-catalogue/*.json`, documented in
+//! `aikit-store::model_catalogue`): an entry gains a `"book"` object.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -113,6 +137,261 @@ pub struct ModelCatalogueEntry {
     pub source: SourceRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<String>,
+    /// The owner's authored model book, when this entry carries one. Only an
+    /// owner entry carries it: the seed and Provider Sources publish identity,
+    /// never judgement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub book: Option<OwnerModelBook>,
+}
+
+/// The owner's authored judgement about one Model — the model book record.
+///
+/// Plain structured fields, no secret material, canonical `ModelRef` identity.
+/// Every record names where it came from and when it was authored; a record
+/// that cannot say so is refused at load, loudly, naming file and field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerModelBook {
+    /// What authored this record (an owner ref, a session ref — a source, not
+    /// a key or a prompt).
+    pub source: String,
+    /// When it was authored (an ISO date is enough).
+    pub authored_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Class facets: independent classifications, never one quality tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<ModelClassFacets>,
+    /// Testable conditional claims. Conflicting qualified observations are
+    /// kept side by side, never overwritten into a universal warning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quirks: Vec<ModelQuirk>,
+    /// The kinds of work the owner reaches for this model. Free tagged
+    /// strings; extensible, not a closed taxonomy. These are authored
+    /// affinities and never become observational task fitness.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub use_for: Vec<String>,
+    /// The owner's preference signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preference: Option<AuthoredPreference>,
+    /// An authored exclusion: the one thing that makes the model fail the
+    /// roster's `authorised` / `policy-allowed` gates. Absent means allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusion: Option<AuthoredExclusion>,
+}
+
+/// Class facets. Each facet is an independent classification; unknown or
+/// undisclosed internals stay unknown by simply not being written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ModelClassFacets {
+    /// Family/architecture lineage, e.g. "Claude 5 family".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    /// Generation within the family, e.g. "2026-03 snapshot".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    /// Reasoning/interaction regime, e.g. "deliberate, long-horizon".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// text / vision / audio / other input-output modalities.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub modalities: BTreeSet<String>,
+    /// Additional expandable facets (parameter scale where genuinely
+    /// disclosed, operational efficiency conditions, and kin), each carrying
+    /// its value only where it is genuinely known.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub facets: BTreeMap<String, String>,
+}
+
+/// One quirk: a testable conditional claim, kept as plain structured fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelQuirk {
+    /// The claim, stated conditionally ("under long tool loops, ...").
+    pub claim: String,
+    /// Route/body/context/task conditions the claim applies under.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<String>,
+    /// What was seen that supports it (refs/summaries, never secrets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// A concrete case that did *not* show the effect, if one is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counterexample: Option<String>,
+    /// What works around it, with its cost if that matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workaround: Option<String>,
+    /// Current standing of the claim.
+    pub standing: QuirkStanding,
+    /// When the behaviour was last observed (ISO date).
+    pub observed_at: String,
+    /// Where the observation came from.
+    pub source: String,
+    /// What would retest, supersede or retire this claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retest: Option<String>,
+}
+
+/// The standing of a quirk claim. Freshness lives in `observed_at`; this says
+/// what kind of claim it presently is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuirkStanding {
+    /// Seen here or reported with named evidence.
+    Observed,
+    /// Believed but not yet evidenced; a question to test, not a fact.
+    Hypothesised,
+    /// A newer observation has qualified this one; kept, not deleted.
+    Superseded,
+    /// Retested and not reproduced; kept for the record.
+    Retired,
+}
+
+/// The owner's preference signal. Higher rank is more preferred. It is
+/// visible in roster explanations and breaks exact ranking ties; it never
+/// becomes task fitness and never gates eligibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoredPreference {
+    pub rank: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// The owner's authored exclusion. This is the only authorisation surface in
+/// the roster: a book with an exclusion makes the model ineligible everywhere,
+/// with the reason carried on the record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoredExclusion {
+    /// Why the owner excluded it. Refused when empty: an exclusion without a
+    /// stated reason is not a record, it is a mood.
+    pub reason: String,
+    /// When the exclusion was authored (ISO date).
+    pub since: String,
+}
+
+impl OwnerModelBook {
+    /// Validate the record. The error message names the offending field so the
+    /// loader can refuse a bad record loudly, with the file named beside it.
+    pub fn validate(&self) -> Result<()> {
+        let bad = |field: &str, why: &str| {
+            Err(AikitError::new(
+                "model_book.invalid_record",
+                format!("`{field}`: {why}"),
+            ))
+        };
+        if self.source.trim().is_empty() {
+            return bad("source", "every book record names where it came from");
+        }
+        if self.authored_at.trim().is_empty() {
+            return bad("authored_at", "every book record carries its date");
+        }
+        if let Some(class) = &self.class {
+            class.validate()?;
+        }
+        for (index, quirk) in self.quirks.iter().enumerate() {
+            quirk.validate(&format!("quirks[{index}]"))?;
+        }
+        if let Some(tag) = self.use_for.iter().find(|tag| tag.trim().is_empty()) {
+            return bad(
+                "use_for",
+                format!("empty tag {tag:?} is not a work type").as_str(),
+            );
+        }
+        if let Some(preference) = &self.preference {
+            if preference
+                .note
+                .as_deref()
+                .is_some_and(|n| n.trim().is_empty())
+            {
+                return bad("preference.note", "an empty note is not a note");
+            }
+        }
+        if let Some(exclusion) = &self.exclusion {
+            if exclusion.reason.trim().is_empty() {
+                return bad(
+                    "exclusion.reason",
+                    "an exclusion without a reason is a mood, not a record",
+                );
+            }
+            if exclusion.since.trim().is_empty() {
+                return bad(
+                    "exclusion.since",
+                    "an exclusion carries the date it was authored",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// True when the book excludes the model — the roster's authorisation
+    /// surface.
+    pub fn excluded(&self) -> bool {
+        self.exclusion.is_some()
+    }
+}
+
+impl ModelClassFacets {
+    fn validate(&self) -> Result<()> {
+        let bad = |field: &str| {
+            Err(AikitError::new(
+                "model_book.invalid_record",
+                format!("`{field}`: an empty facet says nothing; leave it out instead"),
+            ))
+        };
+        if self.family.as_deref().is_some_and(|v| v.trim().is_empty()) {
+            return bad("class.family");
+        }
+        if self
+            .generation
+            .as_deref()
+            .is_some_and(|v| v.trim().is_empty())
+        {
+            return bad("class.generation");
+        }
+        if self
+            .reasoning
+            .as_deref()
+            .is_some_and(|v| v.trim().is_empty())
+        {
+            return bad("class.reasoning");
+        }
+        if self.modalities.iter().any(|m| m.trim().is_empty()) {
+            return bad("class.modalities");
+        }
+        if self
+            .facets
+            .iter()
+            .any(|(k, v)| k.trim().is_empty() || v.trim().is_empty())
+        {
+            return bad("class.facets");
+        }
+        Ok(())
+    }
+}
+
+impl ModelQuirk {
+    fn validate(&self, path: &str) -> Result<()> {
+        let bad = |field: &str, why: &str| {
+            Err(AikitError::new(
+                "model_book.invalid_record",
+                format!("`{path}.{field}`: {why}"),
+            ))
+        };
+        if self.claim.trim().is_empty() {
+            return bad("claim", "a quirk is its claim");
+        }
+        if self.observed_at.trim().is_empty() {
+            return bad("observed_at", "a quirk carries when it was observed");
+        }
+        if self.source.trim().is_empty() {
+            return bad("source", "a quirk names where the observation came from");
+        }
+        if let Some(conditions) = self.conditions.iter().find(|c| c.trim().is_empty()) {
+            return bad(
+                "conditions",
+                format!("empty condition {conditions:?}").as_str(),
+            );
+        }
+        Ok(())
+    }
 }
 
 impl ModelCatalogueEntry {
@@ -270,6 +549,7 @@ fn entry(
         routes,
         source: seed_source(),
         freshness: Some(SEED_FRESHNESS.to_string()),
+        book: None,
     }
 }
 
@@ -511,6 +791,7 @@ pub fn catalogue_from_observations(
                 "point-in-time provider listing; refresh before treating as current catalogue truth"
                     .to_string(),
             ),
+            book: None,
         })?;
     }
     Ok(catalogue)
@@ -584,6 +865,7 @@ mod tests {
                 routes: vec![local(&["llama3.2:8b"])],
                 source: SourceRef::parse("source/owner").unwrap(),
                 freshness: None,
+                book: None,
             })
             .unwrap();
         catalogue.extend(owner);
@@ -622,12 +904,87 @@ mod tests {
                 routes: Vec::new(),
                 source: SourceRef::parse("source/owner").unwrap(),
                 freshness: None,
+                book: None,
             })
             .unwrap();
         let found = catalogue
             .get(&ResourceRef::parse("model:renamed-before").unwrap())
             .unwrap();
         assert_eq!(found.model.as_str(), "model:renamed-now");
+    }
+
+    fn book() -> OwnerModelBook {
+        OwnerModelBook {
+            source: "owner/model-book".into(),
+            authored_at: "2026-09-19".into(),
+            note: Some("the owner's own reading of this model".into()),
+            class: Some(ModelClassFacets {
+                family: Some("Claude 5 family".into()),
+                generation: None,
+                reasoning: Some("deliberate, long-horizon".into()),
+                modalities: BTreeSet::from(["text".into(), "vision".into()]),
+                facets: BTreeMap::new(),
+            }),
+            quirks: vec![ModelQuirk {
+                claim: "under very long tool loops it drops the oldest constraint".into(),
+                conditions: vec!["40+ tool calls in one session".into()],
+                evidence: Some("session journal, 2026-09-12".into()),
+                counterexample: None,
+                workaround: Some("restate the constraint every 20 calls (cheap)".into()),
+                standing: QuirkStanding::Observed,
+                observed_at: "2026-09-12".into(),
+                source: "owner session journal".into(),
+                retest: Some("re-run the 40-call loop after the next provider snapshot".into()),
+            }],
+            use_for: vec!["implementation".into(), "review".into()],
+            preference: Some(AuthoredPreference {
+                rank: 5,
+                note: Some("first pick for hard refactors".into()),
+            }),
+            exclusion: None,
+        }
+    }
+
+    #[test]
+    fn an_owner_book_round_trips_on_the_entry_and_the_seed_has_none() {
+        let mut entry = entry("model:claude-opus-5", "Claude Opus 5", "d", vec![]);
+        assert!(
+            entry.book.is_none(),
+            "the seed publishes identity, never judgement"
+        );
+        entry.book = Some(book());
+        let text = serde_json::to_string(&entry).unwrap();
+        let back: ModelCatalogueEntry = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.book, Some(book()));
+        assert!(!back.book.as_ref().unwrap().excluded());
+    }
+
+    #[test]
+    fn a_book_record_without_source_or_date_is_refused() {
+        let mut bad = book();
+        bad.source = "  ".into();
+        let error = bad.validate().unwrap_err();
+        assert_eq!(error.code(), "model_book.invalid_record");
+        assert!(error.message().contains("source"), "{}", error);
+    }
+
+    #[test]
+    fn a_quirk_without_a_claim_is_refused_and_names_the_field() {
+        let mut bad = book();
+        bad.quirks[0].claim = "".into();
+        let error = bad.validate().unwrap_err();
+        assert!(error.message().contains("quirks[0].claim"), "{}", error);
+    }
+
+    #[test]
+    fn an_exclusion_without_a_reason_is_a_mood_not_a_record() {
+        let mut bad = book();
+        bad.exclusion = Some(AuthoredExclusion {
+            reason: " ".into(),
+            since: "2026-09-19".into(),
+        });
+        let error = bad.validate().unwrap_err();
+        assert!(error.message().contains("exclusion.reason"), "{}", error);
     }
 
     #[test]

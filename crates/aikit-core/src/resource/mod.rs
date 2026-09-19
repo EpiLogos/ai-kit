@@ -35,16 +35,18 @@ pub use model::{
     SourceAuthority, SourceState,
 };
 pub use model_catalogue::{
-    canonical_model_ref, catalogue_from_observations, migrate_model_ref, DeclaredRoute,
-    ModelCatalogue, ModelCatalogueEntry, ProviderCatalogDocument, ProviderCatalogObservation,
+    canonical_model_ref, catalogue_from_observations, migrate_model_ref, AuthoredExclusion,
+    AuthoredPreference, DeclaredRoute, ModelCatalogue, ModelCatalogueEntry, ModelClassFacets,
+    ModelQuirk, OwnerModelBook, ProviderCatalogDocument, ProviderCatalogObservation, QuirkStanding,
     FIRST_PARTY_CATALOGUE_SOURCE, MODEL_CATALOGUE_VERSION, MODEL_REF_PREFIX,
     PROVIDER_CATALOG_OBSERVATION_SCHEMA, PROVIDER_CATALOG_SOURCE,
 };
 pub use model_roster::{
-    candidates_from_routes, rank_model_roster, select_model, ExactSpendObservation,
-    FitnessObservation, FitnessScope, ModelAccessProfileView, ModelPriceObservation,
-    ModelRankingExplanation, ModelRankingPolicy, ModelRoster, ModelRosterCandidate,
-    ModelRosterDemand, ModelRosterEntry, ModelSelection, RankingComponent, MODEL_ROSTER_VERSION,
+    apply_authored_book, candidates_from_routes, price_from_catalog_observation, rank_model_roster,
+    select_model, stamp_provider_catalog_facts, ExactSpendObservation, FitnessObservation,
+    FitnessScope, ModelAccessProfileView, ModelPriceObservation, ModelRankingExplanation,
+    ModelRankingPolicy, ModelRoster, ModelRosterCandidate, ModelRosterDemand, ModelRosterEntry,
+    ModelSelection, RankingComponent, MODEL_ROSTER_VERSION,
 };
 pub use model_route::{
     CredentialCondition, ModelRoute, ModelRouteKind, ModelRouteSet, RouteAvailability,

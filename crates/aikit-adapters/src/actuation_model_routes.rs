@@ -303,9 +303,22 @@ pub fn observed_provider_models(
             };
             named_any = true;
             for item in inventory {
+                // The route shape the observation itself supports: a listing
+                // read at a local endpoint (127.0.0.1/localhost/[::1]) is
+                // local-serving evidence; anything else — a hosted provider's
+                // own API or a remote serving endpoint — is provider-native
+                // evidence. LocalServing is only ever claimed on locality
+                // evidence, never by default.
+                let kind = route_kind_for_endpoint(
+                    endpoint.as_deref(),
+                    facet
+                        .inventory_receipt
+                        .as_ref()
+                        .map(|receipt| receipt.source.as_str()),
+                );
                 observed.push(ObservedProviderModel {
                     provider: provider.clone(),
-                    kind: ModelRouteKind::LocalServing,
+                    kind,
                     provider_native_id: item.id.clone(),
                     also_known_as: item.also_known_as.clone().unwrap_or_default(),
                     endpoint: endpoint.clone(),
@@ -341,6 +354,39 @@ fn state_word(entry: &DetectionEntry) -> String {
                 .as_deref()
                 .unwrap_or("no reason captured")
         ),
+    }
+}
+
+/// Is this URL host genuinely local? Loopback only — locality is evidence,
+/// never a default.
+fn is_local_url(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let host = host.rsplit_once('@').map(|(_, rest)| rest).unwrap_or(host);
+    let host = host.split_once(':').map(|(h, _)| h).unwrap_or(host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+/// Classify the route shape an inventory observation supports, from the
+/// endpoints the evidence carries. The probed service endpoint wins; the
+/// inventory receipt's source is the fallback. Local-serving is claimed only
+/// on loopback evidence — a hosted provider whose models list was read over
+/// the network is provider-native evidence, whatever shape its catalogue
+/// entry declares (the declaration and the observation stay distinguishable
+/// all the way through the join).
+fn route_kind_for_endpoint(endpoint: Option<&str>, receipt_source: Option<&str>) -> ModelRouteKind {
+    let local = endpoint
+        .or(receipt_source)
+        .map(is_local_url)
+        .unwrap_or(false);
+    if local {
+        ModelRouteKind::LocalServing
+    } else {
+        ModelRouteKind::ProviderNative
     }
 }
 
@@ -617,6 +663,7 @@ mod tests {
                     }],
                     source: SourceRef::parse("source/test-catalogue").unwrap(),
                     freshness: None,
+                    book: None,
                 })
                 .unwrap();
         }
@@ -664,6 +711,7 @@ mod tests {
                 ],
                 source: SourceRef::parse("source/test-catalogue").unwrap(),
                 freshness: None,
+                book: None,
             })
             .unwrap();
         let join = join_model_routes(
@@ -835,5 +883,54 @@ mod tests {
         };
         assert_eq!(item.id, "llama3.2:latest");
         assert_eq!(receipt.item_count, 1);
+    }
+
+    #[test]
+    fn local_serving_is_claimed_on_loopback_evidence_only() {
+        let hosted_facets = r#"[{"kind":"models","path":"api","exists":true,"count":1,
+            "inventory":[{"id":"claude-sonnet-5"}],
+            "inventory_receipt":{"kind":"http-json","source":"https://api.anthropic.example/v1/models",
+              "observed_at":"2026-09-19T00:00:00Z","item_count":1}}]"#;
+        let hosted_probe = detection_json("model-provider", hosted_facets)
+            .replace("http://127.0.0.1:11434", "https://api.anthropic.example");
+        let hosted = intake_actuation_detection(&StubRunner(hosted_probe), "actuation");
+        let (observed, _) = observed_provider_models(&hosted);
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed[0].kind,
+            ModelRouteKind::ProviderNative,
+            "a hosted provider's inventory is provider-native evidence, never local-serving"
+        );
+
+        let local_facets = r#"[{"kind":"models","path":"~/.ollama/models","exists":true,"count":1,
+            "inventory":[{"id":"llama3.2:latest"}],
+            "inventory_receipt":{"kind":"http-json","source":"http://127.0.0.1:11434/api/tags",
+              "observed_at":"2026-09-19T00:00:00Z","item_count":1}}]"#;
+        let local = intake_actuation_detection(
+            &StubRunner(detection_json("model-provider", local_facets)),
+            "actuation",
+        );
+        let (observed, _) = observed_provider_models(&local);
+        assert_eq!(observed[0].kind, ModelRouteKind::LocalServing);
+    }
+
+    #[test]
+    fn a_hosted_inventory_offer_that_nobody_claims_stays_honestly_hosted() {
+        let hosted_facets = r#"[{"kind":"models","path":"api","exists":true,"count":1,
+            "inventory":[{"id":"mystery-hosted-model"}],
+            "inventory_receipt":{"kind":"http-json","source":"https://api.hosted.example/v1/models",
+              "observed_at":"2026-09-19T00:00:00Z","item_count":1}}]"#;
+        let detection = detection_json("model-provider", hosted_facets)
+            .replace("http://127.0.0.1:11434", "https://api.hosted.example");
+        let outcome = intake_actuation_detection(&StubRunner(detection), "actuation");
+        let (observed, _) = observed_provider_models(&outcome);
+        let catalogue = catalogue(&[("model:llama3.2", "provider:ollama", &["llama3.2:latest"])]);
+        let join = join_model_routes(&catalogue, &observed, &CredentialEvidence::default());
+        assert_eq!(join.unmatched.len(), 1);
+        assert_eq!(
+            join.unmatched[0].kind,
+            ModelRouteKind::ProviderNative,
+            "the unmatched offer carries the shape the evidence supported"
+        );
     }
 }

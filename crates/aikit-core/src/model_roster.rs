@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::resource::model_catalogue::{OwnerModelBook, ProviderCatalogObservation};
 use crate::resource::{ModelRoute, ModelRouteSet, ProviderRef, ResourceRef};
 
 pub const MODEL_ROSTER_VERSION: &str = "aikit.model-roster/v1";
@@ -225,6 +226,63 @@ pub enum ModelRankingPolicy {
     LocalInspectability,
 }
 
+impl ModelRankingPolicy {
+    /// Every policy name, in the spelling the docs use.
+    pub const ALL_NAMES: [&'static str; 8] = [
+        "CHEAPEST_ELIGIBLE",
+        "TASK_FIT",
+        "ROLE_FIT",
+        "PROFILE_FIT",
+        "QUALITY_UNDER_BUDGET",
+        "BALANCED",
+        "INDEPENDENT_REVIEWER",
+        "LOCAL_INSPECTABILITY",
+    ];
+
+    /// Parse a policy name. Case-insensitive; `-`, `_` and spaces are the same
+    /// separator, so `cheapest-eligible`, `CHEAPEST_ELIGIBLE` and
+    /// `cheapest eligible` all name one policy. Anything else is refused with
+    /// the full list, because a quietly-defaulted policy would lie about how
+    /// the ranking was made.
+    pub fn parse_name(raw: &str) -> crate::Result<Self> {
+        let normalize = |value: &str| {
+            value
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .map(|c| c.to_ascii_uppercase())
+                .collect::<String>()
+        };
+        let wanted = normalize(raw);
+        Self::ALL_NAMES
+            .iter()
+            .find(|name| normalize(name) == wanted)
+            .map(|name| Self::parse_name_exact(name))
+            .ok_or_else(|| {
+                crate::AikitError::new(
+                    "model_roster.unknown_policy",
+                    format!(
+                        "`{raw}` names no ranking policy (have: {})",
+                        Self::ALL_NAMES.join(", ")
+                    ),
+                )
+            })
+    }
+
+    fn parse_name_exact(name: &str) -> Self {
+        match name {
+            "CHEAPEST_ELIGIBLE" => Self::CheapestEligible,
+            "TASK_FIT" => Self::TaskFit,
+            "ROLE_FIT" => Self::RoleFit,
+            "PROFILE_FIT" => Self::ProfileFit,
+            "QUALITY_UNDER_BUDGET" => Self::QualityUnderBudget,
+            "BALANCED" => Self::Balanced,
+            "INDEPENDENT_REVIEWER" => Self::IndependentReviewer,
+            "LOCAL_INSPECTABILITY" => Self::LocalInspectability,
+            _ => unreachable!("ALL_NAMES and this match must agree"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RankingComponent {
     pub name: String,
@@ -290,6 +348,14 @@ pub fn rank_model_roster(
                 .policy_score
                 .partial_cmp(&a.explanation.policy_score)
                 .unwrap_or(Ordering::Equal)
+                // The owner's preference decides exact ties only. It is never
+                // blended into the score, so a preferred-but-unfit candidate
+                // still loses to a fitter one — it only breaks a dead heat.
+                .then_with(|| {
+                    b.explanation
+                        .authored_preference
+                        .cmp(&a.explanation.authored_preference)
+                })
                 .then_with(|| a.model.as_str().cmp(b.model.as_str()))
                 // Several entries may share one ModelRef and differ only by route;
                 // order them deterministically rather than by input accident.
@@ -306,6 +372,10 @@ pub fn rank_model_roster(
         .iter()
         .find(|entry| entry.explanation.eligible)
         .map(|entry| entry.model.clone());
+    let winner_explanation = entries
+        .iter()
+        .find(|entry| entry.explanation.eligible)
+        .map(|entry| entry.explanation.clone());
     let mut rank = 0usize;
     for entry in &mut entries {
         if entry.explanation.eligible {
@@ -313,6 +383,32 @@ pub fn rank_model_roster(
             entry.rank = Some(rank);
             if rank > 1 {
                 entry.explanation.why_lost_to_winner = winner.as_ref().map(|winner| {
+                    // When the policy scores were an exact tie and the
+                    // winner's authored preference was higher, say plainly
+                    // that the owner's book decided — never a generic nudge.
+                    if let Some(winner_explanation) = &winner_explanation {
+                        if winner_explanation.policy_score == entry.explanation.policy_score
+                            && winner_explanation.authored_preference
+                                > entry.explanation.authored_preference
+                        {
+                            return format!(
+                                "{} tied with {} under {:?}; the owner's authored preference \
+                                 ({}) decided over ({})",
+                                entry.model,
+                                winner,
+                                policy,
+                                winner_explanation
+                                    .authored_preference
+                                    .map(|p| p.to_string())
+                                    .unwrap_or_else(|| "unset".into()),
+                                entry
+                                    .explanation
+                                    .authored_preference
+                                    .map(|p| p.to_string())
+                                    .unwrap_or_else(|| "unset".into()),
+                            );
+                        }
+                    }
                     format!(
                         "{} ranked lower than {} under {:?}; inspect policy components and missing data",
                         entry.model, winner, policy
@@ -382,6 +478,98 @@ pub fn candidates_from_routes(
             candidate
         })
         .collect()
+}
+
+/// Stamp the owner's authored model book onto a candidate.
+///
+/// This is the whole authored-preference surface, and it stays exactly that:
+/// the preference rank lands in `authored_preference` (visible in the ranking
+/// explanation, a tie-break between equal policy scores, never task fitness),
+/// an authored exclusion closes the `authorised` / `policy_allowed` gates
+/// (the book is the only authorisation surface there is), and the book's
+/// source rides the candidate's provenance so every explanation can name
+/// where the judgement came from.
+pub fn apply_authored_book(candidate: &mut ModelRosterCandidate, book: &OwnerModelBook) {
+    candidate.authored_preference = book.preference.as_ref().map(|p| p.rank);
+    if book.excluded() {
+        candidate.authorised = false;
+        candidate.policy_allowed = false;
+    }
+    if !book.source.trim().is_empty() {
+        candidate
+            .provenance
+            .push(format!("model-book:{}", book.source));
+    }
+}
+
+/// The price observation one provider-catalog listing supplies for a route.
+///
+/// `model` is the canonical identity the observation was resolved to; the
+/// route matches when its provider/native-id pair is the serving provider's
+/// own (a provider-native route) or the listing router's (a router route).
+/// Unknown currencies or units yield `None` rather than a wrong estimate.
+pub fn price_from_catalog_observation(
+    observation: &ProviderCatalogObservation,
+    model: &ResourceRef,
+    route_provider: &ProviderRef,
+    native_id: &str,
+) -> Option<ModelPriceObservation> {
+    if &observation.model_ref != model {
+        return None;
+    }
+    let provider_native =
+        observation.provider_ref == *route_provider && observation.provider_native_id == native_id;
+    let router_listed =
+        observation.listed_by == *route_provider && observation.listed_variant == native_id;
+    if !(provider_native || router_listed) {
+        return None;
+    }
+    let mut other_charges = observation.pricing_usd_per_1m.clone();
+    let mut take = |key: &str| other_charges.remove(key);
+    Some(ModelPriceObservation {
+        source: observation.source.clone(),
+        provider: route_provider.clone(),
+        model_variant: native_id.to_string(),
+        currency: "USD".into(),
+        unit: "1m-tokens".into(),
+        input_per_unit: take("input"),
+        cached_input_per_unit: take("cached_input"),
+        output_per_unit: take("output"),
+        cache_write_per_unit: take("cache_write"),
+        other_charges,
+        observed_at: observation.observed_at.clone(),
+        source_revision: None,
+        freshness_note: Some(observation.freshness.clone()),
+    })
+}
+
+/// Fill a candidate's provider-observed price and context window from
+/// provider-catalog listings, where one actually matches the candidate's
+/// `(model, provider, native id)` pair. Route facts overwrite model-level
+/// defaults only; a price already carried stays. Catalog facts never create
+/// eligibility — they only make cost and context legible to the policies
+/// that weigh them.
+pub fn stamp_provider_catalog_facts(
+    candidate: &mut ModelRosterCandidate,
+    observations: &[ProviderCatalogObservation],
+) {
+    for observation in observations {
+        if candidate.price.is_none() {
+            candidate.price = price_from_catalog_observation(
+                observation,
+                &candidate.model,
+                &candidate.provider,
+                &candidate.variant,
+            );
+        }
+        if candidate.context_window_tokens.is_none()
+            && observation.model_ref == candidate.model
+            && (observation.provider_native_id == candidate.variant
+                || observation.listed_variant == candidate.variant)
+        {
+            candidate.context_window_tokens = observation.context_window_tokens;
+        }
+    }
 }
 
 /// Collapse a ranked roster back onto Model identity for one Model, keeping
@@ -600,6 +788,16 @@ fn evaluate(
             local_inspectability,
             None,
             &candidate.access.provenance,
+        ),
+        // Authored preference is displayed, never blended: no policy weighs
+        // it, so it cannot buy eligibility or fitness. It decides nothing
+        // except an exact tie (see `rank_model_roster`), and when it does,
+        // the loser's explanation says so.
+        component(
+            "authored-preference",
+            candidate.authored_preference.map(|rank| rank as f64),
+            None,
+            &candidate.provenance,
         ),
     ];
 
@@ -982,6 +1180,194 @@ mod tests {
             .unwrap();
         assert_eq!(p.explanation.authored_preference, Some(100));
         assert_eq!(p.explanation.frecency, Some(999.0));
+    }
+
+    #[test]
+    fn authored_preference_breaks_an_exact_tie_and_the_explanation_says_so() {
+        let mut preferred = candidate("model:aaa", Some(1.0), Some(2.0), 0.8, 0.8);
+        preferred.authored_preference = Some(5);
+        let plain = candidate("model:zzz", Some(1.0), Some(2.0), 0.8, 0.8);
+        let roster = rank_model_roster(
+            demand("coding"),
+            ModelRankingPolicy::TaskFit,
+            vec![plain.clone(), preferred.clone()],
+        );
+        assert_eq!(roster.entries[0].model, preferred.model);
+        let lost = roster.entries[1].explanation.clone();
+        let why = lost.why_lost_to_winner.unwrap();
+        assert!(
+            why.contains("authored preference") && why.contains("5") && why.contains("unset"),
+            "the tie-break must be attributed to the owner's book: {why}"
+        );
+        // And the preference is visible as an unblended component everywhere.
+        for entry in &roster.entries {
+            assert!(entry
+                .explanation
+                .components
+                .iter()
+                .any(|c| c.name == "authored-preference"));
+            assert!(
+                entry
+                    .explanation
+                    .components
+                    .iter()
+                    .find(|c| c.name == "authored-preference")
+                    .and_then(|c| c.weight)
+                    .is_none(),
+                "authored preference is never weighted into the score"
+            );
+        }
+    }
+
+    #[test]
+    fn the_owner_book_stamps_preference_exclusion_and_provenance() {
+        use crate::resource::model_catalogue::{
+            AuthoredExclusion, AuthoredPreference, OwnerModelBook,
+        };
+        let mut base = candidate("model:booked", Some(1.0), Some(2.0), 0.9, 0.9);
+        assert!(base.authorised && base.policy_allowed);
+        let mut book = OwnerModelBook {
+            source: "owner/model-book".into(),
+            authored_at: "2026-09-19".into(),
+            note: None,
+            class: None,
+            quirks: Vec::new(),
+            use_for: vec!["implementation".into()],
+            preference: Some(AuthoredPreference {
+                rank: 3,
+                note: Some("steady on long refactors".into()),
+            }),
+            exclusion: None,
+        };
+        apply_authored_book(&mut base, &book);
+        assert_eq!(base.authored_preference, Some(3));
+        assert!(base.authorised && base.policy_allowed);
+        assert!(base
+            .provenance
+            .iter()
+            .any(|p| p == "model-book:owner/model-book"));
+
+        book.exclusion = Some(AuthoredExclusion {
+            reason: "vendor terms conflict with this project's policy".into(),
+            since: "2026-09-19".into(),
+        });
+        let mut excluded = candidate("model:booked", Some(1.0), Some(2.0), 0.9, 0.9);
+        apply_authored_book(&mut excluded, &book);
+        assert!(!excluded.authorised && !excluded.policy_allowed);
+        let roster = rank_model_roster(
+            demand("coding"),
+            ModelRankingPolicy::TaskFit,
+            vec![excluded],
+        );
+        assert!(!roster.entries[0].explanation.eligible);
+        assert!(roster.entries[0]
+            .explanation
+            .failed_gates
+            .contains(&"authorised".into()));
+        assert!(roster.entries[0]
+            .explanation
+            .failed_gates
+            .contains(&"policy-allowed".into()));
+    }
+
+    #[test]
+    fn provider_catalog_facts_fill_price_and_context_where_the_route_carries_them() {
+        use crate::resource::model_catalogue::ProviderCatalogObservation;
+        use std::collections::BTreeMap;
+        let observation = ProviderCatalogObservation {
+            schema_version: "aikit.provider-catalog-observation/v1".into(),
+            observation_kind: "provider_catalog".into(),
+            source: "https://example.router/api/models".into(),
+            observed_at: "2026-09-18T00:00:00Z".into(),
+            provider_ref: p("provider:openai"),
+            listed_by: p("provider:openrouter"),
+            model_ref: r("model:gpt-5.4"),
+            listed_variant: "openai/gpt-5.4".into(),
+            provider_native_id: "gpt-5.4".into(),
+            canonical_variant: None,
+            name: "GPT-5.4".into(),
+            context_window_tokens: Some(400_000),
+            max_output_tokens: None,
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            supported_parameters: Vec::new(),
+            pricing_usd_per_1m: BTreeMap::from([("input".into(), 2.5), ("output".into(), 15.0)]),
+            freshness: "point-in-time router listing".into(),
+        };
+        let mut router = candidate("model:gpt-5.4", None, None, 0.8, 0.8);
+        router.provider = p("provider:openrouter");
+        router.variant = "openai/gpt-5.4".into();
+        router.context_window_tokens = None;
+        stamp_provider_catalog_facts(&mut router, std::slice::from_ref(&observation));
+        let price = router
+            .price
+            .expect("router route carries the listing's price");
+        assert_eq!(price.input_per_unit, Some(2.5));
+        assert_eq!(price.output_per_unit, Some(15.0));
+        assert_eq!(price.currency, "USD");
+        assert_eq!(router.context_window_tokens, Some(400_000));
+        // A context window already known is never overwritten by a listing.
+        let mut established = candidate("model:gpt-5.4", None, None, 0.8, 0.8);
+        stamp_provider_catalog_facts(&mut established, std::slice::from_ref(&observation));
+        assert_eq!(established.context_window_tokens, Some(1_000_000));
+
+        let mut native = candidate("model:gpt-5.4", None, None, 0.8, 0.8);
+        native.provider = p("provider:openai");
+        native.variant = "gpt-5.4".into();
+        native.context_window_tokens = None;
+        stamp_provider_catalog_facts(&mut native, &[observation]);
+        assert!(
+            native.price.is_some(),
+            "the serving provider's own id carries the listing too"
+        );
+        assert_eq!(native.context_window_tokens, Some(400_000));
+
+        let mut foreign = candidate("model:other", None, None, 0.8, 0.8);
+        stamp_provider_catalog_facts(
+            &mut foreign,
+            &[ProviderCatalogObservation {
+                pricing_usd_per_1m: BTreeMap::new(),
+                observed_at: "2026-09-18T00:00:00Z".into(),
+                source: "x".into(),
+                listed_variant: "openai/gpt-5.4".into(),
+                provider_native_id: "gpt-5.4".into(),
+                model_ref: r("model:gpt-5.4"),
+                listed_by: p("provider:openrouter"),
+                provider_ref: p("provider:openai"),
+                name: "GPT-5.4".into(),
+                context_window_tokens: Some(400_000),
+                schema_version: "aikit.provider-catalog-observation/v1".into(),
+                observation_kind: "provider_catalog".into(),
+                canonical_variant: None,
+                max_output_tokens: None,
+                input_modalities: Vec::new(),
+                output_modalities: Vec::new(),
+                supported_parameters: Vec::new(),
+                freshness: "x".into(),
+            }],
+        );
+        assert!(
+            foreign.price.is_none(),
+            "an unmatched route stays priceless, not free"
+        );
+    }
+
+    #[test]
+    fn a_policy_name_parses_across_spellings_and_refuses_unknowns_loudly() {
+        assert_eq!(
+            ModelRankingPolicy::parse_name("balanced").unwrap(),
+            ModelRankingPolicy::Balanced
+        );
+        assert_eq!(
+            ModelRankingPolicy::parse_name("cheapest-eligible").unwrap(),
+            ModelRankingPolicy::CheapestEligible
+        );
+        assert_eq!(
+            ModelRankingPolicy::parse_name("QUALITY_UNDER_BUDGET").unwrap(),
+            ModelRankingPolicy::QualityUnderBudget
+        );
+        let error = ModelRankingPolicy::parse_name("cheapest-anything").unwrap_err();
+        assert!(error.message().contains("CHEAPEST_ELIGIBLE"));
     }
 
     #[test]

@@ -16,8 +16,9 @@ pub fn model_roster_matrix(roster: &ModelRoster, glyphs: Glyphs) -> Vec<String> 
         "MODEL ROSTER {sep} {:?} {sep} {}",
         roster.policy, roster.demand.use_type
     )];
-    lines
-        .push("RANK  MODEL  PROVIDER  ELIGIBLE  TASK  PROFILE  COST(USD)  ACCESS  WHY".to_string());
+    lines.push(
+        "RANK  MODEL  PROVIDER  ELIGIBLE  TASK  PROFILE  PREF  COST(USD)  ACCESS  WHY".to_string(),
+    );
     lines.extend(roster.entries.iter().map(render_entry));
     lines
 }
@@ -29,6 +30,13 @@ fn render_entry(entry: &ModelRosterEntry) -> String {
         .unwrap_or_else(|| "-".into());
     let task = component(entry, "task-fit");
     let profile = component(entry, "profile-fit");
+    // The owner's authored preference, marked as the authored thing it is:
+    // a rank from the owner's model book, never a computed score.
+    let pref = entry
+        .explanation
+        .authored_preference
+        .map(|rank| format!("*{rank}"))
+        .unwrap_or_else(|| "-".into());
     let cost = entry
         .explanation
         .estimated_cost_usd
@@ -51,7 +59,7 @@ fn render_entry(entry: &ModelRosterEntry) -> String {
         format!("ineligible: {}", entry.explanation.failed_gates.join(","))
     };
     format!(
-        "{rank:<4}  {}  {}  {:<8}  {task:<7}  {profile:<7}  {cost:<9}  {access:<8}  {why}",
+        "{rank:<4}  {}  {}  {:<8}  {task:<7}  {profile:<7}  {pref:<4}  {cost:<9}  {access:<8}  {why}",
         entry.model, entry.provider, entry.explanation.eligible
     )
 }
@@ -145,5 +153,77 @@ mod tests {
         assert!(matrix.contains(model.as_str()));
         assert!(matrix.contains("UNKNOWN"));
         assert!(matrix.contains("i1c1x1l1"));
+        assert!(
+            !matrix.contains("*3"),
+            "no authored preference is invented when the owner wrote none"
+        );
+    }
+
+    #[test]
+    fn an_authored_preference_is_marked_as_authored() {
+        let candidate = candidate_with_preference(Some(3));
+        let roster = rank_model_roster(demand(), ModelRankingPolicy::TaskFit, vec![candidate]);
+        let matrix = model_roster_matrix(&roster, Glyphs::unicode()).join("\n");
+        assert!(matrix.contains("*3"), "the authored rank renders: {matrix}");
+    }
+
+    fn demand() -> ModelRosterDemand {
+        ModelRosterDemand {
+            project: None,
+            profile: None,
+            agency: None,
+            use_type: "review".into(),
+            required_capabilities: BTreeSet::new(),
+            required_modalities: BTreeSet::new(),
+            required_tools: BTreeSet::new(),
+            required_contracts: BTreeSet::new(),
+            context_characteristics: BTreeSet::new(),
+            independence_from: BTreeSet::new(),
+            estimated_input_tokens: None,
+            estimated_output_tokens: None,
+            cost_ceiling_usd: None,
+        }
+    }
+
+    fn candidate_with_preference(preference: Option<i32>) -> ModelRosterCandidate {
+        let model = ResourceRef::parse("model:local").unwrap();
+        ModelRosterCandidate {
+            model: model.clone(),
+            variant: "local".into(),
+            provider: ProviderRef::parse("provider:local").unwrap(),
+            provider_revision: None,
+            available: true,
+            authorised: true,
+            provider_usable: true,
+            policy_allowed: true,
+            contract_compatible: true,
+            harness_compatible: true,
+            harness_composition: Some("pi-local".into()),
+            native_capabilities: BTreeSet::from(["reasoning".into()]),
+            harness_capabilities: BTreeSet::new(),
+            profile_skills: BTreeSet::new(),
+            modalities: BTreeSet::from(["text".into()]),
+            tool_support: BTreeSet::new(),
+            contracts: BTreeSet::new(),
+            task_fitness: BTreeMap::from([("review".into(), 0.8)]),
+            role_fitness: BTreeMap::new(),
+            profile_fit: None,
+            authored_preference: preference,
+            frecency: None,
+            latency_ms: None,
+            reliability: None,
+            context_window_tokens: None,
+            price: None,
+            exact_spend: vec![],
+            observed_fitness: vec![],
+            access: ModelAccessProfileView {
+                inference_access: true,
+                control_access: true,
+                interior_access: true,
+                local_placement: true,
+                ..Default::default()
+            },
+            provenance: vec!["test".into()],
+        }
     }
 }

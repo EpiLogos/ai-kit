@@ -130,6 +130,7 @@ fn catalogue() -> ModelCatalogue {
             ],
             source: SourceRef::parse("source/owner").unwrap(),
             freshness: None,
+            book: None,
         })
         .unwrap();
     let published = catalogue_from_observations(

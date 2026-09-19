@@ -49,6 +49,7 @@ fn catalogue(w: &World) -> ModelCatalogueEntry {
         }],
         source: SourceRef::parse("source/controlled-catalogue").unwrap(),
         freshness: None,
+        book: None,
     };
     publish_catalogue_fixture(w, &entry);
     entry

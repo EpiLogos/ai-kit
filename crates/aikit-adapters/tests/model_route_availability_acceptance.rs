@@ -98,6 +98,7 @@ fn entry(model: &str, routes: Vec<DeclaredRoute>) -> ModelCatalogueEntry {
         routes,
         source: SourceRef::parse("source/acceptance-catalogue").unwrap(),
         freshness: None,
+        book: None,
     }
 }
 
@@ -565,6 +566,7 @@ fn a_credentialled_route_becomes_usable_without_the_model_or_the_route_changing(
         }],
         source: SourceRef::parse("source/acceptance-catalogue").unwrap(),
         freshness: None,
+        book: None,
     }]);
 
     let without = joined_with(
