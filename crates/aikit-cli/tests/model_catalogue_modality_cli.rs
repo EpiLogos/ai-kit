@@ -153,6 +153,81 @@ fn a_keyless_machine_sees_speech_as_a_class_with_each_gap_named() {
 }
 
 #[test]
+fn the_local_speech_models_show_as_the_keyless_contrast_in_the_speech_class() {
+    let dir = TempDir::new().unwrap();
+    let data = run_show(dir.path());
+
+    // The local entries are in the speech class, derived from the
+    // local_speech adapter instance's declared surfaces — on a machine with
+    // no keys at all.
+    let speech = data["classes"]["speech"].as_array().unwrap();
+    for model in ["model:local-whisper-large-v3-turbo", "model:kokoro-82m"] {
+        assert!(
+            speech.iter().any(|listed| listed == model),
+            "{model} must appear in the speech class: {speech:?}"
+        );
+    }
+
+    // The visible contrast to the cloud entries: nothing gates these, so
+    // they read catalogued with the credential fact stated, not missing.
+    let whisper = entry(&data, "model:local-whisper-large-v3-turbo");
+    assert_eq!(whisper["availability"]["state"], "catalogued");
+    let class = &whisper["modality_classes"][0];
+    assert_eq!(class["credential"]["condition"], "not-required");
+    assert_eq!(class["transport"], "http");
+    assert!(class["input_modalities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m == "speech"));
+    assert!(class["output_modalities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m == "text"));
+    assert!(class["transforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t == "speech-to-text"));
+    assert_eq!(
+        class["speech_capable"], false,
+        "STT listens; it does not speak"
+    );
+    // The route delta is route-standing fact, not hidden: the declared
+    // route is the /inference path, and no credential is required.
+    let route = &whisper["declared_routes"][0];
+    assert_eq!(route["provider"], "provider:local-whisper-cpp");
+    assert_eq!(route["kind"], "local-serving");
+    assert_eq!(route["endpoint"], "http://127.0.0.1:8080/inference");
+    assert_eq!(route["credential_required"], false);
+    assert_eq!(route["credential"]["condition"], "not-required");
+
+    let kokoro = entry(&data, "model:kokoro-82m");
+    assert_eq!(kokoro["availability"]["state"], "catalogued");
+    let class = &kokoro["modality_classes"][0];
+    assert_eq!(class["credential"]["condition"], "not-required");
+    assert!(class["transforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t == "text-to-speech"));
+    assert_eq!(
+        class["speech_capable"], false,
+        "TTS speaks; it does not listen"
+    );
+    assert_eq!(
+        kokoro["declared_routes"][0]["endpoint"],
+        "http://127.0.0.1:8880/v1/audio/speech"
+    );
+
+    // The keyless contrast is visible side by side: the cloud entries in
+    // the same listing stay credential-gated.
+    let realtime = entry(&data, "model:gpt-realtime");
+    assert_eq!(realtime["availability"]["state"], "credential-gated");
+}
+
+#[test]
 fn a_bound_credential_resolves_the_same_option_and_a_revoked_one_does_not() {
     let dir = TempDir::new().unwrap();
     bind_credential(dir.path(), "credential:openai", false);

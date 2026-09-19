@@ -1084,7 +1084,7 @@ impl Service {
     pub fn show_model_catalogue(&self, filter: Option<&str>) -> Result<serde_json::Value> {
         let (catalogue, mut notes) = aikit_store::model_catalogue::resolved_catalogue(&self.home);
         let bound_refs = bound_credential_refs(&self.home, &mut notes);
-        let surfaces = aikit_adapters::openai_realtime::declared_surfaces();
+        let surfaces = aikit_adapters::declared_model_surfaces();
         let disclosures =
             aikit_core::resource::disclose_catalogue_modalities(&catalogue, &surfaces, &bound_refs);
         let needle = filter.map(str::to_lowercase);
@@ -1122,6 +1122,7 @@ impl Service {
                             "provider": route.provider,
                             "kind": route.kind.as_str(),
                             "provider_native_ids": route.provider_native_ids,
+                            "endpoint": route.endpoint,
                             "credential_required": route.credential.requires_credential(),
                             "credential": credential,
                         })
