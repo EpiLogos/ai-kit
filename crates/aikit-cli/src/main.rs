@@ -2740,6 +2740,25 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 ],
             ))
         }
+        CredentialSub::Verify(a) => {
+            let credential = aikit_core::credential::CredentialRef::new(a.credential)?;
+            let runner = aikit_adapters::runner::SystemRunner::new()
+                .with_timeout(std::time::Duration::from_secs(30));
+            let outcome = credential::verify(service.home(), &credential, &runner)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "credential": outcome.credential,
+                    "provider": outcome.provider,
+                    "verdict": outcome.verdict,
+                    "http_status_class": outcome.http_status_class,
+                    "definitive": outcome.definitive,
+                    "checked_at_unix_seconds": outcome.checked_at_unix_seconds,
+                    "recorded": outcome.recorded,
+                }),
+                outcome.notes,
+            ))
+        }
     }
 }
 

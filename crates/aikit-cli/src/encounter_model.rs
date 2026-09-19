@@ -1,6 +1,14 @@
 //! Model selection for the existing resident owner. Catalogue identity, scoped
 //! source policy, native Agency authority and credential delivery are separate
 //! inputs. A configured body is not reported as an inference result.
+//!
+//! Credential delivery has two routes into the same scrubbed final-child
+//! environment: the selected-model policy names its credential and target
+//! variable explicitly (the pi dispatch path), and the harness profile
+//! declares, per provider, the env var a harness's native launch reads
+//! ([`profile_environment`]). Both materialise through the identical seam —
+//! native store, explicit env import, or a declared ref through the resolver
+//! suite — and neither ever passes an empty or ambient value.
 use super::{error, native_admission, read_binding};
 use crate::encounter_service::{
     EncounterContextAdmission, EncounterProtocol, EncounterProvider, EncounterRequiredSource,
@@ -9,8 +17,9 @@ use crate::encounter_service::{
 use aikit_adapters::credential_provider::{EnvironmentImportProvider, NativeSecureStoreProvider};
 use aikit_adapters::secret_resolver::SuiteSecretResolver;
 use aikit_core::credential::{
-    resolve_credential, CredentialRef, CredentialResolutionRequest, SecretMaterialisationClass,
-    SecretProvider, SecretRequirement, SecretRequirementRef, SecretValue,
+    resolve_credential, valid_credential_variable, CredentialRef, CredentialResolutionRequest,
+    SecretMaterialisationClass, SecretProvider, SecretRequirement, SecretRequirementRef,
+    SecretValue,
 };
 use aikit_core::resource::{canonical_model_ref, CredentialCondition, ProviderRef};
 use aikit_core::secret_ref::SecretResolver as _;
@@ -19,6 +28,7 @@ use aikit_store::{AikitHome, CredentialBindingStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeSet,
     fs,
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -116,17 +126,6 @@ fn read_policy(source: &EncounterRequiredSource) -> Result<ModelPolicy> {
     }
     canonical_model_ref(policy.model_ref.as_str())?;
     Ok(policy)
-}
-
-fn valid_credential_variable(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 128
-        && !name.starts_with(|c: char| c.is_ascii_digit())
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        && (name.ends_with("_API_KEY") || name.ends_with("_TOKEN") || name.ends_with("_KEY"))
-        && !["CENTRAL_", "WORKCELL_", "AIKIT_", "LD_", "DYLD_"]
-            .iter()
-            .any(|p| name.starts_with(p))
 }
 
 fn credential(
@@ -348,36 +347,102 @@ fn selected_argv(provider: &EncounterProvider, model: &PreparedModel) -> Result<
     Ok(argv)
 }
 
-/// Scoped final-child environment. Raw material is not serializable and is
+/// Scoped final-child environment. Owned by the adapters' spawn seam (where
+/// every provider child is created); raw material is not serializable and is
 /// never stored in model, provider, task, delivery or material receipts.
-pub(crate) struct ModelEnvironment {
-    credential: Option<(String, SecretValue)>,
-}
-impl ModelEnvironment {
-    pub fn apply(self, command: &mut Command) {
-        command.env_clear();
-        for name in [
-            "HOME",
-            "PATH",
-            "TERM",
-            "LANG",
-            "LC_ALL",
-            "TZ",
-            "XDG_CONFIG_HOME",
-            "XDG_DATA_HOME",
-            "XDG_STATE_HOME",
-            "AIKIT_HOME",
-            "AIKIT_CONTEXT_ID",
-            "AIKIT_ISOLATION",
-        ] {
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
-        if let Some((name, value)) = self.credential {
-            command.env(name, value.expose());
-        }
+use aikit_adapters::connection_process::ModelEnvironment;
+
+/// The harness-profile key delivery for one configured provider: the profile
+/// joined by the launch program, its declared env-var deliveries materialised
+/// through the same credential seam the selected-model path uses, each under
+/// its declared variable in the scrubbed final-child environment.
+///
+/// Per declared provider:
+///
+/// * a current binding is materialised and delivered;
+/// * no binding plus an own-login fact is an honest absence — the harness's
+///   native login stands and availability disclosure already reports the
+///   unbound credential;
+/// * no binding without an own-login fact refuses the launch with the bind
+///   remediation, instead of silently starting a body that cannot
+///   authenticate;
+/// * a revoked or expired binding refuses either way: a withdrawn key is
+///   never bypassed through the harness's own login.
+///
+/// `None` means nothing was declared or bound: the child then inherits the
+/// caller's environment unchanged rather than being scrubbed for nothing.
+pub(crate) fn profile_environment(
+    home: &AikitHome,
+    session: &ResourceRef,
+    provider: &EncounterProvider,
+) -> Result<Option<ModelEnvironment>> {
+    let Some(program) = provider.argv.first() else {
+        return Ok(None);
+    };
+    let Some(profile) = aikit_adapters::profiles::for_argv_program(program) else {
+        return Ok(None);
+    };
+    let Some(declared) = profile
+        .models
+        .as_ref()
+        .and_then(|models| models.key_delivery.as_ref())
+    else {
+        return Ok(None);
+    };
+    if declared.env_var.is_empty() {
+        return Ok(None);
     }
+    let own_login: BTreeSet<&str> = declared
+        .own_login
+        .iter()
+        .map(|fact| fact.provider_ref.as_str())
+        .collect();
+    let store = CredentialBindingStore::new(home);
+    let mut environment = ModelEnvironment::new();
+    for entry in &declared.env_var {
+        let vendor = entry
+            .provider_ref
+            .strip_prefix("provider:")
+            .unwrap_or(&entry.provider_ref);
+        let credential_ref = CredentialRef::new(format!("credential:{vendor}"))?;
+        let binding = store.load(&credential_ref)?;
+        let Some(binding) = binding else {
+            if own_login.contains(entry.provider_ref.as_str()) {
+                continue;
+            }
+            return Err(error(format!(
+                "The {} profile declares its native launch reads {} for {} and records no \
+                 own-login fallback, but credential:{vendor} is not bound; bind it with \
+                 `aikit credential setup credential:{vendor}` (or declare its store \
+                 location with --ref) before launching this body",
+                profile.slug, entry.env_var, entry.provider_ref,
+            )));
+        };
+        if binding.revoked
+            || binding
+                .expires_at
+                .as_deref()
+                .map(|string| string.parse::<jiff::Timestamp>().map_err(error))
+                .transpose()?
+                .is_some_and(|deadline| deadline <= jiff::Timestamp::now())
+        {
+            return Err(error(
+                "Declared key credential binding is revoked or expired; no environment bypass",
+            ));
+        }
+        let use_ = ModelCredential {
+            requirement_ref: SecretRequirementRef::new(format!(
+                "secret-requirement:{vendor}-harness-delivery"
+            ))?,
+            credential_ref,
+            target_env: entry.env_var.clone(),
+            from_env: None,
+        };
+        let (_, secret) = credential(home, session, &use_, true)?;
+        let secret = secret.ok_or_else(|| error("Missing delivered key material"))?;
+        environment.push_credential(entry.env_var.clone(), secret)?;
+    }
+    Ok((!environment.is_empty()).then_some(environment))
 }
 
 pub(crate) fn execution(
@@ -386,7 +451,11 @@ pub(crate) fn execution(
     provider: &EncounterProvider,
 ) -> Result<(Vec<String>, Option<ModelEnvironment>)> {
     let Some(model) = prepare(home, session, provider)? else {
-        return Ok((provider.argv.clone(), None));
+        // No selected-model policy: the profile-declared key delivery is the
+        // whole launch environment (None when nothing is declared and bound),
+        // which is the route that carries keys to non-pi harnesses.
+        let environment = profile_environment(home, session, provider)?;
+        return Ok((provider.argv.clone(), environment));
     };
     let delivery = model
         .policy
@@ -406,12 +475,17 @@ pub(crate) fn execution(
         })
         .transpose()?;
     model.require_same(&prepare(home, session, provider)?)?;
-    Ok((
-        selected_argv(provider, &model)?,
-        Some(ModelEnvironment {
-            credential: delivery,
-        }),
-    ))
+    let mut environment = ModelEnvironment::new();
+    if let Some((name, secret)) = delivery {
+        environment.push_credential(name, secret)?;
+    }
+    // A profile-declared delivery rides the same scrubbed environment. The
+    // pi profile declares no env-var deliveries, so the pi selected-model
+    // path is unchanged by this join.
+    if let Some(profile) = profile_environment(home, session, provider)? {
+        environment.extend(profile)?;
+    }
+    Ok((selected_argv(provider, &model)?, Some(environment)))
 }
 
 pub(crate) fn direct_launcher(
@@ -554,5 +628,98 @@ impl EncounterService {
         result["executed"] = json!(false);
         result["standing"] = json!("native selected-model resident, not an inference result");
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aikit_adapters::credential_provider::EnvironmentImportProvider;
+
+    fn provider_with_program(program: &str) -> EncounterProvider {
+        EncounterProvider {
+            protocol: EncounterProtocol::Acp,
+            id: "probe".into(),
+            label: "probe".into(),
+            argv: vec![program.to_string()],
+            required_context: None,
+            model_policy: None,
+        }
+    }
+
+    fn session() -> ResourceRef {
+        ResourceRef::parse("agent-session/key-delivery-probe").unwrap()
+    }
+
+    fn seeded_revoked_binding(home: &AikitHome, credential_ref: &CredentialRef) {
+        let provider = EnvironmentImportProvider::from_value(
+            credential_ref.clone(),
+            "AIKIT_DELIVERY_PROBE_SOURCE",
+            Some("fixture-material-not-a-real-key".into()),
+        )
+        .unwrap();
+        let mut state = provider.binding_state(credential_ref).unwrap().unwrap();
+        state.revoked = true;
+        CredentialBindingStore::new(home).save(&state).unwrap();
+    }
+
+    #[test]
+    fn a_launch_program_that_joins_no_profile_gets_no_delivery() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        // A bridge or wrapper program joins nothing: no declarations, no
+        // environment, no scrub.
+        let environment = profile_environment(
+            &home,
+            &session(),
+            &provider_with_program("/opt/homebrew/bin/node"),
+        )
+        .unwrap();
+        assert!(environment.is_none());
+    }
+
+    #[test]
+    fn an_unbound_declared_key_with_an_own_login_fact_is_an_honest_absence() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        // claude-code declares ANTHROPIC_API_KEY and an own-login fallback,
+        // so an unbound binding does not refuse the launch.
+        let environment =
+            profile_environment(&home, &session(), &provider_with_program("claude")).unwrap();
+        assert!(environment.is_none());
+    }
+
+    #[test]
+    fn an_unbound_required_key_refuses_the_launch_with_the_bind_remediation() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        // kimi declares MOONSHOT_API_KEY with no evidenced own-login store:
+        // launching without a binding would start a body that cannot
+        // authenticate, so it refuses instead.
+        let error =
+            profile_environment(&home, &session(), &provider_with_program("kimi")).unwrap_err();
+        let message = error.message();
+        assert!(message.contains("MOONSHOT_API_KEY"), "{message}");
+        assert!(message.contains("credential:moonshot"), "{message}");
+        assert!(message.contains("aikit credential setup"), "{message}");
+    }
+
+    #[test]
+    fn a_revoked_binding_refuses_the_launch_instead_of_being_bypassed() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        seeded_revoked_binding(&home, &CredentialRef::new("credential:moonshot").unwrap());
+        let error =
+            profile_environment(&home, &session(), &provider_with_program("kimi")).unwrap_err();
+        assert!(error.message().contains("revoked or expired"), "{error}");
+    }
+
+    #[test]
+    fn pi_declares_no_env_delivery_so_its_launch_is_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        let environment =
+            profile_environment(&home, &session(), &provider_with_program("pi")).unwrap();
+        assert!(environment.is_none(), "pi keeps its policy-delivery path");
     }
 }

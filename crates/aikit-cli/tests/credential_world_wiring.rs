@@ -195,6 +195,7 @@ fn a_bound_credential_resolves_to_the_native_provider() {
         declared_secret_ref: None,
         bound_at_unix_seconds: Some(1_700_000_000),
         last_rotated_at_unix_seconds: None,
+        last_verified_at_unix_seconds: None,
     };
     CredentialBindingStore::new(&home).save(&binding).unwrap();
 

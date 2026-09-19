@@ -173,6 +173,7 @@ impl NativeSecureStoreProvider {
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
+            last_verified_at_unix_seconds: None,
         }
     }
 }
@@ -391,6 +392,7 @@ impl EnvironmentImportProvider {
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
+            last_verified_at_unix_seconds: None,
         }
     }
 }

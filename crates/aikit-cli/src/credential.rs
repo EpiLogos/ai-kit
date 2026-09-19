@@ -16,6 +16,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use aikit_adapters::credential_verify::{
+    check_provider_key, known_check, CredentialCheckOutcome, CredentialVerdict,
+};
+use aikit_adapters::runner::CommandRunner;
+use aikit_adapters::secret_resolver::SuiteSecretResolver;
 use aikit_adapters::{
     EnvironmentImportProvider, NativeSecureStoreProvider, NativeSecureStoreStatus,
 };
@@ -25,7 +30,7 @@ use aikit_core::credential::{
     SecretProviderDescriptor, SecretProviderRef, SecretProviderTier, SecretRequirement,
     SecretRequirementRef, SecretValue,
 };
-use aikit_core::secret_ref::SecretRef;
+use aikit_core::secret_ref::{SecretRef, SecretResolver as _};
 use aikit_core::{AikitError, Result};
 use aikit_store::{AikitHome, CredentialBindingStore};
 use aikit_tui::{render_credential_setup_panel, CredentialSetupView};
@@ -212,6 +217,7 @@ fn declared_ref_binding(
         declared_secret_ref: Some(secret_ref),
         bound_at_unix_seconds: None,
         last_rotated_at_unix_seconds: None,
+        last_verified_at_unix_seconds: None,
     })
 }
 
@@ -361,6 +367,154 @@ pub fn revoke(home: &AikitHome, credential: &CredentialRef) -> Result<Credential
     binding.revoked = true;
     store.save(&binding)?;
     Ok(binding)
+}
+
+// ---------------------------------------------------------------------------
+// Verify: one operator-invoked live key check
+// ---------------------------------------------------------------------------
+
+/// The answer of one `aikit credential verify` run: a verdict, the HTTP
+/// status class that produced it, and whether the check was definitive
+/// enough to record into the binding's lifecycle. No field carries material —
+/// the key and the Authorization header are never part of an outcome.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CredentialVerifyOutcome {
+    pub credential: String,
+    pub provider: String,
+    pub verdict: CredentialVerdict,
+    pub http_status_class: Option<String>,
+    /// Whether the outcome definitively establishes key quality (worked, or
+    /// a 401/403 refusal). Only definitive outcomes are recorded.
+    pub definitive: bool,
+    pub checked_at_unix_seconds: u64,
+    pub recorded: bool,
+    pub notes: Vec<String>,
+}
+
+/// `aikit credential verify <CREDENTIAL>`: materialise the bound credential
+/// through the same seam every consumer uses and run ONE minimal live check
+/// against its provider. Operator-invoked only — no launch, resolution or
+/// detection path ever calls this, because a live check spends the key
+/// against the provider and belongs to the operator alone. A provider with
+/// no known check is refused honestly (the known-check refusal comes before
+/// any materialisation, so an unverifiable credential never touches a
+/// store); an inconclusive check — unreachable, rate-limited — records
+/// nothing.
+pub fn verify(
+    home: &AikitHome,
+    credential: &CredentialRef,
+    runner: &dyn CommandRunner,
+) -> Result<CredentialVerifyOutcome> {
+    let store = CredentialBindingStore::new(home);
+    let binding = store.load(credential)?.ok_or_else(|| {
+        AikitError::new(
+            "credential.verify_unbound",
+            format!(
+                "no binding exists for {credential_ref}; bind it with `aikit credential setup` \
+                 first — verify answers for bound credentials only",
+                credential_ref = credential.as_str()
+            ),
+        )
+    })?;
+    if binding.revoked {
+        return Err(AikitError::new(
+            "credential.verify_revoked",
+            "the binding is revoked; rotate or re-bind before verifying — verify does \
+             not bypass revocation",
+        ));
+    }
+    let provider = credential
+        .as_str()
+        .strip_prefix("credential:")
+        .unwrap_or(credential.as_str());
+    known_check(provider).ok_or_else(|| {
+        AikitError::new(
+            "credential.verify_provider_unknown",
+            format!(
+                "no live check is known for provider {provider:?}; verify refuses to fake \
+                 a pass (known providers: {})",
+                aikit_adapters::credential_verify::KNOWN_CHECKS
+                    .iter()
+                    .map(|check| check.provider)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+    })?;
+    let material = materialise_bound(&binding)?;
+    let outcome = check_provider_key(runner, provider, &material)?;
+    let checked_at_unix_seconds = now_unix_seconds();
+    let updated = stamp_verification(&binding, &outcome, checked_at_unix_seconds);
+    let recorded = updated.is_some();
+    if let Some(updated) = updated {
+        store.save(&updated)?;
+    }
+    let notes = match (outcome.verdict, outcome.definitive) {
+        (CredentialVerdict::Working, _) => vec![
+            "the key works right now; the check time was recorded against the binding".to_string(),
+        ],
+        (CredentialVerdict::Refused, true) => vec![format!(
+            "the provider definitively refused this key (HTTP {}); the refusal was \
+             recorded — rotate or re-bind before relying on it",
+            outcome.http_status_class.as_deref().unwrap_or("?")
+        )],
+        (CredentialVerdict::Refused, false) => vec![format!(
+            "the provider refused the request (HTTP {}) without proving the key bad, \
+             for example a rate limit; nothing was recorded",
+            outcome.http_status_class.as_deref().unwrap_or("?")
+        )],
+        (CredentialVerdict::Unreachable, _) => {
+            vec!["the check could not reach a verdict; nothing was recorded".to_string()]
+        }
+    };
+    Ok(CredentialVerifyOutcome {
+        credential: credential.as_str().to_string(),
+        provider: provider.to_string(),
+        verdict: outcome.verdict,
+        http_status_class: outcome.http_status_class,
+        definitive: outcome.definitive,
+        checked_at_unix_seconds,
+        recorded,
+        notes,
+    })
+}
+
+/// Materialise the bound credential through the same seam every consumer
+/// uses: a declared ref resolves straight from the external store the
+/// operator named; otherwise the OS secure store answers for its own binding.
+fn materialise_bound(binding: &CredentialBindingState) -> Result<SecretValue> {
+    if let Some(secret_ref) = &binding.declared_secret_ref {
+        return SuiteSecretResolver::default().resolve(secret_ref);
+    }
+    NativeSecureStoreProvider::with_binding(Some(binding))
+        .materialise(
+            &binding.credential_ref,
+            SecretMaterialisationClass::ProcessEnv,
+        )?
+        .ok_or_else(|| {
+            AikitError::new(
+                "credential.verify_no_material",
+                format!(
+                    "the bound provider holds no material for {}; rotate or re-bind it",
+                    binding.credential_ref.as_str()
+                ),
+            )
+        })
+}
+
+/// The lifecycle stamp rule, kept pure for tests: a definitive outcome
+/// records the check time; an inconclusive one leaves the record untouched.
+fn stamp_verification(
+    binding: &CredentialBindingState,
+    outcome: &CredentialCheckOutcome,
+    checked_at_unix_seconds: u64,
+) -> Option<CredentialBindingState> {
+    if !outcome.definitive {
+        return None;
+    }
+    let mut updated = binding.clone();
+    updated.last_verified_at_unix_seconds = Some(checked_at_unix_seconds);
+    Some(updated)
 }
 
 // ---------------------------------------------------------------------------
@@ -934,6 +1088,121 @@ mod tests {
         let rendered = format!("{names:?}");
         assert!(!rendered.contains("sk-value"));
         assert!(!rendered.contains("other-value"));
+    }
+
+    fn seeded_revoked_binding(home: &AikitHome, credential_ref: &CredentialRef) {
+        let provider = EnvironmentImportProvider::from_value(
+            credential_ref.clone(),
+            "AIKIT_DELIVERY_PROBE_SOURCE",
+            Some("fixture-material-not-a-real-key".into()),
+        )
+        .unwrap();
+        let mut state = provider.binding_state(credential_ref).unwrap().unwrap();
+        state.revoked = true;
+        CredentialBindingStore::new(home).save(&state).unwrap();
+    }
+
+    fn verify_binding() -> CredentialBindingState {
+        declared_ref_binding(
+            &CredentialRef::new("credential:openai").unwrap(),
+            SecretRef::parse("op://Vault/openai/key").unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_definitive_check_is_recorded_and_an_inconclusive_one_is_not() {
+        let binding = verify_binding();
+        let working = CredentialCheckOutcome {
+            provider: "openai".into(),
+            verdict: aikit_adapters::credential_verify::CredentialVerdict::Working,
+            http_status_class: Some("2xx".into()),
+            definitive: true,
+        };
+        let stamped = stamp_verification(&binding, &working, 1_770_000_000).unwrap();
+        assert_eq!(stamped.last_verified_at_unix_seconds, Some(1_770_000_000));
+        // A definitive refusal (401/403) is also recorded: the check ran and
+        // the key is known bad.
+        let refused = CredentialCheckOutcome {
+            verdict: aikit_adapters::credential_verify::CredentialVerdict::Refused,
+            definitive: true,
+            http_status_class: Some("4xx".into()),
+            ..working
+        };
+        assert!(
+            stamp_verification(&binding, &refused, 1_770_000_100).is_some(),
+            "a definitive refusal must be recorded"
+        );
+        // An inconclusive outcome records nothing — the key is neither
+        // proven good nor bad.
+        let rate_limited = CredentialCheckOutcome {
+            definitive: false,
+            ..refused
+        };
+        assert!(stamp_verification(&binding, &rate_limited, 1_770_000_200).is_none());
+        let unreachable = CredentialCheckOutcome {
+            provider: "openai".into(),
+            verdict: aikit_adapters::credential_verify::CredentialVerdict::Unreachable,
+            definitive: false,
+            http_status_class: None,
+        };
+        assert!(stamp_verification(&binding, &unreachable, 1_770_000_300).is_none());
+        assert_eq!(binding.last_verified_at_unix_seconds, None);
+    }
+
+    #[test]
+    fn verify_refuses_an_unbound_credential_before_any_check() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        let runner = aikit_adapters::runner::ScriptedRunner::new();
+        let error = verify(
+            &home,
+            &CredentialRef::new("credential:openai").unwrap(),
+            &runner,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "credential.verify_unbound");
+        assert!(runner.calls().is_empty(), "no network call may be spent");
+    }
+
+    #[test]
+    fn verify_refuses_a_revoked_credential_without_materialising() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        seeded_revoked_binding(&home, &CredentialRef::new("credential:openai").unwrap());
+        let error = verify(
+            &home,
+            &CredentialRef::new("credential:openai").unwrap(),
+            &aikit_adapters::runner::ScriptedRunner::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "credential.verify_revoked");
+    }
+
+    #[test]
+    fn verify_refuses_an_unknown_provider_before_touching_any_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        let credential_ref = CredentialRef::new("credential:unheardof-vendor").unwrap();
+        let provider = EnvironmentImportProvider::from_value(
+            credential_ref.clone(),
+            "AIKIT_DELIVERY_PROBE_SOURCE",
+            Some("fixture-material-not-a-real-key".into()),
+        )
+        .unwrap();
+        let state = provider.binding_state(&credential_ref).unwrap().unwrap();
+        CredentialBindingStore::new(&home).save(&state).unwrap();
+        let error = verify(
+            &home,
+            &credential_ref,
+            &aikit_adapters::runner::ScriptedRunner::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "credential.verify_provider_unknown");
+        assert!(
+            error.message().contains("unheardof-vendor"),
+            "the refusal names the provider: {error}"
+        );
     }
 
     #[test]

@@ -4,16 +4,123 @@
 //! process and byte stream needed to exercise those semantics against a real
 //! target. It deliberately does not create connection, AgentSession, Harness or
 //! SessionSpace identity.
+//!
+//! It also owns the scoped final-child environment ([`ModelEnvironment`]): one
+//! scrubbed allowlist plus the credential variables an encounter launch
+//! delivers. Raw material is not serializable and is never stored in any
+//! receipt, journal or read model — the environment exists only in the
+//! spawned `Command`.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 
+use aikit_core::credential::SecretValue;
 use aikit_core::{AikitError, Result};
 use serde_json::Value;
 
 use crate::agent_connection::ConnectionCommand;
+
+/// Scoped final-child environment: the fixed allowlist a provider process
+/// may see, plus the credential variables delivered at launch. `apply` clears
+/// the environment first, so ambient variables — including unrelated keys —
+/// never reach the child. Raw material is never serialized: the pairs live
+/// only as [`SecretValue`] and land only in the spawned `Command`.
+#[derive(Default)]
+pub struct ModelEnvironment {
+    credentials: Vec<(String, SecretValue)>,
+}
+
+impl std::fmt::Debug for ModelEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = self
+            .credentials
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        f.debug_struct("ModelEnvironment")
+            .field("credentials", &names)
+            .finish()
+    }
+}
+
+impl ModelEnvironment {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// One delivered credential. The variable name is re-checked against the
+    /// shared shape law so no caller can bypass it by constructing the
+    /// environment directly.
+    pub fn with_credential(
+        mut self,
+        env_var: impl Into<String>,
+        secret: SecretValue,
+    ) -> Result<Self> {
+        self.push_credential(env_var, secret)?;
+        Ok(self)
+    }
+
+    /// Merge another environment's deliveries into this one. Every merged
+    /// name passes the same shape law.
+    pub fn extend(&mut self, other: ModelEnvironment) -> Result<()> {
+        for (env_var, secret) in other.credentials {
+            self.push_credential(env_var, secret)?;
+        }
+        Ok(())
+    }
+
+    pub fn push_credential(
+        &mut self,
+        env_var: impl Into<String>,
+        secret: SecretValue,
+    ) -> Result<()> {
+        let env_var = env_var.into();
+        if !aikit_core::credential::valid_credential_variable(&env_var) {
+            return Err(AikitError::new(
+                "connection.credential_variable_invalid",
+                "credential delivery needs a lawful credential variable name; environment \
+                 control injection is refused",
+            )
+            .with("env_var", env_var));
+        }
+        self.credentials.push((env_var, secret));
+        Ok(())
+    }
+
+    /// Whether anything would actually be delivered. An environment with no
+    /// credential is never applied: launching without a key inherits the
+    /// caller's environment unchanged rather than scrubbing it for nothing.
+    pub fn is_empty(&self) -> bool {
+        self.credentials.is_empty()
+    }
+
+    pub fn apply(&self, command: &mut Command) {
+        command.env_clear();
+        for name in [
+            "HOME",
+            "PATH",
+            "TERM",
+            "LANG",
+            "LC_ALL",
+            "TZ",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "AIKIT_HOME",
+            "AIKIT_CONTEXT_ID",
+            "AIKIT_ISOLATION",
+        ] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        for (name, value) in &self.credentials {
+            command.env(name, value.expose());
+        }
+    }
+}
 
 /// A real stdio child process. ACP uses the JSON-line methods; classic targets
 /// can use the text-line methods. Keeping both byte forms on one process owner is
@@ -28,7 +135,7 @@ pub struct ConnectionProcess {
 
 impl ConnectionProcess {
     pub fn spawn(argv: &[String], cwd: Option<&Path>) -> Result<Self> {
-        let (child, stdin, stdout) = spawn_parts(argv, cwd)?;
+        let (child, stdin, stdout) = spawn_parts(argv, cwd, None)?;
         Ok(Self {
             child,
             stdin,
@@ -45,7 +152,18 @@ impl ConnectionProcess {
         argv: &[String],
         cwd: Option<&Path>,
     ) -> Result<(ConnectionWriter, ConnectionReader, ConnectionControl)> {
-        let (child, stdin, stdout) = spawn_parts(argv, cwd)?;
+        Self::spawn_split_with_environment(argv, cwd, None)
+    }
+
+    /// [`ConnectionProcess::spawn_split`] with a scoped launch environment:
+    /// the child sees the scrubbed allowlist plus the delivered credential
+    /// variables instead of the caller's full environment.
+    pub fn spawn_split_with_environment(
+        argv: &[String],
+        cwd: Option<&Path>,
+        environment: Option<&ModelEnvironment>,
+    ) -> Result<(ConnectionWriter, ConnectionReader, ConnectionControl)> {
+        let (child, stdin, stdout) = spawn_parts(argv, cwd, environment)?;
         let argv: Arc<Vec<String>> = Arc::new(argv.to_vec());
         Ok((
             ConnectionWriter {
@@ -175,6 +293,7 @@ impl ConnectionProcess {
 fn spawn_parts(
     argv: &[String],
     cwd: Option<&Path>,
+    environment: Option<&ModelEnvironment>,
 ) -> Result<(OwnedChild, ChildStdin, ChildStdout)> {
     let Some((program, args)) = argv.split_first() else {
         return Err(AikitError::new(
@@ -189,6 +308,11 @@ fn spawn_parts(
         .stdout(Stdio::piped());
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
+    }
+    // A delivered key is injected under the scrubbed final-child environment;
+    // without a delivery the caller's environment is inherited unchanged.
+    if let Some(environment) = environment.filter(|environment| !environment.is_empty()) {
+        environment.apply(&mut command);
     }
     // A private group contains the adapter and ordinary inherited descendants.
     // It is a lifetime boundary, not a sandbox: deliberate setsid/setpgid escape
@@ -482,5 +606,90 @@ impl OwnedChild {
 impl Drop for OwnedChild {
     fn drop(&mut self) {
         let _ = self.terminate();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The delivered variable reaches the child under its declared name; the
+    /// value itself is never printed, asserted on or persisted — presence is
+    /// the fact under test.
+    #[test]
+    fn a_delivered_credential_reaches_the_child_and_ambient_variables_do_not() {
+        let environment = ModelEnvironment::new()
+            .with_credential(
+                "PROBE_HARNESS_API_KEY",
+                SecretValue::new("fixture-material").unwrap(),
+            )
+            .unwrap();
+        let argv = vec![
+            "sh".into(),
+            "-c".into(),
+            "if [ -n \"$PROBE_HARNESS_API_KEY\" ]; then echo delivered; else echo missing; fi; \
+             if [ -n \"$UNRELATED_API_KEY\" ]; then echo leaked; else echo withheld; fi"
+                .into(),
+        ];
+        let (writer, mut reader, control) =
+            ConnectionProcess::spawn_split_with_environment(&argv, None, Some(&environment))
+                .unwrap();
+        drop(writer);
+        let delivered = reader.read_line().unwrap();
+        let unrelated = reader.read_line().unwrap();
+        assert_eq!(delivered, "delivered");
+        assert_eq!(unrelated, "withheld");
+        // Drop terminates the exited child; a reaped group leader may refuse
+        // an explicit signal in restricted environments, so no unwrap here.
+        drop(control);
+    }
+
+    #[test]
+    fn without_a_delivery_the_child_environment_is_inherited_unchanged() {
+        let argv = vec![
+            "sh".into(),
+            "-c".into(),
+            "printenv AIKIT_DELIVERY_PROBE >/dev/null && echo seen || echo absent".into(),
+        ];
+        let (writer, mut reader, control) =
+            ConnectionProcess::spawn_split_with_environment(&argv, None, None).unwrap();
+        drop(writer);
+        assert_eq!(reader.read_line().unwrap(), "absent");
+        // Drop terminates the exited child; a reaped group leader may refuse
+        // an explicit signal in restricted environments, so no unwrap here.
+        drop(control);
+    }
+
+    #[test]
+    fn an_environment_with_no_credentials_is_never_applied() {
+        assert!(ModelEnvironment::new().is_empty());
+        let environment = ModelEnvironment::new()
+            .with_credential(
+                "PROBE_HARNESS_API_KEY",
+                SecretValue::new("fixture-material").unwrap(),
+            )
+            .unwrap();
+        assert!(!environment.is_empty());
+    }
+
+    #[test]
+    fn an_unlawful_variable_name_is_refused_at_environment_construction() {
+        let error = ModelEnvironment::new()
+            .with_credential("PATH", SecretValue::new("fixture-material").unwrap())
+            .unwrap_err();
+        assert_eq!(error.code(), "connection.credential_variable_invalid");
+    }
+
+    #[test]
+    fn the_environment_debug_render_names_variables_never_material() {
+        let environment = ModelEnvironment::new()
+            .with_credential(
+                "PROBE_HARNESS_API_KEY",
+                SecretValue::new("fixture-material").unwrap(),
+            )
+            .unwrap();
+        let rendered = format!("{environment:?}");
+        assert!(rendered.contains("PROBE_HARNESS_API_KEY"));
+        assert!(!rendered.contains("fixture-material"));
     }
 }
