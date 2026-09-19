@@ -24,24 +24,24 @@ use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::Kind;
 use aikit_core::harness_admission::{
-    HarnessAdmissionAdapter, HarnessAdmissionDescriptor, HarnessEditionKind,
-    unsupported_harness_gap,
+    unsupported_harness_gap, HarnessAdmissionAdapter, HarnessAdmissionDescriptor,
+    HarnessEditionKind,
 };
 use aikit_core::procedure::{Inverse, Plan, Procedure, ProcedureKind, WorldEdit};
 use aikit_core::projection::{ProjectionItem, ResolvedContext, TargetAdapter};
 use aikit_core::{AikitError, Result, TargetId};
 
 use aikit_adapters::actuation_harness_capability::{
-    CapabilityOutcome, HarnessCapability, intake_actuation_capability,
+    intake_actuation_capability, CapabilityOutcome, HarnessCapability,
 };
 use aikit_adapters::actuation_harness_detection::{
-    DetectionEntry, DetectionOutcome, DetectionState, intake_actuation_detection,
+    intake_actuation_detection, DetectionEntry, DetectionOutcome, DetectionState,
 };
 use aikit_adapters::clients::{
-    ClientAdapter, antigravity::AntigravityAdapter, broker::BrokerAdapter, claude::ClaudeAdapter,
+    antigravity::AntigravityAdapter, broker::BrokerAdapter, claude::ClaudeAdapter,
     codex::CodexAdapter, gemini::GeminiAdapter, grokbot::GrokbotAdapter, hermes::HermesAdapter,
     kimi::KimiAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter, pi::PiAdapter,
-    zcode::ZcodeAdapter,
+    zcode::ZcodeAdapter, ClientAdapter,
 };
 use aikit_adapters::runner::SystemRunner;
 
@@ -1168,8 +1168,8 @@ fn plan_carrier_install(
     // reviewed.
     let carrier_id = aikit_adapters::CARRIER_CAPSULE_ID;
     let carrier_capsule = {
-        use aikit_core::CapsuleId;
         use aikit_core::catalog::Catalog;
+        use aikit_core::CapsuleId;
         let snapshot = service.snapshot();
         CapsuleId::parse(carrier_id)
             .ok()
@@ -1671,11 +1671,9 @@ mod tests {
             reason: "no bin".to_string(),
         };
         let members = roster_members(&outcome);
-        assert!(
-            members
-                .iter()
-                .all(|m| matches!(m, RosterMember::Unrecorded { .. } | RosterMember::Broker))
-        );
+        assert!(members
+            .iter()
+            .all(|m| matches!(m, RosterMember::Unrecorded { .. } | RosterMember::Broker)));
         assert_eq!(
             members
                 .iter()
