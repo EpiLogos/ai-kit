@@ -2,7 +2,7 @@
 //!
 //! Staging an intent by hand used to mean serde-error archaeology: required
 //! plan fields (`backend_extensions`, `warnings`) were undocumented and
-//! undiscoverable from the failure. `aikit-session-space stage --print-schema`
+//! undiscoverable from the failure. `aikit session-space stage --print-schema`
 //! prints a template for every operation instead, and the golden test in this
 //! module pins that every template parses back as a valid intent.
 
@@ -84,7 +84,7 @@ fn operations() -> Vec<StageSchemaOperation> {
                 "operation": "bind-project-context",
                 "binding": {
                     "project": "<project-ref>",
-                    "context": "<full ContextResolutionEvidence: read it from `aikit-session-space project-context`>",
+                    "context": "<full ContextResolutionEvidence: read it from `aikit session-space project-context`>",
                     "provenance": []
                 }
             }),
@@ -282,7 +282,7 @@ fn operations() -> Vec<StageSchemaOperation> {
             operation: "restore",
             intent: json!({
                 "operation": "restore",
-                "target": "<full SessionSpaceAuthoredState: read it from `aikit-session-space show <space>`>",
+                "target": "<full SessionSpaceAuthoredState: read it from `aikit session-space show <space>`>",
                 "evidence": "why this restore is authorised"
             }),
             notes: vec![
@@ -312,7 +312,7 @@ pub fn schema() -> Value {
     }
     json!({
         "schema": "aikit.session-space-application/v1",
-        "usage": "pass one operation's `intent` value to `aikit-session-space stage --intent-json` (prefix with @ to read from a file); `notes` are documentation, not part of the intent",
+        "usage": "pass one operation's `intent` value to `aikit session-space stage --intent-json` (prefix with @ to read from a file); `notes` are documentation, not part of the intent",
         "operations": Value::Object(entries),
     })
 }

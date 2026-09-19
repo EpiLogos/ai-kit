@@ -1,0 +1,12 @@
+schema = 1
+id = "hook/central/fs-guardrail"
+kind = "hook"
+name = "Central filesystem guardrail"
+description = "The Central ground's PreToolUse write guard, authored by the ground and not by AIKit: the payload is a thin delegator that execs the ground-owned script .agents/hooks/central-fs-guardrail.sh (law: Control/agents/governance/filesystem-guardrails.md, owner-commissioned 2026-09-16). Ownership marker: the command resolves to the Central ground. Interim truth (2026-09-18): the live harness entries in ~/.claude/settings.json and ~/.zcode/cli/config.json still call the ground script directly and remain foreign to AIKit's seams - they are deliberately not replaced by this capsule, because aikit hook dispatch reports a denial only inside its envelope and exits 0 (no exit-code or decision-protocol translation to any harness), so this capsule is composition-ready but cannot yet carry the block. Compose it only when the dispatch boundary translation lands; failure is Closed by default, matching the script's own constitution."
+tags = ["aikit", "central", "guardrail", "pretooluse", "filesystem"]
+
+[hook]
+entry = "payload/fs-guardrail"
+events = ["PreToolUse"]
+matcher = "Write|Edit|MultiEdit|NotebookEdit|ApplyPatch"
+timeout = "10s"

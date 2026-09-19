@@ -53,6 +53,7 @@ use aikit_adapters::clients::dsh::DshAdapter;
 use aikit_adapters::clients::gemini::GeminiAdapter;
 use aikit_adapters::clients::goose::GooseAdapter;
 use aikit_adapters::clients::grokbot::GrokbotAdapter;
+use aikit_adapters::clients::hermes::HermesAdapter;
 use aikit_adapters::clients::kimi::KimiAdapter;
 use aikit_adapters::clients::ollama::OllamaAdapter;
 use aikit_adapters::clients::openclaw::OpenclawAdapter;
@@ -2218,11 +2219,12 @@ impl Service {
 
         let mut effects = Vec::new();
         for target in &self.descriptor.targets {
-            // The single-roster law: every harness arm below has its row in
-            // client.rs's REGISTRY (qwen-code and ollama included). The guard
-            // test `every_harness_client_effects_dispatches_has_a_registry_row`
-            // in client.rs fails when the dispatch grows a harness arm the
-            // roster does not carry.
+            // The detail law: every harness arm below resolves through
+            // profiles::slug_for_target to an embedded harness profile — the
+            // guard test `every_harness_client_effects_arm_resolves_detail_ground`
+            // in client.rs fails when the dispatch grows a harness arm without
+            // detail ground. (The client-status roster is a different surface:
+            // it derives from the live detection record, not from these arms.)
             let effect = match target.as_str() {
                 TargetId::SHELL => Some(ActivationEffect::immediate("shell bin/")),
                 TargetId::CLAUDE_CODE => {
@@ -2267,6 +2269,13 @@ impl Service {
                 ),
                 TargetId::GROK_BOT => plan_effect(
                     &GrokbotAdapter::new(ctx_dir.join("projections/grokbot")),
+                    &rc,
+                ),
+                TargetId::HERMES => {
+                    plan_effect(&HermesAdapter::new(ctx_dir.join("projections/hermes")), &rc)
+                }
+                TargetId::HERMES_ACP => plan_effect(
+                    &HermesAdapter::acp(ctx_dir.join("projections/hermes-acp")),
                     &rc,
                 ),
                 TargetId::KIMI => {
@@ -3123,13 +3132,23 @@ impl PaletteBackend for Service {
                     AikitError::new("model_roster.route_sets_unreadable", error.to_string())
                 })?;
 
+        // The harness facts this context's bound targets contribute: derived
+        // once through the typed seam from the embedded profiles' models
+        // layers, then applied to every candidate after the routes have
+        // filled in real providers.
+        let facts = harness_roster_facts(&self.descriptor.targets);
+
         let mut candidates = Vec::new();
         for set in &route_sets {
-            let base = model_roster_candidate_for(&set.model);
+            let base = model_roster_candidate_for(&set.model, &facts);
             candidates.extend(candidates_from_routes(set, &base));
         }
+        for candidate in &mut candidates {
+            let (harness_compatible, _) = facts.gate(Some(candidate.provider.as_str()));
+            candidate.harness_compatible = harness_compatible;
+        }
         let roster = rank_model_roster(
-            model_roster_demand(),
+            model_roster_demand(&facts),
             ModelRankingPolicy::Balanced,
             candidates,
         );
@@ -3533,10 +3552,38 @@ fn plan_effect(adapter: &dyn TargetAdapter, rc: &ResolvedContext) -> Option<Acti
         .ok()
         .map(|plan| adapter.activation_effect(None, &plan))
 }
-fn model_roster_demand() -> aikit_core::resource::ModelRosterDemand {
+/// The harness facts a context's bound targets contribute to the model
+/// roster, assembled through the one typed seam: every bound target that
+/// carries an embedded harness profile with a models layer lends that layer
+/// to the composition. Unprofiled targets (shell, the broker, harnesses
+/// without a models layer) lend nothing.
+fn harness_roster_facts(
+    targets: &[TargetId],
+) -> aikit_core::model_harness_binding::HarnessCompositionFacts {
+    let layers: Vec<(&str, &aikit_core::harness_profile::ModelsLayer)> = targets
+        .iter()
+        .filter_map(|target| {
+            let slug = aikit_adapters::profiles::slug_for_target(target)?;
+            let profile = aikit_adapters::profiles::for_slug(slug)?;
+            let models = profile.models.as_ref()?;
+            Some((slug, models))
+        })
+        .collect();
+    aikit_core::model_harness_binding::HarnessCompositionFacts::from_layers(&layers)
+}
+
+fn model_roster_demand(
+    facts: &aikit_core::model_harness_binding::HarnessCompositionFacts,
+) -> aikit_core::resource::ModelRosterDemand {
     aikit_core::resource::ModelRosterDemand {
         project: None,
-        profile: None,
+        // The demand-side scope spells the same `harness-profile/<slug>`
+        // convention the candidate side's `harness_composition` uses, so
+        // fitness observations bind across both.
+        profile: facts.scope.as_ref().map(|scope| {
+            aikit_core::resource::ResourceRef::parse(scope)
+                .expect("a harness-profile scope is a valid resource ref")
+        }),
         agency: None,
         use_type: "compose".into(),
         required_capabilities: Default::default(),
@@ -3552,10 +3599,13 @@ fn model_roster_demand() -> aikit_core::resource::ModelRosterDemand {
 }
 
 /// The model-level facts a compose-time candidate carries. Route-level facts
-/// are filled in per route by `candidates_from_routes`; nothing here asserts
-/// fitness, price or authorisation that has not been observed.
+/// are filled in per route by `candidates_from_routes`, and the harness gate
+/// is applied after that fill-in (it compares against the candidate's real
+/// provider); nothing here asserts fitness, price or authorisation that has
+/// not been observed.
 fn model_roster_candidate_for(
     model: &aikit_core::resource::ResourceRef,
+    facts: &aikit_core::model_harness_binding::HarnessCompositionFacts,
 ) -> aikit_core::resource::ModelRosterCandidate {
     aikit_core::resource::ModelRosterCandidate {
         model: model.clone(),
@@ -3568,10 +3618,13 @@ fn model_roster_candidate_for(
         provider_usable: false,
         policy_allowed: false,
         contract_compatible: false,
+        // Gate truth is per-provider and applied in `model_roster` once the
+        // route fills the provider in; the composition scope and capability
+        // disclosure come from the bound harness profiles now.
         harness_compatible: false,
-        harness_composition: None,
+        harness_composition: facts.scope.clone(),
+        harness_capabilities: facts.capability_names(),
         native_capabilities: Default::default(),
-        harness_capabilities: Default::default(),
         profile_skills: Default::default(),
         modalities: Default::default(),
         tool_support: Default::default(),

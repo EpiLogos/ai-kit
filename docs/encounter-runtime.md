@@ -1,6 +1,6 @@
 # Native encounter runtime
 
-The existing `aikit-session-space` companion owns resident ACP encounters. Its
+The `aikit session-space` verb family of the main `aikit` binary owns resident ACP encounters (folded from the former `aikit-session-space` companion binary, O-I #376). Its
 `encounter-configure --provider-json` command records explicit native provider
 argv; `encounter-start` starts the home-scoped owner, and `encounter
 --request-json` dispatches its typed operations. Provider argv is never accepted
