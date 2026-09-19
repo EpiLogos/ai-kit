@@ -236,6 +236,7 @@ fn credential_inventory(service: &Service) -> Result<Value> {
                     .map(|secret_ref| secret_ref.to_string()),
                 "bound_at_unix_seconds": binding.bound_at_unix_seconds,
                 "last_rotated_at_unix_seconds": binding.last_rotated_at_unix_seconds,
+                "last_verified_at_unix_seconds": binding.last_verified_at_unix_seconds,
                 "revoked": binding.revoked,
                 "provenance": binding.binding_provenance,
             })

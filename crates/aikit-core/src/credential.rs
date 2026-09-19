@@ -354,8 +354,14 @@ pub struct CredentialBindingState {
     /// (a rotation or re-bind). Absent until the first rotation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_rotated_at_unix_seconds: Option<u64>,
-}
-impl CredentialBindingState {
+    /// Unix seconds of the last operator-invoked live check that returned a
+    /// definitive answer (the key worked, or the provider definitively
+    /// refused it). Only `aikit credential verify` writes it — never an
+    /// automatic path — and an inconclusive check (unreachable, rate-limited)
+    /// leaves it untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_verified_at_unix_seconds: Option<u64>,
+}impl CredentialBindingState {
     /// Stamp the lifecycle facts a binding flow owns onto a freshly produced
     /// provider state. The first bind sets `bound_at`; a rotation preserves
     /// the original `bound_at` and marks `last_rotated_at`. The credential
@@ -595,6 +601,7 @@ mod tests {
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
+            last_verified_at_unix_seconds: None,
         };
         let rotated = CredentialBindingState {
             revision_or_lease_class: Some("revision:v2".into()),
@@ -623,6 +630,7 @@ mod tests {
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
+            last_verified_at_unix_seconds: None,
         };
         let replacement = CredentialBindingState {
             credential_ref: first.credential_ref.clone(),
@@ -637,6 +645,7 @@ mod tests {
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
+            last_verified_at_unix_seconds: None,
         };
 
         assert_eq!(first.credential_ref, replacement.credential_ref);
@@ -659,6 +668,7 @@ mod tests {
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
+            last_verified_at_unix_seconds: None,
         };
 
         let first = provider_state.clone().with_lifecycle(None, false, 1_000);
