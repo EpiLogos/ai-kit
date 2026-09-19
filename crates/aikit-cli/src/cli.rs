@@ -113,6 +113,18 @@ pub enum Command {
     Continuity(ContinuityCmd),
     /// Bring up, attach to and reconcile session topologies.
     Session(SessionCmd),
+    /// Operate durable SessionSpace semantics (folded companion surface; O-I #376).
+    ///
+    /// A pure pass-through: everything after `session-space` (verbs, flags,
+    /// `--help`) is forwarded verbatim to the one folded companion surface. The
+    /// help flag is disabled here so `--help`/`-h` reach that surface instead of
+    /// this wrapper; run `aikit session-space --help` for the verb list.
+    #[command(name = "session-space", disable_help_flag = true)]
+    SessionSpace {
+        /// Everything after `session-space`, forwarded verbatim.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Compose the launch plan: Central profile + Actuation instantiation receipt → actor bootstrap.
     Compose(ComposeArgs),
     /// Read a Provider Source into the canonical Model catalogue, and read the catalogue back.

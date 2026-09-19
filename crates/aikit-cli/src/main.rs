@@ -240,6 +240,24 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Hook(c)) => cmd_hook(cwd, c),
         Some(Command::Capabilities(c)) => cmd_capabilities(cwd, c),
         Some(Command::Session(c)) => cmd_session(cwd, c),
+        // The folded companion surface (O-I #376): forward the trailing args to
+        // the one shared SessionSpace implementation and exit with its code.
+        // This arm diverges via `process::exit`, so it never produces a `Reply`.
+        //
+        // `--cwd`/`-C` is a global on the outer `aikit` parser, so it is consumed
+        // here rather than left in `args`; the folded surface has its own `-C`,
+        // so the resolved `cwd` is forwarded as `-C` to keep both invocations
+        // identical (when no `--cwd` was given, `cwd` is the process directory
+        // the folded surface would default to anyway).
+        Some(Command::SessionSpace { args }) => {
+            let mut argv: Vec<std::ffi::OsString> = vec![
+                "aikit-session-space".into(),
+                "-C".into(),
+                cwd.as_os_str().to_os_string(),
+            ];
+            argv.extend(args);
+            std::process::exit(aikit_cli::session_space_cli::run_from_args(argv));
+        }
         Some(Command::Compose(a)) => cmd_compose(cwd, a),
         Some(Command::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
