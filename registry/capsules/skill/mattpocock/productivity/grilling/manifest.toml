@@ -1,0 +1,8 @@
+schema = 1
+id = "skill/mattpocock/productivity/grilling"
+kind = "skill"
+name = "grilling"
+description = "Grill the user relentlessly about a plan, decision, or idea. Use when the user wants to stress-test their thinking, or uses any 'grill' trigger phrases."
+
+[skill]
+root = "payload"

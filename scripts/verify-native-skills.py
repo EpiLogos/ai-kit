@@ -25,6 +25,17 @@ EXPECTED_SKILLS = {
     "skill/aikit/meta-harness-craft",
     "skill/aikit/wiki-inhabitation",
     "skill/aikit/experience-campaign",
+    # Vendored default skillsets (registry/README.md "Vendored default
+    # skillsets"): byte-identical copies of the reviewed skill-source
+    # snapshots, shipped so a fresh install resolves the ids this repo's own
+    # .aikit/profile.toml and ADR 0002's default foundation declare.
+    "skill/mattpocock/engineering/wayfinder",
+    "skill/mattpocock/engineering/setup-matt-pocock-skills",
+    "skill/mattpocock/engineering/domain-modeling",
+    "skill/mattpocock/engineering/prototype",
+    "skill/mattpocock/engineering/research",
+    "skill/mattpocock/productivity/grilling",
+    "skill/writing-guidance-tools/writing-guidance-tools",
 }
 EXPECTED_GUIDANCE = {
     "guidance/aikit/living-project-collaboration",

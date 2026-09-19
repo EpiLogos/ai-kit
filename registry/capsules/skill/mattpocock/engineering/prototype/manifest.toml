@@ -1,0 +1,8 @@
+schema = 1
+id = "skill/mattpocock/engineering/prototype"
+kind = "skill"
+name = "prototype"
+description = "Build a throwaway prototype to answer a design question. Use when the user wants to sanity-check whether a state model or logic feels right, or explore what a UI should look like."
+
+[skill]
+root = "payload"

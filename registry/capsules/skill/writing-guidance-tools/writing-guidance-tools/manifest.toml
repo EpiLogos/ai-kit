@@ -1,0 +1,8 @@
+schema = 1
+id = "skill/writing-guidance-tools/writing-guidance-tools"
+kind = "skill"
+name = "writing-guidance-tools"
+description = "Use when drafting, revising, or auditing Frank Taylor's philosophical essays, or a project that explicitly adopts his voice corpus, where argument integrity, anti-slop discipline, technical teaching, and selective calibration matter."
+
+[skill]
+root = "payload"

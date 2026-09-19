@@ -16,6 +16,44 @@ Skill
 
 The existing Wayfinder/default foundation members remain authoritative where they already exist. These operational Skills compose with that foundation; they do not clone its bodies.
 
+## Vendored default skillsets
+
+The repo's own `.aikit/profile.toml` and the recommended default foundation
+(ADR 0002, `mattpocock/wayfinder-foundation`) declare seven skills that must
+resolve wherever this product ships — on a fresh clone and on a fresh install.
+This registry therefore carries them as **vendored** capsules, byte-identical
+to the reviewed skill-source snapshots, so a fresh `AIKIT_HOME` materialised
+from this tree resolves every declared id (`first_party.rs` materialises the
+registry into `<home>/registries/ai-kit` when absent). They keep their
+source-qualified ids — the namespace is the provenance, per ADR 0002 — and,
+like every Skill capsule, they stay inactive until the operator records trust
+(`aikit trust record`); vendoring ships the bytes, it does not pre-review them.
+
+```text
+skill/mattpocock/engineering/wayfinder
+skill/mattpocock/engineering/setup-matt-pocock-skills
+skill/mattpocock/engineering/domain-modeling
+skill/mattpocock/engineering/prototype
+skill/mattpocock/engineering/research
+skill/mattpocock/productivity/grilling
+    upstream  https://github.com/mattpocock/skills.git
+    revision  2ab958093e83e0ec752e6c1c5932da465bf23e0c
+    source    skill source `mattpocock`, snapshot da1ea3e2d10c023334058bdecc0f4c5bc208c9a434a37f3a064d1a397600bb7d
+    license   MIT (per the upstream repository)
+
+skill/writing-guidance-tools/writing-guidance-tools
+    author    owner-authored; canonical at the Antykathera-Essay-Work
+              writing-guidance-tools directory (no upstream repo)
+    source    skill source `writing-guidance-tools`,
+              snapshot 9c8bedfece4a60996c0033bc19f8d42cba9af012d363cf826d5be191aac8db27
+```
+
+Upstream updates do not flow automatically: refreshing a vendored capsule is a
+deliberate act — re-sync the skill source, re-copy the snapshot, and record the
+new revision here. `scripts/verify-native-skills.py` pins the vendored ids
+beside the AIKit-authored ones, so removing one while the profile still
+declares it fails CI.
+
 ## Project understanding and account craft
 
 The project-author SkillSet includes a small compositional authoring family:

@@ -303,5 +303,17 @@ fn system_emits_the_wave5_owner_disclosure_descriptor() {
     // Presence-only: the reading must never carry a secret value or marker.
     let raw = value.to_string();
     assert!(!raw.contains("SecretValue"));
-    assert!(!raw.contains("sk-"));
+    // `sk-` as an API-key marker starts a token ("sk-ant-…"); ordinary prose
+    // that ships in the first-party registry's catalogued descriptions —
+    // "task-appropriate", "task-authorised" — carries the same letters inside
+    // a word, so the marker is matched at a token boundary, not as a substring.
+    let starts_a_token = raw.match_indices("sk-").filter(|(index, _)| {
+        let index = *index;
+        index == 0 || !raw.as_bytes()[index - 1].is_ascii_alphabetic()
+    });
+    assert_eq!(
+        starts_a_token.count(),
+        0,
+        "the descriptor must never carry an API-key-shaped marker: {raw}"
+    );
 }
