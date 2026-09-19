@@ -24,24 +24,24 @@ use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::Kind;
 use aikit_core::harness_admission::{
-    unsupported_harness_gap, HarnessAdmissionAdapter, HarnessAdmissionDescriptor,
-    HarnessEditionKind,
+    HarnessAdmissionAdapter, HarnessAdmissionDescriptor, HarnessEditionKind,
+    unsupported_harness_gap,
 };
 use aikit_core::procedure::{Inverse, Plan, Procedure, ProcedureKind, WorldEdit};
 use aikit_core::projection::{ProjectionItem, ResolvedContext, TargetAdapter};
 use aikit_core::{AikitError, Result, TargetId};
 
 use aikit_adapters::actuation_harness_capability::{
-    intake_actuation_capability, CapabilityOutcome, HarnessCapability,
+    CapabilityOutcome, HarnessCapability, intake_actuation_capability,
 };
 use aikit_adapters::actuation_harness_detection::{
-    intake_actuation_detection, DetectionEntry, DetectionOutcome, DetectionState,
+    DetectionEntry, DetectionOutcome, DetectionState, intake_actuation_detection,
 };
 use aikit_adapters::clients::{
-    antigravity::AntigravityAdapter, broker::BrokerAdapter, claude::ClaudeAdapter,
+    ClientAdapter, antigravity::AntigravityAdapter, broker::BrokerAdapter, claude::ClaudeAdapter,
     codex::CodexAdapter, gemini::GeminiAdapter, grokbot::GrokbotAdapter, hermes::HermesAdapter,
     kimi::KimiAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter, pi::PiAdapter,
-    zcode::ZcodeAdapter, ClientAdapter,
+    zcode::ZcodeAdapter,
 };
 use aikit_adapters::runner::SystemRunner;
 
@@ -694,9 +694,9 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
                 return Err(AikitError::new(
                     "client.unexpected_install_item",
                     format!(
-                    "the {client} adapter asked for an install item AIKit cannot stage: {other:?}"
-                ),
-                ))
+                        "the {client} adapter asked for an install item AIKit cannot stage: {other:?}"
+                    ),
+                ));
             }
         }
     }
@@ -1168,8 +1168,8 @@ fn plan_carrier_install(
     // reviewed.
     let carrier_id = aikit_adapters::CARRIER_CAPSULE_ID;
     let carrier_capsule = {
-        use aikit_core::catalog::Catalog;
         use aikit_core::CapsuleId;
+        use aikit_core::catalog::Catalog;
         let snapshot = service.snapshot();
         CapsuleId::parse(carrier_id)
             .ok()
@@ -1671,9 +1671,11 @@ mod tests {
             reason: "no bin".to_string(),
         };
         let members = roster_members(&outcome);
-        assert!(members
-            .iter()
-            .all(|m| matches!(m, RosterMember::Unrecorded { .. } | RosterMember::Broker)));
+        assert!(
+            members
+                .iter()
+                .all(|m| matches!(m, RosterMember::Unrecorded { .. } | RosterMember::Broker))
+        );
         assert_eq!(
             members
                 .iter()
