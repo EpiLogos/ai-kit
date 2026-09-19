@@ -257,6 +257,18 @@ pub struct ModelKeyDelivery {
     pub env_var: String,
 }
 
+/// The argv flags a provider-plural harness reads per invocation, observed on
+/// its own command surface. A provider-plural dispatch alone says that
+/// selection happens per invocation, not *how* — without the observed flags a
+/// launcher would have to invent a selector, which posture truth forbids. The
+/// names are the harness's own spellings, carried verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ModelArgvSelectors {
+    pub provider: String,
+    pub model: String,
+}
+
 /// One declared own-login fact: the provider this harness can also serve
 /// through its own login store, with the census note. An own-login fact is
 /// what makes a missing binding survivable — where it is absent, an unbound
@@ -302,6 +314,12 @@ pub struct ModelsLayer {
     /// (`harness_compatible` / `harness_capabilities`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compatibility_note: Option<String>,
+    /// The observed argv flags a provider-plural harness reads per invocation.
+    /// Only a provider-plural dispatch may declare them — a natively bound
+    /// harness selects through its declared `selector`, and a `none` dispatch
+    /// selects nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv_selectors: Option<ModelArgvSelectors>,
     /// Declared key delivery: the env var each served provider's launch
     /// reads, and the own-login facts. Absent means the census recorded no
     /// key-delivery fact for this harness at all.
@@ -479,9 +497,54 @@ impl HarnessProfile {
             if let Some(key_delivery) = &models.key_delivery {
                 validate_key_delivery(key_delivery)?;
             }
+            validate_argv_selectors(&models.dispatch, models.argv_selectors.as_ref())?;
         }
         Ok(())
     }
+}
+
+/// Posture truth for the argv-selector declaration: only a provider-plural
+/// dispatch may carry observed per-invocation flags, and the declared names
+/// must look like the flags the harness actually reads (a leading dash and no
+/// whitespace). Anything else would let a launcher pass a model through a
+/// surface the harness never had.
+fn validate_argv_selectors(
+    dispatch: &ModelDispatchPosture,
+    selectors: Option<&ModelArgvSelectors>,
+) -> Result<(), HarnessProfileError> {
+    let Some(selectors) = selectors else {
+        return Ok(());
+    };
+    if !matches!(dispatch, ModelDispatchPosture::ProviderPlural) {
+        return Err(HarnessProfileError::new(
+            "harness_profile.argv_selectors_outside_provider_plural",
+            "the models layer declares argv selectors, but its dispatch posture is not \
+             provider-plural; a harness selects through its declared dispatch surface — \
+             remove `argv-selectors` or change the dispatch posture",
+        )
+        .with("field", "argv-selectors"));
+    }
+    for (field, name) in [
+        ("provider", &selectors.provider),
+        ("model", &selectors.model),
+    ] {
+        if name.trim().is_empty()
+            || name.len() < 2
+            || !name.starts_with('-')
+            || name.split_whitespace().count() != 1
+        {
+            return Err(HarnessProfileError::new(
+                "harness_profile.invalid_argv_selector",
+                format!(
+                    "the declared argv selector for {field} is {name:?}, which is not a single \
+                     command-line flag; record the exact flag the harness's own command surface \
+                     reads (for example \"--model\")"
+                ),
+            )
+            .with("field", format!("argv-selectors.{field}")));
+        }
+    }
+    Ok(())
 }
 
 /// Posture truth for the key-delivery declarations. A declared env-var
@@ -842,6 +905,7 @@ mcp-servers = false
             },
             roster_note: None,
             compatibility_note: None,
+            argv_selectors: None,
             key_delivery: Some(ModelKeyDeliveryLayer {
                 env_var: vec![ModelKeyDelivery {
                     provider_ref: "provider:anthropic".to_string(),
@@ -962,5 +1026,82 @@ mcp-servers = false
         profile
             .validate()
             .expect("a note-only delivery is a fact, not an omission");
+    }
+
+    fn provider_plural_profile() -> HarnessProfile {
+        let mut profile = openclaw_profile();
+        profile.models = Some(ModelsLayer {
+            posture: LayerPosture::Observed,
+            dispatch: ModelDispatchPosture::ProviderPlural,
+            roster_note: None,
+            compatibility_note: None,
+            argv_selectors: Some(ModelArgvSelectors {
+                provider: "--provider".to_string(),
+                model: "--model".to_string(),
+            }),
+            key_delivery: None,
+        });
+        profile
+    }
+
+    #[test]
+    fn argv_selectors_round_trip_and_belong_to_provider_plural_dispatch() {
+        let profile = provider_plural_profile();
+        profile
+            .validate()
+            .expect("provider-plural dispatch may declare observed argv flags");
+        let toml_text = toml::to_string_pretty(&profile).expect("serialises");
+        assert!(
+            toml_text.contains("argv-selectors"),
+            "the declaration must round-trip under its kebab name: {toml_text}"
+        );
+        let reparsed: HarnessProfile = toml::from_str(&toml_text).expect("reparses");
+        assert_eq!(reparsed, profile);
+    }
+
+    #[test]
+    fn argv_selectors_outside_provider_plural_dispatch_are_refused() {
+        let mut profile = claude_shaped_profile();
+        profile.models.as_mut().unwrap().argv_selectors = Some(ModelArgvSelectors {
+            provider: "--provider".to_string(),
+            model: "--model".to_string(),
+        });
+        let error = profile.validate().unwrap_err();
+        assert_eq!(
+            error.code, "harness_profile.argv_selectors_outside_provider_plural",
+            "a natively bound harness selects through its declared selector, not argv flags"
+        );
+    }
+
+    #[test]
+    fn an_argv_selector_that_is_not_a_single_flag_is_refused() {
+        for unlawful in [
+            ("provider", "provider"),
+            ("model", "--model gpt"),
+            ("model", "model"),
+            ("provider", "-"),
+        ] {
+            let mut profile = provider_plural_profile();
+            let selectors = profile
+                .models
+                .as_mut()
+                .unwrap()
+                .argv_selectors
+                .as_mut()
+                .unwrap();
+            match unlawful.0 {
+                "provider" => selectors.provider = unlawful.1.to_string(),
+                _ => selectors.model = unlawful.1.to_string(),
+            }
+            let error = profile.validate().unwrap_err();
+            assert_eq!(
+                error.code, "harness_profile.invalid_argv_selector",
+                "{unlawful:?} must be refused"
+            );
+            assert!(
+                error.to_string().contains(unlawful.1),
+                "the refusal must name the offending spelling: {error}"
+            );
+        }
     }
 }

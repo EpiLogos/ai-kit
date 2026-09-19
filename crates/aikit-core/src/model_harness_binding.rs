@@ -207,6 +207,7 @@ mod tests {
             },
             roster_note: None,
             compatibility_note: None,
+            argv_selectors: None,
             key_delivery: None,
         }
     }
@@ -217,6 +218,7 @@ mod tests {
             dispatch: ModelDispatchPosture::ProviderPlural,
             roster_note: None,
             compatibility_note: None,
+            argv_selectors: None,
             key_delivery: None,
         }
     }
@@ -229,6 +231,7 @@ mod tests {
             },
             roster_note: None,
             compatibility_note: None,
+            argv_selectors: None,
             key_delivery: None,
         }
     }

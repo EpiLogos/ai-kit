@@ -393,6 +393,19 @@ fn lookup(client: &str) -> Option<&'static RegisteredClient> {
         .find(|entry| entry.name == client || entry.aliases.contains(&client))
 }
 
+/// The Actuation catalog slug for a registered harness, accepting the
+/// CLI-facing name, a registered alias, or the slug itself. This is the one
+/// join between surface spellings and profile slugs; alias families and the
+/// route launcher address harnesses through it instead of keeping a list.
+pub fn catalog_slug_for(name: &str) -> Option<&'static str> {
+    let entry = lookup(name).or_else(|| {
+        REGISTRY
+            .iter()
+            .find(|entry| entry.catalog_slug == Some(name))
+    })?;
+    entry.catalog_slug
+}
+
 fn unknown_client_error(client: &str) -> AikitError {
     let names = REGISTRY
         .iter()

@@ -131,6 +131,10 @@ pub enum Command {
     Bypass(BypassCmd),
     /// Install, launch and inspect agent clients.
     Client(ClientCmd),
+    /// Run a harness against a declared model route (ADR 0005 Stage 2).
+    Harness(HarnessCmd),
+    /// List, check and install user-owned alias families (ADR 0005 Stage 1).
+    Alias(AliasCmd),
     /// Install multiplexer integration and detect the current stack.
     Mux(MuxCmd),
     /// The hook dispatcher entry point (invoked by clients, not usually by hand).
@@ -2258,6 +2262,73 @@ pub struct ClientLaunchArgs {
 pub struct ClientStatusArgs {
     #[arg(value_name = "CLIENT")]
     pub client: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// harness / alias (ADR 0005 — the route portal)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct HarnessCmd {
+    #[command(subcommand)]
+    pub command: HarnessSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HarnessSub {
+    /// Run a harness in the foreground against a declared model route.
+    Run(HarnessRunArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HarnessRunArgs {
+    /// The harness to run: a catalog slug, registry name or registered alias.
+    #[arg(long, value_name = "HARNESS")]
+    pub harness: String,
+    /// The canonical `model:<stable-id>` to route to the harness.
+    #[arg(long, value_name = "MODEL_REF")]
+    pub model: String,
+    /// Pin the route's provider. A pin constrains the route; it never changes
+    /// which Model was selected.
+    #[arg(long, value_name = "PROVIDER_REF")]
+    pub provider: Option<String>,
+    /// Print the composed launch (argv, delivered variable names) without
+    /// spawning or materialising anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Arguments passed through to the harness after `--`.
+    #[arg(
+        value_name = "ARGS",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    pub passthrough: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasCmd {
+    #[command(subcommand)]
+    pub command: AliasSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AliasSub {
+    /// List every alias family with what each entry would run, honestly.
+    List,
+    /// Validate the families against the registry, profiles and catalogue.
+    Check,
+    /// Emit a family's launcher scripts as generated data under the AIKit home.
+    Install(AliasInstallArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AliasInstallArgs {
+    /// The family to install (its manifest file name without .toml).
+    #[arg(value_name = "FAMILY")]
+    pub family: String,
+    /// Write the launchers here instead of the AIKit home default.
+    #[arg(long, value_name = "DIR")]
+    pub out: Option<std::path::PathBuf>,
 }
 
 // ---------------------------------------------------------------------------

@@ -8,21 +8,16 @@
 //! declares, per provider, the env var a harness's native launch reads
 //! ([`profile_environment`]). Both materialise through the identical seam —
 //! native store, explicit env import, or a declared ref through the resolver
-//! suite — and neither ever passes an empty or ambient value.
+//! suite — and neither ever passes an empty or ambient value. The seam itself
+//! lives once, in [`crate::credential_delivery`].
 use super::{error, native_admission, read_binding};
+use crate::credential_delivery::{credential, ModelCredential};
 use crate::encounter_service::{
     EncounterContextAdmission, EncounterProtocol, EncounterProvider, EncounterRequiredSource,
     EncounterService,
 };
-use aikit_adapters::credential_provider::{EnvironmentImportProvider, NativeSecureStoreProvider};
-use aikit_adapters::secret_resolver::SuiteSecretResolver;
-use aikit_core::credential::{
-    resolve_credential, valid_credential_variable, CredentialRef, CredentialResolutionRequest,
-    SecretMaterialisationClass, SecretProvider, SecretRequirement, SecretRequirementRef,
-    SecretValue,
-};
+use aikit_core::credential::{CredentialRef, SecretRequirementRef};
 use aikit_core::resource::{canonical_model_ref, CredentialCondition, ProviderRef};
-use aikit_core::secret_ref::SecretResolver as _;
 use aikit_core::{ResourceRef, Result};
 use aikit_store::{AikitHome, CredentialBindingStore};
 use serde::{Deserialize, Serialize};
@@ -33,16 +28,6 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ModelCredential {
-    pub requirement_ref: SecretRequirementRef,
-    pub credential_ref: CredentialRef,
-    pub target_env: String,
-    /// Explicit import, never inferred from an ambient variable or a .env file.
-    pub from_env: Option<String>,
-}
 
 /// An explicit AIKit-owned dispatch policy supplied through the existing native
 /// provider configuration as a pinned SourceRef. It narrows an existing grant;
@@ -126,111 +111,6 @@ fn read_policy(source: &EncounterRequiredSource) -> Result<ModelPolicy> {
     }
     canonical_model_ref(policy.model_ref.as_str())?;
     Ok(policy)
-}
-
-fn credential(
-    home: &AikitHome,
-    session: &ResourceRef,
-    use_: &ModelCredential,
-    materialise: bool,
-) -> Result<(Value, Option<SecretValue>)> {
-    if !valid_credential_variable(&use_.target_env)
-        || use_
-            .from_env
-            .as_ref()
-            .is_some_and(|v| !valid_credential_variable(v))
-    {
-        return Err(error("Model credentials need explicit non-control credential variable names; environment control injection is refused"));
-    }
-    let stored = CredentialBindingStore::new(home).load(&use_.credential_ref)?;
-    if let Some(binding) = &stored {
-        if binding.revoked
-            || binding
-                .expires_at
-                .as_deref()
-                .map(|s| s.parse::<jiff::Timestamp>().map_err(error))
-                .transpose()?
-                .is_some_and(|t| t <= jiff::Timestamp::now())
-        {
-            return Err(error(
-                "Selected credential binding is revoked or expired; no environment bypass",
-            ));
-        }
-    }
-    // A declared reference materialises through the resolver suite straight
-    // from the external store the operator named (1Password, varlock, pass,
-    // keychain). The suite's env-import gate is closed by construction, so
-    // env:// can never ride this path; the ref itself was refused at the
-    // setup seam. When only planning (materialise == false) the vault is
-    // never touched: the delivery record names the route without resolving.
-    if let Some(secret_ref) = stored
-        .as_ref()
-        .and_then(|binding| binding.declared_secret_ref.clone())
-    {
-        let secret = if materialise {
-            Some(SuiteSecretResolver::default().resolve(&secret_ref)?)
-        } else {
-            None
-        };
-        return Ok((
-            json!({
-                "binding": stored,
-                "delivery": "declared-secret-ref",
-                "scheme": secret_ref.scheme(),
-                "secret_persisted": false,
-                "resolution": Value::Null,
-            }),
-            secret,
-        ));
-    }
-    let native = NativeSecureStoreProvider::new();
-    let environment = use_
-        .from_env
-        .as_ref()
-        .map(|name| {
-            EnvironmentImportProvider::from_process(use_.credential_ref.clone(), name, None)
-        })
-        .transpose()?;
-    let mut descriptors = vec![native.descriptor(&use_.credential_ref)];
-    if let Some(env) = &environment {
-        descriptors.push(env.descriptor(&use_.credential_ref));
-    }
-    let resolution = resolve_credential(CredentialResolutionRequest {
-        requirement: SecretRequirement {
-            requirement_ref: use_.requirement_ref.clone(),
-            credential_ref: use_.credential_ref.clone(),
-            consumer_ref: session.to_string(),
-            purpose: "Scoped model dispatch into the selected native resident".into(),
-            permitted_materialisation: [SecretMaterialisationClass::ProcessEnv].into(),
-        },
-        providers: descriptors,
-        headless: true,
-        allow_from_env: use_.from_env.is_some(),
-    })?;
-    let provider = resolution.selected_provider_ref.as_ref().ok_or_else(|| {
-        error("No eligible current credential provider; an inventory reference is not key material")
-    })?;
-    let secret = if materialise {
-        let source: &dyn SecretProvider =
-            if native.descriptor(&use_.credential_ref).provider_ref == *provider {
-                &native
-            } else {
-                environment
-                .as_ref()
-                .filter(|e| e.descriptor(&use_.credential_ref).provider_ref == *provider)
-                .ok_or_else(|| {
-                    error("Selected credential provider is not materialisable by this native path")
-                })?
-            };
-        Some(source.materialise(&use_.credential_ref, SecretMaterialisationClass::ProcessEnv)?
-            .ok_or_else(|| error("Selected credential provider did not return material; refusing provider execution"))?)
-    } else {
-        None
-    };
-    Ok((
-        json!({"resolution":resolution,"binding":stored,"delivery":"process-env", "secret_persisted":false}),
-        secret,
-    ))
 }
 
 pub(crate) fn prepare(
@@ -635,6 +515,8 @@ impl EncounterService {
 mod tests {
     use super::*;
     use aikit_adapters::credential_provider::EnvironmentImportProvider;
+    // The test seeds binding state through the provider trait.
+    use aikit_core::credential::SecretProvider as _;
 
     fn provider_with_program(program: &str) -> EncounterProvider {
         EncounterProvider {
