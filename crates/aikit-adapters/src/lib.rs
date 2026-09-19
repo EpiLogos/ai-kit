@@ -40,6 +40,7 @@ pub mod home_agent_profile;
 pub mod hyprland;
 pub mod interactive_connection;
 pub mod local_source_discovery;
+pub mod local_speech;
 pub mod model_realisation;
 pub mod mux;
 pub mod native_git;
@@ -190,6 +191,19 @@ pub use working_environment_control::{
     AgentSessionSurfaceBinding, AgentSessionWorkingEnvironmentProvider,
     WORKING_ENVIRONMENT_CONTROL_VERSION, WorkingEnvironmentControlClient,
 };
+
+/// Every adapter instance's declared model surfaces: the inventory the
+/// catalogue listing joins against. Each adapter module owns its own
+/// `declared_surfaces()` (facts declared from its frozen fixtures, never
+/// observed availability); this aggregate is the one seam a new adapter
+/// instance joins by registering its inventory here. A declared surface no
+/// catalogue entry claims appears nowhere — the catalogue alone mints
+/// identity.
+pub fn declared_model_surfaces() -> Vec<aikit_core::model_modality::ModelModalityContract> {
+    let mut surfaces = openai_realtime::declared_surfaces();
+    surfaces.extend(local_speech::declared_surfaces());
+    surfaces
+}
 
 /// Pi native RPC connection; no ACP or permission parity is implied.
 pub mod pi_rpc_connection;
