@@ -1,6 +1,6 @@
 ---
 name: aikit-knowledge-navigation
-description: Navigate project/context knowledge through AIKit's source pool and knowledge operations while preserving source ownership and revisions.
+description: The first route for any question about what this project knows, decided, or maintains. Proactively run the native knowledge faculty — aikit knowledge search, resolve, open, read, route, explain, history, and aikit wiki query — before reaching for raw find/grep/Read; raw file search is not a substitute for recorded-knowledge questions. Fall back to raw search only for code-local lookups, or after the knowledge faculty has returned nothing.
 ---
 
 # Context and Knowledge Navigation

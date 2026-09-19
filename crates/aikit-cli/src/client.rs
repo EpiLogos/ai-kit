@@ -131,8 +131,13 @@ enum SemanticBasis {
     None,
 }
 
-/// How AIKit reaches a harness it carries detail for.
+/// How AIKit reaches a harness it carries detail for. Every variant carries
+/// function pointers only, so a reach copies out of the static overlay table.
+#[derive(Clone, Copy)]
 enum Reach {
+    /// AIKit's own client: the config home is AIKit's, and no Actuation
+    /// descriptor is needed or consulted.
+    SelfOwned { build: AdapterBuild },
     /// A dispatch client: launch and install ride the descriptor's seam when
     /// one resolved, and the adapter's default home is the read-model fallback
     /// when it did not.
@@ -145,10 +150,30 @@ enum Reach {
     },
 }
 
+/// One harness adapter builder: the client dirs in, a live adapter plus its
+/// storage path out.
+type AdapterBuild = fn(&ClientDirs) -> Result<(Box<dyn ClientAdapter>, PathBuf)>;
+
 /// A dispatch client's adapter builder: the client dirs and the resolved
 /// capability in, a live adapter plus its storage path out.
 type CapabilityAdapterBuild =
     fn(&ClientDirs, Option<HarnessCapability>) -> Result<(Box<dyn ClientAdapter>, PathBuf)>;
+
+/// The broker's reach — the one SelfOwned resident. AIKit's own client needs
+/// no descriptor and no admission: the config home is AIKit's (`~/.aikit`),
+/// and the build is the real broker adapter, not a stub. The roster law is
+/// untouched: the broker is not an overlay (it has no catalog slug), it is
+/// the synthetic row the derived roster appends.
+fn broker_reach() -> Reach {
+    Reach::SelfOwned {
+        build: |dirs| {
+            Ok((
+                Box::new(BrokerAdapter::new()) as Box<dyn ClientAdapter>,
+                dirs.home.join(".aikit"),
+            ))
+        },
+    }
+}
 
 /// AIKit's detail for one catalog slug: the per-client overlay. The overlay is
 /// keyed by `catalog_slug` and carries everything detection cannot say — the
@@ -562,33 +587,68 @@ fn adapter_for(
     client: &str,
 ) -> Result<(Box<dyn ClientAdapter>, Option<HarnessCapability>, PathBuf)> {
     let dirs = client_dirs(service);
-    if client == BROKER {
-        return Ok((
-            Box::new(BrokerAdapter::new()),
-            None,
-            dirs.home.join(".aikit"),
-        ));
-    }
-    let overlay = client_overlay(client).ok_or_else(|| unknown_client_error(client))?;
-    let capability = match intake_actuation_capability(
-        &SystemRunner::new(),
-        ACTUATION_BIN,
-        overlay.catalog_slug,
-    ) {
-        CapabilityOutcome::Descriptor(capability) => Some(*capability),
-        CapabilityOutcome::Unavailable { .. } => None,
+    let overlay = if client == BROKER {
+        None
+    } else {
+        Some(client_overlay(client).ok_or_else(|| unknown_client_error(client))?)
     };
-    match overlay.reach {
+    // The broker reaches through `SelfOwned`: no descriptor is consulted,
+    // because AIKit owns its own config home. Every overlay harness answers
+    // to Actuation's capability intake first.
+    let (reach, capability) = match overlay {
+        None => (broker_reach(), None),
+        Some(overlay) => {
+            let capability = match intake_actuation_capability(
+                &SystemRunner::new(),
+                ACTUATION_BIN,
+                overlay.catalog_slug,
+            ) {
+                CapabilityOutcome::Descriptor(capability) => Some(*capability),
+                CapabilityOutcome::Unavailable { .. } => None,
+            };
+            (overlay.reach, capability)
+        }
+    };
+    match reach {
+        Reach::SelfOwned { build } => {
+            let (adapter, config_dir) = build(&dirs)?;
+            Ok((adapter, None, config_dir))
+        }
         Reach::Client { build } => {
             let (adapter, config_dir) = build(&dirs, capability.clone())?;
             Ok((adapter, capability, config_dir))
         }
-        Reach::AdapterOnly { .. } => Err(not_dispatchable(overlay)),
+        Reach::AdapterOnly { .. } => Err(not_dispatchable(
+            overlay.expect("only the broker is overlay-less"),
+        )),
     }
 }
 
 /// Plan the install as a Procedure.
 pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
+    // The extension-carrier seam: a harness whose profile declares a managed
+    // hooks layer through the pi-extensions-record grammar has no dispatcher
+    // entries to install — its managed install is the carrier itself,
+    // projected through the settings `extensions` array and gated by capsule
+    // trust. The reach stays AdapterOnly for launch: pi is launched through
+    // its own per-invocation CLI, not through AIKit's projection. The gate is
+    // profile-derived on the overlay's catalog slug, so a harness Actuation
+    // stops declaring loses the seam's row basis with its roster row.
+    let carrier_profile = client_overlay(client)
+        .map(|overlay| overlay.catalog_slug)
+        .and_then(aikit_adapters::profiles::for_slug)
+        .filter(|profile| {
+            profile.hooks.as_ref().is_some_and(|hooks| {
+                hooks.posture == aikit_core::harness_profile::LayerPosture::Managed
+                    && hooks.project.as_ref().is_some_and(|project| {
+                        project.format
+                            == aikit_core::harness_profile::MergeGrammar::PiExtensionsRecord
+                    })
+            })
+        });
+    if let Some(profile) = carrier_profile {
+        return plan_carrier_install(service, client, profile);
+    }
     let (adapter, capability, config_dir) = adapter_for(service, client)?;
     // The law is unchanged: AIKit installs only what Actuation declares the
     // harness to be. The broker is the one exception, because AIKit owns its
@@ -655,6 +715,102 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
         },
         plan,
     )
+}
+
+/// The registered harnesses whose managed hooks seam is **project-relative** —
+/// a seam of the working tree, not of the machine. `aikit apply` keeps these
+/// current, because applying a project is what materialises that tree's
+/// declarations; machine-level seams (`~/.claude/settings.json`,
+/// `~/.zcode/cli/config.json`) stay with the explicit `aikit client install`
+/// procedure. Selection is derived, never a list: a harness qualifies when its
+/// profile declares a managed hooks layer whose project file is neither
+/// home-relative nor absolute.
+pub fn project_scoped_hook_clients() -> Vec<&'static str> {
+    OVERLAYS
+        .iter()
+        .filter_map(|overlay| {
+            // The overlay's catalog slug is the profile join key — the same
+            // key the roster joins detection by.
+            let profile = aikit_adapters::profiles::for_slug(overlay.catalog_slug)?;
+            let hooks = profile.hooks.as_ref()?;
+            if hooks.posture != aikit_core::harness_profile::LayerPosture::Managed {
+                return None;
+            }
+            let file = &hooks.project.as_ref()?.file;
+            if file.starts_with('~') || Path::new(file).is_absolute() {
+                None
+            } else {
+                Some(overlay.name)
+            }
+        })
+        .collect()
+}
+
+/// One project-scoped hook-seam install, as `apply` reports it. `refused`
+/// carries the plain reason nothing was written — a missing descriptor is a
+/// disclosure, never a failed apply.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HookSeamOutcome {
+    pub client: &'static str,
+    /// `installed` (edits applied), `satisfied` (already in place), or
+    /// `refused` (nothing written; `reason` says why).
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub procedure: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub undo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edits: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Plan and run every project-scoped managed hook seam (`aikit apply`'s tail).
+/// Each client installs through the same `plan_install` procedure pipeline the
+/// explicit command uses — descriptor intake, transport-filtered events, the
+/// profile-declared merge grammar with foreign entries preserved and owned
+/// entries swept — so apply's seam write is diffable and reversible exactly
+/// like `aikit client install`. A refusal is an outcome, not an error: apply
+/// must not fail because one harness's descriptor is unreachable.
+pub fn install_project_hook_seams(service: &Service) -> Vec<HookSeamOutcome> {
+    project_scoped_hook_clients()
+        .into_iter()
+        .map(|client| match plan_install(service, client) {
+            Ok(procedure) => {
+                let runner = aikit_store::procedure::ProcedureRunner::new(service.home());
+                match runner.run(&procedure) {
+                    Ok(outcome) => HookSeamOutcome {
+                        client,
+                        state: if outcome.already_satisfied {
+                            "satisfied"
+                        } else {
+                            "installed"
+                        },
+                        procedure: Some(procedure.id.to_string()),
+                        undo: Some(format!("aikit procedure undo {}", procedure.id)),
+                        edits: Some(outcome.applied),
+                        reason: None,
+                    },
+                    Err(error) => HookSeamOutcome {
+                        client,
+                        state: "refused",
+                        procedure: None,
+                        undo: None,
+                        edits: None,
+                        reason: Some(error.message().to_string()),
+                    },
+                }
+            }
+            Err(error) => HookSeamOutcome {
+                client,
+                state: "refused",
+                procedure: None,
+                undo: None,
+                edits: None,
+                reason: Some(error.message().to_string()),
+            },
+        })
+        .collect()
 }
 
 /// The argv that starts a client against this context's projection.
@@ -765,6 +921,10 @@ fn overlaid_row(
     // read-model fallback for adapter-only harnesses; the adapter's default
     // home is the dispatch clients' fallback.
     let (adapter, config_dir): (Box<dyn TargetAdapter>, Option<PathBuf>) = match overlay.reach {
+        Reach::SelfOwned { build } => {
+            let (adapter, config_dir) = build(dirs)?;
+            (adapter as Box<dyn TargetAdapter>, Some(config_dir))
+        }
         Reach::Client { build } => {
             let resolved = match &capability {
                 Some(CapabilityOutcome::Descriptor(capability)) => Some((**capability).clone()),
@@ -811,6 +971,7 @@ fn overlaid_row(
     };
     let (detection_name, detection_reason) = leg_names(&leg, overlay.catalog_slug);
     let dispatch_name = match overlay.reach {
+        Reach::SelfOwned { .. } => "self",
         Reach::Client { .. } => "client",
         Reach::AdapterOnly { .. } => "adapter-only",
     };
@@ -963,6 +1124,247 @@ impl DetectionLeg {
             DetectionLeg::Detected { config_dir } => config_dir.clone(),
             _ => None,
         }
+    }
+}
+
+/// Plan the carrier install for a profile whose managed hooks layer projects
+/// through the settings `extensions` array (pi, today).
+///
+/// The trust gate is not re-implemented here: the resolver only yields the
+/// carrier capsule as active for a trust-recorded revision, so an untrusted
+/// or blocked carrier plans as a sweep — every owned registration entry and
+/// carrier file leaves, and pi loads no AIKit extension at all.
+fn plan_carrier_install(
+    service: &Service,
+    client: &str,
+    profile: &'static aikit_core::harness_profile::HarnessProfile,
+) -> Result<Procedure> {
+    // Actuation still declares what the harness is before AIKit writes its
+    // native configuration — the same law the dispatcher-entry installs keep.
+    // The overlay is the detail source: its catalog slug is what the
+    // capability intake asks for.
+    let overlay = client_overlay(client).ok_or_else(|| unknown_client_error(client))?;
+    let capability = match intake_actuation_capability(
+        &SystemRunner::new(),
+        ACTUATION_BIN,
+        overlay.catalog_slug,
+    ) {
+        CapabilityOutcome::Descriptor(capability) => Some(*capability),
+        CapabilityOutcome::Unavailable { .. } => None,
+    };
+    if capability.is_none() {
+        return Err(AikitError::new(
+            "client.capability_unavailable",
+            format!(
+                "cannot install for {client}: Actuation's capability descriptor is unreachable, \
+                 and AIKit installs only what Actuation declares the harness to be"
+            ),
+        )
+        .with("client", client.to_string()));
+    }
+
+    // The carrier payload comes from the catalogued capsule, not from this
+    // working tree: what gets projected is exactly the revision that was
+    // reviewed.
+    let carrier_id = aikit_adapters::CARRIER_CAPSULE_ID;
+    let carrier_capsule = {
+        use aikit_core::catalog::Catalog;
+        use aikit_core::CapsuleId;
+        let snapshot = service.snapshot();
+        CapsuleId::parse(carrier_id)
+            .ok()
+            .and_then(|id| Catalog::get(snapshot, &id).cloned())
+    };
+    let payload = match &carrier_capsule {
+        Some(capsule) => {
+            let hook = capsule.hook().ok_or_else(|| {
+                AikitError::new(
+                    "client.carrier_not_a_hook",
+                    format!(
+                        "{carrier_id} is not a hook capsule; the carrier projection cannot proceed"
+                    ),
+                )
+            })?;
+            let path = capsule
+                .root
+                .as_ref()
+                .ok_or_else(|| {
+                    AikitError::new(
+                        "client.carrier_unrooted",
+                        format!("{carrier_id} has no payload root on this machine"),
+                    )
+                })?
+                .join(&hook.entry);
+            std::fs::read_to_string(&path).map_err(|error| {
+                AikitError::new(
+                    "client.carrier_unreadable",
+                    format!(
+                        "could not read the carrier payload at {}: {error}",
+                        path.display()
+                    ),
+                )
+                .with("path", path.display().to_string())
+            })?
+        }
+        None => String::new(),
+    };
+    let carrier_active = service
+        .resolved()
+        .active_of_kind(Kind::Hook)
+        .iter()
+        .any(|active| active.id.to_string() == carrier_id);
+    if carrier_active && carrier_capsule.is_none() {
+        return Err(AikitError::new(
+            "client.carrier_unrooted",
+            format!("{carrier_id} is active but has no payload root on this machine"),
+        ));
+    }
+
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let project = profile
+        .hooks
+        .as_ref()
+        .and_then(|hooks| hooks.project.as_ref())
+        .ok_or_else(|| {
+            AikitError::new(
+                "client.carrier_without_seam",
+                format!(
+                    "the {client} profile's hooks layer declares no project seam; the carrier cannot be installed"
+                ),
+            )
+            .with("client", client.to_string())
+        })?;
+    let settings_target = expand_home(&project.file, &home);
+    let projection_absolute = service.context_projection_root().join("projections/pi");
+    let projection = aikit_adapters::ProjectionDir::new(
+        &projection_absolute,
+        declared_home_relative(&projection_absolute, &home),
+    );
+
+    let outcome = aikit_adapters::plan_hooks_projection(
+        carrier_active.then(|| aikit_adapters::HookCarrierSource {
+            payload: payload.clone(),
+        }),
+        profile,
+        &projection,
+        |asked| {
+            let seeded = expand_home(asked, &home);
+            if seeded.is_file() {
+                std::fs::read_to_string(&seeded).map(Some)
+            } else {
+                Ok(None)
+            }
+        },
+        |dir| {
+            Ok(std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok())
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default())
+        },
+    )?;
+
+    let mut plan = Plan::new().with_note(format!(
+        "install AIKit's {client} integration: the extension carrier registered through {}",
+        project.file
+    ));
+    let outcome = match outcome {
+        aikit_adapters::HooksProjectionOutcome::NotProjected { reason } => {
+            return Err(AikitError::new("client.nothing_to_install", reason)
+                .with("client", client.to_string()));
+        }
+        other => other,
+    };
+    let (settings_item, carrier_item, stale_files, activation_note) = match &outcome {
+        aikit_adapters::HooksProjectionOutcome::Projected(plan) => (
+            Some(&plan.settings_item),
+            Some(&plan.carrier_item),
+            plan.stale_carrier_files.as_slice(),
+            "active: pi loads the carrier at the next session (a running TUI can /reload)"
+                .to_string(),
+        ),
+        aikit_adapters::HooksProjectionOutcome::Swept(plan) => (
+            Some(&plan.settings_item),
+            None,
+            plan.stale_carrier_files.as_slice(),
+            "inactive: the carrier is not trust-active, so every owned registration and file was swept"
+                .to_string(),
+        ),
+        aikit_adapters::HooksProjectionOutcome::NotProjected { .. } => unreachable!(),
+    };
+    if let Some(aikit_core::projection::ProjectionItem::Write { contents, .. }) = settings_item {
+        plan = plan.with_edit(WorldEdit::WriteFile {
+            path: settings_target.clone(),
+            contents: contents.clone().into_bytes(),
+            inverse: if settings_target.exists() {
+                Inverse::Restore {
+                    blob: aikit_core::procedure::BlobId::deferred(),
+                }
+            } else {
+                Inverse::Remove
+            },
+        });
+    }
+    if let Some(aikit_core::projection::ProjectionItem::Write { contents, .. }) = carrier_item {
+        plan = plan.with_edit(WorldEdit::WriteFile {
+            path: projection.absolute.join(
+                aikit_adapters::HookCarrierSource {
+                    payload: payload.clone(),
+                }
+                .file_name(),
+            ),
+            contents: contents.clone().into_bytes(),
+            inverse: Inverse::Remove,
+        });
+    }
+    for stale in stale_files {
+        plan = plan.with_edit(WorldEdit::DeleteFile {
+            path: stale.clone(),
+            inverse: Inverse::Restore {
+                blob: aikit_core::procedure::BlobId::deferred(),
+            },
+        });
+    }
+    let _ = activation_note;
+
+    if plan.is_empty() {
+        return Err(AikitError::new(
+            "client.nothing_to_install",
+            format!(
+                "the {client} carrier is inactive and nothing AIKit owns is registered; there is nothing to install or sweep"
+            ),
+            )
+            .with("client", client.to_string()));
+    }
+    aikit_store::procedure::plan_procedure(
+        service.home(),
+        ProcedureKind::ClientInstall {
+            client: aikit_core::TargetId::new(client),
+        },
+        plan,
+    )
+}
+
+/// Expand a leading `~/` against `home`, the spelling profile declarations
+/// and plan write items use.
+fn expand_home(path: &str, home: &Path) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None => PathBuf::from(path),
+    }
+}
+
+/// The home-relative spelling of an absolute path under `home`, for plan
+/// write destinations; an unrelated absolute path passes through untouched.
+fn declared_home_relative(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(rest) => format!("~/{}", rest.to_string_lossy()),
+        Err(_) => path.to_string_lossy().into_owned(),
     }
 }
 
@@ -1188,6 +1590,20 @@ mod tests {
     }
 
     #[test]
+    fn the_project_scoped_hook_seam_surface_is_derived_from_the_profiles() {
+        // Codex's managed hooks seam is the working tree's `.codex/hooks.json`,
+        // so `aikit apply` keeps it current. Claude and zcode name home-level
+        // seams — machine state that stays with the explicit
+        // `aikit client install` — and must never be swept into apply.
+        assert_eq!(
+            project_scoped_hook_clients(),
+            vec!["codex"],
+            "selection is derived from profile facts: managed hooks layers whose \
+             project file is neither home-relative nor absolute"
+        );
+    }
+
+    #[test]
     fn the_roster_is_the_record_plus_unrecorded_overlays_plus_the_broker() {
         // A record naming a generic slug and an overlaid slug: the generic slug
         // renders from the record alone, the overlay joins by catalog slug,
@@ -1286,6 +1702,16 @@ mod tests {
             assert!(
                 !overlay.catalog_slug.trim().is_empty(),
                 "{} must carry a catalog slug: an overlay without one is unrepresentable",
+                overlay.name
+            );
+            // The SelfOwned reach belongs to the broker alone (outside this
+            // surface): an overlay is detail ON a catalog slug, so it cannot
+            // also be the harness that owns its own config home. The broker
+            // carries its real builder through `broker_reach` instead of an
+            // overlay-shaped admission-less stub.
+            assert!(
+                !matches!(overlay.reach, Reach::SelfOwned { .. }),
+                "{} must not claim the self-owned reach; the broker is its one resident",
                 overlay.name
             );
         }

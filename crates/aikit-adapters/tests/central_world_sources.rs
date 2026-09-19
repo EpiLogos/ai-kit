@@ -66,6 +66,7 @@ struct WorldRunner {
     fail_on: BTreeMap<String, ()>,
     unreadable_on: BTreeMap<String, String>,
     coded_absent: BTreeMap<String, ()>,
+    manifest_less: BTreeMap<String, ()>,
     seen: Mutex<Vec<Vec<String>>>,
 }
 
@@ -110,6 +111,24 @@ fn coded_absent_envelope(world_ref: &str) -> String {
     .to_string()
 }
 
+/// Central's real answer (captured live 2026-09-18) for a Work member with
+/// **no ProjectCentral manifest at all**: the io not-found error for the
+/// absent `ProjectCentral/project.json` (ctrl/src/projectcentral.rs
+/// `read_project_manifest`), wrapped by ctrl/src/agent_set_actions.rs, code
+/// `invalid_input`, exit 2. Structural non-existence — there is no project
+/// record, so the declaration is absent, not unreadable.
+fn manifest_less_envelope() -> String {
+    json!({
+        "ok": false,
+        "status": "invalid_input",
+        "error": {
+            "code": "invalid_input",
+            "message": "Project does not expose a valid ProjectCentral source: No such file or directory (os error 2)",
+        }
+    })
+    .to_string()
+}
+
 impl WorldRunner {
     fn with_answer(world_ref: &str, sources: Value) -> Self {
         Self {
@@ -117,6 +136,7 @@ impl WorldRunner {
             fail_on: BTreeMap::new(),
             unreadable_on: BTreeMap::new(),
             coded_absent: BTreeMap::new(),
+            manifest_less: BTreeMap::new(),
             seen: Mutex::new(Vec::new()),
         }
     }
@@ -140,6 +160,13 @@ impl WorldRunner {
         self
     }
 
+    /// Central answers that the member has no ProjectCentral manifest at all —
+    /// structural non-existence, modelled from the live envelope.
+    fn manifest_less_on(mut self, world_ref: &str) -> Self {
+        self.manifest_less.insert(world_ref.to_owned(), ());
+        self
+    }
+
     fn envelope(&self, world_ref: &str, sources: Value) -> String {
         json!({"ok": true, "data": {"world_ref": world_ref, "sources": sources}}).to_string()
     }
@@ -153,20 +180,28 @@ impl CommandRunner for WorldRunner {
             .and_then(|input| serde_json::from_str::<Value>(input).ok())
             .and_then(|input| input["world_ref"].as_str().map(str::to_owned))
             .unwrap_or_default();
-        let stdout = if let Some(message) = self.unreadable_on.get(&world_ref) {
-            unreadable_envelope(message)
+        let (stdout, failure) = if self.manifest_less.contains_key(&world_ref) {
+            (manifest_less_envelope(), true)
+        } else if let Some(message) = self.unreadable_on.get(&world_ref) {
+            (unreadable_envelope(message), true)
         } else if self.coded_absent.contains_key(&world_ref) {
-            coded_absent_envelope(&world_ref)
+            (coded_absent_envelope(&world_ref), true)
         } else if self.fail_on.contains_key(&world_ref) {
-            absent_envelope(&world_ref)
+            (absent_envelope(&world_ref), true)
         } else {
-            self.answers
-                .get(&world_ref)
-                .map(|sources| self.envelope(&world_ref, sources.clone()))
-                .unwrap_or_else(|| absent_envelope(&world_ref))
+            match self.answers.get(&world_ref) {
+                Some(sources) => (self.envelope(&world_ref, sources.clone()), false),
+                None => (absent_envelope(&world_ref), true),
+            }
         };
+        // Central's real contract (ctrl/src/cli.rs `exit_code`): a structured
+        // envelope rides stdout even on failure, and `invalid_input` exits 2.
+        // The mock models that contract; an adapter that demanded exit 0
+        // before reading the envelope would misread every absence below as an
+        // unavailability and withhold the inherited root lineage.
+        let status = if failure { 2 } else { 0 };
         Ok(Output {
-            status: 0,
+            status,
             stdout,
             stderr: String::new(),
         })
@@ -444,6 +479,194 @@ fn absence_is_read_from_the_error_code_when_central_names_it() {
     .expect("the code alone establishes absence");
     assert!(world.inherited_root_lineage);
     assert_eq!(world.sources[0].effective_revision, "1");
+}
+
+/// Regression (2026-09-18, owner-acknowledged): a Work member with NO
+/// ProjectCentral manifest (e.g. `~/Central/Work/epi`) is not an unreadable
+/// declaration — it is structural non-existence. Central answers the shared
+/// `invalid_input` code with "Project does not expose a valid ProjectCentral
+/// source: No such file or directory (os error 2)" and exit 2. Classified as
+/// an unavailability, the binding came back None and the inherited root
+/// graph was withheld from exactly the members that have no project record.
+/// By the one-world convention those members inherit the root lineage, and
+/// the inheritance is disclosed.
+#[test]
+fn a_member_with_no_projectcentral_manifest_inherits_the_root_lineage() {
+    let runner = WorldRunner::with_answer(
+        "control:root",
+        json!([{"ref": "central:source:control:root:Control/user/identity",
+                "state": "available", "effective_revision": "1",
+                "propagation_path": ["control:root"]}]),
+    )
+    .manifest_less_on("project:epi");
+    let mut absences = Vec::new();
+    let world = read_project_binding(
+        &runner,
+        Path::new("ctrl"),
+        &PathBuf::from("/tmp/central"),
+        "epi",
+        &mut absences,
+    )
+    .expect("a manifest-less member has no project record; the root lineage applies");
+    assert!(world.inherited_root_lineage);
+    assert_eq!(world.world_ref, "control:root");
+    assert_eq!(world.sources[0].effective_revision, "1");
+    assert!(
+        absences.iter().any(|a| a.contains("root lineage applies")),
+        "{absences:?}"
+    );
+}
+
+/// The distinction that keeps the widening honest: a manifest that EXISTS but
+/// cannot be parsed answers with the same "Project does not expose a valid
+/// ProjectCentral source" prefix and a different cause (the manifest path and
+/// the parse error). That is an unreadable declaration, not structural
+/// non-existence: no binding, no root lineage, and the root is never even
+/// consulted.
+#[test]
+fn a_malformed_manifest_is_unreadable_not_absent() {
+    let runner = WorldRunner::with_answer(
+        "control:root",
+        json!([{"ref": "central:source:control:root:Control/user/identity",
+                "state": "available", "effective_revision": "1",
+                "propagation_path": ["control:root"]}]),
+    )
+    .unreadable_on(
+        "project:Malformed",
+        "Project does not expose a valid ProjectCentral source: /central/Work/Malformed/ProjectCentral/project.json is not a valid ProjectCentral manifest: expected ident at line 1 column 2",
+    );
+    let mut absences = Vec::new();
+    let world = read_project_binding(
+        &runner,
+        Path::new("ctrl"),
+        &PathBuf::from("/tmp/central"),
+        "Malformed",
+        &mut absences,
+    );
+    assert!(
+        world.is_none(),
+        "an unreadable manifest must still withhold, not inherit"
+    );
+    assert!(
+        absences
+            .iter()
+            .any(|a| a.contains("could not be read or validated")),
+        "{absences:?}"
+    );
+    assert!(
+        !absences.iter().any(|a| a.contains("root lineage applies")),
+        "the root lineage is not assumed: {absences:?}"
+    );
+    assert_eq!(
+        runner.seen.lock().unwrap().len(),
+        1,
+        "only the project declaration was read"
+    );
+}
+
+/// Same prefix, different cause: an io failure other than not-found
+/// (permission denied) also means the manifest exists but cannot be read —
+/// an unavailable declaration, never absence.
+#[test]
+fn an_unreadable_manifest_io_error_is_unavailable_not_absent() {
+    let runner = WorldRunner::with_answer(
+        "control:root",
+        json!([{"ref": "central:source:control:root:Control/user/identity",
+                "state": "available", "effective_revision": "1",
+                "propagation_path": ["control:root"]}]),
+    )
+    .unreadable_on(
+        "project:Locked",
+        "Project does not expose a valid ProjectCentral source: Permission denied (os error 13)",
+    );
+    let mut absences = Vec::new();
+    let world = read_project_binding(
+        &runner,
+        Path::new("ctrl"),
+        &PathBuf::from("/tmp/central"),
+        "Locked",
+        &mut absences,
+    );
+    assert!(world.is_none(), "unreadable withholds");
+    assert!(
+        absences
+            .iter()
+            .any(|a| a.contains("could not be read or validated")),
+        "{absences:?}"
+    );
+    assert!(
+        !absences.iter().any(|a| a.contains("root lineage applies")),
+        "the root lineage is not assumed: {absences:?}"
+    );
+}
+
+/// Regression (2026-09-17 knowledge-fitness round): the real ctrl answers
+/// "no authored record for this world" with a structured `ok:false` envelope
+/// AND exit status 2 (`invalid_input`, ctrl/src/cli.rs `exit_code`). The
+/// adapter used to `require` exit 0 before reading the envelope, so every
+/// real absence was misread as `world_sources_unavailable` — the binding came
+/// back None, the inherited Central graph was withheld, and the whole
+/// SemanticWiki faculty went dark for any project that declares no world.
+/// The envelope, not the exit status, is the answer.
+#[test]
+fn a_nonzero_exit_never_hides_a_structured_absence() {
+    let runner = WorldRunner::with_answer(
+        "control:root",
+        json!([{"ref": "central:source:control:root:Control/user/identity",
+                "state": "available", "effective_revision": "1",
+                "propagation_path": ["control:root"]}]),
+    )
+    .coded_absent_on("project:Zeta");
+    let mut absences = Vec::new();
+    let world = read_project_binding(
+        &runner,
+        Path::new("ctrl"),
+        &PathBuf::from("/tmp/central"),
+        "Zeta",
+        &mut absences,
+    )
+    .expect("a structured absence with a non-zero exit is still an absence");
+    assert!(
+        world.inherited_root_lineage,
+        "the convention discloses the inherited lineage"
+    );
+    assert_eq!(world.sources[0].effective_revision, "1");
+    assert!(
+        absences.iter().any(|a| a.contains("root lineage applies")),
+        "{absences:?}"
+    );
+}
+
+/// The other half of the contract: a non-zero exit with NO readable envelope
+/// is a genuine unavailability — it must not inherit the root lineage and
+/// must not be mistaken for absence.
+#[test]
+fn a_nonzero_exit_without_an_envelope_is_unavailable_not_absent() {
+    struct Garbled;
+    impl CommandRunner for Garbled {
+        fn run(&self, _argv: &[String]) -> aikit_core::Result<Output> {
+            Ok(Output {
+                status: 2,
+                stdout: "panic: not an envelope".into(),
+                stderr: String::new(),
+            })
+        }
+    }
+    let mut absences = Vec::new();
+    let world = read_project_binding(
+        &Garbled,
+        Path::new("ctrl"),
+        &PathBuf::from("/tmp/central"),
+        "Eta",
+        &mut absences,
+    );
+    assert!(world.is_none(), "unavailable degrades to uncontextualised");
+    assert!(
+        absences
+            .iter()
+            .any(|a| a.contains("could not be read or validated")),
+        "no root lineage is assumed: {absences:?}"
+    );
 }
 
 #[test]

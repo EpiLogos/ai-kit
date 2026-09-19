@@ -297,8 +297,8 @@ pub use knowledge_living_relations::{
 pub use knowledge_living_transport::{parse_contemplate_generated, CONTEMPLATE_RETURN_VERSION};
 pub use knowledge_navigation::{
     KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation, KnowledgeProviderStatus,
-    KnowledgeRankingEvidence, KnowledgeSearchHit, KnowledgeSearchResult, SourcePoolBinding,
-    KNOWLEDGE_APPLICATION_VERSION,
+    KnowledgeRankingEvidence, KnowledgeSearchHit, KnowledgeSearchResult, PendingAuthoredTarget,
+    ProjectAuthoredPending, SourcePoolBinding, KNOWLEDGE_APPLICATION_VERSION,
 };
 pub use knowledge_okf::{validate_okf, OkfDocument, OKF_VERSION};
 pub use knowledge_operations::{
@@ -327,9 +327,10 @@ pub use knowledge_wiki::{
     ROOT_WIKI_SPACE_REF,
 };
 pub use knowledge_wiki_index::{
-    SemanticWikiIndex, WikiIndexStatus, WikiLocalWhole, WikiMutationProposal, WikiNeighbour,
-    WikiObjectEnvelope, WikiRelationDirection, WikiSearchAddress, WikiSearchHit, WikiSearchHitKind,
-    DEFAULT_WIKI_NEIGHBOUR_LIMIT, DEFAULT_WIKI_SEARCH_LIMIT, SEMANTIC_WIKI_INDEX_VERSION,
+    repair_absence_lines, SemanticWikiIndex, WikiIndexRepair, WikiIndexStatus, WikiLocalWhole,
+    WikiMutationProposal, WikiNeighbour, WikiObjectEnvelope, WikiRelationDirection,
+    WikiSearchAddress, WikiSearchHit, WikiSearchHitKind, DEFAULT_WIKI_NEIGHBOUR_LIMIT,
+    DEFAULT_WIKI_SEARCH_LIMIT, SEMANTIC_WIKI_INDEX_VERSION,
 };
 pub use knowledge_wiki_provider::{
     SemanticWikiProvider, SemanticWikiProviderStatus, WikiExplanation,

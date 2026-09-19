@@ -2,13 +2,36 @@
 //! supported harness, embedded as TOML and parsed+validated once. The
 //! documents carry only what the per-harness censuses evidenced — the
 //! 2026-09-16 census for the first ten documents, the 2026-09-18
-//! harness-adapter sort-out for the additions (each grounded in that
-//! harness's admission census in this package and, where installed, the live
-//! Omarchy machine) — an absent layer says nothing, a `none` model dispatch
-//! carries its reason, and machine-specific paths are home-relative so the
-//! data survives machines. Actuation's catalog stays the detection
-//! authority; these documents are AIKit's handling declarations joined to it
-//! by slug.
+//! harness-adapter sort-out for the additions, and the 2026-09-18 pi hooks
+//! census (each grounded in that harness's admission census in this package
+//! and, where installed, the live Omarchy machine) — an absent layer says
+//! nothing, a `none` model dispatch carries its reason, and machine-specific
+//! paths are home-relative so the data survives machines. Actuation's catalog
+//! stays the detection authority; these documents are AIKit's handling
+//! declarations joined to it by slug.
+//!
+//! ## Pi hooks (2026-09-18 census; carrier commissioned same day)
+//!
+//! Pi 0.84.4 carries hooks as TypeScript extension events, not shell commands
+//! in a settings map: an extension module subscribes with
+//! `pi.on("session_start", ...)` (pi's `packages/coding-agent/docs/extensions.md`),
+//! and extensions are declared through the `extensions` array of
+//! `~/.pi/agent/settings.json` or discovered in `~/.pi/agent/extensions/`
+//! (global) and trust-gated `.pi/extensions/` (project-local). The managed
+//! hook grammars (claude-hook-map, zcode-hook-wrapper) project
+//! `aikit hook dispatch <client> <event>` shell-command entries into native
+//! config; pi has no such seam. The managed seam pi does have is the
+//! `extensions` array, so the pi hooks layer projects through it — one
+//! first-party extension carrier (`hook/aikit/pi-extension-carrier`)
+//! whose handlers spawn the dispatcher per event and forward its verdicts
+//! back into pi. The carrier is content-addressed at projection time, the
+//! single owned entry in the array, swept and replaced by the
+//! `pi-extensions-record` grammar; individual hook capsules are never
+//! projected into pi — they ride the dispatcher chains the carrier feeds.
+//! The carrier is a `hook` capsule, so a new revision is Unseen until
+//! `aikit trust record` reviews it: an untrusted revision is never
+//! projected and a swept one is removed whole — pi never loads a revision
+//! the owner has not reviewed.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -98,7 +121,7 @@ observe = ["~/.codex/AGENTS.md"]
 [hooks]
 posture = "managed"
 observe = [{ events = ["session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "stop", "session-end", "notification", "pre-compact"], transports = ["hooks-json-file"] }]
-project = { file = "~/.codex/hooks.json", format = "claude-hook-map", ownership-identity = "aikit hook dispatch codex" }
+project = { file = ".codex/hooks.json", format = "claude-hook-map", ownership-identity = "aikit hook dispatch codex" }
 
 [tools]
 posture = "observed"
@@ -149,8 +172,9 @@ edition = "cli"
 config-dir = "~/.zcode/cli"
 
 [skills]
-posture = "brokered"
-shared-tree = "No native skill tree; capability delivery is brokered with a fallback, never projected."
+posture = "observed"
+observe = { paths = ["~/.agents/skills", "~/.zcode/cli/plugins"] }
+shared-tree = "zcode loads skills natively from the codex-managed ~/.agents/skills shared tree and from plugin-shipped skills; codex's managed projection is zcode's delivery, and AIKit projects no separate zcode skill seam."
 
 [hooks]
 posture = "managed"
@@ -189,6 +213,16 @@ scopes = ["machine"]
 "#,
     ),
     (
+        // Hooks census 2026-09-18 (pi 0.84.4, docs/extensions.md): hooks are
+        // TypeScript extension events — `session_start`, `input` (user prompt,
+        // can transform), `tool_call` (pre-tool, can block), `tool_result`,
+        // `session_shutdown`, `session_before_compact` — declared via the
+        // settings `extensions` array or discovery dirs. No shell-command
+        // seam exists for the managed hook grammars, so the carrier vehicle
+        // (hook/aikit/pi-extension-carrier) projects through the `extensions`
+        // array: one content-addressed, trust-gated extension whose handlers
+        // spawn `aikit hook dispatch pi <Event>`. `stop` and `notification`
+        // are omitted (no pi equivalent).
         "pi",
         r#"
 schema = "aikit.harness-profile/v1"
@@ -208,6 +242,12 @@ shared-tree = "Reloads skills on /reload; isolated tree required for isolation."
 [guidance]
 posture = "observed"
 observe = ["~/.pi/agent/AGENTS.md"]
+
+[hooks]
+posture = "managed"
+observe = [{ events = ["session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "session-end", "pre-compact"], transports = ["extension-events"] }]
+project = { file = "~/.pi/agent/settings.json", format = "pi-extensions-record", ownership-identity = "aikit-hook-carrier" }
+activation = "next-session-only"
 
 [tools]
 posture = "brokered"
@@ -797,6 +837,62 @@ mod tests {
     }
 
     #[test]
+    fn zcode_skills_declare_the_native_tree_they_actually_load() {
+        // The 2026-09-18 machine reading: zcode loads skills natively from the
+        // codex-managed `~/.agents/skills` shared tree and plugin-shipped
+        // skills (the admission's NativeSkills evidence), so the honest
+        // posture is `observed` — AIKit writes no zcode skill seam — and the
+        // delivery relation is disclosed rather than denied.
+        let zcode = for_slug("zcode").unwrap();
+        let skills = zcode.skills.as_ref().expect("zcode declares skills");
+        assert_eq!(
+            skills.posture,
+            aikit_core::harness_profile::LayerPosture::Observed,
+            "zcode demonstrably loads a native skill tree, so neither brokered \
+             (\"no native skill tree\") nor managed (AIKit writes nothing here) is true"
+        );
+        let observe = skills
+            .observe
+            .as_ref()
+            .expect("the observed trees are named");
+        assert!(observe.paths.iter().any(|path| path == "~/.agents/skills"));
+        let shared_tree = skills
+            .shared_tree
+            .as_deref()
+            .expect("the delivery relation is disclosed");
+        assert!(
+            shared_tree.contains("codex-managed ~/.agents/skills"),
+            "the disclosure must name codex's projection as zcode's delivery: {shared_tree}"
+        );
+        assert!(
+            !shared_tree.contains("never projected"),
+            "status may not say \"never projected\" while sessions load the tree: \
+             {shared_tree}"
+        );
+    }
+
+    #[test]
+    fn codex_hooks_name_the_project_relative_seam_the_descriptor_declares() {
+        // Codex reads per-project `.codex/hooks.json` (its own config carries
+        // `[hooks.state."<project>/.codex/hooks.json:..."]` entries), so a
+        // home-level seam in the profile would declare a file the harness
+        // never reads. The relative path is what makes the seam belong to the
+        // working tree — and what `aikit apply` keeps current.
+        let codex = for_slug("codex").unwrap();
+        let hooks = codex.hooks.as_ref().expect("codex declares hooks");
+        assert_eq!(
+            hooks.posture,
+            aikit_core::harness_profile::LayerPosture::Managed
+        );
+        let project = hooks.project.as_ref().expect("managed names its seam");
+        assert_eq!(project.file, ".codex/hooks.json");
+        assert!(
+            !project.file.starts_with('~') && !std::path::Path::new(&project.file).is_absolute(),
+            "the codex hook seam is project-relative, never machine-level"
+        );
+    }
+
+    #[test]
     fn pi_sessions_declare_the_refusal_boundary_as_data() {
         let pi = for_slug("pi").unwrap();
         let sessions = pi.sessions.as_ref().unwrap();
@@ -881,6 +977,58 @@ mod tests {
                 .unwrap_or(0);
             assert_eq!(declared, 0, "{slug} declares no trust settings yet");
         }
+    }
+
+    #[test]
+    fn pi_hooks_declare_the_extension_event_census_and_the_carrier_seam() {
+        let pi = for_slug("pi").unwrap();
+        let hooks = pi
+            .hooks
+            .as_ref()
+            .expect("the 2026-09-18 census gives pi a hooks layer");
+        assert_eq!(
+            hooks.posture,
+            aikit_core::harness_profile::LayerPosture::Managed,
+            "the extension carrier is a real seam: pi's settings `extensions` array"
+        );
+        let project = hooks
+            .project
+            .as_ref()
+            .expect("a managed hooks layer names the seam it projects into");
+        assert_eq!(project.file, "~/.pi/agent/settings.json");
+        assert_eq!(
+            project.format,
+            aikit_core::harness_profile::MergeGrammar::PiExtensionsRecord,
+            "the carrier registers through the extensions array, not a hook map"
+        );
+        assert_eq!(
+            project.ownership_identity,
+            crate::hook_sources::HOOKS_PROJECTION_OWNERSHIP,
+            "the sweep identity is the carrier file-name marker"
+        );
+        assert_eq!(
+            hooks.activation,
+            Some(aikit_core::harness_profile::ActivationEffectName::NextSessionOnly),
+            "pi reads extensions at session start; a running TUI can /reload"
+        );
+        let declaration = hooks.observe.first().expect("one event census entry");
+        assert_eq!(
+            declaration.events,
+            vec![
+                "session-start".to_string(),
+                "user-prompt-submit".to_string(),
+                "pre-tool-use".to_string(),
+                "post-tool-use".to_string(),
+                "session-end".to_string(),
+                "pre-compact".to_string(),
+            ],
+            "the six pi events the census proved, in AIKit kind spelling"
+        );
+        assert_eq!(
+            declaration.transports.as_deref(),
+            Some(["extension-events".to_string()].as_slice()),
+            "pi's transport is extension events, not a settings hook map"
+        );
     }
 
     #[test]

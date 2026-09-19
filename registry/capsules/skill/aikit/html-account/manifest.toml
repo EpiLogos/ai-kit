@@ -2,7 +2,7 @@ schema = 1
 id = "skill/aikit/html-account"
 kind = "skill"
 name = "AIKit HTML Account"
-description = "Render a structured authored reading as a clear, research-grounded, self-contained HTML account using the canonical portable account template."
+description = "Create clear, research-grounded, self-contained HTML accounts for explanation, analysis, design intent, review, reference, documentation, Projection presentation, and interactive dissemination. Use the canonical portable account template, adaptive depth, provenance discipline, natural visible headings, and task-appropriate diagrams, data views, mockups, links, and interactions."
 maturity = "stable"
 tags = ["aikit", "html", "account", "authoring", "presentation"]
 

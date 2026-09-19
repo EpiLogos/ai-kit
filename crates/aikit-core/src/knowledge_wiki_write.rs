@@ -267,6 +267,15 @@ impl WikiDocument {
         })
     }
 
+    /// Whether the file already holds `object` with identical content,
+    /// revision aside. Ingest's `--update` consults this so that re-ingesting
+    /// an unchanged corpus advances no revision: a touch without a byte
+    /// change is not a content change.
+    pub fn holds_equivalent(&self, object: &WikiObject) -> bool {
+        self.object(object.ref_id())
+            .is_some_and(|held| with_revision(object.clone(), held.revision()) == *held)
+    }
+
     /// Replace an existing object wholesale, advancing its revision by one.
     /// Canonical identity is the one thing an update may not change.
     pub fn update_object(&mut self, object: WikiObject) -> Result<WikiMutationOutcome> {

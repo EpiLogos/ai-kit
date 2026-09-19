@@ -1,6 +1,6 @@
 ---
 name: aikit-session-space-operation
-description: Operate SessionSpace semantic state through AIKit's shared preview/apply authority while preserving Project, provider, AgentSession and Surface ownership.
+description: Inspect, stage, preview, persist, reconstruct, explain and review SessionSpace semantic state through AIKit's shared application authority.
 ---
 
 # SessionSpace operation

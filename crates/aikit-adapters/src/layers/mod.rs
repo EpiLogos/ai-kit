@@ -16,10 +16,12 @@
 
 mod claude_hook_map;
 mod mcp_servers_record;
+mod pi_extensions_record;
 mod zcode_hook_wrapper;
 
 pub use claude_hook_map::claude_hook_map;
 pub use mcp_servers_record::mcp_servers_record;
+pub use pi_extensions_record::pi_extensions_record;
 pub use zcode_hook_wrapper::zcode_hook_wrapper;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -149,6 +151,13 @@ pub enum MergeArgs {
         managed: BTreeMap<String, serde_json::Value>,
         ownership: String,
     },
+    PiExtensionsRecord {
+        key_path: Vec<String>,
+        /// The projected carrier's absolute path when the carrier is active;
+        /// `None` is a sweep-only merge — every owned entry removed.
+        managed: Option<String>,
+        ownership: String,
+    },
 }
 
 /// The one merge entrypoint: dispatch the grammar a harness profile declares
@@ -180,6 +189,17 @@ pub fn apply_merge(
         ) => {
             let key_path: Vec<&str> = key_path.iter().map(String::as_str).collect();
             mcp_servers_record(existing, &key_path, &managed, &ownership)
+        }
+        (
+            MergeGrammar::PiExtensionsRecord,
+            MergeArgs::PiExtensionsRecord {
+                key_path,
+                managed,
+                ownership,
+            },
+        ) => {
+            let key_path: Vec<&str> = key_path.iter().map(String::as_str).collect();
+            pi_extensions_record(existing, &key_path, managed.as_deref(), &ownership)
         }
         (grammar, _) => Err(LayerMergeError::new(
             "layers.grammar_arguments_mismatch",

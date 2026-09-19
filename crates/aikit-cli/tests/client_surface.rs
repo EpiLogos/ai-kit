@@ -409,12 +409,9 @@ fn install_refuses_for_harnesses_without_a_dispatch_seam() {
         .arg("--json")
         .args(["client", "install", "pi"])
         .current_dir(home.path().join("project"));
-    let output = command.output().unwrap();
-    assert!(!output.status.success(), "pi has no install seam");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("client.not_dispatchable"), "{stdout}");
-
     // The unchanged law: install refuses without a descriptor.
+    // (pi lost its place here when the extension carrier gave it a real
+    // install seam; its supported path is covered by the carrier tests.)
     let mut command = Command::cargo_bin("aikit").unwrap();
     command
         .env("AIKIT_HOME", home.path().join("aikit-home"))

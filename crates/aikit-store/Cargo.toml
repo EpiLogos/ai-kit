@@ -30,4 +30,8 @@ fs4 = { workspace = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
+# The carrier trust-gate proof plans through the adapters' hooks-layer
+# projection against the real first-party registry; tests only.
+aikit-adapters = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }

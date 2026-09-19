@@ -163,7 +163,7 @@ pub fn disclose(
             posture: hooks.posture,
             native: hooks_native_entries(hooks, native),
             composed: Vec::new(),
-            activation: None,
+            activation: hooks.activation,
             drift: Vec::new(),
         });
     }
@@ -542,6 +542,35 @@ mod tests {
     }
 
     #[test]
+    fn the_zcode_skills_layer_discloses_the_native_tree_it_loads_without_drift_or_composition() {
+        // Posture honesty: zcode loads the codex-managed ~/.agents/skills
+        // shared tree natively, so the disclosure renders an observed layer
+        // naming that tree — never a brokered "never projected" claim, and
+        // never composed entries or drift for a layer AIKit does not write.
+        let profile = for_slug("zcode").expect("zcode carries an embedded profile");
+        let disclosure = disclose(profile, &NativeObservation::default(), &[]);
+
+        let skills = disclosure
+            .layers
+            .iter()
+            .find(|layer| layer.layer == "skills")
+            .expect("zcode declares a skills layer");
+        assert_eq!(skills.posture, LayerPosture::Observed);
+        assert!(
+            skills
+                .native
+                .iter()
+                .any(|entry| entry.name == "~/.agents/skills"),
+            "the shared tree zcode demonstrably loads is disclosed as native: {:?}",
+            skills.native
+        );
+        assert!(
+            skills.composed.is_empty() && skills.drift.is_empty(),
+            "AIKit writes no zcode skill seam, so nothing composes or drifts there"
+        );
+    }
+
+    #[test]
     fn detection_only_layers_disclose_their_observed_paths_and_the_hook_seam_fact_as_native_entries(
     ) {
         let profile = for_slug("claude-code").expect("claude-code carries an embedded profile");
@@ -596,5 +625,67 @@ mod tests {
                 layer.layer
             );
         }
+    }
+
+    #[test]
+    fn pi_hooks_disclose_the_extension_event_census_as_managed_without_drift() {
+        let profile = for_slug("pi").expect("pi carries an embedded profile");
+        let disclosure = disclose(profile, &NativeObservation::default(), &[]);
+
+        let hooks = disclosure
+            .layers
+            .iter()
+            .find(|layer| layer.layer == "hooks")
+            .expect("the 2026-09-18 census gives pi a declared hooks layer");
+        assert_eq!(
+            hooks.posture,
+            LayerPosture::Managed,
+            "the extension carrier makes the pi hooks layer a managed projection"
+        );
+        assert_eq!(
+            hooks.native,
+            vec![
+                NativeEntry {
+                    name: "session-start".to_string(),
+                    detail: None
+                },
+                NativeEntry {
+                    name: "user-prompt-submit".to_string(),
+                    detail: None
+                },
+                NativeEntry {
+                    name: "pre-tool-use".to_string(),
+                    detail: None
+                },
+                NativeEntry {
+                    name: "post-tool-use".to_string(),
+                    detail: None
+                },
+                NativeEntry {
+                    name: "session-end".to_string(),
+                    detail: None
+                },
+                NativeEntry {
+                    name: "pre-compact".to_string(),
+                    detail: None
+                },
+            ],
+            "the census events render as the layer's native entries"
+        );
+        assert!(
+            hooks.composed.is_empty(),
+            "the hooks layer's composed concept is the carrier plan, not tool sources: {:?}",
+            hooks.composed
+        );
+        assert!(
+            hooks.drift.is_empty(),
+            "drift is the tools layer's concept; the carrier's truth lives in its plan: {:?}",
+            hooks.drift
+        );
+        assert_eq!(
+            hooks.activation,
+            Some(ActivationEffectName::NextSessionOnly),
+            "pi reads extensions at session start; a running TUI can /reload"
+        );
     }
 }

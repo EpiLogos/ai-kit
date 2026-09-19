@@ -537,7 +537,9 @@ fn the_root_doctor_reports_the_dangling_and_healthy_sets_and_writes_nothing() {
             central.path().to_str().unwrap(),
         ],
     );
-    assert_eq!(code, 0, "{envelope}");
+    // A dangling federation is a finding ops must not be able to miss: the
+    // report still lands, and the exit is non-zero.
+    assert_eq!(code, 1, "{envelope}");
     let healthy = envelope["data"]["healthy"].as_array().unwrap();
     let dangling = envelope["data"]["dangling"].as_array().unwrap();
     assert_eq!(healthy.len(), 1, "{envelope}");
@@ -545,6 +547,49 @@ fn the_root_doctor_reports_the_dangling_and_healthy_sets_and_writes_nothing() {
     assert_eq!(dangling.len(), 1, "{envelope}");
     assert_eq!(dangling[0]["project"], "beta");
     assert_eq!(read(&root), before, "the doctor is read-only");
+}
+
+#[test]
+fn the_root_doctor_exits_zero_when_every_child_resolves() {
+    let central = TempDir::new().unwrap();
+    let scratch = TempDir::new().unwrap();
+
+    write(
+        &central.path().join("Control/agents/wiki/wiki.json"),
+        &root_document(&["central:wiki:project:alpha"]),
+    );
+    write(
+        &central
+            .path()
+            .join("Work/alpha/ProjectCentral/agents/wiki/wiki.json"),
+        &format!(
+            "{{\n  \"objects\": [\n    {}\n  ]\n}}\n",
+            project_space("central:wiki:project:alpha", 1, "central:wiki:root"),
+        ),
+    );
+    write(
+        &central
+            .path()
+            .join("Work/alpha/ProjectCentral/project.json"),
+        "{\"schema\": 1, \"project_id\": \"alpha\"}",
+    );
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "root",
+            "doctor",
+            "--root",
+            central.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(
+        envelope["data"]["dangling"].as_array().unwrap().len(),
+        0,
+        "{envelope}"
+    );
 }
 
 #[test]
@@ -1096,6 +1141,67 @@ fn anchor_project_names_the_root_node_from_the_project() {
 // live corpus carries in `working/…/snapshots/…/before/`.
 // ---------------------------------------------------------------------------
 
+/// A room the owner marked `.no-agent-retrieval` must never reach the wiki:
+/// ingest is a read, and the marker prunes the subtree before anything in it
+/// is read — the same law the ProjectCentral binding and the NOW-field
+/// reader honour. Regression from the 2026-09-17 knowledge-fitness round:
+/// ingest copied a withheld room's record into the wiki and the faculty then
+/// disclosed it.
+#[test]
+fn ingest_never_reads_a_room_the_owner_withheld_from_agent_retrieval() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    write(
+        &corpus.join("open/record.md"),
+        "---\nrecord_id: open-record\nrecord_type: note\n---\n\n# Open record\n",
+    );
+    write(
+        &corpus.join("private/.no-agent-retrieval"),
+        "This room is withheld from agent retrieval by its owner.\n",
+    );
+    write(
+        &corpus.join("private/endpoint.md"),
+        "---\nrecord_id: withheld-record\nrecord_type: note\n---\n\n# Withheld record\n",
+    );
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\n  \"objects\": []\n}\n");
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "ingest",
+            corpus.to_str().unwrap(),
+            "--file",
+            wiki_json.to_str().unwrap(),
+            "--apply",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["records_selected"], Value::from(1));
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "query",
+            "search",
+            "--file",
+            wiki_json.to_str().unwrap(),
+            "Withheld record",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let hits = envelope["data"]["hits"].as_array().unwrap();
+    assert!(
+        !hits.iter().any(|hit| hit["address"]["resource"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("withheld-record")),
+        "the withheld room's record is not in the wiki: {hits:?}"
+    );
+}
+
 fn ingest_corpus_fixture(root: &Path) {
     write(
         &root.join("README.md"),
@@ -1468,7 +1574,72 @@ fn ingest_apply_writes_objects_then_refuses_a_rerun_without_update() {
         .contains("--update"));
     assert_eq!(read(&wiki_json), before);
 
-    // With --update the rerun succeeds and advances every touched revision.
+    // With --update the rerun succeeds — and because the corpus is
+    // byte-identical, nothing is a content change: every revision stays
+    // where it was. A touch without a byte change is not a content change.
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "ingest",
+            corpus.to_str().unwrap(),
+            "--file",
+            wiki_json.to_str().unwrap(),
+            "--apply",
+            "--update",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let unchanged = envelope["data"]["unchanged"].as_u64().unwrap();
+    assert!(
+        unchanged > 0,
+        "the identical rerun changed nothing: {envelope}"
+    );
+    let held: Value = serde_json::from_str(&read(&wiki_json)).unwrap();
+    let a24 = held["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["ref"] == "wiki:node:record/A24")
+        .unwrap();
+    assert_eq!(
+        a24["revision"],
+        Value::from(1),
+        "an unchanged re-ingest advances no revision"
+    );
+}
+
+/// Re-ingesting a corpus where exactly one record genuinely changed must
+/// advance that record's revision and touch nothing else — update fidelity,
+/// not a wholesale rewrite.
+#[test]
+fn ingest_update_advances_only_the_record_that_changed() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\n  \"objects\": []\n}\n");
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "ingest",
+            corpus.to_str().unwrap(),
+            "--file",
+            wiki_json.to_str().unwrap(),
+            "--apply",
+            "--update",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+
+    // A real content change to one record's source file.
+    let record = corpus.join("symbolon/episteme/arguments/A24-Arbitration.md");
+    let mut text = read(&record);
+    text.push_str("\nAddendum: the criterion is the measure, never the usurper.\n");
+    write(&record, &text);
+
     let (code, envelope) = wiki(
         scratch.path(),
         &[
@@ -1483,13 +1654,23 @@ fn ingest_apply_writes_objects_then_refuses_a_rerun_without_update() {
     );
     assert_eq!(code, 0, "{envelope}");
     let held: Value = serde_json::from_str(&read(&wiki_json)).unwrap();
-    let a24 = held["objects"]
-        .as_array()
-        .unwrap()
+    let objects = held["objects"].as_array().unwrap();
+    let changed: Vec<&Value> = objects
         .iter()
-        .find(|o| o["ref"] == "wiki:node:record/A24")
-        .unwrap();
-    assert_eq!(a24["revision"], Value::from(2));
+        .filter(|o| o["revision"].as_u64().unwrap() > 1)
+        .collect();
+    assert_eq!(
+        changed
+            .iter()
+            .map(|o| o["ref"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["wiki:node:record/A24"],
+        "only the record whose bytes changed advanced"
+    );
+    assert!(
+        envelope["data"]["unchanged"].as_u64().unwrap() > 0,
+        "everything else kept its revision: {envelope}"
+    );
 }
 
 /// The capability proof: after ingesting, `wiki query backlinks` and

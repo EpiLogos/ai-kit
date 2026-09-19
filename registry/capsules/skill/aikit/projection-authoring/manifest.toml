@@ -2,7 +2,7 @@ schema = 1
 id = "skill/aikit/projection-authoring"
 kind = "skill"
 name = "AIKit Projection Authoring"
-description = "Prepare and refine selective O:I Projection representations while preserving native source authority, audience boundaries and explicit return paths."
+description = "Select, review, ratify, refine, withdraw, or prepare an authored world reading for O:I Projection without transferring canonical ownership from Central, a Project, Wiki space, or another native source."
 maturity = "stable"
 tags = ["aikit", "projection", "authoring", "oi", "provenance"]
 

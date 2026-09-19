@@ -243,3 +243,44 @@ protocol = "process"
 4. Registry unification (retire `REGISTRY` + `client_effects` divergence).
 5. Model layer binding into roster facts; disclosure read model into status
    and TUI.
+
+## Pi hooks census addendum (2026-09-18)
+
+The knowledge-route SessionStart hook capsule
+(`registry/capsules/hook/aikit/knowledge-route/`) steers claude-code and zcode
+because their profiles carry managed hooks layers whose merge grammars project
+`aikit hook dispatch <client> <event>` shell-command entries into native
+config. The pi census asked whether the same steering can reach pi. Verdict:
+pi 0.84.4 has a real hook/event mechanism, but not one the existing grammars
+can write.
+
+- Mechanism: TypeScript extension modules. An extension subscribes with
+  `pi.on("<event>", handler)`; the lifecycle surface includes `session_start`,
+  `session_shutdown`, `input` (user prompt; can transform or handle),
+  `tool_call` (pre-tool; can block), `tool_result`, and
+  `session_before_compact` (`packages/coding-agent/docs/extensions.md`,
+  verified against the installed pi 0.84.4).
+- Declaration surfaces: the `extensions` array in
+  `~/.pi/agent/settings.json` (paths or directories, glob and
+  exclusion prefixes) and auto-discovery directories
+  `~/.pi/agent/extensions/` (global) and `.pi/extensions/`
+  (project-local, trust-gated).
+- The gap: pi has no shell-command hook seam. Both managed hook grammars are
+  record merges into a native config document; the pi equivalent would be a
+  new carrier vehicle — an owned TS extension file that spawns
+  `aikit hook dispatch pi <Event>` from each mapped handler — plus a
+  foreign-preserving merge into the settings `extensions` array (or placement
+  in a discovery directory). Because projected extension code runs with the
+  session's full permissions inside every pi session, that vehicle is a
+  trust-posture decision and is deliberately not built in this pass.
+- What landed instead: the pi profile declares its hooks layer `observed`
+  with the six proven event kinds and `transports = ["extension-events"]`, so
+  disclosure shows the faculty honestly and no projection is claimed. The
+  dispatcher side already works: `aikit hook dispatch` is client-agnostic, so
+  a future carrier only has to translate pi event names to AIKit kinds
+  (`session_start` → SessionStart, `input` → UserPromptSubmit, `tool_call` →
+  PreToolUse, `tool_result` → PostToolUse, `session_shutdown` → SessionEnd,
+  `session_before_compact` → PreCompact) and the knowledge-route chain is
+  reachable. `stop` and `notification` are omitted from the census: pi has no
+  documented equivalents (nearest are `turn_end`/`agent_end`/`agent_settled`,
+  none of which is a final-stop gate).

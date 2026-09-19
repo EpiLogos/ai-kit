@@ -2,7 +2,7 @@ schema = 1
 id = "skill/aikit/structured-account-authoring"
 kind = "skill"
 name = "AIKit Structured Account Authoring"
-description = "Compose a rich provenance-aware reading of a coherent authored world without replacing its native source or ontology."
+description = "Compose a deep, navigable, provenance-aware reading of Central, a Project, Wiki space, research corpus, or another coherent authored world without replacing its native source or forcing one ontology."
 maturity = "stable"
 tags = ["aikit", "authoring", "account", "provenance", "projection"]
 
