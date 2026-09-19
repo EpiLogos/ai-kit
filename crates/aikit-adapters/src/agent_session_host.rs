@@ -50,7 +50,7 @@ use crate::agent_connection::{
     SessionOpenRequest,
 };
 use crate::connection_process::{
-    ConnectionControl, ConnectionProcess, ConnectionReader, ConnectionWriter,
+    ConnectionControl, ConnectionProcess, ConnectionReader, ConnectionWriter, ModelEnvironment,
 };
 use crate::interactive_connection::{InteractiveAgentConnectionAdapter, PermissionDecision};
 
@@ -345,7 +345,26 @@ impl AgentSessionHost {
     where
         A: InteractiveAgentConnectionAdapter + Send + 'static,
     {
-        let (writer, reader, control) = ConnectionProcess::spawn_split(argv, cwd)?;
+        Self::launch_with_journal_and_environment(adapter, argv, cwd, limits, journal, None)
+    }
+
+    /// [`AgentSessionHost::launch_with_journal`] with a scoped launch
+    /// environment: the provider child is spawned under the scrubbed
+    /// allowlist plus the credential variables delivered at launch, instead
+    /// of the caller's full environment. `None` inherits unchanged.
+    pub fn launch_with_journal_and_environment<A>(
+        adapter: A,
+        argv: &[String],
+        cwd: Option<&Path>,
+        limits: AgentSessionHostLimits,
+        journal: Option<Arc<dyn SessionEventJournal>>,
+        environment: Option<&ModelEnvironment>,
+    ) -> Result<Self>
+    where
+        A: InteractiveAgentConnectionAdapter + Send + 'static,
+    {
+        let (writer, reader, control) =
+            ConnectionProcess::spawn_split_with_environment(argv, cwd, environment)?;
         let shared = Arc::new(HostShared {
             adapter: Mutex::new(Box::new(adapter)),
             writer,
