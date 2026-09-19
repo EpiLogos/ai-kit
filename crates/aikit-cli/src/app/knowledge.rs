@@ -862,8 +862,14 @@ impl Service {
         // Filesystem source shards are a standalone discovery mechanism. In a
         // Central World their copied bodies must not bypass the live source owner
         // (including a source withheld since an earlier cached corpus was written).
+        // Central owns refs under its control-root source namespace. A Project's
+        // own generated SourcePool shard remains the owner of a corpus-local ref:
+        // dropping it would turn a cited source into a permanent unreadable
+        // citation even when no Central source owns it.
         if central_root.is_some() {
-            discovered.sources.clear();
+            discovered
+                .sources
+                .retain(|source, _| !source.as_str().starts_with("central:source:control:root:"));
         }
         let mut material = Vec::new();
         let mut bindings = Vec::new();
