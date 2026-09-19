@@ -1,0 +1,122 @@
+# Product Guardian repertoires are declared here as references to native
+# owners.  This is set composition, not a second Skill body source or a trust
+# grant.  Every body remains at the path in its owner checkout; AIKit remains
+# the resolver, and a member's own trust/availability gates still apply.
+schema = "aikit.guardian-family/v1"
+stewardship = "Each product Guardian stewards only its own native repertoire.  O:I's two-member bootstrap is separate from this family."
+
+[[guardian]]
+product = "Central"
+semantic_ref = "central:skillset:guardian"
+declared_native_sets = ["central-lifecycle", "central-engineering", "central-skills-system"]
+stewardship = "Central lifecycle, engineering and skills-system practices remain rooted under EpiLogos/Central and Central #164's own repertoire language."
+
+[[guardian.members]]
+skill_ref = "central:skill:control-maintenance"
+owner_repository = "EpiLogos/Central"
+body_path = "skills/control-maintenance/SKILL.md"
+
+[[guardian.members]]
+skill_ref = "central:skill:connector-authoring"
+owner_repository = "EpiLogos/Central"
+body_path = "skills/connector-authoring/SKILL.md"
+
+[[guardian.members]]
+skill_ref = "central:skill:connector-hardening"
+owner_repository = "EpiLogos/Central"
+body_path = "skills/connector-hardening/SKILL.md"
+
+[[guardian.members]]
+skill_ref = "central:skill:machine-declaration"
+owner_repository = "EpiLogos/Central"
+body_path = "skills/machine-declaration/SKILL.md"
+
+[[guardian.members]]
+skill_ref = "central:skill:projectcentral-ontology"
+owner_repository = "EpiLogos/Central"
+body_path = "skills/projectcentral-ontology/SKILL.md"
+
+[[guardian]]
+product = "Actuation"
+semantic_ref = "actuation:skillset:guardian"
+stewardship = "Actuation practice remains bounded by authority, realised agency and public versioned contracts."
+
+[[guardian.members]]
+skill_ref = "actuation:skill:operation"
+owner_repository = "EpiLogos/Actuation"
+body_path = "skills/actuation-operation/SKILL.md"
+
+[[guardian.members]]
+skill_ref = "actuation:skill:extension"
+owner_repository = "EpiLogos/Actuation"
+body_path = "skills/actuation-extension/SKILL.md"
+
+[[guardian]]
+product = "AIKit"
+semantic_ref = "aikit:skillset:guardian"
+set_refs = ["aikit:operator", "aikit:project-author", "aikit:extension-developer"]
+stewardship = "AIKit's existing operator/project-author/extension-developer trio is composed by reference; no copied AIKit manuals."
+
+[[guardian]]
+product = "Software Factory"
+semantic_ref = "factory:skillset:guardian"
+stewardship = "Factory operation and bounded development stay authored at Factory; this is not the product roster itself."
+
+[[guardian.members]]
+skill_ref = "factory:method:factory-bounded-work"
+owner_repository = "EpiLogos/Factory"
+body_path = "skills/factory-bounded-work/SKILL.md"
+classification = "METHOD"
+
+[[guardian.members]]
+skill_ref = "factory:skill:factory-development"
+owner_repository = "EpiLogos/Factory"
+body_path = "skills/factory-development/SKILL.md"
+
+[[guardian.members]]
+skill_ref = "factory:skill:factory-operation"
+owner_repository = "EpiLogos/Factory"
+body_path = "skills/factory-operation/SKILL.md"
+
+[[guardian]]
+product = "Workcell"
+semantic_ref = "workcell:skillset:guardian"
+stewardship = "Workcell practice stays owned by materialisation and provider boundaries."
+
+[[guardian.members]]
+skill_ref = "workcell:skill:operation"
+owner_repository = "EpiLogos/Workcell"
+body_path = "skills/workcell-operation/SKILL.md"
+
+[[guardian.members]]
+skill_ref = "workcell:skill:provider-authoring"
+owner_repository = "EpiLogos/Workcell"
+body_path = "skills/provider-authoring/SKILL.md"
+
+[[guardian]]
+product = "Quaternal Logic"
+semantic_ref = "ql:skillset:guardian"
+stewardship = "QL remains optional and formal practice remains source-owned."
+
+[[guardian.members]]
+skill_ref = "ql:skill:foundations"
+owner_repository = "EpiLogos/QL-MEF"
+body_path = "skills/ql-foundations/SKILL.md"
+
+[[guardian.members]]
+skill_ref = "ql:method:ql-operation"
+owner_repository = "EpiLogos/QL-MEF"
+body_path = "skills/ql-operation/SKILL.md"
+classification = "METHOD"
+
+[[gaps]]
+product = "Guardian family"
+gap = "Descriptions at several native owners predate the trigger-contract standard; this revision records them rather than minting replacement bodies outside their owners."
+owner = "each body's native repository"
+next_action = "Edit each SKILL.md frontmatter at its owner, then re-arm and record trust for that exact revision."
+
+[[gaps]]
+product = "AIKit runtime"
+gap = "guardian-family.toml is a source-owned declaration; a native resolver/loader for cross-owner Guardian set references is still required."
+owner = "AIKit"
+next_action = "Admit native-owner set references through the registry source/resolver, preserving per-member withholding."
