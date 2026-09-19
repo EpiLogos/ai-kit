@@ -237,6 +237,14 @@ const SEED_FRESHNESS: &str =
     "first-party catalogue seed, authored 2026-09-09; provider-native names are point-in-time \
      and an owner catalogue entry supersedes this one";
 
+/// The local speech entries were authored with the machine's own speech
+/// bring-up; their freshness names that provenance rather than borrowing
+/// the hosted-providers note.
+const LOCAL_SPEECH_SEED_FRESHNESS: &str =
+    "first-party catalogue seed, authored 2026-09-19 with the local speech captures \
+     (fixture:local-speech-captures/2026-09-19); the services are hosted outside this \
+     repository and an owner catalogue entry supersedes this one";
+
 fn hosted(provider: &str, ids: &[&str]) -> DeclaredRoute {
     DeclaredRoute {
         provider: ProviderRef::parse(provider).expect("seed provider ref"),
@@ -250,11 +258,17 @@ fn hosted(provider: &str, ids: &[&str]) -> DeclaredRoute {
 }
 
 fn local(ids: &[&str]) -> DeclaredRoute {
+    local_serving("provider:ollama", "http://127.0.0.1:11434", ids)
+}
+
+/// A locally served route: the provider's own local endpoint, no credential.
+/// Declared is not available — the join against live detection decides that.
+fn local_serving(provider: &str, endpoint: &str, ids: &[&str]) -> DeclaredRoute {
     DeclaredRoute {
-        provider: ProviderRef::parse("provider:ollama").expect("seed provider ref"),
+        provider: ProviderRef::parse(provider).expect("seed provider ref"),
         kind: ModelRouteKind::LocalServing,
         provider_native_ids: ids.iter().map(|id| (*id).to_string()).collect(),
-        endpoint: Some("http://127.0.0.1:11434".into()),
+        endpoint: Some(endpoint.to_string()),
         credential: CredentialCondition::NotRequired,
     }
 }
@@ -276,6 +290,18 @@ fn entry(
     }
 }
 
+/// A seed entry carrying the local-speech freshness note.
+fn local_speech_entry(
+    model: &str,
+    name: &str,
+    description: &str,
+    routes: Vec<DeclaredRoute>,
+) -> ModelCatalogueEntry {
+    let mut local = entry(model, name, description, routes);
+    local.freshness = Some(LOCAL_SPEECH_SEED_FRESHNESS.to_string());
+    local
+}
+
 /// The seed's speech entries (`model:gpt-realtime`, `model:gpt-4o-transcribe`,
 /// `model:gpt-4o-mini-tts`) are how speech is visible as a class of model in
 /// every listing. Swapping in a better model never touches the generic
@@ -284,6 +310,11 @@ fn entry(
 /// wire is one adapter instance following the `openai_realtime` pattern,
 /// whose surfaces this catalogue already knows how to join by
 /// (provider, provider-native id).
+///
+/// The two local entries (`model:local-whisper-large-v3-turbo`,
+/// `model:kokoro-82m`) are that swap path's second, keyless worked example:
+/// fully local STT/TTS services whose routes need no credential, joined by
+/// the `aikit-adapters::local_speech` adapter instance's declared surfaces.
 fn seed_entries() -> Vec<ModelCatalogueEntry> {
     vec![
         entry(
@@ -327,6 +358,29 @@ fn seed_entries() -> Vec<ModelCatalogueEntry> {
             "GPT-4o mini TTS",
             "OpenAI text-to-speech model",
             vec![hosted("provider:openai", &["gpt-4o-mini-tts"])],
+        ),
+        local_speech_entry(
+            "model:local-whisper-large-v3-turbo",
+            "Whisper large-v3-turbo (local)",
+            "Local speech-to-text (whisper.cpp server, audio/speech in, text out, \
+             no credential; served at POST /inference)",
+            vec![local_serving(
+                "provider:local-whisper-cpp",
+                "http://127.0.0.1:8080/inference",
+                &["whisper-large-v3-turbo-q5_0"],
+            )],
+        ),
+        local_speech_entry(
+            "model:kokoro-82m",
+            "Kokoro 82M (local)",
+            "Local text-to-speech (Kokoro-82M ONNX behind an OpenAI-shaped \
+             wrapper, text in, audio/speech out, no credential; served at \
+             POST /v1/audio/speech)",
+            vec![local_serving(
+                "provider:local-kokoro",
+                "http://127.0.0.1:8880/v1/audio/speech",
+                &["kokoro-82m"],
+            )],
         ),
         entry(
             "model:deepseek-chat",
@@ -899,6 +953,47 @@ mod tests {
             assert_eq!(route.kind, ModelRouteKind::ProviderNative);
             assert!(route.credential.requires_credential());
         }
+    }
+
+    #[test]
+    fn the_seed_carries_the_keyless_local_speech_models_with_their_route_facts() {
+        let catalogue = ModelCatalogue::first_party_seed();
+        let whisper = ProviderRef::parse("provider:local-whisper-cpp").unwrap();
+        let (entry, route) = catalogue
+            .claiming(&whisper, "whisper-large-v3-turbo-q5_0")
+            .expect("seed must declare the local STT model");
+        assert_eq!(entry.model.as_str(), "model:local-whisper-large-v3-turbo");
+        assert_eq!(route.kind, ModelRouteKind::LocalServing);
+        assert_eq!(
+            route.endpoint.as_deref(),
+            Some("http://127.0.0.1:8080/inference"),
+            "the route carries the /inference path override in plain sight"
+        );
+        assert!(!route.credential.requires_credential());
+        assert!(
+            entry
+                .freshness
+                .as_deref()
+                .unwrap_or_default()
+                .contains("2026-09-19"),
+            "the local entries carry their own capture-dated freshness note"
+        );
+
+        let kokoro = ProviderRef::parse("provider:local-kokoro").unwrap();
+        let (entry, route) = catalogue
+            .claiming(&kokoro, "kokoro-82m")
+            .expect("seed must declare the local TTS model");
+        assert_eq!(entry.model.as_str(), "model:kokoro-82m");
+        assert_eq!(
+            route.endpoint.as_deref(),
+            Some("http://127.0.0.1:8880/v1/audio/speech")
+        );
+        assert!(!route.credential.requires_credential());
+
+        // The same native id under a hosted provider is not this model:
+        // the provider is half the join key.
+        let openai = ProviderRef::parse("provider:openai").unwrap();
+        assert!(catalogue.claiming(&openai, "kokoro-82m").is_none());
     }
 
     // -- catalogue modality disclosure -------------------------------------
