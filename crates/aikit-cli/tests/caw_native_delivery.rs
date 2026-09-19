@@ -50,8 +50,7 @@ impl World {
         }
     }
     fn cli(&self, args: &[String]) -> Value {
-        let out = Command::new(env!("CARGO_BIN_EXE_aikit"))
-            .arg("session-space")
+        let out = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
             .env("AIKIT_HOME", self.home.root())
             .arg("-C")
             .arg(self.temp.path())
@@ -76,8 +75,7 @@ impl World {
     }
     fn start(&mut self) {
         self.child = Some(
-            Command::new(env!("CARGO_BIN_EXE_aikit"))
-                .arg("session-space")
+            Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
                 .env("AIKIT_HOME", self.home.root())
                 .arg("-C")
                 .arg(self.temp.path())

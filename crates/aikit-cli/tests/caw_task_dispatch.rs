@@ -143,8 +143,7 @@ impl World {
         world
     }
     fn command(&self, args: &[String]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_aikit"))
-            .arg("session-space")
+        Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
             .env("AIKIT_HOME", self.home.root())
             .env("WORKCELL_CONTROL_TOKEN", "controlled-caw-material-token")
             .arg("-C")
@@ -185,8 +184,7 @@ impl World {
     }
     fn start(&mut self) {
         self.child = Some(
-            Command::new(env!("CARGO_BIN_EXE_aikit"))
-                .arg("session-space")
+            Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
                 .env("AIKIT_HOME", self.home.root())
                 .env("WORKCELL_CONTROL_TOKEN", "controlled-caw-material-token")
                 .env("CENTRAL_NATIVE_TOKEN", "CONTROLLED_MUST_NOT_REACH_PROVIDER")
