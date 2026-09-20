@@ -698,6 +698,7 @@ impl SessionLane {
         })
     }
 
+    ///
     /// Ask the real adapter, under the same identity/lane gate as writes. No
     /// command is sent and no observed model is promoted into a capability.
     pub fn model_controls(&self) -> Result<NativeModelControls> {
