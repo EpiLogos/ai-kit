@@ -15,11 +15,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt
-      - name: Apply exact native integration
+      - name: Apply bounded native integration
         shell: python
         run: |
           from pathlib import Path
-          import subprocess
           p=Path('crates/aikit-store/src/encounter.rs');s=p.read_text()
           assert 'pub mod context;' not in s
           s=s.replace('pub use delivery::{DeliveryReservation, EncounterDelivery};','pub use delivery::{DeliveryReservation, EncounterDelivery};\n#[path = "encounter_context.rs"]\npub mod context;')
@@ -75,39 +74,14 @@ jobs:
           ''')
           s=s.replace('{"ref":"aikit.encounter.draft","enabled":true,"reason":null},','{"ref":"aikit.encounter.draft","enabled":true,"reason":null},\n                    {"ref":"aikit.encounter.context","enabled":true,"reason":null},')
           p.write_text(s)
-          Path('.github/workflows/canvas-context.yml').write_text('''name: Prepared canvas context
-          on:
-            pull_request:
-              paths:
-                - 'crates/aikit-store/src/encounter*'
-                - 'crates/aikit-cli/src/encounter_service.rs'
-                - 'crates/aikit-store/tests/encounter_selected_context.rs'
-                - '.github/workflows/canvas-context.yml'
-            push:
-              branches: [agent/canvas-context-20260920]
-          permissions:
-            contents: read
-          jobs:
-            context:
-              runs-on: ubuntu-latest
-              timeout-minutes: 25
-              steps:
-                - uses: actions/checkout@v4
-                  with:
-                    persist-credentials: false
-                - uses: dtolnay/rust-toolchain@1.98.0
-                - run: cargo test --locked -p aikit-store --test encounter_selected_context
-                - run: cargo check --locked -p aikit-cli
-          ''')
-          Path('.github/workflows/canvas-context-return.yml').unlink()
-      - name: Format and commit the review branch only
+      - name: Commit only bounded Rust changes
         run: |
           rustfmt --edition 2021 --config skip_children=true crates/aikit-store/src/encounter_context.rs crates/aikit-store/tests/encounter_selected_context.rs
           git diff --check
-          git add crates/aikit-store/src/encounter.rs crates/aikit-store/src/encounter_context.rs crates/aikit-store/tests/encounter_selected_context.rs crates/aikit-cli/src/encounter_service.rs .github/workflows/canvas-context.yml .github/workflows/canvas-context-return.yml
+          git add crates/aikit-store/src/encounter.rs crates/aikit-store/src/encounter_context.rs crates/aikit-store/tests/encounter_selected_context.rs crates/aikit-cli/src/encounter_service.rs
           git -c user.name='O:I canvas implementation' -c user.email='noreply@openai.com' commit -m 'feat(context): join prepared selections to native draft dispatch'
-          git push origin HEAD:refs/heads/agent/canvas-context-20260920
           git rev-parse HEAD | tee source-head.txt
+          git push origin HEAD:refs/heads/agent/canvas-context-20260920
       - name: Exact selection and dispatch regressions
         run: set -o pipefail; cargo test --locked -p aikit-store --test encounter_selected_context 2>&1 | tee context-tests.log
       - name: Native CLI integration check
