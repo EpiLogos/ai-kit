@@ -1,0 +1,53 @@
+name: Apply bounded native Wiki implementation
+on:
+  push:
+    branches: [agent/wiki-source-constellation-20260920]
+    paths: [.github/wiki-native-apply.py, .github/workflows/wiki-native-apply.yml]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.repository == 'EpiLogos/ai-kit' && github.ref == 'refs/heads/agent/wiki-source-constellation-20260920'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Apply only the inspected Wiki source edits
+        run: python3 .github/wiki-native-apply.py
+      - name: Format and lock the native source
+        run: |
+          cargo fmt --all
+          cargo check -p aikit-cli
+      - name: Verify native document and relation behaviour
+        run: |
+          cargo test --locked -p aikit-adapters --lib markdown_document
+          cargo test --locked -p aikit-adapters --lib wiki_document
+          cargo test --locked -p aikit-adapters --lib okf
+          cargo test --locked -p aikit-adapters --lib authored_wiki
+          cargo test --locked -p aikit-core --lib knowledge
+      - name: Commit the actual implementation to this feature branch only
+        run: |
+          test "$(git ls-remote origin refs/heads/agent/wiki-source-constellation-20260920 | cut -f1)" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.lock crates/aikit-adapters/src/{lib,markdown_document,okf,authored_wiki_source,wiki_document}.rs crates/aikit-cli/src/{main.rs,app/knowledge.rs} crates/aikit-core/src/{knowledge,knowledge_wiki_provider}.rs
+          git rm .github/wiki-native-apply.py .github/workflows/wiki-native-apply.yml
+          git commit -m 'feat(wiki): connect exact native Markdown readings, source occurrences and backlinks'
+          git push origin HEAD:refs/heads/agent/wiki-source-constellation-20260920
+      - name: Retain actual source and differences even on a failed check
+        if: always()
+        run: |
+          mkdir -p /tmp/wiki-native-finished
+          git rev-parse HEAD > /tmp/wiki-native-finished/revision.txt
+          git diff > /tmp/wiki-native-finished/uncommitted.diff
+          tar -czf /tmp/wiki-native-finished/source.tar.gz crates Cargo.toml Cargo.lock rust-toolchain.toml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wiki-native-finished-${{ github.run_id }}
+          path: /tmp/wiki-native-finished/
+          retention-days: 7
