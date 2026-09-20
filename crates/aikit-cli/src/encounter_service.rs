@@ -12,7 +12,9 @@ use aikit_core::harness_admission::HarnessActivationObservation;
 use aikit_core::projection::ProjectionPlan;
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::{AikitError, ResourceRef, Result, SourceRevision};
-use aikit_store::encounter::context::{ContextRequest, ContextOperation, ContextExpectation, ContextScope};
+use aikit_store::encounter::context::{
+    ContextExpectation, ContextOperation, ContextRequest, ContextScope,
+};
 use aikit_store::{encounter::EncounterStore, AikitHome, SessionSpaceApplicationStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -183,8 +185,14 @@ impl EncounterContextAdmission {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum EncounterRequest {
-    Context { request: ContextRequest },
-    PromptContext { agent_session: ResourceRef, draft_revision: u64, context: ContextExpectation },
+    Context {
+        request: ContextRequest,
+    },
+    PromptContext {
+        agent_session: ResourceRef,
+        draft_revision: u64,
+        context: ContextExpectation,
+    },
     /// Select a catalogue-backed, scoped, already configured native body.
     OpenModel {
         request: Box<EncounterModelOpen>,
@@ -450,13 +458,22 @@ impl EncounterService {
             ))
         }
     }
-    fn check_context_scope(&self, scope:&ContextScope)->Result<()> {
-        let project=ResourceRef::parse(&scope.project)?;
-        if let Some(session)=&scope.agent_session {
+    fn check_context_scope(&self, scope: &ContextScope) -> Result<()> {
+        let project = ResourceRef::parse(&scope.project)?;
+        if let Some(session) = &scope.agent_session {
             self.require_attached(session)?;
-            if !SessionSpaceApplicationStore::new(self.home.clone()).list()?.iter().any(|space|
-                space.definition.projects.contains(&project)&&space.agent_sessions.contains_key(session)) {
-                return Err(AikitError::new("encounter.context_scope","Session is not attached to the selected Project"));
+            if !SessionSpaceApplicationStore::new(self.home.clone())
+                .list()?
+                .iter()
+                .any(|space| {
+                    space.definition.projects.contains(&project)
+                        && space.agent_sessions.contains_key(session)
+                })
+            {
+                return Err(AikitError::new(
+                    "encounter.context_scope",
+                    "Session is not attached to the selected Project",
+                ));
             }
         }
         Ok(())
@@ -861,25 +878,44 @@ impl EncounterService {
         match request {
             EncounterRequest::Context { request } => {
                 self.check_context_scope(&request.scope)?;
-                let data=match request.request {
-                    ContextOperation::Read=>self.store.prepared_context(&request.scope)?,
-                    ContextOperation::Edit{basis,mutation}=>self.store.edit_context(&request.scope,basis,*mutation)?,
-                    ContextOperation::Adopt{basis,project_basis}=>self.store.adopt_context(&request.scope,basis,project_basis)?,
+                let data = match request.request {
+                    ContextOperation::Read => self.store.prepared_context(&request.scope)?,
+                    ContextOperation::Edit { basis, mutation } => {
+                        self.store.edit_context(&request.scope, basis, *mutation)?
+                    }
+                    ContextOperation::Adopt {
+                        basis,
+                        project_basis,
+                    } => self
+                        .store
+                        .adopt_context(&request.scope, basis, project_basis)?,
                 };
                 Ok(json!(data))
             }
-            EncounterRequest::PromptContext { agent_session, draft_revision, context } => {
+            EncounterRequest::PromptContext {
+                agent_session,
+                draft_revision,
+                context,
+            } => {
                 self.check_context_scope(&context.scope)?;
-                let resident=self.resident(&agent_session)?;
-                let _operation=resident.operations.lock().map_err(error)?;
-                let _agency_lock=self.lock_agency(&agent_session)?;
-                self.check_resident_context(&agent_session,&resident,"before-prompt")?;
-                let cleared=self.store.submit_context(&agent_session,draft_revision,Some(&context),|text|{
-                    let text=self.prepare_agency_text(&agent_session,text)?;
-                    let handle=resident.lane.prompt(resident.prompt_payload(&text))?;
-                    drop(handle);Ok(())
-                })?;
-                Ok(json!({"accepted":true,"draft":cleared,"context_revision":context.revision,"context_digest":context.digest}))
+                let resident = self.resident(&agent_session)?;
+                let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
+                self.check_resident_context(&agent_session, &resident, "before-prompt")?;
+                let cleared = self.store.submit_context(
+                    &agent_session,
+                    draft_revision,
+                    Some(&context),
+                    |text| {
+                        let text = self.prepare_agency_text(&agent_session, text)?;
+                        let handle = resident.lane.prompt(resident.prompt_payload(&text))?;
+                        drop(handle);
+                        Ok(())
+                    },
+                )?;
+                Ok(
+                    json!({"accepted":true,"draft":cleared,"context_revision":context.revision,"context_digest":context.digest}),
+                )
             }
             EncounterRequest::OpenModel { request } => self.open_model(*request),
             request @ (EncounterRequest::Send { .. }
@@ -1338,6 +1374,7 @@ pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
     let mut child = std::process::Command::new(std::env::current_exe().map_err(error)?)
         .arg("-C")
         .arg(cwd)
+        .args(crate::session_space_verb_prefix())
         .arg("encounter-serve")
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone().map_err(error)?)
