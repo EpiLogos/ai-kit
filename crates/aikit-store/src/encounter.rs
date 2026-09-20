@@ -30,6 +30,8 @@ pub struct EncounterPage {
 #[path = "encounter_delivery.rs"]
 mod delivery;
 pub use delivery::{DeliveryReservation, EncounterDelivery};
+#[path = "encounter_context.rs"]
+pub mod context;
 
 pub struct EncounterStore {
     connection: Mutex<Connection>,
@@ -58,6 +60,7 @@ impl EncounterStore {
             CREATE INDEX IF NOT EXISTS encounter_block_session ON encounter_blocks(session,id);
             CREATE TABLE IF NOT EXISTS encounter_block_exclusions(session TEXT NOT NULL,block_id INTEGER NOT NULL,basis TEXT NOT NULL,PRIMARY KEY(session,block_id));").map_err(failure)?;
         delivery::install(&connection)?;
+        context::install(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -95,7 +98,7 @@ impl EncounterStore {
         blocks.truncate(16);
         blocks.reverse();
         Ok(
-            serde_json::json!({"agent_session":session,"blocks":blocks,"more":more,"draft":draft_in(&connection,session)?}),
+            serde_json::json!({"agent_session":session,"blocks":blocks,"more":more,"draft":draft_in(&connection,session)?,"prepared_context_receipts":context::receipts_in(&connection,session)?}),
         )
     }
 
@@ -266,10 +269,14 @@ impl EncounterStore {
     }
     /// Serialise dispatch with the canonical draft and journal. Provider sink
     /// writes wait on this transaction, so no response can precede its prompt.
-    pub fn submit(
+    pub fn submit(&self, session: &ResourceRef, basis: u64, dispatch: impl FnOnce(&str) -> Result<()>) -> Result<EncounterDraft> {
+        self.submit_context(session, basis, None, dispatch)
+    }
+    pub fn submit_context(
         &self,
         session: &ResourceRef,
         basis: u64,
+        expectation: Option<&context::ContextExpectation>,
         dispatch: impl FnOnce(&str) -> Result<()>,
     ) -> Result<EncounterDraft> {
         validate(session)?;
@@ -287,9 +294,11 @@ impl EncounterStore {
         let revision = basis
             .checked_add(1)
             .ok_or_else(|| failure("draft revision exhausted"))?;
-        dispatch(&draft.text)?;
+        let prepared=context::prepare_submission(&transaction,session,expectation)?;
+        let payload=context::compose(&draft.text,prepared.as_ref())?;
+        dispatch(&payload)?;
         let accepted = (|| -> Result<()> {
-            transaction.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),serde_json::to_string(&serde_json::json!({"kind":"user-message","text":draft.text,"draft_revision":basis})).map_err(failure)?]).map_err(failure)?;
+            transaction.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),serde_json::to_string(&serde_json::json!({"kind":"user-message","text":draft.text,"draft_revision":basis,"prepared_context":prepared,"payload_digest":format!("blake3:{}",blake3::hash(payload.as_bytes()).to_hex())})).map_err(failure)?]).map_err(failure)?;
             project_block(
                 &transaction,
                 session,
@@ -301,6 +310,7 @@ impl EncounterStore {
                     params![session.as_str(), revision],
                 )
                 .map_err(failure)?;
+            context::clear_submitted(&transaction,prepared.as_ref())?;
             transaction.commit().map_err(failure)
         })();
         accepted.map_err(|error|AikitError::new("encounter.submission_uncertain",format!("Provider accepted the prompt but canonical persistence failed; do not resend automatically: {error}")))?;
