@@ -376,6 +376,14 @@ fn client_overlay(client: &str) -> Option<&'static ClientOverlay> {
     })
 }
 
+/// The Actuation catalog slug for a registered harness, accepting the
+/// CLI-facing name, a registered alias, or the slug itself. This is the one
+/// join between surface spellings and profile slugs; alias families and the
+/// route launcher address harnesses through it instead of keeping a list.
+pub fn catalog_slug_for(name: &str) -> Option<&'static str> {
+    client_overlay(name).map(|overlay| overlay.catalog_slug)
+}
+
 fn unknown_client_error(client: &str) -> AikitError {
     let mut names: Vec<&str> = OVERLAYS.iter().map(|overlay| overlay.name).collect();
     names.push(BROKER);

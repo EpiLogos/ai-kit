@@ -1,7 +1,8 @@
 # ADR 0005 — Harness×model routing portal and user-built alias families
 
-Status: proposed. Stage 0 of the delivery runs in production on the owner's
-Omarchy machine as the pre-integration reference
+Status: proposed. Stages 1 and 2 implemented 2026-09-19 (`aikit alias`,
+`aikit harness run`); Stage 0 of the delivery runs in production on the
+owner's Omarchy machine as the pre-integration reference
 (`examples/alias-families/agents/`; live test evidence 2026-09-15 in the O-I
 campaign archive, `campaign-evidence/2026-09-15-launcher-portal/`).
 
@@ -95,13 +96,30 @@ and route-explain surfaces.
   and herdr/tmux natives, UI07-clean (presence checks only). Its `room.conf`
   slot table is the manifest seed: name/kind/cwd rows a family manifest will
   generalise.
-- **Stage 1.** `aikit alias` — manifest schema `aikit.alias-family/v1`, verbs
-  `list|show|check|install`; installation emits thin composed scripts, no
-  daemons; `check` validates kinds against the client registry and route refs
-  against the catalogue without materialising credentials.
-- **Stage 2.** Route-aware launchers: run a harness with an explicit model
-  route (`--model`, `--route`), composing client launch with credential
-  presence confirmation. The Mac's `epi` retires into an installed family.
+- **Stage 1 (landed 2026-09-19).** `aikit alias list|check|install` over
+  owner-owned `aikit.alias-family/v1` manifests under
+  `<AIKIT home>/alias-families/*.toml`. Validation cites the harness registry
+  (`aikit client`'s registry, joined to profile slugs the same way) and the
+  model catalogue by reference; unknown harness slugs, unknown model refs and
+  ill-shaped values are refused. `install` emits thin launcher scripts as
+  generated data under `<AIKIT home>/alias-families/installed/<family>/` —
+  executable files the owner places on PATH by hand, exactly as the Stage 0
+  flagship documents — and refuses a family with any entry the profile facts
+  cannot carry.
+- **Stage 2 (landed 2026-09-19).** `aikit harness run --harness <slug>
+  --model <model:stable-id> [--provider <provider-ref>] [--dry-run]
+  [-- <passthrough>]`: the catalogue join (detection + harness dispatch
+  reachability + credential presence, never material) selects the route; the
+  harness profile's models layer decides how the model choice reaches the
+  harness — observed `--provider/--model` argv selectors where they were
+  observed (pi), a refusal in the profile's own words where they were not;
+  key delivery materialises only through the existing scrubbed-env seam
+  (`ModelEnvironment`) under the profile-declared variable, never inline.
+  `--dry-run` discloses the composed argv and delivered variable names
+  without spawning or materialising. Honest boundaries are enforced, not
+  advertised: `None{reason}` dispatches, selector-less provider-plural
+  harnesses, and config-key native bindings refuse with the named remediation
+  (coverage honesty beats coverage theater).
 - **Stage 3.** Config-plane integration for family and profile defaults at
   machine scope, sequenced after the in-flight configuration work lands so it
   extends the shared registry rather than colliding with it.

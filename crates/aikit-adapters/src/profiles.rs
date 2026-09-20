@@ -282,7 +282,8 @@ posture = "brokered"
 [models]
 posture = "observed"
 dispatch = "provider-plural"
-roster-note = "Provider and model chosen per invocation (--provider/--model); encounter model policy pins the native selector."
+roster-note = "Provider and model chosen per invocation; encounter model policy pins the native selector."
+argv-selectors = { provider = "--provider", model = "--model" }
 
 [models.key-delivery]
 note = "pi keeps provider keys in its own auth store (~/.pi/agent/auth.json); a selected-model dispatch delivers its policy-named credential explicitly, so no blanket env-var key path is declared here."
@@ -1248,6 +1249,35 @@ mod tests {
         let pi = for_slug("pi").unwrap();
         let delivery = pi.models.as_ref().unwrap().key_delivery.as_ref().unwrap();
         assert!(delivery.env_var.is_empty());
+    }
+
+    #[test]
+    fn argv_selectors_are_declared_exactly_where_a_surface_was_observed() {
+        // Only a harness whose own command surface was observed reading
+        // per-invocation flags may declare them. Today that is pi (its
+        // `--help` census and the encounter selected-model path both name
+        // --provider/--model); every other provider-plural profile leaves the
+        // field absent rather than invent a selector.
+        for (slug, profile) in all() {
+            let Some(models) = &profile.models else {
+                continue;
+            };
+            assert_eq!(
+                models.argv_selectors.is_some(),
+                slug == "pi",
+                "{slug}: argv selectors must be declared exactly where observed"
+            );
+        }
+        let pi = for_slug("pi").unwrap();
+        let selectors = pi
+            .models
+            .as_ref()
+            .unwrap()
+            .argv_selectors
+            .as_ref()
+            .expect("pi observed --provider/--model");
+        assert_eq!(selectors.provider, "--provider");
+        assert_eq!(selectors.model, "--model");
     }
 
     #[test]

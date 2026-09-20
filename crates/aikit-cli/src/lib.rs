@@ -13,6 +13,7 @@
 
 pub mod activity_evidence;
 pub mod adopt;
+pub mod alias_family;
 pub mod app;
 pub mod cli;
 pub mod client;
@@ -23,6 +24,7 @@ pub mod config_plane;
 pub mod continuity_disclosure;
 pub mod control_ground;
 pub mod credential;
+pub(crate) mod credential_delivery;
 pub mod discover;
 pub mod doctor;
 pub mod domain_activation;
@@ -43,6 +45,7 @@ pub mod project_binding;
 pub mod project_recency;
 pub mod projects;
 pub mod recognised_praxis;
+pub mod route_launch;
 pub mod run;
 pub mod scoped_invocation;
 pub mod session_lifecycle_ops;

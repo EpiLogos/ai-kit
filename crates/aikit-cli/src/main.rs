@@ -274,6 +274,8 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Jobs(_)) => cmd_jobs(cwd),
         Some(Command::Log(c)) => cmd_log(cwd, c),
         Some(Command::Client(c)) => cmd_client(cwd, c),
+        Some(Command::Harness(c)) => cmd_harness(cwd, c, json_mode),
+        Some(Command::Alias(c)) => cmd_alias(cwd, c, json_mode),
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
         Some(Command::Gateway(c)) => cmd_gateway(c),
@@ -4153,6 +4155,108 @@ fn cmd_log(cwd: &std::path::Path, c: LogCmd) -> Result<Reply> {
         .collect();
     let data = jval!({ "events": events, "count": events.len(), "limit": a.limit });
     Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit harness run` (ADR 0005 Stage 2): compose the harness launch from
+/// profile facts, the catalogue join and credential presence, then run the
+/// harness in the foreground. The child owns the terminal; only refusals and
+/// dry runs print.
+fn cmd_harness(cwd: &std::path::Path, c: HarnessCmd, json_mode: bool) -> Result<Reply> {
+    let _ = cwd;
+    let HarnessCmd {
+        command: HarnessSub::Run(args),
+    } = c;
+    let home = AikitHome::discover()?;
+    let plan = aikit_cli::route_launch::plan_route_launch(
+        &home,
+        &args.harness,
+        &args.model,
+        args.provider.as_deref(),
+        &args.passthrough,
+    )?;
+    if args.dry_run {
+        let data = aikit_cli::route_launch::plan_disclosure(&plan);
+        return Ok(Reply::Data {
+            context: EnvelopeContext::default(),
+            data,
+            warnings: vec![],
+            exit_code: json::EXIT_OK,
+        });
+    }
+    if !json_mode {
+        eprintln!(
+            "aikit harness run: {} (route via {}, model {} as {}; credential: {})",
+            plan.argv.join(" "),
+            plan.provider,
+            plan.model,
+            plan.provider_native_id,
+            plan.credential_disclosure,
+        );
+        for var in &plan.delivered_env_vars {
+            eprintln!("  delivering bound key under {var}");
+        }
+    }
+    let code = aikit_cli::route_launch::run_plan(&plan)?;
+    Ok(Reply::Status(code))
+}
+
+/// `aikit alias list|check|install` (ADR 0005 Stage 1): the user-owned
+/// command-family surface over manifests that are data, never code.
+fn cmd_alias(cwd: &std::path::Path, c: AliasCmd, _json_mode: bool) -> Result<Reply> {
+    let _ = cwd;
+    let home = AikitHome::discover()?;
+    match c.command {
+        AliasSub::List | AliasSub::Check => {
+            let runner = aikit_adapters::runner::SystemRunner::new();
+            let (readings, problems) = aikit_cli::alias_family::read_all(&home, Some(&runner));
+            let launchable = readings
+                .iter()
+                .filter(|r| r.verdict == "launchable")
+                .count();
+            let refused = readings.iter().filter(|r| r.verdict == "refused").count();
+            let invalid = readings.iter().filter(|r| r.verdict == "invalid").count();
+            let verb = if matches!(c.command, AliasSub::Check) {
+                "checked"
+            } else {
+                "listed"
+            };
+            let data = jval!({
+                "verb": verb,
+                "entries": readings,
+                "problems": problems,
+                "summary": {
+                    "launchable": launchable,
+                    "refused": refused,
+                    "invalid": invalid,
+                },
+                "standing": "families are data over existing seams; `install` emits the launchers as generated data the owner places on PATH",
+            });
+            // `check` fails when anything is refused or invalid, so a broken
+            // family cannot pass quietly; `list` only discloses.
+            let exit_code = if matches!(c.command, AliasSub::Check)
+                && (refused > 0 || invalid > 0 || !problems.is_empty())
+            {
+                json::EXIT_USAGE
+            } else {
+                json::EXIT_OK
+            };
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: problems.clone(),
+                exit_code,
+            })
+        }
+        AliasSub::Install(a) => {
+            let data = aikit_cli::alias_family::install(&home, &a.family, a.out.clone())?;
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+    }
 }
 
 /// `aikit session-space` — the folded SessionSpace/encounter verb family
