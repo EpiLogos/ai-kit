@@ -12,9 +12,9 @@ use aikit_core::harness_admission::HarnessActivationObservation;
 use aikit_core::projection::ProjectionPlan;
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::{AikitError, ResourceRef, Result, SourceRevision};
-use aikit_store::{encounter::EncounterStore, AikitHome, SessionSpaceApplicationStore};
+use aikit_store::{AikitHome, SessionSpaceApplicationStore, encounter::EncounterStore};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -142,7 +142,13 @@ impl EncounterContextAdmission {
                 .map_err(error)?;
             if bytes.len() as u64 > MAX_BYTES || blake3::hash(&bytes).to_hex().as_str() != expected
             {
-                return Err(AikitError::new("encounter.context_stale", format!("Required source {} no longer matches the admitted material for revision {}", source.source, source.revision)));
+                return Err(AikitError::new(
+                    "encounter.context_stale",
+                    format!(
+                        "Required source {} no longer matches the admitted material for revision {}",
+                        source.source, source.revision
+                    ),
+                ));
             }
         }
         for activation in &self.source_activations {
@@ -173,7 +179,7 @@ impl EncounterContextAdmission {
                 return Err(AikitError::new(
                     "encounter.context_invalid",
                     "Projection and activation evidence must be supplied together",
-                ))
+                ));
             }
         }
         Ok(())
@@ -475,13 +481,17 @@ impl EncounterService {
         resident: &Resident,
         phase: &str,
     ) -> Result<()> {
+        crate::direct_agent_session::check(&self.home, session, &resident.cwd)?;
         let current = self.providers()?.into_iter().find(|p| p.id == resident.provider)
             .ok_or_else(|| AikitError::new("encounter.provider_removed", "The resident provider configuration was removed; reopen explicitly before further effects"))?;
         if current.required_context != resident.required_context
             || current.protocol != resident.protocol
             || current.argv != resident.argv
         {
-            let failure = AikitError::new("encounter.context_changed", "Required context configuration changed; recompose and reopen instead of silently updating a resident encounter");
+            let failure = AikitError::new(
+                "encounter.context_changed",
+                "Required context configuration changed; recompose and reopen instead of silently updating a resident encounter",
+            );
             self.store.append(session, &json!({"kind":"context-admission-refused", "provider":resident.provider, "phase":phase, "code":failure.code(), "reason":failure.to_string()}))?;
             return Err(failure);
         }
@@ -493,12 +503,16 @@ impl EncounterService {
         )?;
         let model = agency::model::prepare(&self.home, session, &current)?;
         if model != resident.model {
-            return Err(error("Resident model policy/catalogue/credential/Agency basis changed; explicit re-resolution is required"));
+            return Err(error(
+                "Resident model policy/catalogue/credential/Agency basis changed; explicit re-resolution is required",
+            ));
         }
         if let Some(model) = &model {
             if resident.host.identity(session)?.state != aikit_adapters::SessionLaneState::Resident
             {
-                return Err(error("Model-selected resident already has a turn in flight; no overlapping model readmission"));
+                return Err(error(
+                    "Model-selected resident already has a turn in flight; no overlapping model readmission",
+                ));
             }
             // Pi get_state is a native read. The adapter rejects changed native
             // provider/model/session before another prompt can be submitted.
@@ -530,7 +544,7 @@ impl EncounterService {
         match &*lifecycle {
             Lifecycle::Closed(receipt) => return Ok(receipt.clone()),
             Lifecycle::Failed(reason) => {
-                return Err(AikitError::new("encounter.shutdown_failed", reason.clone()))
+                return Err(AikitError::new("encounter.shutdown_failed", reason.clone()));
             }
             Lifecycle::Running => {}
         }
@@ -617,10 +631,13 @@ impl EncounterService {
                 }
             })
         {
-            return Err(error("Encounter directory is outside its authored local Project context; resolve and attach current native context first"));
+            return Err(error(
+                "Encounter directory is outside its authored local Project context; resolve and attach current native context first",
+            ));
         }
         let _agency_lock = self.lock_agency(&agent_session)?;
         self.check_agency(&agent_session)?;
+        crate::direct_agent_session::check(&self.home, &agent_session, &cwd)?;
         let previous = self.store.last_native_binding(&agent_session)?;
         let mut residents = self.residents.lock().map_err(error)?;
         if let Some(held) = residents.get(&agent_session) {
@@ -635,7 +652,10 @@ impl EncounterService {
             );
         }
         if !reconnect && previous.is_some() {
-            return Err(AikitError::new("encounter.resume_required","A prior native binding exists; use explicit reconnect, or create a new canonical session for a fresh/forked encounter"));
+            return Err(AikitError::new(
+                "encounter.resume_required",
+                "A prior native binding exists; use explicit reconnect, or create a new canonical session for a fresh/forked encounter",
+            ));
         }
         if reconnect
             && previous.as_ref().is_none_or(|p| {
@@ -658,16 +678,21 @@ impl EncounterService {
                 p["cwd"] != json!(cwd)
                     || p["protocol"] != json!(configured.protocol)
                     || p["provider_argv_digest"]
-                        != json!(blake3::hash(
-                            serde_json::to_string(&configured.argv)
-                                .expect("argv JSON")
-                                .as_bytes()
+                        != json!(
+                            blake3::hash(
+                                serde_json::to_string(&configured.argv)
+                                    .expect("argv JSON")
+                                    .as_bytes()
+                            )
+                            .to_hex()
+                            .to_string()
                         )
-                        .to_hex()
-                        .to_string())
             })
         {
-            return Err(AikitError::new("encounter.reconnect_basis", "The recorded cwd/protocol/provider command changed or is unpinned; do not silently resume on a replacement body"));
+            return Err(AikitError::new(
+                "encounter.reconnect_basis",
+                "The recorded cwd/protocol/provider command changed or is unpinned; do not silently resume on a replacement body",
+            ));
         }
         self.check_context(
             &agent_session,
@@ -685,7 +710,10 @@ impl EncounterService {
         ))
         .map_err(error)?;
         if reconnect && configured.protocol != EncounterProtocol::Acp {
-            return Err(AikitError::new("encounter.reconnect_unsupported","This native provider does not publish a supported load/resume operation; no replacement session was created"));
+            return Err(AikitError::new(
+                "encounter.reconnect_unsupported",
+                "This native provider does not publish a supported load/resume operation; no replacement session was created",
+            ));
         }
         // Resolve the composed tool surface before any provider process exists,
         // so a composition failure cannot orphan a native provider. Whether the
@@ -947,13 +975,14 @@ impl EncounterService {
                 let active = connection["state"] == "TurnInFlight";
                 view["schema"] = json!("aikit.encounter-view/v1");
                 view["connection"] = connection;
-                view["permissions"] = json!(self
-                    .permissions
-                    .lock()
-                    .map_err(error)?
-                    .get(&agent_session)
-                    .map(|r| r.values().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default());
+                view["permissions"] = json!(
+                    self.permissions
+                        .lock()
+                        .map_err(error)?
+                        .get(&agent_session)
+                        .map(|r| r.values().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default()
+                );
                 view["permission_authority"] = json!("native-provider-consent");
                 view["history_reclassifications"] =
                     json!(self.store.legacy_load_reclassifications(&agent_session)?);
@@ -969,11 +998,12 @@ impl EncounterService {
                 ]);
                 Ok(view)
             }
-            EncounterRequest::Providers => Ok(json!(self
-                .providers()?
-                .into_iter()
-                .map(|p| json!({"id":p.id,"label":p.label}))
-                .collect::<Vec<_>>())),
+            EncounterRequest::Providers => Ok(json!(
+                self.providers()?
+                    .into_iter()
+                    .map(|p| json!({"id":p.id,"label":p.label}))
+                    .collect::<Vec<_>>()
+            )),
             EncounterRequest::ClassifyLegacyLoadReplay { agent_session } => {
                 self.require_attached(&agent_session)?;
                 let classification = self.store.classify_legacy_load_replay(&agent_session)?;
@@ -1091,12 +1121,24 @@ impl EncounterService {
                 let _operation = resident.operations.lock().map_err(error)?;
                 let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "before-prompt")?;
+                let mut context_evidence = None;
                 let cleared = self.store.submit(&agent_session, draft_revision, |text| {
                     let text = self.prepare_agency_text(&agent_session, text)?;
+                    let (text, evidence) =
+                        crate::direct_agent_session::prompt(&self.home, &agent_session, &text)?;
                     let handle = resident.lane.prompt(resident.prompt_payload(&text))?;
+                    context_evidence = evidence;
                     drop(handle);
                     Ok(())
                 })?;
+                // submit holds the journal transaction. Append only after
+                // commit; a failed post-dispatch receipt is never replayable.
+                if let Some(mut evidence) = context_evidence {
+                    evidence["draft_revision"] = json!(draft_revision);
+                    evidence["native_session_id"] =
+                        json!(resident.lane.binding().native_session_id);
+                    self.store.append(&agent_session, &evidence).map_err(|_| AikitError::new("encounter.submission_uncertain", "Native prompt was submitted but context receipt failed; reread, do not replay"))?;
+                }
                 Ok(json!({"accepted":true,"draft":cleared}))
             }
             EncounterRequest::Cancel {
@@ -1319,7 +1361,9 @@ pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
             )));
         }
         if std::time::Instant::now() >= deadline {
-            return Err(error("Encounter owner startup is still unconfirmed; inspect native owner log before retrying"));
+            return Err(error(
+                "Encounter owner startup is still unconfirmed; inspect native owner log before retrying",
+            ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
