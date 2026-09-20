@@ -3,13 +3,20 @@ on:
   push:
     branches: [agent/direct-accepted-agent-session-20260920]
   pull_request:
-    paths: ['crates/aikit-cli/src/direct_agent_session.rs', 'crates/aikit-cli/tests/direct_agent_session.rs', 'crates/aikit-adapters/src/connection_process.rs', 'crates/aikit-adapters/tests/human_authority_environment.rs', '.github/workflows/direct-agent-session.yml']
+    paths:
+      - 'crates/aikit-cli/src/direct_agent_session.rs'
+      - 'crates/aikit-cli/src/encounter_service.rs'
+      - 'crates/aikit-cli/tests/direct_agent_session.rs'
+      - 'crates/aikit-adapters/src/connection_process.rs'
+      - 'crates/aikit-adapters/tests/human_authority_environment.rs'
+      - 'tests/direct_agent_native_join.py'
+      - '.github/workflows/direct-agent-session.yml'
 permissions:
   contents: read
 jobs:
   native:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     permissions:
       contents: write
     steps:
@@ -17,55 +24,31 @@ jobs:
         with:
           ref: ${{ github.head_ref || github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install components for the actual repository toolchain
+      - name: Install repository formatter and lint
         run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Publish bounded native scope join on the owned branch
+      - name: Publish the preserved bounded native implementation
         if: github.event_name == 'push'
         shell: bash
         run: |
           test "$GITHUB_REF_NAME" = agent/direct-accepted-agent-session-20260920
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('crates/aikit-cli/src/direct_agent_session.rs');s=p.read_text()
-          needle='pub fn prepare(service: &Service, request: PrepareRequest) -> Result<Value> {'
-          if 'pub fn scope(service:' not in s:
-              assert s.count(needle)==1
-              s=s.replace(needle,'''/// Read the actual native ProjectBinding, without preparation or authority.
-          pub fn scope(service: &Service) -> Result<Value> {
-              let cwd = std::fs::canonicalize(service.invocation_cwd()).map_err(io)?;
-              let binding = aikit_tui::PaletteBackend::project_binding(service)?.ok_or_else(||
-                  failure("direct_agent.scope_unbound", "No native Project binding at the disclosed location"))?;
-              let central = crate::temporal::central_root_enclosing(Some(&cwd)).ok_or_else(||
-                  failure("direct_agent.central_unbound", "The disclosed location is not in Central"))?;
-              let central = std::fs::canonicalize(central).map_err(io)?;
-              Ok(json!({"schema":"aikit.direct-agent-scope/v1", "project_ref":binding.project,
-                  "cwd":cwd, "central_root":central, "binding":binding,
-                  "execution_authority_granted":false, "provider_started":false}))
-          }
-          
-          '''+needle)
-              old='"profile_revision":binding.request.expected_revision,"prepared":ready'
-              assert s.count(old)==1
-              s=s.replace(old,'"profile_revision":binding.request.expected_revision,"project_ref":binding.project_context.project,"prepared":ready')
-              p.write_text(s)
-              p=Path('crates/aikit-cli/src/session_space_cli.rs');s=p.read_text()
-              assert s.count('enum Command {')==1
-              s=s.replace('enum Command {','enum Command {\n    /// Read the native ProjectBinding; no session or provider is created.\n    AgentSessionScope,',1)
-              needle='        Command::AgentSessionPrepare { request_json } => emit('
-              assert s.count(needle)==1
-              s=s.replace(needle,'        Command::AgentSessionScope => emit(&crate::direct_agent_session::scope(&service)?),\n'+needle)
-              p.write_text(s)
+          if test -f .github/finish-direct.py; then
+            python3 .github/finish-direct.py
+            rustfmt --edition 2024 --config skip_children=true crates/aikit-cli/src/direct_agent_session.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-cli/src/session_space_cli.rs crates/aikit-cli/tests/direct_agent_session.rs
+            python3 - <<'PY'
+          import subprocess
+          changed=set(subprocess.check_output(['git','diff','--name-only']).decode().splitlines())
+          allowed={'crates/aikit-cli/src/direct_agent_session.rs','crates/aikit-cli/src/encounter_service.rs','crates/aikit-cli/src/session_space_cli.rs','crates/aikit-cli/tests/direct_agent_session.rs'}
+          assert changed <= allowed, changed
           PY
-          rustfmt --edition 2024 --config skip_children=true crates/aikit-cli/src/direct_agent_session.rs crates/aikit-cli/src/session_space_cli.rs
-          git config user.name Epii
-          git config user.email agent-session@users.noreply.github.com
-          git add crates/aikit-cli/src/direct_agent_session.rs crates/aikit-cli/src/session_space_cli.rs
-          if ! git diff --cached --quiet; then
-            git commit -m 'feat(agent): disclose native root and child Project bindings for Direct session consumers'
+            git add crates/aikit-cli/src/direct_agent_session.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-cli/src/session_space_cli.rs crates/aikit-cli/tests/direct_agent_session.rs
+            git rm .github/finish-direct.py .github/repair-direct.py .github/disclose-direct.py
+            git config user.name Epii
+            git config user.email agent-session@users.noreply.github.com
+            git commit -m 'feat(agent): disclose effective World and Skill prerequisites and recover the exact failed native body'
             git push origin HEAD:refs/heads/agent/direct-accepted-agent-session-20260920
           fi
-      - name: Record exact committed source
+      - name: Record actual source and interrupted changes
         if: always()
         run: |
           mkdir -p direct-agent-evidence
@@ -101,14 +84,29 @@ jobs:
           cp target/debug/aikit direct-agent-evidence/aikit
           strip direct-agent-evidence/aikit
           sha256sum direct-agent-evidence/aikit > direct-agent-evidence/binary-sha256.txt
+      - name: Exact Central source acceptance dependency
+        id: central
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p /tmp/central-agent-owner
+          printf '%s\n' d0001cb7ca9eb2886c7158f05aa65272da198fa1 > direct-agent-evidence/central-source-revision.txt
+          curl --fail --silent --show-error --location https://codeload.github.com/EpiLogos/Central/tar.gz/d0001cb7ca9eb2886c7158f05aa65272da198fa1 | tar xz --strip-components=1 -C /tmp/central-agent-owner
+          cargo build --locked --manifest-path /tmp/central-agent-owner/Cargo.toml -p ctrl --bin ctrl 2>&1 | tee direct-agent-evidence/central-build.log
+      - name: Real native Central to ACP work and consequential recovery
+        id: join
+        continue-on-error: true
+        shell: bash
+        run: |
+          python3 tests/direct_agent_native_join.py --ctrl /tmp/central-agent-owner/target/debug/ctrl --aikit "$PWD/target/debug/aikit" 2>&1 | tee direct-agent-evidence/native-join.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: direct-agent-session-evidence
           path: direct-agent-evidence/
           retention-days: 7
-      - name: Preserve every failed gate
+      - name: Preserve every failed or unexecuted gate
         if: always()
         env:
-          OUTCOMES: ${{ steps.direct.outcome }},${{ steps.environment.outcome }},${{ steps.all.outcome }},${{ steps.lint.outcome }},${{ steps.build.outcome }}
-        run: test "$OUTCOMES" = 'success,success,success,success,success'
+          OUTCOMES: ${{ steps.direct.outcome }},${{ steps.environment.outcome }},${{ steps.all.outcome }},${{ steps.lint.outcome }},${{ steps.build.outcome }},${{ steps.central.outcome }},${{ steps.join.outcome }}
+        run: test "$OUTCOMES" = 'success,success,success,success,success,success,success'
