@@ -1,0 +1,47 @@
+name: Publish bounded native open repair
+on:
+  push:
+    branches: [agent/direct-accepted-agent-session-20260920]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Apply only the owned native repair
+        shell: bash
+        run: |
+          test "$GITHUB_REF_NAME" = agent/direct-accepted-agent-session-20260920
+          test -f .github/final-native-open-repair.py
+          python3 .github/final-native-open-repair.py
+          rustup component add rustfmt
+          rustfmt --edition 2021 --config skip_children=true crates/aikit-cli/src/encounter_service.rs
+          python3 - <<'PY'
+          import subprocess
+          allowed={'crates/aikit-cli/src/encounter_service.rs','tests/direct_agent_native_join.py'}
+          actual=set(subprocess.check_output(['git','diff','--name-only']).decode().splitlines());assert actual==allowed,actual
+          subprocess.run(['git','add',*sorted(allowed)],check=True)
+          PY
+          git rm .github/final-native-open-repair.py
+          git config user.name Epii
+          git config user.email agent-session@users.noreply.github.com
+          git commit -m 'fix(encounter): retain adapter open refusal and cleanup without replacing session identity'
+          git push origin HEAD:refs/heads/agent/direct-accepted-agent-session-20260920
+      - name: Retain source and any failed publication
+        if: always()
+        run: |
+          mkdir -p /tmp/native-open-repair
+          git rev-parse HEAD > /tmp/native-open-repair/head.txt
+          git diff > /tmp/native-open-repair/uncommitted.patch
+          git show --format=fuller HEAD > /tmp/native-open-repair/committed.patch
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-open-repair-publication
+          path: /tmp/native-open-repair/
+          retention-days: 7
