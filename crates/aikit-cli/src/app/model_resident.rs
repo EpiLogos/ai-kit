@@ -26,6 +26,7 @@ pub(super) fn realise(
     model: &str,
     provider: Option<&str>,
     body: Option<&str>,
+    resolution: Option<Value>,
 ) -> Result<Value> {
     let target: ResidentTarget = serde_json::from_value(
         compose.get("resident_target").cloned().ok_or_else(|| {
@@ -88,12 +89,18 @@ pub(super) fn realise(
             "Native selected-model admission or observation failed; no instantiation receipt or implicit fallback substitutes for a resident")
             .with("native_response", native.to_string()));
     }
-    Ok(json!({
+    let mut receipt = json!({
         "schema":"aikit.model-realisation/v2",
         "model_ref":model_ref,
         "selected":true,
         "executed":false,
         "resident":native["data"],
         "standing":"native catalogue/authority/credential/model-observed resident; send an addressed turn for actual inference and result evidence"
-    }))
+    });
+    // When the roster chose this model, the receipt names why: the winning
+    // pair, the policy and the ranking explanation ride the realisation.
+    if let Some(resolution) = resolution {
+        receipt["resolution"] = resolution;
+    }
+    Ok(receipt)
 }

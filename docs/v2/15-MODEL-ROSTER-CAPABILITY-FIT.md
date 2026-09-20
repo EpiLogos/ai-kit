@@ -34,7 +34,7 @@ Availability is a join, not a mint. Three independent kinds of evidence can prov
 2. **Router listing.** A Provider Source reads what a router or provider actually publishes. A listing proves the *router* offers an id. It proves nothing about the vendor's own API; the router route may be observed while the provider-native route stays unobserved with a reason.
 3. **Detected-harness dispatch.** A harness that is genuinely detected here, and whose Actuation capability descriptor declares `model_dispatch` (catalog r6 as consumed by #265), is evidence that the named provider is reachable from this machine. Both halves are required: a declaration without detection proves nothing, and `kind: "none"` is a declared absence rather than a missing declaration.
 
-Route shape (`provider-native`, `router-route`, `harness-native`, `local-serving`) is not identity. The same `ModelRef` may be reachable through several of these at once.
+Route shape (`provider-native`, `router-route`, `harness-native`, `local-serving`) is not identity. The same `ModelRef` may be reachable through several of these at once. `local-serving` is claimed only on locality evidence — a loopback endpoint (127.0.0.1/localhost/[::1]); a hosted provider whose models list was read over the network is provider-native evidence, and a router listing proves the router route only, never the vendor's own API. Provider-catalog listings additionally carry each listing's price and context window into the roster's candidate facts, where the route names the same `(provider, native id)` the listing describes.
 
 ### Three standings
 
@@ -192,7 +192,19 @@ The #265 field suites sit beside that receipt: `model_route_availability_accepta
 
 ## Planned extension — situated model profiles and optimisation Return
 
-**Owner-authorised 13 September 2026; implementation and live proving pending.** This extends the existing field, not the meaning of its historical acceptance. It recovers the owner's early roster intention: models understood by class, known or discovered quirks, and usefulness relative to tasks and kinds of work. AIKit is the native home because Direct agents and other consumers need the same knowledge as Factory. Factory remains the developmental demand, experiment/Candidate and outcome owner. Central retains authored preferences and adoption; Actuation actual usage; Workcell actual material conditions.
+**Owner-authorised 13 September 2026; §A–C implemented 2026-09-19 — the owner's
+model book, roster un-bypassing, hosted-route evidence and the compose
+resolution path; live proving = the recording run in the branch's session
+record (author a book entry, `model-catalogue show`, `compose --realise`
+without `--model`, roster JSON with eligible entries). §D–E (Factory Return
+loop, optimisation-protocol acceptance) remain pending.** This extends the
+existing field, not the meaning of its historical acceptance. It recovers the
+owner's early roster intention: models understood by class, known or discovered
+quirks, and usefulness relative to tasks and kinds of work. AIKit is the native
+home because Direct agents and other consumers need the same knowledge as
+Factory. Factory remains the developmental demand, experiment/Candidate and
+outcome owner. Central retains authored preferences and adoption; Actuation
+actual usage; Workcell actual material conditions.
 
 Use the full-suite [optimisation protocol](https://github.com/EpiLogos/O-I/blob/main/docs/experience/OPTIMISATION.md) under O-I#65; its publication/merge and installed loading have separate standing. Missing richness below is ordinary native development, not something a populated Markdown catalogue proves implemented.
 
@@ -229,3 +241,80 @@ Prove at least: two task types produce different explainable choices among eligi
 Compare model/body arrangements under both equal total budgets and equal required outcome quality where useful. Preserve original failed attempts and independent negatives. Compare the selection or quirk-triage practice itself as an exact O0/O1 Candidate on fixed held-out work, including all improvement overhead; changing the evaluator or quality floor to win is a failure. This supplies a concrete native input/Return for Ta-Onta #94's Pleroma/Anima/Aletheia and AW3 optimisation-of-optimisation tests without making QL a dependency of ordinary model selection.
 
 Do not reopen completed #64 or describe #265 foundations as missing. Reconcile the exact current catalogue, roster, selection, actualisation and Factory adapter before implementing only the gaps above. Repository contract tests, actual provider experiments, installation/loading and human experience retain D/C/P/M/H evidence separately.
+
+## The owner's model book (implemented 2026-09-19)
+
+§A–C above are implemented minimally and honestly as an authored overlay on
+the catalogue, read from the same place the owner entries already live —
+`<home>/model-catalogue/*.json`, later layers winning by canonical `ModelRef`,
+detection never writing there. An entry gains an optional `book` object:
+
+```json
+{
+  "model": "model:claude-opus-5",
+  "name": "Claude Opus 5",
+  "description": "…",
+  "routes": [ … ],
+  "source": "source/owner",
+  "book": {
+    "source": "owner/model-book",
+    "authored_at": "2026-09-19",
+    "note": "optional free note",
+    "class": {
+      "family": "Claude 5 family",
+      "generation": "2026-03 snapshot",
+      "reasoning": "deliberate, long-horizon",
+      "modalities": ["text", "vision"],
+      "facets": { "parameter_scale": "…only where genuinely disclosed" }
+    },
+    "quirks": [{
+      "claim": "under 40+ tool calls in one session it drops the oldest constraint",
+      "conditions": ["long tool loops"],
+      "evidence": "what was seen (refs, never secrets)",
+      "counterexample": "a case that did not show it, when known",
+      "workaround": "what works around it, with its cost",
+      "standing": "observed | hypothesised | superseded | retired",
+      "observed_at": "2026-09-12",
+      "source": "owner session journal",
+      "retest": "what would retest, supersede or retire this"
+    }],
+    "use_for": ["implementation", "review"],
+    "preference": { "rank": 5, "note": "first pick for hard refactors" },
+    "exclusion": { "reason": "…", "since": "2026-09-19" }
+  }
+}
+```
+
+The law, enforced in code:
+
+- **Every record carries source/date.** The loader (`load_owner_catalogue`)
+  validates each book and refuses a bad record loudly, naming file, model and
+  field (`model_book.invalid_record`); the refused entry does not load. An
+  exclusion without a reason is refused — it would be a mood, not a record.
+- **Authored judgements ride explanations and never become observations.**
+  The book fills `ModelRosterCandidate::authored_preference` (rendered as a
+  `PREF *rank` column in the TUI matrix, an unblended `authored-preference`
+  component in every explanation) and never fills `task_fitness` or
+  `observed_fitness`. `use_for` affinities and quirks render through
+  `aikit model-catalogue show` and `aikit system --json` (`models.authored`,
+  presence + refs); they are not scored as fitness.
+- **Preference decides exact ties only.** No policy blends authored
+  preference into `policy_score`; when two eligible pairs tie exactly, the
+  higher authored rank wins and the loser's `why_lost_to_winner` says the
+  owner's book decided. A preferred-but-unfit model still loses.
+- **The book is the only authorisation surface.** Without a book, every
+  authored gate stands open (`authorised`, `policy_allowed`,
+  `contract_compatible` true; the contract gates apply per demand
+  `required_contracts`). An authored `exclusion` closes `authorised` and
+  `policy_allowed` for that model everywhere. There is no other permission
+  system; the old hardcoded-false bypass in the compose candidate builder is
+  gone.
+- **No secret belongs in a book record** — keys are none of the book's
+  business. Model identity stays the canonical `ModelRef`; provider-native
+  ids mentioned in quirk conditions stay route metadata.
+
+Selection surfaces, unchanged in name: `aikit compose --realise` (with
+`--model`, an explicit pin; without one, the roster resolves under
+`--ranking-policy` and `--use-type` and the full ranking rides the plan and
+the realisation receipt), `aikit model-catalogue show`, and the TUI roster
+overlay. There is still deliberately no roster listing command.

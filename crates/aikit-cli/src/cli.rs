@@ -320,7 +320,9 @@ pub struct ComposeArgs {
     #[arg(long, requires = "agency_source")]
     pub world: Option<String>,
     /// Actualise the selected model through Actuation instead of only
-    /// disclosing the plan. Requires --model.
+    /// disclosing the plan. With an explicit --model that pin selects; without
+    /// one, the model roster resolves the model and the ranking explanation
+    /// rides the realisation.
     #[arg(long)]
     pub realise: bool,
     /// JSON file naming the existing SessionSpace, AgentSession and native owner socket.
@@ -333,6 +335,16 @@ pub struct ComposeArgs {
     /// never changes which Model was selected.
     #[arg(long)]
     pub provider: Option<String>,
+    /// The kind of work the model is for, when the roster resolves the model
+    /// (no --model). Named in the ranking explanation.
+    #[arg(long, default_value = "compose")]
+    pub use_type: String,
+    /// The ranking policy the roster resolves under, when no --model is
+    /// given. One of: CHEAPEST_ELIGIBLE, TASK_FIT, ROLE_FIT, PROFILE_FIT,
+    /// QUALITY_UNDER_BUDGET, BALANCED (default), INDEPENDENT_REVIEWER,
+    /// LOCAL_INSPECTABILITY.
+    #[arg(long)]
+    pub ranking_policy: Option<String>,
 }
 
 #[derive(Debug, Args)]

@@ -70,8 +70,22 @@ pub fn load_owner_catalogue(home: &AikitHome) -> OwnerCatalogueLoad {
     for path in paths {
         match read_catalogue_file(&path) {
             Ok(entries) => {
-                load.files.push(path);
+                load.files.push(path.clone());
                 for entry in entries {
+                    // An authored book is judged before it is used: a record
+                    // that cannot validate is refused loudly, naming the file
+                    // and the field, and its entry does not load — a silent
+                    // half-record would dress a typo up as the owner's voice.
+                    if let Some(book) = &entry.book {
+                        if let Err(error) = book.validate() {
+                            load.problems.push(format!(
+                                "{}: {}: {error}",
+                                path.display(),
+                                entry.model
+                            ));
+                            continue;
+                        }
+                    }
                     if let Err(error) = load.catalogue.insert(entry) {
                         load.problems.push(error.to_string());
                     }
@@ -333,5 +347,73 @@ mod tests {
         let load = load_owner_catalogue(&home2);
         assert!(load.catalogue.is_empty());
         assert!(load.problems[0].contains("v99"));
+    }
+
+    const BOOK_ENTRY: &str = r#"[{
+      "model": "model:booked-model",
+      "name": "Booked",
+      "description": "owner model book",
+      "routes": [{
+        "provider": "provider:ollama",
+        "kind": "local-serving",
+        "provider_native_ids": ["booked:7b"],
+        "credential": {"condition": "not-required"}
+      }],
+      "source": "source/owner",
+      "book": {
+        "source": "owner/model-book",
+        "authored_at": "2026-09-19",
+        "class": {"family": "Llama family", "reasoning": "fast, shallow",
+                  "modalities": ["text"], "facets": {"parameter_scale": "7B (disclosed)"}},
+        "quirks": [{
+          "claim": "under 30k-token prompts it repeats the seed phrase",
+          "conditions": ["local route, quantised build"],
+          "evidence": "smoke run 2026-09-18",
+          "standing": "observed",
+          "observed_at": "2026-09-18",
+          "source": "owner smoke run",
+          "retest": "after the next ollama pull"
+        }],
+        "use_for": ["drafting", "offline checks"],
+        "preference": {"rank": 2, "note": "the local fallback"},
+        "exclusion": null
+      }
+    }]"#;
+
+    #[test]
+    fn an_owner_book_loads_with_its_entry_and_survives_layering() {
+        let (_dir, home) = home();
+        write(&home, "book.json", BOOK_ENTRY);
+        let (catalogue, notes) = resolved_catalogue(&home);
+        let ollama = ProviderRef::parse("provider:ollama").unwrap();
+        let (entry, _) = catalogue.claiming(&ollama, "booked:7b").unwrap();
+        let book = entry.book.as_ref().expect("the book rides the entry");
+        assert_eq!(book.preference.as_ref().map(|p| p.rank), Some(2));
+        assert_eq!(book.quirks.len(), 1);
+        assert!(!book.excluded());
+        assert!(notes.iter().any(|note| note.contains("owner-authored")));
+    }
+
+    #[test]
+    fn a_bad_book_record_is_refused_loudly_naming_file_and_field() {
+        let (_dir, home) = home();
+        let bad = BOOK_ENTRY.replace(r#""observed_at": "2026-09-18""#, r#""observed_at": " ""#);
+        write(&home, "bad-book.json", &bad);
+        let load = load_owner_catalogue(&home);
+        assert!(
+            load.catalogue.is_empty(),
+            "the refused record does not load"
+        );
+        assert_eq!(load.problems.len(), 1);
+        assert!(
+            load.problems[0].contains("bad-book.json"),
+            "{}",
+            load.problems[0]
+        );
+        assert!(
+            load.problems[0].contains("quirks[0].observed_at"),
+            "the problem names the offending field: {}",
+            load.problems[0]
+        );
     }
 }

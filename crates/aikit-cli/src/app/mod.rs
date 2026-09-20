@@ -1018,13 +1018,99 @@ impl Service {
 
     /// Native source/authority/credential/model-observed resident selection.
     /// Opening is not inference: an addressed turn produces that evidence.
+    /// `resolution` is the roster reading that chose the model, when the
+    /// roster chose it (an explicit `--model` pin carries none); it is
+    /// embedded verbatim so the realisation receipt names why this model.
     pub fn realise_model(
         &self,
         composed: &serde_json::Value,
         model: &str,
         provider: Option<&str>,
+        resolution: Option<serde_json::Value>,
     ) -> Result<serde_json::Value> {
-        model_resident::realise(self, composed, model, provider, None)
+        model_resident::realise(self, composed, model, provider, None, resolution)
+    }
+
+    /// The roster's real selection, run for real: rank every viable
+    /// `(model, route)` pair under this context's demand and the named
+    /// policy, then collapse the winner back onto Model identity with every
+    /// viable route intact (`select_model`). The answer names what was chosen
+    /// (model, provider, native id), why (the winning pair's ranking
+    /// explanation), and carries the whole ranked roster so the disclosure
+    /// can show what lost and why. There is deliberately no standalone roster
+    /// listing command — this, `model-catalogue show` and the TUI overlay are
+    /// the resolution surfaces.
+    pub fn resolve_model(
+        &self,
+        composed: &serde_json::Value,
+        use_type: &str,
+        policy: aikit_core::resource::ModelRankingPolicy,
+    ) -> Result<serde_json::Value> {
+        use aikit_core::resource::{rank_model_roster, select_model, ModelRouteSet};
+
+        let route_sets: Vec<ModelRouteSet> =
+            serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
+                .map_err(|error| {
+                    AikitError::new("model_roster.route_sets_unreadable", error.to_string())
+                })?;
+        let candidates = self.roster_candidates(&route_sets)?;
+        let demand = self.model_roster_demand(use_type)?;
+        let roster = rank_model_roster(demand, policy, candidates);
+
+        let winning_model = roster
+            .entries
+            .iter()
+            .find(|entry| entry.explanation.eligible)
+            .map(|entry| entry.model.clone())
+            .ok_or_else(|| {
+                AikitError::new(
+                    "model_roster.no_eligible_candidate",
+                    "no (model, route) pair is eligible under the current demand — inspect the \
+                     roster's failed gates; a missing key, an unobserved route or an authored \
+                     exclusion each name themselves",
+                )
+                .with("use_type", use_type)
+            })?;
+        let set = route_sets
+            .iter()
+            .find(|set| set.model == winning_model)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "model_roster.route_set_missing",
+                    format!("the ranked winner {winning_model} has no route set"),
+                )
+            })?;
+        let selection = select_model(&roster, set, None).ok_or_else(|| {
+            AikitError::new(
+                "model_roster.selection_unresolvable",
+                format!("the ranked winner {winning_model} resolved to no usable route"),
+            )
+        })?;
+        let chosen = selection.viable_routes.first().cloned().ok_or_else(|| {
+            AikitError::new(
+                "model_roster.selection_unresolvable",
+                "the selection carries no route",
+            )
+        })?;
+
+        Ok(serde_json::json!({
+            "schema": "aikit.model-resolution/v1",
+            "policy": policy,
+            "use_type": use_type,
+            "selected": {
+                "model": selection.model,
+                "provider": chosen.provider,
+                "provider_native_id": chosen.provider_native_id,
+                "route_kind": chosen.kind.as_str(),
+                "credential": chosen.credential,
+                "pinned_provider": selection.pinned_provider,
+            },
+            "why": selection.explanation,
+            "viable_routes": selection.viable_routes,
+            "roster": roster,
+            "standing": "roster resolution over live route evidence; an explicit --model pin, \
+                         or a pinned encounter model-policy document, overrides without apology",
+        }))
     }
 
     /// Read one Provider Source's published model list into the local
@@ -1191,6 +1277,13 @@ impl Service {
                         "provider_native_ids": route.provider_native_ids,
                         "credential_required": route.credential.requires_credential(),
                     })).collect::<Vec<_>>(),
+                    // The owner's authored facts, when this entry carries
+                    // them: class facets, quirks, use-for affinities,
+                    // preference, exclusion. Authored judgements render beside
+                    // the model — they never masquerade as observations, and
+                    // `null` here means "no authored facts", not "no opinion
+                    // observed".
+                    "book": entry.book,
                 })
             })
             .collect();
@@ -2470,6 +2563,87 @@ impl Service {
             .with("scope", other.as_str())),
         }
     }
+    /// The real ranking demand: the project and profile this context actually
+    /// resolves, the kind of work asked of the model, and nothing invented.
+    /// Every hard gate except these authored constraints comes from route
+    /// evidence, not from here.
+    fn model_roster_demand(
+        &self,
+        use_type: &str,
+    ) -> Result<aikit_core::resource::ModelRosterDemand> {
+        let project = self
+            .project_binding()?
+            .map(|binding| aikit_core::ResourceRef::parse(binding.project.as_str()))
+            .transpose()?;
+        // The highest-precedence scope layer that names a profile supplies
+        // the profile ref; no authored profile means no profile ref, never a
+        // guessed one.
+        let profile = self
+            .scope_layers()
+            .and_then(|layers| {
+                layers
+                    .iter()
+                    .rev()
+                    .find_map(|layer| layer.patch.profiles.last())
+            })
+            .map(|id| aikit_core::ResourceRef::parse(format!("profile:{}", id.path())))
+            .transpose()?;
+        Ok(aikit_core::resource::ModelRosterDemand {
+            project,
+            profile,
+            agency: None,
+            use_type: use_type.to_string(),
+            required_capabilities: Default::default(),
+            required_modalities: Default::default(),
+            required_tools: Default::default(),
+            required_contracts: Default::default(),
+            context_characteristics: Default::default(),
+            independence_from: Default::default(),
+            estimated_input_tokens: None,
+            estimated_output_tokens: None,
+            cost_ceiling_usd: None,
+        })
+    }
+
+    /// One roster candidate per viable `(model, route)` pair, with the
+    /// model-level facts the catalogue supplies: the owner's book (authored
+    /// preference, authored exclusion, provenance) and the provider-catalog
+    /// listings (price, context window) where they name the route.
+    fn roster_candidates(
+        &self,
+        route_sets: &[aikit_core::resource::ModelRouteSet],
+    ) -> Result<Vec<aikit_core::resource::ModelRosterCandidate>> {
+        use aikit_core::resource::{
+            candidates_from_routes, stamp_provider_catalog_facts, ProviderCatalogObservation,
+        };
+
+        let (catalogue, _catalogue_notes) =
+            aikit_store::model_catalogue::resolved_catalogue(&self.home);
+        let (documents, _problems) =
+            aikit_store::model_catalogue::load_provider_catalogs(&self.home);
+        let observations: Vec<ProviderCatalogObservation> = documents
+            .into_iter()
+            .flat_map(|document| document.observations)
+            .collect();
+
+        let mut candidates = Vec::new();
+        for set in route_sets {
+            let book = catalogue
+                .get(&set.model)
+                .and_then(|entry| entry.book.clone());
+            let base = model_roster_candidate_for(&set.model, book.as_ref());
+            let built = candidates_from_routes(set, &base);
+            for (mut candidate, route) in built.into_iter().zip(set.viable()) {
+                stamp_harness_gate(&mut candidate, route);
+                stamp_provider_catalog_facts(&mut candidate, &observations);
+                candidates.push(candidate);
+            }
+        }
+        // Provider-catalog cache problems are not re-disclosed here: the
+        // compose plan's join notes already carry them, and a price missing
+        // because a cache file is unreadable stays visible there.
+        Ok(candidates)
+    }
 }
 
 /// A scope's on-disk declaration, opened for editing.
@@ -3199,15 +3373,14 @@ impl PaletteBackend for Service {
     /// Reuses the compose path's resolved `model_routes` (catalogue joined
     /// against live route observation) — the same route sets `realise_model`
     /// selects from — and ranks their viable `(model, route)` candidates through
-    /// the shared `rank_model_roster`. Central root is already a meta-project;
+    /// the shared `rank_model_roster`, under the same real demand the compose
+    /// resolution uses. Central root is already a meta-project;
     /// it needs neither a child Project nor a Profile to expose this roster.
     /// Only absence of both a native binding and local ground yields `None`.
     /// Source-only explicitly admitted Worlds use `compose_selected_plan`.
     /// Cached per session.
     fn model_roster(&self) -> Result<Option<aikit_core::resource::ModelRoster>> {
-        use aikit_core::resource::{
-            candidates_from_routes, rank_model_roster, ModelRankingPolicy, ModelRouteSet,
-        };
+        use aikit_core::resource::{rank_model_roster, ModelRankingPolicy, ModelRouteSet};
 
         if self.project_binding()?.is_none() && self.descriptor.project_root.is_none() {
             return Ok(None);
@@ -3223,23 +3396,9 @@ impl PaletteBackend for Service {
                     AikitError::new("model_roster.route_sets_unreadable", error.to_string())
                 })?;
 
-        // The harness facts this context's bound targets contribute: derived
-        // once through the typed seam from the embedded profiles' models
-        // layers, then applied to every candidate after the routes have
-        // filled in real providers.
-        let facts = harness_roster_facts(&self.descriptor.targets);
-
-        let mut candidates = Vec::new();
-        for set in &route_sets {
-            let base = model_roster_candidate_for(&set.model, &facts);
-            candidates.extend(candidates_from_routes(set, &base));
-        }
-        for candidate in &mut candidates {
-            let (harness_compatible, _) = facts.gate(Some(candidate.provider.as_str()));
-            candidate.harness_compatible = harness_compatible;
-        }
+        let candidates = self.roster_candidates(&route_sets)?;
         let roster = rank_model_roster(
-            model_roster_demand(&facts),
+            self.model_roster_demand("compose")?,
             ModelRankingPolicy::Balanced,
             candidates,
         );
@@ -3643,78 +3802,79 @@ fn plan_effect(adapter: &dyn TargetAdapter, rc: &ResolvedContext) -> Option<Acti
         .ok()
         .map(|plan| adapter.activation_effect(None, &plan))
 }
-/// The harness facts a context's bound targets contribute to the model
-/// roster, assembled through the one typed seam: every bound target that
-/// carries an embedded harness profile with a models layer lends that layer
-/// to the composition. Unprofiled targets (shell, the broker, harnesses
-/// without a models layer) lend nothing.
-fn harness_roster_facts(
-    targets: &[TargetId],
-) -> aikit_core::model_harness_binding::HarnessCompositionFacts {
-    let layers: Vec<(&str, &aikit_core::harness_profile::ModelsLayer)> = targets
-        .iter()
-        .filter_map(|target| {
-            let slug = aikit_adapters::profiles::slug_for_target(target)?;
-            let profile = aikit_adapters::profiles::for_slug(slug)?;
-            let models = profile.models.as_ref()?;
-            Some((slug, models))
-        })
-        .collect();
-    aikit_core::model_harness_binding::HarnessCompositionFacts::from_layers(&layers)
-}
+/// Stamp the harness provider gate onto a candidate served through a
+/// detected harness-native route. The route's endpoint carries the harness it
+/// was observed through (`… via harness/<slug>`); the embedded profile for
+/// that slug decides, through the shared `model_harness_binding` gate,
+/// whether the candidate's provider may serve that harness at all, and the
+/// roster's `harness_compatible`/`harness_composition` facts stop being
+/// stubs. Routes of every other kind carry no harness relation, and the base
+/// candidate's unfilled gate stands.
+fn stamp_harness_gate(
+    candidate: &mut aikit_core::resource::ModelRosterCandidate,
+    route: &aikit_core::resource::ModelRoute,
+) {
+    use aikit_core::model_harness_binding::{fitness_scope, gate_candidate, provider_gate};
+    use aikit_core::resource::ModelRouteKind;
 
-fn model_roster_demand(
-    facts: &aikit_core::model_harness_binding::HarnessCompositionFacts,
-) -> aikit_core::resource::ModelRosterDemand {
-    aikit_core::resource::ModelRosterDemand {
-        project: None,
-        // The demand-side scope spells the same `harness-profile/<slug>`
-        // convention the candidate side's `harness_composition` uses, so
-        // fitness observations bind across both.
-        profile: facts.scope.as_ref().map(|scope| {
-            aikit_core::resource::ResourceRef::parse(scope)
-                .expect("a harness-profile scope is a valid resource ref")
-        }),
-        agency: None,
-        use_type: "compose".into(),
-        required_capabilities: Default::default(),
-        required_modalities: Default::default(),
-        required_tools: Default::default(),
-        required_contracts: Default::default(),
-        context_characteristics: Default::default(),
-        independence_from: Default::default(),
-        estimated_input_tokens: None,
-        estimated_output_tokens: None,
-        cost_ceiling_usd: None,
+    if route.kind != ModelRouteKind::HarnessNative {
+        return;
     }
+    let Some((_selector, through)) = route
+        .endpoint
+        .as_deref()
+        .and_then(|endpoint| endpoint.rsplit_once(" via "))
+    else {
+        return;
+    };
+    let Some(slug) = through.strip_prefix("harness/") else {
+        return;
+    };
+    let Some(profile) = aikit_adapters::profiles::for_slug(slug) else {
+        return;
+    };
+    let Some(models) = profile.models.as_ref() else {
+        return;
+    };
+    let gate = provider_gate(models);
+    let (compatible, _why) = gate_candidate(&gate, Some(candidate.provider.as_str()));
+    candidate.harness_compatible = compatible;
+    candidate.harness_composition = Some(fitness_scope(slug));
 }
 
-/// The model-level facts a compose-time candidate carries. Route-level facts
-/// are filled in per route by `candidates_from_routes`, and the harness gate
-/// is applied after that fill-in (it compares against the candidate's real
-/// provider); nothing here asserts fitness, price or authorisation that has
-/// not been observed.
+/// The model-level facts a compose-time candidate carries, seeded from the
+/// owner's book where one exists. The owner's ruling is implemented here and
+/// nowhere else: eligibility is availability + key + harness, the book's
+/// exclusion is the only authored authorisation surface, and without a book
+/// every authored gate stands open. Route-level facts are filled per route by
+/// `candidates_from_routes`; nothing here asserts fitness, price or
+/// authorisation that has not been observed or authored.
 fn model_roster_candidate_for(
     model: &aikit_core::resource::ResourceRef,
-    facts: &aikit_core::model_harness_binding::HarnessCompositionFacts,
+    book: Option<&aikit_core::resource::OwnerModelBook>,
 ) -> aikit_core::resource::ModelRosterCandidate {
-    aikit_core::resource::ModelRosterCandidate {
+    use aikit_core::resource::apply_authored_book;
+    let mut candidate = aikit_core::resource::ModelRosterCandidate {
         model: model.clone(),
         variant: model.to_string(),
         provider: aikit_core::resource::ProviderRef::parse("provider:unresolved")
             .expect("static provider ref"),
         provider_revision: None,
+        // Nothing is proven at the model level; the route join proves
+        // availability and usability per route.
         available: false,
-        authorised: false,
         provider_usable: false,
-        policy_allowed: false,
-        contract_compatible: false,
-        // Gate truth is per-provider and applied in `model_roster` once the
-        // route fills the provider in; the composition scope and capability
-        // disclosure come from the bound harness profiles now.
+        // Only the harness gate and the owner's book constrain these; there
+        // is no other permission system to consult.
+        authorised: true,
+        policy_allowed: true,
+        // No contract demand exists on this surface; when one does, the
+        // roster's per-contract gates (demand.required_contracts ∩
+        // candidate.contracts) decide it, not this flag.
+        contract_compatible: true,
         harness_compatible: false,
-        harness_composition: facts.scope.clone(),
-        harness_capabilities: facts.capability_names(),
+        harness_composition: None,
+        harness_capabilities: Default::default(),
         native_capabilities: Default::default(),
         profile_skills: Default::default(),
         modalities: Default::default(),
@@ -3733,5 +3893,149 @@ fn model_roster_candidate_for(
         observed_fitness: Vec::new(),
         access: Default::default(),
         provenance: Vec::new(),
+    };
+    if let Some(book) = book {
+        apply_authored_book(&mut candidate, book);
+    }
+    candidate
+}
+
+#[cfg(test)]
+mod roster_gate_tests {
+    use super::stamp_harness_gate;
+    use aikit_core::resource::ModelRosterCandidate;
+    use aikit_core::resource::{
+        CredentialCondition, ModelRoute, ModelRouteKind, ProviderRef, ResourceRef,
+        RouteAvailability,
+    };
+
+    use crate::app::model_roster_candidate_for;
+
+    fn route(kind: ModelRouteKind, endpoint: Option<&str>) -> ModelRoute {
+        ModelRoute {
+            model: ResourceRef::parse("model:claude-sonnet-5").unwrap(),
+            provider: ProviderRef::parse("provider:anthropic").unwrap(),
+            kind,
+            provider_native_id: "claude-sonnet-5".into(),
+            endpoint: endpoint.map(str::to_string),
+            availability: RouteAvailability::Observed {
+                detection_ref: "detection:fixture".into(),
+            },
+            credential: CredentialCondition::NotRequired,
+            provenance: Vec::new(),
+        }
+    }
+
+    fn candidate(provider: &str) -> ModelRosterCandidate {
+        let mut candidate =
+            model_roster_candidate_for(&ResourceRef::parse("model:claude-sonnet-5").unwrap(), None);
+        candidate.provider = ProviderRef::parse(provider).unwrap();
+        candidate
+    }
+
+    #[test]
+    fn harness_native_route_stamps_the_profile_gate() {
+        // claude-code natively binds provider:anthropic.
+        let route = route(
+            ModelRouteKind::HarnessNative,
+            Some("config-key model via harness/claude-code"),
+        );
+
+        let mut matching = candidate("provider:anthropic");
+        stamp_harness_gate(&mut matching, &route);
+        assert!(matching.harness_compatible);
+        assert_eq!(
+            matching.harness_composition.as_deref(),
+            Some("harness-profile/claude-code")
+        );
+
+        let mut foreign = candidate("provider:openai");
+        stamp_harness_gate(&mut foreign, &route);
+        assert!(!foreign.harness_compatible);
+        // The composition is still named: the verdict carries its scope.
+        assert_eq!(
+            foreign.harness_composition.as_deref(),
+            Some("harness-profile/claude-code")
+        );
+    }
+
+    #[test]
+    fn provider_plural_and_unknown_slugs_do_not_stamp() {
+        // pi is provider-plural: the gate passes, and the scope is stamped.
+        let pi_route = route(
+            ModelRouteKind::HarnessNative,
+            Some("--provider argv via harness/pi"),
+        );
+        let mut plural = candidate("provider:zai");
+        stamp_harness_gate(&mut plural, &pi_route);
+        assert!(plural.harness_compatible);
+        assert_eq!(
+            plural.harness_composition.as_deref(),
+            Some("harness-profile/pi")
+        );
+
+        // A harness with no embedded profile carries no gate; the base
+        // candidate's unfilled facts stand.
+        let mut unstamped = candidate("provider:anthropic");
+        stamp_harness_gate(
+            &mut unstamped,
+            &route(
+                ModelRouteKind::HarnessNative,
+                Some("config-key model via harness/not-a-profile"),
+            ),
+        );
+        assert!(!unstamped.harness_compatible);
+        assert_eq!(unstamped.harness_composition, None);
+
+        // Non-harness routes never stamp.
+        let mut native = candidate("provider:anthropic");
+        stamp_harness_gate(
+            &mut native,
+            &route(ModelRouteKind::ProviderNative, Some("https://api")),
+        );
+        assert!(!native.harness_compatible);
+        assert_eq!(native.harness_composition, None);
+    }
+
+    #[test]
+    fn the_bypassed_gates_stand_open_without_a_book_and_close_only_on_exclusion() {
+        use aikit_core::resource::{AuthoredExclusion, AuthoredPreference, OwnerModelBook};
+
+        let plain =
+            model_roster_candidate_for(&ResourceRef::parse("model:claude-sonnet-5").unwrap(), None);
+        assert!(
+            plain.authorised && plain.policy_allowed && plain.contract_compatible,
+            "only the harness and routing constrain; there is no hidden permission system"
+        );
+
+        let mut book = OwnerModelBook {
+            source: "owner/model-book".into(),
+            authored_at: "2026-09-19".into(),
+            note: None,
+            class: None,
+            quirks: Vec::new(),
+            use_for: Vec::new(),
+            preference: Some(AuthoredPreference {
+                rank: 4,
+                note: None,
+            }),
+            exclusion: None,
+        };
+        let preferred = model_roster_candidate_for(
+            &ResourceRef::parse("model:claude-sonnet-5").unwrap(),
+            Some(&book),
+        );
+        assert_eq!(preferred.authored_preference, Some(4));
+        assert!(preferred.authorised && preferred.policy_allowed);
+
+        book.exclusion = Some(AuthoredExclusion {
+            reason: "excluded by the owner for this machine".into(),
+            since: "2026-09-19".into(),
+        });
+        let excluded = model_roster_candidate_for(
+            &ResourceRef::parse("model:claude-sonnet-5").unwrap(),
+            Some(&book),
+        );
+        assert!(!excluded.authorised && !excluded.policy_allowed);
     }
 }

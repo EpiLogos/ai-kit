@@ -23,7 +23,8 @@ fn application_realisation_dispatches_native_selected_model_and_requires_the_own
         .realise_model(
             &composed,
             "model:controlled-caw",
-            Some("provider:controlled-native")
+            Some("provider:controlled-native"),
+            None,
         )
         .is_err());
     assert!(!w.temp.path().join("root.log").exists());
@@ -34,10 +35,10 @@ fn application_realisation_dispatches_native_selected_model_and_requires_the_own
         .unwrap()
         .remove("resident_target");
     assert!(service
-        .realise_model(&incomplete, "model:controlled-caw", None)
+        .realise_model(&incomplete, "model:controlled-caw", None, None)
         .is_err());
     assert!(service
-        .realise_model(&composed, "model:unrelated", None)
+        .realise_model(&composed, "model:unrelated", None, None)
         .is_err());
     assert!(!w.temp.path().join("root.log").exists());
     let result = service
@@ -45,6 +46,7 @@ fn application_realisation_dispatches_native_selected_model_and_requires_the_own
             &composed,
             "model:controlled-caw",
             Some("provider:controlled-native"),
+            None,
         )
         .unwrap();
     assert_eq!(result["schema"], "aikit.model-realisation/v2");
@@ -64,7 +66,7 @@ fn application_realisation_dispatches_native_selected_model_and_requires_the_own
     assert_no_secret(w.home.root());
     w.stop();
     assert!(service
-        .realise_model(&composed, "model:controlled-caw", None)
+        .realise_model(&composed, "model:controlled-caw", None, None)
         .is_err());
     assert_eq!(prompts(&w), 1);
     println!("MODEL_APPLICATION_NATIVE_CONNECTION_EXECUTED");

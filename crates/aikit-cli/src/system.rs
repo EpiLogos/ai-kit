@@ -342,6 +342,41 @@ fn credential_inventory(service: &Service) -> Result<Value> {
     Ok(json!(rows))
 }
 
+/// The owner's authored model book, at presence-and-refs strength: which
+/// files the overlay loaded, each entry's ref and source, and which authored
+/// facts it carries. Judgement content (notes, quirk text, reasons) lives in
+/// `aikit model-catalogue show`; this row only says the book exists.
+fn authored_models(service: &Service) -> Value {
+    let load = aikit_store::model_catalogue::load_owner_catalogue(service.home());
+    json!({
+        "files": load
+            .files
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+        "problems": load.problems,
+        "entries": load
+            .catalogue
+            .entries()
+            .map(|entry| {
+                let facts = entry.book.as_ref();
+                json!({
+                    "model": entry.model,
+                    "name": entry.name,
+                    "source": entry.source,
+                    "authored": {
+                        "class": facts.is_some_and(|book| book.class.is_some()),
+                        "quirks": facts.map(|book| book.quirks.len()).unwrap_or(0),
+                        "use_for": facts.map(|book| book.use_for.len()).unwrap_or(0),
+                        "preference": facts.and_then(|book| book.preference.as_ref()).map(|p| p.rank),
+                        "excluded": facts.is_some_and(|book| book.excluded()),
+                    },
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// The usage overlays the active composition carries, one entry per active
 /// capability that has at least one overlay.
 fn usage_overlays(service: &Service) -> Value {
@@ -682,6 +717,7 @@ pub fn disclose(service: &Service) -> Result<Value> {
     let inventory_json = credential_inventory(service)?;
     let security_posture_json = security_posture(service)?;
     let secret_stores_json = secret_stores();
+    let authored_models_json = authored_models(service);
     let overlays_json = usage_overlays(service);
 
     // Authored (declared) half of the resolution chain. These come from the
@@ -878,6 +914,16 @@ pub fn disclose(service: &Service) -> Result<Value> {
                     Value::Null, "none",
                     "one row per binding: provider, declared location, added and last-rotated timestamps; never a value",
                     "aikit credential list", "ai-kit:credential:inventory", observed_at,
+                    materialisation_ref.clone(),
+                ),
+                setting(
+                    "models.authored", "Owner model book entries", "presence",
+                    Value::Null, "ai-kit:model:authored",
+                    authored_models_json.clone(),
+                    authored_models_json,
+                    Value::Null, "none",
+                    "presence and refs only: the owner's authored model-catalogue entries and which authored facts each carries; never a secret and never the observed half",
+                    "aikit model-catalogue show", "ai-kit:models:authored", observed_at,
                     materialisation_ref.clone(),
                 ),
             ],

@@ -610,16 +610,70 @@ fn cmd_compose(cwd: &std::path::Path, args: ComposeArgs) -> Result<Reply> {
             .map_err(|e| AikitError::new("compose.resident_target", e.to_string()))?;
     }
     if args.realise {
-        let model = args.model.as_deref().ok_or_else(|| {
-            AikitError::new(
-                "compose.realise_needs_model",
-                "--realise needs --model <model:stable-id>: a model is selected, never guessed",
-            )
-        })?;
-        let realisation = service.realise_model(&data, model, args.provider.as_deref())?;
+        // Two selection paths, both explicit about which one ran: an
+        // authored --model pin selects itself; without one, the model roster
+        // resolves under the named policy and the explanation rides the
+        // realisation. The pinned encounter model-policy document remains an
+        // override on the encounter path — it, too, is an authored pin.
+        let (model, provider, resolution, extra_warnings) = match args.model.as_deref() {
+            Some(model) => {
+                let warnings = if args.ranking_policy.is_some() {
+                    vec![
+                        "--ranking-policy is only consulted when --model is absent; the explicit \
+                         model pins the selection"
+                            .to_string(),
+                    ]
+                } else {
+                    Vec::new()
+                };
+                (model.to_string(), args.provider.clone(), None, warnings)
+            }
+            None => {
+                let policy = match args.ranking_policy.as_deref() {
+                    Some(name) => aikit_core::resource::ModelRankingPolicy::parse_name(name)?,
+                    None => aikit_core::resource::ModelRankingPolicy::Balanced,
+                };
+                let resolution = service.resolve_model(&data, args.use_type.as_str(), policy)?;
+                let selected = &resolution["selected"];
+                let model = selected["model"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        AikitError::new(
+                            "compose.resolution_incomplete",
+                            "the roster resolution named no model",
+                        )
+                    })?
+                    .to_string();
+                (
+                    model,
+                    selected["provider"].as_str().map(str::to_string),
+                    Some(resolution),
+                    Vec::new(),
+                )
+            }
+        };
+        let realisation =
+            match service.realise_model(&data, &model, provider.as_deref(), resolution.clone()) {
+                Ok(realisation) => realisation,
+                // A realisation refusal (no resident owner, for instance) must not
+                // bury the ranking: the resolution already happened, so it rides
+                // the refusal as structured detail.
+                Err(error) => {
+                    return Err(match resolution {
+                        Some(resolution) => error.with("model_resolution", resolution.to_string()),
+                        None => error,
+                    });
+                }
+            };
         if let Some(object) = data.as_object_mut() {
+            if let Some(resolution) = resolution {
+                object.insert("model_resolution".into(), resolution);
+            }
             object.insert("realisation".into(), realisation);
         }
+        let mut warnings = diagnostic_warnings(&service);
+        warnings.extend(extra_warnings);
+        return Ok(reply(&service, data, warnings));
     }
     Ok(reply(&service, data, diagnostic_warnings(&service)))
 }
