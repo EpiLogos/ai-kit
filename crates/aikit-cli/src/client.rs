@@ -6,22 +6,26 @@
 //! each client's config shape); this module turns that into world edits with
 //! inverses and hands them to the one engine.
 //!
-//! ## The surface is derived, never listed
+//! ## The roster derives from detection, never a list
 //!
-//! The client surface is the registry below joined against live intake: one
-//! detection run for the presence leg, one capability intake per catalog slug
-//! for the contract leg. Every registered adapter gets a row from the two
-//! three-state laws — a resolved descriptor is installable; a harness that is
-//! present here but whose descriptor is refused is a disclosed compatibility
-//! gap (the `HarnessCompatibilityGap` contract); a harness detection cannot
-//! see is absent with the evidence named. An intake that cannot be read at all
-//! is disclosed as unavailable — never silence, never a hard-coded roster.
+//! The universe of harness rows is the live `actuation harness detect --json`
+//! output — every descriptor the detector reports, whatever its state — plus
+//! exactly one synthetic non-harness row, the broker (AIKit itself). Detection
+//! owns the list; AIKit adds detail to it. The detail lives in the per-client
+//! overlay below, keyed by catalog slug: config-home fallbacks, dispatch
+//! decisions, materialisation adapters and admission censuses. A catalog slug
+//! with no overlay renders as an honest adapter-only row (the gemini
+//! precedent: the `aikit.harness-adapter/v1` missing-contract disclosure); a
+//! slug with no catalog entry has no row at all — it appears when Actuation's
+//! descriptor lands, never before. An intake that cannot be read at all is
+//! disclosed as unavailable — never silence, never a hard-coded roster.
 
 use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::Kind;
 use aikit_core::harness_admission::{
     unsupported_harness_gap, HarnessAdmissionAdapter, HarnessAdmissionDescriptor,
+    HarnessEditionKind,
 };
 use aikit_core::procedure::{Inverse, Plan, Procedure, ProcedureKind, WorldEdit};
 use aikit_core::projection::{ProjectionItem, ResolvedContext, TargetAdapter};
@@ -34,11 +38,10 @@ use aikit_adapters::actuation_harness_detection::{
     intake_actuation_detection, DetectionEntry, DetectionOutcome, DetectionState,
 };
 use aikit_adapters::clients::{
-    aider::AiderAdapter, antigravity::AntigravityAdapter, broker::BrokerAdapter,
-    claude::ClaudeAdapter, codex::CodexAdapter, cursor::CursorAdapter, dsh::DshAdapter,
-    gemini::GeminiAdapter, goose::GooseAdapter, grokbot::GrokbotAdapter, kimi::KimiAdapter,
-    ollama::OllamaAdapter, openclaw::OpenclawAdapter, opencode::OpencodeAdapter, pi::PiAdapter,
-    qwen::QwenAdapter, zcode::ZcodeAdapter, ClientAdapter,
+    antigravity::AntigravityAdapter, broker::BrokerAdapter, claude::ClaudeAdapter,
+    codex::CodexAdapter, gemini::GeminiAdapter, grokbot::GrokbotAdapter, hermes::HermesAdapter,
+    kimi::KimiAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter, pi::PiAdapter,
+    zcode::ZcodeAdapter, ClientAdapter,
 };
 use aikit_adapters::runner::SystemRunner;
 
@@ -47,6 +50,10 @@ use crate::app::Service;
 /// The Actuation binary every intake asks. Resolved at spawn time; a missing
 /// or refusing binary is an intake outcome, never a build-time fact.
 const ACTUATION_BIN: &str = "actuation";
+
+/// The one synthetic non-harness row: AIKit's own client, outside the
+/// catalog's law by design.
+const BROKER: &str = "broker";
 
 /// Where each client's dispatch wiring lands, decided the same way every time:
 /// Actuation's capability descriptor declares the seam when it is reachable;
@@ -122,17 +129,11 @@ enum SemanticBasis {
     Skills,
     /// No native projection: the honest count is zero, not the broker's set.
     None,
-    /// The broker's whole active view.
-    AllActive,
 }
 
-/// One harness adapter builder: the client dirs in, a live adapter plus its
-/// storage path out.
-type AdapterBuild = fn(&ClientDirs) -> Result<(Box<dyn ClientAdapter>, PathBuf)>;
-type CapabilityAdapterBuild =
-    fn(&ClientDirs, Option<HarnessCapability>) -> Result<(Box<dyn ClientAdapter>, PathBuf)>;
-
-/// How AIKit reaches this harness.
+/// How AIKit reaches a harness it carries detail for. Every variant carries
+/// function pointers only, so a reach copies out of the static overlay table.
+#[derive(Clone, Copy)]
 enum Reach {
     /// AIKit's own client: the config home is AIKit's, and no Actuation
     /// descriptor is needed or consulted.
@@ -149,29 +150,62 @@ enum Reach {
     },
 }
 
-/// One registered harness on the client surface. The registry is the single
-/// source of the roster: `status` enumerates it, `adapter_for` dispatches
-/// through it, and neither keeps a second list.
-struct RegisteredClient {
+/// One harness adapter builder: the client dirs in, a live adapter plus its
+/// storage path out.
+type AdapterBuild = fn(&ClientDirs) -> Result<(Box<dyn ClientAdapter>, PathBuf)>;
+
+/// A dispatch client's adapter builder: the client dirs and the resolved
+/// capability in, a live adapter plus its storage path out.
+type CapabilityAdapterBuild =
+    fn(&ClientDirs, Option<HarnessCapability>) -> Result<(Box<dyn ClientAdapter>, PathBuf)>;
+
+/// The broker's reach — the one SelfOwned resident. AIKit's own client needs
+/// no descriptor and no admission: the config home is AIKit's (`~/.aikit`),
+/// and the build is the real broker adapter, not a stub. The roster law is
+/// untouched: the broker is not an overlay (it has no catalog slug), it is
+/// the synthetic row the derived roster appends.
+fn broker_reach() -> Reach {
+    Reach::SelfOwned {
+        build: |dirs| {
+            Ok((
+                Box::new(BrokerAdapter::new()) as Box<dyn ClientAdapter>,
+                dirs.home.join(".aikit"),
+            ))
+        },
+    }
+}
+
+/// AIKit's detail for one catalog slug: the per-client overlay. The overlay is
+/// keyed by `catalog_slug` and carries everything detection cannot say — the
+/// CLI-facing name, aliases, the adapter, the admission census. A catalog slug
+/// without an overlay is a real harness row all the same: the generic row
+/// renders it honestly from its record entry alone. An overlay whose slug is
+/// absent from the catalog is unrepresentable: the key is not an `Option`.
+struct ClientOverlay {
     /// The CLI-facing name (`aikit client status <name>`).
     name: &'static str,
     /// Other names accepted for the same entry.
     aliases: &'static [&'static str],
-    /// The Actuation catalog slug the capability and detection intakes ask
-    /// for. `None` only for the broker, which is AIKit's own.
-    catalog_slug: Option<&'static str>,
+    /// The Actuation catalog slug this overlay details — the detection and
+    /// capability intakes ask for it.
+    catalog_slug: &'static str,
     semantic: SemanticBasis,
     reach: Reach,
     /// The evidence-backed admission census, used to disclose compatibility
-    /// gaps. `None` only for the broker, which needs no admission.
-    admission: Option<fn(&ClientDirs) -> HarnessAdmissionDescriptor>,
+    /// gaps.
+    admission: fn(&ClientDirs) -> HarnessAdmissionDescriptor,
 }
 
-static REGISTRY: &[RegisteredClient] = &[
-    RegisteredClient {
+/// The overlay surface: one entry per catalog slug AIKit carries an adapter
+/// for. This is detail ON detection's list, never a second list — a harness
+/// that Actuation stops declaring loses its overlay's row basis and shows up
+/// (if at all) through the record, and a harness Actuation declares without an
+/// overlay here still gets its honest generic row.
+static OVERLAYS: &[ClientOverlay] = &[
+    ClientOverlay {
         name: "claude",
         aliases: &["claude-code"],
-        catalog_slug: Some(TargetId::CLAUDE_CODE),
+        catalog_slug: TargetId::CLAUDE_CODE,
         semantic: SemanticBasis::Skills,
         reach: Reach::Client {
             build: |dirs, capability| match capability {
@@ -190,12 +224,12 @@ static REGISTRY: &[RegisteredClient] = &[
                 )),
             },
         },
-        admission: Some(|dirs| ClaudeAdapter::new(dirs.ctx_dir.clone()).admission()),
+        admission: |dirs| ClaudeAdapter::new(dirs.ctx_dir.clone()).admission(),
     },
-    RegisteredClient {
+    ClientOverlay {
         name: "codex",
         aliases: &[],
-        catalog_slug: Some(TargetId::CODEX),
+        catalog_slug: TargetId::CODEX,
         semantic: SemanticBasis::Skills,
         reach: Reach::Client {
             build: |dirs, capability| match capability {
@@ -213,12 +247,12 @@ static REGISTRY: &[RegisteredClient] = &[
                 )),
             },
         },
-        admission: Some(|dirs| CodexAdapter::new(dirs.tree.clone()).admission()),
+        admission: |dirs| CodexAdapter::new(dirs.tree.clone()).admission(),
     },
-    RegisteredClient {
+    ClientOverlay {
         name: "zcode",
         aliases: &[],
-        catalog_slug: Some(TargetId::ZCODE),
+        catalog_slug: TargetId::ZCODE,
         semantic: SemanticBasis::None,
         reach: Reach::Client {
             build: |dirs, capability| match capability {
@@ -236,188 +270,215 @@ static REGISTRY: &[RegisteredClient] = &[
                 )),
             },
         },
-        admission: Some(|_dirs| ZcodeAdapter::new().admission()),
+        admission: |_dirs| ZcodeAdapter::new().admission(),
     },
-    RegisteredClient {
-        name: "broker",
-        aliases: &[],
-        catalog_slug: None,
-        semantic: SemanticBasis::AllActive,
-        reach: Reach::SelfOwned {
-            build: |dirs| {
-                Ok((
-                    Box::new(BrokerAdapter::new()) as Box<dyn ClientAdapter>,
-                    dirs.home.join(".aikit"),
-                ))
-            },
-        },
-        admission: None,
-    },
-    RegisteredClient {
-        name: TargetId::AIDER,
-        aliases: &[],
-        catalog_slug: Some(TargetId::AIDER),
-        semantic: SemanticBasis::None,
-        reach: Reach::AdapterOnly {
-            build: |dirs| Box::new(AiderAdapter::new(projection_dir(dirs, "aider"))),
-        },
-        admission: Some(|dirs| AiderAdapter::new(projection_dir(dirs, "aider")).admission()),
-    },
-    RegisteredClient {
-        name: TargetId::ANTIGRAVITY,
-        aliases: &["antigravity"],
-        catalog_slug: Some(TargetId::ANTIGRAVITY),
-        semantic: SemanticBasis::None,
-        reach: Reach::AdapterOnly {
-            build: |dirs| Box::new(AntigravityAdapter::new(projection_dir(dirs, "antigravity"))),
-        },
-        admission: Some(|dirs| {
-            AntigravityAdapter::new(projection_dir(dirs, "antigravity")).admission()
-        }),
-    },
-    RegisteredClient {
-        name: TargetId::CURSOR_CLI,
-        aliases: &["cursor"],
-        catalog_slug: Some(TargetId::CURSOR_CLI),
-        semantic: SemanticBasis::None,
-        reach: Reach::AdapterOnly {
-            build: |dirs| Box::new(CursorAdapter::new(projection_dir(dirs, "cursor"))),
-        },
-        admission: Some(|dirs| CursorAdapter::new(projection_dir(dirs, "cursor")).admission()),
-    },
-    RegisteredClient {
-        name: TargetId::DEEPSEEK_HARNESS,
-        aliases: &["dsh"],
-        catalog_slug: Some(TargetId::DEEPSEEK_HARNESS),
-        semantic: SemanticBasis::None,
-        reach: Reach::AdapterOnly {
-            build: |dirs| Box::new(DshAdapter::new(projection_dir(dirs, "dsh"))),
-        },
-        admission: Some(|dirs| DshAdapter::new(projection_dir(dirs, "dsh")).admission()),
-    },
-    RegisteredClient {
+    ClientOverlay {
         name: TargetId::GEMINI_CLI,
         aliases: &["gemini"],
-        catalog_slug: Some(TargetId::GEMINI_CLI),
+        // The catalog slug is `gemini` (Round 4, TargetId::GEMINI): the
+        // client keeps the name `gemini-cli` with its `gemini` alias, and the
+        // detection/capability intakes ask the catalog what it actually
+        // declares — the claude/claude-code precedent on the join key.
+        catalog_slug: TargetId::GEMINI,
         semantic: SemanticBasis::None,
         reach: Reach::AdapterOnly {
             build: |dirs| Box::new(GeminiAdapter::new(projection_dir(dirs, "gemini"))),
         },
-        admission: Some(|dirs| GeminiAdapter::new(projection_dir(dirs, "gemini")).admission()),
+        admission: |dirs| GeminiAdapter::new(projection_dir(dirs, "gemini")).admission(),
     },
-    RegisteredClient {
-        name: TargetId::GOOSE,
-        aliases: &[],
-        catalog_slug: Some(TargetId::GOOSE),
-        semantic: SemanticBasis::None,
-        reach: Reach::AdapterOnly {
-            build: |dirs| Box::new(GooseAdapter::new(projection_dir(dirs, "goose"))),
-        },
-        admission: Some(|dirs| GooseAdapter::new(projection_dir(dirs, "goose")).admission()),
-    },
-    RegisteredClient {
-        name: TargetId::GROK_BOT,
-        aliases: &["grokbot"],
-        catalog_slug: Some(TargetId::GROK_BOT),
-        semantic: SemanticBasis::None,
-        reach: Reach::AdapterOnly {
-            build: |dirs| Box::new(GrokbotAdapter::new(projection_dir(dirs, "grokbot"))),
-        },
-        admission: Some(|dirs| GrokbotAdapter::new(projection_dir(dirs, "grokbot")).admission()),
-    },
-    RegisteredClient {
-        name: TargetId::KIMI,
-        aliases: &[],
-        catalog_slug: Some(TargetId::KIMI),
-        semantic: SemanticBasis::None,
-        reach: Reach::AdapterOnly {
-            build: |dirs| Box::new(KimiAdapter::new(projection_dir(dirs, "kimi"))),
-        },
-        admission: Some(|dirs| KimiAdapter::new(projection_dir(dirs, "kimi")).admission()),
-    },
-    RegisteredClient {
-        name: TargetId::OPENCODE,
-        aliases: &[],
-        catalog_slug: Some(TargetId::OPENCODE),
-        semantic: SemanticBasis::None,
-        reach: Reach::AdapterOnly {
-            build: |dirs| Box::new(OpencodeAdapter::new(projection_dir(dirs, "opencode"))),
-        },
-        admission: Some(|dirs| OpencodeAdapter::new(projection_dir(dirs, "opencode")).admission()),
-    },
-    RegisteredClient {
-        name: TargetId::OPENCLAW,
-        aliases: &[],
-        catalog_slug: Some(TargetId::OPENCLAW),
-        semantic: SemanticBasis::None,
-        reach: Reach::AdapterOnly {
-            build: |dirs| Box::new(OpenclawAdapter::new(projection_dir(dirs, "openclaw"))),
-        },
-        admission: Some(|dirs| OpenclawAdapter::new(projection_dir(dirs, "openclaw")).admission()),
-    },
-    RegisteredClient {
+    ClientOverlay {
         name: TargetId::PI,
         aliases: &[],
-        catalog_slug: Some(TargetId::PI),
+        catalog_slug: TargetId::PI,
         semantic: SemanticBasis::Skills,
         reach: Reach::AdapterOnly {
             build: |dirs| Box::new(PiAdapter::new(projection_dir(dirs, "pi"))),
         },
-        admission: Some(|dirs| PiAdapter::new(projection_dir(dirs, "pi")).admission()),
+        admission: |dirs| PiAdapter::new(projection_dir(dirs, "pi")).admission(),
     },
-    RegisteredClient {
-        name: TargetId::QWEN_CODE,
-        aliases: &[],
-        catalog_slug: Some(TargetId::QWEN_CODE),
+    ClientOverlay {
+        name: TargetId::ANTIGRAVITY,
+        aliases: &["antigravity"],
+        catalog_slug: TargetId::ANTIGRAVITY,
         semantic: SemanticBasis::None,
         reach: Reach::AdapterOnly {
-            build: |dirs| Box::new(QwenAdapter::new(projection_dir(dirs, "qwen"))),
+            build: |dirs| Box::new(AntigravityAdapter::new(projection_dir(dirs, "antigravity"))),
         },
-        admission: Some(|dirs| QwenAdapter::new(projection_dir(dirs, "qwen")).admission()),
+        admission: |dirs| AntigravityAdapter::new(projection_dir(dirs, "antigravity")).admission(),
     },
-    RegisteredClient {
+    ClientOverlay {
+        name: TargetId::GROK_BOT,
+        aliases: &["grokbot"],
+        catalog_slug: TargetId::GROK_BOT,
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(GrokbotAdapter::new(projection_dir(dirs, "grokbot"))),
+        },
+        admission: |dirs| GrokbotAdapter::new(projection_dir(dirs, "grokbot")).admission(),
+    },
+    ClientOverlay {
+        name: TargetId::KIMI,
+        aliases: &[],
+        catalog_slug: TargetId::KIMI,
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(KimiAdapter::new(projection_dir(dirs, "kimi"))),
+        },
+        admission: |dirs| KimiAdapter::new(projection_dir(dirs, "kimi")).admission(),
+    },
+    ClientOverlay {
+        name: TargetId::OPENCLAW,
+        aliases: &[],
+        catalog_slug: TargetId::OPENCLAW,
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(OpenclawAdapter::new(projection_dir(dirs, "openclaw"))),
+        },
+        admission: |dirs| OpenclawAdapter::new(projection_dir(dirs, "openclaw")).admission(),
+    },
+    ClientOverlay {
         name: TargetId::OLLAMA,
         aliases: &[],
-        catalog_slug: Some(TargetId::OLLAMA),
+        catalog_slug: TargetId::OLLAMA,
         semantic: SemanticBasis::None,
         reach: Reach::AdapterOnly {
             build: |dirs| Box::new(OllamaAdapter::new(projection_dir(dirs, "ollama"))),
         },
-        admission: Some(|dirs| OllamaAdapter::new(projection_dir(dirs, "ollama")).admission()),
+        admission: |dirs| OllamaAdapter::new(projection_dir(dirs, "ollama")).admission(),
+    },
+    ClientOverlay {
+        name: TargetId::HERMES,
+        aliases: &[],
+        catalog_slug: TargetId::HERMES,
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(HermesAdapter::new(projection_dir(dirs, "hermes"))),
+        },
+        admission: |dirs| HermesAdapter::new(projection_dir(dirs, "hermes")).admission(),
+    },
+    ClientOverlay {
+        name: TargetId::HERMES_ACP,
+        aliases: &[],
+        catalog_slug: TargetId::HERMES_ACP,
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(HermesAdapter::acp(projection_dir(dirs, "hermes-acp"))),
+        },
+        admission: |dirs| HermesAdapter::acp(projection_dir(dirs, "hermes-acp")).admission(),
     },
 ];
 
-fn lookup(client: &str) -> Option<&'static RegisteredClient> {
-    REGISTRY
-        .iter()
-        .find(|entry| entry.name == client || entry.aliases.contains(&client))
+fn client_overlay(client: &str) -> Option<&'static ClientOverlay> {
+    OVERLAYS.iter().find(|overlay| {
+        overlay.name == client
+            || overlay.aliases.contains(&client)
+            || overlay.catalog_slug == client
+    })
 }
 
 fn unknown_client_error(client: &str) -> AikitError {
-    let names = REGISTRY
-        .iter()
-        .map(|entry| entry.name)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let mut names: Vec<&str> = OVERLAYS.iter().map(|overlay| overlay.name).collect();
+    names.push(BROKER);
+    let names = names.join(", ");
     AikitError::new(
         "client.unknown",
         format!(
-            "`{client}` is not a client AIKit knows; the registered client surface is: {names}"
+            "`{client}` is not a client AIKit has an adapter for; the adapter surface is: {names}. \
+             The full harness roster derives from `actuation harness detect` — \
+             `aikit client status` shows every descriptor it reports, overlaid or not"
         ),
     )
     .with("client", client.to_string())
 }
 
-fn not_dispatchable(entry: &RegisteredClient) -> AikitError {
+fn not_dispatchable(overlay: &ClientOverlay) -> AikitError {
     AikitError::new(
         "client.not_dispatchable",
         format!(
             "`{}` is a registered harness with no launch or install seam; \
              `aikit client install|launch` reaches dispatch clients only",
-            entry.name
+            overlay.name
         ),
     )
-    .with("client", entry.name.to_string())
+    .with("client", overlay.name.to_string())
+}
+
+/// One row of the derived client surface. The type makes the wrong state
+/// unrepresentable: every row is the broker, or one descriptor read from the
+/// live detection record, or an overlay whose declared catalog slug the record
+/// does not name (or could not be read at all). A row keyed by nothing at all
+/// cannot be constructed.
+enum RosterMember {
+    /// A descriptor the live record reports, with AIKit's overlay when one
+    /// exists for its slug.
+    Descriptor {
+        entry: Box<DetectionEntry>,
+        overlay: Option<&'static ClientOverlay>,
+    },
+    /// An overlay whose catalog slug the record does not name (a detector
+    /// lagging the catalog), or whose record could not be read: AIKit's own
+    /// integrations stay visible with the disclosure instead of vanishing.
+    Unrecorded { overlay: &'static ClientOverlay },
+    /// The broker: AIKit itself, outside detection's law.
+    Broker,
+}
+
+impl RosterMember {
+    /// Whether this member answers to the given name: its CLI-facing name, an
+    /// alias, or — for a generic row — its catalog slug.
+    fn answers_to(&self, name: &str) -> bool {
+        match self {
+            RosterMember::Descriptor {
+                entry: _,
+                overlay: Some(overlay),
+            } => overlay.name == name || overlay.aliases.contains(&name),
+            RosterMember::Descriptor {
+                entry,
+                overlay: None,
+            } => entry.slug == name,
+            RosterMember::Unrecorded { overlay } => {
+                overlay.name == name || overlay.aliases.contains(&name)
+            }
+            RosterMember::Broker => name == BROKER,
+        }
+    }
+}
+
+/// Derive the roster members from one detection outcome. The record's entries
+/// come first (record order); overlays the record does not name follow; the
+/// broker closes the surface. With an unreadable record only the overlays and
+/// the broker render — nothing is invented in detection's place.
+fn roster_members(detection: &DetectionOutcome) -> Vec<RosterMember> {
+    let mut members = Vec::new();
+    match detection {
+        DetectionOutcome::Record(record) => {
+            for entry in &record.harnesses {
+                let overlay = OVERLAYS
+                    .iter()
+                    .find(|o| o.catalog_slug == entry.slug.as_str());
+                members.push(RosterMember::Descriptor {
+                    entry: Box::new(entry.clone()),
+                    overlay,
+                });
+            }
+            for overlay in OVERLAYS {
+                if !record
+                    .harnesses
+                    .iter()
+                    .any(|entry| entry.slug == overlay.catalog_slug)
+                {
+                    members.push(RosterMember::Unrecorded { overlay });
+                }
+            }
+        }
+        DetectionOutcome::Unavailable { .. } => {
+            for overlay in OVERLAYS {
+                members.push(RosterMember::Unrecorded { overlay });
+            }
+        }
+    }
+    members.push(RosterMember::Broker);
+    members
 }
 
 /// One harness's leg of the detection record, or the disclosure for why
@@ -439,17 +500,9 @@ enum DetectionLeg {
     RunUnavailable {
         reason: String,
     },
-    /// The broker: AIKit's own client, outside detection's law.
-    SelfOwned,
 }
 
-fn detection_leg(detection: &DetectionOutcome, entry: &RegisteredClient) -> DetectionLeg {
-    if matches!(entry.reach, Reach::SelfOwned { .. }) {
-        return DetectionLeg::SelfOwned;
-    }
-    let Some(slug) = entry.catalog_slug else {
-        return DetectionLeg::SelfOwned;
-    };
+fn detection_leg(detection: &DetectionOutcome, slug: &str) -> DetectionLeg {
     match detection {
         DetectionOutcome::Unavailable { reason } => DetectionLeg::RunUnavailable {
             reason: reason.clone(),
@@ -481,17 +534,17 @@ fn detection_config_dir(recorded: &DetectionEntry) -> Option<String> {
         .and_then(|probe| probe.spec.clone())
 }
 
-/// The derived surface state, from the two intake legs. Capability resolved
-/// means the install leg is satisfiable; a harness that is present while its
-/// descriptor is refused is a compatibility gap, not an error; detection's
-/// absence evidence is honoured; an unreadable intake is disclosed.
+/// The derived surface state of an overlaid harness, from the two intake legs.
+/// Capability resolved means the install leg is satisfiable; a harness that is
+/// present while its descriptor is refused is a compatibility gap, not an
+/// error; detection's absence evidence is honoured; an unreadable intake is
+/// disclosed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SurfaceKind {
     Installable,
     Gap,
     Absent,
     Unavailable,
-    SelfOwned,
 }
 
 fn derive_surface_kind(capability: Option<&CapabilityOutcome>, leg: &DetectionLeg) -> SurfaceKind {
@@ -503,34 +556,60 @@ fn derive_surface_kind(capability: Option<&CapabilityOutcome>, leg: &DetectionLe
             DetectionLeg::EntryUnavailable { .. } | DetectionLeg::RunUnavailable { .. } => {
                 SurfaceKind::Unavailable
             }
-            DetectionLeg::SelfOwned => SurfaceKind::SelfOwned,
         },
-        None => SurfaceKind::SelfOwned,
+        None => SurfaceKind::Unavailable,
+    }
+}
+
+/// The state of a catalog slug AIKit carries no overlay for. There is no
+/// adapter to install or plan through, so the row can never claim
+/// installable: a descriptor on the contract leg does not make the
+/// harness-adapter contract resolved. Present-without-adapter is the same
+/// honest gap the gemini precedent discloses.
+fn derive_generic_kind(leg: &DetectionLeg) -> SurfaceKind {
+    match leg {
+        DetectionLeg::Detected { .. } => SurfaceKind::Gap,
+        DetectionLeg::NotInstalled | DetectionLeg::AbsentFromRecord => SurfaceKind::Absent,
+        DetectionLeg::EntryUnavailable { .. } | DetectionLeg::RunUnavailable { .. } => {
+            SurfaceKind::Unavailable
+        }
     }
 }
 
 /// The adapter plus its configuration home. `capability` is `None` when
 /// Actuation's descriptor is unreachable — readable, but not installable.
 ///
-/// Dispatch comes from the one registry: a name this surface does not register
-/// is unknown, and a registered harness without a dispatch seam is told apart
-/// from an unknown name.
+/// Dispatch comes from the one overlay surface: a name no overlay carries is
+/// unknown to install and launch (the harness may still be a real catalog row;
+/// `aikit client status` shows it).
 fn adapter_for(
     service: &Service,
     client: &str,
 ) -> Result<(Box<dyn ClientAdapter>, Option<HarnessCapability>, PathBuf)> {
-    let entry = lookup(client).ok_or_else(|| unknown_client_error(client))?;
     let dirs = client_dirs(service);
-    let capability = match entry.catalog_slug {
-        Some(slug) => {
-            match intake_actuation_capability(&SystemRunner::new(), ACTUATION_BIN, slug) {
+    let overlay = if client == BROKER {
+        None
+    } else {
+        Some(client_overlay(client).ok_or_else(|| unknown_client_error(client))?)
+    };
+    // The broker reaches through `SelfOwned`: no descriptor is consulted,
+    // because AIKit owns its own config home. Every overlay harness answers
+    // to Actuation's capability intake first.
+    let (reach, capability) = match overlay {
+        None => (broker_reach(), None),
+        Some(overlay) => {
+            let capability = match intake_actuation_capability(
+                &SystemRunner::new(),
+                ACTUATION_BIN,
+                overlay.catalog_slug,
+            ) {
                 CapabilityOutcome::Descriptor(capability) => Some(*capability),
                 CapabilityOutcome::Unavailable { .. } => None,
-            }
+            };
+            (overlay.reach, capability)
         }
-        None => None,
     };
-    match entry.reach {
+    match reach {
         Reach::SelfOwned { build } => {
             let (adapter, config_dir) = build(&dirs)?;
             Ok((adapter, None, config_dir))
@@ -539,21 +618,24 @@ fn adapter_for(
             let (adapter, config_dir) = build(&dirs, capability.clone())?;
             Ok((adapter, capability, config_dir))
         }
-        Reach::AdapterOnly { .. } => Err(not_dispatchable(entry)),
+        Reach::AdapterOnly { .. } => Err(not_dispatchable(
+            overlay.expect("only the broker is overlay-less"),
+        )),
     }
 }
 
 /// Plan the install as a Procedure.
 pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
-    let entry = lookup(client).ok_or_else(|| unknown_client_error(client))?;
     // The extension-carrier seam: a harness whose profile declares a managed
     // hooks layer through the pi-extensions-record grammar has no dispatcher
     // entries to install — its managed install is the carrier itself,
     // projected through the settings `extensions` array and gated by capsule
     // trust. The reach stays AdapterOnly for launch: pi is launched through
-    // its own per-invocation CLI, not through AIKit's projection.
-    let carrier_profile = entry
-        .catalog_slug
+    // its own per-invocation CLI, not through AIKit's projection. The gate is
+    // profile-derived on the overlay's catalog slug, so a harness Actuation
+    // stops declaring loses the seam's row basis with its roster row.
+    let carrier_profile = client_overlay(client)
+        .map(|overlay| overlay.catalog_slug)
         .and_then(aikit_adapters::profiles::for_slug)
         .filter(|profile| {
             profile.hooks.as_ref().is_some_and(|hooks| {
@@ -571,7 +653,7 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
     // The law is unchanged: AIKit installs only what Actuation declares the
     // harness to be. The broker is the one exception, because AIKit owns its
     // config home and needs no descriptor for it.
-    if capability.is_none() && !matches!(entry.reach, Reach::SelfOwned { .. }) {
+    if capability.is_none() && client != BROKER {
         return Err(AikitError::new(
             "client.capability_unavailable",
             format!(
@@ -612,9 +694,9 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
                 return Err(AikitError::new(
                     "client.unexpected_install_item",
                     format!(
-                    "the {client} adapter asked for an install item AIKit cannot stage: {other:?}"
-                ),
-                ))
+                        "the {client} adapter asked for an install item AIKit cannot stage: {other:?}"
+                    ),
+                ));
             }
         }
     }
@@ -644,12 +726,12 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
 /// profile declares a managed hooks layer whose project file is neither
 /// home-relative nor absolute.
 pub fn project_scoped_hook_clients() -> Vec<&'static str> {
-    REGISTRY
+    OVERLAYS
         .iter()
-        .filter_map(|entry| {
-            let slug = entry.catalog_slug?;
-            let profile = aikit_adapters::profiles::slug_for_target(&TargetId::new(slug))
-                .and_then(aikit_adapters::profiles::for_slug)?;
+        .filter_map(|overlay| {
+            // The overlay's catalog slug is the profile join key — the same
+            // key the roster joins detection by.
+            let profile = aikit_adapters::profiles::for_slug(overlay.catalog_slug)?;
             let hooks = profile.hooks.as_ref()?;
             if hooks.posture != aikit_core::harness_profile::LayerPosture::Managed {
                 return None;
@@ -658,7 +740,7 @@ pub fn project_scoped_hook_clients() -> Vec<&'static str> {
             if file.starts_with('~') || Path::new(file).is_absolute() {
                 None
             } else {
-                Some(entry.name)
+                Some(overlay.name)
             }
         })
         .collect()
@@ -746,13 +828,11 @@ pub fn launch_command(service: &Service, client: &str) -> Result<Vec<String>> {
     Ok(argv)
 }
 
-/// What each registered client's derived surface says: the two intake legs
-/// (capability descriptor, detection), the lower-level materialisation work
-/// required to realise its projection, and whether the client is installed.
-///
-/// Every registered adapter gets a row — installable, gap, absent or
-/// unavailable, each with its intake evidence — so a harness can never be
-/// missing from the surface while its descriptor resolves.
+/// What the derived surface says: the live detection record enumerates the
+/// harness rows, each joined to its overlay detail when one exists, and the
+/// broker closes the surface. The two intake legs (capability descriptor,
+/// detection), the lower-level materialisation work required to realise a
+/// projection, and whether the client is installed ride each row.
 ///
 /// `items` deliberately counts selected semantic resources, not filesystem
 /// operations. A managed actor bootstrap can add a second generated projection
@@ -764,37 +844,83 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
     let rc = service.projection_context()?;
     let dirs = client_dirs(service);
     let detection = intake_actuation_detection(&SystemRunner::new(), ACTUATION_BIN);
+    let members = roster_members(&detection);
     let mut rows = Vec::new();
-    for entry in REGISTRY {
+    for member in &members {
         if let Some(only) = only {
-            if only != entry.name && !entry.aliases.contains(&only) {
+            if !member.answers_to(only) {
                 continue;
             }
         }
-        let capability = entry
-            .catalog_slug
-            .map(|slug| intake_actuation_capability(&SystemRunner::new(), ACTUATION_BIN, slug));
-        rows.push(client_row(entry, &rc, &dirs, &detection, capability)?);
+        rows.push(client_row(member, &rc, &dirs, &detection)?);
     }
     Ok(rows)
 }
 
-/// Derive one registry entry's row from its intake outcomes.
+/// Derive one roster member's row from the live intake outcomes.
 fn client_row(
-    entry: &'static RegisteredClient,
+    member: &RosterMember,
     rc: &ResolvedContext,
     dirs: &ClientDirs,
     detection: &DetectionOutcome,
-    capability: Option<CapabilityOutcome>,
 ) -> Result<serde_json::Value> {
-    let leg = detection_leg(detection, entry);
+    match member {
+        RosterMember::Broker => broker_row(rc, dirs),
+        RosterMember::Descriptor { entry, overlay } => match overlay {
+            Some(overlay) => overlaid_row(overlay, rc, dirs, detection),
+            None => generic_row(entry, rc, dirs, detection),
+        },
+        RosterMember::Unrecorded { overlay } => overlaid_row(overlay, rc, dirs, detection),
+    }
+}
+
+/// The broker's row: AIKit's own client, outside the three-state law.
+fn broker_row(rc: &ResolvedContext, dirs: &ClientDirs) -> Result<serde_json::Value> {
+    let adapter = BrokerAdapter::new();
+    let config_dir = dirs.home.join(".aikit");
+    let planned = adapter.plan(rc);
+    Ok(serde_json::json!({
+        "client": BROKER,
+        "harness": null,
+        "state": "self",
+        "dispatch": "self",
+        "config_dir": config_dir.display().to_string(),
+        "installed": config_dir.exists(),
+        "effect": planned.as_ref().ok().map(|p| adapter.activation_effect(None, p).describe()),
+        "items": planned.as_ref().ok().map(|_| rc.view.active.len()),
+        "materialization_items": planned.as_ref().ok().map(|p| p.items.len()),
+        "actor_bootstrap": rc.actor_bootstrap.is_some(),
+        "capability": "self",
+        "capability_reason": null,
+        "detection": "self",
+        "detection_reason": null,
+        "gap": null,
+        "notes": planned.as_ref().map(|p| p.notes.clone()).unwrap_or_default(),
+        "error": planned.as_ref().err().map(|e| e.message().to_string()),
+    }))
+}
+
+/// An overlaid harness's row: the full detail surface — adapter plan, semantic
+/// items, admission census-backed gap disclosure.
+fn overlaid_row(
+    overlay: &'static ClientOverlay,
+    rc: &ResolvedContext,
+    dirs: &ClientDirs,
+    detection: &DetectionOutcome,
+) -> Result<serde_json::Value> {
+    let leg = detection_leg(detection, overlay.catalog_slug);
+    let capability = Some(intake_actuation_capability(
+        &SystemRunner::new(),
+        ACTUATION_BIN,
+        overlay.catalog_slug,
+    ));
     let kind = derive_surface_kind(capability.as_ref(), &leg);
 
     // The adapter for planning, and the config home the row reports. The
     // descriptor's seam wins when it resolved; the detection probe is the
     // read-model fallback for adapter-only harnesses; the adapter's default
     // home is the dispatch clients' fallback.
-    let (adapter, config_dir): (Box<dyn TargetAdapter>, Option<PathBuf>) = match entry.reach {
+    let (adapter, config_dir): (Box<dyn TargetAdapter>, Option<PathBuf>) = match overlay.reach {
         Reach::SelfOwned { build } => {
             let (adapter, config_dir) = build(dirs)?;
             (adapter as Box<dyn TargetAdapter>, Some(config_dir))
@@ -822,10 +948,9 @@ fn client_row(
     };
 
     let planned = adapter.plan(rc);
-    let semantic_items = match entry.semantic {
+    let semantic_items = match overlay.semantic {
         SemanticBasis::Skills => rc.view.active_of_kind(Kind::Skill).len(),
         SemanticBasis::None => 0,
-        SemanticBasis::AllActive => rc.view.active.len(),
     };
     let mut notes = planned
         .as_ref()
@@ -836,38 +961,24 @@ fn client_row(
         SurfaceKind::Installable => ("installable", None),
         SurfaceKind::Absent => ("absent", None),
         SurfaceKind::Unavailable => ("unavailable", None),
-        SurfaceKind::SelfOwned => ("self", None),
-        SurfaceKind::Gap => ("gap", Some(gap_disclosure(entry, dirs, &mut notes))),
+        SurfaceKind::Gap => ("gap", Some(gap_disclosure(overlay, dirs, &mut notes))),
     };
 
     let (capability_name, capability_reason) = match &capability {
-        None => ("self", None),
         Some(CapabilityOutcome::Descriptor(_)) => ("descriptor", None),
         Some(CapabilityOutcome::Unavailable { reason }) => ("unavailable", Some(reason.clone())),
+        None => ("unavailable", None),
     };
-    let (detection_name, detection_reason) = match &leg {
-        DetectionLeg::Detected { .. } => ("detected", None),
-        DetectionLeg::NotInstalled => ("not-installed", None),
-        DetectionLeg::EntryUnavailable { reason } => ("unavailable", reason.clone()),
-        DetectionLeg::AbsentFromRecord => (
-            "absent-from-record",
-            Some(format!(
-                "the detection record names no entry for slug {}",
-                entry.catalog_slug.unwrap_or(entry.name)
-            )),
-        ),
-        DetectionLeg::RunUnavailable { reason } => ("unavailable", Some(reason.clone())),
-        DetectionLeg::SelfOwned => ("self", None),
-    };
-    let dispatch_name = match entry.reach {
+    let (detection_name, detection_reason) = leg_names(&leg, overlay.catalog_slug);
+    let dispatch_name = match overlay.reach {
         Reach::SelfOwned { .. } => "self",
         Reach::Client { .. } => "client",
         Reach::AdapterOnly { .. } => "adapter-only",
     };
 
     Ok(serde_json::json!({
-        "client": entry.name,
-        "harness": entry.catalog_slug,
+        "client": overlay.name,
+        "harness": overlay.catalog_slug,
         "state": state,
         "dispatch": dispatch_name,
         "config_dir": config_dir.as_ref().map(|d| d.display().to_string()),
@@ -886,24 +997,86 @@ fn client_row(
     }))
 }
 
-/// The compatibility-gap disclosure for a harness that is present here while
-/// its capability descriptor is refused: the harness-adapter contract's own
-/// structured gap, built from the adapter's evidence-backed admission census.
-/// A census that cannot be built is disclosed in the notes, never silently
-/// dropped.
+/// A catalog slug's row when AIKit carries no overlay for it: the honest
+/// adapter-only shape. There is no adapter to plan or install through, so
+/// effect and item counts stay null; the detection probe is the config-home
+/// evidence; a present harness discloses the missing harness-adapter contract.
+fn generic_row(
+    entry: &DetectionEntry,
+    rc: &ResolvedContext,
+    dirs: &ClientDirs,
+    detection: &DetectionOutcome,
+) -> Result<serde_json::Value> {
+    let leg = detection_leg(detection, &entry.slug);
+    let capability = intake_actuation_capability(&SystemRunner::new(), ACTUATION_BIN, &entry.slug);
+    let kind = derive_generic_kind(&leg);
+
+    let (state, gap) = match kind {
+        SurfaceKind::Gap => ("gap", generic_gap_disclosure(entry)),
+        SurfaceKind::Absent => ("absent", None),
+        SurfaceKind::Unavailable => ("unavailable", None),
+        // Unreachable by construction: `derive_generic_kind` never yields it.
+        SurfaceKind::Installable => ("installable", None),
+    };
+
+    let (capability_name, capability_reason) = match &capability {
+        CapabilityOutcome::Descriptor(_) => ("descriptor", None),
+        CapabilityOutcome::Unavailable { reason } => ("unavailable", Some(reason.clone())),
+    };
+    let (detection_name, detection_reason) = leg_names(&leg, &entry.slug);
+    let config_dir = leg
+        .detected_config_dir()
+        .map(|spec| expand_seam(&spec, &dirs.home, &dirs.tree));
+
+    Ok(serde_json::json!({
+        "client": entry.slug,
+        "harness": entry.slug,
+        "state": state,
+        "dispatch": "adapter-only",
+        "config_dir": config_dir.as_ref().map(|d| d.display().to_string()),
+        "installed": config_dir.as_ref().map(|d| d.exists()),
+        "effect": null,
+        "items": null,
+        "materialization_items": null,
+        "actor_bootstrap": rc.actor_bootstrap.is_some(),
+        "capability": capability_name,
+        "capability_reason": capability_reason,
+        "detection": detection_name,
+        "detection_reason": detection_reason,
+        "gap": gap,
+        "notes": ["no AIKit adapter carries this catalog slug; the row is the \
+                   detection record's own disclosure"],
+        "error": null,
+    }))
+}
+
+/// The display names of a detection leg, shared by overlaid and generic rows.
+fn leg_names(leg: &DetectionLeg, slug: &str) -> (&'static str, Option<String>) {
+    match leg {
+        DetectionLeg::Detected { .. } => ("detected", None),
+        DetectionLeg::NotInstalled => ("not-installed", None),
+        DetectionLeg::EntryUnavailable { reason } => ("unavailable", reason.clone()),
+        DetectionLeg::AbsentFromRecord => (
+            "absent-from-record",
+            Some(format!(
+                "the detection record names no entry for slug {slug}"
+            )),
+        ),
+        DetectionLeg::RunUnavailable { reason } => ("unavailable", Some(reason.clone())),
+    }
+}
+
+/// The compatibility-gap disclosure for an overlaid harness that is present
+/// here while its capability descriptor is refused: the harness-adapter
+/// contract's own structured gap, built from the adapter's evidence-backed
+/// admission census. A census that cannot be built is disclosed in the notes,
+/// never silently dropped.
 fn gap_disclosure(
-    entry: &'static RegisteredClient,
+    overlay: &'static ClientOverlay,
     dirs: &ClientDirs,
     notes: &mut Vec<String>,
 ) -> Option<serde_json::Value> {
-    let Some(admission) = entry.admission else {
-        notes.push(format!(
-            "no admission census is registered for {}; the gap is disclosed by its intake reasons alone",
-            entry.name
-        ));
-        return None;
-    };
-    let descriptor = admission(dirs);
+    let descriptor = (overlay.admission)(dirs);
     match unsupported_harness_gap(
         descriptor.target.clone(),
         descriptor.product.clone(),
@@ -930,6 +1103,21 @@ fn gap_disclosure(
     }
 }
 
+/// The generic slug's gap disclosure: no admission census exists because no
+/// adapter does, so the missing contract is named plainly from the record's
+/// own entry.
+fn generic_gap_disclosure(entry: &DetectionEntry) -> Option<serde_json::Value> {
+    let gap = unsupported_harness_gap(
+        TargetId::new(entry.slug.clone()),
+        entry.slug.clone(),
+        HarnessEditionKind::Custom,
+        entry.version.clone(),
+        Vec::new(),
+    )
+    .ok()?;
+    serde_json::to_value(&gap).ok()
+}
+
 impl DetectionLeg {
     fn detected_config_dir(&self) -> Option<String> {
         match self {
@@ -953,15 +1141,16 @@ fn plan_carrier_install(
 ) -> Result<Procedure> {
     // Actuation still declares what the harness is before AIKit writes its
     // native configuration — the same law the dispatcher-entry installs keep.
-    let entry = lookup(client).ok_or_else(|| unknown_client_error(client))?;
-    let capability = match entry.catalog_slug {
-        Some(slug) => {
-            match intake_actuation_capability(&SystemRunner::new(), ACTUATION_BIN, slug) {
-                CapabilityOutcome::Descriptor(capability) => Some(*capability),
-                CapabilityOutcome::Unavailable { .. } => None,
-            }
-        }
-        None => None,
+    // The overlay is the detail source: its catalog slug is what the
+    // capability intake asks for.
+    let overlay = client_overlay(client).ok_or_else(|| unknown_client_error(client))?;
+    let capability = match intake_actuation_capability(
+        &SystemRunner::new(),
+        ACTUATION_BIN,
+        overlay.catalog_slug,
+    ) {
+        CapabilityOutcome::Descriptor(capability) => Some(*capability),
+        CapabilityOutcome::Unavailable { .. } => None,
     };
     if capability.is_none() {
         return Err(AikitError::new(
@@ -991,7 +1180,9 @@ fn plan_carrier_install(
             let hook = capsule.hook().ok_or_else(|| {
                 AikitError::new(
                     "client.carrier_not_a_hook",
-                    format!("{carrier_id} is not a hook capsule; the carrier projection                              cannot proceed"),
+                    format!(
+                        "{carrier_id} is not a hook capsule; the carrier projection cannot proceed"
+                    ),
                 )
             })?;
             let path = capsule
@@ -1040,7 +1231,7 @@ fn plan_carrier_install(
             AikitError::new(
                 "client.carrier_without_seam",
                 format!(
-                    "the {client} profile's hooks layer declares no project seam; the                      carrier cannot be installed"
+                    "the {client} profile's hooks layer declares no project seam; the carrier cannot be installed"
                 ),
             )
             .with("client", client.to_string())
@@ -1101,7 +1292,7 @@ fn plan_carrier_install(
             Some(&plan.settings_item),
             None,
             plan.stale_carrier_files.as_slice(),
-            "inactive: the carrier is not trust-active, so every owned registration              and file was swept"
+            "inactive: the carrier is not trust-active, so every owned registration and file was swept"
                 .to_string(),
         ),
         aikit_adapters::HooksProjectionOutcome::NotProjected { .. } => unreachable!(),
@@ -1145,7 +1336,7 @@ fn plan_carrier_install(
         return Err(AikitError::new(
             "client.nothing_to_install",
             format!(
-                "the {client} carrier is inactive and nothing AIKit owns is registered;                  there is nothing to install or sweep"
+                "the {client} carrier is inactive and nothing AIKit owns is registered; there is nothing to install or sweep"
             ),
             )
             .with("client", client.to_string()));
@@ -1297,10 +1488,30 @@ mod tests {
     }
 
     #[test]
-    fn self_owned_is_outside_the_three_state_law() {
+    fn a_generic_slug_never_claims_installable() {
+        // No overlay, no adapter: even detection's best evidence cannot make
+        // the row installable — the missing contract is the adapter contract.
+        for leg in [
+            DetectionLeg::Detected { config_dir: None },
+            DetectionLeg::NotInstalled,
+            DetectionLeg::AbsentFromRecord,
+            DetectionLeg::RunUnavailable {
+                reason: "spawn lost".into(),
+            },
+        ] {
+            assert_ne!(
+                derive_generic_kind(&leg),
+                SurfaceKind::Installable,
+                "a generic row has nothing to install through"
+            );
+        }
         assert_eq!(
-            derive_surface_kind(None, &DetectionLeg::SelfOwned),
-            SurfaceKind::SelfOwned
+            derive_generic_kind(&DetectionLeg::Detected { config_dir: None }),
+            SurfaceKind::Gap
+        );
+        assert_eq!(
+            derive_generic_kind(&DetectionLeg::NotInstalled),
+            SurfaceKind::Absent
         );
     }
 
@@ -1322,7 +1533,7 @@ mod tests {
               "harnesses": [
                 {"slug": "pi", "harness_ref": "harness/pi", "state": "detected",
                  "probes": [{"kind": "config-dir", "result": "pass", "spec": "~/.pi/agent"}]},
-                {"slug": "aider", "harness_ref": "harness/aider", "state": "not-installed"},
+                {"slug": "unrecorded-anywhere", "harness_ref": "harness/unrecorded-anywhere", "state": "not-installed"},
                 {"slug": "flaky", "harness_ref": "harness/flaky", "state": "unavailable",
                  "unavailable_reason": "probes failed"}
               ],
@@ -1330,20 +1541,7 @@ mod tests {
               "availability": "complete"
             }"#,
         );
-        let pi = REGISTRY.iter().find(|e| e.name == "pi").unwrap();
-        let aider = REGISTRY.iter().find(|e| e.name == TargetId::AIDER).unwrap();
-        let flaky = RegisteredClient {
-            name: "flaky",
-            aliases: &[],
-            catalog_slug: Some("flaky"),
-            semantic: SemanticBasis::None,
-            reach: Reach::AdapterOnly {
-                build: |_| Box::new(PiAdapter::new(".")),
-            },
-            admission: None,
-        };
-
-        match detection_leg(&outcome, pi) {
+        match detection_leg(&outcome, "pi") {
             DetectionLeg::Detected { config_dir } => {
                 assert_eq!(config_dir.as_deref(), Some("~/.pi/agent"))
             }
@@ -1352,18 +1550,18 @@ mod tests {
         assert_eq!(
             derive_surface_kind(
                 unavailable("refused").as_ref(),
-                &detection_leg(&outcome, pi)
+                &detection_leg(&outcome, "pi")
             ),
             SurfaceKind::Gap
         );
         assert_eq!(
             derive_surface_kind(
                 unavailable("refused").as_ref(),
-                &detection_leg(&outcome, aider)
+                &detection_leg(&outcome, "unrecorded-anywhere")
             ),
             SurfaceKind::Absent
         );
-        match detection_leg(&outcome, &flaky) {
+        match detection_leg(&outcome, "flaky") {
             DetectionLeg::EntryUnavailable { reason } => {
                 assert_eq!(reason.as_deref(), Some("probes failed"))
             }
@@ -1385,9 +1583,8 @@ mod tests {
               "availability": "complete"
             }"#,
         );
-        let pi = REGISTRY.iter().find(|e| e.name == "pi").unwrap();
         assert!(matches!(
-            detection_leg(&outcome, pi),
+            detection_leg(&outcome, "pi"),
             DetectionLeg::AbsentFromRecord
         ));
     }
@@ -1407,47 +1604,126 @@ mod tests {
     }
 
     #[test]
-    fn registry_is_one_roster_keyed_by_target_id() {
-        let mut names: Vec<&str> = REGISTRY.iter().map(|e| e.name).collect();
-        let count = names.len();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), count, "registry names must be unique");
-        for entry in REGISTRY {
-            match entry.reach {
-                Reach::SelfOwned { .. } => {
-                    assert!(
-                        entry.catalog_slug.is_none(),
-                        "{} owns its config home",
-                        entry.name
-                    );
-                    assert!(
-                        entry.admission.is_none(),
-                        "{} needs no admission",
-                        entry.name
-                    );
+    fn the_roster_is_the_record_plus_unrecorded_overlays_plus_the_broker() {
+        // A record naming a generic slug and an overlaid slug: the generic slug
+        // renders from the record alone, the overlay joins by catalog slug,
+        // overlays the record does not name stay visible as unrecorded, and the
+        // broker closes the surface.
+        let outcome = detection_record(
+            r#"{
+              "schema": "actuation.harness-detection/v1",
+              "detection_ref": "detection:fixture",
+              "observed_at": "2026-09-15T00:00:00Z",
+              "catalog_revision": 7,
+              "detector": {"implementation": "fixture"},
+              "harnesses": [
+                {"slug": "pi", "harness_ref": "harness/pi", "state": "detected"},
+                {"slug": "future-harness", "harness_ref": "harness/future-harness", "state": "detected"}
+              ],
+              "absent": [],
+              "availability": "complete"
+            }"#,
+        );
+        let members = roster_members(&outcome);
+        let broker = members.last().expect("the broker closes the surface");
+        assert!(matches!(broker, RosterMember::Broker));
+
+        let generics: Vec<_> = members
+            .iter()
+            .filter_map(|m| match m {
+                RosterMember::Descriptor { entry, overlay } if overlay.is_none() => {
+                    Some(entry.slug.as_str())
                 }
-                _ => {
-                    assert!(
-                        entry.catalog_slug.is_some(),
-                        "{} must carry its catalog slug",
-                        entry.name
-                    );
-                    assert!(
-                        entry.admission.is_some(),
-                        "{} must carry an admission census for gap disclosure",
-                        entry.name
-                    );
-                }
-            }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(generics, vec!["future-harness"]);
+
+        // pi joins its overlay by catalog slug; the record's name for the row
+        // is the overlay's CLI-facing name, not the slug.
+        let pi = members.iter().find_map(|m| match m {
+            RosterMember::Descriptor {
+                overlay: Some(o), ..
+            } if o.catalog_slug == "pi" => Some(o.name),
+            _ => None,
+        });
+        assert_eq!(pi, Some("pi"));
+
+        // Every overlay slug the record does not name is an unrecorded row.
+        let unrecorded: Vec<_> = members
+            .iter()
+            .filter_map(|m| match m {
+                RosterMember::Unrecorded { overlay } => Some(overlay.catalog_slug),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            unrecorded.len(),
+            OVERLAYS.len() - 1,
+            "the record named exactly one overlay slug (pi)"
+        );
+        assert!(!unrecorded.contains(&"pi"));
+    }
+
+    #[test]
+    fn an_unreadable_record_leaves_the_overlays_and_the_broker_only() {
+        let outcome = DetectionOutcome::Unavailable {
+            reason: "no bin".to_string(),
+        };
+        let members = roster_members(&outcome);
+        assert!(members
+            .iter()
+            .all(|m| matches!(m, RosterMember::Unrecorded { .. } | RosterMember::Broker)));
+        assert_eq!(
+            members
+                .iter()
+                .filter(|m| matches!(m, RosterMember::Broker))
+                .count(),
+            1,
+            "exactly one broker row"
+        );
+    }
+
+    #[test]
+    fn the_overlay_surface_is_keyed_by_catalog_slug() {
+        let mut names: Vec<&str> = OVERLAYS.iter().map(|o| o.name).collect();
+        let mut slugs: Vec<&str> = OVERLAYS.iter().map(|o| o.catalog_slug).collect();
+        for checked in [&mut names, &mut slugs] {
+            let count = checked.len();
+            checked.sort_unstable();
+            checked.dedup();
+            assert_eq!(
+                checked.len(),
+                count,
+                "overlay names and slugs must be unique"
+            );
+        }
+        for overlay in OVERLAYS {
+            assert!(
+                !overlay.catalog_slug.trim().is_empty(),
+                "{} must carry a catalog slug: an overlay without one is unrepresentable",
+                overlay.name
+            );
+            // The SelfOwned reach belongs to the broker alone (outside this
+            // surface): an overlay is detail ON a catalog slug, so it cannot
+            // also be the harness that owns its own config home. The broker
+            // carries its real builder through `broker_reach` instead of an
+            // overlay-shaped admission-less stub.
+            assert!(
+                !matches!(overlay.reach, Reach::SelfOwned { .. }),
+                "{} must not claim the self-owned reach; the broker is its one resident",
+                overlay.name
+            );
         }
     }
 
     #[test]
-    fn every_harness_client_effects_dispatches_has_a_registry_row() {
+    fn every_harness_client_effects_arm_resolves_detail_ground() {
         // The harness targets `app::client_effects` dispatches on, pinned here
-        // so a harness added to the effects dispatch without a registry row
-        // fails this test instead of silently diverging from the roster.
+        // so a harness added to the effects dispatch without detail ground
+        // fails this test instead of silently diverging. The client-status
+        // roster, by contrast, derives from detection — an effects arm is a
+        // context-binding surface, not a roster claim.
         let dispatched: &[&str] = &[
             TargetId::CLAUDE_CODE,
             TargetId::CODEX,
@@ -1465,15 +1741,15 @@ mod tests {
             TargetId::OLLAMA,
             TargetId::OPENCLAW,
             TargetId::PI,
+            TargetId::HERMES,
+            TargetId::HERMES_ACP,
         ];
         for target in dispatched {
-            let resolved = lookup(target).is_some()
-                || REGISTRY
-                    .iter()
-                    .any(|entry| entry.catalog_slug == Some(*target));
+            let slug = aikit_adapters::profiles::slug_for_target(&TargetId::new(*target))
+                .unwrap_or_else(|| panic!("{target} is dispatched but joins no catalog slug"));
             assert!(
-                resolved,
-                "{target} is dispatched by client_effects but has no registry row"
+                aikit_adapters::profiles::for_slug(slug).is_some(),
+                "{target} joins to profile `{slug}` but no embedded profile carries it"
             );
         }
 
@@ -1490,25 +1766,8 @@ mod tests {
             body.matches("TargetId::").count(),
             dispatched.len() + 1,
             "client_effects names a target this guard does not list; \
-             extend the guard and the registry together with the dispatch"
+             extend the guard and the overlay together with the dispatch"
         );
-
-        // Where the profile surface joins a roster slug to a catalog slug, the
-        // joined profile must exist. Slugs the profile surface does not map
-        // (dsh, grok-bot, aider, …) are roster-only and assert nothing here.
-        for entry in REGISTRY {
-            let Some(slug) = entry.catalog_slug else {
-                continue; // the broker: AIKit's own, no catalog join
-            };
-            if let Some(profile_slug) =
-                aikit_adapters::profiles::slug_for_target(&TargetId::new(slug))
-            {
-                assert!(
-                    aikit_adapters::profiles::for_slug(profile_slug).is_some(),
-                    "{slug} joins to profile `{profile_slug}` but no embedded profile carries it"
-                );
-            }
-        }
     }
 
     #[test]
@@ -1516,34 +1775,34 @@ mod tests {
         for (alias, name) in [
             ("claude-code", "claude"),
             ("antigravity", TargetId::ANTIGRAVITY),
-            ("cursor", TargetId::CURSOR_CLI),
-            ("dsh", TargetId::DEEPSEEK_HARNESS),
             ("gemini", TargetId::GEMINI_CLI),
             ("grokbot", TargetId::GROK_BOT),
         ] {
-            let via_alias = lookup(alias).expect("alias must resolve");
-            let via_name = lookup(name).expect("name must resolve");
+            let via_alias = client_overlay(alias).expect("alias must resolve");
+            let via_name = client_overlay(name).expect("name must resolve");
             assert!(
                 std::ptr::eq(via_alias, via_name),
-                "{alias} and {name} must be the same registry entry"
+                "{alias} and {name} must be the same overlay entry"
             );
         }
+        // A catalog slug resolves to the same entry as its client name —
+        // the gemini precedent on the join key.
+        let via_slug = client_overlay(TargetId::GEMINI).expect("catalog slug must resolve");
+        let via_name = client_overlay(TargetId::GEMINI_CLI).expect("name must resolve");
+        assert!(std::ptr::eq(via_slug, via_name));
     }
 
     #[test]
-    fn every_registered_harness_gap_disclosure_builds() {
-        // The admission census of every registered harness must satisfy the
-        // gap contract, or a gap row would lose its structured disclosure.
+    fn every_overlay_admission_builds() {
+        // The admission census of every overlaid harness must satisfy the gap
+        // contract, or a gap row would lose its structured disclosure.
         let dirs = ClientDirs {
             ctx_dir: PathBuf::from("/tmp/ctx"),
             tree: PathBuf::from("/tmp/tree"),
             home: PathBuf::from("/tmp/home"),
         };
-        for entry in REGISTRY {
-            let Some(admission) = entry.admission else {
-                continue;
-            };
-            let descriptor = admission(&dirs);
+        for overlay in OVERLAYS {
+            let descriptor = (overlay.admission)(&dirs);
             unsupported_harness_gap(
                 descriptor.target.clone(),
                 descriptor.product.clone(),
@@ -1554,7 +1813,7 @@ mod tests {
             .unwrap_or_else(|error| {
                 panic!(
                     "{}'s admission must build a valid gap: {}",
-                    entry.name,
+                    overlay.name,
                     error.message()
                 )
             });
@@ -1562,17 +1821,17 @@ mod tests {
     }
 
     #[test]
-    fn client_roster_is_derived_never_a_literal() {
+    fn the_surface_is_derived_never_a_literal() {
         let source = include_str!("client.rs");
         // Split the needles so this check's own text cannot match them.
         let loop_needle = format!("for {} in [", "client");
         assert!(
             !source.contains(&loop_needle),
-            "the client roster must be enumerated from the registry, not a literal loop"
+            "the client roster must be enumerated from the derived members, not a literal loop"
         );
         assert!(
-            source.contains("for entry in REGISTRY"),
-            "status must enumerate the registry"
+            source.contains("for member in &members"),
+            "status must enumerate the derived roster members"
         );
         let roster_needle = format!("\"claude\", \"{}\", \"zcode\", \"{}\"", "codex", "broker");
         assert!(

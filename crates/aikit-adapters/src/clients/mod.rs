@@ -39,6 +39,7 @@ pub mod dsh;
 pub mod gemini;
 pub mod goose;
 pub mod grokbot;
+pub mod hermes;
 pub mod hook_map;
 pub mod kimi;
 pub mod ollama;

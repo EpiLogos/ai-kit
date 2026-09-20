@@ -534,7 +534,9 @@ mod tests {
                 .iter()
                 .map(|layer| layer.layer.as_str())
                 .collect::<Vec<_>>(),
-            vec!["skills", "guidance", "hooks", "tools", "models", "sessions"],
+            // claude-code declares the settings layer since the trust
+            // declarations landed (settings.trust-settings); profile order.
+            vec!["skills", "guidance", "hooks", "tools", "models", "sessions", "settings"],
             "layers render in profile order; undeclared layers are absent"
         );
     }

@@ -10,7 +10,7 @@ The optional `source_activations` use existing `ContextActivationReceipt` semant
 
 Current limitations are deliberate and visible: the preflight is a point-in-time material check, not an atomic snapshot consumed by every harness tool; the gate does not police built-in Pi tools or replace native Action/Workcell enforcement. It does not automatically resolve Profile governance into effective context. Owner-issued revision metadata is retained, while current local bytes are checked separately. Proving source loading and governed tool effects requires the actual supported ACP integration and its evidence.
 
-Use the existing native `aikit-session-space encounter-configure --provider-json` operation to configure the provider; it is not an IPC capability. JSON may include `required_context` with `sources`, `source_activations`, `projection` and `activation`. An owner can omit activation evidence by using an empty source-activation list and null projection/activation; that remains a source prerequisite only. Do not manufacture loading receipts to fill these fields.
+Use the existing native `aikit session-space encounter-configure --provider-json` operation to configure the provider; it is not an IPC capability. JSON may include `required_context` with `sources`, `source_activations`, `projection` and `activation`. An owner can omit activation evidence by using an empty source-activation list and null projection/activation; that remains a source prerequisite only. Do not manufacture loading receipts to fill these fields.
 
 Run focused real acceptance:
 

@@ -46,6 +46,7 @@ pub mod recognised_praxis;
 pub mod run;
 pub mod scoped_invocation;
 pub mod session_lifecycle_ops;
+pub mod session_space_cli;
 pub mod session_space_ops;
 pub mod session_space_schema;
 pub mod session_space_service;

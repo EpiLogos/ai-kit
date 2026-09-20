@@ -6,7 +6,7 @@ cut, **not closure of those tickets or end-to-end continuous work acceptance**.
 
 ## What is executable
 
-`aikit-session-space` remains the native session owner. The same encounter
+`aikit session-space` (in the main `aikit` binary; the companion binary is retired) remains the native session owner. The same encounter
 store, owner-only IPC, canonical AgentSession and actual ACP/Pi host carry human
 interaction and addressed machine requests. There is no parallel chat daemon or
 new human document store. Machine requests never use or mutate the human draft.
@@ -42,12 +42,12 @@ separate checks. Imported source text cannot reconfigure the owner.
 Provision through the **local native owner**, not a gateway message:
 
 ```text
-aikit-session-space -C <cwd> encounter-agency-configure \
+aikit session-space -C <cwd> encounter-agency-configure \
   --agent-session agent-session/example \
   --binding-json @binding.json [--expected-revision <current-revision>]
 
-aikit-session-space -C <cwd> encounter-configure --provider-json @provider.json
-aikit-session-space -C <cwd> encounter-serve --socket <private-dir>/owner.sock
+aikit session-space -C <cwd> encounter-configure --provider-json @provider.json
+aikit session-space -C <cwd> encounter-serve --socket <private-dir>/owner.sock
 ```
 
 `EncounterAgencyBinding` is the maintained Rust/JSON type in
@@ -120,7 +120,7 @@ is not automatic retry permission.
 Explicit recovery of an unresolved request is available through:
 
 ```text
-aikit-session-space encounter-delivery-reconcile \
+aikit session-space encounter-delivery-reconcile \
   --agent-session <ref> --delivery-ref <ref> \
   --expected-phase <dispatching|submitted|uncertain> --evidence-ref <native-ref>
 ```

@@ -53,6 +53,7 @@ use aikit_adapters::clients::dsh::DshAdapter;
 use aikit_adapters::clients::gemini::GeminiAdapter;
 use aikit_adapters::clients::goose::GooseAdapter;
 use aikit_adapters::clients::grokbot::GrokbotAdapter;
+use aikit_adapters::clients::hermes::HermesAdapter;
 use aikit_adapters::clients::kimi::KimiAdapter;
 use aikit_adapters::clients::ollama::OllamaAdapter;
 use aikit_adapters::clients::openclaw::OpenclawAdapter;
@@ -915,14 +916,18 @@ impl Service {
             aikit_store::model_catalogue::load_provider_catalogs(&self.home);
         notes.extend(problems);
         for document in documents {
+            let listed_by = document.listed_by.as_str().to_string();
             let outcome =
                 aikit_adapters::provider_catalog_source::ProviderCatalogOutcome::Observed {
                     observations: document.observations,
                     source: document.source,
                     observed_at: document.observed_at,
                 };
-            observed
-                .extend(aikit_adapters::provider_catalog_source::observed_router_routes(&outcome));
+            observed.extend(
+                aikit_adapters::provider_catalog_source::observed_routes_for_catalog(
+                    &listed_by, &outcome,
+                ),
+            );
         }
 
         // Harness workability: a harness that is actually installed here and
@@ -1028,16 +1033,27 @@ impl Service {
     /// separable from the credential half ("what can I use today").
     pub fn refresh_model_catalogue(&self, provider: &str) -> Result<serde_json::Value> {
         use aikit_adapters::provider_catalog_source::{
-            fetch_openrouter_catalog, ProviderCatalogOutcome, OPENROUTER_PROVIDER,
+            fetch_openrouter_catalog, ProviderCatalogOutcome, OPENROUTER_PROVIDER, ZAI_PROVIDER,
         };
-        if provider != "openrouter" {
-            return Err(AikitError::new(
-                "model_catalogue.unknown_provider_source",
-                format!("no Provider Source is implemented for {provider:?} (have: openrouter)"),
-            ));
-        }
         let observed_at = jiff::Timestamp::now().to_string();
-        let outcome = fetch_openrouter_catalog(&SystemRunner::new(), &observed_at);
+        let (provider_ref, outcome) = match provider {
+            "openrouter" => (
+                OPENROUTER_PROVIDER,
+                fetch_openrouter_catalog(&SystemRunner::new(), &observed_at),
+            ),
+            "z-ai" => (
+                ZAI_PROVIDER,
+                self.refresh_zai_coding_catalogue(&observed_at)?,
+            ),
+            other => {
+                return Err(AikitError::new(
+                    "model_catalogue.unknown_provider_source",
+                    format!(
+                        "no Provider Source is implemented for {other:?} (have: openrouter, z-ai)"
+                    ),
+                ));
+            }
+        };
         match outcome {
             ProviderCatalogOutcome::Observed {
                 observations,
@@ -1045,7 +1061,7 @@ impl Service {
                 observed_at,
             } => {
                 let document = aikit_core::resource::ProviderCatalogDocument::new(
-                    aikit_core::resource::ProviderRef::parse(OPENROUTER_PROVIDER)?,
+                    aikit_core::resource::ProviderRef::parse(provider_ref)?,
                     source.clone(),
                     observed_at.clone(),
                     observations,
@@ -1055,7 +1071,7 @@ impl Service {
                 let folded =
                     aikit_core::resource::catalogue_from_observations(&document.observations)?;
                 Ok(serde_json::json!({
-                    "provider": OPENROUTER_PROVIDER,
+                    "provider": provider_ref,
                     "source": source,
                     "observed_at": observed_at,
                     "listings_read": document.observations.len(),
@@ -1070,6 +1086,82 @@ impl Service {
                 reason,
             )),
         }
+    }
+
+    /// Resolve the `z-ai` credential through the credential world and read the
+    /// GLM Coding-Plan model list with it. The secret is materialised straight
+    /// into the fetch (a private `curl --config` file) and is never returned
+    /// here, held, or logged — the same guarded path model dispatch uses.
+    fn refresh_zai_coding_catalogue(
+        &self,
+        observed_at: &str,
+    ) -> Result<aikit_adapters::provider_catalog_source::ProviderCatalogOutcome> {
+        use aikit_adapters::credential_provider::EnvironmentImportProvider;
+        use aikit_adapters::provider_catalog_source::fetch_zai_coding_catalog;
+        use aikit_adapters::NativeSecureStoreProvider;
+        use aikit_core::credential::{
+            resolve_credential, CredentialRef, CredentialResolutionRequest,
+            SecretMaterialisationClass, SecretProvider, SecretRequirement, SecretRequirementRef,
+        };
+
+        // z-ai resolves from whichever store the field actually holds it in: the
+        // OS keyring (the reference host) or an explicit `ZAI_API_KEY` import (a
+        // machine or CI that keeps it in the environment). The secret is never
+        // returned to this scope — only materialised straight into the fetch.
+        let credential_ref = CredentialRef::new("z-ai")?;
+        let binding = aikit_store::credentials::CredentialBindingStore::new(&self.home)
+            .load(&credential_ref)?;
+        let native = NativeSecureStoreProvider::with_binding(binding.as_ref());
+        let environment =
+            EnvironmentImportProvider::from_process(credential_ref.clone(), "ZAI_API_KEY", None)
+                .ok();
+
+        let mut descriptors = vec![native.descriptor(&credential_ref)];
+        if let Some(environment) = &environment {
+            descriptors.push(environment.descriptor(&credential_ref));
+        }
+        let resolution = resolve_credential(CredentialResolutionRequest {
+            requirement: SecretRequirement {
+                requirement_ref: SecretRequirementRef::new(
+                    "secret-requirement:model-catalogue/z-ai",
+                )?,
+                credential_ref: credential_ref.clone(),
+                consumer_ref: "operator:aikit/model-catalogue-refresh".to_string(),
+                purpose: "read the z.ai Coding-Plan model list".to_string(),
+                permitted_materialisation: [SecretMaterialisationClass::ProcessEnv].into(),
+            },
+            providers: descriptors,
+            headless: true,
+            allow_from_env: environment.is_some(),
+        })?;
+        let provider = resolution.selected_provider_ref.as_ref().ok_or_else(|| {
+            AikitError::new(
+                "model_catalogue.credential_unavailable",
+                "the z-ai credential is not available on this machine; bind it with \
+                 `aikit credential setup z-ai` or export ZAI_API_KEY, then refresh again",
+            )
+        })?;
+        let secret = if native.descriptor(&credential_ref).provider_ref == *provider {
+            native.materialise(&credential_ref, SecretMaterialisationClass::ProcessEnv)?
+        } else if let Some(environment) = environment
+            .as_ref()
+            .filter(|env| env.descriptor(&credential_ref).provider_ref == *provider)
+        {
+            environment.materialise(&credential_ref, SecretMaterialisationClass::ProcessEnv)?
+        } else {
+            None
+        }
+        .ok_or_else(|| {
+            AikitError::new(
+                "model_catalogue.credential_unavailable",
+                "the selected z-ai provider returned no key material",
+            )
+        })?;
+        Ok(fetch_zai_coding_catalog(
+            &SystemRunner::new(),
+            secret.expose(),
+            observed_at,
+        ))
     }
 
     /// Read the resolved catalogue back: the first-party seed, whatever
@@ -2218,11 +2310,12 @@ impl Service {
 
         let mut effects = Vec::new();
         for target in &self.descriptor.targets {
-            // The single-roster law: every harness arm below has its row in
-            // client.rs's REGISTRY (qwen-code and ollama included). The guard
-            // test `every_harness_client_effects_dispatches_has_a_registry_row`
-            // in client.rs fails when the dispatch grows a harness arm the
-            // roster does not carry.
+            // The detail law: every harness arm below resolves through
+            // profiles::slug_for_target to an embedded harness profile — the
+            // guard test `every_harness_client_effects_arm_resolves_detail_ground`
+            // in client.rs fails when the dispatch grows a harness arm without
+            // detail ground. (The client-status roster is a different surface:
+            // it derives from the live detection record, not from these arms.)
             let effect = match target.as_str() {
                 TargetId::SHELL => Some(ActivationEffect::immediate("shell bin/")),
                 TargetId::CLAUDE_CODE => {
@@ -2267,6 +2360,13 @@ impl Service {
                 ),
                 TargetId::GROK_BOT => plan_effect(
                     &GrokbotAdapter::new(ctx_dir.join("projections/grokbot")),
+                    &rc,
+                ),
+                TargetId::HERMES => {
+                    plan_effect(&HermesAdapter::new(ctx_dir.join("projections/hermes")), &rc)
+                }
+                TargetId::HERMES_ACP => plan_effect(
+                    &HermesAdapter::acp(ctx_dir.join("projections/hermes-acp")),
                     &rc,
                 ),
                 TargetId::KIMI => {
@@ -3123,17 +3223,23 @@ impl PaletteBackend for Service {
                     AikitError::new("model_roster.route_sets_unreadable", error.to_string())
                 })?;
 
+        // The harness facts this context's bound targets contribute: derived
+        // once through the typed seam from the embedded profiles' models
+        // layers, then applied to every candidate after the routes have
+        // filled in real providers.
+        let facts = harness_roster_facts(&self.descriptor.targets);
+
         let mut candidates = Vec::new();
         for set in &route_sets {
-            let base = model_roster_candidate_for(&set.model);
-            let built = candidates_from_routes(set, &base);
-            for (mut candidate, route) in built.into_iter().zip(set.viable()) {
-                stamp_harness_gate(&mut candidate, route);
-                candidates.push(candidate);
-            }
+            let base = model_roster_candidate_for(&set.model, &facts);
+            candidates.extend(candidates_from_routes(set, &base));
+        }
+        for candidate in &mut candidates {
+            let (harness_compatible, _) = facts.gate(Some(candidate.provider.as_str()));
+            candidate.harness_compatible = harness_compatible;
         }
         let roster = rank_model_roster(
-            model_roster_demand(),
+            model_roster_demand(&facts),
             ModelRankingPolicy::Balanced,
             candidates,
         );
@@ -3537,10 +3643,38 @@ fn plan_effect(adapter: &dyn TargetAdapter, rc: &ResolvedContext) -> Option<Acti
         .ok()
         .map(|plan| adapter.activation_effect(None, &plan))
 }
-fn model_roster_demand() -> aikit_core::resource::ModelRosterDemand {
+/// The harness facts a context's bound targets contribute to the model
+/// roster, assembled through the one typed seam: every bound target that
+/// carries an embedded harness profile with a models layer lends that layer
+/// to the composition. Unprofiled targets (shell, the broker, harnesses
+/// without a models layer) lend nothing.
+fn harness_roster_facts(
+    targets: &[TargetId],
+) -> aikit_core::model_harness_binding::HarnessCompositionFacts {
+    let layers: Vec<(&str, &aikit_core::harness_profile::ModelsLayer)> = targets
+        .iter()
+        .filter_map(|target| {
+            let slug = aikit_adapters::profiles::slug_for_target(target)?;
+            let profile = aikit_adapters::profiles::for_slug(slug)?;
+            let models = profile.models.as_ref()?;
+            Some((slug, models))
+        })
+        .collect();
+    aikit_core::model_harness_binding::HarnessCompositionFacts::from_layers(&layers)
+}
+
+fn model_roster_demand(
+    facts: &aikit_core::model_harness_binding::HarnessCompositionFacts,
+) -> aikit_core::resource::ModelRosterDemand {
     aikit_core::resource::ModelRosterDemand {
         project: None,
-        profile: None,
+        // The demand-side scope spells the same `harness-profile/<slug>`
+        // convention the candidate side's `harness_composition` uses, so
+        // fitness observations bind across both.
+        profile: facts.scope.as_ref().map(|scope| {
+            aikit_core::resource::ResourceRef::parse(scope)
+                .expect("a harness-profile scope is a valid resource ref")
+        }),
         agency: None,
         use_type: "compose".into(),
         required_capabilities: Default::default(),
@@ -3555,51 +3689,14 @@ fn model_roster_demand() -> aikit_core::resource::ModelRosterDemand {
     }
 }
 
-/// Stamp the harness provider gate onto a candidate served through a
-/// detected harness-native route. The route's endpoint carries the harness it
-/// was observed through (`… via harness/<slug>`); the embedded profile for
-/// that slug decides, through the shared `model_harness_binding` gate,
-/// whether the candidate's provider may serve that harness at all, and the
-/// roster's `harness_compatible`/`harness_composition` facts stop being
-/// stubs. Routes of every other kind carry no harness relation, and the base
-/// candidate's unfilled gate stands.
-fn stamp_harness_gate(
-    candidate: &mut aikit_core::resource::ModelRosterCandidate,
-    route: &aikit_core::resource::ModelRoute,
-) {
-    use aikit_core::model_harness_binding::{fitness_scope, gate_candidate, provider_gate};
-    use aikit_core::resource::ModelRouteKind;
-
-    if route.kind != ModelRouteKind::HarnessNative {
-        return;
-    }
-    let Some((_selector, through)) = route
-        .endpoint
-        .as_deref()
-        .and_then(|endpoint| endpoint.rsplit_once(" via "))
-    else {
-        return;
-    };
-    let Some(slug) = through.strip_prefix("harness/") else {
-        return;
-    };
-    let Some(profile) = aikit_adapters::profiles::for_slug(slug) else {
-        return;
-    };
-    let Some(models) = profile.models.as_ref() else {
-        return;
-    };
-    let gate = provider_gate(models);
-    let (compatible, _why) = gate_candidate(&gate, Some(candidate.provider.as_str()));
-    candidate.harness_compatible = compatible;
-    candidate.harness_composition = Some(fitness_scope(slug));
-}
-
 /// The model-level facts a compose-time candidate carries. Route-level facts
-/// are filled in per route by `candidates_from_routes`; nothing here asserts
-/// fitness, price or authorisation that has not been observed.
+/// are filled in per route by `candidates_from_routes`, and the harness gate
+/// is applied after that fill-in (it compares against the candidate's real
+/// provider); nothing here asserts fitness, price or authorisation that has
+/// not been observed.
 fn model_roster_candidate_for(
     model: &aikit_core::resource::ResourceRef,
+    facts: &aikit_core::model_harness_binding::HarnessCompositionFacts,
 ) -> aikit_core::resource::ModelRosterCandidate {
     aikit_core::resource::ModelRosterCandidate {
         model: model.clone(),
@@ -3612,10 +3709,13 @@ fn model_roster_candidate_for(
         provider_usable: false,
         policy_allowed: false,
         contract_compatible: false,
+        // Gate truth is per-provider and applied in `model_roster` once the
+        // route fills the provider in; the composition scope and capability
+        // disclosure come from the bound harness profiles now.
         harness_compatible: false,
-        harness_composition: None,
+        harness_composition: facts.scope.clone(),
+        harness_capabilities: facts.capability_names(),
         native_capabilities: Default::default(),
-        harness_capabilities: Default::default(),
         profile_skills: Default::default(),
         modalities: Default::default(),
         tool_support: Default::default(),
@@ -3633,103 +3733,5 @@ fn model_roster_candidate_for(
         observed_fitness: Vec::new(),
         access: Default::default(),
         provenance: Vec::new(),
-    }
-}
-
-#[cfg(test)]
-mod roster_gate_tests {
-    use super::stamp_harness_gate;
-    use aikit_core::resource::ModelRosterCandidate;
-    use aikit_core::resource::{
-        CredentialCondition, ModelRoute, ModelRouteKind, ProviderRef, ResourceRef,
-        RouteAvailability,
-    };
-
-    use crate::app::model_roster_candidate_for;
-
-    fn route(kind: ModelRouteKind, endpoint: Option<&str>) -> ModelRoute {
-        ModelRoute {
-            model: ResourceRef::parse("model:claude-sonnet-5").unwrap(),
-            provider: ProviderRef::parse("provider:anthropic").unwrap(),
-            kind,
-            provider_native_id: "claude-sonnet-5".into(),
-            endpoint: endpoint.map(str::to_string),
-            availability: RouteAvailability::Observed {
-                detection_ref: "detection:fixture".into(),
-            },
-            credential: CredentialCondition::NotRequired,
-            provenance: Vec::new(),
-        }
-    }
-
-    fn candidate(provider: &str) -> ModelRosterCandidate {
-        let mut candidate =
-            model_roster_candidate_for(&ResourceRef::parse("model:claude-sonnet-5").unwrap());
-        candidate.provider = ProviderRef::parse(provider).unwrap();
-        candidate
-    }
-
-    #[test]
-    fn harness_native_route_stamps_the_profile_gate() {
-        // claude-code natively binds provider:anthropic.
-        let route = route(
-            ModelRouteKind::HarnessNative,
-            Some("config-key model via harness/claude-code"),
-        );
-
-        let mut matching = candidate("provider:anthropic");
-        stamp_harness_gate(&mut matching, &route);
-        assert!(matching.harness_compatible);
-        assert_eq!(
-            matching.harness_composition.as_deref(),
-            Some("harness-profile/claude-code")
-        );
-
-        let mut foreign = candidate("provider:openai");
-        stamp_harness_gate(&mut foreign, &route);
-        assert!(!foreign.harness_compatible);
-        // The composition is still named: the verdict carries its scope.
-        assert_eq!(
-            foreign.harness_composition.as_deref(),
-            Some("harness-profile/claude-code")
-        );
-    }
-
-    #[test]
-    fn provider_plural_and_unknown_slugs_do_not_stamp() {
-        // pi is provider-plural: the gate passes, and the scope is stamped.
-        let pi_route = route(
-            ModelRouteKind::HarnessNative,
-            Some("--provider argv via harness/pi"),
-        );
-        let mut plural = candidate("provider:zai");
-        stamp_harness_gate(&mut plural, &pi_route);
-        assert!(plural.harness_compatible);
-        assert_eq!(
-            plural.harness_composition.as_deref(),
-            Some("harness-profile/pi")
-        );
-
-        // A harness with no embedded profile carries no gate; the base
-        // candidate's unfilled facts stand.
-        let mut unstamped = candidate("provider:anthropic");
-        stamp_harness_gate(
-            &mut unstamped,
-            &route(
-                ModelRouteKind::HarnessNative,
-                Some("config-key model via harness/not-a-profile"),
-            ),
-        );
-        assert!(!unstamped.harness_compatible);
-        assert_eq!(unstamped.harness_composition, None);
-
-        // Non-harness routes never stamp.
-        let mut native = candidate("provider:anthropic");
-        stamp_harness_gate(
-            &mut native,
-            &route(ModelRouteKind::ProviderNative, Some("https://api")),
-        );
-        assert!(!native.harness_compatible);
-        assert_eq!(native.harness_composition, None);
     }
 }

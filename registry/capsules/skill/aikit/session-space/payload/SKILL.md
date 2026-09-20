@@ -25,7 +25,7 @@ Use the shared SessionSpace application operation for:
 
 CLI, TUI and agent surfaces may render these differently, but they must use the same canonical refs, typed intent, preview, basis, apply authority, receipt and read model.
 
-The production structured CLI is `aikit-session-space`. Its `create` and `stage` commands are write-free and return a serialised preview. `apply --preview-json <JSON|@FILE>` is the mutation boundary. `stage --intent-json <JSON|@FILE>` accepts the same typed `SessionSpaceMutation` used by the canonical Service, so agent operation does not need a separate command ontology for bind/unbind, attachment or focus intent. `list`, `show`, `open`, `discover`, `history`, `compare`, `restore-preview`, `reconstruct`, `reconcile` and `explain` are read/stage projections over that same authority.
+The production structured CLI is `aikit session-space` (folded into the main `aikit` binary; the former `aikit-session-space` companion executable is retired and `oi install` places no second binary). Its `create` and `stage` commands are write-free and return a serialised preview. `apply --preview-json <JSON|@FILE>` is the mutation boundary. `stage --intent-json <JSON|@FILE>` accepts the same typed `SessionSpaceMutation` used by the canonical Service, so agent operation does not need a separate command ontology for bind/unbind, attachment or focus intent. `list`, `show`, `open`, `discover`, `history`, `compare`, `restore-preview`, `reconstruct`, `reconcile` and `explain` are read/stage projections over that same authority.
 
 ## Identity and authority invariants
 
@@ -51,7 +51,7 @@ Each Project binding must retain its exact `ProjectRef` and an independent, attr
 
 Never merge several Projects into an aggregate Project or flatten their ContextResolution provenance into a space-level resolver. If SessionSpace intent affects Project resolution, make that input explicit at the owning Project/Context operation and preserve it in the resulting evidence.
 
-`aikit-session-space -C <project-directory> project-context` reads that binding from the canonical application ContextResolution. Pass this returned binding to the existing `bind-project-context` typed stage intent; do not construct a resolver hash or invent Project membership in the consumer. The read is not a SessionSpace mutation and does not imply a live AgentSession.
+`aikit session-space -C <project-directory> project-context` reads that binding from the canonical application ContextResolution. Pass this returned binding to the existing `bind-project-context` typed stage intent; do not construct a resolver hash or invent Project membership in the consumer. The read is not a SessionSpace mutation and does not imply a live AgentSession.
 
 ## Durable mutation law
 
