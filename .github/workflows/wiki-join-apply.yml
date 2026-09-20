@@ -28,18 +28,41 @@ jobs:
           assert hashlib.sha256(patch).hexdigest()=='091c1875db7c2b5a32fc8073d5ce683f3f3dc5228ce1287075ccb83f453e6b5f'
           subprocess.run(['git','apply','--check','-'],input=patch,check=True)
           subprocess.run(['git','apply','-'],input=patch,check=True)
-          repairs = [
-            ('crates/aikit-core/src/knowledge_navigation.rs',
-             '        self.augment_project_map_relations(address.resource_ref(), &mut view)?;\n        Ok(view)',
-             '        if depth > 0 { self.augment_project_map_relations(address.resource_ref(), &mut view)?; }\n        Ok(view)'),
-            ('crates/aikit-adapters/src/wiki_document.rs',
-             '.filter(|edge| edge.to == reading.resource)',
-             '.filter(|edge| edge.to == reading.resource && edge.authored_relation.is_some())'),
-          ]
-          for path, old, new in repairs:
+          def repair(path,old,new):
               p=pathlib.Path(path); text=p.read_text()
-              assert text.count(old)==1, (path, 'source basis differs')
+              assert text.count(old)==1, (path, 'source basis differs',text.count(old))
               p.write_text(text.replace(old,new))
+          repair('crates/aikit-core/src/knowledge_navigation.rs',
+            '        self.augment_project_map_relations(address.resource_ref(), &mut view)?;\n        Ok(view)',
+            '        if depth > 0 { self.augment_project_map_relations(address.resource_ref(), &mut view)?; }\n        Ok(view)')
+          repair('crates/aikit-adapters/src/wiki_document.rs',
+            '.filter(|edge| edge.to == reading.resource)',
+            '.filter(|edge| edge.to == reading.resource && edge.authored_relation.is_some())')
+          # An empty full-text query intentionally returns no SourcePool hits.
+          # Graph browse is an explicit metadata inventory, not a change to that
+          # search contract. Use only the runtime's already admitted descriptors.
+          repair('crates/aikit-cli/src/app/knowledge.rs',
+            '            Ok(aikit_adapters::wiki_graph::project_graph(&found.hits, &objects, &runtime.document_material(), max_nodes, max_edges, &found.absences))',
+            '''            let material = runtime.document_material();
+                      let mut hits = found.hits.clone();
+                      if query.trim().is_empty() {
+                          for item in &material {
+                              let provider = runtime.central.as_ref().filter(|p|p.descriptors().iter().any(|m|m.binding.source==item.binding.source)).map(|p|p.status().provider)
+                                  .or_else(||runtime.now_field.as_ref().filter(|_|runtime.now_field_roster.iter().any(|m|m.binding.source==item.binding.source)).map(|p|p.status().provider))
+                                  .unwrap_or_else(||runtime.native_source.status().provider);
+                              hits.push(aikit_core::knowledge_navigation::KnowledgeSearchHit {
+                                  address: KnowledgeAddress::Source(item.binding.source.clone()),
+                                  resource: ResourceRef::parse(item.binding.source.as_str())?,
+                                  kind: ResourceKind::KnowledgeSource, label: item.binding.title.clone(),
+                                  score: 0.0, snippet: String::new(), provider,
+                                  authority: SourceAuthority::Observed, ranking: None,
+                              });
+                          }
+                      }
+                      Ok(aikit_adapters::wiki_graph::project_graph(&hits, &objects, &material, max_nodes, max_edges, &found.absences))''')
+          repair('crates/aikit-cli/tests/wiki_document_end_to_end.rs',
+            'assert!(graph["nodes"].as_array().unwrap().iter().any(|n|n["resource"]=="source:a"&&n["address"]["kind"]=="source"));',
+            'assert!(graph["nodes"].as_array().unwrap().iter().any(|n|n["resource"]=="source:a"&&n["address"]["kind"]=="source"), "{graph}");')
           PY
       - name: Compile the actual native CLI
         run: |
