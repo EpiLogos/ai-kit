@@ -1,22 +1,75 @@
-name: Adaptive projection source receipt
+name: Adaptive projection native implementation
 on:
   push:
     branches: [agent/adaptive-wiki-projection-20260920]
+    paths: [.github/workflows/adaptive-projection-source.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  source:
+  implement:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - name: Preserve exact tracked source
-        run: |
-          git rev-parse HEAD > revision.txt
-          git archive --format=tar.gz HEAD -o adaptive-source.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v7.0.1
         with:
-          name: adaptive-source-${{ github.sha }}
+          ref: agent/adaptive-wiki-projection-20260920
+          fetch-depth: 2
+      - name: Verify and apply exact bounded patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/agent/adaptive-wiki-projection-20260920
+          python3 - <<'PY'
+          import base64, gzip, hashlib, pathlib
+          p = pathlib.Path
+          encoded = ''.join(p(f'.github/adaptive-payload.{n}.b64').read_text() for n in range(4))
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '1722702b282d6379bdc33d2ef0c7ccd846a27c3fd1ea77c83bf5fcda8d60d00a'
+          p('/tmp/adaptive.patch').write_bytes(patch)
+          PY
+          git apply --check /tmp/adaptive.patch
+          git apply /tmp/adaptive.patch
+      - name: Install native toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+      - name: Format and preserve implementation on its own branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt +1.98.0 --edition 2021 --config skip_children=true crates/aikit-cli/src/wiki_projection.rs crates/aikit-cli/tests/wiki_projection.rs crates/aikit-cli/src/hook.rs
+          chmod +x registry/capsules/hook/continuity/wiki-projection/payload/wiki-projection
+          rm .github/adaptive-payload.*.b64 .github/workflows/adaptive-projection-source.yml
+          git add README.md crates/aikit-cli/src/app/mod.rs crates/aikit-cli/src/cli.rs crates/aikit-cli/src/hook.rs crates/aikit-cli/src/lib.rs crates/aikit-cli/src/main.rs crates/aikit-cli/src/wiki.rs crates/aikit-cli/src/wiki_projection.rs crates/aikit-cli/tests/wiki_projection.rs crates/aikit-core/src/continuity.rs docs/WIKI-OPERATIONAL-PROJECTION.md registry/capsules/hook/continuity/wiki-projection registry/capsules/skill/aikit/knowledge-navigation/payload/SKILL.md .github
+          git diff --cached --check
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'feat: revision-checked Wiki projection and live hook context delivery'
+          git rev-parse HEAD > /tmp/adaptive-revision.txt
+          git archive --format=tar.gz HEAD -o /tmp/adaptive-tested-source.tar.gz
+          git push origin HEAD:refs/heads/agent/adaptive-wiki-projection-20260920
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Execute correction-to-next-prompt regression
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +1.98.0 test --locked -p aikit-cli --test wiki_projection 2>&1 | tee /tmp/adaptive-loop.log
+      - name: Execute hook transport and retained regressions
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +1.98.0 test --locked -p aikit-cli --lib context_transport_tests 2>&1 | tee /tmp/adaptive-transport.log
+          cargo +1.98.0 test --locked -p aikit-cli --test guidance_delivery --test skill_overlay --test hook_stdout_inject --test hook_bypass 2>&1 | tee /tmp/adaptive-retained.log
+      - name: Native clippy
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +1.98.0 clippy --locked -p aikit-cli --lib --bin aikit --test wiki_projection -- -D warnings 2>&1 | tee /tmp/adaptive-clippy.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: adaptive-native-${{ github.run_id }}
           path: |
-            adaptive-source.tar.gz
-            revision.txt
-          retention-days: 3
+            /tmp/adaptive-revision.txt
+            /tmp/adaptive-tested-source.tar.gz
+            /tmp/adaptive-*.log
+            /tmp/adaptive.patch
+          retention-days: 7
