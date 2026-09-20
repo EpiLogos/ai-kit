@@ -16,19 +16,18 @@ permissions:
 jobs:
   native-protocol:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install the repository-selected toolchain and formatter
+      - name: Install the repository-selected toolchain and checks
         shell: bash
         run: |
           set -euo pipefail
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
-          rustup toolchain install "$toolchain" --profile minimal --component rustfmt
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
           rustc --version
-          cargo fmt --version
       - uses: Swatinem/rust-cache@v2.9.2
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -36,3 +35,7 @@ jobs:
         run: cargo test --locked -p aikit-adapters --test native_model_controls --test interactive_connection_v2 --test agent_session_host_v2
       - name: Production handler, context admission and shutdown regressions
         run: cargo test --locked -p aikit-cli --test agent_session_protocol --test encounter_context_admission --test encounter_shutdown
+      - name: Full native lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Full repository regressions
+        run: cargo test --all-targets --locked
