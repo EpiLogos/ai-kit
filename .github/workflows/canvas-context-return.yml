@@ -1,0 +1,26 @@
+name: Return bounded canvas context implementation
+on:
+  push:
+    branches: [agent/canvas-context-20260920]
+    paths: ['.github/workflows/canvas-context-return.yml']
+permissions:
+  contents: write
+jobs:
+  return:
+    if: github.ref == 'refs/heads/agent/canvas-context-20260920'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt
+      - name: Apply the exact source return, never an owner machine
+        shell: python
+        run: |
+          import subprocess, pathlib
+          # Source changes are supplied in the next bounded return commit.
+          # This branch-only job does not touch main, installations or secrets.
+          print(subprocess.check_output(['git','rev-parse','HEAD'], text=True))
