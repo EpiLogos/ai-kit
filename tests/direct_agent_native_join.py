@@ -101,7 +101,7 @@ def exercise(ctrl: Path, aikit: Path, evidence: Path | None = None) -> dict:
         processes: list[subprocess.Popen] = []
         logs = (base/"owner.log").open("w+")
         def command(argv: list[str], expect: bool = True) -> dict | list:
-            run = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=25)
+            run = subprocess.run(argv, cwd=root if root.exists() else base, env=env, capture_output=True, text=True, timeout=25)
             try: value = json.loads(run.stdout)
             except json.JSONDecodeError:
                 value = {"ok":False,"error":run.stderr[-2000:]}
@@ -169,6 +169,7 @@ def exercise(ctrl: Path, aikit: Path, evidence: Path | None = None) -> dict:
             skill_file=capsule/"payload/SKILL.md"
             skill_body='---\nname: native-join\ndescription: Controlled source return method.\n---\n\n'+marker+'\n'
             skill_file.write_text(skill_body)
+            command([str(aikit),"--json","trust","record",skill_ref,"--note","Explicit review of controlled test-only Skill bytes"])
             command([str(aikit),"--json","enable",skill_ref,"--scope","global"])
             skills=ai("agent-session-skills")
             assert any(row["ref"]==skill_ref and row["eligible"] is True for row in skills["rows"]), skills
