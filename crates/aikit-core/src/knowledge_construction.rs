@@ -261,11 +261,11 @@ fn selection_sources(sources: &[WikiProvenanceRef]) -> Result<()> {
             return Err(err("source participation requires its exact revision"));
         }
         // The native facet parser refuses unknown selector fields and malformed units.
-        if let Some(selector) = read_source_selector(source)? {
-            if let crate::knowledge_facets::SourceSelector::TextSpan { start, end, .. } = selector {
-                if start >= end {
-                    return Err(err("selected passage must have a non-empty forward span"));
-                }
+        if let Some(crate::knowledge_facets::SourceSelector::TextSpan { start, end, .. }) =
+            read_source_selector(source)?
+        {
+            if start >= end {
+                return Err(err("selected passage must have a non-empty forward span"));
             }
         }
     }
