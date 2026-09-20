@@ -18,9 +18,7 @@ use aikit_cli::app::{
 };
 use aikit_cli::cli::*;
 use aikit_cli::json::{self, EnvelopeContext};
-use aikit_cli::{
-    credential, hook, multicall, run, ui, SessionLifecycleServiceOps,
-};
+use aikit_cli::{credential, hook, multicall, run, ui, SessionLifecycleServiceOps};
 use aikit_tui::{application_service::ApplicationService, ExplainHistoryApplicationService};
 
 use aikit_core::hooks::HookEvent;

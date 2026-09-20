@@ -361,7 +361,8 @@ pub struct CredentialBindingState {
     /// leaves it untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_verified_at_unix_seconds: Option<u64>,
-}impl CredentialBindingState {
+}
+impl CredentialBindingState {
     /// Stamp the lifecycle facts a binding flow owns onto a freshly produced
     /// provider state. The first bind sets `bound_at`; a rotation preserves
     /// the original `bound_at` and marks `last_rotated_at`. The credential
