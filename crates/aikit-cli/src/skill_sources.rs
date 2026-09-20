@@ -730,6 +730,13 @@ fn load_spec(home: &AikitHome, id: &str) -> Result<SourceSpec> {
     read_toml(&source_dir(home, id).join(SPEC_FILE), "source.unknown")
 }
 
+/// Read a source's spec by id, for read models (such as projection drift
+/// detection) that need a snapshot's canonical location without going through
+/// the `source status` surface.
+pub fn source_spec(home: &AikitHome, id: &str) -> Result<SourceSpec> {
+    load_spec(home, id)
+}
+
 fn load_state(home: &AikitHome, id: &str) -> Result<SourceState> {
     read_toml(
         &source_dir(home, id).join(STATE_FILE),

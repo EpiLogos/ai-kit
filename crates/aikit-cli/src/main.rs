@@ -2455,6 +2455,11 @@ fn cmd_status(cwd: &std::path::Path, a: StatusArgs, json_mode: bool) -> Result<R
     let service = Service::discover(cwd)?;
     let view = service.resolved();
     let warnings = diagnostic_warnings(&service);
+    // Canonical-vs-projected skill drift is invisible to the resolver read
+    // model (set membership cannot see it), so status reads it separately and
+    // discloses the count; `aikit diff` names the entries.
+    let content_drift = aikit_cli::projection_drift::detect(service.home())?;
+    let drift_warnings = aikit_cli::projection_drift::warnings(&content_drift);
     if json_mode {
         let active: Vec<Value> = view
             .active
@@ -2477,6 +2482,7 @@ fn cmd_status(cwd: &std::path::Path, a: StatusArgs, json_mode: bool) -> Result<R
             "bypasses": bypass_summaries(&service)?,
             "generation_label": properties.get("label"),
             "generation_properties": properties,
+            "content_drift_count": content_drift.len(),
         });
         if a.all {
             let unavailable: Vec<Value> = view
@@ -2486,6 +2492,8 @@ fn cmd_status(cwd: &std::path::Path, a: StatusArgs, json_mode: bool) -> Result<R
                 .collect();
             data["unavailable"] = jval!(unavailable);
         }
+        let mut warnings = warnings;
+        warnings.extend(drift_warnings);
         return Ok(reply(&service, data, warnings));
     }
     let generation_properties = service.current_generation_properties();
@@ -2497,11 +2505,13 @@ fn cmd_status(cwd: &std::path::Path, a: StatusArgs, json_mode: bool) -> Result<R
         generation_label,
         bypass_summaries(&service)?,
         warnings,
+        content_drift.len(),
     )))
 }
 
 /// The person-facing reading of `aikit status`. The `--json` envelope is the
 /// machine contract and keeps its exact shape; this text is for the terminal.
+#[allow(clippy::too_many_arguments)]
 fn status_summary(
     descriptor: &aikit_core::ContextDescriptor,
     view: &aikit_core::resolve::ResolvedView,
@@ -2509,6 +2519,7 @@ fn status_summary(
     generation_label: Option<&str>,
     bypasses: Vec<Value>,
     warnings: Vec<String>,
+    content_drift_count: usize,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
     let project_root = descriptor
@@ -2576,6 +2587,13 @@ fn status_summary(
                 for_clause
             ));
         }
+    }
+
+    if content_drift_count > 0 {
+        lines.push(format!(
+            "Skill content drift: {content_drift_count} projected cop{} differ from their canonical sources (run `aikit diff` for the named entries)",
+            if content_drift_count == 1 { "y" } else { "ies" }
+        ));
     }
 
     if view.unavailable.is_empty() {
@@ -3946,6 +3964,11 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
 ///
 /// Diff before write, always (STANDARDS §5). This is the same staging path the
 /// palette previews with, so the two can never disagree.
+///
+/// The stage is set-membership: it answers what an apply would add or drop.
+/// `content_drift` answers a different question — whether the projected copies
+/// harnesses load right now still match their canonical sources. Detection is
+/// read-only; repair is the existing sync -> promote -> apply cycle's job.
 fn cmd_diff(cwd: &std::path::Path) -> Result<Reply> {
     use aikit_cli::app::StageRequest;
     let service = Service::discover(cwd)?;
@@ -3955,6 +3978,7 @@ fn cmd_diff(cwd: &std::path::Path) -> Result<Reply> {
         toggles: vec![],
     })?;
 
+    let content_drift = aikit_cli::projection_drift::detect(service.home())?;
     let clean = staged.added_dependencies.is_empty()
         && staged.dropped_dependencies.is_empty()
         && staged.still_unavailable.is_empty();
@@ -3974,6 +3998,20 @@ fn cmd_diff(cwd: &std::path::Path) -> Result<Reply> {
             "effect": e.effect.describe(),
         })).collect::<Vec<_>>(),
         "active_after": staged.projected.active.len(),
+        // Canonical-vs-projected content drift, one entry per drifted skill.
+        // Clean staging says nothing about this: a stale copy keeps serving
+        // old practice with `would_add: []` unless it is read here.
+        "content_drift": content_drift.iter().map(|entry| jval!({
+            "skill": entry.skill,
+            "kind": entry.kind.as_str(),
+            "source": entry.source.display().to_string(),
+            "projected": entry.projected.display().to_string(),
+            "drifted_copies": entry.drifted_copies,
+            "direction": entry.direction.as_str(),
+            "differing_files": entry.differing_files,
+            "summary": entry.summary(),
+        })).collect::<Vec<_>>(),
+        "content_drift_count": content_drift.len(),
     });
     Ok(reply(&service, data, vec![]))
 }
