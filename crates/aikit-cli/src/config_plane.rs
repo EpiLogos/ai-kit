@@ -560,7 +560,7 @@ fn harness_sections() -> Vec<Value> {
         TrustSettingScope::Project => "project",
     };
     let mut sections: Vec<Value> = Vec::new();
-    for (slug, profile) in aikit_adapters::profiles::all() {
+    for (slug, profile) in aikit_adapters::profiles::all_profiles() {
         let Some(settings) = &profile.settings else {
             continue;
         };

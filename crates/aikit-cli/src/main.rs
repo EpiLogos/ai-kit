@@ -192,6 +192,9 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
     let json_mode = cli.json;
     match cli.command {
         Some(Command::Source(c)) => cmd_source(cwd, c),
+        Some(Command::HarnessProfile(c)) => {
+            aikit_cli::harness_profile::run(cwd, c.command).map(Reply::RawJson)
+        }
         Some(Command::Skill(c)) => cmd_skill(cwd, c),
         Some(Command::Project(c)) => cmd_project(cwd, c),
         None => open_palette(cwd, None, false),

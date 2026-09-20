@@ -501,6 +501,12 @@ fn install_refuses_for_harnesses_without_a_dispatch_seam() {
     let output = command.output().unwrap();
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("client.unknown"), "{stdout}");
-    assert!(stdout.contains("actuation harness detect"), "{stdout}");
+    // An unrecognised target is a first-class compatibility gap (the SDK
+    // contract), not a bare roster miss: it names the route to support.
+    assert!(stdout.contains("harness.compatibility_gap"), "{stdout}");
+    assert!(stdout.contains("aikit:harness-adapter-sdk/v1"), "{stdout}");
+    assert!(
+        stdout.contains("skill/aikit/harness-adapter-authoring"),
+        "{stdout}"
+    );
 }

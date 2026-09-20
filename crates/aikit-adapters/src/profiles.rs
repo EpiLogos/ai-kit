@@ -50,6 +50,7 @@
 //! the owner has not reviewed.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use aikit_core::harness_profile::HarnessProfile;
@@ -757,9 +758,101 @@ fn parsed() -> &'static BTreeMap<&'static str, HarnessProfile> {
     })
 }
 
-/// The validated profile for one catalog slug, if this package carries one.
+/// The directory external profile documents load from:
+/// `$AIKIT_HOME/harness-profiles/*.toml`, else
+/// `$HOME/.aikit/harness-profiles`. Resolved the same way the store resolves
+/// its home — this crate consults the environment for this one location only.
+pub fn external_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("AIKIT_HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(home).join("harness-profiles"));
+    }
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(|home| PathBuf::from(home).join(".aikit").join("harness-profiles"))
+}
+
+/// What the external profile directory contains: the documents that parsed
+/// and validated, and the named problems for those that did not. External
+/// documents may NOT override an embedded slug — the embedded surface is the
+/// declared product; an external document earns its place under a new slug.
+/// What the external directory held when it was read: documents that loaded,
+/// and named problems for those that did not.
+type ExternalProfiles = (BTreeMap<String, HarnessProfile>, Vec<(String, String)>);
+
+fn external() -> &'static ExternalProfiles {
+    static CACHE: OnceLock<ExternalProfiles> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut profiles = BTreeMap::new();
+        let mut problems: Vec<(String, String)> = Vec::new();
+        let Some(dir) = external_dir() else {
+            return (profiles, problems);
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return (profiles, problems);
+        };
+        for entry in entries.filter_map(std::result::Result::ok) {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+                continue;
+            }
+            let name = path.display().to_string();
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                problems.push((name, "unreadable".to_string()));
+                continue;
+            };
+            let parsed_document: Result<HarnessProfile, _> = toml::from_str(&text);
+            match parsed_document {
+                Ok(profile) => {
+                    let slug = profile.slug.clone();
+                    if parsed().contains_key(slug.as_str()) {
+                        problems.push((
+                            name,
+                            format!(
+                                "slug `{slug}` collides with an embedded profile; \
+                                 external documents may not override embedded ones"
+                            ),
+                        ));
+                    } else if profiles.insert(slug.clone(), profile).is_some() {
+                        problems.push((
+                            name,
+                            format!("duplicate slug `{slug}` in the external profile directory"),
+                        ));
+                    }
+                }
+                Err(error) => problems.push((name, error.to_string())),
+            }
+        }
+        (profiles, problems)
+    })
+}
+
+/// Named problems from loading the external profile directory: unreadable
+/// files, documents that did not parse or validate, slug collisions with
+/// embedded profiles, duplicates. Readers never see broken documents; the
+/// CLI surfaces these so a dropped document is visible, not silent.
+pub fn external_load_problems() -> &'static [(String, String)] {
+    &external().1
+}
+
+/// The external profiles that loaded, keyed by catalog slug.
+pub fn external_profiles() -> &'static BTreeMap<String, HarnessProfile> {
+    &external().0
+}
+
+/// One embedded document exactly as shipped — the published grammar by
+/// example, for inspection surfaces.
+pub fn embedded_raw(slug: &str) -> Option<&'static str> {
+    EMBEDDED_PROFILES
+        .iter()
+        .find(|(name, _)| *name == slug)
+        .map(|(_, text)| *text)
+}
+
+/// The validated profile for one catalog slug, if this package carries one
+/// embedded or one external document declares it. Embedded wins: an external
+/// document never overrides the declared product surface.
 pub fn for_slug(slug: &str) -> Option<&'static HarnessProfile> {
-    parsed().get(slug)
+    parsed().get(slug).or_else(|| external().0.get(slug))
 }
 
 /// The profile whose presence executables name this launch program. The join
@@ -770,17 +863,41 @@ pub fn for_slug(slug: &str) -> Option<&'static HarnessProfile> {
 /// key-delivery declarations, which is the honest absence.
 pub fn for_argv_program(program: &str) -> Option<&'static HarnessProfile> {
     let name = std::path::Path::new(program).file_name()?.to_string_lossy();
-    parsed().values().find(|profile| {
-        profile
-            .presence
-            .as_ref()
-            .is_some_and(|presence| presence.executables.iter().any(|e| *e == name))
-    })
+    parsed()
+        .values()
+        .find(|profile| {
+            profile
+                .presence
+                .as_ref()
+                .is_some_and(|presence| presence.executables.iter().any(|e| *e == name))
+        })
+        .or_else(|| {
+            external().0.values().find(|profile| {
+                profile
+                    .presence
+                    .as_ref()
+                    .is_some_and(|presence| presence.executables.iter().any(|e| *e == name))
+            })
+        })
 }
 
 /// Every embedded profile, keyed by catalog slug.
 pub fn all() -> impl Iterator<Item = (&'static str, &'static HarnessProfile)> {
     parsed().iter().map(|(slug, profile)| (*slug, profile))
+}
+
+/// Every profile that resolves in this process — embedded first, then the
+/// external documents that loaded — keyed by catalog slug.
+pub fn all_profiles() -> impl Iterator<Item = (&'static str, &'static HarnessProfile)> {
+    parsed()
+        .iter()
+        .map(|(slug, profile)| (*slug, profile))
+        .chain(
+            external()
+                .0
+                .iter()
+                .map(|(slug, profile)| (slug.as_str(), profile)),
+        )
 }
 
 /// The catalog slug a client TargetId resolves to, mirroring the registry's

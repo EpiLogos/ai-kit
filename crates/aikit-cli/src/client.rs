@@ -411,15 +411,26 @@ fn unknown_client_error(client: &str) -> AikitError {
     let mut names: Vec<&str> = OVERLAYS.iter().map(|overlay| overlay.name).collect();
     names.push(BROKER);
     let names = names.join(", ");
+    // The SDK contract (docs/v2/HARNESS-ADMISSION-AND-ADAPTER-SDK.md): an
+    // unrecognised target is a first-class compatibility gap, not synthetic
+    // support and not a bare roster miss — the route to support is named.
     AikitError::new(
-        "client.unknown",
+        "harness.compatibility_gap",
         format!(
-            "`{client}` is not a client AIKit has an adapter for; the adapter surface is: {names}. \
-             The full harness roster derives from `actuation harness detect` — \
-             `aikit client status` shows every descriptor it reports, overlaid or not"
+            "`{client}` has no AIKit adapter: a compatibility gap, not synthetic support. \
+             The adapter surface is: {names}. The full harness roster derives from \
+             `actuation harness detect` — `aikit client status` shows every descriptor \
+             it reports, overlaid or not"
         ),
     )
     .with("client", client.to_string())
+    .with("gap_kind", "no_adapter")
+    .with("sdk_ref", "aikit:harness-adapter-sdk/v1")
+    .with(
+        "authoring_skill_ref",
+        "skill/aikit/harness-adapter-authoring",
+    )
+    .with("profile_authoring_doc", "docs/HARNESS-PROFILE-AUTHORING.md")
 }
 
 fn not_dispatchable(overlay: &ClientOverlay) -> AikitError {
@@ -888,6 +899,31 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
             }
         }
         rows.push(client_row(member, &rc, &dirs, &detection)?);
+    }
+    if rows.is_empty() {
+        let Some(only) = only else {
+            return Ok(rows);
+        };
+        let mut error = unknown_client_error(only);
+        // Whatever the detection record actually saw about this target is
+        // evidence the gap carries, not synthetic support.
+        if let DetectionOutcome::Record(record) = detection {
+            if let Some(entry) = record.harnesses.iter().find(|entry| entry.slug == only) {
+                error = error
+                    .with("observed_state", format!("{:?}", entry.state))
+                    .with(
+                        "observed_probes",
+                        entry
+                            .probes
+                            .iter()
+                            .flatten()
+                            .map(|probe| format!("{}={}", probe.kind, probe.result))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    );
+            }
+        }
+        return Err(error);
     }
     Ok(rows)
 }

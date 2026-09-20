@@ -38,6 +38,8 @@ pub struct Cli {
 pub enum Command {
     /// Manage pinned Git and machine-local Agent Skill sources.
     Source(SourceCmd),
+    /// Validate, inspect and register harness-profile documents.
+    HarnessProfile(HarnessProfileCmd),
     /// Author scoped, additive guidance for Agent Skills.
     Skill(SkillCmd),
     /// Bind directories and repositories to reusable project skill sets.
@@ -595,6 +597,52 @@ pub struct SourcePromoteArgs {
     /// Record trust for one selected skill revision. Repeat for more skills.
     #[arg(long = "trust-skill", value_name = "CAPSULE", conflicts_with = "trust")]
     pub trust_skills: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct HarnessProfileCmd {
+    #[command(subcommand)]
+    pub command: HarnessProfileSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HarnessProfileSub {
+    /// Validate a harness-profile document against aikit.harness-profile/v1,
+    /// naming the first field that fails.
+    Validate(HarnessProfileValidateArgs),
+    /// Show one embedded or external profile document: embedded documents
+    /// print exactly as shipped (the published grammar by example).
+    Show(HarnessProfileSlugArgs),
+    /// Validate a document and install it into the AIKit home's
+    /// harness-profiles directory, where the profile registry reads it.
+    /// Embedded slugs are never overridden.
+    Register(HarnessProfileRegisterArgs),
+    /// List every profile that resolves (embedded and external) and every
+    /// external document that failed to load, with the reason.
+    List,
+}
+
+#[derive(Debug, Args)]
+pub struct HarnessProfileValidateArgs {
+    /// Path to the document to validate.
+    #[arg(value_name = "FILE")]
+    pub path: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct HarnessProfileSlugArgs {
+    #[arg(value_name = "SLUG")]
+    pub slug: String,
+}
+
+#[derive(Debug, Args)]
+pub struct HarnessProfileRegisterArgs {
+    /// Path to the document to register.
+    #[arg(value_name = "FILE")]
+    pub path: std::path::PathBuf,
+    /// Replace an already-registered external document of the same slug.
+    #[arg(long)]
+    pub force: bool,
 }
 
 // ---------------------------------------------------------------------------
