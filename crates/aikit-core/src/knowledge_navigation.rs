@@ -723,7 +723,7 @@ impl<'a> KnowledgeApplication<'a> {
                 self.wiki_relations(resource.clone(), depth, max_nodes, max_edges)?
             }
             KnowledgeAddress::Source(source) => {
-                self.source_relations(source, max_nodes, max_edges)?
+                self.source_relations(source, depth, max_nodes, max_edges)?
             }
             KnowledgeAddress::Code(reference) => {
                 self.code_relations(reference, max_nodes, max_edges)?
@@ -732,7 +732,9 @@ impl<'a> KnowledgeApplication<'a> {
                 self.project_map_relations(resource, depth, max_nodes, max_edges)?
             }
         };
-        self.augment_project_map_relations(address.resource_ref(), &mut view)?;
+        if depth > 0 {
+            self.augment_project_map_relations(address.resource_ref(), &mut view)?;
+        }
         Ok(view)
     }
 
@@ -1146,10 +1148,13 @@ impl<'a> KnowledgeApplication<'a> {
     fn source_relations(
         &self,
         source: &SourceRef,
+        depth: u8,
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
-        // A source's relations are the curated nodes that cite it. That is a
+        // A source's relations include native authored-link adjacency AND the
+        // curated nodes that cite it; neither is inferred from prose similarity.
+        // A source's citations are the curated nodes that cite it. That is a
         // fact the Wiki holds whether or not the SourcePool can materialise
         // the source's content, so requiring material here refused to answer
         // a question we could answer: a cited-but-unmaterialised source came
@@ -1164,7 +1169,7 @@ impl<'a> KnowledgeApplication<'a> {
         let focus = ResourceRef::parse(source.as_str())?;
         let query = RelationQuery {
             focus: focus.clone(),
-            depth: 1,
+            depth,
             max_nodes,
             max_edges,
             filters: Vec::new(),
@@ -1182,6 +1187,24 @@ impl<'a> KnowledgeApplication<'a> {
                 .push("SemanticWiki absent; source backlinks unavailable".into());
             return Ok(view);
         };
+        if depth == 0 {
+            return Ok(view);
+        }
+        if !wiki.neighbours(&focus, 1).is_empty() {
+            let linked = wiki.relations(view.query.clone())?;
+            view.truncated |= linked.truncated;
+            view.warnings.extend(linked.warnings);
+            for node in linked.nodes {
+                view.push_node(node);
+            }
+            for edge in linked.edges {
+                if view.nodes.iter().any(|n| n.resource == edge.from)
+                    && view.nodes.iter().any(|n| n.resource == edge.to)
+                {
+                    view.push_edge(edge)?;
+                }
+            }
+        }
         for resource in wiki.discover() {
             if !wiki.sources(&resource).contains(source) {
                 continue;

@@ -104,6 +104,15 @@ impl KnowledgeRuntime {
         (!key.contains('/')).then(|| format!("Work/{key}"))
     }
 
+    fn document_material(&self) -> Vec<SourceMaterial> {
+        let mut material = self.material.clone();
+        if let Some(provider) = &self.central {
+            material.extend_from_slice(provider.descriptors());
+        }
+        material.extend_from_slice(&self.now_field_roster);
+        material
+    }
+
     pub(super) fn source_material(&self) -> &[SourceMaterial] {
         &self.material
     }
@@ -461,12 +470,107 @@ impl Service {
     pub fn knowledge_read_document(&self, address: &KnowledgeAddress) -> Result<serde_json::Value> {
         self.with_knowledge(|runtime, application| {
             let reading = application.read(address)?;
-            let relations = application.relations(address, 1, 256, 512).ok();
+            let material = runtime.document_material();
+            let objects: Vec<_> = runtime
+                .wiki_index()
+                .map(|index| {
+                    index
+                        .discover()
+                        .into_iter()
+                        .filter_map(|reference| index.resolve(&reference))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let relations = application
+                .relations(address, 1, 256, 512)
+                .and_then(|view| {
+                    aikit_adapters::wiki_document::complete_source_relations(
+                        &reading, view, &material, &objects,
+                    )
+                })
+                .ok();
             aikit_adapters::wiki_document::reading_document(
                 &reading,
                 relations.as_ref(),
-                &runtime.material,
+                &runtime.document_material(),
             )
+        })
+    }
+
+    /// Complete metadata projection within explicit caller budgets; ranking and
+    /// admission remain the existing native query path, never a UI grammar.
+    pub fn knowledge_graph(
+        &self,
+        query: &str,
+        max_nodes: usize,
+        max_edges: usize,
+    ) -> Result<serde_json::Value> {
+        if max_nodes == 0 || max_nodes > 20_000 || max_edges == 0 || max_edges > 100_000 {
+            return Err(aikit_core::AikitError::new(
+                "knowledge.graph_budget",
+                "graph limits require 1..=20000 nodes and 1..=100000 edges",
+            ));
+        }
+        let found =
+            self.knowledge_search(query, max_nodes.saturating_add(max_edges).saturating_add(1))?;
+        self.with_knowledge(|runtime, _| {
+            let objects: Vec<_> = runtime
+                .wiki_index()
+                .map(|index| {
+                    index
+                        .discover()
+                        .into_iter()
+                        .filter_map(|reference| index.resolve(&reference))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let material = runtime.document_material();
+            let mut hits = found.hits.clone();
+            if query.trim().is_empty() {
+                for item in &material {
+                    let provider = runtime
+                        .central
+                        .as_ref()
+                        .filter(|p| {
+                            p.descriptors()
+                                .iter()
+                                .any(|m| m.binding.source == item.binding.source)
+                        })
+                        .map(|p| p.status().provider)
+                        .or_else(|| {
+                            runtime
+                                .now_field
+                                .as_ref()
+                                .filter(|_| {
+                                    runtime
+                                        .now_field_roster
+                                        .iter()
+                                        .any(|m| m.binding.source == item.binding.source)
+                                })
+                                .map(|p| p.status().provider)
+                        })
+                        .unwrap_or_else(|| runtime.native_source.status().provider);
+                    hits.push(aikit_core::knowledge_navigation::KnowledgeSearchHit {
+                        address: KnowledgeAddress::Source(item.binding.source.clone()),
+                        resource: ResourceRef::parse(item.binding.source.as_str())?,
+                        kind: ResourceKind::KnowledgeSource,
+                        label: item.binding.title.clone(),
+                        score: 0.0,
+                        snippet: String::new(),
+                        provider,
+                        authority: SourceAuthority::Observed,
+                        ranking: None,
+                    });
+                }
+            }
+            Ok(aikit_adapters::wiki_graph::project_graph(
+                &hits,
+                &objects,
+                &material,
+                max_nodes,
+                max_edges,
+                &found.absences,
+            ))
         })
     }
 
@@ -477,8 +581,28 @@ impl Service {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
-        self.with_knowledge(|_, application| {
-            application.relations(address, depth, max_nodes, max_edges)
+        self.with_knowledge(|runtime, application| {
+            let view = application.relations(address, depth, max_nodes, max_edges)?;
+            if !matches!(address, KnowledgeAddress::Source(_)) || depth == 0 {
+                return Ok(view);
+            }
+            let reading = application.read(address)?;
+            let objects: Vec<_> = runtime
+                .wiki_index()
+                .map(|index| {
+                    index
+                        .discover()
+                        .into_iter()
+                        .filter_map(|reference| index.resolve(&reference))
+                        .collect()
+                })
+                .unwrap_or_default();
+            aikit_adapters::wiki_document::complete_source_relations(
+                &reading,
+                view,
+                &runtime.document_material(),
+                &objects,
+            )
         })
     }
 

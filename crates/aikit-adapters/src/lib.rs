@@ -68,6 +68,7 @@ mod telegram_bot_api;
 pub mod telegram_gateway;
 pub mod tool_sources;
 pub mod wiki_document;
+pub mod wiki_graph;
 pub mod workcell_instance_intake;
 pub mod working_environment;
 pub mod working_environment_control;

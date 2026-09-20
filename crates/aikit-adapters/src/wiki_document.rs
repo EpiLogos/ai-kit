@@ -71,10 +71,7 @@ pub fn compile_material_sources(
         })
         .collect();
     let mut sources = Vec::new();
-    for item in material
-        .iter()
-        .filter(|item| is_markdown(item) && !item.body.is_empty())
-    {
+    for item in material.iter().filter(|item| is_markdown(item)) {
         let locators = match &item.binding.locator {
             Some(ResourceLocator::Path(path)) => vec![path.to_string_lossy().into_owned()],
             _ => Vec::new(),
@@ -167,6 +164,98 @@ pub fn document_selectors(document: &MarkdownDocument) -> Vec<Value> {
     result
 }
 
+/// Overlay the current selected source's explicit syntax on the same native
+/// relation reading. Only source bytes actually returned by its owner enter;
+/// metadata for other admitted sources is sufficient for target resolution.
+/// This read model is not a second semantic store and changes no authored Wiki.
+pub fn complete_source_relations(
+    reading: &KnowledgeReading,
+    mut view: KnowledgeRelationView,
+    material: &[SourceMaterial],
+    objects: &[WikiObject],
+) -> Result<KnowledgeRelationView> {
+    let Some(content) = reading.content.as_deref() else {
+        return Ok(view);
+    };
+    let mut current = material.to_vec();
+    let Some(source) = current.iter_mut().find(|item| {
+        item.binding.source.as_str() == reading.resource.as_str() && is_markdown(item)
+    }) else {
+        return Ok(view);
+    };
+    source.body = content.to_owned();
+    if let Some(revision) = &reading.revision {
+        source.binding.revision = aikit_core::resource::SourceRevision::parse(revision)?;
+    }
+    let mut warnings = Vec::new();
+    let compiled = compile_material_sources(&current, objects, &mut warnings)?;
+    let own_ref = reading.resource.as_str();
+    let is_old_source_edge = |object: &WikiObject| match object {
+        WikiObject::Edge(edge) => edge
+            .extensions
+            .get("authored_relation")
+            .is_some_and(|e| e["source_ref"] == own_ref),
+        _ => false,
+    };
+    let compiled_refs: std::collections::BTreeSet<_> = compiled
+        .edges
+        .iter()
+        .map(|edge| edge.ref_id.clone())
+        .collect();
+    let mut all: Vec<_> = objects
+        .iter()
+        .filter(|object| !is_old_source_edge(object) && !compiled_refs.contains(object.ref_id()))
+        .cloned()
+        .collect();
+    all.extend(compiled.edges.into_iter().map(WikiObject::Edge));
+    let (index, _) =
+        aikit_core::knowledge_wiki_index::SemanticWikiIndex::rebuild_with_repairs(all)?;
+    view.edges.retain(|edge| {
+        !edge
+            .authored_relation
+            .as_ref()
+            .is_some_and(|e| e.source_ref.as_str() == own_ref)
+    });
+    if !index.neighbours(&reading.resource, 1).is_empty() {
+        let native = aikit_core::knowledge_wiki_provider::SemanticWikiProvider::new(&index)
+            .relations(view.query.clone())?;
+        view.truncated |= native.truncated;
+        for mut node in native.nodes {
+            if let Some(source) = current
+                .iter()
+                .find(|source| source.binding.source.as_str() == node.resource.as_str())
+            {
+                node.label = source.binding.title.clone();
+            }
+            view.push_node(node);
+        }
+        for edge in native.edges {
+            if view
+                .edges
+                .iter()
+                .any(|old| match (&old.reference, &edge.reference) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => {
+                        old.from == edge.from
+                            && old.to == edge.to
+                            && old.relation == edge.relation
+                            && old.reference == edge.reference
+                    }
+                })
+            {
+                continue;
+            }
+            if view.nodes.iter().any(|node| node.resource == edge.from)
+                && view.nodes.iter().any(|node| node.resource == edge.to)
+            {
+                view.push_edge(edge)?;
+            }
+        }
+    }
+    view.warnings.extend(warnings);
+    Ok(view)
+}
+
 /// The original KnowledgeReading is kept byte-for-byte inside its normal wire
 /// fields. The optional facet carries the same source/revision and native edges.
 pub fn reading_document(
@@ -186,6 +275,20 @@ pub fn reading_document(
         return Ok(value);
     };
     let document = parse_markdown_document(content);
+    // Resolve the selected current body against admitted metadata. No neighbour
+    // body reads are needed merely to follow a link, and no renderer re-parses.
+    let mut current_material = material.to_vec();
+    if let Some(current) = current_material
+        .iter_mut()
+        .find(|item| item.binding.source == source.binding.source)
+    {
+        current.body = content.to_owned();
+        if let Some(revision) = &reading.revision {
+            current.binding.revision = aikit_core::resource::SourceRevision::parse(revision)?;
+        }
+    }
+    let mut warnings = Vec::new();
+    let compiled = compile_material_sources(&current_material, &[], &mut warnings)?;
     let mut occurrences = Vec::new();
     for link in &document.links {
         let native = relations.and_then(|view| {
@@ -201,15 +304,47 @@ pub fn reading_document(
                     })
             })
         });
-        let target = native.map(|edge| {
+        let own = compiled.edges.iter().find(|edge| {
+            edge.extensions
+                .get("authored_relation")
+                .and_then(|v| v.get("anchor"))
+                .is_some_and(|anchor| {
+                    anchor["start_byte"] == link.start_byte && anchor["end_byte"] == link.end_byte
+                })
+                && edge.from_ref == reading.resource
+        });
+        let pending = compiled.pending.iter().find(|item| {
+            item.evidence.source_ref == source.binding.source
+                && item.evidence.anchor.start_byte == Some(link.start_byte)
+                && item.evidence.anchor.end_byte == Some(link.end_byte)
+        });
+        let to = native
+            .map(|edge| &edge.to)
+            .or_else(|| own.map(|edge| &edge.to_ref));
+        let target = to.map(|target| {
             let source = material
                 .iter()
-                .any(|item| item.binding.source.as_str() == edge.to.as_str());
-            json!({"kind":if source {"source"} else {"wiki"},"value":edge.to})
+                .any(|item| item.binding.source.as_str() == target.as_str());
+            json!({"kind":if source {"source"} else {"wiki"},"value":target})
         });
-        occurrences.push(json!({"start_byte":link.start_byte,"end_byte":link.end_byte,"target":target,"reference":native.and_then(|edge|edge.reference.as_ref()),"evidence":native.and_then(|edge|edge.authored_relation.as_ref()),"state":if link.external {"external"} else if native.is_some() {"resolved"} else {"unresolved"}}));
+        let reference = native
+            .and_then(|edge| edge.reference.as_ref())
+            .or_else(|| own.map(|edge| &edge.ref_id));
+        let evidence = native
+            .and_then(|edge| edge.authored_relation.as_ref())
+            .map(|e| json!(e))
+            .or_else(|| own.and_then(|edge| edge.extensions.get("authored_relation").cloned()))
+            .or_else(|| pending.map(|item| json!(item.evidence)));
+        let ambiguous = pending.is_some_and(|item| {
+            matches!(
+                item.evidence.resolution,
+                AuthoredRelationResolution::Ambiguous { .. }
+            )
+        });
+        occurrences.push(json!({"start_byte":link.start_byte,"end_byte":link.end_byte,"target":target,"reference":reference,"evidence":evidence,"state":if link.external {"external"} else if to.is_some() {"resolved"} else if ambiguous {"ambiguous"} else {"unresolved"}}));
     }
-    let incoming: Vec<Value> = relations.into_iter().flat_map(|view| &view.edges).filter(|edge| edge.to == reading.resource).map(|edge| {
+
+    let incoming: Vec<Value> = relations.into_iter().flat_map(|view| &view.edges).filter(|edge| edge.to == reading.resource && edge.authored_relation.is_some()).map(|edge| {
         let source = material.iter().find(|item| item.binding.source.as_str() == edge.from.as_str());
         json!({"reference":edge.reference,"from":edge.from,"relation":edge.relation,"origin":edge.origin,"evidence":edge.authored_relation,"label":source.map(|item|item.binding.title.as_str()).unwrap_or(edge.from.as_str()),"address":{"kind":if source.is_some() {"source"} else {"wiki"},"value":edge.from}})
     }).collect();

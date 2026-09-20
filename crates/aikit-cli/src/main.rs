@@ -1917,6 +1917,9 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             let address = parse_knowledge_address(&a.address)?;
             jval!(service.knowledge_relations(&address, a.depth, a.max_nodes, a.max_edges)?)
         }
+        KnowledgeSub::Graph(a) => {
+            jval!(service.knowledge_graph(&a.query, a.max_nodes, a.max_edges)?)
+        }
         KnowledgeSub::Route(a) => {
             let addresses = a
                 .addresses
