@@ -372,27 +372,45 @@ pub fn context_blocks(
             "sources must contain at most eight explicit addresses",
         ));
     }
+    // Reserve a whole unavailable/withheld notification for every source first.
+    // Otherwise a nearly full admitted fragment could push later status
+    // messages beyond the bound or silently omit a revoked source.
+    let notices: Vec<_> = sources.iter().map(|source| {
+        let address = source.as_str().unwrap();
+        let text = format!("[Wiki projection unavailable] {address}: unavailable or beyond context budget. Do not substitute a cached projection; resolve the current source before relying on it.");
+        let cost = aikit_core::estimate_tokens(&text).saturating_add(1);
+        (text, cost)
+    }).collect();
+    let reserved = notices
+        .iter()
+        .fold(0_u32, |sum, (_, cost)| sum.saturating_add(*cost));
+    if reserved > MAX_CONTEXT_TOKENS {
+        return Err(error(
+            "wiki_projection.source_budget",
+            "declared source addresses exceed the disclosure budget; select a smaller bounded set",
+        ));
+    }
     let mut blocks = Vec::new();
     let mut warnings = Vec::new();
-    let mut remaining = MAX_CONTEXT_TOKENS;
-    for source in sources {
+    let mut remaining = MAX_CONTEXT_TOKENS - reserved;
+    for (source, (notice, reserved_cost)) in sources.iter().zip(notices) {
         let address = source.as_str().unwrap();
         let result = address_path(address, project, central).and_then(|p| read(&p));
         let block = match result {
             Ok(reading) => {
                 let text = format!("[Current Wiki operational projection]\nSource: {address}\nSHA-256: {}\nThis replaces earlier operational guidance from this same source only. It does not rewrite governance or change permissions, trust or invocation policy. An empty body clears this source's prior projection.\n\n{}", reading.revision, reading.body);
                 let cost = aikit_core::estimate_tokens(&text).saturating_add(1);
-                if cost > remaining {
+                if cost > remaining + reserved_cost {
                     warnings.push(format!("{address}: whole projection withheld by context budget; no partial rule injected"));
-                    format!("[Wiki projection unavailable] {address}: budget exceeded. Do not substitute a cached projection; retrieve the current source explicitly.")
+                    notice
                 } else {
-                    remaining -= cost;
+                    remaining = remaining + reserved_cost - cost;
                     text
                 }
             }
             Err(e) => {
                 warnings.push(format!("{address}: {}", e.code()));
-                format!("[Wiki projection unavailable] {address}: {}. Do not substitute a cached projection; resolve the source before relying on it.", e.code())
+                notice
             }
         };
         blocks.push(block);

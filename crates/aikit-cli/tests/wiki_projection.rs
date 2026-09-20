@@ -364,3 +364,37 @@ fn concurrent_feedback_writers_cannot_both_commit_the_same_basis() {
     assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
     assert_eq!(projection::read(&file).unwrap().feedback.len(), 1);
 }
+
+#[test]
+fn unavailable_statuses_share_the_same_total_budget_as_guidance() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let file = source(&root);
+    write(&file, &"guidance ".repeat(850));
+    let addresses: Vec<toml::Value> =
+        std::iter::once("project:ProjectCentral/agents/wiki/projection.md".to_string())
+            .chain((1..8).map(|i| format!("project:ProjectCentral/agents/wiki/missing-{i}.md")))
+            .map(toml::Value::String)
+            .collect();
+    let config =
+        toml::value::Table::from_iter([("sources".to_string(), toml::Value::Array(addresses))]);
+    let (blocks, warnings) = projection::context_blocks(&config, Some(&root), None).unwrap();
+    assert_eq!(blocks.len(), 8);
+    assert!(!warnings.is_empty());
+    assert!(aikit_core::estimate_tokens(&blocks.join("\n\n")) <= 2048);
+    assert!(blocks
+        .iter()
+        .skip(1)
+        .all(|s| s.contains("Do not substitute a cached projection")));
+}
+
+#[test]
+fn source_address_overflow_is_explicit_not_unbounded_context() {
+    let addresses: Vec<_> = (0..8)
+        .map(|i| toml::Value::String(format!("project:{}-{i}.md", "x".repeat(4096))))
+        .collect();
+    let config =
+        toml::value::Table::from_iter([("sources".to_string(), toml::Value::Array(addresses))]);
+    let error = projection::context_blocks(&config, None, None).unwrap_err();
+    assert_eq!(error.code(), "wiki_projection.source_budget");
+}
