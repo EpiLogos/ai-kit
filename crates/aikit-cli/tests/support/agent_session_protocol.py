@@ -23,7 +23,7 @@ def result(ident, value):
 
 def config():
     return [
-        {"id": "model", "type": "select", "name": "Model", "currentValue": model,
+        {"id": "model", "category": "model", "type": "select", "name": "Model", "currentValue": model,
          "options": [{"value": "test/a", "name": "A"}, {"value": "test/b", "name": "B"}]},
         {"id": "reasoning_effort", "type": "select", "name": "Reasoning", "currentValue": effort,
          "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]},

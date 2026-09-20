@@ -22,7 +22,7 @@ fn legacy_model_observation_does_not_invent_a_writable_config_selector() {
 #[test]
 fn only_exact_advertised_acp_session_controls_are_writable() {
     let mut adapter = opened(json!({"sessionId":"native-test","configOptions":[
-        {"id":"model","type":"select","name":"Model","currentValue":"test/a","options":[{"value":"test/a","name":"A"},{"value":"test/b","name":"B"}]},
+        {"id":"model","category":"model","type":"select","name":"Model","currentValue":"test/a","options":[{"value":"test/a","name":"A"},{"value":"test/b","name":"B"}]},
         {"id":"reasoning_effort","type":"select","name":"Reasoning","currentValue":"low","options":[{"value":"low","name":"Low"},{"value":"high","name":"High"}]}
     ]}));
     let controls = adapter.session_model_controls("native-test");
@@ -40,4 +40,10 @@ fn pi_resident_model_observation_never_promises_an_unimplemented_selector() {
     let controls = adapter.session_model_controls("native-test");
     assert!(!controls.model_selection && !controls.reasoning_effort_selection);
     assert!(controls.reason.is_some());
+}
+
+#[test]
+fn a_selector_without_the_required_model_category_stays_read_only() {
+    let adapter = opened(json!({"sessionId":"native-test","configOptions":[{"id":"model","type":"select","name":"Model","currentValue":"test/a","options":[{"value":"test/a","name":"A"}]}]}));
+    assert!(!adapter.session_model_controls("native-test").model_selection);
 }
