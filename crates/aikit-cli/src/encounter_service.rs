@@ -1030,7 +1030,10 @@ impl EncounterService {
                 let _operation = resident.operations.lock().map_err(error)?;
                 self.check_resident_context(&agent_session, &resident, "native-model-select")?;
                 let observed = resident.host.identity(&agent_session)?;
-                if expected_native_session_id.as_ref().is_some_and(|expected| expected != &observed.binding.native_session_id) {
+                if expected_native_session_id
+                    .as_ref()
+                    .is_some_and(|expected| expected != &observed.binding.native_session_id)
+                {
                     return Err(AikitError::new("encounter.stale_native_session", "The native session changed after the model read; read its controls again before selecting"));
                 }
                 if resident

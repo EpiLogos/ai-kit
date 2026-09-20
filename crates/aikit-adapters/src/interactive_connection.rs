@@ -44,7 +44,11 @@ pub struct NativeModelControls {
 
 impl NativeModelControls {
     pub fn unavailable(reason: impl Into<String>) -> Self {
-        Self { model_selection: false, reasoning_effort_selection: false, reason: Some(reason.into()) }
+        Self {
+            model_selection: false,
+            reasoning_effort_selection: false,
+            reason: Some(reason.into()),
+        }
     }
 }
 
@@ -488,7 +492,9 @@ impl InteractiveAgentConnectionAdapter for AcpStableConnectionAdapter {
                 reasoning_effort_selection: observation.reasoning_effort.is_some(),
                 reason: None,
             },
-            None => NativeModelControls::unavailable("ACP did not advertise a model config selector for this native session"),
+            None => NativeModelControls::unavailable(
+                "ACP did not advertise a model config selector for this native session",
+            ),
         }
     }
 
