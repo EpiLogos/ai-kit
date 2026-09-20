@@ -115,7 +115,11 @@ pub(crate) fn credential_resolved(
             secret,
         ));
     }
-    let native = NativeSecureStoreProvider::new();
+    // Seed the native provider with the persisted binding record: binding
+    // presence is metadata the store already holds, and an unseeded provider
+    // would report every credential as unbound, making headless dispatch
+    // refuse the OS keychain exactly when it is the bound route.
+    let native = NativeSecureStoreProvider::with_binding(stored.as_ref());
     let environment = use_
         .from_env
         .as_ref()

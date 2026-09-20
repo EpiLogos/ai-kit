@@ -373,19 +373,21 @@ pub(crate) fn direct_launcher(
     provider: &EncounterProvider,
     model: &PreparedModel,
 ) -> Result<Vec<String>> {
-    Ok(vec![
-        std::env::current_exe()
-            .map_err(error)?
-            .display()
-            .to_string(),
-        "encounter-model-exec".into(),
+    // Same folded-binary law as the owner spawn: the exec verb must be
+    // addressed through the shape this executable dispatches.
+    let mut argv = crate::encounter_service::session_space_exec(
+        &std::env::current_exe().map_err(error)?,
+        "encounter-model-exec",
+    );
+    argv.extend([
         "--agent-session".into(),
         session.to_string(),
         "--provider".into(),
         provider.id.clone(),
         "--expected-model-basis".into(),
         model.fingerprint()?,
-    ])
+    ]);
+    Ok(argv)
 }
 
 impl EncounterService {
@@ -474,26 +476,40 @@ impl EncounterService {
     pub(crate) fn open_model(&self, request: EncounterModelOpen) -> Result<Value> {
         self.require_attached(&request.agent_session)?;
         let mut candidates = Vec::new();
+        // A refusal must name why each explicitly configured body was rejected:
+        // a generic eligibility message leaves the operator no repair route.
+        let mut rejections: Vec<String> = Vec::new();
         for configured in self.providers()? {
-            if configured.model_policy.is_none()
-                || request.body.as_ref().is_some_and(|b| b != &configured.id)
-            {
+            if configured.model_policy.is_none() {
                 continue;
             }
-            if validate_target(&self.home, &request.agent_session, &configured, &request).is_ok()
-                && self
-                    .check_task_launch(&request.agent_session, &configured, &request.cwd)
-                    .is_ok()
-            {
-                candidates.push(configured);
+            if request.body.as_ref().is_some_and(|b| b != &configured.id) {
+                continue;
             }
+            if let Err(e) =
+                validate_target(&self.home, &request.agent_session, &configured, &request)
+            {
+                rejections.push(format!("body {}: {}", configured.id, e.message()));
+                continue;
+            }
+            if let Err(e) =
+                self.check_task_launch(&request.agent_session, &configured, &request.cwd)
+            {
+                rejections.push(format!("body {}: {}", configured.id, e.message()));
+                continue;
+            }
+            candidates.push(configured);
         }
         if candidates.len() != 1 {
-            return Err(error(if candidates.is_empty() {
+            let mut err = error(if candidates.is_empty() {
                 "No configured body has current model/source/credential/authority/protocol eligibility; no fallback selected"
             } else {
                 "Several native bodies are eligible; explicitly select a body"
-            }));
+            });
+            for (index, rejection) in rejections.iter().enumerate() {
+                err = err.with(format!("rejected_body_{index}"), rejection.clone());
+            }
+            return Err(err);
         }
         let provider = candidates.remove(0);
         let mut result = self.open_native(

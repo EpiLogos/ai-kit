@@ -629,10 +629,23 @@ impl EncounterService {
                     "Canonical encounter is already bound to another space/provider",
                 ));
             }
-            self.check_resident_context(&agent_session, held, "resident-open")?;
-            return Ok(
-                json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"model_selection":held.model,"resident":true}),
-            );
+            // A held resident whose process has died must not answer an open
+            // as if it were resident: verify liveness, retire the dead body,
+            // and fall through so reconnect/open report the true state and
+            // the supported recovery route.
+            let dead = held.host.transport_error().is_some()
+                || held
+                    .host
+                    .is_running()
+                    .map(|running| !running)
+                    .unwrap_or(true);
+            if !dead {
+                self.check_resident_context(&agent_session, held, "resident-open")?;
+                return Ok(
+                    json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"model_selection":held.model,"resident":true}),
+                );
+            }
+            residents.remove(&agent_session);
         }
         if !reconnect && previous.is_some() {
             return Err(AikitError::new("encounter.resume_required","A prior native binding exists; use explicit reconnect, or create a new canonical session for a fresh/forked encounter"));
@@ -1231,7 +1244,14 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
             let response = match result {
                 Ok(data) => json!({"ok":true,"data":data}),
                 Err(error) => {
-                    json!({"ok":false,"error":{"code":error.code(),"message":error.message()}})
+                    // Details ride the envelope: refusal reasons (for example
+                    // per-body open-model rejections) are the operator's
+                    // repair route and must not be stripped in transit.
+                    json!({"ok":false,"error":{
+                        "code":error.code(),
+                        "message":error.message(),
+                        "details":error.details(),
+                    }})
                 }
             };
             if let Ok(mut bytes) = serde_json::to_vec(&response) {
@@ -1253,6 +1273,29 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
     }
     std::fs::remove_file(socket).map_err(error)?;
     Ok(())
+}
+
+/// The SessionSpace surface is folded into the main binary, where its verbs
+/// dispatch as `session-space <verb>`, while the companion shim
+/// (`aikit-session-space`) dispatches the same verbs bare. Spawning one of
+/// these verbs must address the shape this executable actually answers to;
+/// the previous fixed `encounter-*` argv exited "unrecognized subcommand" on
+/// every folded-binary spawn (owner start and selected-model exec).
+#[cfg(unix)]
+pub(crate) fn session_space_exec(current_exe: &Path, verb: &str) -> Vec<String> {
+    let companion_shim = current_exe
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.starts_with("aikit-session-space"));
+    if companion_shim {
+        vec![current_exe.display().to_string(), verb.to_string()]
+    } else {
+        vec![
+            current_exe.display().to_string(),
+            "session-space".to_string(),
+            verb.to_string(),
+        ]
+    }
 }
 #[cfg(unix)]
 pub fn request(socket: &Path, request: &EncounterRequest) -> Result<Value> {
@@ -1298,16 +1341,19 @@ pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
         .open(home.state().join("encounter-owner.log"))
         .map_err(error)?;
     use std::os::unix::process::CommandExt;
-    let mut child = std::process::Command::new(std::env::current_exe().map_err(error)?)
-        .arg("-C")
-        .arg(cwd)
-        .arg("encounter-serve")
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone().map_err(error)?)
-        .stderr(log)
-        .process_group(0)
-        .spawn()
-        .map_err(error)?;
+    let mut argv = session_space_exec(&std::env::current_exe().map_err(error)?, "encounter-serve");
+    let mut child = {
+        let mut command = std::process::Command::new(argv.remove(0));
+        command
+            .arg("-C")
+            .arg(cwd)
+            .args(argv)
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone().map_err(error)?)
+            .stderr(log)
+            .process_group(0);
+        command.spawn().map_err(error)?
+    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         if let Ok(health) = request(&socket, &EncounterRequest::Health) {
