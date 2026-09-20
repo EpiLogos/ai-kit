@@ -12,23 +12,25 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install the repository-declared toolchain including formatter
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
       - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          cache-on-failure: true
       - name: Apply only the inspected Wiki source edits
         run: python3 .github/wiki-native-apply.py
       - name: Format and lock the native source
         run: |
+          mkdir -p /tmp/wiki-native-finished
           cargo fmt --all
-          cargo check -p aikit-cli
+          cargo check -q -p aikit-cli 2>&1 | tee /tmp/wiki-native-finished/check.log
       - name: Verify native document and relation behaviour
         run: |
-          cargo test --locked -p aikit-adapters --lib markdown_document
-          cargo test --locked -p aikit-adapters --lib wiki_document
-          cargo test --locked -p aikit-adapters --lib okf
-          cargo test --locked -p aikit-adapters --lib authored_wiki
-          cargo test --locked -p aikit-core --lib knowledge
+          cargo test -q --locked -p aikit-adapters --lib markdown_document
+          cargo test -q --locked -p aikit-adapters --lib wiki_document
+          cargo test -q --locked -p aikit-adapters --lib okf
+          cargo test -q --locked -p aikit-adapters --lib authored_wiki
+          cargo test -q --locked -p aikit-core --lib knowledge
       - name: Commit the actual implementation to this feature branch only
         run: |
           test "$(git ls-remote origin refs/heads/agent/wiki-source-constellation-20260920 | cut -f1)" = "$GITHUB_SHA"
