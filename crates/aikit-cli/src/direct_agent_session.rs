@@ -212,7 +212,9 @@ fn owner_review<R: CommandRunner>(runner: &R, binding: &DirectAgentBinding) -> R
         "agent-profile.review".into(),
         input.to_string(),
     ];
-    let output = runner.run(&executable, &args, None)?;
+    let mut argv = vec![executable];
+    argv.extend(args);
+    let output = runner.run(&argv)?;
     // Do not reproduce arbitrary native stderr, which may include operator data.
     if output.status != 0 {
         return Err(failure(
@@ -382,7 +384,7 @@ pub fn prepare_with<R: CommandRunner>(
                 .to_owned(),
         )
     };
-    let space = SessionSpaceRef::parse(format!("session-space/direct-{id}"))?;
+    let space = SessionSpaceRef::parse(&format!("session-space/direct-{id}"))?;
     let session = ResourceRef::parse(format!("agent-session/direct-{id}"))?;
     let _lock = ContextLock::acquire(
         service.home(),
@@ -420,7 +422,9 @@ pub fn prepare_with<R: CommandRunner>(
         "agent-profile.review".into(),
         input.to_string(),
     ];
-    let output = runner.run(&executable, &args, None)?;
+    let mut argv = vec![executable];
+    argv.extend(args);
+    let output = runner.run(&argv)?;
     if output.status != 0 || output.stdout.len() > MAX_BYTES {
         return Err(failure(
             "direct_agent.review_unavailable",
