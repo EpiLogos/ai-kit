@@ -2,6 +2,16 @@
 //! source policy, native Agency authority and credential delivery are separate
 //! inputs. A configured body is not reported as an inference result.
 //!
+//! How a bound policy reaches the harness is declared, not assumed: the
+//! harness profile joined by the launch program names the selector surface
+//! ([`dispatch_for`]) — per-invocation argv flags where the census observed
+//! them (pi), the native session's model configuration where the harness
+//! selects through its `model` config key (claude-code, codex, and the
+//! provider-plural ACP harnesses whose per-session selection the encounter
+//! decides) — and a `none` dispatch refuses with its declared reason. A bound
+//! policy is delivered or the open fails; it is never silently ignored. The
+//! Pi RPC path keeps its existing surface unchanged.
+//!
 //! Credential delivery has two routes into the same scrubbed final-child
 //! environment: the selected-model policy names its credential and target
 //! variable explicitly (the pi dispatch path), and the harness profile
@@ -17,6 +27,7 @@ use crate::encounter_service::{
     EncounterService,
 };
 use aikit_core::credential::{CredentialRef, SecretRequirementRef};
+use aikit_core::harness_profile::ModelDispatchPosture;
 use aikit_core::resource::{canonical_model_ref, CredentialCondition, ProviderRef};
 use aikit_core::{ResourceRef, Result};
 use aikit_store::{AikitHome, CredentialBindingStore};
@@ -58,6 +69,147 @@ pub(crate) struct PreparedModel {
     pub agency_ref: ResourceRef,
     pub world_binding_ref: ResourceRef,
     pub credential_reading: Option<Value>,
+    /// The declared dispatch this policy is delivered through. Part of the
+    /// serialized basis, so a dispatch change is a basis change.
+    pub dispatch: ModelDispatchDelivery,
+}
+
+/// The ACP stable schema's session configuration option for the model: the
+/// connection adapter observes exactly `id == "model"` with category `model`
+/// and sets it with `configId: "model"` (see `agent_connection` and
+/// `interactive_connection`). It is the one session-side surface a declared
+/// config-key selector can be delivered through, and it exists only where the
+/// harness advertises it.
+const ACP_SESSION_MODEL_SELECTOR: &str = "model";
+
+/// How a bound model policy is delivered to this harness. Serialized into the
+/// resident basis; the variants name the delivery, never a harness guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind", deny_unknown_fields)]
+pub(crate) enum ModelDispatchDelivery {
+    /// The profile declares the per-invocation argv flags the harness reads
+    /// (pi: `--provider`/`--model`); the launch appends them and the
+    /// harness's own state must still confirm the selection.
+    Argv {
+        provider_flag: String,
+        model_flag: String,
+    },
+    /// The harness selects its model through its `model` config key —
+    /// declared as `selector-kind = "config-key"` (claude-code, codex) or by
+    /// a provider-plural posture that leaves per-session selection to the
+    /// encounter. The delivery is the native session's own model
+    /// configuration option of the declared name: admitted against the
+    /// harness's advertised list and confirmed by readback. The harness's
+    /// on-disk default config is never rewritten.
+    ConfigKey { name: String },
+}
+
+/// The dispatch determination for one provider: how a bound policy is
+/// delivered, and the one provider the harness natively binds when its
+/// profile declares a native binding (the same limit the roster reads
+/// through `model_harness_binding`, here applied on the dispatch side).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelDispatch {
+    pub native_provider_ref: Option<String>,
+    pub delivery: ModelDispatchDelivery,
+}
+
+/// The declared dispatch for one provider, decided from the harness profile's
+/// models layer joined by the launch program — never from the connection
+/// protocol alone. The old protocol gate refused every ACP provider because
+/// ACP selection semantics were unassumed; the profiles now declare the
+/// surfaces, so each harness gets exactly its declared delivery and a
+/// harness with no declared surface refuses with its declared reason. The
+/// Pi RPC adapter carries its selection into the session open and keeps its
+/// existing surface unchanged.
+pub(crate) fn dispatch_for(provider: &EncounterProvider) -> Result<ModelDispatch> {
+    match provider.protocol {
+        EncounterProtocol::PiRpc => Ok(ModelDispatch {
+            native_provider_ref: None,
+            delivery: ModelDispatchDelivery::Argv {
+                provider_flag: "--provider".into(),
+                model_flag: "--model".into(),
+            },
+        }),
+        EncounterProtocol::Acp => {
+            let Some(program) = provider.argv.first() else {
+                return Err(error(
+                    "A model-selected provider needs a launch program; no dispatch surface is declared for an empty command",
+                ));
+            };
+            let Some(profile) = aikit_adapters::profiles::for_argv_program(program) else {
+                return Err(error(format!(
+                    "The launch program {program} joins no harness profile, so no model \
+                     dispatch surface is declared for it; a bound policy is never delivered \
+                     through an assumed surface"
+                )));
+            };
+            let Some(models) = &profile.models else {
+                return Err(error(format!(
+                    "The {} profile declares no models layer, so no model dispatch is declared",
+                    profile.slug
+                )));
+            };
+            let native_provider_ref = match &models.dispatch {
+                ModelDispatchPosture::NativeProviderBinding { provider_ref, .. } => {
+                    Some(provider_ref.clone())
+                }
+                _ => None,
+            };
+            let delivery = match &models.dispatch {
+                ModelDispatchPosture::ProviderPlural => match &models.argv_selectors {
+                    Some(selectors) => ModelDispatchDelivery::Argv {
+                        provider_flag: selectors.provider.clone(),
+                        model_flag: selectors.model.clone(),
+                    },
+                    None => ModelDispatchDelivery::ConfigKey {
+                        name: ACP_SESSION_MODEL_SELECTOR.into(),
+                    },
+                },
+                ModelDispatchPosture::NativeProviderBinding {
+                    selector_kind,
+                    selector_name,
+                    ..
+                } => {
+                    if selector_kind != "config-key" || selector_name != ACP_SESSION_MODEL_SELECTOR
+                    {
+                        return Err(error(format!(
+                            "The {} profile declares a {selector_kind} model selector named \
+                             {selector_name}; the encounter has no delivery for that surface \
+                             and does not improvise one",
+                            profile.slug
+                        )));
+                    }
+                    ModelDispatchDelivery::ConfigKey {
+                        name: selector_name.clone(),
+                    }
+                }
+                ModelDispatchPosture::None { reason } => {
+                    return Err(error(format!(
+                        "The {} profile declares no model dispatch: {reason}",
+                        profile.slug
+                    )));
+                }
+            };
+            Ok(ModelDispatch {
+                native_provider_ref,
+                delivery,
+            })
+        }
+    }
+}
+
+/// A harness that binds one provider natively serves exactly that provider;
+/// a provider-plural harness takes any provider's policy.
+fn check_dispatch_provider(dispatch: &ModelDispatch, policy: &ModelPolicy) -> Result<()> {
+    match &dispatch.native_provider_ref {
+        Some(declared) if declared != policy.provider_ref.as_str() => Err(error(format!(
+            "The harness profile binds {declared} natively; the policy names {}, \
+             which this harness does not serve",
+            policy.provider_ref
+        ))),
+        _ => Ok(()),
+    }
 }
 
 fn read_policy(source: &EncounterRequiredSource) -> Result<ModelPolicy> {
@@ -121,9 +273,7 @@ pub(crate) fn prepare(
     let Some(source) = &provider.model_policy else {
         return Ok(None);
     };
-    if provider.protocol != EncounterProtocol::PiRpc {
-        return Err(error("This model-dispatch adapter supports Pi RPC only; ACP configuration is not assumed to have Pi selection/readback semantics"));
-    }
+    let dispatch = dispatch_for(provider)?;
     let binding = read_binding(home, session)?
         .ok_or_else(|| error("Selected model needs a real Agency/WorldBinding, not a profile"))?;
     let admitted = native_admission(&binding)?;
@@ -143,6 +293,7 @@ pub(crate) fn prepare(
     {
         return Err(error("Current Agency does not authorise this selected model policy, World, authority or bounds"));
     }
+    check_dispatch_provider(&dispatch, &policy)?;
     let (catalogue, _) = aikit_store::model_catalogue::resolved_catalogue(home);
     let entry = catalogue.get(&policy.model_ref).ok_or_else(|| {
         error("Selected Model is absent from the canonical catalogue; detection does not mint it")
@@ -185,6 +336,7 @@ pub(crate) fn prepare(
         agency_ref: admitted.agency_ref,
         world_binding_ref: admitted.world_binding_ref,
         credential_reading,
+        dispatch: dispatch.delivery,
     }))
 }
 
@@ -203,25 +355,37 @@ impl PreparedModel {
     }
 }
 
-/// Pi's native flags select its model. Its real get_state and assistant result
-/// must also confirm the same provider/id; these arguments alone are not proof.
+/// The launch argv for a policy-selected provider. Where the declared
+/// dispatch rides argv (pi's native flags select its model) the declared
+/// flags are appended, and the harness's real get_state and assistant result
+/// must also confirm the same provider/id; these arguments alone are not
+/// proof. Where the selection rides the native session's model configuration
+/// instead, the provider starts unchanged and the resident delivers the
+/// selection after the session exists.
 fn selected_argv(provider: &EncounterProvider, model: &PreparedModel) -> Result<Vec<String>> {
+    let ModelDispatchDelivery::Argv {
+        provider_flag,
+        model_flag,
+    } = &model.dispatch
+    else {
+        return Ok(provider.argv.clone());
+    };
     if provider.argv.is_empty()
         || provider.argv.iter().any(|a| {
             a == "--"
-                || a == "--model"
-                || a == "--provider"
-                || a.starts_with("--model=")
-                || a.starts_with("--provider=")
+                || a == provider_flag
+                || a == model_flag
+                || a.starts_with(&format!("{provider_flag}="))
+                || a.starts_with(&format!("{model_flag}="))
         })
     {
         return Err(error("Model-selected provider needs one unambiguous native provider/model binding; conflicting flags are not rewritten"));
     }
     let mut argv = provider.argv.clone();
     argv.extend([
-        "--provider".into(),
+        provider_flag.clone(),
         model.policy.native_provider.clone(),
-        "--model".into(),
+        model_flag.clone(),
         model.policy.provider_native_id.clone(),
     ]);
     Ok(argv)
@@ -603,5 +767,339 @@ mod tests {
         let environment =
             profile_environment(&home, &session(), &provider_with_program("pi")).unwrap();
         assert!(environment.is_none(), "pi keeps its policy-delivery path");
+    }
+
+    // --- dispatch determination ---
+
+    fn acp_provider(argv: &[&str]) -> EncounterProvider {
+        EncounterProvider {
+            protocol: EncounterProtocol::Acp,
+            id: "probe".into(),
+            label: "probe".into(),
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            required_context: None,
+            model_policy: None,
+        }
+    }
+
+    fn pi_rpc_provider(argv: &[&str]) -> EncounterProvider {
+        let mut provider = acp_provider(argv);
+        provider.protocol = EncounterProtocol::PiRpc;
+        provider
+    }
+
+    fn policy_naming(provider_ref: &str) -> ModelPolicy {
+        ModelPolicy {
+            schema: "aikit.model-dispatch-policy/v1".into(),
+            agent_ref: ResourceRef::parse("agent/probe").unwrap(),
+            world_ref: ResourceRef::parse("world/probe").unwrap(),
+            authority_ref: ResourceRef::parse("authority/probe").unwrap(),
+            bounds_refs: vec![ResourceRef::parse("bound/probe").unwrap()],
+            model_ref: ResourceRef::parse("model/probe").unwrap(),
+            provider_ref: ProviderRef::parse(provider_ref).unwrap(),
+            native_provider: "probe-native".into(),
+            provider_native_id: "probe-model-1".into(),
+            expires_at_unix_ms: u64::MAX,
+            credential: None,
+        }
+    }
+
+    /// The expected determination for one declared executable: the declared
+    /// argv dispatch, a config-key session selection (with the natively bound
+    /// provider when the profile declares one), or a refusal.
+    enum ExpectedDispatch {
+        Argv,
+        ConfigKey(&'static str),
+        Refusal,
+    }
+
+    #[test]
+    fn pi_rpc_keeps_its_unchanged_argv_dispatch_even_for_a_bridge_program() {
+        // The Pi RPC adapter carries the selection into its session open and
+        // pi's native flags select its model; a bridge program (which joins
+        // no profile) must keep working exactly as before.
+        let dispatch = dispatch_for(&pi_rpc_provider(&[
+            "/opt/homebrew/bin/node",
+            "/bridges/codex-resident.mjs",
+        ]))
+        .unwrap();
+        assert_eq!(dispatch.native_provider_ref, None);
+        assert_eq!(
+            dispatch.delivery,
+            ModelDispatchDelivery::Argv {
+                provider_flag: "--provider".into(),
+                model_flag: "--model".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_config_key_profile_declares_the_session_selection_and_binds_its_provider() {
+        let claude = dispatch_for(&acp_provider(&["claude"])).unwrap();
+        assert_eq!(
+            claude.delivery,
+            ModelDispatchDelivery::ConfigKey {
+                name: "model".into()
+            }
+        );
+        assert_eq!(
+            claude.native_provider_ref.as_deref(),
+            Some("provider:anthropic"),
+            "claude-code binds provider:anthropic natively"
+        );
+        let codex = dispatch_for(&acp_provider(&["codex"])).unwrap();
+        assert_eq!(
+            codex.delivery,
+            ModelDispatchDelivery::ConfigKey {
+                name: "model".into()
+            }
+        );
+        assert_eq!(
+            codex.native_provider_ref.as_deref(),
+            Some("provider:openai")
+        );
+    }
+
+    #[test]
+    fn a_provider_plural_acp_harness_rides_the_session_model_selector() {
+        // gemini and kimi declare provider-plural dispatch with no observed
+        // argv flags: per-session selection is the encounter's to decide, and
+        // the ACP session's own model configuration is the surface it rides.
+        for program in ["gemini", "kimi"] {
+            let dispatch = dispatch_for(&acp_provider(&[program])).unwrap();
+            assert_eq!(dispatch.native_provider_ref, None);
+            assert_eq!(
+                dispatch.delivery,
+                ModelDispatchDelivery::ConfigKey {
+                    name: "model".into()
+                },
+                "{program}: provider-plural selection rides the session selector"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declared_none_harness_refuses_with_its_declared_reason() {
+        for (program, fragment) in [
+            (
+                "openclaw",
+                "The catalog capability descriptor is undeclared for openclaw",
+            ),
+            (
+                "cursor-agent",
+                "Cursor's model surface is subscription-mediated",
+            ),
+            (
+                "opencode",
+                "The catalog declares no capability document for opencode",
+            ),
+        ] {
+            let error = dispatch_for(&acp_provider(&[program])).unwrap_err();
+            let message = error.message();
+            assert!(
+                message.contains("declares no model dispatch"),
+                "{program}: {message}"
+            );
+            assert!(
+                message.contains(fragment),
+                "{program}: the declared reason must travel: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_harness_without_a_models_layer_and_a_bridge_program_refuse() {
+        let error = dispatch_for(&acp_provider(&["hermes-acp"])).unwrap_err();
+        assert!(
+            error.message().contains("declares no models layer"),
+            "{}",
+            error.message()
+        );
+        let error = dispatch_for(&acp_provider(&[
+            "/opt/homebrew/bin/node",
+            "/bridges/pi-acp/index.js",
+        ]))
+        .unwrap_err();
+        assert!(
+            error.message().contains("joins no harness profile"),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn a_policy_outside_the_declared_native_binding_refuses() {
+        let dispatch = dispatch_for(&acp_provider(&["claude"])).unwrap();
+        let error =
+            check_dispatch_provider(&dispatch, &policy_naming("provider:openai")).unwrap_err();
+        let message = error.message();
+        assert!(message.contains("provider:anthropic"), "{message}");
+        assert!(message.contains("provider:openai"), "{message}");
+        check_dispatch_provider(&dispatch, &policy_naming("provider:anthropic")).unwrap();
+    }
+
+    #[test]
+    fn a_provider_plural_dispatch_takes_any_provider_policy() {
+        let dispatch = dispatch_for(&acp_provider(&["gemini"])).unwrap();
+        check_dispatch_provider(&dispatch, &policy_naming("provider:gemini")).unwrap();
+        check_dispatch_provider(&dispatch, &policy_naming("provider:openrouter")).unwrap();
+    }
+
+    #[test]
+    fn every_declared_executable_resolves_to_its_expected_dispatch() {
+        // The whole declared table in one place: the dispatch determination
+        // is decided by the embedded profiles, so the expectation is legible
+        // and drifts loudly.
+        let expected: &[(&str, ExpectedDispatch)] = &[
+            ("claude", ExpectedDispatch::ConfigKey("provider:anthropic")),
+            ("codex", ExpectedDispatch::ConfigKey("provider:openai")),
+            ("gemini", ExpectedDispatch::ConfigKey("")),
+            ("kimi", ExpectedDispatch::ConfigKey("")),
+            ("qwen", ExpectedDispatch::ConfigKey("")),
+            ("ollama", ExpectedDispatch::ConfigKey("")),
+            ("hermes", ExpectedDispatch::ConfigKey("")),
+            ("goose", ExpectedDispatch::ConfigKey("")),
+            ("pi", ExpectedDispatch::Argv),
+            ("openclaw", ExpectedDispatch::Refusal),
+            ("cursor-agent", ExpectedDispatch::Refusal),
+            ("opencode", ExpectedDispatch::Refusal),
+            ("grok-bot", ExpectedDispatch::Refusal),
+            ("aider", ExpectedDispatch::Refusal),
+        ];
+        for (program, expected) in expected {
+            let determined = dispatch_for(&acp_provider(&[program]));
+            match expected {
+                ExpectedDispatch::Argv => assert!(matches!(
+                    determined.unwrap().delivery,
+                    ModelDispatchDelivery::Argv { .. }
+                )),
+                ExpectedDispatch::ConfigKey(provider) => {
+                    let dispatch = determined.unwrap();
+                    assert!(matches!(
+                        dispatch.delivery,
+                        ModelDispatchDelivery::ConfigKey { .. }
+                    ));
+                    assert_eq!(
+                        dispatch.native_provider_ref.as_deref(),
+                        (!provider.is_empty()).then_some(*provider)
+                    );
+                }
+                ExpectedDispatch::Refusal => assert!(
+                    determined.is_err(),
+                    "{program}: a declared-none dispatch must refuse"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn profiles_without_a_declared_executable_are_unreachable_by_program_join() {
+        // zcode, gemini-antigravity and deepseek-harness declare `none`
+        // dispatches but no executable (the census recorded no binary name),
+        // so no launch program joins them: an ACP provider naming such a
+        // binary refuses as profile-less rather than with the declared
+        // reason. The refusal stands either way — a bound policy is never
+        // silently ignored.
+        for program in ["zcode", "gemini-antigravity", "deepseek-harness"] {
+            let error = dispatch_for(&acp_provider(&[program])).unwrap_err();
+            assert!(
+                error.message().contains("joins no harness profile"),
+                "{program}: {}",
+                error.message()
+            );
+        }
+    }
+
+    // --- dispatch translation ---
+
+    fn prepared_with_dispatch(dispatch: ModelDispatchDelivery) -> PreparedModel {
+        PreparedModel {
+            policy_source: EncounterRequiredSource {
+                source: ResourceRef::parse("source/probe-policy").unwrap(),
+                revision: aikit_core::SourceRevision::parse("policy/1").unwrap(),
+                path: std::path::PathBuf::from("/tmp/probe-policy.json"),
+                content_digest: format!("blake3:{}", blake3::hash(b"probe-policy").to_hex()),
+            },
+            policy: policy_naming("provider:gemini"),
+            catalogue_entry: serde_json::json!({}),
+            catalogue_digest: "blake3:probe".into(),
+            agency_source: serde_json::json!({}),
+            agency_ref: ResourceRef::parse("agency/probe").unwrap(),
+            world_binding_ref: ResourceRef::parse("world-binding/probe").unwrap(),
+            credential_reading: None,
+            dispatch,
+        }
+    }
+
+    #[test]
+    fn an_argv_dispatch_appends_exactly_the_declared_flags() {
+        let provider = pi_rpc_provider(&["/Users/admin/.local/bin/pi", "--mode", "rpc"]);
+        let model = prepared_with_dispatch(ModelDispatchDelivery::Argv {
+            provider_flag: "--provider".into(),
+            model_flag: "--model".into(),
+        });
+        let argv = selected_argv(&provider, &model).unwrap();
+        assert_eq!(
+            argv,
+            vec![
+                "/Users/admin/.local/bin/pi",
+                "--mode",
+                "rpc",
+                "--provider",
+                "probe-native",
+                "--model",
+                "probe-model-1",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_conflicting_native_flag_refuses_without_rewriting() {
+        let model = prepared_with_dispatch(ModelDispatchDelivery::Argv {
+            provider_flag: "--provider".into(),
+            model_flag: "--model".into(),
+        });
+        for existing in [
+            vec!["pi", "--model", "other"],
+            vec!["pi", "--provider=zai"],
+            vec!["pi", "--"],
+        ] {
+            let provider = pi_rpc_provider(&existing);
+            let error = selected_argv(&provider, &model).unwrap_err();
+            assert!(
+                error
+                    .message()
+                    .contains("conflicting flags are not rewritten"),
+                "{existing:?}: {}",
+                error.message()
+            );
+        }
+    }
+
+    #[test]
+    fn a_config_key_dispatch_launches_the_provider_unchanged() {
+        // The selection rides the session's model configuration after the
+        // session exists, so the launch argv is the provider's own, never
+        // rewritten with pi's flags.
+        let provider = acp_provider(&["/opt/homebrew/bin/gemini", "--experimental-acp"]);
+        let model = prepared_with_dispatch(ModelDispatchDelivery::ConfigKey {
+            name: "model".into(),
+        });
+        let argv = selected_argv(&provider, &model).unwrap();
+        assert_eq!(argv, provider.argv);
+    }
+
+    #[test]
+    fn no_policy_resolves_to_no_dispatch_and_no_effect() {
+        // The no-policy path returns before any profile join: a provider
+        // without a bound policy is untouched, whatever its protocol or argv.
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        let mut provider = acp_provider(&["/opt/homebrew/bin/gemini", "--experimental-acp"]);
+        provider.model_policy = None;
+        assert!(prepare(&home, &session(), &provider).unwrap().is_none());
+        let mut bridge = acp_provider(&["/opt/homebrew/bin/node", "/bridges/x.mjs"]);
+        bridge.protocol = EncounterProtocol::PiRpc;
+        assert!(prepare(&home, &session(), &bridge).unwrap().is_none());
     }
 }
