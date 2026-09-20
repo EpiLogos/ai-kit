@@ -71,3 +71,14 @@ pub use session_space_service::SessionSpaceServiceOps;
 
 pub mod encounter_mcp;
 pub mod encounter_service;
+
+/// Self-invocation shape for session-space verbs. The main `aikit` binary
+/// takes them under the `session-space` subcommand; the standalone
+/// `aikit-session-space` binary (kept so direct callers keep working) takes
+/// them unprefixed. Anything that re-invokes its own executable — resident
+/// spawn, model-exec launcher, task launcher — must match its own shape.
+pub fn session_space_verb_prefix() -> Option<&'static str> {
+    let exe = std::env::current_exe().ok()?;
+    let name = exe.file_name()?.to_str()?;
+    (name == "aikit").then_some("session-space")
+}

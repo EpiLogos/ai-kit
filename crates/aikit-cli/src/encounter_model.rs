@@ -373,21 +373,23 @@ pub(crate) fn direct_launcher(
     provider: &EncounterProvider,
     model: &PreparedModel,
 ) -> Result<Vec<String>> {
-    Ok(vec![
-        std::env::current_exe()
-            .map_err(error)?
-            .display()
-            .to_string(),
-        // Folded invocation shape: the verb lives under `session-space`.
-        "session-space".into(),
-        "encounter-model-exec".into(),
+    let mut argv = vec![std::env::current_exe()
+        .map_err(error)?
+        .display()
+        .to_string()];
+    if let Some(prefix) = crate::session_space_verb_prefix() {
+        argv.push(prefix.to_owned());
+    }
+    argv.push("encounter-model-exec".into());
+    argv.extend([
         "--agent-session".into(),
         session.to_string(),
         "--provider".into(),
         provider.id.clone(),
         "--expected-model-basis".into(),
         model.fingerprint()?,
-    ])
+    ]);
+    Ok(argv)
 }
 
 impl EncounterService {

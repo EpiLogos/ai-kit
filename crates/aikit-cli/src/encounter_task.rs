@@ -379,19 +379,21 @@ impl EncounterService {
             "task-{}",
             blake3::hash(session.as_str().as_bytes()).to_hex()
         );
-        launcher.argv = vec![
-            std::env::current_exe()
-                .map_err(error)?
-                .display()
-                .to_string(),
-            // Folded invocation shape: the verb lives under `session-space`.
-            "session-space".into(),
-            "encounter-task-exec".into(),
+        let mut argv = vec![std::env::current_exe()
+            .map_err(error)?
+            .display()
+            .to_string()];
+        if let Some(prefix) = crate::session_space_verb_prefix() {
+            argv.push(prefix.to_owned());
+        }
+        argv.push("encounter-task-exec".into());
+        argv.extend([
             "--agent-session".into(),
             session.to_string(),
             "--expected-revision".into(),
             revision.to_string(),
-        ];
+        ]);
+        launcher.argv = argv;
         let mut record = TaskRecord {
             schema: "aikit.encounter-task/v1".into(),
             revision,

@@ -1374,9 +1374,7 @@ pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
     let mut child = std::process::Command::new(std::env::current_exe().map_err(error)?)
         .arg("-C")
         .arg(cwd)
-        // The session-space verbs live in the main binary (O-I #376 fold);
-        // the self-spawn must use the folded invocation shape.
-        .arg("session-space")
+        .args(crate::session_space_verb_prefix())
         .arg("encounter-serve")
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone().map_err(error)?)
