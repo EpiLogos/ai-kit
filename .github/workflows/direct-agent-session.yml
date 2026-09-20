@@ -1,0 +1,133 @@
+name: Direct accepted Agent session
+on:
+  push:
+    branches: [agent/direct-accepted-agent-session-20260920]
+  pull_request:
+    paths: ['crates/aikit-cli/src/direct_agent_session.rs', 'crates/aikit-cli/tests/direct_agent_session.rs', 'crates/aikit-adapters/src/connection_process.rs', 'crates/aikit-adapters/tests/human_authority_environment.rs', '.github/workflows/direct-agent-session.yml']
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Wire bounded native handlers on the isolated implementation branch
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          test "$GITHUB_REF_NAME" = agent/direct-accepted-agent-session-20260920
+          python3 - <<'PY'
+          from pathlib import Path
+          if 'pub mod direct_agent_session;' in Path('crates/aikit-cli/src/lib.rs').read_text():
+              raise SystemExit(0)
+          def replace(p,a,b):
+              f=Path(p);t=f.read_text();assert t.count(a)==1,(p,t.count(a),a[:90]);f.write_text(t.replace(a,b))
+          replace('crates/aikit-cli/src/lib.rs','pub mod discover;','pub mod discover;\npub mod direct_agent_session;')
+          replace('crates/aikit-cli/src/session_space_cli.rs','enum Command {','''enum Command {
+              /// Prepare one accepted Central Agent and canonical Direct session.
+              AgentSessionPrepare { #[arg(long)] request_json: String },
+              /// Read a preparation without opening a provider or replaying work.
+              AgentSessionRead { #[arg(long)] agent_session: String },
+              /// Recover interrupted preparation by its original correlation.
+              AgentSessionFind { #[arg(long)] request_id: String },''')
+          replace('crates/aikit-cli/src/session_space_cli.rs','    match cli.command {','''    match cli.command {
+                  Command::AgentSessionPrepare { request_json } => emit(&crate::direct_agent_session::prepare(&service,parse_json_arg(&request_json)?)?),
+                  Command::AgentSessionRead { agent_session } => emit(&crate::direct_agent_session::reading(service.home(),&aikit_core::ResourceRef::parse(agent_session)?)?),
+                  Command::AgentSessionFind { request_id } => emit(&crate::direct_agent_session::find(service.home(), &request_id)?),''')
+          replace('crates/aikit-cli/src/encounter_agency.rs','    /// CAS owner configuration.', '''    pub fn ensure_no_agency(home: &AikitHome, session: &ResourceRef) -> Result<()> {
+                  if read_binding(home, session)?.is_some() {
+                      return Err(AikitError::new("direct_agent.agency_conflict", "This session already has native Agency admission; it cannot be rebound to a Direct Agent identity"));
+                  }
+                  Ok(())
+              }
+              /// CAS owner configuration.''')
+          replace('crates/aikit-cli/src/encounter_agency.rs','        let current = read_binding(home, session)?;','''        if crate::direct_agent_session::read(home, session)?.is_some() {
+                      return Err(AikitError::new("encounter.direct_agent_conflict", "This session belongs to an accepted Direct Agent definition; create a separately attributed Agency session"));
+                  }
+                  let current = read_binding(home, session)?;''')
+          replace('crates/aikit-cli/src/encounter_service.rs','        let previous = self.store.last_native_binding(&agent_session)?;','''        crate::direct_agent_session::check(&self.home, &agent_session, &cwd)?;
+                  let previous = self.store.last_native_binding(&agent_session)?;''')
+          replace('crates/aikit-cli/src/encounter_service.rs','        let current = self.providers()?.into_iter().find(|p| p.id == resident.provider)','''        crate::direct_agent_session::check(&self.home, session, &resident.cwd)?;
+                  let current = self.providers()?.into_iter().find(|p| p.id == resident.provider)''')
+          replace('crates/aikit-cli/src/encounter_service.rs','''                let cleared = self.store.submit(&agent_session, draft_revision, |text| {
+                              let text = self.prepare_agency_text(&agent_session, text)?;
+                              let handle = resident.lane.prompt(resident.prompt_payload(&text))?;
+                              drop(handle);
+                              Ok(())
+                          })?;
+                          Ok(json!({"accepted":true,"draft":cleared}))''','''                let mut context_evidence = None;
+                          let cleared = self.store.submit(&agent_session, draft_revision, |text| {
+                              let text = self.prepare_agency_text(&agent_session, text)?;
+                              let (text, evidence) = crate::direct_agent_session::prompt(&self.home, &agent_session, &text)?;
+                              let handle = resident.lane.prompt(resident.prompt_payload(&text))?;
+                              context_evidence = evidence;
+                              drop(handle);
+                              Ok(())
+                          })?;
+                          // submit holds the journal transaction. Append only after
+                          // commit; a failed post-dispatch receipt is never replayable.
+                          if let Some(mut evidence) = context_evidence {
+                              evidence["draft_revision"] = json!(draft_revision);
+                              evidence["native_session_id"] = json!(resident.lane.binding().native_session_id);
+                              self.store.append(&agent_session, &evidence).map_err(|_| AikitError::new("encounter.submission_uncertain", "Native prompt was submitted but context receipt failed; reread, do not replay"))?;
+                          }
+                          Ok(json!({"accepted":true,"draft":cleared}))''')
+          replace('crates/aikit-adapters/src/connection_process.rs','    // A private group contains the adapter and ordinary inherited descendants.','''    // Human native-action authority is not a provider credential. Even an
+              // unscoped/login-backed harness must not inherit acceptance authority.
+              command.env_remove("CENTRAL_NATIVE_TOKEN");
+              // A private group contains the adapter and ordinary inherited descendants.''')
+          PY
+          rustup component add rustfmt clippy
+          rustfmt --edition 2024 --config skip_children=true crates/aikit-cli/src/direct_agent_session.rs crates/aikit-cli/tests/direct_agent_session.rs crates/aikit-adapters/tests/human_authority_environment.rs crates/aikit-cli/src/session_space_cli.rs crates/aikit-cli/src/encounter_agency.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-adapters/src/connection_process.rs
+          git config user.name Epii
+          git config user.email agent-session@users.noreply.github.com
+          git add crates/aikit-cli/src/direct_agent_session.rs crates/aikit-cli/tests/direct_agent_session.rs crates/aikit-adapters/tests/human_authority_environment.rs crates/aikit-adapters/src/connection_process.rs crates/aikit-cli/src/encounter_agency.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-cli/src/lib.rs crates/aikit-cli/src/session_space_cli.rs
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat(agent): wire accepted Agent sessions and fence human acceptance credentials'
+            git push origin HEAD:refs/heads/agent/direct-accepted-agent-session-20260920
+          fi
+      - name: Exact tested source
+        if: always()
+        run: |
+          mkdir -p direct-agent-evidence
+          git rev-parse HEAD > direct-agent-evidence/source-revision.txt
+          git diff > direct-agent-evidence/uncommitted.patch
+          git archive --format=tar.gz HEAD > direct-agent-evidence/source.tar.gz
+      - name: Native Direct-session validation
+        id: direct
+        continue-on-error: true
+        shell: bash
+        run: cargo test --locked -p aikit-cli --test direct_agent_session 2>&1 | tee direct-agent-evidence/direct.log
+      - name: Real child-process authority boundary
+        id: environment
+        continue-on-error: true
+        shell: bash
+        run: cargo test --locked -p aikit-adapters --test human_authority_environment 2>&1 | tee direct-agent-evidence/environment.log
+      - name: Full native regression suite
+        id: all
+        continue-on-error: true
+        shell: bash
+        run: cargo test --all-targets --locked 2>&1 | tee direct-agent-evidence/all.log
+      - name: Strict full native lint
+        id: lint
+        continue-on-error: true
+        shell: bash
+        run: cargo clippy --all-targets --locked -- -D warnings 2>&1 | tee direct-agent-evidence/clippy.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: direct-agent-session-evidence
+          path: direct-agent-evidence/
+          retention-days: 7
+      - name: Retain every failing gate
+        if: steps.direct.outcome != 'success' || steps.environment.outcome != 'success' || steps.all.outcome != 'success' || steps.lint.outcome != 'success'
+        run: exit 1
