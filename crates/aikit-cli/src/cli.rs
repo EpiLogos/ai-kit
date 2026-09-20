@@ -77,6 +77,8 @@ pub enum Command {
     /// surface, separate from `wiki` so this case never has to touch that
     /// command's dispatch).
     WikiShape(WikiShapeCmd),
+    /// Construct revisioned native Wiki wholes and contextual participations.
+    WikiConstruct(crate::wiki_construct::ConstructArgs),
     /// Show the effective view for the current context.
     Status(StatusArgs),
     /// Emit the owner settings-disclosure descriptor for the O:I System surface.

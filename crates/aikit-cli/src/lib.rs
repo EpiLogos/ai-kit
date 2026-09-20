@@ -63,6 +63,7 @@ pub mod tree_build;
 pub mod ui;
 pub mod wiki;
 pub mod wiki_shape;
+pub mod wiki_construct;
 pub mod working_environment_field;
 
 pub use session_lifecycle_ops::SessionLifecycleServiceOps;
