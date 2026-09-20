@@ -378,6 +378,8 @@ pub(crate) fn direct_launcher(
             .map_err(error)?
             .display()
             .to_string(),
+        // Folded invocation shape: the verb lives under `session-space`.
+        "session-space".into(),
         "encounter-model-exec".into(),
         "--agent-session".into(),
         session.to_string(),

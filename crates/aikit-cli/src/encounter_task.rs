@@ -384,6 +384,8 @@ impl EncounterService {
                 .map_err(error)?
                 .display()
                 .to_string(),
+            // Folded invocation shape: the verb lives under `session-space`.
+            "session-space".into(),
             "encounter-task-exec".into(),
             "--agent-session".into(),
             session.to_string(),
