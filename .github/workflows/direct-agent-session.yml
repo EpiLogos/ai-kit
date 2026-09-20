@@ -28,21 +28,26 @@ jobs:
       - name: Install repository formatter and lint
         run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Apply preserved test repair to this owned branch only
+      - name: Preserve native trust prerequisite in the controlled test
         if: github.event_name == 'push'
         shell: bash
         run: |
           test "$GITHUB_REF_NAME" = agent/direct-accepted-agent-session-20260920
-          if test -f .github/finish-agent-join.py; then
-            python3 .github/finish-agent-join.py
-            test "$(git diff --name-only)" = tests/direct_agent_native_join.py
-            git add tests/direct_agent_native_join.py
-            git rm .github/finish-agent-join.py
-            git config user.name Epii
-            git config user.email agent-session@users.noreply.github.com
-            git commit -m 'test(agent): verify Resident completion, effective Skill delivery and retained native failure evidence'
-            git push origin HEAD:refs/heads/agent/direct-accepted-agent-session-20260920
-          fi
+          python3 - <<'PY'
+          import pathlib,subprocess
+          p=pathlib.Path('tests/direct_agent_native_join.py');s=p.read_text()
+          old='            command([str(aikit),"--json","enable",skill_ref,"--scope","global"])'
+          if '"trust","record",skill_ref' not in s:
+              assert s.count(old)==1
+              s=s.replace(old,'            command([str(aikit),"--json","trust","record",skill_ref,"--note","Explicit review of controlled test-only Skill bytes"])\n'+old)
+              s=s.replace('subprocess.run(argv, env=env, capture_output=True','subprocess.run(argv, cwd=root if root.exists() else base, env=env, capture_output=True')
+              p.write_text(s)
+              subprocess.run(['git','add',str(p)],check=True)
+              subprocess.run(['git','config','user.name','Epii'],check=True)
+              subprocess.run(['git','config','user.email','agent-session@users.noreply.github.com'],check=True)
+              subprocess.run(['git','commit','-m','test(agent): review the controlled Skill revision before native enablement'],check=True)
+              subprocess.run(['git','push','origin','HEAD:refs/heads/agent/direct-accepted-agent-session-20260920'],check=True)
+          PY
       - name: Record exact committed source
         if: always()
         run: |
@@ -99,10 +104,11 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          git fetch --no-tags origin 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 579a1cdaf202b3b0de74a2ce25ec240fe857a91b 62161b00249111ae797a41c825bc75e5054b4de0
-          git diff 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 -- crates/aikit-adapters/src/interactive_connection.rs crates/aikit-adapters/src/agent_session_host.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-adapters/tests/native_model_controls.rs crates/aikit-cli/tests/encounter_native_protocol.rs > direct-agent-evidence/model-dependency.patch
+          exec > >(tee direct-agent-evidence/composition.log) 2>&1
+          git fetch --no-tags origin 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 37994265f5727af50ec6446687ed629dde047412 62161b00249111ae797a41c825bc75e5054b4de0
+          git diff 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 -- crates/aikit-adapters/src/interactive_connection.rs crates/aikit-adapters/src/agent_session_host.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-adapters/tests/native_model_controls.rs crates/aikit-cli/tests/agent_session_protocol.rs crates/aikit-cli/tests/support/agent_session_protocol.py > direct-agent-evidence/model-dependency.patch
           git apply --3way direct-agent-evidence/model-dependency.patch
-          git diff 579a1cdaf202b3b0de74a2ce25ec240fe857a91b 62161b00249111ae797a41c825bc75e5054b4de0 -- crates > direct-agent-evidence/folded-dependency.patch
+          git diff 37994265f5727af50ec6446687ed629dde047412 62161b00249111ae797a41c825bc75e5054b4de0 -- crates > direct-agent-evidence/folded-dependency.patch
           git apply --3way direct-agent-evidence/folded-dependency.patch
           git write-tree > direct-agent-evidence/composed-tree.txt
           git diff HEAD > direct-agent-evidence/composed.patch
@@ -112,13 +118,18 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          cargo test --locked -p aikit-cli --test encounter_owner_folded_spawn 2>&1 | tee direct-agent-evidence/folded-startup.log
+          cargo test --locked -p aikit-cli --test encounter_owner_folded_spawn --test agent_session_protocol 2>&1 | tee direct-agent-evidence/folded-protocol.log
+          cargo test --locked -p aikit-adapters --test native_model_controls 2>&1 | tee direct-agent-evidence/model-controls.log
           cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee direct-agent-evidence/composed-build.log
           python3 tests/direct_agent_native_join.py --ctrl /tmp/central-agent-owner/target/debug/ctrl --aikit "$PWD/target/debug/aikit" --evidence direct-agent-evidence/composed-join 2>&1 | tee direct-agent-evidence/composed-join.log
-          cp target/debug/aikit direct-agent-evidence/aikit-composed
-          cp /tmp/central-agent-owner/target/debug/ctrl direct-agent-evidence/ctrl
-          strip direct-agent-evidence/aikit-composed direct-agent-evidence/ctrl
-          sha256sum direct-agent-evidence/aikit-composed direct-agent-evidence/ctrl > direct-agent-evidence/binary-sha256.txt
+      - name: Preserve actual native binaries and source composition even after a failed test
+        if: always()
+        shell: bash
+        run: |
+          if test -f target/debug/aikit; then cp target/debug/aikit direct-agent-evidence/aikit-tested; strip direct-agent-evidence/aikit-tested; fi
+          if test -f /tmp/central-agent-owner/target/debug/ctrl; then cp /tmp/central-agent-owner/target/debug/ctrl direct-agent-evidence/ctrl; strip direct-agent-evidence/ctrl; fi
+          git diff HEAD > direct-agent-evidence/tested-changes.patch
+          sha256sum direct-agent-evidence/aikit-tested direct-agent-evidence/ctrl > direct-agent-evidence/binary-sha256.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
