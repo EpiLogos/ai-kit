@@ -108,6 +108,26 @@ pub fn bind(
     Ok(spec)
 }
 
+/// Remove a Project Specification entirely, together with the AIKit-owned
+/// link it placed inside each bound directory. The bound projects' own files
+/// are untouched.
+pub fn unbind(home: &AikitHome, id: &str) -> Result<()> {
+    validate_id(id)?;
+    let path = project_file(home, id);
+    if !path.is_file() {
+        return Err(AikitError::new(
+            "project.unknown",
+            format!("no Project Specification named `{id}` is registered"),
+        )
+        .with("project", id));
+    }
+    let spec = read_spec(&path)?;
+    for directory in &spec.directories {
+        remove_aikit_owned_codex_link(home, directory)?;
+    }
+    fs::remove_file(&path).map_err(|error| io(&path, error))
+}
+
 pub fn resolve(home: &AikitHome, cwd: &Path) -> Result<Option<ProjectMatch>> {
     let cwd = fs::canonicalize(cwd).map_err(|error| {
         AikitError::new(

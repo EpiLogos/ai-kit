@@ -457,6 +457,9 @@ pub enum ProjectSub {
     List(ProjectListArgs),
     /// Configure the Skill Sets inherited by Project Specifications by default.
     Defaults(ProjectDefaultsArgs),
+    /// Remove a Project Specification and the AIKit-owned link it placed in
+    /// each bound directory. The projects' own files are untouched.
+    Unbind(ProjectIdArgs),
 }
 
 #[derive(Debug, Args)]
@@ -475,6 +478,12 @@ pub struct ProjectBindArgs {
 
 #[derive(Debug, Args)]
 pub struct ProjectShowArgs {}
+
+#[derive(Debug, Args)]
+pub struct ProjectIdArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+}
 
 #[derive(Debug, Args)]
 pub struct ProjectListArgs {
@@ -512,6 +521,10 @@ pub enum SourceSub {
     Promote(SourcePromoteArgs),
     /// Return to the previous promoted snapshot.
     Rollback(SourceNameArgs),
+    /// Remove the registration and every snapshot it owns. Refuses while the
+    /// source still has an active snapshot unless `--force` names the loss;
+    /// recorded trust stays as review evidence.
+    Remove(SourceRemoveArgs),
 }
 
 #[derive(Debug, Args)]
@@ -559,6 +572,17 @@ pub struct SourceSetRevisionArgs {
 pub struct SourceNameArgs {
     #[arg(value_name = "ID")]
     pub id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SourceRemoveArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// Remove even while the source still has an active snapshot. The reply
+    /// names what was removed; projected generations keep their bytes until
+    /// the next apply rebuilds without the source.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]

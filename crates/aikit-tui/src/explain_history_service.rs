@@ -15,9 +15,10 @@ use aikit_core::{
     HistoryRecoverability, Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS, EXPLAIN_HISTORY_VERSION,
 };
 use aikit_store::{
-    compare_generation_worlds, familiarity_history_evidence_model, generation_history_evidence,
-    knowledge_application_receipt_evidence, procedure_history_evidence,
-    session_space_history_evidence, GenerationWorldComparison, SessionSpaceApplicationStore,
+    all_contexts_generation_history_evidence, compare_generation_worlds,
+    familiarity_history_evidence_model, knowledge_application_receipt_evidence,
+    procedure_history_evidence, session_space_history_evidence, source_history_evidence,
+    GenerationWorldComparison, SessionSpaceApplicationStore,
 };
 
 use crate::application_service::ApplicationService;
@@ -263,10 +264,11 @@ impl ExplainHistoryApplicationService for ApplicationService<'_> {
         }
 
         if let Some(home) = backend.application_home() {
-            entries.extend(generation_history_evidence(
-                home,
-                &backend.context().context_id,
-            )?);
+            // Applies mint fresh contexts as the resolution identity changes,
+            // so the lifecycle is read across every recorded context rather
+            // than only the caller's current one.
+            entries.extend(all_contexts_generation_history_evidence(home)?);
+            entries.extend(source_history_evidence(home)?);
             entries.extend(procedure_history_evidence(home)?);
 
             // SessionSpace receipts are indexed by canonical relations at read

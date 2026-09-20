@@ -110,3 +110,26 @@ To update safely, run `aikit source set-revision <source> <exact-commit>`, then
 `source sync`, inspect the candidate shown by `source show`, and promote it
 explicitly. `source rollback` returns to the prior promoted snapshot without
 fetching or rebuilding it.
+
+Lifecycle facts the flow depends on:
+
+- **Binding a set to a project does not enable its members.** Each skill still
+  needs an explicit `aikit enable <skill-id> --scope project` (or a User
+  Baseline enable) before `apply` materialises it.
+- **Generation rollback needs a held context.** An unpinned `apply` mints a
+  fresh context id, so the published projections stop updating and the
+  previous generation becomes unreachable. Pin `AIKIT_CONTEXT_ID` across a
+  working session (mux panes and child processes) so every apply and
+  `aikit rollback` act inside one generation chain. Rolling back twice
+  returns you forward again; an identical re-apply changes nothing and never
+  costs you the rollback target.
+- **Removal is a real verb now.** `aikit source remove <id>` deletes the
+  registration and every snapshot it owns, refusing while the source still
+  has an active snapshot unless `--force` names the loss; recorded trust
+  stays as review evidence. `aikit project unbind <id>` removes the binding
+  and the AIKit-owned link it placed in the bound directory, leaving the
+  project's own files untouched.
+- **`history` reads the skill lifecycle.** `aikit history --resource
+  skill/<source>/<name>` reaches the generations that carried the skill and
+  the source snapshots that promoted it, across every recorded context —
+  not only the caller's current one.

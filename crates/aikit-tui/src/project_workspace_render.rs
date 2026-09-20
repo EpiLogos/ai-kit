@@ -1119,6 +1119,7 @@ fn history_kind_label(entry: &HistoryEvidence) -> &'static str {
         HistoryKind::SessionSpace => "SessionSpace",
         HistoryKind::Procedure => "Procedure",
         HistoryKind::LiveActivation => "Live activation",
+        HistoryKind::Source => "Source",
     }
 }
 

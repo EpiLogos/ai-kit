@@ -701,6 +701,79 @@ fn rolling_back_with_nothing_to_roll_back_to_says_so() {
 }
 
 // ---------------------------------------------------------------------------
+// An identical re-apply must not break the rollback chain
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_identical_reapply_keeps_the_rollback_chain_intact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = registry(tmp.path());
+    let resolved_small = resolve_fixture(&fixture, &["script/test/nt"]);
+    let resolved_large = resolve_fixture(&fixture, &["script/test/nt", "skill/rust/review"]);
+    let ctx = context_dir(tmp.path());
+
+    let first = build_and_commit(&ctx, &resolved_large, "one", None);
+    let second = build_and_commit(&ctx, &resolved_small, "one", Some(&first));
+    assert_ne!(first, second);
+
+    // Re-applying the already-current content mints nothing, and must leave
+    // the pointers alone: `previous` still names the generation this content
+    // replaced, so a rollback is the real swap, not a reported no-op.
+    let again = build_and_commit(&ctx, &resolved_small, "one", Some(&second));
+    assert_eq!(again, second, "the generation id is a content hash");
+    assert_eq!(
+        generation::previous(&ctx).unwrap(),
+        Some(first.clone()),
+        "an identical re-apply must not alias `previous` to `current`"
+    );
+
+    let outcome = generation::rollback(&ctx).unwrap();
+    assert_eq!(outcome.was_current, second);
+    assert_eq!(outcome.now_current, first);
+}
+
+#[test]
+fn rollback_heals_a_previous_pointer_that_aliases_current() {
+    // A historical defect pointed `previous` at `current` when an apply
+    // reproduced the current content. The generation metadata still records
+    // the true base, so rollback recovers the chain instead of swapping a
+    // symlink with itself.
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = registry(tmp.path());
+    let resolved_small = resolve_fixture(&fixture, &["script/test/nt"]);
+    let resolved_large = resolve_fixture(&fixture, &["script/test/nt", "skill/rust/review"]);
+    let ctx = context_dir(tmp.path());
+
+    let first = build_and_commit(&ctx, &resolved_large, "one", None);
+    let second = build_and_commit(&ctx, &resolved_small, "one", Some(&first));
+
+    // Corrupt the pointer the way the defect left it.
+    let alias = ctx.join("previous.tmp");
+    std::os::unix::fs::symlink(
+        ctx.join("generations")
+            .join(second.as_str())
+            .file_name()
+            .unwrap(),
+        &alias,
+    )
+    .unwrap();
+    fs::rename(&alias, ctx.join("previous")).unwrap();
+
+    let outcome = generation::rollback(&ctx).unwrap();
+    assert_eq!(outcome.was_current, second);
+    assert_eq!(
+        outcome.now_current, first,
+        "the base recorded in the generation metadata is the real rollback target"
+    );
+    assert_eq!(generation::current(&ctx).unwrap(), Some(first));
+    assert_eq!(
+        generation::previous(&ctx).unwrap(),
+        Some(second),
+        "the healed pointer keeps the rollback undoable"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Link mode and copy mode are logically the same projection
 // ---------------------------------------------------------------------------
 

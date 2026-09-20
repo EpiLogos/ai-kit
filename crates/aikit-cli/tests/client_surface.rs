@@ -201,6 +201,51 @@ fn scenario_with_partial_intake() -> tempfile::TempDir {
 }
 
 #[test]
+fn a_client_honours_its_own_config_home_override_over_every_default() {
+    // claude is detected with a resolved descriptor whose seam names
+    // `~/seams/claude-code.json`; the harness's own documented env override
+    // must still win — install and read models otherwise describe and wire a
+    // different installation than the one that will run. This is also what
+    // makes the surface exercisable in an isolated receiving scope.
+    let home = scenario_with_partial_intake();
+    let scratch = home.path().join("scratch-claude");
+    fs::create_dir_all(&scratch).unwrap();
+
+    let mut command = Command::cargo_bin("aikit").unwrap();
+    command
+        .env("AIKIT_HOME", home.path().join("aikit-home"))
+        .env("HOME", home.path().join("user-home"))
+        .env("CLAUDE_CONFIG_DIR", &scratch)
+        .env(
+            "PATH",
+            format!(
+                "{}:/usr/bin:/bin",
+                home.path().join("actuation-bin").display()
+            ),
+        )
+        .env("FIXTURES", home.path().join("actuation-fixtures"))
+        .arg("--json")
+        .args(["client", "status", "claude"])
+        .current_dir(home.path().join("project"));
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "status must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    let rows = value["data"]["clients"].as_array().unwrap();
+    let claude = by_name(rows, "claude");
+    assert_eq!(
+        claude["config_dir"],
+        scratch.display().to_string(),
+        "CLAUDE_CONFIG_DIR must win over the descriptor seam and every ~/ default, got {}",
+        claude["config_dir"]
+    );
+}
+
+#[test]
 fn a_registered_adapter_with_a_descriptor_fixture_gets_its_row() {
     let home = scenario_with_partial_intake();
     let rows = rows_with_fixtures_env(&home, &["client", "status"]);
