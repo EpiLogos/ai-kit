@@ -19,9 +19,16 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          persist-credentials: false
+      - name: Install the repository-selected toolchain and formatter
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt
+          rustc --version
+          cargo fmt --version
       - uses: Swatinem/rust-cache@v2.9.2
       - name: Check formatting
         run: cargo fmt --all -- --check
