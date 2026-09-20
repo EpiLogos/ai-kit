@@ -98,10 +98,11 @@ jobs:
         shell: bash
         run: |
           exec > >(tee direct-agent-evidence/composition.log) 2>&1
-          git fetch --no-tags origin 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 37994265f5727af50ec6446687ed629dde047412 62161b00249111ae797a41c825bc75e5054b4de0
+          git fetch --no-tags origin 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 37994265f5727af50ec6446687ed629dde047412 a0647b9b7110745661e4f1488f265e58623cad69
           git diff 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 -- crates/aikit-adapters/src/interactive_connection.rs crates/aikit-adapters/src/agent_session_host.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-adapters/tests/native_model_controls.rs crates/aikit-cli/tests/agent_session_protocol.rs crates/aikit-cli/tests/support/agent_session_protocol.py > direct-agent-evidence/model-dependency.patch
           git apply --3way direct-agent-evidence/model-dependency.patch
-          git diff 37994265f5727af50ec6446687ed629dde047412 62161b00249111ae797a41c825bc75e5054b4de0 -- crates > direct-agent-evidence/folded-dependency.patch
+          # #371 changes only #364's test, retaining its exact native implementation.
+          git diff 37994265f5727af50ec6446687ed629dde047412 a0647b9b7110745661e4f1488f265e58623cad69 -- crates > direct-agent-evidence/folded-dependency.patch
           git apply --3way direct-agent-evidence/folded-dependency.patch
           git write-tree > direct-agent-evidence/composed-tree.txt
           git diff HEAD > direct-agent-evidence/composed.patch
