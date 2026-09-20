@@ -83,21 +83,43 @@ pub fn project_graph(
         aliases.dedup();
         nodes.push(json!({"resource":hit.resource,"address":source.map(|item|json!({"kind":"source","value":item.binding.source})).unwrap_or_else(||json!(hit.address)),"kind":hit.kind,"label":hit.label,"provider":hit.provider,"authority":hit.authority,"revision":revision,"tags":tags,"aliases":aliases}));
     }
-    let source_nodes: BTreeMap<String, Value> = nodes.iter().filter_map(|node| Some((node["resource"].as_str()?.to_owned(), node.clone()))).collect();
+    let source_nodes: BTreeMap<String, Value> = nodes
+        .iter()
+        .filter_map(|node| Some((node["resource"].as_str()?.to_owned(), node.clone())))
+        .collect();
     let mut participations = BTreeMap::<String, Value>::new();
     for object in objects.values() {
-        let WikiObject::Frame(frame) = object else {continue};
-        if !allowed.contains(frame.ref_id.as_str()) {continue;}
+        let WikiObject::Frame(frame) = object else {
+            continue;
+        };
+        if !allowed.contains(frame.ref_id.as_str()) {
+            continue;
+        }
         for whole in &frame.constellations {
             for member in &whole.members {
-                let Some(source) = source_nodes.get(member.ref_id.as_str()) else {continue};
-                let Some(participation) = member.extensions.get("aikit.constellation-participation/v1") else {continue};
-                let Some(reference) = participation["participation_ref"].as_str() else {continue};
-                if participations.contains_key(reference) {continue;}
-                if nodes.len() >= max_nodes {truncated = true;continue;}
-                let node=json!({"resource":reference,"address":source["address"],"subject_ref":member.ref_id,"kind":"constellation-member","label":source["label"],
+                let Some(source) = source_nodes.get(member.ref_id.as_str()) else {
+                    continue;
+                };
+                let Some(participation) = member
+                    .extensions
+                    .get("aikit.constellation-participation/v1")
+                else {
+                    continue;
+                };
+                let Some(reference) = participation["participation_ref"].as_str() else {
+                    continue;
+                };
+                if participations.contains_key(reference) {
+                    continue;
+                }
+                if nodes.len() >= max_nodes {
+                    truncated = true;
+                    continue;
+                }
+                let node = json!({"resource":reference,"address":source["address"],"subject_ref":member.ref_id,"kind":"constellation-member","label":source["label"],
                     "provider":"provider/semantic-wiki","authority":"authored","revision":frame.revision.to_string(),"tags":source["tags"],"aliases":source["aliases"],"frame_ref":frame.ref_id});
-                participations.insert(reference.to_owned(),node.clone());nodes.push(node);
+                participations.insert(reference.to_owned(), node.clone());
+                nodes.push(node);
             }
         }
     }
@@ -116,21 +138,37 @@ pub fn project_graph(
                 if allowed.contains(edge.from_ref.as_str())
                     && allowed.contains(edge.to_ref.as_str()) =>
             {
-                let relation=edge.extensions.get("aikit.constellation-relation/v1");
+                let relation = edge.extensions.get("aikit.constellation-relation/v1");
                 if let Some(relation) = relation {
-                    if !edge.origin_ref.as_ref().is_some_and(|r| allowed.contains(r.as_str()))
-                        || !relation["from_participation_ref"].as_str().is_some_and(|r| participations.contains_key(r))
-                        || !relation["to_participation_ref"].as_str().is_some_and(|r| participations.contains_key(r)) {
+                    if !edge
+                        .origin_ref
+                        .as_ref()
+                        .is_some_and(|r| allowed.contains(r.as_str()))
+                        || !relation["from_participation_ref"]
+                            .as_str()
+                            .is_some_and(|r| participations.contains_key(r))
+                        || !relation["to_participation_ref"]
+                            .as_str()
+                            .is_some_and(|r| participations.contains_key(r))
+                    {
                         continue;
                     }
                 }
-                let from=relation.and_then(|v|v["from_participation_ref"].as_str()).filter(|r|participations.contains_key(*r)).unwrap_or(edge.from_ref.as_str());
-                let to=relation.and_then(|v|v["to_participation_ref"].as_str()).filter(|r|participations.contains_key(*r)).unwrap_or(edge.to_ref.as_str());
+                let from = relation
+                    .and_then(|v| v["from_participation_ref"].as_str())
+                    .filter(|r| participations.contains_key(*r))
+                    .unwrap_or(edge.from_ref.as_str());
+                let to = relation
+                    .and_then(|v| v["to_participation_ref"].as_str())
+                    .filter(|r| participations.contains_key(*r))
+                    .unwrap_or(edge.to_ref.as_str());
                 let ql = edge.origin_ref.as_ref().and_then(|r|objects.get(r.as_str())).is_some_and(|o|matches!(o,WikiObject::Frame(frame) if frame.extensions.get("aikit.constellation/v1").and_then(|v|v.get("frame")).is_some_and(Value::is_object)));
-                add(json!({"from":from,"to":to,"from_subject_ref":edge.from_ref,"to_subject_ref":edge.to_ref,"relation":edge.relation,"reference":edge.ref_id,
+                add(
+                    json!({"from":from,"to":to,"from_subject_ref":edge.from_ref,"to_subject_ref":edge.to_ref,"relation":edge.relation,"reference":edge.ref_id,
                     "origin":{"provider":"provider/semantic-wiki","lens":"semantic-wiki","authority":edge.origin,"revision":edge.revision.to_string()},
                     "authored_relation":edge.extensions.get("authored_relation"),"family":if relation.is_some(){if ql{"ql-authored"}else{"constellation-relation"}}else if edge.extensions.contains_key("authored_relation"){"source-occurrence"}else{"native-semantic"},
-                    "standing":relation.and_then(|v|v.get("standing")),"from_participation_ref":relation.and_then(|v|v.get("from_participation_ref")),"to_participation_ref":relation.and_then(|v|v.get("to_participation_ref"))}));
+                    "standing":relation.and_then(|v|v.get("standing")),"from_participation_ref":relation.and_then(|v|v.get("from_participation_ref")),"to_participation_ref":relation.and_then(|v|v.get("to_participation_ref"))}),
+                );
             }
             WikiObject::Space(space) if allowed.contains(space.ref_id.as_str()) => {
                 for (member, relation) in space
@@ -150,7 +188,10 @@ pub fn project_graph(
                 for constellation in &frame.constellations {
                     // Never send a private ref, position count or label. A partial
                     // owner reading is explicitly incomplete, not a smaller form.
-                    let form = frame.extensions.get("aikit.constellation/v1").and_then(|v| v.get("frame"));
+                    let form = frame
+                        .extensions
+                        .get("aikit.constellation/v1")
+                        .and_then(|v| v.get("frame"));
                     let members:Vec<_>=constellation.members.iter().filter(|m|allowed.contains(m.ref_id.as_str())).filter(|m| {
                         // A budgeted-out contextual occurrence is a partial whole,
                         // not permission to collapse it onto its source vertex.
@@ -164,10 +205,16 @@ pub fn project_graph(
                             "participation_ref":participation.and_then(|v|v.get("participation_ref")),"address":role.and_then(|r|r.get("address")).map(public_role_address)})
                     }).collect();
                     for member in &members {
-                        add(json!({"from":frame.ref_id,"to":member["ref"],"relation":"constellation-member","family":"constellation-membership","containment":"encloses",
-                            "origin":{"provider":"provider/semantic-wiki","authority":"authored","revision":frame.revision.to_string()}}));
-                        if member["ref"]!=member["subject_ref"] {add(json!({"from":member["ref"],"to":member["subject_ref"],"relation":"participates-as","family":"constellation-membership",
-                            "origin":{"provider":"provider/semantic-wiki","authority":"authored","revision":frame.revision.to_string()}}));}
+                        add(
+                            json!({"from":frame.ref_id,"to":member["ref"],"relation":"constellation-member","family":"constellation-membership","containment":"encloses",
+                            "origin":{"provider":"provider/semantic-wiki","authority":"authored","revision":frame.revision.to_string()}}),
+                        );
+                        if member["ref"] != member["subject_ref"] {
+                            add(
+                                json!({"from":member["ref"],"to":member["subject_ref"],"relation":"participates-as","family":"constellation-membership",
+                            "origin":{"provider":"provider/semantic-wiki","authority":"authored","revision":frame.revision.to_string()}}),
+                            );
+                        }
                     }
                     // Role coordinates and whole structure are native metadata;
                     // private member refs, source quotes and evidence never enter
@@ -183,13 +230,29 @@ pub fn project_graph(
     }
     json!({"schema":SCHEMA,"nodes":nodes,"edges":edges,"formations":formations,"truncated":truncated,"limits":{"nodes":max_nodes,"edges":max_edges},"absences":absences,"shape_catalog":authoring_forms::catalog(),"basis":"admitted native knowledge horizon; metadata only"})
 }
-fn public_role_address(value:&Value)->Value {
-    let mut address=serde_json::Map::new();
-    for key in ["position","conjugate","face"] {if let Some(value)=value.get(key).filter(|v|v.is_number()||v.is_boolean()||v.is_string()){address.insert(key.to_owned(),value.clone());}}
-    if let Some(layout)=value.get("layout") {
-        let mut position=serde_json::Map::new();
-        for key in ["x","y","z"] {if let Some(number)=layout[key].as_f64().filter(|v|v.is_finite()&&v.abs()<=100.0){position.insert(key.to_owned(),json!(number));}}
-        if position.len()==3 {address.insert("layout".into(),Value::Object(position));}
+fn public_role_address(value: &Value) -> Value {
+    let mut address = serde_json::Map::new();
+    for key in ["position", "conjugate", "face"] {
+        if let Some(value) = value
+            .get(key)
+            .filter(|v| v.is_number() || v.is_boolean() || v.is_string())
+        {
+            address.insert(key.to_owned(), value.clone());
+        }
+    }
+    if let Some(layout) = value.get("layout") {
+        let mut position = serde_json::Map::new();
+        for key in ["x", "y", "z"] {
+            if let Some(number) = layout[key]
+                .as_f64()
+                .filter(|v| v.is_finite() && v.abs() <= 100.0)
+            {
+                position.insert(key.to_owned(), json!(number));
+            }
+        }
+        if position.len() == 3 {
+            address.insert("layout".into(), Value::Object(position));
+        }
     }
     Value::Object(address)
 }
