@@ -16,20 +16,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           cache-on-failure: true
-      - name: Verify and apply the bounded patch
+      - name: Verify and apply the bounded patch and returned defect repairs
         run: |
           mkdir -p /tmp/wiki-native-join
           python3 - <<'PY'
           import base64, zlib, hashlib, pathlib, subprocess
           encoded=pathlib.Path('.github/wiki-join.patch.z64').read_text().strip()
-          # Repair four transport transcription duplicates; the complete
-          # decoded patch must still match its independently recorded digest.
           for old,new in [('DEDlni4I2rd','DEDlni4rd'),('XzRPFyKuw','XzRPFyuw'),('3bzVJJtu','3bzVJtu'),('dnLinLinb','dnLinb')]:
               encoded=encoded.replace(old,new)
           patch=zlib.decompress(base64.b64decode(encoded,validate=True))
           assert hashlib.sha256(patch).hexdigest()=='091c1875db7c2b5a32fc8073d5ce683f3f3dc5228ce1287075ccb83f453e6b5f'
           subprocess.run(['git','apply','--check','-'],input=patch,check=True)
           subprocess.run(['git','apply','-'],input=patch,check=True)
+          repairs = [
+            ('crates/aikit-core/src/knowledge_navigation.rs',
+             '        self.augment_project_map_relations(address.resource_ref(), &mut view)?;\n        Ok(view)',
+             '        if depth > 0 { self.augment_project_map_relations(address.resource_ref(), &mut view)?; }\n        Ok(view)'),
+            ('crates/aikit-adapters/src/wiki_document.rs',
+             '.filter(|edge| edge.to == reading.resource)',
+             '.filter(|edge| edge.to == reading.resource && edge.authored_relation.is_some())'),
+          ]
+          for path, old, new in repairs:
+              p=pathlib.Path(path); text=p.read_text()
+              assert text.count(old)==1, (path, 'source basis differs')
+              p.write_text(text.replace(old,new))
           PY
       - name: Compile the actual native CLI
         run: |
@@ -39,12 +49,15 @@ jobs:
         env:
           WIKI_READER_FIXTURE: /tmp/wiki-native-join/reader-fixture.json
         run: |
-          cargo test --locked -q -p aikit-cli --test wiki_document_end_to_end -- --nocapture
-          cargo test --locked -q -p aikit-cli --test knowledge_application_v2
-          cargo test --locked -q -p aikit-adapters --lib wiki_document
-          cargo test --locked -q -p aikit-adapters --lib wiki_media_tests
-          cargo test --locked -q -p aikit-adapters --lib markdown_document
-          cargo test --locked -q -p aikit-core --lib knowledge
+          set -euo pipefail
+          {
+            cargo test --locked -q -p aikit-cli --test wiki_document_end_to_end -- --nocapture
+            cargo test --locked -q -p aikit-cli --test knowledge_application_v2
+            cargo test --locked -q -p aikit-adapters --lib wiki_document
+            cargo test --locked -q -p aikit-adapters --lib wiki_media_tests
+            cargo test --locked -q -p aikit-adapters --lib markdown_document
+            cargo test --locked -q -p aikit-core --lib knowledge
+          } 2>&1 | tee /tmp/wiki-native-join/tests.log
       - name: Commit verified production files on this branch only
         run: |
           test "$(git ls-remote origin refs/heads/agent/wiki-source-constellation-20260920 | cut -f1)" = "$GITHUB_SHA"
