@@ -1,0 +1,47 @@
+name: Native Wiki document contract
+on:
+  pull_request:
+    paths:
+      - 'crates/aikit-*/src/**'
+      - 'crates/aikit-*/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/wiki-document.yml'
+permissions:
+  contents: read
+concurrency:
+  group: wiki-document-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  native-wiki:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Use the repository Rust toolchain
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Compile native Markdown and authored-link contracts
+        run: cargo test -p aikit-adapters --lib markdown_document -- --nocapture
+      - name: Preserve existing source compilation and OKF round trips
+        run: |
+          cargo test -p aikit-adapters --lib okf -- --nocapture
+          cargo test -p aikit-adapters --lib authored_wiki -- --nocapture
+      - name: Retain exact dependency resolution and formatting for review
+        if: always()
+        run: |
+          mkdir -p /tmp/wiki-native-review
+          git rev-parse HEAD > /tmp/wiki-native-review/source-revision.txt
+          cp Cargo.lock /tmp/wiki-native-review/Cargo.lock
+          cargo fmt --all
+          git diff -- crates/aikit-adapters crates/aikit-core crates/aikit-cli crates/aikit-store > /tmp/wiki-native-review/formatting.diff
+          tar -czf /tmp/wiki-native-review/native-source.tar.gz crates/aikit-adapters/src/markdown_document.rs crates/aikit-adapters/src/okf.rs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wiki-native-review-${{ github.run_id }}
+          path: /tmp/wiki-native-review/
+          retention-days: 7

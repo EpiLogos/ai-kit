@@ -13,6 +13,7 @@ aikit-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+pulldown-cmark = { version = "=0.13.4", default-features = false }
 toml = { workspace = true }
 thiserror = { workspace = true }
 shell-words = { workspace = true }

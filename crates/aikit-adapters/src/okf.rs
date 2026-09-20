@@ -4,7 +4,7 @@
 //! Markdown syntax so parsing/serialization cannot pull codec concerns into the
 //! I/O-free domain crate.
 
-use aikit_core::knowledge_okf::{AuthoredRelationAnchor, AuthoredRelationEvidence};
+use aikit_core::knowledge_okf::AuthoredRelationEvidence;
 use aikit_core::resource::{SourceRef, SourceRevision};
 use aikit_core::{AikitError, OkfDocument, Result};
 use serde_json::Value;
@@ -42,238 +42,16 @@ pub fn render_okf_markdown(document: &OkfDocument) -> Result<String> {
 /// explicit metadata or a separately attributable derived reading.
 ///
 /// Byte anchors are relative to the complete supplied source. YAML frontmatter,
-/// fenced code, inline code and Obsidian embed syntax are excluded from this
-/// portable first tranche.
+/// fenced code and inline code are excluded. Explicit local embeds retain an
+/// `embeds` relation instead of being confused with prose references.
 pub fn parse_authored_markdown_relations(
     source_ref: &SourceRef,
     source_revision: Option<&SourceRevision>,
     markdown: &str,
 ) -> Vec<AuthoredRelationEvidence> {
-    let body_start = optional_frontmatter_body_start(markdown).unwrap_or(0);
-    let mut relations = Vec::new();
-    let mut base = body_start;
-    let mut fence: Option<(u8, usize)> = None;
-
-    for line in markdown[body_start..].split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if let Some((marker, minimum)) = fence {
-            if fence_marker(trimmed)
-                .is_some_and(|(found, count)| found == marker && count >= minimum)
-            {
-                fence = None;
-            }
-            base += line.len();
-            continue;
-        }
-        if let Some(marker) = fence_marker(trimmed) {
-            fence = Some(marker);
-            base += line.len();
-            continue;
-        }
-
-        parse_inline_links(source_ref, source_revision, line, base, &mut relations);
-        base += line.len();
-    }
-
-    relations
+    crate::markdown_document::authored_markdown_relations(source_ref, source_revision, markdown)
 }
 
-fn parse_inline_links(
-    source_ref: &SourceRef,
-    source_revision: Option<&SourceRevision>,
-    line: &str,
-    base: usize,
-    output: &mut Vec<AuthoredRelationEvidence>,
-) {
-    let bytes = line.as_bytes();
-    let mut cursor = 0usize;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'`' {
-            let run = byte_run(bytes, cursor, b'`');
-            if let Some(close) = find_byte_run(bytes, cursor + run, b'`', run) {
-                cursor = close + run;
-            } else {
-                break;
-            }
-            continue;
-        }
-
-        if bytes[cursor] == b'['
-            && cursor + 1 < bytes.len()
-            && bytes[cursor + 1] == b'['
-            && (cursor == 0 || bytes[cursor - 1] != b'!')
-        {
-            if let Some(close) = find_pair(bytes, cursor + 2, b']', b']') {
-                let end = close + 2;
-                let inner = &line[cursor + 2..close];
-                if let Some((target, display, fragment)) = parse_wikilink_inner(inner) {
-                    output.push(AuthoredRelationEvidence::body_reference(
-                        source_ref.clone(),
-                        source_revision.cloned(),
-                        target,
-                        line[cursor..end].to_string(),
-                        display,
-                        fragment,
-                        AuthoredRelationAnchor::body(base + cursor, base + end),
-                    ));
-                }
-                cursor = end;
-                continue;
-            }
-        }
-
-        if bytes[cursor] == b'[' && (cursor == 0 || bytes[cursor - 1] != b'!') {
-            if let Some(label_close) = find_byte(bytes, cursor + 1, b']') {
-                let open_paren = label_close + 1;
-                if open_paren < bytes.len() && bytes[open_paren] == b'(' {
-                    if let Some(target_close) = find_byte(bytes, open_paren + 1, b')') {
-                        let end = target_close + 1;
-                        let label = &line[cursor + 1..label_close];
-                        let destination = line[open_paren + 1..target_close].trim();
-                        if let Some((target, fragment)) = parse_markdown_destination(destination) {
-                            output.push(AuthoredRelationEvidence::body_reference(
-                                source_ref.clone(),
-                                source_revision.cloned(),
-                                target,
-                                line[cursor..end].to_string(),
-                                (!label.is_empty()).then(|| label.to_string()),
-                                fragment,
-                                AuthoredRelationAnchor::body(base + cursor, base + end),
-                            ));
-                        }
-                        cursor = end;
-                        continue;
-                    }
-                }
-            }
-        }
-
-        cursor += 1;
-    }
-}
-
-fn parse_wikilink_inner(inner: &str) -> Option<(String, Option<String>, Option<String>)> {
-    let (target_with_fragment, display) = match inner.split_once('|') {
-        Some((target, display)) => (target.trim(), Some(display.to_string())),
-        None => (inner.trim(), None),
-    };
-    if target_with_fragment.is_empty() {
-        return None;
-    }
-    let (target, fragment) = split_fragment(target_with_fragment);
-    if target.is_empty() {
-        return None;
-    }
-    Some((target.to_string(), display, fragment.map(ToOwned::to_owned)))
-}
-
-fn parse_markdown_destination(destination: &str) -> Option<(String, Option<String>)> {
-    if destination.is_empty() {
-        return None;
-    }
-    // The portable first tranche addresses local/source Wiki relations. External
-    // URLs remain ordinary Markdown until a provider explicitly owns them as an
-    // external semantic target.
-    let lower = destination.to_ascii_lowercase();
-    if lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("mailto:")
-        || lower.starts_with("data:")
-        || lower.starts_with("javascript:")
-    {
-        return None;
-    }
-    let destination = destination
-        .strip_prefix('<')
-        .and_then(|value| value.strip_suffix('>'))
-        .unwrap_or(destination);
-    let (target, fragment) = split_fragment(destination);
-    if target.is_empty() {
-        return None;
-    }
-    Some((target.to_string(), fragment.map(ToOwned::to_owned)))
-}
-
-fn split_fragment(raw: &str) -> (&str, Option<&str>) {
-    match raw.split_once('#') {
-        Some((target, fragment)) => (target, Some(fragment)),
-        None => (raw, None),
-    }
-}
-
-fn fence_marker(line: &str) -> Option<(u8, usize)> {
-    let bytes = line.as_bytes();
-    let marker = *bytes.first()?;
-    if marker != b'`' && marker != b'~' {
-        return None;
-    }
-    let count = byte_run(bytes, 0, marker);
-    (count >= 3).then_some((marker, count))
-}
-
-fn byte_run(bytes: &[u8], start: usize, byte: u8) -> usize {
-    let mut cursor = start;
-    while cursor < bytes.len() && bytes[cursor] == byte {
-        cursor += 1;
-    }
-    cursor - start
-}
-
-fn find_byte_run(bytes: &[u8], start: usize, byte: u8, minimum: usize) -> Option<usize> {
-    let mut cursor = start;
-    while cursor < bytes.len() {
-        if bytes[cursor] == byte {
-            let count = byte_run(bytes, cursor, byte);
-            if count >= minimum {
-                return Some(cursor);
-            }
-            cursor += count.max(1);
-        } else {
-            cursor += 1;
-        }
-    }
-    None
-}
-
-fn find_pair(bytes: &[u8], start: usize, first: u8, second: u8) -> Option<usize> {
-    let mut cursor = start;
-    while cursor + 1 < bytes.len() {
-        if bytes[cursor] == first && bytes[cursor + 1] == second {
-            return Some(cursor);
-        }
-        cursor += 1;
-    }
-    None
-}
-
-fn find_byte(bytes: &[u8], start: usize, byte: u8) -> Option<usize> {
-    bytes[start..]
-        .iter()
-        .position(|candidate| *candidate == byte)
-        .map(|offset| start + offset)
-}
-
-fn optional_frontmatter_body_start(markdown: &str) -> Option<usize> {
-    let bom = if markdown.starts_with('\u{feff}') {
-        '\u{feff}'.len_utf8()
-    } else {
-        0
-    };
-    let source = &markdown[bom..];
-    let rest = source
-        .strip_prefix("---\r\n")
-        .or_else(|| source.strip_prefix("---\n"))?;
-    let rest_offset = markdown.len() - rest.len();
-    let mut offset = 0usize;
-    for line in rest.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.trim() == "---" {
-            return Some(rest_offset + offset + line.len());
-        }
-        offset += line.len();
-    }
-    None
-}
 
 fn split_frontmatter(markdown: &str) -> Result<(&str, &str)> {
     let markdown = markdown.strip_prefix('\u{feff}').unwrap_or(markdown);
@@ -375,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_skips_frontmatter_code_and_embed_syntax() {
+    fn parser_skips_frontmatter_and_code_but_retains_explicit_embeds() {
         let markdown = r#"---
 type: Concept
 relations:
@@ -393,9 +171,11 @@ Visible [[Living Wiki]].
 Normal [Flow](flow.md).
 "#;
         let relations = parse_authored_markdown_relations(&source_ref(), None, markdown);
-        assert_eq!(relations.len(), 2);
+        assert_eq!(relations.len(), 3);
         assert_eq!(relations[0].raw_target, "Living Wiki");
-        assert_eq!(relations[1].raw_target, "flow.md");
+        assert_eq!(relations[1].raw_target, "embedded-note");
+        assert_eq!(relations[1].relation, "embeds");
+        assert_eq!(relations[2].raw_target, "flow.md");
     }
 
     #[test]

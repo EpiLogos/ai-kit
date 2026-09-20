@@ -49,6 +49,7 @@ pub mod mux;
 pub mod native_git;
 pub mod now_field;
 pub mod okf;
+pub mod markdown_document;
 pub mod openai_realtime;
 pub mod place_technology;
 pub mod profiles;
