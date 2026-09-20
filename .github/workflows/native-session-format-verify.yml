@@ -1,0 +1,63 @@
+name: Native session format and verify
+on:
+  push:
+    branches: [agent/native-session-controls-20260920]
+    paths: [.github/workflows/native-session-format-verify.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/agent/native-session-controls-20260920'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Repository Rust toolchain
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Format only claimed files and commit normally
+        run: |
+          rustfmt --edition 2021 crates/aikit-adapters/src/interactive_connection.rs crates/aikit-adapters/src/agent_session_host.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-adapters/tests/native_model_controls.rs crates/aikit-cli/tests/agent_session_protocol.rs
+          git diff --check
+          git rm .github/workflows/native-session-format-verify.yml
+          git add crates/aikit-adapters/src/interactive_connection.rs crates/aikit-adapters/src/agent_session_host.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-adapters/tests/native_model_controls.rs crates/aikit-cli/tests/agent_session_protocol.rs
+          git -c user.name=Epii -c user.email=agent-session@users.noreply.github.com commit -m 'style(encounter): format native model controls and production-handler regressions'
+          git push origin HEAD:refs/heads/agent/native-session-controls-20260920
+          git rev-parse HEAD | tee /tmp/native-head.txt
+      - name: Repository formatting check
+        id: format
+        continue-on-error: true
+        run: cargo fmt --all -- --check > /tmp/native-format.log 2>&1
+      - name: Adapter regression tests
+        id: adapters
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p aikit-adapters --test native_model_controls --test interactive_connection_v2 --test agent_session_host_v2 2>&1 | tee /tmp/native-adapters.log
+      - name: Production encounter handler regression tests
+        id: handlers
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p aikit-cli --test agent_session_protocol --test encounter_context_admission --test encounter_shutdown 2>&1 | tee /tmp/native-handlers.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-session-verification
+          path: /tmp/native-*.txt
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-session-verification-logs
+          path: /tmp/native-*.log
+          retention-days: 7
+      - name: Preserve failed test result
+        if: steps.format.outcome != 'success' || steps.adapters.outcome != 'success' || steps.handlers.outcome != 'success'
+        run: exit 1
