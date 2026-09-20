@@ -217,6 +217,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),
         Some(Command::Status(a)) => cmd_status(cwd, a, json_mode),
         Some(Command::System(_)) => cmd_system(cwd),
+        Some(Command::Family(_)) => cmd_family(cwd),
         Some(Command::ConfigContribution(_)) => Ok(Reply::RawJson(
             aikit_cli::config_plane::contribution_document(cwd),
         )),
@@ -2449,6 +2450,10 @@ fn cmd_system(cwd: &std::path::Path) -> Result<Reply> {
     let service = Service::discover(cwd)?;
     let data = aikit_cli::system::disclose(&service)?;
     Ok(Reply::RawJson(data))
+}
+
+fn cmd_family(_cwd: &std::path::Path) -> Result<Reply> {
+    Ok(Reply::RawJson(aikit_cli::guardian_family::disclose()?))
 }
 
 fn cmd_status(cwd: &std::path::Path, a: StatusArgs, json_mode: bool) -> Result<Reply> {
