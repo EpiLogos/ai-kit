@@ -64,7 +64,16 @@ impl TargetId {
     pub const QWEN_CODE: &'static str = "qwen-code";
     // Round 3: ids align to Actuation catalog slugs.
     pub const ANTIGRAVITY: &'static str = "gemini-antigravity";
+    // Round 4: the gemini client's catalog join slug. The registry client
+    // keeps the name `gemini-cli` (the claude/claude-code precedent: the
+    // client name may differ from the catalog slug, the join key must not);
+    // `GEMINI` is the Actuation catalog slug the intakes ask for.
+    pub const GEMINI: &'static str = "gemini";
     pub const GROK_BOT: &'static str = "grok-bot";
+    // The hermes pair joins by the catalog slugs Actuation declares
+    // (hermes, hermes-acp); the client names are the slugs themselves.
+    pub const HERMES: &'static str = "hermes";
+    pub const HERMES_ACP: &'static str = "hermes-acp";
     pub const KIMI: &'static str = "kimi";
     pub const OLLAMA: &'static str = "ollama";
     pub const OPENCLAW: &'static str = "openclaw";
@@ -101,6 +110,9 @@ impl TargetId {
     pub fn gemini_cli() -> Self {
         Self::new(Self::GEMINI_CLI)
     }
+    pub fn gemini() -> Self {
+        Self::new(Self::GEMINI)
+    }
     pub fn goose() -> Self {
         Self::new(Self::GOOSE)
     }
@@ -115,6 +127,12 @@ impl TargetId {
     }
     pub fn grok_bot() -> Self {
         Self::new(Self::GROK_BOT)
+    }
+    pub fn hermes() -> Self {
+        Self::new(Self::HERMES)
+    }
+    pub fn hermes_acp() -> Self {
+        Self::new(Self::HERMES_ACP)
     }
     pub fn kimi() -> Self {
         Self::new(Self::KIMI)

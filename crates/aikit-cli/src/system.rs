@@ -216,6 +216,104 @@ fn credential_world(service: &Service) -> Result<CredentialWorldDisclosure> {
     ))
 }
 
+/// Whether a store CLI is on PATH. A pure path probe — nothing is executed,
+/// so `installed` means the boundary was found, never that a vault is
+/// unlocked.
+fn binary_on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
+        .unwrap_or(false)
+}
+
+/// Which secret stores could resolve a declared credential ref on this
+/// machine right now. Presence only — there is nothing here a value could
+/// occupy, and an unlocked vault is deliberately indistinguishable from a
+/// locked one.
+fn secret_stores() -> Value {
+    use aikit_adapters::NativeSecureStoreProvider;
+    use aikit_adapters::NativeSecureStoreStatus;
+    use aikit_core::credential::CredentialRef;
+
+    let keychain_available = CredentialRef::new("credential:aikit/doctor-probe")
+        .ok()
+        .map(|probe| {
+            NativeSecureStoreProvider::new().status(&probe) != NativeSecureStoreStatus::Unavailable
+        })
+        .unwrap_or(false);
+    let row = |store: &str, scheme: &str, installed: bool, route: &str| {
+        json!({
+            "store": store,
+            "scheme": scheme,
+            "availability": if installed { "available" } else { "not found" },
+            "route": route,
+        })
+    };
+    json!([
+        row(
+            "OS secure store",
+            "keychain://",
+            keychain_available,
+            "the platform credential store AIKit binds material into",
+        ),
+        row(
+            "1Password",
+            "op://",
+            binary_on_path("op"),
+            "the op CLI resolves item fields at materialisation",
+        ),
+        row(
+            "varlock",
+            "varlock://",
+            binary_on_path("varlock"),
+            "the varlock CLI resolves sealed env entries (the declared native default)",
+        ),
+        row(
+            "pass",
+            "pass://",
+            binary_on_path("pass"),
+            "the pass(1) gpg-backed store resolves entries at materialisation",
+        ),
+    ])
+}
+
+/// The security posture AIKit actually keeps, as disclosure rows: the trust
+/// ledger by state, capture-time secret scanning, and the environment-import
+/// gate. Counts and named facts only.
+fn security_posture(service: &Service) -> Result<Value> {
+    use aikit_core::trust::TrustState;
+    use aikit_store::trust::TrustStore;
+
+    let snapshot = TrustStore::new(service.index()).snapshot()?;
+    let mut states = std::collections::BTreeMap::new();
+    for state in snapshot.entries().values() {
+        let name = match state {
+            TrustState::Unseen => "unseen",
+            TrustState::Dismissed => "dismissed",
+            TrustState::Quarantined => "quarantined",
+            TrustState::Reviewed => "reviewed",
+            TrustState::Trusted => "trusted",
+            TrustState::Blocked => "blocked",
+            TrustState::Superseded => "superseded",
+        };
+        *states.entry(name).or_insert(0u64) += 1;
+    }
+    Ok(json!({
+        "trust": {
+            "keys": snapshot.len(),
+            "states": states,
+        },
+        "capture_scanning": {
+            "enabled": true,
+            "families": ["token-shape", "secret-name-context", "entropy"],
+            "law": "a captured possible secret is quarantined and never enters the ordinary registry",
+        },
+        "environment_import_gate": {
+            "state": "closed",
+            "law": "environment import happens only under an explicit --from-env choice; a matching variable alone never makes it eligible",
+        },
+    }))
+}
+
 /// The credential inventory the settings page renders as lifecycle rows: one
 /// row per persisted binding with its declared location and lifecycle
 /// timestamps. Presence, refs and timestamps only — there is no field a
@@ -236,7 +334,6 @@ fn credential_inventory(service: &Service) -> Result<Value> {
                     .map(|secret_ref| secret_ref.to_string()),
                 "bound_at_unix_seconds": binding.bound_at_unix_seconds,
                 "last_rotated_at_unix_seconds": binding.last_rotated_at_unix_seconds,
-                "last_verified_at_unix_seconds": binding.last_verified_at_unix_seconds,
                 "revoked": binding.revoked,
                 "provenance": binding.binding_provenance,
             })
@@ -583,6 +680,8 @@ pub fn disclose(service: &Service) -> Result<Value> {
     let providers_json = tv(&world.credential_world.providers);
     let credentials_json = tv(&world.credential_world.credentials);
     let inventory_json = credential_inventory(service)?;
+    let security_posture_json = security_posture(service)?;
+    let secret_stores_json = secret_stores();
     let overlays_json = usage_overlays(service);
 
     // Authored (declared) half of the resolution chain. These come from the
@@ -845,6 +944,32 @@ pub fn disclose(service: &Service) -> Result<Value> {
                     Value::Null, "none",
                     "exactly one authored SessionSpace is canonical per project; ambiguity is never silently resolved",
                     "aikit session space list", "ai-kit:session-space:registry", observed_at,
+                    materialisation_ref.clone(),
+                ),
+            ],
+        }),
+        json!({
+            "id": "security",
+            "title": "Security / trust / secret stores",
+            "settings": [
+                setting(
+                    "security.posture", "Security posture", "table",
+                    Value::Null, "ai-kit:security:authored",
+                    security_posture_json.clone(),
+                    security_posture_json,
+                    Value::Null, "none",
+                    "the trust ledger, capture-time secret scanning and the environment-import gate, as AIKit actually keeps them",
+                    "aikit doctor --json", "ai-kit:security:posture", observed_at,
+                    materialisation_ref.clone(),
+                ),
+                setting(
+                    "security.secret_stores", "Usable secret stores", "table",
+                    Value::Null, "ai-kit:security:authored",
+                    secret_stores_json.clone(),
+                    secret_stores_json,
+                    Value::Null, "none",
+                    "which stores could resolve a declared credential ref on this machine; installed means found, never unlocked",
+                    "aikit credential explain --json", "ai-kit:security:secret-stores", observed_at,
                     materialisation_ref.clone(),
                 ),
             ],

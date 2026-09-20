@@ -36,6 +36,13 @@ pub const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 pub const OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1";
 pub const OPENROUTER_PROVIDER: &str = "provider:openrouter";
 
+/// The GLM Coding-Plan Provider Source. Unlike OpenRouter this is the provider's
+/// own OpenAI-compatible API, so its listing proves provider-native routes, and
+/// its `/models` read needs a credential.
+pub const ZAI_CODING_MODELS_URL: &str = "https://api.z.ai/api/coding/paas/v4/models";
+pub const ZAI_CODING_ENDPOINT: &str = "https://api.z.ai/api/coding/paas/v4";
+pub const ZAI_PROVIDER: &str = "provider:z-ai";
+
 /// What reading a Provider Source yielded. A failed read is disclosed; it is
 /// never an empty catalogue read as "this router publishes nothing".
 #[derive(Debug, Clone, PartialEq)]
@@ -284,6 +291,182 @@ pub fn observed_router_routes(outcome: &ProviderCatalogOutcome) -> Vec<ObservedP
         .collect()
 }
 
+/// Fetch the GLM Coding-Plan model list. This provider needs a credential, so
+/// the caller resolves the secret through the credential world and hands the
+/// exposed key in. It is written only into a private `curl --config` file
+/// (created 0600 by `tempfile`), never into argv or the environment, so it
+/// cannot surface in `ps` output or a shell history; the file is unlinked as
+/// soon as the read returns.
+pub fn fetch_zai_coding_catalog(
+    runner: &dyn CommandRunner,
+    api_key: &str,
+    observed_at: &str,
+) -> ProviderCatalogOutcome {
+    use std::io::Write as _;
+    let mut config = match tempfile::Builder::new().prefix("aikit-zai-").tempfile() {
+        Ok(file) => file,
+        Err(error) => {
+            return ProviderCatalogOutcome::Unavailable {
+                reason: format!(
+                    "could not stage the credential for {ZAI_CODING_MODELS_URL}: {error}"
+                ),
+            };
+        }
+    };
+    if let Err(error) = writeln!(config, "header = \"Authorization: Bearer {api_key}\"") {
+        return ProviderCatalogOutcome::Unavailable {
+            reason: format!("could not stage the credential for {ZAI_CODING_MODELS_URL}: {error}"),
+        };
+    }
+    let config_path = config.path().to_string_lossy().into_owned();
+    let argv = vec![
+        "curl".to_string(),
+        "-sS".to_string(),
+        "--max-time".to_string(),
+        "20".to_string(),
+        "-f".to_string(),
+        "--config".to_string(),
+        config_path,
+        ZAI_CODING_MODELS_URL.to_string(),
+    ];
+    let outcome = runner.run(&argv);
+    // The secret leaves the disk the moment the read is done, pass or fail.
+    drop(config);
+    let output = match outcome {
+        Ok(output) => output,
+        Err(error) => {
+            return ProviderCatalogOutcome::Unavailable {
+                reason: format!("could not read {ZAI_CODING_MODELS_URL}: {error}"),
+            };
+        }
+    };
+    if output.status != 0 {
+        return ProviderCatalogOutcome::Unavailable {
+            reason: format!(
+                "{ZAI_CODING_MODELS_URL} returned status {}: {}",
+                output.status,
+                output.stderr.trim().chars().take(200).collect::<String>()
+            ),
+        };
+    }
+    match parse_zai_catalog(&output.stdout, observed_at) {
+        Ok(observations) => ProviderCatalogOutcome::Observed {
+            observations,
+            source: ZAI_CODING_MODELS_URL.to_string(),
+            observed_at: observed_at.to_string(),
+        },
+        Err(error) => ProviderCatalogOutcome::Unavailable {
+            reason: format!("{ZAI_CODING_MODELS_URL} unparsable: {error}"),
+        },
+    }
+}
+
+/// Parse a GLM Coding-Plan `/models` listing. Its ids are bare model slugs
+/// (`glm-4.6`), not vendor-prefixed router ids, so the canonical ref is
+/// `model:{id}` and the listing provider is z-ai itself.
+pub fn parse_zai_catalog(body: &str, observed_at: &str) -> Result<Vec<ProviderCatalogObservation>> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| AikitError::new("provider_catalog.unparsable", error.to_string()))?;
+    let listed_by = ProviderRef::parse(ZAI_PROVIDER)?;
+    let entries = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            AikitError::new(
+                "provider_catalog.unexpected_shape",
+                "z.ai Coding-Plan listing has no `data` array",
+            )
+        })?;
+    let mut observations = Vec::new();
+    for entry in entries {
+        let Some(id) = entry.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        let Ok(model_ref) = canonical_model_ref(format!("model:{id}")) else {
+            continue;
+        };
+        observations.push(ProviderCatalogObservation {
+            schema_version: PROVIDER_CATALOG_OBSERVATION_SCHEMA.to_string(),
+            observation_kind: "provider_catalog".to_string(),
+            source: ZAI_CODING_MODELS_URL.to_string(),
+            observed_at: observed_at.to_string(),
+            provider_ref: listed_by.clone(),
+            listed_by: listed_by.clone(),
+            model_ref,
+            listed_variant: id.to_string(),
+            provider_native_id: id.to_string(),
+            canonical_variant: None,
+            name: entry
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(id)
+                .to_string(),
+            context_window_tokens: entry
+                .get("context_length")
+                .and_then(serde_json::Value::as_u64),
+            max_output_tokens: None,
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            supported_parameters: Vec::new(),
+            pricing_usd_per_1m: BTreeMap::new(),
+            freshness: FRESHNESS.to_string(),
+        });
+    }
+    if observations.is_empty() {
+        return Err(AikitError::new(
+            "provider_catalog.empty",
+            "z.ai Coding-Plan listing parsed to no usable observations",
+        ));
+    }
+    Ok(observations)
+}
+
+/// The routes a z.ai Coding-Plan listing proves. Unlike a router listing, this
+/// IS the provider's own API, so each id is a reachable *provider-native* route
+/// on the Coding-Plan endpoint — not a router route through a third party.
+pub fn observed_zai_native_routes(outcome: &ProviderCatalogOutcome) -> Vec<ObservedProviderModel> {
+    let ProviderCatalogOutcome::Observed {
+        observations,
+        source,
+        observed_at,
+    } = outcome
+    else {
+        return Vec::new();
+    };
+    let catalog_ref = format!("provider-catalog:{observed_at}");
+    observations
+        .iter()
+        .map(|observation| ObservedProviderModel {
+            provider: observation.listed_by.clone(),
+            kind: ModelRouteKind::ProviderNative,
+            provider_native_id: observation.provider_native_id.clone(),
+            also_known_as: Vec::new(),
+            endpoint: Some(ZAI_CODING_ENDPOINT.to_string()),
+            detection_ref: catalog_ref.clone(),
+            inventory_source: Some(source.clone()),
+        })
+        .collect()
+}
+
+/// Dispatch a stored provider catalogue to the route emitter its provider needs:
+/// z-ai listings prove provider-native routes, everything else (OpenRouter today)
+/// proves router routes. One call keeps the compose-time join from having to know
+/// each provider's route shape inline.
+pub fn observed_routes_for_catalog(
+    provider: &str,
+    outcome: &ProviderCatalogOutcome,
+) -> Vec<ObservedProviderModel> {
+    if provider == ZAI_PROVIDER {
+        observed_zai_native_routes(outcome)
+    } else {
+        observed_router_routes(outcome)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,6 +615,69 @@ mod tests {
             assert_eq!(observation.observation_kind, "provider_catalog");
             assert!(observation.source.starts_with("https://"));
             assert!(!observation.freshness.is_empty());
+        }
+    }
+
+    const ZAI_LISTING: &str = r#"{"data":[
+      {"id":"glm-4.5","object":"model"},
+      {"id":"glm-4.6","object":"model"},
+      {"id":"glm-5","object":"model"},
+      {"id":"   ","object":"model"}
+    ]}"#;
+
+    #[test]
+    fn zai_listing_parses_bare_ids_as_provider_native_zai_models() {
+        let observations = parse_zai_catalog(ZAI_LISTING, "2026-09-19T00:00:00Z").unwrap();
+        // The blank id is skipped; the three real ones parse as bare slugs.
+        let refs: Vec<String> = observations
+            .iter()
+            .map(|o| o.model_ref.to_string())
+            .collect();
+        assert_eq!(refs, vec!["model:glm-4.5", "model:glm-4.6", "model:glm-5"]);
+        for observation in &observations {
+            assert_eq!(observation.listed_by.as_str(), ZAI_PROVIDER);
+            assert_eq!(observation.provider_ref.as_str(), ZAI_PROVIDER);
+            assert_eq!(observation.source, ZAI_CODING_MODELS_URL);
+        }
+    }
+
+    #[test]
+    fn zai_routes_are_provider_native_on_the_coding_endpoint() {
+        let outcome = ProviderCatalogOutcome::Observed {
+            observations: parse_zai_catalog(ZAI_LISTING, "2026-09-19T00:00:00Z").unwrap(),
+            source: ZAI_CODING_MODELS_URL.to_string(),
+            observed_at: "2026-09-19T00:00:00Z".to_string(),
+        };
+        let routes = observed_zai_native_routes(&outcome);
+        assert_eq!(routes.len(), 3);
+        for route in &routes {
+            assert_eq!(route.kind, ModelRouteKind::ProviderNative);
+            assert_eq!(route.provider.as_str(), ZAI_PROVIDER);
+            assert_eq!(route.endpoint.as_deref(), Some(ZAI_CODING_ENDPOINT));
+        }
+        // The dispatcher sends a z-ai catalogue to the native emitter and
+        // anything else to the router emitter.
+        assert_eq!(observed_routes_for_catalog(ZAI_PROVIDER, &outcome).len(), 3);
+    }
+
+    #[test]
+    fn zai_fetch_keeps_the_secret_out_of_argv() {
+        struct ZaiListing;
+        impl CommandRunner for ZaiListing {
+            fn run(&self, argv: &[String]) -> Result<Output> {
+                // The credential rides a `--config` file, never the argv, so it
+                // cannot appear in `ps`.
+                assert!(argv.iter().any(|arg| arg == "--config"));
+                assert!(argv.iter().all(|arg| !arg.contains("secret-key")));
+                Ok(Output::success(ZAI_LISTING))
+            }
+        }
+        let outcome = fetch_zai_coding_catalog(&ZaiListing, "secret-key", "2026-09-19T00:00:00Z");
+        match outcome {
+            ProviderCatalogOutcome::Observed { observations, .. } => {
+                assert_eq!(observations.len(), 3);
+            }
+            _ => panic!("expected an observed z.ai catalogue"),
         }
     }
 }

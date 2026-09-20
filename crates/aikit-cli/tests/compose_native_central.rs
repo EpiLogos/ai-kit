@@ -33,7 +33,8 @@ fn aikit(root: &Path, home: &Path, cwd: &Path, args: &[&str]) -> Output {
 fn project_context(root: &Path, home: &Path, cwd: &Path) -> Output {
     // The public Context receipt lives on the native SessionSpace application
     // command. `method resolve` is not part of the current CLI grammar.
-    Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+    Command::new(env!("CARGO_BIN_EXE_aikit"))
+        .arg("session-space")
         .env("AIKIT_HOME", home)
         .env("CENTRAL_ROOT", root)
         .env_remove("AIKIT_CONTEXT_ID")

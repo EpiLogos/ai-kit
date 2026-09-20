@@ -18,7 +18,9 @@ use aikit_cli::app::{
 };
 use aikit_cli::cli::*;
 use aikit_cli::json::{self, EnvelopeContext};
-use aikit_cli::{credential, hook, multicall, run, ui, SessionLifecycleServiceOps};
+use aikit_cli::{
+    credential, hook, multicall, run, ui, SessionLifecycleServiceOps,
+};
 use aikit_tui::{application_service::ApplicationService, ExplainHistoryApplicationService};
 
 use aikit_core::hooks::HookEvent;
@@ -237,9 +239,27 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Task(c)) => cmd_task(cwd, c),
         Some(Command::Bypass(c)) => cmd_bypass(cwd, c),
         Some(Command::Bypasses(_)) => cmd_bypasses(cwd),
-        Some(Command::Hook(c)) => cmd_hook(cwd, c),
+        Some(Command::Hook(c)) => cmd_hook(cwd, c, json_mode),
         Some(Command::Capabilities(c)) => cmd_capabilities(cwd, c),
         Some(Command::Session(c)) => cmd_session(cwd, c),
+        // The folded companion surface (O-I #376): forward the trailing args to
+        // the one shared SessionSpace implementation and exit with its code.
+        // This arm diverges via `process::exit`, so it never produces a `Reply`.
+        //
+        // `--cwd`/`-C` is a global on the outer `aikit` parser, so it is consumed
+        // here rather than left in `args`; the folded surface has its own `-C`,
+        // so the resolved `cwd` is forwarded as `-C` to keep both invocations
+        // identical (when no `--cwd` was given, `cwd` is the process directory
+        // the folded surface would default to anyway).
+        Some(Command::SessionSpace { args }) => {
+            let mut argv: Vec<std::ffi::OsString> = vec![
+                "aikit-session-space".into(),
+                "-C".into(),
+                cwd.as_os_str().to_os_string(),
+            ];
+            argv.extend(args);
+            std::process::exit(aikit_cli::session_space_cli::run_from_args(argv));
+        }
         Some(Command::Compose(a)) => cmd_compose(cwd, a),
         Some(Command::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
@@ -3242,7 +3262,7 @@ fn cmd_bypasses(cwd: &std::path::Path) -> Result<Reply> {
     ))
 }
 
-fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
+fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply> {
     let HookSub::Dispatch(a) = c.command;
     let service = Service::discover(cwd)?;
 
@@ -3278,7 +3298,37 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
         // pass silently.
         "steps": steps,
     });
-    Ok(reply(&service, data, vec![]))
+
+    // The dispatch boundary is where AIKit's verdict becomes the calling
+    // harness's protocol. The harness sees only this process's streams and
+    // exit status, so a denial must reach it as exit 2 (the block code both
+    // claude-code and zcode act on); the folded envelope alone would read as
+    // an allowance. `--json` keeps the machine envelope and now carries the
+    // verdict in its exit status; plain mode speaks the harness protocol
+    // itself (see `hook::translate_verdict`).
+    let denial_message = decision.denial.as_ref().map(|d| d.describe());
+    let verdict = hook::translate_verdict(
+        decision.allowed,
+        denial_message.as_deref(),
+        a.decision_json,
+        &a.event,
+    );
+
+    if json_mode {
+        Ok(Reply::Data {
+            context: EnvelopeContext::from_descriptor(service.descriptor()),
+            data,
+            warnings: vec![],
+            exit_code: verdict.exit_code,
+        })
+    } else if let Some(document) = verdict.stdout {
+        Ok(Reply::Text(document))
+    } else {
+        if let Some(message) = verdict.stderr {
+            eprintln!("{message}");
+        }
+        Ok(Reply::Status(verdict.exit_code))
+    }
 }
 
 fn cmd_capabilities(cwd: &std::path::Path, c: CapabilitiesCmd) -> Result<Reply> {
@@ -4107,6 +4157,12 @@ fn cmd_log(cwd: &std::path::Path, c: LogCmd) -> Result<Reply> {
     Ok(reply(&service, data, vec![]))
 }
 
+/// `aikit session-space` — the folded SessionSpace/encounter verb family
+/// (formerly the `aikit-session-space` companion binary, O-I #376). The
+/// companion's output contract is preserved: each verb's bare document on
+/// stdout in human mode (envelope-wrapped only under the global `--json`),
+/// and its human failure contract `<code>: <message>` on stderr with exit 1,
+/// which machine consumers such as O-I's cradle kernel parse.
 /// `aikit client install|launch|status`.
 fn cmd_client(cwd: &std::path::Path, c: ClientCmd) -> Result<Reply> {
     let service = Service::discover(cwd)?;

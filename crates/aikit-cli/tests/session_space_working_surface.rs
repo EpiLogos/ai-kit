@@ -85,11 +85,12 @@ fn attach_through_public_cli(
         eprintln!("SKIP terminal attach PTY proof: /usr/bin/script is unavailable");
         return Vec::new();
     }
-    let binary = cargo_bin("aikit-session-space");
+    let binary = cargo_bin("aikit");
     let argv = vec![
         binary.to_str().unwrap().to_owned(),
         "-C".into(),
         home.to_str().unwrap().to_owned(),
+        "session-space".into(),
         "working-surface".into(),
         "attach".into(),
         space.to_string(),

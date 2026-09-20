@@ -1,11 +1,14 @@
 //! The harness profile instances: one `aikit.harness-profile/v1` document per
 //! supported harness, embedded as TOML and parsed+validated once. The
-//! documents carry only what the per-harness censuses evidenced (2026-09-16,
-//! pi hooks added 2026-09-18, key delivery added 2026-09-19) — an absent
-//! layer says nothing, a `none` model dispatch carries its reason, and
-//! machine-specific paths are home-relative so the data survives machines.
-//! Actuation's catalog stays the detection authority; these documents are
-//! AIKit's handling declarations joined to it by slug.
+//! documents carry only what the per-harness censuses evidenced — the
+//! 2026-09-16 census for the first ten documents, the 2026-09-18
+//! harness-adapter sort-out for the additions, the 2026-09-18 pi hooks
+//! census, and the 2026-09-19 key-delivery census (each grounded in that
+//! harness's admission census in this package and, where installed, the live
+//! Omarchy machine) — an absent layer says nothing, a `none` model dispatch
+//! carries its reason, and machine-specific paths are home-relative so the
+//! data survives machines. Actuation's catalog stays the detection authority;
+//! these documents are AIKit's handling declarations joined to it by slug.
 //!
 //! ## Key delivery (2026-09-19 census)
 //!
@@ -95,6 +98,23 @@ own-login = [{ provider-ref = "provider:anthropic", note = "claude login keeps O
 [sessions]
 posture = "observed"
 protocol = "process"
+
+[settings]
+posture = "observed"
+observe = ["~/.claude/settings.json"]
+
+# The harness's own enforcement surface, declared for the configuration plane
+# as ai-kit:claude:<key>. Grounded in the live config: the PreToolUse entry is
+# the Central filesystem guardrail riding the AIKit hook chain (aikit hook
+# dispatch claude PreToolUse); herdr's SessionStart stays foreign and is not
+# AIKit's to declare.
+[[settings.trust-settings]]
+key = "hooks.fs-guardrail"
+title = "PreToolUse filesystem guardrail"
+description = "The PreToolUse enforcement entry Central ground law (filesystem-guardrails.md) requires in this harness; it rides the AIKit hook chain and blocks out-of-bounds writes with exit 2."
+config = "~/.claude/settings.json hooks.PreToolUse[].hooks[].command"
+value-schema = { type = "scalar" }
+scopes = ["machine"]
 "#,
     ),
     (
@@ -139,6 +159,30 @@ own-login = [{ provider-ref = "provider:openai", note = "codex login writes its 
 posture = "observed"
 protocol = "process"
 open-modes = ["resume"]
+
+[settings]
+posture = "observed"
+observe = ["~/.codex/config.toml"]
+
+# The harness's own trust surface, declared for the configuration plane as
+# ai-kit:codex:<key> (the general trust pattern: declare what the harness's
+# own config supports; the plane derives the disclosure). Grounded in the
+# live config and Control/agents/governance/filesystem-guardrails.md.
+[[settings.trust-settings]]
+key = "projects.trust_level"
+title = "Project workspace trust"
+description = "Which project roots codex marks trusted. This ground trusts exactly the declared project roots, never $HOME wholesale."
+config = '~/.codex/config.toml [projects."<root>"] trust_level'
+value-schema = { type = "enum", options = ["trusted"] }
+scopes = ["project"]
+
+[[settings.trust-settings]]
+key = "home.trust_level"
+title = "Home wholesale trust"
+description = "Whether $HOME is ever trusted wholesale. The 2026-09-16 narrowing removed ~/Work and tm02-field-test trust; absence is the declaration — HOME is a dwelling, not a workspace."
+config = "~/.codex/config.toml (absence is the declaration)"
+value-schema = { type = "boolean" }
+scopes = ["machine"]
 "#,
     ),
     (
@@ -177,6 +221,22 @@ note = "zcode authenticates through its own managed login; the 2026-09-19 machin
 [sessions]
 posture = "observed"
 protocol = "process"
+
+[settings]
+posture = "observed"
+observe = ["~/.zcode/cli/config.json"]
+
+# The harness's own enforcement surface, declared for the configuration plane
+# as ai-kit:zcode:<key>. Grounded in the live config: the PreToolUse entry is
+# the Central filesystem guardrail riding the AIKit hook chain (aikit hook
+# dispatch zcode PreToolUse); hooks.enabled true is its master switch.
+[[settings.trust-settings]]
+key = "hooks.fs-guardrail"
+title = "PreToolUse filesystem guardrail"
+description = "The PreToolUse enforcement entry Central ground law (filesystem-guardrails.md) requires in this harness; it rides the AIKit hook chain and blocks out-of-bounds writes with exit 2."
+config = "~/.zcode/cli/config.json hooks.events.PreToolUse[].hooks[].command"
+value-schema = { type = "scalar" }
+scopes = ["machine"]
 "#,
     ),
     (
@@ -438,12 +498,211 @@ protocol = "process"
 "#,
     ),
     (
-        // Key delivery 2026-09-19: opencode serves arbitrary models.dev
-        // providers and authenticates through its own per-provider store
-        // (`opencode auth login`) plus per-provider config — its docs census
-        // (clients/opencode.rs, 2026-09-06) names no fixed env-var key path,
-        // so the honest declaration is the fact, not an invented variable.
+        "hermes",
+        // Evidence: live Omarchy machine 2026-09-18 (hermes v0.19.0; ~/.hermes
+        // with config.yaml, SOUL.md, skills/ directories; `hermes --help`
+        // showing --provider/-m/--resume and the skills/hooks/mcp subcommands)
+        // plus the catalog r10 descriptor. No AIKit hermes adapter exists, so
+        // every writable posture is refused by the absence of a seam, not by
+        // silence.
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "hermes"
+edition = "cli"
+
+[presence]
+executables = ["hermes"]
+config-dir = "~/.hermes"
+
+[skills]
+posture = "brokered"
+shared-tree = "SOUL.md, memories and the skills tree are hermes-authored and -managed; projection stays brokered until a hermes adapter owns a seam."
+observe = { paths = ["~/.hermes/skills"] }
+
+[guidance]
+posture = "observed"
+observe = ["~/.hermes/SOUL.md"]
+
+[models]
+posture = "observed"
+dispatch = "provider-plural"
+roster-note = "Provider and model chosen per invocation (--provider/-m) or the config.yaml model defaults (observed 2026-09-18: provider zai, model glm-5.3-flash); hermes carries its own provider catalog."
+
+[sessions]
+posture = "observed"
+protocol = "process"
+open-modes = ["resume"]
+"#,
+    ),
+    (
+        "hermes-acp",
+        // Evidence: live Omarchy machine 2026-09-18 (`hermes acp --help`:
+        // "Start Hermes Agent in ACP mode for editor integration",
+        // hermes-acp 0.19.0, shares ~/.hermes). The catalog edition is
+        // "acp-bridge", which AIKit's HarnessEditionKind vocabulary has no
+        // member for; `cli` is the least-distorting member (a command-line
+        // bridge process) and the sessions layer carries the ACP truth.
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "hermes-acp"
+edition = "cli"
+
+[presence]
+executables = ["hermes-acp"]
+config-dir = "~/.hermes"
+
+[skills]
+posture = "brokered"
+shared-tree = "The ACP bridge rides the hermes config tree (~/.hermes); it owns no independent skill surface."
+
+[sessions]
+posture = "observed"
+protocol = "acp"
+"#,
+    ),
+    (
+        "grok-bot",
+        // Evidence: catalog r10 descriptor (cli+service daemon, aliases
+        // gbot, executable names grok-bot/gbot, config-dir ~/.grokbot) and
+        // the clients/grokbot.rs admission census (brokered). Absent on the
+        // 2026-09-18 machine; nothing is claimed beyond the record.
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "grok-bot"
+edition = "custom"
+
+[presence]
+executables = ["grok-bot", "gbot"]
+config-dir = "~/.grokbot"
+
+[models]
+posture = "observed"
+dispatch = { none = { reason = "The catalog capability-gap document records the grok-bot surface as unobserved, including the daemon's provider binding; no model dispatch is declared." } }
+
+[sessions]
+posture = "observed"
+protocol = "process"
+"#,
+    ),
+    (
+        "gemini-antigravity",
+        // Evidence: catalog r10 descriptor (edition ide, config-dir
+        // ~/.gemini/antigravity, detected inside the gemini config tree) and
+        // the clients/antigravity.rs admission census (brokered, Ide).
+        // Absent on the 2026-09-18 machine.
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "gemini-antigravity"
+edition = "ide"
+
+[presence]
+config-dir = "~/.gemini/antigravity"
+
+[models]
+posture = "observed"
+dispatch = { none = { reason = "The catalog capability-gap document records the antigravity surface as unobserved beyond detection; no model dispatch is declared." } }
+"#,
+    ),
+    (
+        "aider",
+        // Evidence: clients/aider.rs admission census (process-per-invocation
+        // CLI reading .aider.conf.yml and --read files; no skill tree, tool
+        // protocol or delegation; brokered). Absent on the 2026-09-18
+        // machine.
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "aider"
+edition = "cli"
+
+[presence]
+executables = ["aider"]
+
+[skills]
+posture = "brokered"
+shared-tree = "No skill tree, tool protocol or delegation surface; a process-per-invocation CLI that reads .aider.conf.yml and --read files at startup (aider census)."
+
+[guidance]
+posture = "observed"
+observe = ["CONVENTIONS.md"]
+
+[models]
+posture = "observed"
+dispatch = { none = { reason = "The catalog declares no capability document for aider and the census records no provider binding surface; no model dispatch is declared." } }
+
+[sessions]
+posture = "observed"
+protocol = "process"
+"#,
+    ),
+    (
+        "deepseek-harness",
+        // Evidence: clients/dsh.rs admission census (composition-managed
+        // faculties — Cordis Host/Client plugins, agent presets, skills,
+        // model tools; no fixed tree to project; brokered; edition Custom).
+        // No executable observed on any machine; presence says nothing
+        // rather than guessing a binary name.
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "deepseek-harness"
+edition = "custom"
+
+[skills]
+posture = "brokered"
+shared-tree = "Composition-managed (Cordis Host/Client plugins, agent presets): there is no fixed skill tree to project (DSH census)."
+
+[models]
+posture = "observed"
+dispatch = { none = { reason = "The catalog declares no capability document for deepseek-harness and the census records composition-managed model tools, not a provider binding; no model dispatch is declared." } }
+
+[sessions]
+posture = "observed"
+protocol = "process"
+"#,
+    ),
+    (
+        "goose",
+        // Evidence: clients/goose.rs admission census (config
+        // ~/.config/goose/config.yaml; .goosehints project instructions;
+        // Claude-compatible Agent Skills via the built-in skills extension;
+        // 15+ providers via config; resumable sessions; brokered). Absent on
+        // the 2026-09-18 machine.
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "goose"
+edition = "cli"
+
+[presence]
+executables = ["goose"]
+config-dir = "~/.config/goose"
+
+[skills]
+posture = "brokered"
+shared-tree = "Claude-compatible Agent Skills (SKILL.md) via the built-in skills extension; this census revision brokers projection."
+
+[guidance]
+posture = "observed"
+observe = [".goosehints"]
+
+[models]
+posture = "observed"
+dispatch = "provider-plural"
+roster-note = "15+ providers (Anthropic, OpenAI, Google, Ollama, OpenRouter, ...) selected through config (goose census)."
+
+[sessions]
+posture = "observed"
+protocol = "process"
+open-modes = ["resume"]
+"#,
+    ),
+    (
         "opencode",
+        // Evidence: clients/opencode.rs admission census (opencode.ai docs:
+        // global ~/.config/opencode, opencode.json, skills/ config
+        // subdirectory, AGENTS.md rules, plugins, MCP local+remote) plus the
+        // live Omarchy machine 2026-09-18 (opencode 1.18.30; opencode.json
+        // present; the published config schema names the top-level `mcp`
+        // collection). Installed here; the Actuation descriptor lives on the
+        // Mac's catalog line only, so detection still cannot see it.
         r#"
 schema = "aikit.harness-profile/v1"
 slug = "opencode"
@@ -451,13 +710,32 @@ edition = "cli"
 
 [presence]
 executables = ["opencode"]
+config-dir = "~/.config/opencode"
+
+[skills]
+posture = "brokered"
+shared-tree = "skills/ is a documented config subdirectory (global and project scope); this census revision brokers projection (opencode census)."
+observe = { paths = ["~/.config/opencode/skills"] }
+
+[guidance]
+posture = "observed"
+observe = ["~/.config/opencode/AGENTS.md"]
+
+[tools]
+posture = "observed"
+observe = [{ path = "~/.config/opencode/opencode.json", collection = "mcp" }]
 
 [models]
 posture = "observed"
-dispatch = "provider-plural"
+dispatch = { none = { reason = "The catalog declares no capability document for opencode and the census records no provider binding surface; no model dispatch is declared." } }
 
 [models.key-delivery]
 note = "opencode authenticates through its own per-provider auth store (opencode auth login) and per-provider config; no fixed env-var key path is declared for its native launch."
+
+[sessions]
+posture = "observed"
+protocol = "process"
+open-modes = ["resume", "attach"]
 "#,
     ),
 ];
@@ -512,12 +790,21 @@ pub fn slug_for_target(target: &TargetId) -> Option<&'static str> {
         TargetId::CODEX => Some("codex"),
         TargetId::ZCODE => Some("zcode"),
         TargetId::PI => Some("pi"),
+        TargetId::GEMINI => Some("gemini"),
         TargetId::GEMINI_CLI => Some("gemini"),
         TargetId::KIMI => Some("kimi"),
         TargetId::OPENCLAW => Some("openclaw"),
         TargetId::CURSOR_CLI => Some("cursor-cli"),
         TargetId::QWEN_CODE => Some("qwen-code"),
         TargetId::OLLAMA => Some("ollama"),
+        TargetId::AIDER => Some("aider"),
+        TargetId::DEEPSEEK_HARNESS => Some("deepseek-harness"),
+        TargetId::GOOSE => Some("goose"),
+        TargetId::GROK_BOT => Some("grok-bot"),
+        TargetId::ANTIGRAVITY => Some("gemini-antigravity"),
+        TargetId::OPENCODE => Some("opencode"),
+        TargetId::HERMES => Some("hermes"),
+        TargetId::HERMES_ACP => Some("hermes-acp"),
         _ => None,
     }
 }
@@ -525,12 +812,13 @@ pub fn slug_for_target(target: &TargetId) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aikit_core::harness_profile::{TrustSettingScope, TrustValueKind};
 
     #[test]
     fn every_embedded_profile_parses_validates_and_resolves_by_slug() {
         let all: Vec<_> = all().collect();
         assert!(
-            all.len() >= 10,
+            all.len() >= 18,
             "the roster carries profiles: {}",
             all.len()
         );
@@ -538,7 +826,21 @@ mod tests {
             assert_eq!(profile.slug, *slug, "slug must match its key");
             assert_eq!(profile.schema, "aikit.harness-profile/v1");
         }
-        for slug in ["claude-code", "codex", "zcode", "pi", "openclaw"] {
+        for slug in [
+            "claude-code",
+            "codex",
+            "zcode",
+            "pi",
+            "openclaw",
+            "hermes",
+            "hermes-acp",
+            "grok-bot",
+            "gemini-antigravity",
+            "aider",
+            "deepseek-harness",
+            "goose",
+            "opencode",
+        ] {
             assert!(for_slug(slug).is_some(), "{slug} must resolve");
         }
     }
@@ -673,6 +975,79 @@ mod tests {
     }
 
     #[test]
+    fn trust_declaring_profiles_declare_their_trust_settings_as_data() {
+        // The general harness-trust pattern: each declaring profile carries
+        // its trust/permissions declarations in its own settings layer, and
+        // every declaration is plane-ready (key grammar, scopes, enum
+        // options) so the configuration plane can surface it unchanged.
+        let expected: &[(
+            &str,
+            &[(&str, aikit_core::harness_profile::TrustSettingScope)],
+        )] = &[
+            (
+                "claude-code",
+                &[("hooks.fs-guardrail", TrustSettingScope::Machine)],
+            ),
+            (
+                "codex",
+                &[
+                    ("projects.trust_level", TrustSettingScope::Project),
+                    ("home.trust_level", TrustSettingScope::Machine),
+                ],
+            ),
+            (
+                "zcode",
+                &[("hooks.fs-guardrail", TrustSettingScope::Machine)],
+            ),
+        ];
+        for (slug, keys) in expected {
+            let profile = for_slug(slug).expect("embedded profile");
+            let layer = profile
+                .settings
+                .as_ref()
+                .unwrap_or_else(|| panic!("{slug} declares trust settings but no settings layer"));
+            assert_eq!(
+                layer.posture,
+                aikit_core::harness_profile::LayerPosture::Observed,
+                "trust declarations are disclosure-only: {slug}"
+            );
+            let declared: Vec<_> = layer
+                .trust_settings
+                .iter()
+                .map(|t| (t.key.as_str(), t.scopes[0]))
+                .collect();
+            assert_eq!(&declared[..], *keys, "declared keys/scopes for {slug}");
+            for declaration in &layer.trust_settings {
+                assert!(
+                    !declaration.config.is_empty(),
+                    "{slug} {} names its config",
+                    declaration.key
+                );
+                if declaration.value_schema.kind == TrustValueKind::Enum {
+                    assert!(
+                        !declaration.value_schema.options.is_empty(),
+                        "{slug} {} enum carries options",
+                        declaration.key
+                    );
+                }
+            }
+        }
+        // The posture truth cuts both ways: profiles that declare no trust
+        // surface carry no trust declarations.
+        for (slug, profile) in all() {
+            if slug == "claude-code" || slug == "codex" || slug == "zcode" {
+                continue;
+            }
+            let declared = profile
+                .settings
+                .as_ref()
+                .map(|layer| layer.trust_settings.len())
+                .unwrap_or(0);
+            assert_eq!(declared, 0, "{slug} declares no trust settings yet");
+        }
+    }
+
+    #[test]
     fn pi_hooks_declare_the_extension_event_census_and_the_carrier_seam() {
         let pi = for_slug("pi").unwrap();
         let hooks = pi
@@ -733,6 +1108,19 @@ mod tests {
         assert_eq!(slug_for_target(&TargetId::openclaw()), Some("openclaw"));
         assert_eq!(slug_for_target(&TargetId::qwen_code()), Some("qwen-code"));
         assert_eq!(slug_for_target(&TargetId::gemini_cli()), Some("gemini"));
+        // The catalog slug itself resolves through the same table (the
+        // registry's join key for the gemini client is TargetId::GEMINI).
+        assert_eq!(slug_for_target(&TargetId::gemini()), Some("gemini"));
+        for (target, slug) in [
+            (TargetId::aider(), "aider"),
+            (TargetId::deepseek_harness(), "deepseek-harness"),
+            (TargetId::goose(), "goose"),
+            (TargetId::grok_bot(), "grok-bot"),
+            (TargetId::antigravity(), "gemini-antigravity"),
+            (TargetId::opencode(), "opencode"),
+        ] {
+            assert_eq!(slug_for_target(&target), Some(slug));
+        }
         assert!(slug_for_target(&TargetId::shell()).is_none());
         for target in [
             TargetId::claude_code(),
@@ -879,5 +1267,41 @@ mod tests {
         // A bridge or wrapper joins nothing: no declarations, no delivery.
         assert!(for_argv_program("/opt/homebrew/bin/node").is_none());
         assert!(for_argv_program("/bin/sh").is_none());
+    }
+
+    #[test]
+    fn every_registered_harness_target_resolves_to_a_profile() {
+        // The registry roster and the embedded profiles must cover the same
+        // harnesses: every non-broker registry target resolves to a profile.
+        // The gemini client joins by catalog slug (TargetId::GEMINI), the
+        // rest by their own target id.
+        let targets = [
+            TargetId::claude_code(),
+            TargetId::codex(),
+            TargetId::zcode(),
+            TargetId::aider(),
+            TargetId::antigravity(),
+            TargetId::cursor_cli(),
+            TargetId::deepseek_harness(),
+            TargetId::gemini(),
+            TargetId::goose(),
+            TargetId::grok_bot(),
+            TargetId::kimi(),
+            TargetId::opencode(),
+            TargetId::openclaw(),
+            TargetId::pi(),
+            TargetId::qwen_code(),
+            TargetId::ollama(),
+            TargetId::hermes(),
+            TargetId::hermes_acp(),
+        ];
+        for target in targets {
+            let slug = slug_for_target(&target)
+                .unwrap_or_else(|| panic!("{target}: no catalog slug join"));
+            assert!(
+                for_slug(slug).is_some(),
+                "{target} joins to profile `{slug}` but no embedded profile carries it"
+            );
+        }
     }
 }
