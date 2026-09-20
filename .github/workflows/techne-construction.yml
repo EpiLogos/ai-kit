@@ -1,9 +1,7 @@
 name: Native constructive field
 on:
   pull_request:
-    paths:
-      - 'crates/**'
-      - '.github/workflows/techne-construction.yml'
+    paths: ['crates/**', '.github/workflows/techne-construction.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -12,9 +10,8 @@ concurrency:
   cancel-in-progress: false
 jobs:
   register:
-    # Temporary bounded source delivery on this commissioned branch only.
-    # The registrations and one Clippy repair below must match exact source.
-    # Remove before final delivery; never write main or bypass normal gates.
+    # Temporary bounded source transport; remove before final delivery.
+    # Only the commissioned branch may receive this exact patch and formatting.
     if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'codex/techne-native-construction-20260920'
     runs-on: ubuntu-latest
     permissions:
@@ -28,51 +25,41 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt
-      - name: Register exactly the commissioned native modules
+      - name: Apply the exact native selector lint repair
         id: register
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          replacements = {
-              'crates/aikit-core/src/lib.rs': ('pub mod knowledge;\n', 'pub mod knowledge;\npub mod knowledge_construction;\n'),
-              'crates/aikit-cli/src/lib.rs': ('pub mod wiki_shape;\n', 'pub mod wiki_shape;\npub mod wiki_construct;\n'),
-              'crates/aikit-cli/src/cli.rs': ('    WikiShape(WikiShapeCmd),\n', '    WikiShape(WikiShapeCmd),\n    /// Construct revisioned native Wiki wholes and contextual participations.\n    WikiConstruct(crate::wiki_construct::ConstructArgs),\n'),
-              'crates/aikit-cli/src/main.rs': ('        Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),\n', '        Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),\n        Some(Command::WikiConstruct(c)) => Ok(Reply::Data {\n            context: EnvelopeContext {\n                context_id: None,\n                session_id: None,\n                project_root: Some(cwd.display().to_string()),\n            },\n            data: aikit_cli::wiki_construct::run(c)?,\n            warnings: vec![],\n            exit_code: json::EXIT_OK,\n        }),\n'),
-          }
-          for filename, (before, after) in replacements.items():
-              path = Path(filename)
-              source = path.read_text()
-              if after in source: continue
-              assert source.count(before) == 1, f'concurrent registration change: {filename}'
-              path.write_text(source.replace(before, after))
           path = Path('crates/aikit-core/src/knowledge_construction.rs')
           source = path.read_text()
-          before = '''        if let Some(selector) = read_source_selector(source)? {
-                      if let crate::knowledge_facets::SourceSelector::TextSpan { start, end, .. } = selector {
-                          if start >= end {
-                              return Err(err("selected passage must have a non-empty forward span"));
-                          }
-                      }
-                  }'''
-          # Dedent the literal continuation to the Rust file's indentation.
-          before = before.replace('\n          ', '\n')
-          after = '''        if let Some(crate::knowledge_facets::SourceSelector::TextSpan { start, end, .. }) = read_source_selector(source)? {
-                      if start >= end {
-                          return Err(err("selected passage must have a non-empty forward span"));
-                      }
-                  }'''.replace('\n          ', '\n')
+          before = '\n'.join([
+              '        if let Some(selector) = read_source_selector(source)? {',
+              '            if let crate::knowledge_facets::SourceSelector::TextSpan { start, end, .. } = selector {',
+              '                if start >= end {',
+              '                    return Err(err("selected passage must have a non-empty forward span"));',
+              '                }',
+              '            }',
+              '        }',
+          ])
+          after = '\n'.join([
+              '        if let Some(crate::knowledge_facets::SourceSelector::TextSpan { start, end, .. }) = read_source_selector(source)? {',
+              '            if start >= end {',
+              '                return Err(err("selected passage must have a non-empty forward span"));',
+              '            }',
+              '        }',
+          ])
           if 'if let Some(selector) = read_source_selector(source)?' in source:
               assert source.count(before) == 1, 'native selector validation changed concurrently'
               path.write_text(source.replace(before, after))
           PY
           rustfmt --edition 2021 crates/aikit-core/src/knowledge_construction.rs crates/aikit-core/src/knowledge_construction_tests.rs crates/aikit-cli/src/wiki_construct.rs crates/aikit-cli/tests/wiki_construct_commands.rs
-          git add crates/aikit-core/src/knowledge_construction.rs crates/aikit-core/src/knowledge_construction_tests.rs crates/aikit-cli/src/wiki_construct.rs crates/aikit-cli/tests/wiki_construct_commands.rs crates/aikit-core/src/lib.rs crates/aikit-cli/src/lib.rs crates/aikit-cli/src/cli.rs crates/aikit-cli/src/main.rs
+          git add crates/aikit-core/src/knowledge_construction.rs crates/aikit-core/src/knowledge_construction_tests.rs crates/aikit-cli/src/wiki_construct.rs crates/aikit-cli/tests/wiki_construct_commands.rs
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'fix(knowledge): keep selector validation lint-clean and format native CLI proofs'
+            git commit -m 'fix(knowledge): format native constructive transactions and their file proofs'
             git push origin HEAD:refs/heads/codex/techne-native-construction-20260920
           fi
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
