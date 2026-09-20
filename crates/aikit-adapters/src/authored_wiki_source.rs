@@ -21,7 +21,7 @@ use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::okf::{parse_authored_markdown_relations, parse_okf_markdown};
+use crate::okf::parse_okf_markdown;
 
 pub const AUTHORED_WIKI_SOURCE_VERSION: &str = "aikit.authored-wiki-source/v1";
 
@@ -104,8 +104,12 @@ pub fn parse_authored_wiki_source_with_authority(
     locators: Vec<String>,
     markdown: &str,
 ) -> Result<AuthoredWikiSourceProjection> {
-    let mut relations =
-        parse_authored_markdown_relations(&source_ref, source_revision.as_ref(), markdown);
+    let document = crate::markdown_document::parse_markdown_document(markdown);
+    let mut relations = crate::markdown_document::authored_relations_from_document(
+        &source_ref,
+        source_revision.as_ref(),
+        &document,
+    );
     let profile = parse_optional_okf_profile(markdown, &source_ref, source_revision.as_ref())?;
 
     let (profile_subject, title, aliases, mut metadata_relations) = match profile {
@@ -115,7 +119,16 @@ pub fn parse_authored_wiki_source_with_authority(
             profile.aliases,
             profile.relations,
         ),
-        None => (None, None, Vec::new(), Vec::new()),
+        None => (
+            None,
+            document
+                .properties
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            aliases_from_extensions(&document.properties),
+            Vec::new(),
+        ),
     };
     relations.append(&mut metadata_relations);
 

@@ -457,6 +457,19 @@ impl Service {
         self.with_knowledge(|_, application| application.read(address))
     }
 
+    /// Additive native document facet; plain KnowledgeReading users keep their API.
+    pub fn knowledge_read_document(&self, address: &KnowledgeAddress) -> Result<serde_json::Value> {
+        self.with_knowledge(|runtime, application| {
+            let reading = application.read(address)?;
+            let relations = application.relations(address, 1, 256, 512).ok();
+            aikit_adapters::wiki_document::reading_document(
+                &reading,
+                relations.as_ref(),
+                &runtime.material,
+            )
+        })
+    }
+
     pub fn knowledge_relations(
         &self,
         address: &KnowledgeAddress,
@@ -795,31 +808,6 @@ impl Service {
             );
         }
 
-        let wiki = if discovered.wiki.is_empty() {
-            absences.push("SemanticWiki material absent from the project horizon".into());
-            None
-        } else {
-            let horizon = blake3::hash(root.to_string_lossy().as_bytes()).to_hex();
-            let path = self
-                .home
-                .cache()
-                .join("knowledge/wiki")
-                .join(format!("{horizon}.sqlite3"));
-            match SqliteWikiProvider::rebuild(&path, discovered.wiki, wiki_registers.clone()) {
-                Ok(provider) => {
-                    // The read index materialised past dangling references;
-                    // every repair is disclosed as a named absence, one line
-                    // per distinct fault. Strict write gates are untouched.
-                    absences.extend(repair_absence_lines(provider.repairs()));
-                    Some(provider)
-                }
-                Err(error) => {
-                    absences.push(format!("SemanticWiki materialisation degraded: {error}"));
-                    None
-                }
-            }
-        };
-
         let central = if let Some(central_root) = central_root {
             let project = self.invocation_project_member(central_root, root);
             // A missing map degrades this lens, not independent Wiki/code
@@ -881,6 +869,40 @@ impl Service {
         material = material_for_actor(&pool, &material, None, true)?;
         let mut native_source = NativeSourcePoolProvider::new();
         native_source.rebuild(&material)?;
+
+        let ordinary = aikit_adapters::wiki_document::compile_material_sources(
+            &material,
+            &discovered.wiki,
+            &mut absences,
+        )?;
+        aikit_adapters::central_entities::adopt_into(
+            &mut discovered.wiki,
+            ordinary.edges.into_iter().map(WikiObject::Edge).collect(),
+        );
+        let wiki = if discovered.wiki.is_empty() {
+            absences.push("SemanticWiki material absent from the project horizon".into());
+            None
+        } else {
+            let horizon = blake3::hash(root.to_string_lossy().as_bytes()).to_hex();
+            let path = self
+                .home
+                .cache()
+                .join("knowledge/wiki")
+                .join(format!("{horizon}.sqlite3"));
+            match SqliteWikiProvider::rebuild(&path, discovered.wiki, wiki_registers.clone()) {
+                Ok(provider) => {
+                    // The read index materialised past dangling references;
+                    // every repair is disclosed as a named absence, one line
+                    // per distinct fault. Strict write gates are untouched.
+                    absences.extend(repair_absence_lines(provider.repairs()));
+                    Some(provider)
+                }
+                Err(error) => {
+                    absences.push(format!("SemanticWiki materialisation degraded: {error}"));
+                    None
+                }
+            }
+        };
 
         let mut bkmr = None;
         if central_root.is_none() {

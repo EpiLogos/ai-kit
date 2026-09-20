@@ -52,7 +52,6 @@ pub fn parse_authored_markdown_relations(
     crate::markdown_document::authored_markdown_relations(source_ref, source_revision, markdown)
 }
 
-
 fn split_frontmatter(markdown: &str) -> Result<(&str, &str)> {
     let markdown = markdown.strip_prefix('\u{feff}').unwrap_or(markdown);
     let Some(rest) = markdown.strip_prefix("---") else {
