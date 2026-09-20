@@ -44,6 +44,9 @@ def peer(base: Path) -> None:
 
     def turn(request: dict) -> None:
         prompt = json.dumps(request["params"]["prompt"])
+        skill_marker = (base / "skill-marker").read_text()
+        assert skill_marker in prompt, "selected effective Skill never reached ACP prompt"
+        effect({"kind":"skill-delivered", "digest":hashlib.sha256(skill_marker.encode()).hexdigest(), "model_consumption_observed":False})
         effect({"kind":"prompt", "digest":hashlib.sha256(prompt.encode()).hexdigest()})
         if "CONTROLLED-DISCONNECT" in prompt:
             chunk("partial-before-disconnect")
@@ -88,7 +91,7 @@ def peer(base: Path) -> None:
             decision.append(request["result"]); permission.set()
 
 
-def exercise(ctrl: Path, aikit: Path) -> dict:
+def exercise(ctrl: Path, aikit: Path, evidence: Path | None = None) -> dict:
     checks: list[str] = []
     with tempfile.TemporaryDirectory(prefix="native-agent-join-") as temp:
         base = Path(temp); root = base / "Central"
@@ -140,7 +143,7 @@ def exercise(ctrl: Path, aikit: Path) -> dict:
                 time.sleep(0.03)
             raise AssertionError(why)
         def settle(session: str):
-            return until(lambda: (v if (v:=request("status",agent_session=session))["state"]=="Idle" and v.get("error") is None else None),"native turn did not reach Idle")
+            return until(lambda: (v if (v:=request("status",agent_session=session))["state"]=="Resident" and v.get("error") is None else None),"native turn did not reach the actual Resident state without a transport error")
         def send(session: str, text: str):
             page=request("read",agent_session=session,after=0,limit=1)
             draft=request("draft",agent_session=session,basis=page["draft"]["revision"],text=text)
@@ -157,8 +160,20 @@ def exercise(ctrl: Path, aikit: Path) -> dict:
             checks.append("Real native prerequisite and Skill discovery perform no proposal, grant or provider launch")
             central("central.world-relations.save",{"record":{"schema":"central.world-relations/v1","ref":"control:root","revision":"controlled-r1","parent":None,"sources":[]}})
             assert ai("agent-session-scope")["world_readiness"]["world_ref"]=="control:root"
+            skill_ref="skill/test/native-join"
+            capsule=base/"aikit/registries/personal/capsules"/skill_ref
+            (capsule/"payload").mkdir(parents=True)
+            (capsule/"manifest.toml").write_text('schema = 1\nid = "skill/test/native-join"\nkind = "skill"\nname = "native-join"\ndescription = "Controlled source return method."\n[skill]\nroot = "payload"\n')
+            marker="CONTROLLED_SKILL_"+secrets.token_hex(24)
+            (base/"skill-marker").write_text(marker)
+            skill_file=capsule/"payload/SKILL.md"
+            skill_body='---\nname: native-join\ndescription: Controlled source return method.\n---\n\n'+marker+'\n'
+            skill_file.write_text(skill_body)
+            command([str(aikit),"--json","enable",skill_ref,"--scope","global"])
+            skills=ai("agent-session-skills")
+            assert any(row["ref"]==skill_ref and row["eligible"] is True for row in skills["rows"]), skills
             purpose="Read only my selected source and report its exact content."
-            made=central("agent-profile.express",{"name":"Controlled source reader","purpose":purpose,"intent_expression":purpose,"world_ref":"control:root","ratified_world_refs":["control:root"],"skill_refs":[]})
+            made=central("agent-profile.express",{"name":"Controlled source reader","purpose":purpose,"intent_expression":purpose,"world_ref":"control:root","ratified_world_refs":["control:root"],"skill_refs":[skill_ref]})
             profile=made["profile"]
             review=central("agent-profile.review",{"profile_ref":profile["ref"]})
             assert review["accepted"] is False
@@ -194,7 +209,8 @@ def exercise(ctrl: Path, aikit: Path) -> dict:
             history=events(session)
             assert nonce[:9] in json.dumps(history) and nonce[9:] in json.dumps(history)
             assert any(e.get("event",{}).get("kind")=="direct-agent-context-submitted" for e in history), history
-            checks.append("Real production handshake, fragmented stream and source-dependent result reach the native journal; human token is absent in the peer")
+            assert any(e["kind"]=="skill-delivered" for e in effects())
+            checks.append("Actual selected effective Skill bytes, fragmented ACP source return and hashed delivery evidence reach production handlers; no model-consumption claim or human-token leak")
             send(session,"CONTROLLED-DENIAL")
             pending=until(lambda:request("status",agent_session=session)["permissions"],"permission never reached native owner")
             request("permission",agent_session=session,request_id=pending[0]["native_request_id"],decision={"outcome":"selected","option_id":"reject"})
@@ -230,6 +246,12 @@ def exercise(ctrl: Path, aikit: Path) -> dict:
             assert "native-reconnect-identity-refused" in json.dumps(events(session))
             checks.append("A provider returning a different load identity is refused and never counted as continuation")
             (base/"wrong-load").unlink()
+            skill_file.write_text(skill_body+"Changed after preparation\n")
+            count=sum(e["kind"]=="prompt" for e in effects())
+            ai("agent-session-prepare","--request-json",json.dumps(preparation),expect=False)
+            assert sum(e["kind"]=="prompt" for e in effects())==count
+            skill_file.write_text(skill_body)
+            checks.append("Changed effective Skill content is refused against the prepared digest before provider work")
             request("shutdown",expected_pid=pid); processes[-1].wait(timeout=10)
             profile_file=next((root/"Control/agents/profiles").glob("*.json"))
             original=json.loads(profile_file.read_text()); original["purpose"]="Changed outside accepted basis"
@@ -244,6 +266,15 @@ def exercise(ctrl: Path, aikit: Path) -> dict:
                     process.terminate()
                     try: process.wait(timeout=5)
                     except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=5)
+            logs.flush()
+            if evidence is not None:
+                evidence.mkdir(parents=True,exist_ok=True)
+                # This World is entirely controlled. Never copy authority files,
+                # runtime stores, tokens, native profiles or caller environment.
+                logs.seek(0)
+                (evidence/"controlled-owner.log").write_text(logs.read().replace(env.get("CENTRAL_NATIVE_TOKEN","<absent>"),"[test credential redacted]"))
+                (evidence/"completed-checks.json").write_text(json.dumps({"standing":"controlled-not-live", "checks":checks},indent=2))
+                (evidence/"peer-effects.json").write_text(json.dumps(effects(),indent=2))
             logs.close()
 
 
@@ -251,9 +282,10 @@ def main() -> None:
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ctrl",type=Path); parser.add_argument("--aikit",type=Path)
     parser.add_argument("--peer",type=Path)
+    parser.add_argument("--evidence",type=Path)
     args=parser.parse_args()
     if args.peer: peer(args.peer); return
     if not args.ctrl or not args.aikit: parser.error("--ctrl and --aikit are required")
-    print(json.dumps(exercise(args.ctrl.resolve(),args.aikit.resolve()),indent=2))
+    print(json.dumps(exercise(args.ctrl.resolve(),args.aikit.resolve(),args.evidence),indent=2))
 
 if __name__=="__main__": main()
