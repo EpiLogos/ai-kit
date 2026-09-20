@@ -1,0 +1,144 @@
+name: Native session controls implementation
+on:
+  push:
+    branches: [agent/native-session-controls-20260920]
+    paths: [.github/workflows/native-session-controls-bootstrap.yml]
+permissions:
+  contents: read
+jobs:
+  implement-and-test:
+    if: github.ref == 'refs/heads/agent/native-session-controls-20260920' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply exact bounded source hunks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace(s, old, new):
+              assert s.count(old) == 1, f'Expected one exact source hunk: {old[:100]}'
+              return s.replace(old, new, 1)
+          p=Path('crates/aikit-adapters/src/interactive_connection.rs');s=p.read_text()
+          s=replace(s,'/// The connection seam used by an interactive UI/controller.', '''/// Non-mutating disclosure from the actual adapter, not inferred from model
+          /// observations. A reported model does not imply a writable selector.
+          #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+          pub struct NativeModelControls {
+              pub model_selection: bool,
+              pub reasoning_effort_selection: bool,
+              pub reason: Option<String>,
+          }
+          
+          impl NativeModelControls {
+              pub fn unavailable(reason: impl Into<String>) -> Self {
+                  Self { model_selection: false, reasoning_effort_selection: false, reason: Some(reason.into()) }
+              }
+          }
+          
+          /// The connection seam used by an interactive UI/controller.''')
+          s=replace(s,'pub trait InteractiveAgentConnectionAdapter: AgentConnectionAdapter {', '''pub trait InteractiveAgentConnectionAdapter: AgentConnectionAdapter {
+              /// Query only the exact native session. The default deliberately keeps
+              /// adapters without a confirmed configuration protocol read-only.
+              fn session_model_controls(&self, _native_session_id: &str) -> NativeModelControls {
+                  NativeModelControls::unavailable("This adapter has no confirmed in-session model selector; use its native launch configuration")
+              }
+          ''')
+          needle='impl InteractiveAgentConnectionAdapter for AcpStableConnectionAdapter {'
+          s=replace(s,needle,needle+'''
+              fn session_model_controls(&self, native_session_id: &str) -> NativeModelControls {
+                  match self.model_options.get(native_session_id) {
+                      Some(observation) => NativeModelControls {
+                          model_selection: true,
+                          reasoning_effort_selection: observation.reasoning_effort.is_some(),
+                          reason: None,
+                      },
+                      None => NativeModelControls::unavailable("ACP did not advertise a model config selector for this native session"),
+                  }
+              }
+          ''');p.write_text(s)
+          p=Path('crates/aikit-adapters/src/agent_session_host.rs');s=p.read_text()
+          s=replace(s,'use crate::interactive_connection::{InteractiveAgentConnectionAdapter, PermissionDecision};','use crate::interactive_connection::{InteractiveAgentConnectionAdapter, NativeModelControls, PermissionDecision};')
+          needle='    /// Select a provider-advertised model on this exact resident native'
+          s=replace(s,needle,'''    /// Ask the real adapter, under the same identity/lane gate as writes. No
+              /// command is sent and no observed model is promoted into a capability.
+              pub fn model_controls(&self) -> Result<NativeModelControls> {
+                  let _gate = self.shared.gate()?;
+                  let state = self.shared.state()?;
+                  let record = state.sessions.get(&self.agent_session)
+                      .ok_or_else(|| session_not_open(&self.agent_session))?;
+                  if record.binding.native_session_id != self.binding.native_session_id {
+                      return Err(AikitError::new("agent_session_host.stale_lane", "Model controls belong to a different native session"));
+                  }
+                  if !matches!(state.lane_state(&record.binding.native_session_id), SessionLaneState::Resident) {
+                      return Ok(NativeModelControls::unavailable("Model configuration requires an idle resident session"));
+                  }
+                  let native_session_id = record.binding.native_session_id.clone();
+                  drop(state);
+                  Ok(self.shared.adapter()?.session_model_controls(&native_session_id))
+              }
+          
+          '''+needle);p.write_text(s)
+          p=Path('crates/aikit-cli/src/encounter_service.rs');s=p.read_text()
+          start=s.index('    ModelSelect {');end=s.index('    },',start)
+          assert 'expected_native_session_id' not in s[start:end]
+          s=s[:end]+'''        /// Optional for old clients; new consumers bind a write to their read.
+                  #[serde(default)]
+                  expected_native_session_id: Option<String>,
+          '''+s[end:]
+          s=replace(s,'"model_observation":identity.binding.model_observation,\n                    "standing":"provider-reported-configuration-not-independent-selection-or-inference-proof"','''"model_observation":identity.binding.model_observation,
+                              "model_controls":match resident.host.transport_error() {
+                                  Some(reason) => aikit_adapters::interactive_connection::NativeModelControls::unavailable(reason),
+                                  None => resident.lane.model_controls()?,
+                              },
+                              "pinned_model_id":resident.model.as_ref().map(|model| &model.policy.provider_native_id),
+                              "standing":"provider-reported-configuration-not-independent-selection-or-inference-proof"''')
+          s=replace(s,'                provider_reasoning_effort,\n            } => {','                provider_reasoning_effort,\n                expected_native_session_id,\n            } => {')
+          needle='                self.check_resident_context(&agent_session, &resident, "native-model-select")?;'
+          s=replace(s,needle,needle+'''
+                          let observed = resident.host.identity(&agent_session)?;
+                          if expected_native_session_id.as_ref().is_some_and(|expected| expected != &observed.binding.native_session_id) {
+                              return Err(AikitError::new("encounter.stale_native_session", "The native session changed after the model read; read its controls again before selecting"));
+                          }''')
+          p.write_text(s)
+          PY
+          git diff --check
+          git rm .github/workflows/native-session-controls-bootstrap.yml
+          git add crates/aikit-adapters/src/interactive_connection.rs crates/aikit-adapters/src/agent_session_host.rs crates/aikit-cli/src/encounter_service.rs
+          git -c user.name='Epii' -c user.email='agent-session@users.noreply.github.com' commit -m 'feat(encounter): disclose adapter-native model controls and reject stale selections'
+          git push origin HEAD:refs/heads/agent/native-session-controls-20260920
+          git rev-parse HEAD | tee /tmp/native-session-head.txt
+      - name: Install repository Rust toolchain
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component clippy
+          rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Adapter controlled protocol regressions
+        id: adapters
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p aikit-adapters --test native_model_controls --test interactive_connection_v2 --test agent_session_host_v2 2>&1 | tee /tmp/adapter-controls.log
+      - name: Production encounter handler regressions
+        id: handlers
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p aikit-cli --test agent_session_protocol --test encounter_context_admission --test encounter_shutdown 2>&1 | tee /tmp/encounter-controls.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-session-controlled-results
+          path: |
+            /tmp/native-session-head.txt
+            /tmp/adapter-controls.log
+            /tmp/encounter-controls.log
+          retention-days: 7
+      - name: Preserve failing test status
+        if: steps.adapters.outcome != 'success' || steps.handlers.outcome != 'success'
+        run: exit 1
