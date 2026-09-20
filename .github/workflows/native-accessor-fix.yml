@@ -1,0 +1,41 @@
+name: Publish native error accessor fix
+on:
+  push:
+    branches: [agent/direct-accepted-agent-session-20260920]
+    paths: [.github/workflows/native-accessor-fix.yml]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Correct the one native accessor
+        shell: bash
+        run: |
+          test "$GITHUB_REF_NAME" = agent/direct-accepted-agent-session-20260920
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('crates/aikit-cli/src/encounter_service.rs');s=p.read_text()
+          old='"error_code":failure.code,'
+          assert s.count(old)==1
+          p.write_text(s.replace(old,'"error_code":failure.code(),'))
+          PY
+          test "$(git diff --name-only)" = crates/aikit-cli/src/encounter_service.rs
+          git add crates/aikit-cli/src/encounter_service.rs
+          git config user.name Epii
+          git config user.email agent-session@users.noreply.github.com
+          git commit -m 'fix(encounter): serialize the public native error code without accessing private fields'
+          git push origin HEAD:refs/heads/agent/direct-accepted-agent-session-20260920
+      - name: Retain exact source result
+        if: always()
+        run: mkdir -p /tmp/accessor && git show --format=fuller HEAD > /tmp/accessor/commit.patch && git diff > /tmp/accessor/uncommitted.patch
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-accessor-source
+          path: /tmp/accessor/
+          retention-days: 7
