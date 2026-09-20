@@ -14,92 +14,85 @@ on:
 permissions:
   contents: read
 jobs:
-  native:
+  native-quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    permissions:
-      contents: write
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref || github.ref_name }}
-          fetch-depth: 1
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install repository formatter and lint
-        run: rustup component add rustfmt clippy
+      - run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Preserve native trust prerequisite in the controlled test
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          test "$GITHUB_REF_NAME" = agent/direct-accepted-agent-session-20260920
-          python3 - <<'PY'
-          import pathlib,subprocess
-          p=pathlib.Path('tests/direct_agent_native_join.py');s=p.read_text()
-          old='            command([str(aikit),"--json","enable",skill_ref,"--scope","global"])'
-          if '"trust","record",skill_ref' not in s:
-              assert s.count(old)==1
-              s=s.replace(old,'            command([str(aikit),"--json","trust","record",skill_ref,"--note","Explicit review of controlled test-only Skill bytes"])\n'+old)
-              s=s.replace('subprocess.run(argv, env=env, capture_output=True','subprocess.run(argv, cwd=root if root.exists() else base, env=env, capture_output=True')
-              p.write_text(s)
-              subprocess.run(['git','add',str(p)],check=True)
-              subprocess.run(['git','config','user.name','Epii'],check=True)
-              subprocess.run(['git','config','user.email','agent-session@users.noreply.github.com'],check=True)
-              subprocess.run(['git','commit','-m','test(agent): review the controlled Skill revision before native enablement'],check=True)
-              subprocess.run(['git','push','origin','HEAD:refs/heads/agent/direct-accepted-agent-session-20260920'],check=True)
-          PY
-      - name: Record exact committed source
-        if: always()
-        run: |
-          mkdir -p direct-agent-evidence
-          git rev-parse HEAD > direct-agent-evidence/source-revision.txt
-          git diff > direct-agent-evidence/uncommitted.patch
-          git archive --format=tar.gz HEAD > direct-agent-evidence/source.tar.gz
-      - name: Direct-session validation
-        id: direct
-        continue-on-error: true
-        shell: bash
-        run: cargo test --locked -p aikit-cli --test direct_agent_session 2>&1 | tee direct-agent-evidence/direct.log
-      - name: Actual child-process authority boundary
-        id: environment
-        continue-on-error: true
-        shell: bash
-        run: cargo test --locked -p aikit-adapters --test human_authority_environment 2>&1 | tee direct-agent-evidence/environment.log
-      - name: Full native regression suite without early target termination
+      - name: Exact source
+        run: mkdir -p direct-agent-evidence && git rev-parse HEAD > direct-agent-evidence/source-revision.txt
+      - name: Full regression suite
         id: all
         continue-on-error: true
         shell: bash
         run: cargo test --all-targets --no-fail-fast --locked 2>&1 | tee direct-agent-evidence/all.log
+      - name: Strict lint
+        id: lint
+        continue-on-error: true
+        shell: bash
+        run: cargo clippy --all-targets --locked -- -D warnings 2>&1 | tee direct-agent-evidence/clippy.log
       - name: Repeat original QL observation failure separately
         id: original
         continue-on-error: true
         shell: bash
         run: cargo test --locked -p aikit-adapters --test ql_provider 2>&1 | tee direct-agent-evidence/original-ql.log
-      - name: Full native strict lint
-        id: lint
-        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: direct-agent-quality-evidence
+          path: direct-agent-evidence/
+          retention-days: 7
+      - name: Preserve failures
+        if: always()
+        env:
+          OUTCOMES: ${{ steps.all.outcome }},${{ steps.lint.outcome }},${{ steps.original.outcome }}
+        run: test "$OUTCOMES" = 'success,success,success'
+  joined-protocol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Record immutable source
         shell: bash
-        run: cargo clippy --all-targets --locked -- -D warnings 2>&1 | tee direct-agent-evidence/clippy.log
-      - name: Build exact native CLI
-        id: build
-        continue-on-error: true
-        shell: bash
-        run: cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee direct-agent-evidence/build.log
-      - name: Exact Central source acceptance dependency
-        id: central
+        run: |
+          mkdir -p direct-agent-evidence
+          git rev-parse HEAD > direct-agent-evidence/source-revision.txt
+          git archive --format=tar.gz HEAD > direct-agent-evidence/source.tar.gz
+      - name: Direct identity and actual child-process authority checks
+        id: direct
         continue-on-error: true
         shell: bash
         run: |
+          cargo test --locked -p aikit-cli --test direct_agent_session 2>&1 | tee direct-agent-evidence/direct.log
+          cargo test --locked -p aikit-adapters --test human_authority_environment 2>&1 | tee direct-agent-evidence/environment.log
+      - name: Build exact source with Central acceptance dependency
+        id: build
+        continue-on-error: true
+        shell: bash
+        run: |
+          cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee direct-agent-evidence/build.log
           mkdir -p /tmp/central-agent-owner
           printf '%s\n' d0001cb7ca9eb2886c7158f05aa65272da198fa1 > direct-agent-evidence/central-source-revision.txt
           curl --fail --silent --show-error --location https://codeload.github.com/EpiLogos/Central/tar.gz/d0001cb7ca9eb2886c7158f05aa65272da198fa1 | tar xz --strip-components=1 -C /tmp/central-agent-owner
           cargo build --locked --manifest-path /tmp/central-agent-owner/Cargo.toml -p ctrl --bin ctrl 2>&1 | tee direct-agent-evidence/central-build.log
-      - name: Real native acceptance to ACP work and recovery
+      - name: Native source acceptance to complete ACP work and recovery
         id: join
         continue-on-error: true
         shell: bash
         run: python3 tests/direct_agent_native_join.py --ctrl /tmp/central-agent-owner/target/debug/ctrl --aikit "$PWD/target/debug/aikit" --evidence direct-agent-evidence/join 2>&1 | tee direct-agent-evidence/native-join.log
-      - name: Compose published adapter dependencies for testing only
+      - name: Compose published model and folded-startup dependencies for testing only
         id: compose
         continue-on-error: true
         shell: bash
@@ -112,17 +105,23 @@ jobs:
           git apply --3way direct-agent-evidence/folded-dependency.patch
           git write-tree > direct-agent-evidence/composed-tree.txt
           git diff HEAD > direct-agent-evidence/composed.patch
-      - name: Composed native build, folded startup and model protocol
-        id: composed
+      - name: Composed production protocol and native folded startup
+        id: protocol
         if: steps.compose.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
           cargo test --locked -p aikit-cli --test encounter_owner_folded_spawn --test agent_session_protocol 2>&1 | tee direct-agent-evidence/folded-protocol.log
           cargo test --locked -p aikit-adapters --test native_model_controls 2>&1 | tee direct-agent-evidence/model-controls.log
+      - name: Composed native source return and reopening
+        id: composed
+        if: steps.compose.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
           cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee direct-agent-evidence/composed-build.log
           python3 tests/direct_agent_native_join.py --ctrl /tmp/central-agent-owner/target/debug/ctrl --aikit "$PWD/target/debug/aikit" --evidence direct-agent-evidence/composed-join 2>&1 | tee direct-agent-evidence/composed-join.log
-      - name: Preserve actual native binaries and source composition even after a failed test
+      - name: Preserve native binaries and composition even after failed tests
         if: always()
         shell: bash
         run: |
@@ -133,11 +132,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: direct-agent-session-evidence
+          name: direct-agent-joined-evidence
           path: direct-agent-evidence/
           retention-days: 7
       - name: Preserve every failed or unexecuted gate
         if: always()
         env:
-          OUTCOMES: ${{ steps.direct.outcome }},${{ steps.environment.outcome }},${{ steps.all.outcome }},${{ steps.original.outcome }},${{ steps.lint.outcome }},${{ steps.build.outcome }},${{ steps.central.outcome }},${{ steps.join.outcome }},${{ steps.compose.outcome }},${{ steps.composed.outcome }}
-        run: test "$OUTCOMES" = 'success,success,success,success,success,success,success,success,success,success'
+          OUTCOMES: ${{ steps.direct.outcome }},${{ steps.build.outcome }},${{ steps.join.outcome }},${{ steps.compose.outcome }},${{ steps.protocol.outcome }},${{ steps.composed.outcome }}
+        run: test "$OUTCOMES" = 'success,success,success,success,success,success'
