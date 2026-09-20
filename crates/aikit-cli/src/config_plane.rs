@@ -236,9 +236,13 @@ fn settings() -> Vec<Setting> {
             section_ref: "models",
             key: "models.credentials",
             title: "Provider credential reference",
-            description: "Presence and reference for provider credentials. The material is bound \
-                      only through AIKit's own native mechanism (`aikit credential setup`); \
-                      this plane never carries or mutates a value.",
+            description: "Presence and reference for provider credentials — classic LLMs and \
+                      voice models alike, one inventory per provider. The material is bound \
+                      owner-natively (`aikit credential setup`, optionally declaring an \
+                      external store location with `--ref op://…`); the lifecycle is closed \
+                      with `aikit credential rotate` and `aikit credential revoke`, and \
+                      `aikit credential discover` surfaces candidate keys already on the \
+                      machine, presence only. This plane never carries or mutates a value.",
             value_schema: json!({ "type": "secret" }),
             allowed_scopes: &["world"],
             writable: false,
@@ -670,8 +674,10 @@ pub fn contribution_document(cwd: &Path) -> Value {
                     "SessionSpace authoring and model selection stay native (`aikit session`, \
                      `aikit compose --model`); they are relational or per-launch choices, not \
                      addressable settings.",
-                    "Credential material is bound only through `aikit credential setup`; the \
-                     plane discloses presence and reference.",
+                    "Credential material is bound only through `aikit credential setup` (or \
+                     declared with `--ref`); the plane discloses presence and reference, and \
+                     the per-provider inventory rides `aikit system --json` \
+                     (`ai-kit:credential:inventory`).",
                 ],
             });
             finalize_digest(&mut body).unwrap_or(());

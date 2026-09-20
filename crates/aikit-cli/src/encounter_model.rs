@@ -7,11 +7,13 @@ use crate::encounter_service::{
     EncounterService,
 };
 use aikit_adapters::credential_provider::{EnvironmentImportProvider, NativeSecureStoreProvider};
+use aikit_adapters::secret_resolver::SuiteSecretResolver;
 use aikit_core::credential::{
     resolve_credential, CredentialRef, CredentialResolutionRequest, SecretMaterialisationClass,
     SecretProvider, SecretRequirement, SecretRequirementRef, SecretValue,
 };
 use aikit_core::resource::{canonical_model_ref, CredentialCondition, ProviderRef};
+use aikit_core::secret_ref::SecretResolver as _;
 use aikit_core::{ResourceRef, Result};
 use aikit_store::{AikitHome, CredentialBindingStore};
 use serde::{Deserialize, Serialize};
@@ -155,6 +157,32 @@ fn credential(
                 "Selected credential binding is revoked or expired; no environment bypass",
             ));
         }
+    }
+    // A declared reference materialises through the resolver suite straight
+    // from the external store the operator named (1Password, varlock, pass,
+    // keychain). The suite's env-import gate is closed by construction, so
+    // env:// can never ride this path; the ref itself was refused at the
+    // setup seam. When only planning (materialise == false) the vault is
+    // never touched: the delivery record names the route without resolving.
+    if let Some(secret_ref) = stored
+        .as_ref()
+        .and_then(|binding| binding.declared_secret_ref.clone())
+    {
+        let secret = if materialise {
+            Some(SuiteSecretResolver::default().resolve(&secret_ref)?)
+        } else {
+            None
+        };
+        return Ok((
+            json!({
+                "binding": stored,
+                "delivery": "declared-secret-ref",
+                "scheme": secret_ref.scheme(),
+                "secret_persisted": false,
+                "resolution": Value::Null,
+            }),
+            secret,
+        ));
     }
     let native = NativeSecureStoreProvider::new();
     let environment = use_

@@ -1790,6 +1790,7 @@ fn run_credential_setup_from_palette(service: &Service) -> Result<Reply> {
         project_env: None,
         from_env: false,
         headless: false,
+        declared_ref: None,
     };
     let outcome = credential::setup(service.home(), &request)?;
     println!(
@@ -2562,6 +2563,7 @@ fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {
             project_env: a.project_env.clone(),
             from_env: a.from_env,
             headless: a.headless,
+            declared_ref: None,
         };
         let inspection = credential::inspect(service.home(), &request)?;
         return Ok(reply(
@@ -2628,6 +2630,10 @@ fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {
 
 fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool) -> Result<Reply> {
     let service = Service::discover(cwd)?;
+    let declared_ref = |raw: Option<String>| -> Result<Option<aikit_core::secret_ref::SecretRef>> {
+        raw.map(|raw| aikit_core::secret_ref::SecretRef::parse(&raw))
+            .transpose()
+    };
     match command.command {
         CredentialSub::Setup(a) => {
             let request = credential::CredentialRequest {
@@ -2638,8 +2644,18 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 project_env: a.project_env,
                 from_env: a.from_env,
                 headless: a.headless || json_mode,
+                declared_ref: declared_ref(a.declared_ref)?,
             };
             let outcome = credential::setup(service.home(), &request)?;
+            let notes = if outcome.binding.declared_secret_ref.is_some() {
+                vec![format!(
+                    "the material stays in the declared store; AIKit holds only the \
+                     location ({})",
+                    outcome.binding.binding_provenance
+                )]
+            } else {
+                vec![]
+            };
             Ok(reply(
                 &service,
                 jval!({
@@ -2648,7 +2664,7 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                     "binding": outcome.binding,
                     "resolution": outcome.resolution,
                 }),
-                vec![],
+                notes,
             ))
         }
         CredentialSub::Explain(a) => {
@@ -2660,6 +2676,7 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 project_env: a.project_env,
                 from_env: a.from_env,
                 headless: a.headless || json_mode,
+                declared_ref: None,
             };
             let inspection = credential::inspect(service.home(), &request)?;
             Ok(reply(
@@ -2680,6 +2697,67 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 &service,
                 jval!({ "bindings": bindings, "count": bindings.len() }),
                 vec![],
+            ))
+        }
+        CredentialSub::Rotate(a) => {
+            let request = credential::CredentialRequest {
+                credential: aikit_core::credential::CredentialRef::new(a.credential)?,
+                consumer_ref: a.consumer,
+                purpose: a.purpose,
+                env_var: a.env_var,
+                project_env: a.project_env,
+                from_env: a.from_env,
+                headless: true,
+                declared_ref: declared_ref(a.declared_ref)?,
+            };
+            let outcome = credential::rotate(service.home(), &request)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "credential": request.credential.as_str(),
+                    "rotated": true,
+                    "binding": outcome.binding,
+                }),
+                outcome.notes,
+            ))
+        }
+        CredentialSub::Revoke(a) => {
+            let credential = aikit_core::credential::CredentialRef::new(a.credential)?;
+            let binding = credential::revoke(service.home(), &credential)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "credential": credential.as_str(),
+                    "revoked": binding.revoked,
+                    "binding": binding,
+                }),
+                vec![
+                    "the binding is revoked; any keychain item or vault entry the \
+                     operator stored stays in place"
+                        .to_string(),
+                ],
+            ))
+        }
+        CredentialSub::Discover(a) => {
+            let findings = credential::discover(service.home(), Some(cwd), a.env_file.as_deref())?;
+            let proposable = findings
+                .iter()
+                .filter(|finding| finding.proposed_credential_ref.is_some())
+                .count();
+            Ok(reply(
+                &service,
+                jval!({
+                    "findings": findings,
+                    "count": findings.len(),
+                    "proposable": proposable,
+                }),
+                vec![
+                    "findings are presence-only: names and locations, never values. \
+                     bind one with `aikit credential setup credential:<provider> \
+                     --from-env --env-var <NAME>` or declare its store location \
+                     with `--ref <SECRET_REF>`"
+                        .to_string(),
+                ],
             ))
         }
     }

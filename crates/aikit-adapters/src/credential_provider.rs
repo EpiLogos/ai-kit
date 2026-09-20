@@ -170,6 +170,9 @@ impl NativeSecureStoreProvider {
             expires_at: None,
             revoked: false,
             metadata,
+            declared_secret_ref: None,
+            bound_at_unix_seconds: None,
+            last_rotated_at_unix_seconds: None,
         }
     }
 }
@@ -385,6 +388,9 @@ impl EnvironmentImportProvider {
             expires_at: None,
             revoked: false,
             metadata,
+            declared_secret_ref: None,
+            bound_at_unix_seconds: None,
+            last_rotated_at_unix_seconds: None,
         }
     }
 }
@@ -554,6 +560,9 @@ mod encrypted_fallback {
                 expires_at: None,
                 revoked: false,
                 metadata,
+                declared_secret_ref: None,
+                bound_at_unix_seconds: None,
+                last_rotated_at_unix_seconds: None,
             }
         }
 

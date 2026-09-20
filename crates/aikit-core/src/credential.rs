@@ -322,6 +322,44 @@ pub struct CredentialBindingState {
     pub expires_at: Option<String>,
     pub revoked: bool,
     pub metadata: BTreeMap<String, String>,
+    /// The declared location of the credential material, when the operator
+    /// declared one: a `central.security/v1` ref (`op://`, `varlock://`,
+    /// `pass://`, `keychain://`). Location only — it names where a resolver
+    /// materialises from and can never carry a value. `env://` is refused at
+    /// the setup seam, mirroring the `--from-env` law.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_secret_ref: Option<crate::secret_ref::SecretRef>,
+    /// Unix seconds when this credential was first bound. Absent for records
+    /// that predate lifecycle tracking; never backfilled by inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_at_unix_seconds: Option<u64>,
+    /// Unix seconds when the material behind this credential last changed
+    /// (a rotation or re-bind). Absent until the first rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_rotated_at_unix_seconds: Option<u64>,
+}
+
+impl CredentialBindingState {
+    /// Stamp the lifecycle facts a binding flow owns onto a freshly produced
+    /// provider state. The first bind sets `bound_at`; a rotation preserves
+    /// the original `bound_at` and marks `last_rotated_at`. The credential
+    /// ref never changes here — rotation is provider state, not identity.
+    pub fn with_lifecycle(
+        mut self,
+        previous: Option<&CredentialBindingState>,
+        rotation: bool,
+        now_unix_seconds: u64,
+    ) -> Self {
+        self.bound_at_unix_seconds = previous
+            .and_then(|previous| previous.bound_at_unix_seconds)
+            .or(Some(now_unix_seconds));
+        if rotation {
+            self.last_rotated_at_unix_seconds = Some(now_unix_seconds);
+        } else if let Some(previous) = previous {
+            self.last_rotated_at_unix_seconds = previous.last_rotated_at_unix_seconds;
+        }
+        self
+    }
 }
 
 /// Provider-neutral operational seam behind the credential resolution contract.
@@ -538,6 +576,9 @@ mod tests {
             expires_at: None,
             revoked: false,
             metadata: BTreeMap::new(),
+            declared_secret_ref: None,
+            bound_at_unix_seconds: None,
+            last_rotated_at_unix_seconds: None,
         };
         let rotated = CredentialBindingState {
             revision_or_lease_class: Some("revision:v2".into()),
@@ -563,6 +604,9 @@ mod tests {
             expires_at: None,
             revoked: false,
             metadata: BTreeMap::new(),
+            declared_secret_ref: None,
+            bound_at_unix_seconds: None,
+            last_rotated_at_unix_seconds: None,
         };
         let replacement = CredentialBindingState {
             credential_ref: first.credential_ref.clone(),
@@ -574,11 +618,56 @@ mod tests {
             expires_at: None,
             revoked: false,
             metadata: BTreeMap::new(),
+            declared_secret_ref: None,
+            bound_at_unix_seconds: None,
+            last_rotated_at_unix_seconds: None,
         };
 
         assert_eq!(first.credential_ref, replacement.credential_ref);
         assert_ne!(first.provider_ref, replacement.provider_ref);
         assert_ne!(first.binding_provenance, replacement.binding_provenance);
+    }
+
+    #[test]
+    fn lifecycle_stamps_first_bind_preserves_bound_at_on_rotation() {
+        let provider_state = CredentialBindingState {
+            credential_ref: credential("credential:openai/research"),
+            provider_ref: SecretProviderRef::new("provider:keychain").unwrap(),
+            provider_tier: SecretProviderTier::OsSecureStore,
+            materialisation: SecretMaterialisationClass::ProviderNativeLease,
+            binding_provenance: "keychain:item-42".into(),
+            revision_or_lease_class: Some("revision:v1".into()),
+            expires_at: None,
+            revoked: false,
+            metadata: BTreeMap::new(),
+            declared_secret_ref: None,
+            bound_at_unix_seconds: None,
+            last_rotated_at_unix_seconds: None,
+        };
+
+        let first = provider_state.clone().with_lifecycle(None, false, 1_000);
+        assert_eq!(first.bound_at_unix_seconds, Some(1_000));
+        assert_eq!(first.last_rotated_at_unix_seconds, None);
+
+        let rotated = CredentialBindingState {
+            revision_or_lease_class: Some("revision:v2".into()),
+            ..provider_state.clone()
+        }
+        .with_lifecycle(Some(&first), true, 2_000);
+        assert_eq!(rotated.credential_ref, first.credential_ref);
+        assert_eq!(rotated.bound_at_unix_seconds, Some(1_000));
+        assert_eq!(rotated.last_rotated_at_unix_seconds, Some(2_000));
+
+        // A legacy record without timestamps gains them at the next bind
+        // without losing the rotation fact it already carried.
+        let legacy_previous = CredentialBindingState {
+            last_rotated_at_unix_seconds: Some(900),
+            bound_at_unix_seconds: None,
+            ..first.clone()
+        };
+        let rebound = provider_state.with_lifecycle(Some(&legacy_previous), false, 3_000);
+        assert_eq!(rebound.bound_at_unix_seconds, Some(3_000));
+        assert_eq!(rebound.last_rotated_at_unix_seconds, Some(900));
     }
 
     struct FakeProvider {

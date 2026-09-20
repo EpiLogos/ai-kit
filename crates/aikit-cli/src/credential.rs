@@ -1,7 +1,20 @@
 //! Credential application flow shared by CLI and the small initial-config panel.
+//!
+//! Three ways a credential comes to exist, all owner-native:
+//! the OS secure store (`aikit credential setup` prompting once for the
+//! material), an explicit environment import (`--from-env --env-var`), and a
+//! declared reference (`--ref op://…` / `varlock://…` / `pass://…`) that names
+//! where an external store already holds the material — AIKit stores the
+//! location, and a resolver materialises from it at the one moment of use.
+//! Lifecycle metadata (first-bound and last-rotated timestamps) is stamped by
+//! this flow, never inferred; `rotate` and `revoke` close the lifecycle; and
+//! `discover` surfaces candidate keys already on the machine with
+//! presence-only findings — a discovery finding carries a variable name and a
+//! location, never a value.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aikit_adapters::{
     EnvironmentImportProvider, NativeSecureStoreProvider, NativeSecureStoreStatus,
@@ -9,8 +22,10 @@ use aikit_adapters::{
 use aikit_core::credential::{
     resolve_registered_credential, CredentialBindingState, CredentialProviderRejection,
     CredentialRef, CredentialResolution, SecretMaterialisationClass, SecretProvider,
-    SecretProviderDescriptor, SecretRequirement, SecretRequirementRef, SecretValue,
+    SecretProviderDescriptor, SecretProviderRef, SecretProviderTier, SecretRequirement,
+    SecretRequirementRef, SecretValue,
 };
+use aikit_core::secret_ref::SecretRef;
 use aikit_core::{AikitError, Result};
 use aikit_store::{AikitHome, CredentialBindingStore};
 use aikit_tui::{render_credential_setup_panel, CredentialSetupView};
@@ -26,6 +41,13 @@ pub struct CredentialRequest {
     pub project_env: Option<PathBuf>,
     pub from_env: bool,
     pub headless: bool,
+    /// Declare the material's location instead of binding material. The ref
+    /// is stored as-is; a resolver materialises from it at use time.
+    pub declared_ref: Option<SecretRef>,
+}
+
+pub fn now_unix_seconds() -> u64 {
+    jiff::Timestamp::now().as_second().max(0) as u64
 }
 
 #[derive(Debug)]
@@ -115,6 +137,9 @@ pub fn inspect(home: &AikitHome, request: &CredentialRequest) -> Result<Credenti
 }
 
 pub fn setup(home: &AikitHome, request: &CredentialRequest) -> Result<CredentialSetupOutcome> {
+    if let Some(secret_ref) = request.declared_ref.clone() {
+        return declare_ref(home, request, secret_ref);
+    }
     let inspection = inspect(home, request)?;
     if inspection.resolution.selected() {
         return selected_outcome(home, request, inspection.resolution, false);
@@ -154,6 +179,417 @@ pub fn setup(home: &AikitHome, request: &CredentialRequest) -> Result<Credential
             "choose 1, 2, 3, or q",
         )),
     }
+}
+
+/// The binding record a declared reference produces. The material stays in
+/// the external store; this record names the resolver route to it. Declared
+/// refs are brokered facts, not keychain items, so `NativeSecureStoreProvider`
+/// never mistakes them for its own bound set.
+fn declared_ref_binding(
+    credential: &CredentialRef,
+    secret_ref: SecretRef,
+) -> Result<CredentialBindingState> {
+    if matches!(secret_ref, SecretRef::Env { .. }) {
+        return Err(AikitError::new(
+            "credential.declared_env_ref_refused",
+            "env:// names a transient process variable, not a store; import explicitly \
+             with --from-env --env-var instead",
+        ));
+    }
+    let scheme = secret_ref.scheme().to_string();
+    let mut metadata = BTreeMap::new();
+    metadata.insert("scheme".into(), scheme.clone());
+    Ok(CredentialBindingState {
+        credential_ref: credential.clone(),
+        provider_ref: SecretProviderRef::new(format!("provider:secret-resolver/{scheme}"))?,
+        provider_tier: SecretProviderTier::BrokeredSecureProvider,
+        materialisation: SecretMaterialisationClass::CredentialBroker,
+        binding_provenance: secret_ref.to_string(),
+        revision_or_lease_class: Some("declared-secret-ref/v1".into()),
+        expires_at: None,
+        revoked: false,
+        metadata,
+        declared_secret_ref: Some(secret_ref),
+        bound_at_unix_seconds: None,
+        last_rotated_at_unix_seconds: None,
+    })
+}
+
+/// `aikit credential setup <ref> --ref …`: record where the material lives.
+/// No material is read, prompted for or stored — declaring a location is the
+/// one binding act that never touches a secret at all.
+fn declare_ref(
+    home: &AikitHome,
+    request: &CredentialRequest,
+    secret_ref: SecretRef,
+) -> Result<CredentialSetupOutcome> {
+    let store = CredentialBindingStore::new(home);
+    let previous = store.load(&request.credential)?;
+    if let Some(existing) = &previous {
+        if !existing.revoked
+            && existing.provider_tier == SecretProviderTier::BrokeredSecureProvider
+            && existing.declared_secret_ref.as_ref() == Some(&secret_ref)
+        {
+            return Ok(CredentialSetupOutcome {
+                resolution: resolve_registered_credential(
+                    requirement(request)?,
+                    &[&NativeSecureStoreProvider::new()],
+                    true,
+                    false,
+                )?,
+                binding: existing.clone(),
+                newly_bound: false,
+            });
+        }
+    }
+    let binding = declared_ref_binding(&request.credential, secret_ref)?.with_lifecycle(
+        previous.as_ref(),
+        previous.is_some(),
+        now_unix_seconds(),
+    );
+    store.save(&binding)?;
+    let resolution = resolve_registered_credential(
+        requirement(request)?,
+        &[&NativeSecureStoreProvider::new()],
+        true,
+        false,
+    )?;
+    Ok(CredentialSetupOutcome {
+        resolution,
+        binding,
+        newly_bound: true,
+    })
+}
+
+#[derive(Debug)]
+pub struct CredentialRotationOutcome {
+    pub binding: CredentialBindingState,
+    pub notes: Vec<String>,
+}
+
+/// `aikit credential rotate`: replace the material or its location while the
+/// credential ref stays stable. Either a new declared ref (`--ref`) or fresh
+/// material imported explicitly from the environment (`--from-env --env-var`,
+/// stored into the OS secure store) is required; rotation never prompts.
+pub fn rotate(home: &AikitHome, request: &CredentialRequest) -> Result<CredentialRotationOutcome> {
+    let store = CredentialBindingStore::new(home);
+    let previous = store.load(&request.credential)?;
+    let mut notes = Vec::new();
+    let binding = if let Some(secret_ref) = request.declared_ref.clone() {
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous.provider_tier == SecretProviderTier::OsSecureStore)
+        {
+            notes.push(
+                "the previous binding pointed at the OS secure store; its keychain item, \
+                 if any, was left in place"
+                    .into(),
+            );
+        }
+        declared_ref_binding(&request.credential, secret_ref)?.with_lifecycle(
+            previous.as_ref(),
+            true,
+            now_unix_seconds(),
+        )
+    } else if request.from_env {
+        let env_var = request.env_var.as_ref().ok_or_else(|| {
+            AikitError::new(
+                "credential.env_var_required",
+                "rotating from imported material requires --env-var NAME with --from-env",
+            )
+        })?;
+        let environment = EnvironmentImportProvider::from_process(
+            request.credential.clone(),
+            env_var.clone(),
+            request.project_env.as_deref(),
+        )?;
+        let secret = environment
+            .materialise(&request.credential, SecretMaterialisationClass::ProcessEnv)?
+            .ok_or_else(|| {
+                AikitError::new(
+                    "credential.env_missing",
+                    format!("{env_var} is not present in the selected shell/project environment"),
+                )
+            })?;
+        let native = NativeSecureStoreProvider::new();
+        if native.status(&request.credential) == NativeSecureStoreStatus::Unavailable {
+            return Err(AikitError::new(
+                "credential.native_store_unavailable",
+                "the OS secure store is unavailable; rotate by declaring a ref (--ref) instead",
+            ));
+        }
+        let mut fresh = native.bind(&request.credential, &secret)?;
+        // The material now lives in the native store; a stale declared
+        // location would resolve to the old material and must not survive.
+        fresh.declared_secret_ref = None;
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous.declared_secret_ref.is_some())
+        {
+            notes.push(
+                "the previous binding declared an external store location; it has been \
+                 replaced by the OS secure store binding"
+                    .into(),
+            );
+        }
+        fresh.with_lifecycle(previous.as_ref(), true, now_unix_seconds())
+    } else {
+        return Err(AikitError::new(
+            "credential.rotation_source_required",
+            "rotation needs a source: --ref SECRET_REF to declare a new location, or \
+             --from-env --env-var NAME to import fresh material into the OS secure store",
+        ));
+    };
+    store.save(&binding)?;
+    Ok(CredentialRotationOutcome { binding, notes })
+}
+
+/// `aikit credential revoke`: mark the binding revoked so resolution and
+/// dispatch refuse it at the next use. Nothing operator-owned is deleted —
+/// the keychain item or vault entry stays exactly where it is.
+pub fn revoke(home: &AikitHome, credential: &CredentialRef) -> Result<CredentialBindingState> {
+    let store = CredentialBindingStore::new(home);
+    let mut binding = store.load(credential)?.ok_or_else(|| {
+        AikitError::new(
+            "credential.binding_missing",
+            format!(
+                "no persisted binding exists for {}; nothing to revoke",
+                credential.as_str()
+            ),
+        )
+    })?;
+    binding.revoked = true;
+    store.save(&binding)?;
+    Ok(binding)
+}
+
+// ---------------------------------------------------------------------------
+// Discovery: candidate keys already on this machine, presence only
+// ---------------------------------------------------------------------------
+
+/// One candidate key found on the machine. A finding carries a variable name
+/// and a location — never a value; there is no field that could.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CredentialDiscoveryFinding {
+    /// `shell-env`, `project-env` or `harness-auth`.
+    pub source: &'static str,
+    /// Where the name was seen (file path or "process environment").
+    pub location: String,
+    /// The variable or key name, as seen.
+    pub name: String,
+    /// The credential ref a bind would satisfy, when the vendor is known.
+    pub proposed_credential_ref: Option<String>,
+    /// The env var an explicit `--from-env` import would read.
+    pub proposed_env_var: Option<String>,
+    /// Whether a non-revoked binding for the proposed ref already exists.
+    pub already_bound: bool,
+}
+
+/// Known vendor prefixes and the provider segment of the credential ref each
+/// one maps to. Voice and speech providers sit here beside the classic LLM
+/// providers: a key is a key per provider, whatever it serves.
+const VENDOR_PREFIXES: &[(&str, &str)] = &[
+    ("OPENAI", "openai"),
+    ("ANTHROPIC", "anthropic"),
+    ("GEMINI", "gemini"),
+    ("GOOGLE", "google"),
+    ("ZAI", "zai"),
+    ("ZHIPU", "zhipu"),
+    ("DEEPSEEK", "deepseek"),
+    ("OPENROUTER", "openrouter"),
+    ("MOONSHOT", "moonshot"),
+    ("DASHSCOPE", "dashscope"),
+    ("GROQ", "groq"),
+    ("MISTRAL", "mistral"),
+    ("XAI", "xai"),
+    ("HUGGINGFACE", "huggingface"),
+    ("TOGETHER", "together"),
+    ("FIREWORKS", "fireworks"),
+    ("PERPLEXITY", "perplexity"),
+    ("COHERE", "cohere"),
+    ("VOYAGE", "voyage"),
+    ("ELEVENLABS", "elevenlabs"),
+    ("CARTESIA", "cartesia"),
+    ("DEEPGRAM", "deepgram"),
+    ("ASSEMBLYAI", "assemblyai"),
+];
+
+/// Variable names that can never be provider keys: AIKit's own and the
+/// dynamic-linker escapes.
+fn is_excluded_variable(name: &str) -> bool {
+    ["AIKIT_", "CENTRAL_", "WORKCELL_", "LD_", "DYLD_"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+/// Whether a variable name has the shape of a provider credential
+/// (`<VENDOR>_API_KEY` / `_TOKEN` / `_KEY` with a real vendor prefix).
+fn is_candidate_variable(name: &str) -> bool {
+    if is_excluded_variable(name) {
+        return false;
+    }
+    let shaped = name.ends_with("_API_KEY") || name.ends_with("_TOKEN") || name.ends_with("_KEY");
+    shaped
+        && name
+            .strip_suffix("_API_KEY")
+            .or_else(|| name.strip_suffix("_TOKEN"))
+            .or_else(|| name.strip_suffix("_KEY"))
+            .is_some_and(|prefix| prefix.len() >= 2)
+}
+
+/// The credential ref a discovered variable name proposes, when the vendor is
+/// known. Shape follows the catalogue's synthesised requirements
+/// (`credential:<provider>`), so binding the proposal satisfies the route
+/// condition the model router actually checks.
+fn propose_credential_ref(name: &str) -> Option<String> {
+    if is_excluded_variable(name) {
+        return None;
+    }
+    let prefix = name
+        .strip_suffix("_API_KEY")
+        .or_else(|| name.strip_suffix("_TOKEN"))
+        .or_else(|| name.strip_suffix("_KEY"))?;
+    if prefix.len() < 2 {
+        return None;
+    }
+    let upper = prefix.to_ascii_uppercase();
+    VENDOR_PREFIXES
+        .iter()
+        .find(|(vendor, _)| *vendor == upper)
+        .map(|(_, provider)| format!("credential:{provider}"))
+}
+
+/// Variable names in a dotenv-shaped text. Only the key side is kept; values
+/// are never parsed into memory.
+fn dotenv_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        if let Some((key, _)) = line.split_once('=') {
+            let key = key.trim();
+            if !key.is_empty() {
+                names.push(key.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// Top-level key names of a JSON auth file. Values are discarded by
+/// construction: only the object's key set is read.
+fn json_key_names(bytes: &[u8]) -> Option<Vec<String>> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    Some(value.as_object()?.keys().cloned().collect::<Vec<String>>())
+}
+
+/// Candidate harness auth files, as (harness, path-relative-to-HOME) pairs.
+/// The list is deliberately short and named; discovery never sweeps the home
+/// directory.
+const HARNESS_AUTH_FILES: &[(&str, &str)] = &[
+    ("codex", ".codex/auth.json"),
+    ("claude", ".claude/.credentials.json"),
+    ("pi", ".pi/agent/auth.json"),
+];
+
+/// Scan the machine for candidate provider keys: shell environment names, the
+/// project's dotenv files and a short, named list of harness auth files.
+/// Presence only — findings name what was seen and where, never what the
+/// value is.
+pub fn discover(
+    home: &AikitHome,
+    project_root: Option<&Path>,
+    extra_env_file: Option<&Path>,
+) -> Result<Vec<CredentialDiscoveryFinding>> {
+    let bindings = CredentialBindingStore::new(home).list()?;
+    let bound_refs: BTreeSet<String> = bindings
+        .iter()
+        .filter(|binding| !binding.revoked)
+        .map(|binding| binding.credential_ref.as_str().to_string())
+        .collect();
+
+    let mut findings: BTreeMap<(String, String, String), CredentialDiscoveryFinding> =
+        BTreeMap::new();
+    let push =
+        |source: &'static str,
+         location: String,
+         name: String,
+         findings: &mut BTreeMap<(String, String, String), CredentialDiscoveryFinding>| {
+            let proposed = propose_credential_ref(&name);
+            let already_bound = proposed
+                .as_ref()
+                .map(|reference| bound_refs.contains(reference))
+                .unwrap_or(false);
+            findings.insert(
+                (source.to_string(), location.clone(), name.clone()),
+                CredentialDiscoveryFinding {
+                    source,
+                    location,
+                    proposed_credential_ref: proposed,
+                    proposed_env_var: Some(name.clone()),
+                    name,
+                    already_bound,
+                },
+            );
+        };
+
+    for name in std::env::vars().map(|(name, _)| name) {
+        if is_candidate_variable(&name) {
+            push(
+                "shell-env",
+                "process environment".into(),
+                name,
+                &mut findings,
+            );
+        }
+    }
+
+    let mut dotenv_paths: Vec<PathBuf> = Vec::new();
+    if let Some(root) = project_root {
+        dotenv_paths.push(root.join(".env"));
+        dotenv_paths.push(root.join(".env.local"));
+    }
+    if let Some(extra) = extra_env_file {
+        dotenv_paths.push(extra.to_path_buf());
+    }
+    for path in dotenv_paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for name in dotenv_names(&text) {
+            push(
+                "project-env",
+                path.display().to_string(),
+                name,
+                &mut findings,
+            );
+        }
+    }
+
+    if let Ok(home_dir) = std::env::var("HOME") {
+        for (harness, relative) in HARNESS_AUTH_FILES {
+            let path = Path::new(&home_dir).join(relative);
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Some(names) = json_key_names(&bytes) else {
+                continue;
+            };
+            for name in names {
+                push(
+                    "harness-auth",
+                    format!("{} ({harness})", path.display()),
+                    name,
+                    &mut findings,
+                );
+            }
+        }
+    }
+
+    Ok(findings.into_values().collect())
 }
 
 fn selected_outcome(
@@ -421,6 +857,7 @@ mod tests {
             project_env: None,
             from_env: false,
             headless: true,
+            declared_ref: None,
         };
         let resolution = resolve_registered_credential(
             requirement(&request).unwrap(),
@@ -432,5 +869,90 @@ mod tests {
         let error = unresolved_headless(&resolution);
         assert_eq!(error.code(), "credential.unresolved_headless");
         assert!(error.to_string().contains("credential-not-bound"));
+    }
+
+    #[test]
+    fn declared_ref_binding_is_brokered_and_refuses_env_scheme() {
+        let credential = CredentialRef::new("credential:openai").unwrap();
+        let err = declared_ref_binding(
+            &credential,
+            SecretRef::parse("env://OPENAI_API_KEY").unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "credential.declared_env_ref_refused");
+
+        let binding = declared_ref_binding(
+            &credential,
+            SecretRef::parse("op://Vault/openai/key").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            binding.provider_ref.as_str(),
+            "provider:secret-resolver/onepassword"
+        );
+        assert_eq!(
+            binding.provider_tier,
+            SecretProviderTier::BrokeredSecureProvider
+        );
+        assert_eq!(
+            binding.declared_secret_ref.as_ref().unwrap().to_string(),
+            "op://Vault/openai/key"
+        );
+        // The provenance is the ref — a location. No material anywhere.
+        assert!(binding.binding_provenance.starts_with("op://"));
+    }
+
+    #[test]
+    fn discovery_proposals_map_known_vendors_and_skip_non_keys() {
+        assert_eq!(
+            propose_credential_ref("OPENAI_API_KEY").as_deref(),
+            Some("credential:openai")
+        );
+        assert_eq!(
+            propose_credential_ref("ZAI_API_KEY").as_deref(),
+            Some("credential:zai")
+        );
+        assert_eq!(
+            propose_credential_ref("ELEVENLABS_API_KEY").as_deref(),
+            Some("credential:elevenlabs")
+        );
+        // Known-shaped but unknown vendor: disclosed, never proposed.
+        assert_eq!(propose_credential_ref("SOMETHING_API_KEY"), None);
+        // AIKit's own surfaces are never provider keys.
+        assert_eq!(propose_credential_ref("AIKIT_GATEWAY_TOKEN"), None);
+        assert_eq!(propose_credential_ref("LD_PRELOAD_KEY"), None);
+        assert_eq!(propose_credential_ref("X_API_KEY"), None);
+        assert_eq!(propose_credential_ref("HOME"), None);
+    }
+
+    #[test]
+    fn dotenv_discovery_keeps_names_and_never_values() {
+        let text =
+            "# comment\nexport FIRST_API_KEY=sk-value\nSECOND_TOKEN='other-value'\n\nBROKEN\n=";
+        let names = dotenv_names(text);
+        assert_eq!(names, vec!["FIRST_API_KEY", "SECOND_TOKEN"]);
+        let rendered = format!("{names:?}");
+        assert!(!rendered.contains("sk-value"));
+        assert!(!rendered.contains("other-value"));
+    }
+
+    #[test]
+    fn json_auth_discovery_reads_key_names_only() {
+        let bytes = br#"{"zai.key": "material-that-must-not-leak", "expires": "never"}"#;
+        let names = json_key_names(bytes).unwrap();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"zai.key".to_string()));
+        let rendered = format!("{names:?}");
+        assert!(!rendered.contains("material-that-must-not-leak"));
+        assert_eq!(json_key_names(b"not json"), None);
+    }
+
+    #[test]
+    fn candidate_variable_shape_requires_a_vendor_prefix() {
+        assert!(is_candidate_variable("OPENAI_API_KEY"));
+        assert!(is_candidate_variable("MY_SERVICE_TOKEN"));
+        assert!(!is_candidate_variable("X_API_KEY"));
+        assert!(!is_candidate_variable("PATH"));
+        assert!(!is_candidate_variable("AIKIT_GATEWAY_TOKEN"));
     }
 }
