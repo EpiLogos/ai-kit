@@ -379,17 +379,21 @@ impl EncounterService {
             "task-{}",
             blake3::hash(session.as_str().as_bytes()).to_hex()
         );
-        launcher.argv = vec![
-            std::env::current_exe()
-                .map_err(error)?
-                .display()
-                .to_string(),
-            "encounter-task-exec".into(),
-            "--agent-session".into(),
+        let exe = std::env::current_exe().map_err(error)?;
+        let mut argv: Vec<String> = vec![exe.display().to_string()];
+        argv.extend(
+            crate::session_space_cli::surface_invocation_prefix(&exe)
+                .into_iter()
+                .map(|arg| arg.to_string_lossy().into_owned()),
+        );
+        argv.extend([
+            "encounter-task-exec".to_string(),
+            "--agent-session".to_string(),
             session.to_string(),
-            "--expected-revision".into(),
+            "--expected-revision".to_string(),
             revision.to_string(),
-        ];
+        ]);
+        launcher.argv = argv;
         let mut record = TaskRecord {
             schema: "aikit.encounter-task/v1".into(),
             revision,

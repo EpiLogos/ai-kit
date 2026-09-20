@@ -1298,7 +1298,11 @@ pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
         .open(home.state().join("encounter-owner.log"))
         .map_err(error)?;
     use std::os::unix::process::CommandExt;
-    let mut child = std::process::Command::new(std::env::current_exe().map_err(error)?)
+    let exe = std::env::current_exe().map_err(error)?;
+    let mut child = std::process::Command::new(&exe)
+        // Companion-era this was a top-level verb; since the O-I #376 fold the
+        // main binary only accepts it nested under `session-space`.
+        .args(crate::session_space_cli::surface_invocation_prefix(&exe))
         .arg("-C")
         .arg(cwd)
         .arg("encounter-serve")

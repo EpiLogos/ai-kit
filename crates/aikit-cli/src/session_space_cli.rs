@@ -192,6 +192,20 @@ enum WorkingSurfaceCommand {
     Attach { space: String, binding: String },
 }
 
+/// The argv between `current_exe` and this surface's verbs when a process of
+/// this crate self-spawns its own CLI (the `encounter-serve` owner boot and
+/// the `encounter-model-exec` / `encounter-task-exec` launchers): empty for
+/// the standalone `aikit-session-space` companion, whose top level *is* this
+/// surface, and `["session-space"]` for the folded main `aikit` binary
+/// (O-I #376). The name rule mirrors the multicall shim's argv[0] dispatch;
+/// any other name takes the folded shape, the surface's primary invocation.
+pub fn surface_invocation_prefix(exe: &std::path::Path) -> Vec<std::ffi::OsString> {
+    match exe.file_name().and_then(|name| name.to_str()) {
+        Some("aikit-session-space") | Some("aikit-session-space.exe") => Vec::new(),
+        _ => vec!["session-space".into()],
+    }
+}
+
 /// Parse `args` (argv, program name first) and run the folded SessionSpace
 /// surface, returning a process exit code. Both the standalone
 /// `aikit-session-space` binary and the main `aikit session-space` subcommand

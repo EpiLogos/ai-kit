@@ -373,19 +373,23 @@ pub(crate) fn direct_launcher(
     provider: &EncounterProvider,
     model: &PreparedModel,
 ) -> Result<Vec<String>> {
-    Ok(vec![
-        std::env::current_exe()
-            .map_err(error)?
-            .display()
-            .to_string(),
-        "encounter-model-exec".into(),
-        "--agent-session".into(),
+    let exe = std::env::current_exe().map_err(error)?;
+    let mut argv: Vec<String> = vec![exe.display().to_string()];
+    argv.extend(
+        crate::session_space_cli::surface_invocation_prefix(&exe)
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned()),
+    );
+    argv.extend([
+        "encounter-model-exec".to_string(),
+        "--agent-session".to_string(),
         session.to_string(),
-        "--provider".into(),
+        "--provider".to_string(),
         provider.id.clone(),
-        "--expected-model-basis".into(),
+        "--expected-model-basis".to_string(),
         model.fingerprint()?,
-    ])
+    ]);
+    Ok(argv)
 }
 
 impl EncounterService {
