@@ -18,7 +18,6 @@ use crate::encounter_service::{
 };
 use aikit_core::credential::{CredentialRef, SecretRequirementRef};
 use aikit_core::resource::{canonical_model_ref, CredentialCondition, ProviderRef};
-use aikit_core::secret_ref::SecretResolver as _;
 use aikit_core::{ResourceRef, Result};
 use aikit_store::{AikitHome, CredentialBindingStore};
 use serde::{Deserialize, Serialize};
