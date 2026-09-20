@@ -830,7 +830,7 @@ impl EncounterService {
                     &json!({
                         "kind":"native-open-refused",
                         "continuation_requested":reconnect,
-                        "error_code":failure.code,
+                        "error_code":failure.code(),
                         "cleanup_confirmed":cleanup.is_ok(),
                         "binding_recorded":false,
                         "turn_replayed":false
