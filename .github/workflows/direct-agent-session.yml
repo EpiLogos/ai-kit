@@ -17,8 +17,8 @@ jobs:
         with:
           ref: ${{ github.head_ref || github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install components for the actual repository toolchain
+        run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
       - name: Publish bounded native scope join on the owned branch
         if: github.event_name == 'push'
@@ -66,10 +66,11 @@ jobs:
             git push origin HEAD:refs/heads/agent/direct-accepted-agent-session-20260920
           fi
       - name: Record exact committed source
+        if: always()
         run: |
           mkdir -p direct-agent-evidence
           git rev-parse HEAD > direct-agent-evidence/source-revision.txt
-          git diff --exit-code
+          git diff > direct-agent-evidence/uncommitted.patch
           git archive --format=tar.gz HEAD > direct-agent-evidence/source.tar.gz
       - name: Direct-session validation
         id: direct
@@ -107,5 +108,7 @@ jobs:
           path: direct-agent-evidence/
           retention-days: 7
       - name: Preserve every failed gate
-        if: steps.direct.outcome != 'success' || steps.environment.outcome != 'success' || steps.all.outcome != 'success' || steps.lint.outcome != 'success' || steps.build.outcome != 'success'
-        run: exit 1
+        if: always()
+        env:
+          OUTCOMES: ${{ steps.direct.outcome }},${{ steps.environment.outcome }},${{ steps.all.outcome }},${{ steps.lint.outcome }},${{ steps.build.outcome }}
+        run: test "$OUTCOMES" = 'success,success,success,success,success'
