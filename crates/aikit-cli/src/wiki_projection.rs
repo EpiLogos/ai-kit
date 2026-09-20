@@ -387,13 +387,15 @@ pub fn context_blocks(
     // messages beyond the bound or silently omit a revoked source.
     let notices: Vec<_> = sources.iter().map(|source| {
         let address = source.as_str().unwrap();
-        let text = format!("[Wiki projection unavailable] {address}: unavailable or beyond context budget. Do not substitute a cached projection; resolve the current source before relying on it.");
+        let result = address_path(address, project, central).and_then(|p| read(&p));
+        let reason = result.as_ref().err().map(|e| e.code()).unwrap_or("wiki_projection.context_budget");
+        let text = format!("[Wiki projection unavailable] {address}: {reason}. Do not substitute a cached projection; resolve the current source before relying on it.");
         let cost = aikit_core::estimate_tokens(&text).saturating_add(1);
-        (text, cost)
+        (result, text, cost)
     }).collect();
     let reserved = notices
         .iter()
-        .fold(0_u32, |sum, (_, cost)| sum.saturating_add(*cost));
+        .fold(0_u32, |sum, (_, _, cost)| sum.saturating_add(*cost));
     if reserved > MAX_CONTEXT_TOKENS {
         return Err(error(
             "wiki_projection.source_budget",
@@ -403,9 +405,8 @@ pub fn context_blocks(
     let mut blocks = Vec::new();
     let mut warnings = Vec::new();
     let mut remaining = MAX_CONTEXT_TOKENS - reserved;
-    for (source, (notice, reserved_cost)) in sources.iter().zip(notices) {
+    for (source, (result, notice, reserved_cost)) in sources.iter().zip(notices) {
         let address = source.as_str().unwrap();
-        let result = address_path(address, project, central).and_then(|p| read(&p));
         let block = match result {
             Ok(reading) => {
                 let text = format!("[Current Wiki operational projection]\nSource: {address}\nSHA-256: {}\nThis replaces earlier operational guidance from this same source only. It does not rewrite governance or change permissions, trust or invocation policy. An empty body clears this source's prior projection.\n\n{}", reading.revision, reading.body);
