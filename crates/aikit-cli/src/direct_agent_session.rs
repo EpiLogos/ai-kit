@@ -349,6 +349,29 @@ fn material(
     Ok((digests, text))
 }
 
+/// Read the actual native ProjectBinding, without preparation or authority.
+pub fn scope(service: &Service) -> Result<Value> {
+    let cwd = std::fs::canonicalize(service.invocation_cwd()).map_err(io)?;
+    let binding = aikit_tui::PaletteBackend::project_binding(service)?.ok_or_else(|| {
+        failure(
+            "direct_agent.scope_unbound",
+            "No native Project binding at the disclosed location",
+        )
+    })?;
+    let central = crate::temporal::central_root_enclosing(Some(&cwd)).ok_or_else(|| {
+        failure(
+            "direct_agent.central_unbound",
+            "The disclosed location is not in Central",
+        )
+    })?;
+    let central = std::fs::canonicalize(central).map_err(io)?;
+    Ok(
+        json!({"schema":"aikit.direct-agent-scope/v1", "project_ref":binding.project,
+        "cwd":cwd, "central_root":central, "binding":binding,
+        "execution_authority_granted":false, "provider_started":false}),
+    )
+}
+
 pub fn prepare(service: &Service, request: PrepareRequest) -> Result<Value> {
     prepare_with(service, request, &SystemRunner::new())
 }
@@ -556,7 +579,7 @@ pub fn reading(home: &AikitHome, session: &ResourceRef) -> Result<Value> {
         && state.project_contexts.get(&binding.project_context.project)
             == Some(&binding.project_context.context);
     Ok(
-        json!({"schema":SCHEMA,"agent_ref":binding.agent_ref,"agent_session":session,"space":binding.space,"request_id":binding.request.request_id,"acceptance_ref":binding.request.expected_acceptance_ref,"profile_ref":binding.request.profile_ref,"profile_revision":binding.request.expected_revision,"prepared":ready,"provider_started":false,"execution_authority_granted":false,"brokered_child_context":"not-established; child launch requires its own context/admission","skill_sources":binding.skill_digests}),
+        json!({"schema":SCHEMA,"agent_ref":binding.agent_ref,"agent_session":session,"space":binding.space,"request_id":binding.request.request_id,"acceptance_ref":binding.request.expected_acceptance_ref,"profile_ref":binding.request.profile_ref,"profile_revision":binding.request.expected_revision,"project_ref":binding.project_context.project,"prepared":ready,"provider_started":false,"execution_authority_granted":false,"brokered_child_context":"not-established; child launch requires its own context/admission","skill_sources":binding.skill_digests}),
     )
 }
 

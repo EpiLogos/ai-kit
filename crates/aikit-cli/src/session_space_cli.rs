@@ -41,6 +41,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Read the native ProjectBinding; no session or provider is created.
+    AgentSessionScope,
     /// Prepare one accepted Central Agent and canonical Direct session.
     AgentSessionPrepare {
         #[arg(long)]
@@ -241,6 +243,7 @@ fn run(cli: Cli) -> Result<()> {
     let service = Service::discover(&cwd)?;
 
     match cli.command {
+        Command::AgentSessionScope => emit(&crate::direct_agent_session::scope(&service)?),
         Command::AgentSessionPrepare { request_json } => emit(
             &crate::direct_agent_session::prepare(&service, parse_json_arg(&request_json)?)?,
         ),
