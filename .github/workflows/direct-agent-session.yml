@@ -16,39 +16,34 @@ permissions:
 jobs:
   native:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - name: Install repository formatter and lint
         run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Publish the preserved bounded native implementation
+      - name: Apply preserved test repair to this owned branch only
         if: github.event_name == 'push'
         shell: bash
         run: |
           test "$GITHUB_REF_NAME" = agent/direct-accepted-agent-session-20260920
-          if test -f .github/finish-direct.py; then
-            python3 .github/finish-direct.py
-            rustfmt --edition 2024 --config skip_children=true crates/aikit-cli/src/direct_agent_session.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-cli/src/session_space_cli.rs crates/aikit-cli/tests/direct_agent_session.rs
-            python3 - <<'PY'
-          import subprocess
-          changed=set(subprocess.check_output(['git','diff','--name-only']).decode().splitlines())
-          allowed={'crates/aikit-cli/src/direct_agent_session.rs','crates/aikit-cli/src/encounter_service.rs','crates/aikit-cli/src/session_space_cli.rs','crates/aikit-cli/tests/direct_agent_session.rs'}
-          assert changed <= allowed, changed
-          PY
-            git add crates/aikit-cli/src/direct_agent_session.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-cli/src/session_space_cli.rs crates/aikit-cli/tests/direct_agent_session.rs
-            git rm .github/finish-direct.py .github/repair-direct.py .github/disclose-direct.py
+          if test -f .github/finish-agent-join.py; then
+            python3 .github/finish-agent-join.py
+            test "$(git diff --name-only)" = tests/direct_agent_native_join.py
+            git add tests/direct_agent_native_join.py
+            git rm .github/finish-agent-join.py
             git config user.name Epii
             git config user.email agent-session@users.noreply.github.com
-            git commit -m 'feat(agent): disclose effective World and Skill prerequisites and recover the exact failed native body'
+            git commit -m 'test(agent): verify Resident completion, effective Skill delivery and retained native failure evidence'
             git push origin HEAD:refs/heads/agent/direct-accepted-agent-session-20260920
           fi
-      - name: Record actual source and interrupted changes
+      - name: Record exact committed source
         if: always()
         run: |
           mkdir -p direct-agent-evidence
@@ -65,25 +60,26 @@ jobs:
         continue-on-error: true
         shell: bash
         run: cargo test --locked -p aikit-adapters --test human_authority_environment 2>&1 | tee direct-agent-evidence/environment.log
-      - name: Full native regression suite
+      - name: Full native regression suite without early target termination
         id: all
         continue-on-error: true
         shell: bash
-        run: cargo test --all-targets --locked 2>&1 | tee direct-agent-evidence/all.log
+        run: cargo test --all-targets --no-fail-fast --locked 2>&1 | tee direct-agent-evidence/all.log
+      - name: Repeat original QL observation failure separately
+        id: original
+        continue-on-error: true
+        shell: bash
+        run: cargo test --locked -p aikit-adapters --test ql_provider 2>&1 | tee direct-agent-evidence/original-ql.log
       - name: Full native strict lint
         id: lint
         continue-on-error: true
         shell: bash
         run: cargo clippy --all-targets --locked -- -D warnings 2>&1 | tee direct-agent-evidence/clippy.log
-      - name: Build native CLI
+      - name: Build exact native CLI
         id: build
         continue-on-error: true
         shell: bash
-        run: |
-          cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee direct-agent-evidence/build.log
-          cp target/debug/aikit direct-agent-evidence/aikit
-          strip direct-agent-evidence/aikit
-          sha256sum direct-agent-evidence/aikit > direct-agent-evidence/binary-sha256.txt
+        run: cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee direct-agent-evidence/build.log
       - name: Exact Central source acceptance dependency
         id: central
         continue-on-error: true
@@ -93,12 +89,36 @@ jobs:
           printf '%s\n' d0001cb7ca9eb2886c7158f05aa65272da198fa1 > direct-agent-evidence/central-source-revision.txt
           curl --fail --silent --show-error --location https://codeload.github.com/EpiLogos/Central/tar.gz/d0001cb7ca9eb2886c7158f05aa65272da198fa1 | tar xz --strip-components=1 -C /tmp/central-agent-owner
           cargo build --locked --manifest-path /tmp/central-agent-owner/Cargo.toml -p ctrl --bin ctrl 2>&1 | tee direct-agent-evidence/central-build.log
-      - name: Real native Central to ACP work and consequential recovery
+      - name: Real native acceptance to ACP work and recovery
         id: join
         continue-on-error: true
         shell: bash
+        run: python3 tests/direct_agent_native_join.py --ctrl /tmp/central-agent-owner/target/debug/ctrl --aikit "$PWD/target/debug/aikit" --evidence direct-agent-evidence/join 2>&1 | tee direct-agent-evidence/native-join.log
+      - name: Compose published adapter dependencies for testing only
+        id: compose
+        continue-on-error: true
+        shell: bash
         run: |
-          python3 tests/direct_agent_native_join.py --ctrl /tmp/central-agent-owner/target/debug/ctrl --aikit "$PWD/target/debug/aikit" 2>&1 | tee direct-agent-evidence/native-join.log
+          git fetch --no-tags origin 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 579a1cdaf202b3b0de74a2ce25ec240fe857a91b 62161b00249111ae797a41c825bc75e5054b4de0
+          git diff 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 -- crates/aikit-adapters/src/interactive_connection.rs crates/aikit-adapters/src/agent_session_host.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-adapters/tests/native_model_controls.rs crates/aikit-cli/tests/encounter_native_protocol.rs > direct-agent-evidence/model-dependency.patch
+          git apply --3way direct-agent-evidence/model-dependency.patch
+          git diff 579a1cdaf202b3b0de74a2ce25ec240fe857a91b 62161b00249111ae797a41c825bc75e5054b4de0 -- crates > direct-agent-evidence/folded-dependency.patch
+          git apply --3way direct-agent-evidence/folded-dependency.patch
+          git write-tree > direct-agent-evidence/composed-tree.txt
+          git diff HEAD > direct-agent-evidence/composed.patch
+      - name: Composed native build, folded startup and model protocol
+        id: composed
+        if: steps.compose.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          cargo test --locked -p aikit-cli --test encounter_owner_folded_spawn 2>&1 | tee direct-agent-evidence/folded-startup.log
+          cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee direct-agent-evidence/composed-build.log
+          python3 tests/direct_agent_native_join.py --ctrl /tmp/central-agent-owner/target/debug/ctrl --aikit "$PWD/target/debug/aikit" --evidence direct-agent-evidence/composed-join 2>&1 | tee direct-agent-evidence/composed-join.log
+          cp target/debug/aikit direct-agent-evidence/aikit-composed
+          cp /tmp/central-agent-owner/target/debug/ctrl direct-agent-evidence/ctrl
+          strip direct-agent-evidence/aikit-composed direct-agent-evidence/ctrl
+          sha256sum direct-agent-evidence/aikit-composed direct-agent-evidence/ctrl > direct-agent-evidence/binary-sha256.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -108,5 +128,5 @@ jobs:
       - name: Preserve every failed or unexecuted gate
         if: always()
         env:
-          OUTCOMES: ${{ steps.direct.outcome }},${{ steps.environment.outcome }},${{ steps.all.outcome }},${{ steps.lint.outcome }},${{ steps.build.outcome }},${{ steps.central.outcome }},${{ steps.join.outcome }}
-        run: test "$OUTCOMES" = 'success,success,success,success,success,success,success'
+          OUTCOMES: ${{ steps.direct.outcome }},${{ steps.environment.outcome }},${{ steps.all.outcome }},${{ steps.original.outcome }},${{ steps.lint.outcome }},${{ steps.build.outcome }},${{ steps.central.outcome }},${{ steps.join.outcome }},${{ steps.compose.outcome }},${{ steps.composed.outcome }}
+        run: test "$OUTCOMES" = 'success,success,success,success,success,success,success,success,success,success'
