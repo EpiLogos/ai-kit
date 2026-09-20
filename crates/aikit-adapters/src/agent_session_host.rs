@@ -52,7 +52,7 @@ use crate::agent_connection::{
 use crate::connection_process::{
     ConnectionControl, ConnectionProcess, ConnectionReader, ConnectionWriter, ModelEnvironment,
 };
-use crate::interactive_connection::{InteractiveAgentConnectionAdapter, PermissionDecision};
+use crate::interactive_connection::{InteractiveAgentConnectionAdapter, NativeModelControls, PermissionDecision};
 
 pub const AGENT_SESSION_HOST_VERSION: &str = "aikit.agent-session-host/v1";
 
@@ -694,6 +694,24 @@ impl SessionLane {
             shared: Arc::clone(&self.shared),
             lane: Arc::clone(&self.lane),
         })
+    }
+
+    /// Ask the real adapter, under the same identity/lane gate as writes. No
+    /// command is sent and no observed model is promoted into a capability.
+    pub fn model_controls(&self) -> Result<NativeModelControls> {
+        let _gate = self.shared.gate()?;
+        let state = self.shared.state()?;
+        let record = state.sessions.get(&self.agent_session)
+            .ok_or_else(|| session_not_open(&self.agent_session))?;
+        if record.binding.native_session_id != self.binding.native_session_id {
+            return Err(AikitError::new("agent_session_host.stale_lane", "Model controls belong to a different native session"));
+        }
+        if !matches!(state.lane_state(&record.binding.native_session_id), SessionLaneState::Resident) {
+            return Ok(NativeModelControls::unavailable("Model configuration requires an idle resident session"));
+        }
+        let native_session_id = record.binding.native_session_id.clone();
+        drop(state);
+        Ok(self.shared.adapter()?.session_model_controls(&native_session_id))
     }
 
     /// Select a provider-advertised model on this exact resident native

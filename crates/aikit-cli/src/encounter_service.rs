@@ -223,6 +223,9 @@ pub enum EncounterRequest {
         /// only after model confirmation and never exposes arbitrary config.
         #[serde(default)]
         provider_reasoning_effort: Option<String>,
+        /// Optional for old clients; new consumers bind a write to their read.
+        #[serde(default)]
+        expected_native_session_id: Option<String>,
     },
     Send {
         agent_session: ResourceRef,
@@ -993,6 +996,11 @@ impl EncounterService {
                     "agent_session":agent_session,
                     "native_session_id":identity.binding.native_session_id,
                     "model_observation":identity.binding.model_observation,
+                    "model_controls":match resident.host.transport_error() {
+                        Some(reason) => aikit_adapters::interactive_connection::NativeModelControls::unavailable(reason),
+                        None => resident.lane.model_controls()?,
+                    },
+                    "pinned_model_id":resident.model.as_ref().map(|model| &model.policy.provider_native_id),
                     "standing":"provider-reported-configuration-not-independent-selection-or-inference-proof"
                 }))
             }
@@ -1000,6 +1008,7 @@ impl EncounterService {
                 agent_session,
                 provider_model_id,
                 provider_reasoning_effort,
+                expected_native_session_id,
             } => {
                 self.require_attached(&agent_session)?;
                 if provider_model_id.trim().is_empty() || provider_model_id.len() > 256 {
@@ -1020,6 +1029,10 @@ impl EncounterService {
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
                 self.check_resident_context(&agent_session, &resident, "native-model-select")?;
+                let observed = resident.host.identity(&agent_session)?;
+                if expected_native_session_id.as_ref().is_some_and(|expected| expected != &observed.binding.native_session_id) {
+                    return Err(AikitError::new("encounter.stale_native_session", "The native session changed after the model read; read its controls again before selecting"));
+                }
                 if resident
                     .model
                     .as_ref()

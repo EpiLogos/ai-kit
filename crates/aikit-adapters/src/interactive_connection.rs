@@ -33,11 +33,32 @@ pub struct AcpStableSessionCapabilities {
     pub list: bool,
 }
 
+/// Non-mutating disclosure from the actual adapter, not inferred from model
+/// observations. A reported model does not imply a writable selector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeModelControls {
+    pub model_selection: bool,
+    pub reasoning_effort_selection: bool,
+    pub reason: Option<String>,
+}
+
+impl NativeModelControls {
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self { model_selection: false, reasoning_effort_selection: false, reason: Some(reason.into()) }
+    }
+}
+
 /// The connection seam used by an interactive UI/controller. It is deliberately
 /// protocol-neutral: ACP can yield several wire commands for one semantic cancel
 /// (permission cancellation responses + session/cancel), while a classic process
 /// normally yields one interrupt command.
 pub trait InteractiveAgentConnectionAdapter: AgentConnectionAdapter {
+    /// Query only the exact native session. The default deliberately keeps
+    /// adapters without a confirmed configuration protocol read-only.
+    fn session_model_controls(&self, _native_session_id: &str) -> NativeModelControls {
+        NativeModelControls::unavailable("This adapter has no confirmed in-session model selector; use its native launch configuration")
+    }
+
     fn respond_permission(
         &mut self,
         request: &NativePermissionRequest,
@@ -460,6 +481,17 @@ impl AgentConnectionAdapter for AcpStableConnectionAdapter {
 }
 
 impl InteractiveAgentConnectionAdapter for AcpStableConnectionAdapter {
+    fn session_model_controls(&self, native_session_id: &str) -> NativeModelControls {
+        match self.model_options.get(native_session_id) {
+            Some(observation) => NativeModelControls {
+                model_selection: true,
+                reasoning_effort_selection: observation.reasoning_effort.is_some(),
+                reason: None,
+            },
+            None => NativeModelControls::unavailable("ACP did not advertise a model config selector for this native session"),
+        }
+    }
+
     fn respond_permission(
         &mut self,
         request: &NativePermissionRequest,
