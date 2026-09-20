@@ -55,7 +55,8 @@ impl EncounterStore {
             CREATE TABLE IF NOT EXISTS encounter_events(cursor INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT NOT NULL,event TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS encounter_event_session_cursor ON encounter_events(session,cursor);
             CREATE TABLE IF NOT EXISTS encounter_blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL);
-            CREATE INDEX IF NOT EXISTS encounter_block_session ON encounter_blocks(session,id);").map_err(failure)?;
+            CREATE INDEX IF NOT EXISTS encounter_block_session ON encounter_blocks(session,id);
+            CREATE TABLE IF NOT EXISTS encounter_block_exclusions(session TEXT NOT NULL,block_id INTEGER NOT NULL,basis TEXT NOT NULL,PRIMARY KEY(session,block_id));").map_err(failure)?;
         delivery::install(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -85,7 +86,7 @@ impl EncounterStore {
     pub fn view(&self, session: &ResourceRef, before: Option<u64>) -> Result<Value> {
         validate(session)?;
         let connection = self.connection.lock().map_err(failure)?;
-        let mut query=connection.prepare("SELECT id,CASE WHEN kind='assistant' AND NOT EXISTS(SELECT 1 FROM encounter_blocks AS earlier WHERE earlier.session=encounter_blocks.session AND earlier.kind='user' AND earlier.id<encounter_blocks.id) THEN 'provider-notice' ELSE kind END,text FROM encounter_blocks WHERE session=?1 AND id<?2 ORDER BY id DESC LIMIT 17").map_err(failure)?;
+        let mut query=connection.prepare("SELECT id,CASE WHEN kind='assistant' AND NOT EXISTS(SELECT 1 FROM encounter_blocks AS earlier WHERE earlier.session=encounter_blocks.session AND earlier.kind='user' AND earlier.id<encounter_blocks.id) THEN 'provider-notice' ELSE kind END,text FROM encounter_blocks WHERE session=?1 AND id<?2 AND NOT EXISTS(SELECT 1 FROM encounter_block_exclusions AS excluded WHERE excluded.session=encounter_blocks.session AND excluded.block_id=encounter_blocks.id) ORDER BY id DESC LIMIT 17").map_err(failure)?;
         let rows=query.query_map(params![session.as_str(),before.unwrap_or(i64::MAX as u64)],|row|Ok(serde_json::json!({"id":row.get::<_,u64>(0)?,"kind":row.get::<_,String>(1)?,"text":row.get::<_,String>(2)?}))).map_err(failure)?;
         let mut blocks = rows
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -98,6 +99,138 @@ impl EncounterStore {
         )
     }
 
+    /// Fail-closed, presentation-only classification of a legacy native-load
+    /// replay. Canonical journal events and stored blocks remain untouched.
+    pub fn classify_legacy_load_replay(&self, session: &ResourceRef) -> Result<Value> {
+        validate(session)?;
+        let mut connection = self.connection.lock().map_err(failure)?;
+        let events = journal_events(&connection, session)?;
+        let blocks = journal_blocks(&connection, session)?;
+        let mut output = Vec::new();
+        for (at, event) in events.iter().enumerate() {
+            let Some(native) = event
+                .event
+                .pointer("/receipt/native_session_id")
+                .and_then(Value::as_str)
+                .filter(|_| event.event["kind"] == "owner-shutdown-completed")
+            else {
+                continue;
+            };
+            let mut generation = None;
+            let mut replay_cursor = None;
+            let mut binding_cursor = None;
+            let mut ambiguous = false;
+            for next in &events[at + 1..] {
+                if next.event["kind"] == "user-message" {
+                    ambiguous = true;
+                    break;
+                }
+                if next.event["kind"] == "binding"
+                    && next.event["continuation"] == "native-load"
+                    && next.event["native_session_id"].as_str() == Some(native)
+                {
+                    binding_cursor = Some(next.cursor);
+                    break;
+                }
+                let Some(signal) = next.event.pointer("/event/Signal") else {
+                    if next.event["kind"].as_str().is_some() {
+                        ambiguous = true
+                    };
+                    continue;
+                };
+                if signal["native_session_id"].as_str() != Some(native) {
+                    ambiguous = true;
+                    break;
+                }
+                let Some(current) = next.event["connection_generation"].as_str() else {
+                    ambiguous = true;
+                    break;
+                };
+                if generation.as_deref().is_some_and(|value| value != current) {
+                    ambiguous = true;
+                    break;
+                };
+                generation.get_or_insert_with(|| current.to_owned());
+                match signal.pointer("/kind/kind").and_then(Value::as_str) {
+                    Some("status") => {}
+                    Some("agent-message-chunk") => {
+                        if replay_cursor.replace(next.cursor).is_some() {
+                            ambiguous = true;
+                            break;
+                        }
+                    }
+                    _ => {
+                        ambiguous = true;
+                        break;
+                    }
+                }
+            }
+            let (Some(replay_cursor), Some(binding_cursor), Some(generation)) =
+                (replay_cursor, binding_cursor, generation)
+            else {
+                continue;
+            };
+            if ambiguous {
+                continue;
+            }
+            let Some(block_index) = projected_assistant_block_index(&events, replay_cursor) else {
+                continue;
+            };
+            let projected = projected_blocks(&events);
+            if projected.len() != blocks.len()
+                || !projected.iter().zip(&blocks).all(
+                    |((kind, text), (_, actual_kind, actual_text))| {
+                        kind == actual_kind && text == actual_text
+                    },
+                )
+            {
+                continue;
+            }
+            let Some((block_id, kind, text)) = blocks.get(block_index) else {
+                continue;
+            };
+            let expected = events
+                .iter()
+                .find(|item| item.cursor == replay_cursor)
+                .and_then(|item| item.event.pointer("/event/Signal/kind/text"))
+                .and_then(Value::as_str);
+            if kind != "assistant" || expected != Some(text.as_str()) {
+                continue;
+            }
+            let basis = serde_json::json!({"kind":"legacy-native-load-replay","standing":"derived-from-exact-owner-journal-causality","shutdown_completed_cursor":event.cursor,"native_session_id":native,"connection_generation":generation,"pre_native_load_provider_cursors":[replay_cursor],"native_load_binding_cursor":binding_cursor,"projection_block_id":block_id,"intervening_owner_prompt_or_user_write":false});
+            output.push(basis);
+        }
+        // Replace, rather than accumulate, this derived presentation overlay.
+        // The raw journal and persisted blocks are never mutated.
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        transaction
+            .execute(
+                "DELETE FROM encounter_block_exclusions WHERE session=?1",
+                params![session.as_str()],
+            )
+            .map_err(failure)?;
+        for basis in &output {
+            transaction.execute("INSERT INTO encounter_block_exclusions(session,block_id,basis) VALUES(?1,?2,?3)", params![session.as_str(), basis["projection_block_id"].as_u64(), serde_json::to_string(basis).map_err(failure)?]).map_err(failure)?;
+        }
+        transaction.commit().map_err(failure)?;
+        Ok(serde_json::json!({"classified":!output.is_empty(),"receipts":output}))
+    }
+    pub fn legacy_load_reclassifications(&self, session: &ResourceRef) -> Result<Vec<Value>> {
+        validate(session)?;
+        let connection = self.connection.lock().map_err(failure)?;
+        let mut q = connection
+            .prepare(
+                "SELECT basis FROM encounter_block_exclusions WHERE session=?1 ORDER BY block_id",
+            )
+            .map_err(failure)?;
+        let rows = q
+            .query_map(params![session.as_str()], |r| r.get::<_, String>(0))
+            .map_err(failure)?;
+        rows.map(|r| serde_json::from_str(&r.map_err(failure)?).map_err(failure))
+            .collect()
+    }
     pub fn draft(&self, session: &ResourceRef) -> Result<EncounterDraft> {
         validate(session)?;
         let connection = self.connection.lock().map_err(failure)?;
@@ -211,6 +344,126 @@ impl EncounterStore {
         })
     }
 }
+fn journal_events(connection: &Connection, session: &ResourceRef) -> Result<Vec<EncounterEvent>> {
+    let mut q = connection
+        .prepare("SELECT cursor,event FROM encounter_events WHERE session=?1 ORDER BY cursor")
+        .map_err(failure)?;
+    let rows = q
+        .query_map(params![session.as_str()], |r| {
+            Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(failure)?;
+    let pairs = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(failure)?;
+    pairs
+        .into_iter()
+        .map(|(cursor, event)| {
+            Ok(EncounterEvent {
+                cursor,
+                event: serde_json::from_str(&event).map_err(failure)?,
+            })
+        })
+        .collect()
+}
+
+fn journal_blocks(
+    connection: &Connection,
+    session: &ResourceRef,
+) -> Result<Vec<(u64, String, String)>> {
+    let mut q = connection
+        .prepare("SELECT id,kind,text FROM encounter_blocks WHERE session=?1 ORDER BY id")
+        .map_err(failure)?;
+    let rows = q
+        .query_map(params![session.as_str()], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .map_err(failure)?;
+    let result = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(failure)?;
+    Ok(result)
+}
+
+fn projected_blocks(events: &[EncounterEvent]) -> Vec<(String, String)> {
+    let mut blocks = Vec::new();
+    for event in events {
+        let piece = if event.event["kind"] == "user-message" {
+            event.event["text"].as_str().map(|text| ("user", text))
+        } else if let Some(kind) = event.event.pointer("/event/Signal/kind") {
+            match kind["kind"].as_str() {
+                Some("agent-message-chunk") => {
+                    kind["text"].as_str().map(|text| ("assistant", text))
+                }
+                Some("agent-thought-chunk") => kind["text"].as_str().map(|text| ("thinking", text)),
+                _ => None,
+            }
+        } else if event
+            .event
+            .pointer("/event/TurnEnded/stop/Completed")
+            .is_some()
+        {
+            Some(("completed", ""))
+        } else {
+            None
+        };
+        let Some((kind, text)) = piece else { continue };
+        if matches!(kind, "assistant" | "thinking")
+            && blocks
+                .last()
+                .is_some_and(|(held, prior): &(String, String)| {
+                    held == kind && prior.len() + text.len() <= 16 * 1024
+                })
+        {
+            blocks.last_mut().unwrap().1.push_str(text);
+        } else {
+            blocks.push((kind.into(), text.into()));
+        }
+    }
+    blocks
+}
+
+fn projected_assistant_block_index(events: &[EncounterEvent], target: u64) -> Option<usize> {
+    let mut blocks: Vec<(String, String)> = Vec::new();
+    let mut target_index = None;
+    for event in events {
+        let piece = if event.event["kind"] == "user-message" {
+            Some(("user", event.event["text"].as_str()?))
+        } else if let Some(kind) = event.event.pointer("/event/Signal/kind") {
+            match kind["kind"].as_str() {
+                Some("agent-message-chunk") => Some(("assistant", kind["text"].as_str()?)),
+                Some("agent-thought-chunk") => Some(("thinking", kind["text"].as_str()?)),
+                _ => None,
+            }
+        } else if event
+            .event
+            .pointer("/event/TurnEnded/stop/Completed")
+            .is_some()
+        {
+            Some(("completed", ""))
+        } else {
+            None
+        };
+        let Some((kind, text)) = piece else { continue };
+        let index = if matches!(kind, "assistant" | "thinking")
+            && blocks
+                .last()
+                .is_some_and(|(held, prior)| held == kind && prior.len() + text.len() <= 16 * 1024)
+        {
+            let i = blocks.len() - 1;
+            blocks[i].1.push_str(text);
+            i
+        } else {
+            blocks.push((kind.into(), text.into()));
+            blocks.len() - 1
+        };
+        if event.cursor == target {
+            target_index = Some(index)
+        }
+    }
+    target_index
+}
+
 fn validate(session: &ResourceRef) -> Result<()> {
     if !session.as_str().starts_with("agent-session/") {
         return Err(AikitError::new(
@@ -423,5 +676,131 @@ mod tests {
         }
         assert_eq!(count, 2048);
         assert!(reopened.draft(&other).unwrap().text.is_empty());
+    }
+    fn legacy_event(native: &str, generation: &str, kind: &str, text: Option<&str>) -> Value {
+        let mut signal =
+            serde_json::json!({"native_session_id":native,"sequence":1,"kind":{"kind":kind}});
+        if let Some(text) = text {
+            signal["kind"]["text"] = serde_json::json!(text);
+        }
+        serde_json::json!({"kind":"provider","connection_generation":generation,"event":{"Signal":signal}})
+    }
+    fn install_legacy_window(
+        store: &EncounterStore,
+        session: &ResourceRef,
+        provider_native: &str,
+        replay_native: &str,
+        with_user: bool,
+    ) {
+        store
+            .append(
+                session,
+                &serde_json::json!({"kind":"user-message","text":"original"}),
+            )
+            .unwrap();
+        store
+            .append(
+                session,
+                &legacy_event(
+                    provider_native,
+                    "old",
+                    "agent-message-chunk",
+                    Some("answer"),
+                ),
+            )
+            .unwrap();
+        store.append(session,&serde_json::json!({"kind":"provider","event":{"TurnEnded":{"stop":{"Completed":{}}}}})).unwrap();
+        store.append(session,&serde_json::json!({"kind":"owner-shutdown-completed","receipt":{"native_session_id":provider_native}})).unwrap();
+        store
+            .append(
+                session,
+                &legacy_event(replay_native, "load", "status", None),
+            )
+            .unwrap();
+        if with_user {
+            store
+                .append(
+                    session,
+                    &serde_json::json!({"kind":"user-message","text":"intervening"}),
+                )
+                .unwrap();
+        }
+        store
+            .append(
+                session,
+                &legacy_event(replay_native, "load", "agent-message-chunk", Some("answer")),
+            )
+            .unwrap();
+        store.append(session,&serde_json::json!({"kind":"binding","continuation":"native-load","native_session_id":provider_native})).unwrap();
+    }
+    #[test]
+    fn actual_sqlite_legacy_load_reclassification_hides_only_proven_replay_block() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path());
+        let session = ResourceRef::parse("agent-session/legacy-load").unwrap();
+        let store = EncounterStore::open(&home).unwrap();
+        install_legacy_window(&store, &session, "native/a", "native/a", false);
+        let classified = store.classify_legacy_load_replay(&session).unwrap();
+        assert_eq!(classified["classified"], true);
+        let view = store.view(&session, None).unwrap();
+        assert_eq!(view["blocks"].as_array().unwrap().len(), 3);
+        let raw = store.events(&session, 0, 32).unwrap();
+        assert_eq!(
+            raw.events.len(),
+            7,
+            "classification preserves journal events"
+        );
+    }
+    #[test]
+    fn actual_sqlite_legacy_load_reclassification_refuses_mismatched_native_or_intervening_user() {
+        for (name, replay_native, with_user) in [
+            ("native-mismatch", "native/b", false),
+            ("intervening-user", "native/a", true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let home = AikitHome::at(root.path());
+            let session = ResourceRef::parse(&format!("agent-session/{name}")).unwrap();
+            let store = EncounterStore::open(&home).unwrap();
+            install_legacy_window(&store, &session, "native/a", replay_native, with_user);
+            assert_eq!(
+                store.classify_legacy_load_replay(&session).unwrap()["classified"],
+                false
+            );
+            assert_eq!(
+                store.view(&session, None).unwrap()["blocks"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                if with_user { 5 } else { 4 }
+            );
+        }
+    }
+    #[test]
+    fn actual_sqlite_legacy_load_reclassification_refuses_unmatched_projection() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path());
+        let session = ResourceRef::parse("agent-session/legacy-extra-block").unwrap();
+        let store = EncounterStore::open(&home).unwrap();
+        install_legacy_window(&store, &session, "native/a", "native/a", false);
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO encounter_blocks(session,kind,text) VALUES(?1,?2,?3)",
+                params![session.as_str(), "assistant", "answer"],
+            )
+            .unwrap();
+        assert_eq!(
+            store.classify_legacy_load_replay(&session).unwrap()["classified"],
+            false
+        );
+        assert_eq!(
+            store.view(&session, None).unwrap()["blocks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
     }
 }

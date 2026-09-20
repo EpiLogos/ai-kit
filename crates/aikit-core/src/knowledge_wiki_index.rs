@@ -127,8 +127,13 @@ pub struct WikiLocalWhole {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "kebab-case")]
 pub enum WikiMutationProposal {
-    Upsert { object: WikiObjectEnvelope },
-    Remove { resource: ResourceRef, expected_revision: u64 },
+    Upsert {
+        object: WikiObjectEnvelope,
+    },
+    Remove {
+        resource: ResourceRef,
+        expected_revision: u64,
+    },
 }
 
 /// Serializable proposal envelope without making `WikiObject` itself a tagged
@@ -150,6 +155,112 @@ impl WikiObjectEnvelope {
     }
 }
 
+/// One dangling reference the read-side rebuild set aside instead of refusing
+/// the whole index. `code` is the stable error code the strict rebuild raises
+/// for the same fault, so a read-side repair and a write-time refusal name the
+/// same thing in the same vocabulary; `subject` is the space (or node) that
+/// declared the unresolved reference and `other` the reference that did not
+/// resolve.
+///
+/// Repairs are disclosure, not healing: nothing canonical is rewritten. The
+/// repaired entry is dropped from the derived read index only, and the strict
+/// `rebuild` keeps refusing, so every write-time gate is unweakened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiIndexRepair {
+    pub code: String,
+    pub subject: String,
+    pub other: String,
+}
+
+impl WikiIndexRepair {
+    /// The exact error the strict rebuild raises for this fault: same code,
+    /// same message, same details, in the same detail keys. `rebuild` delegates
+    /// to the degrading path and converts the first repair back through here,
+    /// which is what makes "strict is unchanged" provable rather than claimed.
+    fn strict_error(&self) -> AikitError {
+        match self.code.as_str() {
+            "knowledge.wiki_space_missing_child" => AikitError::new(
+                "knowledge.wiki_space_missing_child",
+                "WikiSpace child ref does not resolve inside the SemanticWiki",
+            )
+            .with("space", self.subject.clone())
+            .with("child", self.other.clone()),
+            "knowledge.wiki_space_asymmetry" => AikitError::new(
+                "knowledge.wiki_space_asymmetry",
+                "WikiSpace child relation is not reciprocated by parent_space_refs",
+            )
+            .with("space", self.subject.clone())
+            .with("child", self.other.clone()),
+            "knowledge.wiki_space_missing_node" => AikitError::new(
+                "knowledge.wiki_space_missing_node",
+                "WikiSpace member ref does not resolve to a WikiNode",
+            )
+            .with("space", self.subject.clone())
+            .with("node", self.other.clone()),
+            "knowledge.wiki_local_space_missing" => AikitError::new(
+                "knowledge.wiki_local_space_missing",
+                "WikiNode local_space_ref does not resolve to a WikiSpace",
+            )
+            .with("node", self.subject.clone())
+            .with("space", self.other.clone()),
+            "knowledge.wiki_local_space_anchor" => AikitError::new(
+                "knowledge.wiki_local_space_anchor",
+                "Node-as-local-whole requires the local WikiSpace anchor_ref to be the node",
+            )
+            .with("node", self.subject.clone())
+            .with("space", self.other.clone()),
+            other => unreachable!("no repair carries the unknown code {other}"),
+        }
+    }
+
+    /// The one named-absence line a repair discloses: kind, declaring ref and
+    /// unresolved ref, plus what the read side did about it.
+    pub fn absence_line(&self) -> String {
+        let detail = match self.code.as_str() {
+            "knowledge.wiki_space_missing_child" => format!(
+                "{} declares child {}, which does not resolve; entry dropped from the read index",
+                self.subject, self.other
+            ),
+            "knowledge.wiki_space_asymmetry" => format!(
+                "{} declares child {} without reciprocation; entry dropped from the read index",
+                self.subject, self.other
+            ),
+            "knowledge.wiki_space_missing_node" => format!(
+                "{} declares member {}, which does not resolve; entry dropped from the read index",
+                self.subject, self.other
+            ),
+            "knowledge.wiki_local_space_missing" => format!(
+                "{} anchors local space {}, which does not resolve; local whole set aside",
+                self.subject, self.other
+            ),
+            "knowledge.wiki_local_space_anchor" => format!(
+                "{}'s local space {} is not anchored on the node; local whole set aside",
+                self.subject, self.other
+            ),
+            _ => format!("{} {}", self.subject, self.other),
+        };
+        format!("SemanticWiki read repaired [{}]: {}", self.code, detail)
+    }
+}
+
+/// The named-absence lines for a repair set: one line per distinct
+/// `(code, subject, other)`, so a many-offender world cannot flood a reply,
+/// in deterministic first-occurrence order.
+pub fn repair_absence_lines(repairs: &[WikiIndexRepair]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut lines = Vec::new();
+    for repair in repairs {
+        if seen.insert((
+            repair.code.as_str(),
+            repair.subject.as_str(),
+            repair.other.as_str(),
+        )) {
+            lines.push(repair.absence_line());
+        }
+    }
+    lines
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SemanticWikiIndex {
     spaces: BTreeMap<ResourceRef, WikiSpace>,
@@ -169,7 +280,27 @@ pub struct SemanticWikiIndex {
 }
 
 impl SemanticWikiIndex {
+    /// The strict rebuild. Write-time gates (`WikiDocument::validate`, the
+    /// ProjectCentral maintenance planner, `wiki validate`) run exactly this:
+    /// the first dangling reference refuses the whole index. It is the
+    /// degrading path with every repair converted back into the error the
+    /// strict walk raised, so its behaviour cannot drift from the read side.
     pub fn rebuild(objects: impl IntoIterator<Item = WikiObject>) -> Result<Self> {
+        let (index, repairs) = Self::rebuild_with_repairs(objects)?;
+        match repairs.first() {
+            Some(repair) => Err(repair.strict_error()),
+            None => Ok(index),
+        }
+    }
+
+    /// The read-side rebuild: materialise the index, setting dangling
+    /// references aside as named [`WikiIndexRepair`]s instead of refusing the
+    /// whole knowledge faculty. One dangling `child_space_refs` entry costs
+    /// that entry, never the field. Duplicates and invalid objects stay fatal —
+    /// those are canonical-corruption faults, not topology drift.
+    pub fn rebuild_with_repairs(
+        objects: impl IntoIterator<Item = WikiObject>,
+    ) -> Result<(Self, Vec<WikiIndexRepair>)> {
         let mut index = Self::default();
         let mut identities = BTreeSet::new();
         let mut revision_material = Vec::new();
@@ -227,9 +358,8 @@ impl SemanticWikiIndex {
             .to_hex()
             .to_string();
         index.rebuild_relations();
-        index.validate_space_topology()?;
-        index.validate_local_wholes()?;
-        Ok(index)
+        let repairs = index.repair_topology();
+        Ok((index, repairs))
     }
 
     pub fn revision(&self) -> &str {
@@ -533,62 +663,108 @@ impl SemanticWikiIndex {
         }
     }
 
-    fn validate_space_topology(&self) -> Result<()> {
-        for space in self.spaces.values() {
+    /// The topology walk behind both rebuild faces, in the strict walk's exact
+    /// order so `repairs[0]` is always the fault the strict rebuild refuses
+    /// first. Each repair names its drop and the drop is applied to the read
+    /// index: a dangling child or membership ref leaves its space (the space
+    /// stays), an unreciprocated child edge is dropped from the declaring
+    /// parent, a broken local whole is set aside (the reader already handles
+    /// `None`). Nothing canonical is touched — repairs re-derive identically
+    /// on every rebuild from the same objects.
+    fn repair_topology(&mut self) -> Vec<WikiIndexRepair> {
+        let mut repairs = Vec::new();
+        let mut drop_children: BTreeMap<ResourceRef, Vec<ResourceRef>> = BTreeMap::new();
+        let mut drop_members: BTreeMap<ResourceRef, Vec<ResourceRef>> = BTreeMap::new();
+        let mut drop_local_wholes: Vec<ResourceRef> = Vec::new();
+
+        for (space_ref, space) in &self.spaces {
             for child in &space.child_space_refs {
-                let Some(child_space) = self.spaces.get(child) else {
-                    return Err(AikitError::new(
-                        "knowledge.wiki_space_missing_child",
-                        "WikiSpace child ref does not resolve inside the SemanticWiki",
-                    )
-                    .with("space", space.ref_id.to_string())
-                    .with("child", child.to_string()));
-                };
+                let resolved = self.spaces.get(child);
+                if resolved.is_none() {
+                    repairs.push(WikiIndexRepair {
+                        code: "knowledge.wiki_space_missing_child".into(),
+                        subject: space_ref.to_string(),
+                        other: child.to_string(),
+                    });
+                    drop_children
+                        .entry(space_ref.clone())
+                        .or_default()
+                        .push(child.clone());
+                    continue;
+                }
+                let child_space = resolved.expect("resolved child checked above");
                 if !child_space.parent_space_refs.contains(&space.ref_id) {
-                    return Err(AikitError::new(
-                        "knowledge.wiki_space_asymmetry",
-                        "WikiSpace child relation is not reciprocated by parent_space_refs",
-                    )
-                    .with("space", space.ref_id.to_string())
-                    .with("child", child.to_string()));
+                    repairs.push(WikiIndexRepair {
+                        code: "knowledge.wiki_space_asymmetry".into(),
+                        subject: space_ref.to_string(),
+                        other: child.to_string(),
+                    });
+                    drop_children
+                        .entry(space_ref.clone())
+                        .or_default()
+                        .push(child.clone());
                 }
             }
             for node_ref in &space.node_refs {
                 if !self.nodes.contains_key(node_ref) {
-                    return Err(AikitError::new(
-                        "knowledge.wiki_space_missing_node",
-                        "WikiSpace member ref does not resolve to a WikiNode",
-                    )
-                    .with("space", space.ref_id.to_string())
-                    .with("node", node_ref.to_string()));
+                    repairs.push(WikiIndexRepair {
+                        code: "knowledge.wiki_space_missing_node".into(),
+                        subject: space_ref.to_string(),
+                        other: node_ref.to_string(),
+                    });
+                    drop_members
+                        .entry(space_ref.clone())
+                        .or_default()
+                        .push(node_ref.clone());
                 }
             }
         }
-        Ok(())
-    }
-
-    fn validate_local_wholes(&self) -> Result<()> {
         for node in self.nodes.values() {
-            if let Some(space_ref) = &node.local_space_ref {
-                let Some(space) = self.spaces.get(space_ref) else {
-                    return Err(AikitError::new(
-                        "knowledge.wiki_local_space_missing",
-                        "WikiNode local_space_ref does not resolve to a WikiSpace",
-                    )
-                    .with("node", node.ref_id.to_string())
-                    .with("space", space_ref.to_string()));
-                };
-                if space.anchor_ref.as_ref() != Some(&node.ref_id) {
-                    return Err(AikitError::new(
-                        "knowledge.wiki_local_space_anchor",
-                        "Node-as-local-whole requires the local WikiSpace anchor_ref to be the node",
-                    )
-                    .with("node", node.ref_id.to_string())
-                    .with("space", space_ref.to_string()));
+            let Some(space_ref) = &node.local_space_ref else {
+                continue;
+            };
+            let repaired = match self.spaces.get(space_ref) {
+                None => {
+                    repairs.push(WikiIndexRepair {
+                        code: "knowledge.wiki_local_space_missing".into(),
+                        subject: node.ref_id.to_string(),
+                        other: space_ref.to_string(),
+                    });
+                    true
                 }
+                Some(space) if space.anchor_ref.as_ref() != Some(&node.ref_id) => {
+                    repairs.push(WikiIndexRepair {
+                        code: "knowledge.wiki_local_space_anchor".into(),
+                        subject: node.ref_id.to_string(),
+                        other: space_ref.to_string(),
+                    });
+                    true
+                }
+                Some(_) => false,
+            };
+            if repaired {
+                drop_local_wholes.push(node.ref_id.clone());
             }
         }
-        Ok(())
+
+        for (space_ref, children) in drop_children {
+            if let Some(space) = self.spaces.get_mut(&space_ref) {
+                space
+                    .child_space_refs
+                    .retain(|child| !children.contains(child));
+            }
+        }
+        for (space_ref, members) in drop_members {
+            if let Some(space) = self.spaces.get_mut(&space_ref) {
+                space.node_refs.retain(|member| !members.contains(member));
+            }
+        }
+        for node_ref in drop_local_wholes {
+            if let Some(node) = self.nodes.get_mut(&node_ref) {
+                node.local_space_ref = None;
+            }
+        }
+        repairs
     }
 
     fn all_refs(&self) -> impl Iterator<Item = &ResourceRef> {
@@ -608,24 +784,55 @@ impl SemanticWikiIndex {
                 "space",
                 label,
                 searchable,
-                format!("{} node refs · {} child spaces", space.node_refs.len(), space.child_space_refs.len()),
+                format!(
+                    "{} node refs · {} child spaces",
+                    space.node_refs.len(),
+                    space.child_space_refs.len()
+                ),
             );
         }
         if let Some(node) = self.nodes.get(resource) {
             let label = node.title.clone().unwrap_or_else(|| resource.to_string());
-            let searchable = format!("{} {} {}", label, node.node_type, node.source_refs.len());
+            // Admitted aliases are discovery aids over the same ref: a query
+            // matching an alias must resolve the canonical node, never a
+            // second identity. Aliases ride the conventional `aliases`
+            // extension (string or array of strings).
+            let aliases = extension_aliases(&node.extensions);
+            let searchable = if aliases.is_empty() {
+                format!("{} {} {}", label, node.node_type, node.source_refs.len())
+            } else {
+                format!(
+                    "{} {} {} {}",
+                    label,
+                    node.node_type,
+                    node.source_refs.len(),
+                    aliases.join(" ")
+                )
+            };
             return (
                 "node",
                 label,
                 searchable,
-                format!("{} · {} source refs", node.node_type, node.source_refs.len()),
+                format!(
+                    "{} · {} source refs",
+                    node.node_type,
+                    node.source_refs.len()
+                ),
             );
         }
         if let Some(edge) = self.edges.get(resource) {
+            // An authored edge's own link spelling (`raw_target`, display) is
+            // part of its evidence: a relative link resolved to a stable
+            // hashed file address must still be findable by what its author
+            // actually wrote.
+            let authored = extension_authored_text(&edge.extensions);
             return (
                 "edge",
                 edge.relation.clone(),
-                format!("{} {} {}", edge.relation, edge.from_ref, edge.to_ref),
+                format!(
+                    "{} {} {} {}",
+                    edge.relation, edge.from_ref, edge.to_ref, authored
+                ),
                 format!("{} → {} · {:?}", edge.from_ref, edge.to_ref, edge.origin),
             );
         }
@@ -639,7 +846,11 @@ impl SemanticWikiIndex {
                 "frame",
                 label.clone(),
                 format!("{} {}", label, frame.member_refs.len()),
-                format!("{} members · {} spaces", frame.member_refs.len(), frame.space_refs.len()),
+                format!(
+                    "{} members · {} spaces",
+                    frame.member_refs.len(),
+                    frame.space_refs.len()
+                ),
             );
         }
         let reading = self
@@ -721,6 +932,43 @@ fn tokens(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// Admitted aliases carried on the conventional `aliases` node/space
+/// extension (a string or an array of strings). Aliases widen what a query
+/// can match; they never become identity.
+fn extension_aliases(
+    extensions: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Vec<String> {
+    match extensions.get("aliases") {
+        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+            vec![value.clone()]
+        }
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The authored link spelling carried in an edge's `authored_relation`
+/// evidence, when present: the raw target and its display text.
+fn extension_authored_text(
+    extensions: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> String {
+    let Some(value) = extensions.get("authored_relation") else {
+        return String::new();
+    };
+    ["raw_target", "display"]
+        .into_iter()
+        .filter_map(|key| value.get(key).and_then(serde_json::Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn score(tokens: &[String], id: &str, label: &str, searchable: &str) -> Option<u32> {
     if tokens.is_empty() {
         return Some(100);
@@ -754,7 +1002,14 @@ mod tests {
         ResourceRef::parse(raw).unwrap()
     }
 
-    fn space(id: &str, title: &str, parents: &[&str], children: &[&str], nodes: &[&str], anchor: Option<&str>) -> WikiObject {
+    fn space(
+        id: &str,
+        title: &str,
+        parents: &[&str],
+        children: &[&str],
+        nodes: &[&str],
+        anchor: Option<&str>,
+    ) -> WikiObject {
         WikiObject::Space(WikiSpace {
             profile: crate::OKF_WIKI_PROFILE.into(),
             ref_id: r(id),
@@ -836,10 +1091,23 @@ mod tests {
     #[test]
     fn rebuild_is_deterministic_and_search_backlinks_preserve_authority() {
         let objects = vec![
-            space("wiki:space:root", "Root", &[], &[], &["wiki:node:a", "wiki:node:b"], Some("wiki:node:a")),
+            space(
+                "wiki:space:root",
+                "Root",
+                &[],
+                &[],
+                &["wiki:node:a", "wiki:node:b"],
+                Some("wiki:node:a"),
+            ),
             node("wiki:node:a", "Semantic Wiki", &["wiki:space:root"], None),
             node("wiki:node:b", "Source Pool", &["wiki:space:root"], None),
-            edge("wiki:edge:a-b", "wiki:node:a", "wiki:node:b", "develops", WikiEdgeOrigin::Authored),
+            edge(
+                "wiki:edge:a-b",
+                "wiki:node:a",
+                "wiki:node:b",
+                "develops",
+                WikiEdgeOrigin::Authored,
+            ),
         ];
         let first = SemanticWikiIndex::rebuild(objects.clone()).unwrap();
         let second = SemanticWikiIndex::rebuild(objects).unwrap();
@@ -861,16 +1129,47 @@ mod tests {
     #[test]
     fn recursive_spaces_and_node_as_local_whole_are_bounded() {
         let objects = vec![
-            space("wiki:space:root", "Root", &[], &["wiki:space:child"], &["wiki:node:whole"], Some("wiki:node:whole")),
-            space("wiki:space:child", "Child", &["wiki:space:root"], &[], &["wiki:node:whole", "wiki:node:part"], Some("wiki:node:whole")),
-            node("wiki:node:whole", "Whole", &["wiki:space:root", "wiki:space:child"], Some("wiki:space:child")),
+            space(
+                "wiki:space:root",
+                "Root",
+                &[],
+                &["wiki:space:child"],
+                &["wiki:node:whole"],
+                Some("wiki:node:whole"),
+            ),
+            space(
+                "wiki:space:child",
+                "Child",
+                &["wiki:space:root"],
+                &[],
+                &["wiki:node:whole", "wiki:node:part"],
+                Some("wiki:node:whole"),
+            ),
+            node(
+                "wiki:node:whole",
+                "Whole",
+                &["wiki:space:root", "wiki:space:child"],
+                Some("wiki:space:child"),
+            ),
             node("wiki:node:part", "Part", &["wiki:space:child"], None),
-            edge("wiki:edge:whole-part", "wiki:node:whole", "wiki:node:part", "contains", WikiEdgeOrigin::QlDerived),
+            edge(
+                "wiki:edge:whole-part",
+                "wiki:node:whole",
+                "wiki:node:part",
+                "contains",
+                WikiEdgeOrigin::QlDerived,
+            ),
         ];
         let index = SemanticWikiIndex::rebuild(objects).unwrap();
-        assert_eq!(index.subspaces(&r("wiki:space:root"), 1), vec![r("wiki:space:child")]);
+        assert_eq!(
+            index.subspaces(&r("wiki:space:root"), 1),
+            vec![r("wiki:space:child")]
+        );
         let whole = index.local_whole(&r("wiki:node:whole")).unwrap();
-        assert_eq!(whole.local_space.unwrap().ref_id.as_str(), "wiki:space:child");
+        assert_eq!(
+            whole.local_space.unwrap().ref_id.as_str(),
+            "wiki:space:child"
+        );
         assert_eq!(whole.members.len(), 2);
         assert_eq!(whole.neighbours[0].origin, WikiEdgeOrigin::QlDerived);
     }
@@ -886,12 +1185,7 @@ mod tests {
             "knowledge.wiki_duplicate_ref"
         );
 
-        let broken = vec![node(
-            "wiki:node:a",
-            "A",
-            &[],
-            Some("wiki:space:missing"),
-        )];
+        let broken = vec![node("wiki:node:a", "A", &[], Some("wiki:space:missing"))];
         assert_eq!(
             SemanticWikiIndex::rebuild(broken).unwrap_err().code(),
             "knowledge.wiki_local_space_missing"
@@ -1008,5 +1302,185 @@ mod tests {
             .find(|hit| hit.hit_kind() == WikiSearchHitKind::AuthoredSource)
             .expect("the shared source is findable");
         assert!(hit.summary.contains("Alpha") && hit.summary.contains("Beta"));
+    }
+
+    #[test]
+    fn node_aliases_are_searchable_over_the_canonical_ref() {
+        let mut subject = node("wiki:node:quay", "The Quay wall", &[], None);
+        if let WikiObject::Node(value) = &mut subject {
+            value.extensions.insert(
+                "aliases".into(),
+                serde_json::json!(["quay-wall", "harbour-quay"]),
+            );
+        }
+        let index =
+            SemanticWikiIndex::rebuild(vec![subject, node("wiki:node:other", "Beta", &[], None)])
+                .unwrap();
+
+        // The alias resolves the canonical node.
+        let hits = index.search("quay-wall", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].address.as_curated().unwrap().as_str(),
+            "wiki:node:quay"
+        );
+
+        // A token that only the other node carries does not match through
+        // the alias-bearing node's searchable text (curated hits only; the
+        // authored-source facet is a separate hit class over cited labels).
+        assert_eq!(
+            index
+                .search("beta", 10)
+                .iter()
+                .filter_map(|hit| hit.address.as_curated())
+                .map(|resource| resource.as_str())
+                .collect::<Vec<_>>(),
+            vec!["wiki:node:other"]
+        );
+    }
+
+    /// The commissioning case: ONE dangling child ref must never switch off
+    /// the whole knowledge faculty. The read side materialises past it with
+    /// exactly one named repair while the healthy sibling stays traversable;
+    /// the strict rebuild refuses with the identical first-offender error.
+    #[test]
+    fn one_dangling_child_degrades_the_read_index_and_strict_rebuild_still_refuses() {
+        let objects = vec![
+            space(
+                "wiki:space:root",
+                "Root",
+                &[],
+                &["wiki:space:ghost", "wiki:space:health"],
+                &["wiki:node:a"],
+                Some("wiki:node:a"),
+            ),
+            space(
+                "wiki:space:health",
+                "Health",
+                &["wiki:space:root"],
+                &[],
+                &["wiki:node:b"],
+                None,
+            ),
+            node("wiki:node:a", "Alpha", &["wiki:space:root"], None),
+            node("wiki:node:b", "Beta", &["wiki:space:health"], None),
+        ];
+        let (index, repairs) = SemanticWikiIndex::rebuild_with_repairs(objects.clone()).unwrap();
+        assert_eq!(
+            repairs.len(),
+            1,
+            "one dangling ref, one repair: {repairs:?}"
+        );
+        assert_eq!(repairs[0].code, "knowledge.wiki_space_missing_child");
+        assert_eq!(repairs[0].subject, "wiki:space:root");
+        assert_eq!(repairs[0].other, "wiki:space:ghost");
+
+        // The healthy sibling is traversable; the ghost is gone from the read
+        // index, and healthy content still answers search.
+        assert_eq!(
+            index.subspaces(&r("wiki:space:root"), 4),
+            vec![r("wiki:space:health")]
+        );
+        assert!(index.space(&r("wiki:space:ghost")).is_none());
+        assert_eq!(
+            index
+                .search("Beta", 8)
+                .iter()
+                .filter_map(|hit| hit.address.as_curated())
+                .map(|resource| resource.as_str())
+                .collect::<Vec<_>>(),
+            vec!["wiki:node:b"]
+        );
+
+        // Write-gate canary: strict rebuild errs, first offender, same code,
+        // same details the strict walk always carried.
+        let error = SemanticWikiIndex::rebuild(objects).unwrap_err();
+        assert_eq!(error.code(), "knowledge.wiki_space_missing_child");
+        assert_eq!(
+            error.details().get("space").map(String::as_str),
+            Some("wiki:space:root")
+        );
+        assert_eq!(
+            error.details().get("child").map(String::as_str),
+            Some("wiki:space:ghost")
+        );
+    }
+
+    /// Every repair kind names its fault, and the absence lines dedupe to one
+    /// line per distinct (code, subject, other) so a many-offender world
+    /// cannot flood a reply.
+    #[test]
+    fn repairs_name_each_kind_and_absence_lines_dedupe() {
+        let objects = vec![
+            // Declares a missing child AND an unreciprocated one.
+            space(
+                "wiki:space:root",
+                "Root",
+                &[],
+                &["wiki:space:ghost", "wiki:space:stranger"],
+                &["wiki:node:missing-member"],
+                None,
+            ),
+            // Exists but does not list root as its parent: asymmetry.
+            space("wiki:space:stranger", "Stranger", &[], &[], &[], None),
+            // Anchors a local space that does not exist.
+            node(
+                "wiki:node:anchor",
+                "Anchor",
+                &["wiki:space:root"],
+                Some("wiki:space:nowhere"),
+            ),
+        ];
+        let (index, repairs) = SemanticWikiIndex::rebuild_with_repairs(objects).unwrap();
+        let codes: Vec<&str> = repairs.iter().map(|repair| repair.code.as_str()).collect();
+        assert_eq!(
+            codes,
+            vec![
+                "knowledge.wiki_space_missing_child",
+                "knowledge.wiki_space_asymmetry",
+                "knowledge.wiki_space_missing_node",
+                "knowledge.wiki_local_space_missing",
+            ],
+            "strict walk order: children, then members, then local wholes"
+        );
+
+        // The unreciprocated edge is dropped from the declaring parent; the
+        // local whole is set aside (the reader already handles None).
+        assert_eq!(
+            index.space(&r("wiki:space:root")).unwrap().child_space_refs,
+            Vec::<ResourceRef>::new()
+        );
+        assert!(index
+            .node(&r("wiki:node:anchor"))
+            .unwrap()
+            .local_space_ref
+            .is_none());
+        let whole = index.local_whole(&r("wiki:node:anchor")).unwrap();
+        assert!(whole.local_space.is_none());
+
+        let mut doubled = repairs.clone();
+        doubled.extend(repairs.clone());
+        let lines = repair_absence_lines(&doubled);
+        assert_eq!(lines.len(), repairs.len(), "one line per distinct fault");
+        assert!(lines[0].contains("knowledge.wiki_space_missing_child"));
+        assert!(lines[0].contains("wiki:space:root"));
+        assert!(lines[0].contains("wiki:space:ghost"));
+        assert!(lines[3].contains("local whole set aside"), "{lines:?}");
+    }
+
+    /// Repairs never mask canonical-corruption faults: duplicates and invalid
+    /// objects stay fatal on the degrading path too.
+    #[test]
+    fn duplicates_stay_fatal_on_the_degrading_path() {
+        let duplicated = vec![
+            node("wiki:node:a", "A", &[], None),
+            node("wiki:node:a", "Again", &[], None),
+        ];
+        assert_eq!(
+            SemanticWikiIndex::rebuild_with_repairs(duplicated)
+                .unwrap_err()
+                .code(),
+            "knowledge.wiki_duplicate_ref"
+        );
     }
 }

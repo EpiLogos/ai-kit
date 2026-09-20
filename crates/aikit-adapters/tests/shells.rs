@@ -183,11 +183,7 @@ fn path_entries_for(shell_path: &str, shell: Shell, sourcings: usize) -> Vec<Str
     let snippet = snippet_file(dir.path(), shell);
 
     let source = format!(". {}\n", snippet.display()).repeat(sourcings);
-    let (ok, stdout, stderr) = run(
-        shell_path,
-        &format!("{source}printf '%s' \"$PATH\""),
-        &view,
-    );
+    let (ok, stdout, stderr) = run(shell_path, &format!("{source}printf '%s' \"$PATH\""), &view);
     assert!(ok, "sourcing the snippet failed: {stderr}");
 
     let wanted = view.join("bin").display().to_string();
@@ -298,13 +294,13 @@ fn the_snippet_survives_aikit_not_being_installed() {
     // `run` deliberately supplies a PATH with no `aikit` on it.
     let (ok, stdout, stderr) = run(
         &bash,
-        &format!(
-            ". {}\n__aikit_chpwd\nprintf '%s' alive",
-            snippet.display()
-        ),
+        &format!(". {}\n__aikit_chpwd\nprintf '%s' alive", snippet.display()),
         &view,
     );
-    assert!(ok, "the snippet broke a shell with no aikit on PATH: {stderr}");
+    assert!(
+        ok,
+        "the snippet broke a shell with no aikit on PATH: {stderr}"
+    );
     assert_eq!(stdout, "alive");
 }
 
@@ -421,7 +417,10 @@ fn a_shim_really_runs_and_forwards_its_arguments() {
 fn a_shell_can_be_named_the_way_a_person_would_name_it() {
     assert_eq!("bash".parse::<Shell>().unwrap(), Shell::Bash);
     assert_eq!("/bin/zsh".parse::<Shell>().unwrap(), Shell::Zsh);
-    assert_eq!("/opt/homebrew/bin/fish".parse::<Shell>().unwrap(), Shell::Fish);
+    assert_eq!(
+        "/opt/homebrew/bin/fish".parse::<Shell>().unwrap(),
+        Shell::Fish
+    );
     assert_eq!(
         "tcsh".parse::<Shell>().unwrap_err().code(),
         "shell.unsupported"

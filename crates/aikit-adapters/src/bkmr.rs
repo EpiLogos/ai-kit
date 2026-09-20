@@ -234,17 +234,23 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
     fn rebuild(&mut self, material: &[SourceMaterial]) -> Result<()> {
         // Central's persistent map is never a disposable SourcePool, even when
         // a stale standalone configuration still points at that database.
-        let resolved=self.db_path.canonicalize().unwrap_or_else(|_|self.db_path.clone());
-        let parts:Vec<_>=resolved.components().collect();
-        if parts.windows(2).any(|p|p[0].as_os_str()==".central"&&p[1].as_os_str()=="bkmr") {
-            return Err(AikitError::new("knowledge.bkmr_owner_only","Central-owned bkmr storage cannot be rebuilt by AIKit"));
+        let resolved = self
+            .db_path
+            .canonicalize()
+            .unwrap_or_else(|_| self.db_path.clone());
+        let parts: Vec<_> = resolved.components().collect();
+        if parts
+            .windows(2)
+            .any(|p| p[0].as_os_str() == ".central" && p[1].as_os_str() == "bkmr")
+        {
+            return Err(AikitError::new(
+                "knowledge.bkmr_owner_only",
+                "Central-owned bkmr storage cannot be rebuilt by AIKit",
+            ));
         }
 
         if let Some(reason) = self.surface_reason() {
-            return Err(AikitError::new(
-                "knowledge.bkmr_unavailable",
-                reason,
-            ));
+            return Err(AikitError::new("knowledge.bkmr_unavailable", reason));
         }
 
         let mut refs = BTreeSet::new();
@@ -276,14 +282,20 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
             && (!owner_is_regular
                 || std::fs::read_to_string(&ownership).ok().as_deref() != Some(&owner_text))
         {
-            return Err(AikitError::new("knowledge.bkmr_not_disposable",
-                "Existing bkmr database is not this adapter's disposable view; adopt it through Central"));
+            return Err(AikitError::new(
+                "knowledge.bkmr_not_disposable",
+                "Existing bkmr database is not this adapter's disposable view; adopt it through Central",
+            ));
         }
         if !owner_is_regular {
             use std::io::Write;
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
-                .open(&ownership).map_err(|e| AikitError::new("knowledge.bkmr_owner_failed", e.to_string()))?;
-            file.write_all(owner_text.as_bytes()).and_then(|_| file.sync_all())
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&ownership)
+                .map_err(|e| AikitError::new("knowledge.bkmr_owner_failed", e.to_string()))?;
+            file.write_all(owner_text.as_bytes())
+                .and_then(|_| file.sync_all())
                 .map_err(|e| AikitError::new("knowledge.bkmr_owner_failed", e.to_string()))?;
         }
         for suffix in ["", "-wal", "-shm"] {
@@ -396,9 +408,11 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
                 )?;
                 let mut ids = Vec::new();
                 for line in stdout.lines() {
-                    if let Some(id) = line.split_whitespace().next().filter(|raw| {
-                        !raw.is_empty() && raw.chars().all(|ch| ch.is_ascii_digit())
-                    }) {
+                    if let Some(id) = line
+                        .split_whitespace()
+                        .next()
+                        .filter(|raw| !raw.is_empty() && raw.chars().all(|ch| ch.is_ascii_digit()))
+                    {
                         if !ids.iter().any(|seen| seen == id) {
                             ids.push(id.to_string());
                         }
@@ -415,11 +429,8 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrSourcePoolProvider<R> {
                     for record in records {
                         if let Some(hit) = self.hit_from_record(&record, mode, rank) {
                             let required = tags.iter().map(String::as_str).collect::<BTreeSet<_>>();
-                            let actual = hit
-                                .tags
-                                .iter()
-                                .map(String::as_str)
-                                .collect::<BTreeSet<_>>();
+                            let actual =
+                                hit.tags.iter().map(String::as_str).collect::<BTreeSet<_>>();
                             if required.is_subset(&actual) {
                                 hits.push(hit);
                             }
@@ -476,8 +487,11 @@ fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> BkmrCliSurface {
                 hybrid_json: false,
                 tags: false,
                 db_selector: false,
-                reason: Some(format!("bkmr --version exited with status {}", output.status)),
-            }
+                reason: Some(format!(
+                    "bkmr --version exited with status {}",
+                    output.status
+                )),
+            };
         }
         Err(error) => {
             return BkmrCliSurface {
@@ -490,10 +504,13 @@ fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> BkmrCliSurface {
                 tags: false,
                 db_selector: false,
                 reason: Some(error.to_string()),
-            }
+            };
         }
     };
-    let version = parse_version(&format!("{} {}", version_output.stdout, version_output.stderr));
+    let version = parse_version(&format!(
+        "{} {}",
+        version_output.stdout, version_output.stderr
+    ));
     let top = probe_help(runner, binary, &["--help"]);
     let search = probe_help(runner, binary, &["search", "--help"]);
     let hybrid = probe_help(runner, binary, &["hsearch", "--help"]);
@@ -581,7 +598,10 @@ fn json_records(stdout: &str) -> Result<Vec<Map<String, Value>>> {
         Value::Object(mut object) => {
             for key in ["hits", "results", "bookmarks"] {
                 if let Some(Value::Array(values)) = object.remove(key) {
-                    return Ok(values.into_iter().filter_map(ValueObjectOwned::into_object).collect());
+                    return Ok(values
+                        .into_iter()
+                        .filter_map(ValueObjectOwned::into_object)
+                        .collect());
                 }
             }
             vec![Value::Object(object)]
@@ -611,7 +631,7 @@ impl ValueObjectOwned for Value {
 mod tests {
     use std::sync::Arc;
 
-    use aikit_core::knowledge_source_pool::{SourceVisibility, SourceProviderStatus};
+    use aikit_core::knowledge_source_pool::{SourceProviderStatus, SourceVisibility};
     use aikit_core::resource::SourceRevision;
 
     use super::*;
@@ -658,9 +678,15 @@ mod tests {
         let runner = scripted("[]");
         let mut provider = BkmrSourcePoolProvider::new(Arc::clone(&runner), &path, false);
         assert!(provider.status().available);
-        assert_eq!(provider.rebuild(&[astronomy()]).unwrap_err().code(), "knowledge.bkmr_not_disposable");
+        assert_eq!(
+            provider.rebuild(&[astronomy()]).unwrap_err().code(),
+            "knowledge.bkmr_not_disposable"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"retained database");
-        assert!(!runner.call_lines().iter().any(|line| line.contains("create-db ")));
+        assert!(!runner
+            .call_lines()
+            .iter()
+            .any(|line| line.contains("create-db ")));
     }
 
     #[test]
@@ -686,7 +712,8 @@ mod tests {
         let response = r#"[{"bookmark":{"id":41,"title":"Astronomy","description":"aikit-source-ref:source:astronomy","tags":["astronomy","science"],"content":"quasars"},"score":0.9}]"#;
         let runner = scripted(response);
         let calls = Arc::clone(&runner);
-        let mut provider = BkmrSourcePoolProvider::new(runner, "/tmp/aikit-bkmr-contract.db", false);
+        let mut provider =
+            BkmrSourcePoolProvider::new(runner, "/tmp/aikit-bkmr-contract.db", false);
         provider.rebuild(&[astronomy()]).unwrap();
         let hits = provider
             .search("quasars", SourceSearchMode::Fulltext, &[], 20)

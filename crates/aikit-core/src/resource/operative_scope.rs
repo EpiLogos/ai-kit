@@ -19,6 +19,7 @@ use super::{
     ResourceRecord, ResourceRef, SourceRef, SourceRevision,
 };
 
+pub mod invocation;
 pub mod knowledge;
 
 pub const OPERATIVE_SCOPE_VERSION: &str = "aikit.operative-scope/v1";
@@ -175,6 +176,7 @@ impl ScopedResolveExpression {
                 }
                 ResolveExpression::Address { expression, .. }
                 | ResolveExpression::Unary { expression, .. }
+                | ResolveExpression::Scope { expression, .. }
                 | ResolveExpression::Frame { expression } => pending.push((expression, depth + 1)),
                 ResolveExpression::Binary { left, right, .. } => {
                     pending.push((left, depth + 1));
@@ -221,6 +223,7 @@ impl ScopedResolveExpression {
             node = match (node, edge) {
                 (ResolveExpression::Address { expression, .. }, ExpressionEdge::Operand)
                 | (ResolveExpression::Unary { expression, .. }, ExpressionEdge::Operand)
+                | (ResolveExpression::Scope { expression, .. }, ExpressionEdge::Operand)
                 | (ResolveExpression::Frame { expression }, ExpressionEdge::Operand) => expression,
                 (ResolveExpression::Binary { left, .. }, ExpressionEdge::Left) => left,
                 (ResolveExpression::Binary { right, .. }, ExpressionEdge::Right) => right,
@@ -363,7 +366,7 @@ pub trait ScopeAwareOperativeProvider: OperativeSemanticProvider {
     ) -> Result<ScopeObservation>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedExpressionScope {
     pub scope: ExpressionScope,
     pub observation: ScopeObservation,

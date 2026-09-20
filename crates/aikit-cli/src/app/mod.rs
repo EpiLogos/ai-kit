@@ -23,7 +23,7 @@ use aikit_core::continuity::ContinuityTuning;
 use aikit_core::id::{CapsuleId, GenerationId, SessionId};
 use aikit_core::platform::TargetId;
 use aikit_core::policy::ManagedPolicy;
-use aikit_core::profile::SkillUsageOverlayPatch;
+use aikit_core::profile::{PoolPatch, SkillUsageOverlayPatch};
 use aikit_core::projection::{
     ActivationEffect, ProjectionItem, ProjectionPlan, ResolvedContext, TargetAdapter,
 };
@@ -53,6 +53,7 @@ use aikit_adapters::clients::dsh::DshAdapter;
 use aikit_adapters::clients::gemini::GeminiAdapter;
 use aikit_adapters::clients::goose::GooseAdapter;
 use aikit_adapters::clients::grokbot::GrokbotAdapter;
+use aikit_adapters::clients::hermes::HermesAdapter;
 use aikit_adapters::clients::kimi::KimiAdapter;
 use aikit_adapters::clients::ollama::OllamaAdapter;
 use aikit_adapters::clients::openclaw::OpenclawAdapter;
@@ -66,11 +67,11 @@ use aikit_adapters::factory_developmental::{
 use aikit_adapters::runner::SystemRunner;
 
 use aikit_core::working_environment::WorkingEnvironmentObservation;
-use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
 use aikit_tui::backend::{
     ClientEffect, FactoryWorkEntry, FactoryWorkStartReceipt, JobOutput, PaletteBackend, Projected,
     PromotionDraft, RunIntent, Toggle,
 };
+use aikit_tui::live_field::{WorkingEnvironmentOperation, WorkingEnvironmentOutcome};
 pub use aikit_tui::staging::StagedDiff;
 
 use crate::discover::{self, DiscoveredProject};
@@ -287,6 +288,11 @@ pub struct Service {
     /// compose path does; it is fetched on demand (roster overlay open), so one
     /// composition per session is reused rather than recomputed on each open.
     model_roster_reading: std::cell::RefCell<Option<aikit_core::resource::ModelRoster>>,
+    /// Context-composition notes. Read-only discovery (search, explain,
+    /// relations, contextual actions) is decorated by live Central actor
+    /// composition but never gated by it: when composition fails, the reading
+    /// proceeds without the actor slice and the reason is disclosed here.
+    context_composition_notes: std::cell::RefCell<Vec<String>>,
 }
 
 impl Service {
@@ -430,6 +436,7 @@ impl Service {
             doctor_report: std::cell::RefCell::new(None),
             workcell_reading: std::cell::RefCell::new(None),
             model_roster_reading: std::cell::RefCell::new(None),
+            context_composition_notes: std::cell::RefCell::new(Vec::new()),
         })
     }
 
@@ -621,7 +628,28 @@ impl Service {
         };
         use aikit_store::state::StateStore;
 
-        let mux = match plan.mux.or(self.descriptor.mux) {
+        // The plan's declared place technology is an open name. The session
+        // stack can only drive the built-in multiplexers, so an unregistered
+        // name is a declared-unsupported outcome naming the technology — never
+        // a silent fallback onto some other technology's session.
+        let declared = match &plan.mux {
+            Some(technology) => match technology.known() {
+                Some(kind) => Some(kind),
+                None => {
+                    return Err(AikitError::new(
+                        "mux.technology_unsupported",
+                        format!(
+                            "session `{}` declares the place technology `{technology}`, which \
+                             this build's session stack cannot drive; it needs a registered \
+                             adapter for that technology",
+                            plan.id
+                        ),
+                    ));
+                }
+            },
+            None => self.descriptor.mux,
+        };
+        let mux = match declared {
             Some(kind) => kind,
             None => crate::mux_install::choose_installed(None)?,
         };
@@ -762,6 +790,49 @@ impl Service {
         )
     }
 
+    /// Remove every profile declaration this scope carries, letting lower
+    /// scopes decide again. The configuration plane's `reset` for
+    /// `ai-kit:resolution:resolution.profiles` runs on this.
+    pub fn reset_scope_profiles(&mut self, scope: ScopeKind) -> Result<AppliedGeneration> {
+        {
+            let mut writer = self.scope_document(scope)?;
+            for profile in writer.patch()?.profiles {
+                writer.drop_profile(&profile);
+            }
+            writer.save()?;
+        }
+        AikitApplication::apply(
+            self,
+            ApplyRequest {
+                scope,
+                toggles: vec![],
+                label: None,
+            },
+        )
+    }
+
+    /// Remove every enable/disable declaration this scope carries. The
+    /// configuration plane's `reset` for `ai-kit:skills:skills.capabilities`
+    /// runs on this.
+    pub fn clear_scope_toggles(&mut self, scope: ScopeKind) -> Result<AppliedGeneration> {
+        {
+            let mut writer = self.scope_document(scope)?;
+            let patch = writer.patch()?;
+            for id in patch.enable.iter().chain(patch.disable.iter()) {
+                writer.clear(id);
+            }
+            writer.save()?;
+        }
+        AikitApplication::apply(
+            self,
+            ApplyRequest {
+                scope,
+                toggles: vec![],
+                label: None,
+            },
+        )
+    }
+
     /// The operational index, for commands that read or write the store's own
     /// records (the inbox channel, collate's conflict reports).
     pub fn index(&self) -> &Index {
@@ -845,14 +916,18 @@ impl Service {
             aikit_store::model_catalogue::load_provider_catalogs(&self.home);
         notes.extend(problems);
         for document in documents {
+            let listed_by = document.listed_by.as_str().to_string();
             let outcome =
                 aikit_adapters::provider_catalog_source::ProviderCatalogOutcome::Observed {
                     observations: document.observations,
                     source: document.source,
                     observed_at: document.observed_at,
                 };
-            observed
-                .extend(aikit_adapters::provider_catalog_source::observed_router_routes(&outcome));
+            observed.extend(
+                aikit_adapters::provider_catalog_source::observed_routes_for_catalog(
+                    &listed_by, &outcome,
+                ),
+            );
         }
 
         // Harness workability: a harness that is actually installed here and
@@ -958,16 +1033,27 @@ impl Service {
     /// separable from the credential half ("what can I use today").
     pub fn refresh_model_catalogue(&self, provider: &str) -> Result<serde_json::Value> {
         use aikit_adapters::provider_catalog_source::{
-            fetch_openrouter_catalog, ProviderCatalogOutcome, OPENROUTER_PROVIDER,
+            fetch_openrouter_catalog, ProviderCatalogOutcome, OPENROUTER_PROVIDER, ZAI_PROVIDER,
         };
-        if provider != "openrouter" {
-            return Err(AikitError::new(
-                "model_catalogue.unknown_provider_source",
-                format!("no Provider Source is implemented for {provider:?} (have: openrouter)"),
-            ));
-        }
         let observed_at = jiff::Timestamp::now().to_string();
-        let outcome = fetch_openrouter_catalog(&SystemRunner::new(), &observed_at);
+        let (provider_ref, outcome) = match provider {
+            "openrouter" => (
+                OPENROUTER_PROVIDER,
+                fetch_openrouter_catalog(&SystemRunner::new(), &observed_at),
+            ),
+            "z-ai" => (
+                ZAI_PROVIDER,
+                self.refresh_zai_coding_catalogue(&observed_at)?,
+            ),
+            other => {
+                return Err(AikitError::new(
+                    "model_catalogue.unknown_provider_source",
+                    format!(
+                        "no Provider Source is implemented for {other:?} (have: openrouter, z-ai)"
+                    ),
+                ));
+            }
+        };
         match outcome {
             ProviderCatalogOutcome::Observed {
                 observations,
@@ -975,7 +1061,7 @@ impl Service {
                 observed_at,
             } => {
                 let document = aikit_core::resource::ProviderCatalogDocument::new(
-                    aikit_core::resource::ProviderRef::parse(OPENROUTER_PROVIDER)?,
+                    aikit_core::resource::ProviderRef::parse(provider_ref)?,
                     source.clone(),
                     observed_at.clone(),
                     observations,
@@ -985,7 +1071,7 @@ impl Service {
                 let folded =
                     aikit_core::resource::catalogue_from_observations(&document.observations)?;
                 Ok(serde_json::json!({
-                    "provider": OPENROUTER_PROVIDER,
+                    "provider": provider_ref,
                     "source": source,
                     "observed_at": observed_at,
                     "listings_read": document.observations.len(),
@@ -1000,6 +1086,82 @@ impl Service {
                 reason,
             )),
         }
+    }
+
+    /// Resolve the `z-ai` credential through the credential world and read the
+    /// GLM Coding-Plan model list with it. The secret is materialised straight
+    /// into the fetch (a private `curl --config` file) and is never returned
+    /// here, held, or logged — the same guarded path model dispatch uses.
+    fn refresh_zai_coding_catalogue(
+        &self,
+        observed_at: &str,
+    ) -> Result<aikit_adapters::provider_catalog_source::ProviderCatalogOutcome> {
+        use aikit_adapters::credential_provider::EnvironmentImportProvider;
+        use aikit_adapters::provider_catalog_source::fetch_zai_coding_catalog;
+        use aikit_adapters::NativeSecureStoreProvider;
+        use aikit_core::credential::{
+            resolve_credential, CredentialRef, CredentialResolutionRequest,
+            SecretMaterialisationClass, SecretProvider, SecretRequirement, SecretRequirementRef,
+        };
+
+        // z-ai resolves from whichever store the field actually holds it in: the
+        // OS keyring (the reference host) or an explicit `ZAI_API_KEY` import (a
+        // machine or CI that keeps it in the environment). The secret is never
+        // returned to this scope — only materialised straight into the fetch.
+        let credential_ref = CredentialRef::new("z-ai")?;
+        let binding = aikit_store::credentials::CredentialBindingStore::new(&self.home)
+            .load(&credential_ref)?;
+        let native = NativeSecureStoreProvider::with_binding(binding.as_ref());
+        let environment =
+            EnvironmentImportProvider::from_process(credential_ref.clone(), "ZAI_API_KEY", None)
+                .ok();
+
+        let mut descriptors = vec![native.descriptor(&credential_ref)];
+        if let Some(environment) = &environment {
+            descriptors.push(environment.descriptor(&credential_ref));
+        }
+        let resolution = resolve_credential(CredentialResolutionRequest {
+            requirement: SecretRequirement {
+                requirement_ref: SecretRequirementRef::new(
+                    "secret-requirement:model-catalogue/z-ai",
+                )?,
+                credential_ref: credential_ref.clone(),
+                consumer_ref: "operator:aikit/model-catalogue-refresh".to_string(),
+                purpose: "read the z.ai Coding-Plan model list".to_string(),
+                permitted_materialisation: [SecretMaterialisationClass::ProcessEnv].into(),
+            },
+            providers: descriptors,
+            headless: true,
+            allow_from_env: environment.is_some(),
+        })?;
+        let provider = resolution.selected_provider_ref.as_ref().ok_or_else(|| {
+            AikitError::new(
+                "model_catalogue.credential_unavailable",
+                "the z-ai credential is not available on this machine; bind it with \
+                 `aikit credential setup z-ai` or export ZAI_API_KEY, then refresh again",
+            )
+        })?;
+        let secret = if native.descriptor(&credential_ref).provider_ref == *provider {
+            native.materialise(&credential_ref, SecretMaterialisationClass::ProcessEnv)?
+        } else if let Some(environment) = environment
+            .as_ref()
+            .filter(|env| env.descriptor(&credential_ref).provider_ref == *provider)
+        {
+            environment.materialise(&credential_ref, SecretMaterialisationClass::ProcessEnv)?
+        } else {
+            None
+        }
+        .ok_or_else(|| {
+            AikitError::new(
+                "model_catalogue.credential_unavailable",
+                "the selected z-ai provider returned no key material",
+            )
+        })?;
+        Ok(fetch_zai_coding_catalog(
+            &SystemRunner::new(),
+            secret.expose(),
+            observed_at,
+        ))
     }
 
     /// Read the resolved catalogue back: the first-party seed, whatever
@@ -1071,12 +1233,16 @@ impl Service {
             // projections resolve to defaults — never guessed; a fetch failure
             // is fail-soft (no projection), never a resolution failure.
             let composed = match self.descriptor.project_root.as_deref() {
-                Some(root) => self.central_meta_root.clone().or_else(|| process_central_root(Some(root))).and_then(|central| {
-                    let runner = SystemRunner::new();
-                    compose_live_actor_inputs(&runner, &central, root)
-                        .ok()
-                        .flatten()
-                }),
+                Some(root) => self
+                    .central_meta_root
+                    .clone()
+                    .or_else(|| process_central_root(Some(root)))
+                    .and_then(|central| {
+                        let runner = SystemRunner::new();
+                        compose_live_actor_inputs(&runner, &central, root)
+                            .ok()
+                            .flatten()
+                    }),
                 None => None,
             };
 
@@ -1195,13 +1361,18 @@ impl Service {
             .project_root
             .as_deref()
             .unwrap_or(&self.invocation_cwd);
-        let central_root = self.central_meta_root.clone()
+        let central_root = self
+            .central_meta_root
+            .clone()
             .or_else(|| process_central_root(Some(project_root)));
         let native_binding = if self.descriptor.project_root.is_none() {
             admission.map(|a| a.context_binding()).transpose()?
-        } else { None };
+        } else {
+            None
+        };
         if admission.is_some_and(|a| a.scope_ref.as_str() == "scope:root")
-            && self.descriptor.project_root.is_some() && self.central_meta_root.is_none()
+            && self.descriptor.project_root.is_some()
+            && self.central_meta_root.is_none()
         {
             return Err(AikitError::new(
                 "compose.root_world_child_context",
@@ -1298,17 +1469,29 @@ impl Service {
                 .map(|c| c.source_resources.clone())
                 .unwrap_or_default(),
         )?;
-        let actors = composed.as_ref().map(|c| c.requested_actors.clone()).unwrap_or_default();
+        let actors = composed
+            .as_ref()
+            .map(|c| c.requested_actors.clone())
+            .unwrap_or_default();
         let mut resolution = if self.descriptor.project_root.is_none() {
             if let Some(binding) = native_binding {
                 aikit_core::application_context_resolution_with_binding(
-                    &self.descriptor, &self.view, &self.layers, &resources, actors, binding,
+                    &self.descriptor,
+                    &self.view,
+                    &self.layers,
+                    &resources,
+                    actors,
+                    binding,
                 )?
             } else {
-                aikit_tui::project_world_service::context_resolution_from_resources(self, actors, &resources)?
+                aikit_tui::project_world_service::context_resolution_from_resources(
+                    self, actors, &resources,
+                )?
             }
         } else {
-            aikit_tui::project_world_service::context_resolution_from_resources(self, actors, &resources)?
+            aikit_tui::project_world_service::context_resolution_from_resources(
+                self, actors, &resources,
+            )?
         };
         // Harness detection is owned by Actuation and consumed here — one
         // live `actuation harness detect` run discloses which operative
@@ -2068,6 +2251,12 @@ impl Service {
             .collect()
     }
 
+    /// Context-composition notes: why a reading is missing its actor-context
+    /// slice (see `context_composition_notes`).
+    pub fn context_composition_notes(&self) -> Vec<String> {
+        self.context_composition_notes.borrow().clone()
+    }
+
     /// The context directory under the home, created if needed.
     fn context_dir(&self) -> Result<PathBuf> {
         self.home.ensure_context_dir(&self.descriptor.context_id)
@@ -2121,6 +2310,12 @@ impl Service {
 
         let mut effects = Vec::new();
         for target in &self.descriptor.targets {
+            // The detail law: every harness arm below resolves through
+            // profiles::slug_for_target to an embedded harness profile — the
+            // guard test `every_harness_client_effects_arm_resolves_detail_ground`
+            // in client.rs fails when the dispatch grows a harness arm without
+            // detail ground. (The client-status roster is a different surface:
+            // it derives from the live detection record, not from these arms.)
             let effect = match target.as_str() {
                 TargetId::SHELL => Some(ActivationEffect::immediate("shell bin/")),
                 TargetId::CLAUDE_CODE => {
@@ -2165,6 +2360,13 @@ impl Service {
                 ),
                 TargetId::GROK_BOT => plan_effect(
                     &GrokbotAdapter::new(ctx_dir.join("projections/grokbot")),
+                    &rc,
+                ),
+                TargetId::HERMES => {
+                    plan_effect(&HermesAdapter::new(ctx_dir.join("projections/hermes")), &rc)
+                }
+                TargetId::HERMES_ACP => plan_effect(
+                    &HermesAdapter::acp(ctx_dir.join("projections/hermes-acp")),
                     &rc,
                 ),
                 TargetId::KIMI => {
@@ -2277,6 +2479,14 @@ enum ScopeWriter {
 }
 
 impl ScopeWriter {
+    /// The scope's current declarations, as the resolver reads them.
+    fn patch(&self) -> Result<PoolPatch> {
+        match self {
+            ScopeWriter::Overlay(doc) => doc.patch(),
+            ScopeWriter::Profile(doc) => doc.patch(),
+        }
+    }
+
     fn apply_toggles(&mut self, toggles: &[Toggle]) {
         for toggle in toggles {
             match self {
@@ -2302,6 +2512,23 @@ impl ScopeWriter {
         match self {
             ScopeWriter::Overlay(doc) => doc.use_profile(profile),
             ScopeWriter::Profile(doc) => doc.use_profile(profile),
+        }
+    }
+
+    /// Remove a profile declaration from this scope, letting lower scopes
+    /// decide again.
+    fn drop_profile(&mut self, profile: &aikit_core::id::ProfileId) {
+        match self {
+            ScopeWriter::Overlay(doc) => doc.drop_profile(profile),
+            ScopeWriter::Profile(doc) => doc.drop_profile(profile),
+        }
+    }
+
+    /// Remove every declaration for a capsule from this scope.
+    fn clear(&mut self, id: &CapsuleId) {
+        match self {
+            ScopeWriter::Overlay(doc) => doc.clear(id),
+            ScopeWriter::Profile(doc) => doc.clear(id),
         }
     }
 
@@ -2431,7 +2658,10 @@ impl AikitApplication for Service {
         let committed = staged.commit(base.as_ref())?;
         let mut warnings = self.view.warnings.clone();
         warnings.extend(crate::skill_sources::report_central_generation(
-            &self.home, &committed.id.to_string(), &committed.path));
+            &self.home,
+            &committed.id.to_string(),
+            &committed.path,
+        ));
         let effects = self.client_effects(&self.view);
 
         Ok(AppliedGeneration {
@@ -2627,10 +2857,27 @@ impl PaletteBackend for Service {
         let Some(project) = self.descriptor.project_root.as_deref() else {
             return Ok(Vec::new());
         };
-        let mut records = if let Some(central) = self.central_meta_root.clone().or_else(|| process_central_root(Some(project))) {
-            compose_live_actor_inputs(&SystemRunner::new(), &central, project)?
-                .map(|inputs| inputs.source_resources)
-                .unwrap_or_default()
+        let mut records = if let Some(central) = self
+            .central_meta_root
+            .clone()
+            .or_else(|| process_central_root(Some(project)))
+        {
+            match compose_live_actor_inputs(&SystemRunner::new(), &central, project) {
+                Ok(composed) => composed
+                    .map(|inputs| inputs.source_resources)
+                    .unwrap_or_default(),
+                Err(error) => {
+                    // The same fail-soft law as projection_context_for: actor
+                    // context decorates a reading, it never gates one. The
+                    // failure is disclosed, not swallowed.
+                    self.context_composition_notes.borrow_mut().push(format!(
+                        "context composition skipped ({}): {}",
+                        error.code(),
+                        error.message()
+                    ));
+                    Vec::new()
+                }
+            }
         } else {
             Vec::new()
         };
@@ -2646,9 +2893,8 @@ impl PaletteBackend for Service {
                     state.clone(),
                     project_ref.clone(),
                 )?;
-                records.extend(
-                    read_factory_developmental(&SystemRunner::new(), &binding)?.resources,
-                );
+                records
+                    .extend(read_factory_developmental(&SystemRunner::new(), &binding)?.resources);
             }
             // A configured start-work request may legitimately point at a new
             // state path. Until the owner accepts the Commission, this is a
@@ -2658,7 +2904,7 @@ impl PaletteBackend for Service {
                 return Err(AikitError::new(
                     "factory.developmental_incomplete_binding",
                     "Factory navigation requires an existing AIKIT_FACTORY_STATE plus AIKIT_FACTORY_PROJECT_REF, or a complete AIKIT_FACTORY_STATE + AIKIT_FACTORY_REQUEST_FILE start-work binding; no Factory identity is inferred from the current Session or harness",
-                ))
+                ));
             }
         }
         Ok(records)
@@ -2742,7 +2988,7 @@ impl PaletteBackend for Service {
                 return Err(AikitError::new(
                     "projectcentral.manifest_read",
                     error.to_string(),
-                ))
+                ));
             }
         }
         let binding = aikit_adapters::ProjectCentralFilesystemBinding::inspect(root, None)?;
@@ -2917,7 +3163,9 @@ impl PaletteBackend for Service {
     /// `Unavailable` arms; only identity and observed liveness cross the
     /// boundary. Cached per session for the same reason as the health reading.
     fn workcell_world(&self) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
-        use aikit_adapters::workcell_instance_intake::{intake_workcell_instances, InstancesOutcome};
+        use aikit_adapters::workcell_instance_intake::{
+            intake_workcell_instances, InstancesOutcome,
+        };
         use aikit_core::workcell_world::{WorkcellDisclosure, WorkcellInstanceDisclosure};
 
         if let Some(cached) = self.workcell_reading.borrow().as_ref() {
@@ -2975,13 +3223,23 @@ impl PaletteBackend for Service {
                     AikitError::new("model_roster.route_sets_unreadable", error.to_string())
                 })?;
 
+        // The harness facts this context's bound targets contribute: derived
+        // once through the typed seam from the embedded profiles' models
+        // layers, then applied to every candidate after the routes have
+        // filled in real providers.
+        let facts = harness_roster_facts(&self.descriptor.targets);
+
         let mut candidates = Vec::new();
         for set in &route_sets {
-            let base = model_roster_candidate_for(&set.model);
+            let base = model_roster_candidate_for(&set.model, &facts);
             candidates.extend(candidates_from_routes(set, &base));
         }
+        for candidate in &mut candidates {
+            let (harness_compatible, _) = facts.gate(Some(candidate.provider.as_str()));
+            candidate.harness_compatible = harness_compatible;
+        }
         let roster = rank_model_roster(
-            model_roster_demand(),
+            model_roster_demand(&facts),
             ModelRankingPolicy::Balanced,
             candidates,
         );
@@ -3385,10 +3643,38 @@ fn plan_effect(adapter: &dyn TargetAdapter, rc: &ResolvedContext) -> Option<Acti
         .ok()
         .map(|plan| adapter.activation_effect(None, &plan))
 }
-fn model_roster_demand() -> aikit_core::resource::ModelRosterDemand {
+/// The harness facts a context's bound targets contribute to the model
+/// roster, assembled through the one typed seam: every bound target that
+/// carries an embedded harness profile with a models layer lends that layer
+/// to the composition. Unprofiled targets (shell, the broker, harnesses
+/// without a models layer) lend nothing.
+fn harness_roster_facts(
+    targets: &[TargetId],
+) -> aikit_core::model_harness_binding::HarnessCompositionFacts {
+    let layers: Vec<(&str, &aikit_core::harness_profile::ModelsLayer)> = targets
+        .iter()
+        .filter_map(|target| {
+            let slug = aikit_adapters::profiles::slug_for_target(target)?;
+            let profile = aikit_adapters::profiles::for_slug(slug)?;
+            let models = profile.models.as_ref()?;
+            Some((slug, models))
+        })
+        .collect();
+    aikit_core::model_harness_binding::HarnessCompositionFacts::from_layers(&layers)
+}
+
+fn model_roster_demand(
+    facts: &aikit_core::model_harness_binding::HarnessCompositionFacts,
+) -> aikit_core::resource::ModelRosterDemand {
     aikit_core::resource::ModelRosterDemand {
         project: None,
-        profile: None,
+        // The demand-side scope spells the same `harness-profile/<slug>`
+        // convention the candidate side's `harness_composition` uses, so
+        // fitness observations bind across both.
+        profile: facts.scope.as_ref().map(|scope| {
+            aikit_core::resource::ResourceRef::parse(scope)
+                .expect("a harness-profile scope is a valid resource ref")
+        }),
         agency: None,
         use_type: "compose".into(),
         required_capabilities: Default::default(),
@@ -3404,10 +3690,13 @@ fn model_roster_demand() -> aikit_core::resource::ModelRosterDemand {
 }
 
 /// The model-level facts a compose-time candidate carries. Route-level facts
-/// are filled in per route by `candidates_from_routes`; nothing here asserts
-/// fitness, price or authorisation that has not been observed.
+/// are filled in per route by `candidates_from_routes`, and the harness gate
+/// is applied after that fill-in (it compares against the candidate's real
+/// provider); nothing here asserts fitness, price or authorisation that has
+/// not been observed.
 fn model_roster_candidate_for(
     model: &aikit_core::resource::ResourceRef,
+    facts: &aikit_core::model_harness_binding::HarnessCompositionFacts,
 ) -> aikit_core::resource::ModelRosterCandidate {
     aikit_core::resource::ModelRosterCandidate {
         model: model.clone(),
@@ -3420,10 +3709,13 @@ fn model_roster_candidate_for(
         provider_usable: false,
         policy_allowed: false,
         contract_compatible: false,
+        // Gate truth is per-provider and applied in `model_roster` once the
+        // route fills the provider in; the composition scope and capability
+        // disclosure come from the bound harness profiles now.
         harness_compatible: false,
-        harness_composition: None,
+        harness_composition: facts.scope.clone(),
+        harness_capabilities: facts.capability_names(),
         native_capabilities: Default::default(),
-        harness_capabilities: Default::default(),
         profile_skills: Default::default(),
         modalities: Default::default(),
         tool_support: Default::default(),
@@ -3443,4 +3735,3 @@ fn model_roster_candidate_for(
         provenance: Vec::new(),
     }
 }
-

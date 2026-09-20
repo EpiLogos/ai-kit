@@ -101,6 +101,84 @@ pub struct KnowledgeProviderStatus {
     pub project_map: bool,
     #[serde(default)]
     pub absences: Vec<String>,
+    /// Per-project rollups of pending authored relations. Status is the only
+    /// surface that carries every project; search/resolve/frame replies keep
+    /// their own scope's rollup line only.
+    #[serde(default)]
+    pub authored_pending: Vec<ProjectAuthoredPending>,
+}
+
+/// One project's rollup of pending authored relations (unresolved `[[links]]`
+/// and path targets). Identical pending targets collapse into one row; the
+/// full per-occurrence evidence stays in the compile that disclosed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectAuthoredPending {
+    /// Work-relative project display, e.g. `Work/Actuation`.
+    pub project: String,
+    /// The project's own manifest id, e.g. `epilogos/actuation`, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub unresolved_targets: usize,
+    pub occurrences: usize,
+    pub targets: Vec<PendingAuthoredTarget>,
+}
+
+/// One distinct pending target and how many authored occurrences carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAuthoredTarget {
+    pub subject_ref: String,
+    pub target: String,
+    pub relation: String,
+    pub occurrences: usize,
+}
+
+impl ProjectAuthoredPending {
+    /// The one disclosure line a reply carries for this project.
+    pub fn rollup_line(&self) -> String {
+        let targets = if self.unresolved_targets == 1 {
+            "target"
+        } else {
+            "targets"
+        };
+        let occurrences = if self.occurrences == 1 {
+            "occurrence"
+        } else {
+            "occurrences"
+        };
+        format!(
+            "{}: {} unresolved {} across {} {} pending (per-target detail: knowledge status)",
+            self.project, self.unresolved_targets, targets, self.occurrences, occurrences
+        )
+    }
+
+    /// Whether a scope key names this project. The canonical keys are the
+    /// Work-relative display and the project id; the bare Work name is read
+    /// as a convenience (`demo` for `Work/demo`).
+    pub fn matches_key(&self, key: &str) -> bool {
+        let key = key.trim().to_lowercase();
+        if key.is_empty() {
+            return false;
+        }
+        if let Some(project_id) = &self.project_id {
+            if project_id.to_lowercase() == key {
+                return true;
+            }
+            if project_id
+                .rsplit('/')
+                .next()
+                .is_some_and(|segment| segment.eq_ignore_ascii_case(&key))
+            {
+                return true;
+            }
+        }
+        if self.project.to_lowercase() == key {
+            return true;
+        }
+        self.project
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| segment.eq_ignore_ascii_case(&key))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -224,6 +302,7 @@ impl<'a> KnowledgeApplication<'a> {
             code,
             project_map: self.project_map.is_some(),
             absences,
+            authored_pending: Vec::new(),
         }
     }
 
@@ -335,7 +414,10 @@ impl<'a> KnowledgeApplication<'a> {
                 hits
             }
             ResolveExpression::Unary { expression, .. }
-            | ResolveExpression::Frame { expression } => self.evaluate(expression, limit, absences),
+            | ResolveExpression::Frame { expression }
+            | ResolveExpression::Scope { expression, .. } => {
+                self.evaluate(expression, limit, absences)
+            }
             ResolveExpression::Binary { left, right, .. } => {
                 let mut hits = self.evaluate(left, limit, absences);
                 hits.extend(self.evaluate(right, limit, absences));
@@ -394,8 +476,9 @@ impl<'a> KnowledgeApplication<'a> {
                         if self.source_material(source).is_none() {
                             unreadable.push(source.clone());
                         }
-                        let resource = ResourceRef::parse(source.as_str())
-                            .expect("SourceRef validation is compatible with ResourceRef validation");
+                        let resource = ResourceRef::parse(source.as_str()).expect(
+                            "SourceRef validation is compatible with ResourceRef validation",
+                        );
                         KnowledgeSearchHit {
                             address: KnowledgeAddress::Source(source.clone()),
                             resource,
@@ -690,7 +773,10 @@ impl<'a> KnowledgeApplication<'a> {
                             format!("Source {source} is absent"),
                         ));
                     }
-                    let wiki = self.wiki.as_ref().expect("a citation implies a Wiki provider");
+                    let wiki = self
+                        .wiki
+                        .as_ref()
+                        .expect("a citation implies a Wiki provider");
                     return Ok(KnowledgeExplanation {
                         address: address.clone(),
                         provider: Some(wiki.status().provider),
@@ -1329,8 +1415,15 @@ impl<'a> KnowledgeApplication<'a> {
                             format!("Source {source} is absent"),
                         ));
                     }
-                    let wiki = self.wiki.as_ref().expect("a citation implies a Wiki provider");
-                    return Ok((Some(wiki.status().provider), SourceAuthority::Authored, None));
+                    let wiki = self
+                        .wiki
+                        .as_ref()
+                        .expect("a citation implies a Wiki provider");
+                    return Ok((
+                        Some(wiki.status().provider),
+                        SourceAuthority::Authored,
+                        None,
+                    ));
                 };
                 Ok((
                     Some(binding.provider.status().provider),
@@ -1487,7 +1580,10 @@ mod tests {
     fn a_tag_term_narrows_the_source_pool_rather_than_being_matched_as_text() {
         assert_eq!(
             split_tag_filters("rotate tag:auth tag:spec tokens"),
-            ("rotate tokens".to_owned(), vec!["auth".to_owned(), "spec".to_owned()])
+            (
+                "rotate tokens".to_owned(),
+                vec!["auth".to_owned(), "spec".to_owned()]
+            )
         );
         // `#word` is ordinary prose in a markdown corpus and is left alone.
         assert_eq!(
@@ -1605,7 +1701,10 @@ mod tests {
         );
 
         // The front adds nothing the canonical entry does not do.
-        let canonical = app.resolve(&parse_or_search_expression("@2 Authentication").unwrap(), 10);
+        let canonical = app.resolve(
+            &parse_or_search_expression("@2 Authentication").unwrap(),
+            10,
+        );
         assert_eq!(canonical.hits, narrowed.hits);
         assert_eq!(canonical.path_identity, narrowed.path_identity);
     }

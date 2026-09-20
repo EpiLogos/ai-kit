@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "aikit hook dispatch codex PostToolUse",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "aikit hook dispatch codex PreToolUse",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "aikit hook dispatch codex SessionStart",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

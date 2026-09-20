@@ -18,6 +18,7 @@ use crate::context_activation::ContextActivationReceipt;
 use crate::context_resolution::{ContextResolution, ReferenceResolution, ScopeResolution};
 use crate::project::{ProjectBinding, ProjectRef};
 use crate::resource::ResourceRef;
+use crate::session::SessionPlan;
 use crate::session_space::{SessionSpaceDefinition, SessionSpaceReadModel, SessionSpaceRef};
 use crate::{AikitError, Result};
 
@@ -172,6 +173,28 @@ pub struct SessionSpaceSurfaceAttachmentIntent {
     pub provenance: Vec<String>,
 }
 
+/// The durable, provider-neutral address of one exact working Surface.
+///
+/// The `SessionPlan` is a validated snapshot because a mux can only focus a
+/// pane through the plan that gives the pane its logical key. Provider-native
+/// session/window/pane ids are re-observed on every operation and never become
+/// canonical identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionSpaceWorkingSurfaceBinding {
+    /// Durable owner address for this binding. A Surface can have distinct
+    /// bindings through distinct admitted providers without conflating them.
+    pub binding: ResourceRef,
+    pub surface: ResourceRef,
+    pub agent_session: ResourceRef,
+    pub provider: ResourceRef,
+    pub plan: SessionPlan,
+    pub plan_key: String,
+    #[serde(default)]
+    pub provenance: Vec<String>,
+}
+
+impl Eq for SessionSpaceWorkingSurfaceBinding {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionSpaceNativeReferenceKind {
@@ -222,6 +245,8 @@ pub struct SessionSpaceAuthoredState {
     #[serde(default)]
     pub surfaces: BTreeMap<ResourceRef, SessionSpaceSurfaceAttachmentIntent>,
     #[serde(default)]
+    pub working_surfaces: BTreeMap<ResourceRef, SessionSpaceWorkingSurfaceBinding>,
+    #[serde(default)]
     pub native_references: BTreeMap<ResourceRef, SessionSpaceNativeReferenceBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<SessionSpaceFocus>,
@@ -237,6 +262,7 @@ impl SessionSpaceAuthoredState {
             project_contexts: BTreeMap::new(),
             agent_sessions: BTreeMap::new(),
             surfaces: BTreeMap::new(),
+            working_surfaces: BTreeMap::new(),
             native_references: BTreeMap::new(),
             focus: None,
         }
@@ -263,7 +289,10 @@ impl SessionSpaceAuthoredState {
         if self.version != SESSION_SPACE_APPLICATION_VERSION {
             return Err(AikitError::new(
                 "session_space.unsupported_application_version",
-                format!("unsupported SessionSpace application state {}", self.version),
+                format!(
+                    "unsupported SessionSpace application state {}",
+                    self.version
+                ),
             ));
         }
         for (project, context) in &self.project_contexts {
@@ -281,6 +310,79 @@ impl SessionSpaceAuthoredState {
                 return Err(AikitError::new(
                     "session_space.project_context_without_membership",
                     format!("Project {project} has Context evidence but is not a member"),
+                ));
+            }
+        }
+        for (binding_ref, binding) in &self.working_surfaces {
+            if binding_ref != &binding.binding {
+                return Err(AikitError::new(
+                    "session_space.working_surface_key_mismatch",
+                    "working Surface map key differs from the binding identity",
+                ));
+            }
+            let surface = &binding.surface;
+            if !self.surfaces.contains_key(surface) {
+                return Err(AikitError::new(
+                    "session_space.working_surface_unattached",
+                    format!("working Surface {surface} has no SessionSpace Surface attachment"),
+                ));
+            }
+            if !self.agent_sessions.contains_key(&binding.agent_session) {
+                return Err(AikitError::new(
+                    "session_space.working_surface_agent_session_unattached",
+                    format!(
+                        "working Surface {surface} names AgentSession {} which is not attached",
+                        binding.agent_session
+                    ),
+                ));
+            }
+            if !self
+                .native_references
+                .get(&binding.provider)
+                .is_some_and(|reference| {
+                    reference.kind == SessionSpaceNativeReferenceKind::Provider
+                })
+            {
+                return Err(AikitError::new(
+                    "session_space.working_surface_provider_unbound",
+                    format!(
+                        "working Surface {surface} names unbound provider {}",
+                        binding.provider
+                    ),
+                ));
+            }
+            let expected = binding
+                .plan
+                .views
+                .iter()
+                .flat_map(|view| {
+                    view.steps.iter().map(move |step| {
+                        (
+                            format!("{}/{}", view.id, step.pane),
+                            ResourceRef::parse(format!(
+                                "surface/terminal/{}/{}",
+                                view.id, step.pane
+                            )),
+                        )
+                    })
+                })
+                .find_map(|(key, reference)| (key == binding.plan_key).then_some(reference));
+            let Some(Ok(expected)) = expected else {
+                return Err(AikitError::new(
+                    "session_space.working_surface_plan_key_absent",
+                    format!(
+                        "working Surface {surface} has no plan pane `{}`",
+                        binding.plan_key
+                    ),
+                ));
+            };
+            if expected != *surface {
+                return Err(AikitError::new(
+                    "session_space.working_surface_plan_identity_mismatch",
+                    format!(
+                        "working Surface {surface} does not match the canonical plan Surface {expected} for `{}`",
+                        binding.plan_key
+                    ),
                 ));
             }
         }
@@ -320,6 +422,12 @@ pub enum SessionSpaceMutation {
     DetachSurface {
         surface: ResourceRef,
     },
+    BindWorkingSurface {
+        binding: Box<SessionSpaceWorkingSurfaceBinding>,
+    },
+    UnbindWorkingSurface {
+        binding: ResourceRef,
+    },
     BindNativeReference {
         binding: SessionSpaceNativeReferenceBinding,
     },
@@ -340,17 +448,31 @@ pub enum SessionSpaceMutation {
 #[serde(tag = "operation", rename_all = "kebab-case")]
 pub enum SessionSpaceOperation {
     List,
-    Show { space: SessionSpaceRef },
-    Open { space: SessionSpaceRef },
+    Show {
+        space: SessionSpaceRef,
+    },
+    Open {
+        space: SessionSpaceRef,
+    },
     Discover {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<ProjectRef>,
     },
-    Mutate { intent: Box<SessionSpaceMutation> },
-    Reconcile { space: SessionSpaceRef },
-    Reconstruct { space: SessionSpaceRef },
-    Explain { space: SessionSpaceRef },
-    History { space: SessionSpaceRef },
+    Mutate {
+        intent: Box<SessionSpaceMutation>,
+    },
+    Reconcile {
+        space: SessionSpaceRef,
+    },
+    Reconstruct {
+        space: SessionSpaceRef,
+    },
+    Explain {
+        space: SessionSpaceRef,
+    },
+    History {
+        space: SessionSpaceRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -442,7 +564,11 @@ fn apply_intent(
             let member = ResourceRef::parse(project.as_str())?;
             state.definition.projects.remove(&member);
             state.project_contexts.remove(project);
-            if state.focus.as_ref().is_some_and(|focus| focus.target == member) {
+            if state
+                .focus
+                .as_ref()
+                .is_some_and(|focus| focus.target == member)
+            {
                 state.focus = None;
             }
             changed.push(change("project-context", project.as_str(), "unbound"));
@@ -484,13 +610,38 @@ fn apply_intent(
         }
         SessionSpaceMutation::DetachSurface { surface } => {
             state.surfaces.remove(surface);
-            if state.focus.as_ref().is_some_and(|focus| focus.target == *surface) {
+            state
+                .working_surfaces
+                .retain(|_, binding| &binding.surface != surface);
+            if state
+                .focus
+                .as_ref()
+                .is_some_and(|focus| focus.target == *surface)
+            {
                 state.focus = None;
             }
             changed.push(change(
                 "surface",
                 surface.as_str(),
                 "attachment-intent-removed",
+            ));
+        }
+        SessionSpaceMutation::BindWorkingSurface { binding } => {
+            state
+                .working_surfaces
+                .insert(binding.binding.clone(), (**binding).clone());
+            changed.push(change(
+                "working-surface",
+                binding.binding.as_str(),
+                "provider-binding-added",
+            ));
+        }
+        SessionSpaceMutation::UnbindWorkingSurface { binding } => {
+            state.working_surfaces.remove(binding);
+            changed.push(change(
+                "working-surface",
+                binding.as_str(),
+                "provider-binding-removed",
             ));
         }
         SessionSpaceMutation::BindNativeReference { binding } => {
@@ -661,7 +812,9 @@ pub fn reconstruct_session_space(
                 "transport/provider reconnection observed, but AgentSession continuity is unproven"
                     .into(),
             ),
-            _ => Some("authored AgentSession attachment intent restored; live session absent".into()),
+            _ => {
+                Some("authored AgentSession attachment intent restored; live session absent".into())
+            }
         };
         relations.push(ReconstructionRelation {
             relation: "agent-session".into(),
@@ -801,9 +954,7 @@ mod tests {
                 depth: 0,
                 origin: origin.into(),
             }],
-            context_sources: vec![
-                ResourceRef::parse(&format!("context-source/{name}")).unwrap(),
-            ],
+            context_sources: vec![ResourceRef::parse(&format!("context-source/{name}")).unwrap()],
             host: None,
             context_activations: Vec::new(),
             observed_source_resources: Vec::new(),
@@ -869,12 +1020,9 @@ mod tests {
     #[test]
     fn staging_is_write_free_and_basis_moves_only_in_proposed_state() {
         let id = SessionSpaceRef::parse("session-space/stage").unwrap();
-        let current = stage_session_space(
-            None,
-            SessionSpaceMutation::Create { id, label: None },
-        )
-        .unwrap()
-        .proposed;
+        let current = stage_session_space(None, SessionSpaceMutation::Create { id, label: None })
+            .unwrap()
+            .proposed;
         let before = current.clone();
         let preview = stage_session_space(
             Some(&current),

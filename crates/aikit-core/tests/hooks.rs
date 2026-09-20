@@ -75,9 +75,18 @@ fn an_unknown_event_is_carried_through_rather_than_dropped() {
 
 #[test]
 fn a_manifest_may_spell_an_event_in_kebab_or_snake_case() {
-    assert_eq!(HookEventKind::parse("pre-tool-use"), HookEventKind::PreToolUse);
-    assert_eq!(HookEventKind::parse("pre_tool_use"), HookEventKind::PreToolUse);
-    assert_eq!(HookEventKind::parse("PRETOOLUSE"), HookEventKind::PreToolUse);
+    assert_eq!(
+        HookEventKind::parse("pre-tool-use"),
+        HookEventKind::PreToolUse
+    );
+    assert_eq!(
+        HookEventKind::parse("pre_tool_use"),
+        HookEventKind::PreToolUse
+    );
+    assert_eq!(
+        HookEventKind::parse("PRETOOLUSE"),
+        HookEventKind::PreToolUse
+    );
 }
 
 #[test]
@@ -315,7 +324,10 @@ fn a_step_whose_matcher_misses_is_recorded_as_not_matched_and_never_invoked() {
     };
     let decision = Dispatcher::new().run(&chain, &pre_tool_use("Bash"), &mut runner);
 
-    assert!(invoked.is_empty(), "a non-matching step must not be executed");
+    assert!(
+        invoked.is_empty(),
+        "a non-matching step must not be executed"
+    );
     assert!(decision.allowed);
     assert_eq!(decision.steps[0].outcome, StepOutcome::NotMatched);
 }
@@ -378,7 +390,10 @@ fn a_gate_denial_short_circuits_the_verifiers_but_the_observers_still_run() {
     assert_eq!(denial.capsule.to_string(), "hook/gate/boundary");
     assert_eq!(denial.phase, HookPhase::Gate);
     assert!(!denial.from_system_failure);
-    assert_eq!(denial.reason, "writes outside the project are not allowed here");
+    assert_eq!(
+        denial.reason,
+        "writes outside the project are not allowed here"
+    );
 
     let verifier = decision.step("hook/verify/secrets").unwrap();
     assert_eq!(verifier.outcome, StepOutcome::ShortCircuited);
@@ -399,7 +414,10 @@ fn an_observer_can_never_deny_the_event() {
     let mut runner = |_: &HookStep, _: &HookEvent| StepResult::deny("I disapprove");
     let decision = Dispatcher::new().run(&chain, &pre_tool_use("Bash"), &mut runner);
 
-    assert!(decision.allowed, "an observe-phase denial must not stop the event");
+    assert!(
+        decision.allowed,
+        "an observe-phase denial must not stop the event"
+    );
     assert!(decision.denial.is_none());
     assert!(
         decision.warnings.iter().any(|w| w.contains("observe")),
@@ -427,7 +445,8 @@ fn failure_fixture(policy: &str) -> Fixture {
 
 fn run_failing(f: &Fixture) -> aikit_core::hooks::HookDecision {
     let chain = chain(f, "PreToolUse");
-    let mut runner = |_: &HookStep, _: &HookEvent| StepResult::system_failure("exited with signal 9");
+    let mut runner =
+        |_: &HookStep, _: &HookEvent| StepResult::system_failure("exited with signal 9");
     Dispatcher::new().run(&chain, &pre_tool_use("Bash"), &mut runner)
 }
 
@@ -543,8 +562,14 @@ fn a_transform_rewrites_the_payload_that_every_later_step_sees() {
     .with_tool_name("Bash");
     let decision = Dispatcher::new().run(&chain, &event, &mut runner);
 
-    assert_eq!(seen_by_verifier, serde_json::json!({ "command": "echo ***" }));
-    assert_eq!(decision.payload, serde_json::json!({ "command": "echo ***" }));
+    assert_eq!(
+        seen_by_verifier,
+        serde_json::json!({ "command": "echo ***" })
+    );
+    assert_eq!(
+        decision.payload,
+        serde_json::json!({ "command": "echo ***" })
+    );
     assert_eq!(
         decision.step("hook/transform/redact").unwrap().outcome,
         StepOutcome::Transformed
@@ -669,7 +694,11 @@ fn two_parallel_verifiers_are_not_grouped_when_one_depends_on_the_other() {
     let chain = chain(&f, "PreToolUse");
     let groups = chain.execution_groups();
 
-    assert_eq!(groups.len(), 2, "a dependency must split the parallel group");
+    assert_eq!(
+        groups.len(),
+        2,
+        "a dependency must split the parallel group"
+    );
     assert_eq!(groups[0].capsules[0].to_string(), "hook/verify/b-producer");
     assert_eq!(groups[1].capsules[0].to_string(), "hook/verify/a-consumer");
 }
@@ -716,7 +745,9 @@ fn bypassable(id: &str, bypass: &str) -> aikit_core::capsule::Capsule {
     hook_table(
         id,
         "",
-        &format!("entry = \"payload/x\"\nevents = [\"PreToolUse\"]\nphase = \"gate\"\nbypass = {bypass}"),
+        &format!(
+            "entry = \"payload/x\"\nevents = [\"PreToolUse\"]\nphase = \"gate\"\nbypass = {bypass}"
+        ),
     )
 }
 
@@ -818,8 +849,14 @@ fn a_bypassed_step_is_skipped_recorded_and_loudly_warned_about() {
 fn a_bypass_issued_for_one_capsule_does_not_cover_another() {
     let f = enabled(
         vec![
-            bypassable("hook/gate/a-one", "{ allowed = true, reason_required = false }"),
-            bypassable("hook/gate/b-two", "{ allowed = true, reason_required = false }"),
+            bypassable(
+                "hook/gate/a-one",
+                "{ allowed = true, reason_required = false }",
+            ),
+            bypassable(
+                "hook/gate/b-two",
+                "{ allowed = true, reason_required = false }",
+            ),
         ],
         &["hook/gate/a-one", "hook/gate/b-two"],
     );
@@ -858,11 +895,7 @@ fn every_step_appears_in_the_decision_record_with_its_phase_and_duration() {
 
     assert_eq!(decision.steps.len(), 3);
     assert_eq!(
-        decision
-            .steps
-            .iter()
-            .map(|s| s.phase)
-            .collect::<Vec<_>>(),
+        decision.steps.iter().map(|s| s.phase).collect::<Vec<_>>(),
         vec![HookPhase::Gate, HookPhase::Verify, HookPhase::Observe]
     );
     for record in &decision.steps {
@@ -877,7 +910,10 @@ fn a_step_carries_the_effective_config_the_resolver_produced_for_its_capsule() {
     let mut layer = layer(ScopeKind::Session, &["hook/verify/cargo-check"], &[]);
     let mut table = toml::value::Table::new();
     table.insert("mode".into(), toml::Value::String("changed-crates".into()));
-    layer.patch.config.insert(cid("hook/verify/cargo-check"), table);
+    layer
+        .patch
+        .config
+        .insert(cid("hook/verify/cargo-check"), table);
 
     let f = Fixture::new(vec![hook_table(
         "hook/verify/cargo-check",
@@ -891,4 +927,229 @@ fn a_step_carries_the_effective_config_the_resolver_produced_for_its_capsule() {
         chain.steps[0].config.get("mode").and_then(|v| v.as_str()),
         Some("changed-crates")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Guidance delivery
+//
+// Guidance capsules are content, not processes: an active one joins the chains
+// of the events its `[guidance] inject` declares, as an inject-phase step whose
+// entry is the fragment file. These tests pin the planning side of that
+// delivery — who joins, who is withheld, how fragments order and dedup —
+// through the same resolve-then-build path production dispatch uses.
+// ---------------------------------------------------------------------------
+
+/// A guidance capsule declared the way the conformance contract requires
+/// first parties to declare them: an explicit inject event and a non-empty entry.
+fn guidance_fixture(layers: Vec<aikit_core::scope::ScopeLayer>) -> Fixture {
+    Fixture::new(vec![guidance_table(
+        "guidance/mode/orientation",
+        "",
+        "entry = \"payload/guidance.md\"\ninject = [\"SessionStart\"]\norder = 15",
+    )])
+    .with_layers(layers)
+}
+
+#[test]
+fn an_active_guidance_capsule_joins_the_chains_of_the_events_it_declares() {
+    let f = guidance_fixture(vec![layer(
+        ScopeKind::Project,
+        &["guidance/mode/orientation"],
+        &[],
+    )]);
+    let session = chain(&f, "SessionStart");
+
+    assert_eq!(step_ids(&session), vec!["guidance/mode/orientation"]);
+    let step = session.step(&cid("guidance/mode/orientation")).unwrap();
+    assert_eq!(
+        step.phase,
+        HookPhase::Inject,
+        "guidance is content: it composes with inject-phase semantics only"
+    );
+    assert_eq!(step.entry, "payload/guidance.md");
+    assert_eq!(step.order, 15);
+    assert!(step.matcher.is_none(), "prose has no tool name to match");
+    assert!(
+        step.timeout.is_none(),
+        "delivery is a file read, not a process to time out"
+    );
+
+    // And only the declared events: no other chain exists to receive it.
+    assert!(!chains(&f).contains_key("UserPromptSubmit"));
+}
+
+#[test]
+fn a_disabled_guidance_capsule_composes_nothing() {
+    let f = guidance_fixture(vec![layer(
+        ScopeKind::Project,
+        &[],
+        &["guidance/mode/orientation"],
+    )]);
+    assert!(chains(&f).is_empty());
+}
+
+#[test]
+fn an_untrusted_guidance_revision_is_withheld_from_the_chain() {
+    let f = guidance_fixture(vec![layer(
+        ScopeKind::Project,
+        &["guidance/mode/orientation"],
+        &[],
+    )])
+    .untrust("guidance/mode/orientation");
+    assert!(
+        chains(&f).is_empty(),
+        "guidance changes agent behaviour, so an unreviewed revision is withheld at resolution \
+         and the chain never sees it"
+    );
+}
+
+#[test]
+fn guidance_joins_no_chain_until_its_manifest_declares_an_event() {
+    let f = Fixture::new(vec![guidance_table(
+        "guidance/mode/silent",
+        "",
+        "entry = \"payload/guidance.md\"\norder = 10",
+    )])
+    .with_layers(vec![layer(
+        ScopeKind::Project,
+        &["guidance/mode/silent"],
+        &[],
+    )]);
+    assert!(chains(&f).is_empty(), "no declared event, no delivery");
+}
+
+#[test]
+fn guidance_fragments_fold_alongside_hook_inject_steps_in_chain_order() {
+    let f = Fixture::new(vec![
+        hook_table(
+            "hook/gate/boundary",
+            "",
+            "entry = \"payload/check\"\nevents = [\"SessionStart\"]\nphase = \"gate\"",
+        ),
+        hook_table(
+            "hook/inject/steer",
+            "",
+            "entry = \"payload/x\"\nevents = [\"SessionStart\"]\nphase = \"inject\"\norder = 10",
+        ),
+        guidance_table(
+            "guidance/mode/orientation",
+            "",
+            "entry = \"payload/guidance.md\"\ninject = [\"SessionStart\"]\norder = 20",
+        ),
+    ])
+    .with_layers(vec![layer(
+        ScopeKind::Project,
+        &[
+            "hook/gate/boundary",
+            "hook/inject/steer",
+            "guidance/mode/orientation",
+        ],
+        &[],
+    )]);
+    let chain = chain(&f, "SessionStart");
+    assert_eq!(
+        step_ids(&chain),
+        vec![
+            "hook/gate/boundary",
+            "hook/inject/steer",
+            "guidance/mode/orientation"
+        ]
+    );
+
+    let event = HookEvent::new("claude", HookEventKind::SessionStart, serde_json::json!({}));
+    let mut runner = |step: &HookStep, _: &HookEvent| {
+        if step.capsule.kind() == aikit_core::capsule::Kind::Guidance {
+            StepResult::inject("orient before acting")
+        } else if step.phase == HookPhase::Inject {
+            StepResult::inject("hook note")
+        } else {
+            StepResult::allow()
+        }
+    };
+    let decision = Dispatcher::new().run(&chain, &event, &mut runner);
+    assert!(decision.allowed);
+    assert_eq!(
+        decision.injected,
+        vec!["hook note", "orient before acting"],
+        "guidance rides the composed injection alongside hook capsules, in chain order"
+    );
+
+    // The same chain with the gate denying: guidance, like every inject step,
+    // is short-circuited — a refused session never receives its guidance.
+    let mut denying = |step: &HookStep, _: &HookEvent| {
+        if step.capsule.kind() == aikit_core::capsule::Kind::Guidance {
+            panic!("guidance must not be consulted after a denial");
+        }
+        if step.phase == HookPhase::Gate {
+            StepResult::deny("outside the boundary")
+        } else {
+            StepResult::allow()
+        }
+    };
+    let refused = Dispatcher::new().run(&chain, &event, &mut denying);
+    assert!(!refused.allowed);
+    assert!(refused.injected.is_empty());
+}
+
+#[test]
+fn guidance_sharing_a_dedup_key_is_planned_once_and_the_higher_scope_wins() {
+    let body = "entry = \"payload/guidance.md\"\ninject = [\"SessionStart\"]\norder = 10\ndedup_key = \"orientation\"";
+    let f = Fixture::new(vec![
+        guidance_table("guidance/mode/global-copy", "", body),
+        guidance_table("guidance/mode/session-copy", "", body),
+    ])
+    .with_layers(vec![
+        layer(ScopeKind::Global, &["guidance/mode/global-copy"], &[]),
+        layer(ScopeKind::Session, &["guidance/mode/session-copy"], &[]),
+    ]);
+
+    let session = chain(&f, "SessionStart");
+    assert_eq!(
+        step_ids(&session),
+        vec!["guidance/mode/session-copy"],
+        "the session-scoped selection outranks the global default it was written to replace"
+    );
+}
+
+#[test]
+fn a_dedup_tie_goes_to_the_first_declared_order() {
+    let f = Fixture::new(vec![
+        guidance_table(
+            "guidance/mode/later",
+            "",
+            "entry = \"payload/guidance.md\"\ninject = [\"SessionStart\"]\norder = 30\ndedup_key = \"orientation\"",
+        ),
+        guidance_table(
+            "guidance/mode/earlier",
+            "",
+            "entry = \"payload/guidance.md\"\ninject = [\"SessionStart\"]\norder = 20\ndedup_key = \"orientation\"",
+        ),
+    ])
+    .with_layers(vec![layer(
+        ScopeKind::Project,
+        &["guidance/mode/later", "guidance/mode/earlier"],
+        &[],
+    )]);
+
+    assert_eq!(
+        step_ids(&chain(&f, "SessionStart")),
+        vec!["guidance/mode/earlier"],
+        "same scope, so the composer's own tie rule applies: first in (order, capsule) order"
+    );
+}
+
+#[test]
+fn guidance_without_a_dedup_key_is_never_deduplicated() {
+    let body = "entry = \"payload/guidance.md\"\ninject = [\"SessionStart\"]\norder = 10";
+    let f = Fixture::new(vec![
+        guidance_table("guidance/mode/one", "", body),
+        guidance_table("guidance/mode/two", "", body),
+    ])
+    .with_layers(vec![layer(
+        ScopeKind::Project,
+        &["guidance/mode/one", "guidance/mode/two"],
+        &[],
+    )]);
+
+    assert_eq!(chain(&f, "SessionStart").steps.len(), 2);
 }

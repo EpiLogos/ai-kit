@@ -144,8 +144,7 @@ impl ProfileDocument {
                 toml_edit::value(description.clone());
         }
         if let Some(guidance) = &overlay.guidance {
-            self.doc[SKILL_OVERLAYS][&rendered]["guidance"] =
-                toml_edit::value(guidance.clone());
+            self.doc[SKILL_OVERLAYS][&rendered]["guidance"] = toml_edit::value(guidance.clone());
         }
         if let Some(revision) = &overlay.reviewed_against {
             self.doc[SKILL_OVERLAYS][&rendered]["reviewed_against"] =
@@ -314,6 +313,12 @@ impl OverlayDocument {
         self.inner.use_profile(id);
     }
 
+    /// Remove a profile reference from this overlay, letting lower scopes
+    /// decide again.
+    pub fn drop_profile(&mut self, id: &ProfileId) {
+        self.inner.drop_profile(id);
+    }
+
     pub fn set_config(&mut self, id: &CapsuleId, key: &str, value: Item) {
         self.inner.set_config(id, key, value);
     }
@@ -408,7 +413,8 @@ fn write_atomically(path: &Path, contents: &[u8]) -> Result<()> {
         "{}.aikit-tmp",
         path.extension().and_then(|e| e.to_str()).unwrap_or("toml")
     ));
-    std::fs::write(&temporary, contents).map_err(|e| io_error("edit.write_failed", &temporary, &e))?;
+    std::fs::write(&temporary, contents)
+        .map_err(|e| io_error("edit.write_failed", &temporary, &e))?;
     match std::fs::rename(&temporary, path) {
         Ok(()) => Ok(()),
         Err(e) => {

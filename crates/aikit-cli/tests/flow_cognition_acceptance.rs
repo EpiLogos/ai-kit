@@ -168,6 +168,7 @@ fn runtime(session: &str) -> ModelRuntimeReadModel {
                     material_control: AccessFieldReading::unavailable("not required"),
                     interior: AccessFieldReading::unavailable("not required"),
                 },
+                modality: None,
             },
             change_application: RuntimeChangeApplication::Live,
         },
@@ -623,4 +624,170 @@ fn changed_since_returns_typed_rows_with_provenance_and_explicit_states() {
     assert!(empty.reading.changed_sources.is_empty());
     assert!(empty.reading.affected_knowledge.is_empty());
     assert!(empty.reading.unresolved.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// NOW contemplation — the re-aimed subject (Central #175 cell 2)
+// ---------------------------------------------------------------------------
+
+use aikit_core::{NowContemplateExecutor, NowContemplateRecord, NowContemplation, NowFixturesSeam};
+
+const NOW_REF: &str = "central:now:control:root:acceptance";
+
+fn now_seam() -> NowFixturesSeam {
+    NowFixturesSeam::parse(
+        r#"{
+            "schema": "central.thoughts-reading/v1",
+            "now_ref": "central:now:control:root:acceptance",
+            "total": 2,
+            "truncated": false,
+            "fixtures": [
+                {"file": "raw-finding-2026-09-13.md", "revision": "central.content-fnv1a64/v1:1:aa", "conforming": true, "day": "2026-09-13", "actor": "agent:test", "actor_kind": "agent", "content": "what returned today"},
+                {"file": "legacy-2026-09-12.md", "revision": "central.content-fnv1a64/v1:2:bb", "conforming": false, "content": "pre-law fixture"}
+            ]
+        }"#,
+    )
+    .unwrap()
+}
+
+struct ProposedDistillation;
+
+impl NowContemplateExecutor for ProposedDistillation {
+    fn distill(
+        &mut self,
+        _preflight: &aikit_core::NowContemplationPreflight,
+        fixtures: &[aikit_core::NowFixture],
+    ) -> aikit_core::Result<String> {
+        Ok(format!(
+            "one signal parsed from {} fixtures",
+            fixtures.len()
+        ))
+    }
+}
+
+#[test]
+fn now_subject_preflight_discloses_the_stream_and_records_nothing() {
+    let temp = TempDir::new().unwrap();
+    let mut service = open_service(&temp);
+    let receipt = service
+        .now_contemplate_preflight_receipt(
+            NOW_REF,
+            &now_seam(),
+            "preflight only; nothing was executed",
+        )
+        .unwrap();
+    assert_eq!(receipt.version, "aikit.now-contemplation/v1");
+    assert_eq!(receipt.now_ref, NOW_REF);
+    let preflight = receipt.preflight.as_ref().unwrap();
+    assert_eq!(preflight.fixture_count, 2);
+    assert_eq!(preflight.days, vec!["2026-09-13".to_owned()]);
+    assert_eq!(
+        preflight.unstructured,
+        vec!["legacy-2026-09-12.md".to_owned()]
+    );
+    assert!(preflight
+        .invocation_ref
+        .to_string()
+        .starts_with("now-contemplate/"));
+    let evidence = receipt
+        .explain
+        .iter()
+        .flat_map(|evidence| evidence.facts.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(evidence
+        .iter()
+        .any(|fact| fact.summary.contains("central.now.learnings.distill")));
+    assert!(matches!(
+        receipt.contemplation,
+        NowContemplation::Unavailable { .. }
+    ));
+    assert_eq!(receipt.recorded, None);
+}
+
+#[test]
+fn now_subject_mismatch_and_foreign_seams_are_refused() {
+    let temp = TempDir::new().unwrap();
+    let mut service = open_service(&temp);
+    let error = service
+        .now_contemplate_preflight_receipt(
+            "central:now:control:root:another",
+            &now_seam(),
+            "preflight only; nothing was executed",
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "now.contemplate_subject_mismatch");
+    assert!(NowFixturesSeam::parse(
+        "{\"schema\":\"central.learnings-reading/v1\",\"now_ref\":\"x\"}"
+    )
+    .is_err());
+}
+
+#[test]
+fn now_subject_execution_is_record_gated_and_the_learning_stays_a_proposal() {
+    let temp = TempDir::new().unwrap();
+    let mut service = open_service(&temp);
+    let preflight = aikit_core::now_contemplate_preflight(&now_seam()).unwrap();
+    let mut drifted = NowContemplateRecord {
+        version: "aikit.now-contemplation/v1".into(),
+        invocation_ref: preflight.invocation_ref.clone(),
+        now_ref: NOW_REF.into(),
+        preflight: preflight.clone(),
+    };
+    drifted.preflight.fixture_count = 7;
+    let refused = service
+        .now_contemplate_with_record(NOW_REF, &now_seam(), &drifted, None)
+        .unwrap();
+    assert!(matches!(
+        refused.contemplation,
+        NowContemplation::Refused { .. }
+    ));
+
+    // Without a host executor: explicit unavailable, never an invocation.
+    let record = NowContemplateRecord {
+        version: "aikit.now-contemplation/v1".into(),
+        invocation_ref: preflight.invocation_ref.clone(),
+        now_ref: NOW_REF.into(),
+        preflight: preflight.clone(),
+    };
+    let unavailable = service
+        .now_contemplate_with_record(NOW_REF, &now_seam(), &record, None)
+        .unwrap();
+    assert!(matches!(
+        unavailable.contemplation,
+        NowContemplation::Unavailable { .. }
+    ));
+    assert_eq!(unavailable.recorded, None);
+
+    // With one: the learning is proposed, linkage rides, one observation records.
+    let proposed = service
+        .now_contemplate_with_record(
+            NOW_REF,
+            &now_seam(),
+            &record,
+            Some(&mut ProposedDistillation),
+        )
+        .unwrap();
+    match &proposed.contemplation {
+        NowContemplation::Proposed {
+            proposal,
+            automatic_agent_or_model_invocation,
+            ..
+        } => {
+            assert_eq!(proposal.content, "one signal parsed from 2 fixtures");
+            assert_eq!(
+                proposal.source_fixtures,
+                vec![
+                    "raw-finding-2026-09-13.md".to_owned(),
+                    "legacy-2026-09-12.md".to_owned(),
+                ]
+            );
+            assert!(*automatic_agent_or_model_invocation);
+        }
+        other => panic!("expected a proposal, got {other:?}"),
+    }
+    assert_eq!(
+        proposed.recorded.as_deref(),
+        Some(FLOW_CONTEMPLATE_USE_RECORDED)
+    );
 }

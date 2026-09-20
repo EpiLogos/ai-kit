@@ -1,0 +1,22 @@
+{
+ "id": "cli:pane:split",
+ "result": {
+  "pane": {
+   "agent_status": "unknown",
+   "cwd": "/home/frank/Central",
+   "focused": false,
+   "foreground_cwd": "/home/frank/Central",
+   "pane_id": "wY:p2",
+   "revision": 0,
+   "scroll": {
+    "max_offset_from_bottom": 0,
+    "offset_from_bottom": 0,
+    "viewport_rows": 25
+   },
+   "tab_id": "wY:t1",
+   "terminal_id": "term_65bbf26885def2b",
+   "workspace_id": "wY"
+  },
+  "type": "pane_info"
+ }
+}

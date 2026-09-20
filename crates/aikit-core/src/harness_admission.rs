@@ -226,10 +226,19 @@ pub fn verify_activation_truth(
 
     let impossible = matches!(
         (&plan.effect, observation.state),
-        (ActivationEffect::Unsupported { .. }, HarnessActivationState::Loaded)
-            | (ActivationEffect::Brokered { .. }, HarnessActivationState::Loaded)
-            | (ActivationEffect::NextSessionOnly { .. }, HarnessActivationState::Loaded)
-            | (ActivationEffect::RestartClient { .. }, HarnessActivationState::Loaded)
+        (
+            ActivationEffect::Unsupported { .. },
+            HarnessActivationState::Loaded
+        ) | (
+            ActivationEffect::Brokered { .. },
+            HarnessActivationState::Loaded
+        ) | (
+            ActivationEffect::NextSessionOnly { .. },
+            HarnessActivationState::Loaded
+        ) | (
+            ActivationEffect::RestartClient { .. },
+            HarnessActivationState::Loaded
+        )
     );
     if impossible {
         return Err(AikitError::new(

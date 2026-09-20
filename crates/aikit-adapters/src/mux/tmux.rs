@@ -170,6 +170,36 @@ impl<R: CommandRunner> Tmux<R> {
         Ok(self.run(&["has-session", "-t", name])?.ok())
     }
 
+    /// The exact native command for a terminal client to attach to one live,
+    /// AIKit-tagged plan pane. This is provider-owned command construction;
+    /// callers receive argv only after `inspect_session` has verified the
+    /// current binding. A missing/recycled pane is refused rather than guessed.
+    pub fn attach_surface_command(
+        &self,
+        plan: &SessionPlan,
+        logical_key: &str,
+    ) -> Result<(String, Vec<String>)> {
+        let binding = self.inspect_session(plan)?;
+        let native = binding.surfaces.get(logical_key).cloned().ok_or_else(|| {
+            AikitError::new(
+                "mux.tmux_surface_not_live",
+                format!("tmux has no live AIKit pane for `{logical_key}`"),
+            )
+        })?;
+        Ok((
+            native.clone(),
+            self.argv(&[
+                "attach-session",
+                "-t",
+                binding.session.as_str(),
+                ";",
+                "select-pane",
+                "-t",
+                native.as_str(),
+            ]),
+        ))
+    }
+
     /// Every pane in a window as `(pane id, plan tag)`.
     ///
     /// An empty tag means a person created that pane.
@@ -593,7 +623,7 @@ pub fn install(config_path: &Path, key: &str) -> Result<InstallOutcome> {
                 "mux.config_unreadable",
                 format!("could not read {}: {e}", config_path.display()),
             )
-            .with("path", config_path.display().to_string()))
+            .with("path", config_path.display().to_string()));
         }
     };
 
@@ -741,10 +771,10 @@ impl<R: CommandRunner> MuxAdapter for Tmux<R> {
                 return Ok(MuxPresence::absent(
                     MuxKind::Tmux,
                     format!("`tmux -V` exited with status {}", out.status),
-                ))
+                ));
             }
             Err(e) if e.code() == "mux.command_spawn_failed" => {
-                return Ok(MuxPresence::absent(MuxKind::Tmux, "`tmux` is not on PATH"))
+                return Ok(MuxPresence::absent(MuxKind::Tmux, "`tmux` is not on PATH"));
             }
             Err(e) => return Err(e),
         };

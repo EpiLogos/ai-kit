@@ -7,6 +7,7 @@ use crate::resource::{
     ResourceDescriptor, ResourceKind, OPERATIVE_SEMANTIC_PROVIDER_VERSION,
 };
 
+mod invocation;
 mod knowledge;
 
 fn binding() -> OperativeScope {

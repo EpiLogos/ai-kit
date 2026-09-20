@@ -10,11 +10,19 @@
 use aikit_adapters::central_entities::materialise_central_entities;
 use aikit_core::{SemanticWikiIndex, WikiObject};
 use serde_json::json;
-use std::{fs, path::PathBuf, sync::atomic::{AtomicU64, Ordering}, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 fn fixture_central() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
         "aikit-central-entities-{}-{nonce}-{sequence}",
@@ -102,10 +110,14 @@ fn case15_half_identity_source_edit_changes_relations_never_the_entity_ref() {
 
     let first = materialise_central_entities(&central);
     // Member disclosures are honest absence data; carrier errors are not.
-    assert!(!first
-        .absences
-        .iter()
-        .any(|absence| absence.contains("carrier")), "{:?}", first.absences);
+    assert!(
+        !first
+            .absences
+            .iter()
+            .any(|absence| absence.contains("carrier")),
+        "{:?}",
+        first.absences
+    );
     let nara_first = first
         .objects
         .iter()
@@ -117,7 +129,9 @@ fn case15_half_identity_source_edit_changes_relations_never_the_entity_ref() {
         })
         .expect("nara entity materialises");
     assert_eq!(nara_first.node_type, "pasu");
-    let form = nara_first.extensions["aikit.pasu/v1"]["form"].as_str().unwrap();
+    let form = nara_first.extensions["aikit.pasu/v1"]["form"]
+        .as_str()
+        .unwrap();
     assert_eq!(form, "nara");
     let revision_first = nara_first.extensions["aikit.pasu/v1"]["extra"]["sourced"][0]
         ["content_revision"]
@@ -127,7 +141,11 @@ fn case15_half_identity_source_edit_changes_relations_never_the_entity_ref() {
 
     // The identity source is edited in place; the manifest revision is
     // untouched. Same subject, changed sourced relations.
-    fs::write(central.join("Control/user/identity/present.md"), "who I am now, revised\n").unwrap();
+    fs::write(
+        central.join("Control/user/identity/present.md"),
+        "who I am now, revised\n",
+    )
+    .unwrap();
     let second = materialise_central_entities(&central);
     let nara_second = second
         .objects
@@ -153,11 +171,10 @@ fn case15_half_identity_source_edit_changes_relations_never_the_entity_ref() {
 fn case16_half_profile_revision_change_relinks_the_same_agent_entity() {
     let central = fixture_central();
     let first = materialise_central_entities(&central);
-    assert!(first
-        .objects
-        .iter()
-        .any(|object| matches!(object,
-            WikiObject::Node(node) if node.ref_id.as_str() == "wiki:node:pasu:agent:agent:hermes")));
+    assert!(
+        first.objects.iter().any(|object| matches!(object,
+            WikiObject::Node(node) if node.ref_id.as_str() == "wiki:node:pasu:agent:agent:hermes"))
+    );
 
     // Profile revision advances; the agent entity ref is untouched.
     fs::write(
@@ -184,7 +201,9 @@ fn case16_half_profile_revision_change_relinks_the_same_agent_entity() {
         .objects
         .iter()
         .find_map(|object| match object {
-            WikiObject::Node(node) if node.ref_id.as_str() == "wiki:node:pasu:agent:agent:hermes" => {
+            WikiObject::Node(node)
+                if node.ref_id.as_str() == "wiki:node:pasu:agent:agent:hermes" =>
+            {
                 Some(node.clone())
             }
             _ => None,
@@ -206,9 +225,13 @@ fn case17_half_agent_set_materialises_with_compiled_member_edges() {
         .iter()
         .any(|absence| absence.contains("agent:unprofiled")));
     // The profiled member edge compiles and the whole set rebuilds into the index.
-    let index = SemanticWikiIndex::rebuild(reading.objects).expect("entity materialisation rebuilds");
+    let index =
+        SemanticWikiIndex::rebuild(reading.objects).expect("entity materialisation rebuilds");
     let members = index.search("central-operators", 5);
-    assert!(!members.is_empty(), "agent-set entity participates in search");
+    assert!(
+        !members.is_empty(),
+        "agent-set entity participates in search"
+    );
 }
 
 /// W10 V4: the agent-set entity is a bounded local whole — `local_space_ref`
@@ -221,7 +244,8 @@ fn case17_local_whole_resolves_and_navigation_traverses_membership() {
     let reading = materialise_central_entities(&central);
     let index = SemanticWikiIndex::rebuild(reading.objects).expect("rebuild");
 
-    let set_ref = aikit_core::ResourceRef::parse("wiki:node:pasu:agent-set:central-operators").unwrap();
+    let set_ref =
+        aikit_core::ResourceRef::parse("wiki:node:pasu:agent-set:central-operators").unwrap();
     let whole = index.local_whole(&set_ref).expect("local whole resolves");
     assert!(
         whole.local_space.is_some(),
@@ -242,8 +266,16 @@ fn case17_local_whole_resolves_and_navigation_traverses_membership() {
         filters: Vec::new(),
     };
     let view = provider.relations(query).expect("relations view");
-    assert!(view.edges.iter().any(|edge| edge.relation == "local-member"),
-        "navigation traverses the local whole: {:?}", view.edges.iter().map(|e| e.relation.clone()).collect::<Vec<_>>());
+    assert!(
+        view.edges
+            .iter()
+            .any(|edge| edge.relation == "local-member"),
+        "navigation traverses the local whole: {:?}",
+        view.edges
+            .iter()
+            .map(|e| e.relation.clone())
+            .collect::<Vec<_>>()
+    );
 }
 
 /// Central serialises the profile identifier as `ref`
@@ -258,7 +290,9 @@ fn the_profile_identifier_and_intent_survive_from_centrals_own_shape() {
         .objects
         .iter()
         .find_map(|object| match object {
-            WikiObject::Node(node) if node.ref_id.as_str() == "wiki:node:pasu:agent:agent:hermes" => {
+            WikiObject::Node(node)
+                if node.ref_id.as_str() == "wiki:node:pasu:agent:agent:hermes" =>
+            {
                 Some(node.clone())
             }
             _ => None,
@@ -326,8 +360,14 @@ fn legacy_profile_ref_records_still_read_and_absence_is_marked() {
             _ => None,
         })
     };
-    assert_eq!(profile_ref_of("agent:legacy").as_deref(), Some("profile/legacy"));
-    assert_eq!(profile_ref_of("agent:nameless").as_deref(), Some("unprofiled"));
+    assert_eq!(
+        profile_ref_of("agent:legacy").as_deref(),
+        Some("profile/legacy")
+    );
+    assert_eq!(
+        profile_ref_of("agent:nameless").as_deref(),
+        Some("unprofiled")
+    );
 }
 
 /// Central permits colon-bearing set refs (`ctrl/src/agent_set_store.rs:533`
@@ -365,11 +405,15 @@ fn colon_bearing_set_refs_get_distinct_local_spaces() {
         .collect();
 
     assert!(
-        spaces.iter().any(|s| s == "wiki:space:pasu-local:team:review"),
+        spaces
+            .iter()
+            .any(|s| s == "wiki:space:pasu-local:team:review"),
         "{spaces:?}"
     );
     assert!(
-        spaces.iter().any(|s| s == "wiki:space:pasu-local:other:review"),
+        spaces
+            .iter()
+            .any(|s| s == "wiki:space:pasu-local:other:review"),
         "{spaces:?}"
     );
     let mut unique = spaces.clone();
@@ -392,7 +436,11 @@ fn the_committed_real_central_record_is_consumed_faithfully() {
     let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/central/profile-factory-bounded-acceptance.json");
     let body = fs::read_to_string(&real).expect("committed real record");
-    fs::write(central.join("Control/agents/profiles/profile-real.json"), &body).unwrap();
+    fs::write(
+        central.join("Control/agents/profiles/profile-real.json"),
+        &body,
+    )
+    .unwrap();
 
     let reading = materialise_central_entities(&central);
     let node = reading

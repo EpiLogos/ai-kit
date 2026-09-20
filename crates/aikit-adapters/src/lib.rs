@@ -7,10 +7,8 @@ extern crate self as aikit_adapters;
 pub mod actor_composition;
 pub mod actuation_harness_capability;
 pub mod actuation_harness_detection;
-pub mod actuation_model_routes;
-pub mod model_realisation;
-pub mod provider_catalog_source;
 pub mod actuation_instantiation;
+pub mod actuation_model_routes;
 pub mod actuation_stream_projection;
 pub mod agent_connection;
 pub mod agent_session_host;
@@ -25,12 +23,11 @@ pub mod clients;
 pub mod composition_topology;
 pub mod connection_process;
 pub mod credential_provider;
-pub mod secret_resolver;
 pub mod deepseek_harness;
 pub mod deepseek_live;
 pub mod deepseek_maximal;
-pub mod factory_run_thought_authored_wiki;
 pub mod factory_developmental;
+pub mod factory_run_thought_authored_wiki;
 pub mod flow_authored_wiki;
 pub mod gateway_client;
 pub mod gateway_connector;
@@ -38,26 +35,39 @@ pub mod gateway_connector;
 pub mod gateway_runtime;
 pub mod gateway_service;
 pub mod gitnexus;
+pub mod harness_disclosure;
 pub mod herdr;
 pub mod home_agent_profile;
+pub mod hook_sources;
 pub mod hyprland;
 pub mod interactive_connection;
+pub mod layers;
 pub mod local_source_discovery;
+pub mod model_realisation;
 pub mod mux;
 pub mod native_git;
+pub mod now_field;
 pub mod okf;
+pub mod openai_realtime;
+pub mod place_technology;
+pub mod profiles;
 pub mod projectcentral;
 pub mod projectcentral_authored_wiki;
+pub mod provider_catalog_source;
+pub mod ql_provider;
+pub mod ripgrep;
 pub mod runner;
+pub mod secret_resolver;
 pub mod session_space_connection;
 pub mod session_space_observation;
 pub mod session_space_reconstruction;
 pub mod shells;
 mod telegram_bot_api;
 pub mod telegram_gateway;
+pub mod tool_sources;
+pub mod workcell_instance_intake;
 pub mod working_environment;
 pub mod working_environment_control;
-pub mod workcell_instance_intake;
 
 pub use actuation_stream_projection::{
     project_connection_signal_to_actuation_stream, ActuationStreamAppendProjection,
@@ -132,21 +142,30 @@ pub use gateway_connector::{
 pub use gateway_runtime::{
     connector_descriptor, execute_gateway_command, text_send, AgencyGateway,
     GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayBinding,
-    GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency,
-    GatewayEcologySession, GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope,
-    GatewayForkOrigin, GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult,
-    GatewayInvocationMode, GatewayReplay, GatewayRequestEnvelope, GatewayResponse,
-    GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
-    GatewayStreamJournal, GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_INVOCATION_MODES,
+    GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency, GatewayEcologySession,
+    GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope, GatewayForkOrigin,
+    GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult, GatewayInvocationMode,
+    GatewayReplay, GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope,
+    GatewaySnapshot, GatewayStatus, GatewayStreamEvent, GatewayStreamJournal,
     ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA, AGENCY_GATEWAY_VERSION,
+    GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_INVOCATION_MODES,
 };
 pub use gateway_service::{
     persist_gateway_state, restore_gateway_state, run_gateway_service, GatewayServiceConfig,
     DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
 };
+pub use harness_disclosure::{
+    disclose, ComposedEntry, DriftEntry, DriftKind, HarnessDisclosure, NativeEntry,
+    NativeObservation,
+};
 pub use herdr::{
     parse_herdr_snapshot, HerdrAgentObservation, HerdrAgentStatus, HerdrSnapshot,
     HerdrWorkingEnvironment, HERDR_PROVIDER_VERSION, HERDR_UPSTREAM_REVISION,
+};
+pub use hook_sources::{
+    plan_hooks_projection, HookCarrierSource, HookSourceError, HooksProjectionOutcome,
+    HooksProjectionPlan, HooksSweepPlan, ProjectionDir, CARRIER_CAPSULE_ID,
+    HOOKS_PROJECTION_OWNERSHIP,
 };
 pub use hyprland::{
     parse_hyprland_clients, HyprlandWindowObservation, HyprlandWorkingEnvironment,
@@ -155,6 +174,10 @@ pub use hyprland::{
 pub use interactive_connection::{
     AcpStableConnectionAdapter, AcpStableSessionCapabilities, InteractiveAgentConnectionAdapter,
     PermissionDecision,
+};
+pub use layers::{
+    apply_merge, claude_hook_map, mcp_servers_record, pi_extensions_record, zcode_hook_wrapper,
+    LayerMergeError, MatcherPolicy, MergeArgs, MergeReport,
 };
 pub use local_source_discovery::{
     discover_local_sources, DiscoveredLocalSource, LocalSourceDiscovery,
@@ -167,6 +190,7 @@ pub use projectcentral_authored_wiki::{
     projectcentral_authored_wiki, ProjectCentralAuthoredWiki, ProjectCentralAuthoredWikiStatus,
     PROJECTCENTRAL_AUTHORED_WIKI_VERSION,
 };
+pub use ql_provider::{QlCliClient, QlOperativeProvider, QL_CLI_PROVIDER_VERSION};
 pub use session_space_connection::connection_into_session_space;
 pub use session_space_observation::{
     SessionSpaceFileObservationProvider, SessionSpaceObservationError,
@@ -176,6 +200,10 @@ pub use session_space_reconstruction::session_space_native_observations;
 pub use telegram_gateway::{
     TelegramBotApiTransport, TelegramBotIdentity, TelegramConnector, TelegramConnectorConfig,
     TELEGRAM_BOT_API_BASE, TELEGRAM_GATEWAY_CONNECTOR_VERSION,
+};
+pub use tool_sources::{
+    plan_tools_projection, ToolServerRecord, ToolSourceEntry, ToolSourceError,
+    ToolsProjectionOutcome, ToolsProjectionPlan, TOOLS_PROJECTION_OWNERSHIP,
 };
 pub use working_environment::{
     MuxSessionSpaceActivationDriver, MuxWorkingEnvironment, NativeBindingKind,
@@ -195,9 +223,12 @@ pub mod capability_matrix;
 pub mod central_entities;
 pub mod central_wiki;
 pub mod central_world_sources;
+pub mod oi_explore;
+pub mod projectcentral_folder_subjects;
 mod session_event_queue;
+pub mod techne_temporal;
 
 pub mod agency_admission;
-pub mod placement_enforcement;
 pub mod central_file_map;
 pub mod central_placement;
+pub mod placement_enforcement;

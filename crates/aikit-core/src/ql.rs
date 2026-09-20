@@ -464,7 +464,11 @@ fn compatibility_reason(
         return Some(format!("provider does not advertise lens {}", request.lens));
     }
     if let Some(frame) = &request.frame {
-        if !capabilities.supported_forms.iter().any(|value| value == frame) {
+        if !capabilities
+            .supported_forms
+            .iter()
+            .any(|value| value == frame)
+        {
             return Some(format!("provider does not advertise QL form {frame}"));
         }
     }
@@ -594,8 +598,7 @@ fn lens_regex() -> &'static Regex {
 fn sublens_regex() -> &'static Regex {
     static VALUE: OnceLock<Regex> = OnceLock::new();
     VALUE.get_or_init(|| {
-        Regex::new(r"^mef:sublens:(L[0-5]'?)\.[0-5]@1$")
-            .expect("canonical SublensRef regex")
+        Regex::new(r"^mef:sublens:(L[0-5]'?)\.[0-5]@1$").expect("canonical SublensRef regex")
     })
 }
 

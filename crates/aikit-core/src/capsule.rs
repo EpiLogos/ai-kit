@@ -40,11 +40,12 @@ pub enum Kind {
     Alias,
     Session,
     Tool,
+    ToolProtocol,
     Template,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 8] = [
+    pub const ALL: [Kind; 9] = [
         Kind::Skill,
         Kind::Script,
         Kind::Hook,
@@ -52,6 +53,7 @@ impl Kind {
         Kind::Alias,
         Kind::Session,
         Kind::Tool,
+        Kind::ToolProtocol,
         Kind::Template,
     ];
 
@@ -64,6 +66,7 @@ impl Kind {
             Kind::Alias => "alias",
             Kind::Session => "session",
             Kind::Tool => "tool",
+            Kind::ToolProtocol => "tool-protocol",
             Kind::Template => "template",
         }
     }
@@ -78,6 +81,10 @@ impl Kind {
             Kind::Alias => "exported through shell integration or a generated shim",
             Kind::Session => "available to create or reconcile a session space",
             Kind::Tool => "available as a checked external dependency or wrapper",
+            Kind::ToolProtocol => {
+                "projected as an MCP server record, making the server available to be \
+                 launched as a tool source"
+            }
             Kind::Template => "available to materialize into a project or task",
         }
     }
@@ -85,7 +92,10 @@ impl Kind {
     /// Kinds whose activation changes agent behaviour, and therefore demand a
     /// reviewed revision before they may become active.
     pub fn requires_trust_to_activate(self) -> bool {
-        matches!(self, Kind::Hook | Kind::Skill | Kind::Guidance)
+        matches!(
+            self,
+            Kind::Hook | Kind::Skill | Kind::Guidance | Kind::ToolProtocol
+        )
     }
 
     /// Kinds that carry an executable payload.
@@ -117,6 +127,7 @@ impl FromStr for Kind {
             "alias" => Kind::Alias,
             "session" => Kind::Session,
             "tool" => Kind::Tool,
+            "tool-protocol" => Kind::ToolProtocol,
             "template" => Kind::Template,
             other => {
                 return err(
@@ -140,7 +151,6 @@ pub enum Maturity {
     Deprecated,
     Blocked,
 }
-
 
 impl Maturity {
     pub fn as_str(self) -> &'static str {
@@ -357,7 +367,14 @@ impl ControlGround {
     /// its retirement record is a fault, because it would make the withholding
     /// undisclosable — the reason would be silently swallowed.
     fn validate(&self, id: &CapsuleId) -> Result<()> {
-        if self.is_retired() && self.retirement_reason.as_deref().unwrap_or("").trim().is_empty() {
+        if self.is_retired()
+            && self
+                .retirement_reason
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+        {
             return Err(AikitError::new(
                 "manifest.invalid",
                 format!(
@@ -445,7 +462,6 @@ pub enum ExecMode {
     Replace,
 }
 
-
 impl ExecMode {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -480,7 +496,6 @@ pub enum WorkingDir {
     /// The capsule's own payload directory.
     Capsule,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -525,7 +540,6 @@ pub enum SkillFormat {
     Aikit,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[derive(Default)]
@@ -535,7 +549,6 @@ pub enum SkillActivation {
     #[default]
     ModelOrUser,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -569,7 +582,6 @@ pub enum HookPhase {
     Observe,
     Capture,
 }
-
 
 impl HookPhase {
     pub fn as_str(self) -> &'static str {
@@ -610,7 +622,6 @@ pub enum FailurePolicy {
     /// Allow, but record and surface a warning.
     Warn,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -688,6 +699,67 @@ pub struct ToolSection {
     /// A script capsule that can install the tool. Never run implicitly.
     #[serde(default)]
     pub install_hint: Option<String>,
+}
+
+/// One MCP server, packaged as a capability source a target can be handed.
+///
+/// The server record is a whole record wherever it is projected: a scope that
+/// redeclares the server replaces it entirely rather than deep-merging into it
+/// — the `config_merge = "replace"` semantics ([`ConfigMerge`]), so one scope's
+/// `env` key can never bleed into another's server definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolProtocolSection {
+    /// Name the server is exported under. Defaults to the capsule's leaf, the
+    /// same rule `[skill] export_name` follows.
+    #[serde(default)]
+    pub export_name: Option<String>,
+    pub server: ToolServerRecord,
+}
+
+/// How to bring one MCP server up: launch it locally (`command`) or reach it
+/// over the network (`url`). Exactly one of the two — enforced at parse, since
+/// a record that could do both or neither is a contradiction no projection can
+/// resolve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolServerRecord {
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Working directory for a locally launched server.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+impl ToolProtocolSection {
+    fn validate(&self, id: &CapsuleId) -> Result<()> {
+        match (&self.server.command, &self.server.url) {
+            (Some(_), Some(_)) => Err(AikitError::new(
+                "manifest.invalid",
+                format!(
+                    "`{id}` declares both `server.command` and `server.url`; an MCP server is \
+                     either launched locally or reached over a URL — remove the one that does \
+                     not apply"
+                ),
+            )
+            .with("id", id.to_string())),
+            (None, None) => Err(AikitError::new(
+                "manifest.invalid",
+                format!(
+                    "`{id}` declares neither `server.command` nor `server.url`; set `command` to \
+                     launch a local server or `url` to reach a remote one"
+                ),
+            )
+            .with("id", id.to_string())),
+            _ => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -785,6 +857,8 @@ struct RawManifest {
     session: Option<SessionSection>,
     #[serde(default)]
     tool: Option<ToolSection>,
+    #[serde(default, rename = "tool-protocol")]
+    tool_protocol: Option<ToolProtocolSection>,
     #[serde(default)]
     alias: Option<AliasSection>,
     #[serde(default)]
@@ -810,6 +884,7 @@ pub enum Payload {
     Guidance(GuidanceSection),
     Session(SessionSection),
     Tool(ToolSection),
+    ToolProtocol(ToolProtocolSection),
     Alias(AliasSection),
     Template(TemplateSection),
 }
@@ -870,7 +945,10 @@ pub struct Capsule {
 impl Capsule {
     pub fn from_toml_str(src: &str) -> Result<Self> {
         let raw: RawManifest = toml::from_str(src).map_err(|e| {
-            AikitError::new("manifest.parse_error", format!("could not parse manifest: {e}"))
+            AikitError::new(
+                "manifest.parse_error",
+                format!("could not parse manifest: {e}"),
+            )
         })?;
         Self::from_raw(raw)
     }
@@ -920,7 +998,9 @@ impl Capsule {
         if raw.description.trim().is_empty() {
             return err(
                 "manifest.invalid",
-                format!("`{id}` has an empty description; the description is what makes it findable"),
+                format!(
+                    "`{id}` has an empty description; the description is what makes it findable"
+                ),
             );
         }
 
@@ -943,6 +1023,14 @@ impl Capsule {
             Kind::Guidance => Payload::Guidance(raw.guidance.clone().ok_or_else(missing)?),
             Kind::Session => Payload::Session(raw.session.clone().ok_or_else(missing)?),
             Kind::Tool => Payload::Tool(raw.tool.clone().ok_or_else(missing)?),
+            Kind::ToolProtocol => {
+                let mut s = raw.tool_protocol.clone().ok_or_else(missing)?;
+                if s.export_name.as_deref().unwrap_or("").is_empty() {
+                    s.export_name = Some(id.leaf().to_string());
+                }
+                s.validate(&id)?;
+                Payload::ToolProtocol(s)
+            }
             Kind::Alias => Payload::Alias(raw.alias.clone().ok_or_else(missing)?),
             Kind::Template => Payload::Template(raw.template.clone().ok_or_else(missing)?),
         };
@@ -956,6 +1044,7 @@ impl Capsule {
             ("guidance", raw.guidance.is_some()),
             ("session", raw.session.is_some()),
             ("tool", raw.tool.is_some()),
+            ("tool-protocol", raw.tool_protocol.is_some()),
             ("alias", raw.alias.is_some()),
             ("template", raw.template.is_some()),
         ];
@@ -1026,9 +1115,7 @@ impl Capsule {
         for (name, ref_string) in &raw.secrets {
             let exportable = !name.is_empty()
                 && !name.starts_with(|c: char| c.is_ascii_digit())
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
             if !exportable {
                 return Err(AikitError::new(
                     "manifest.invalid",
@@ -1036,17 +1123,13 @@ impl Capsule {
                 )
                 .with("id", id.to_string()));
             }
-            let secret_ref = crate::secret_ref::SecretRef::parse(ref_string).map_err(|e| {
-                e.with("id", id.to_string()).with("secret", name.clone())
-            })?;
+            let secret_ref = crate::secret_ref::SecretRef::parse(ref_string)
+                .map_err(|e| e.with("id", id.to_string()).with("secret", name.clone()))?;
             secrets.insert(name.clone(), secret_ref);
         }
         for req in &raw.requires {
             if req.id == id {
-                return err(
-                    "manifest.invalid",
-                    format!("`{id}` requires itself"),
-                );
+                return err("manifest.invalid", format!("`{id}` requires itself"));
             }
         }
         for con in &raw.conflicts {
@@ -1118,6 +1201,12 @@ impl Capsule {
             _ => None,
         }
     }
+    pub fn tool_protocol(&self) -> Option<&ToolProtocolSection> {
+        match &self.payload {
+            Payload::ToolProtocol(s) => Some(s),
+            _ => None,
+        }
+    }
     pub fn alias(&self) -> Option<&AliasSection> {
         match &self.payload {
             Payload::Alias(s) => Some(s),
@@ -1166,7 +1255,10 @@ mod tests {
     #[test]
     fn kinds_declare_what_activation_means_for_them() {
         for kind in Kind::ALL {
-            assert!(!kind.activation_meaning().is_empty(), "{kind} has no meaning");
+            assert!(
+                !kind.activation_meaning().is_empty(),
+                "{kind} has no meaning"
+            );
         }
     }
 
@@ -1179,6 +1271,161 @@ mod tests {
         // explicit confirmation to run, which is a different control.
         assert!(!Kind::Script.requires_trust_to_activate());
         assert!(Kind::Script.runnable_while_inactive());
+    }
+
+    #[test]
+    fn a_tool_protocol_capsule_parses_with_a_full_server_record() {
+        let src = r#"
+schema = 1
+id = "tool-protocol/bimba/server"
+kind = "tool-protocol"
+name = "Bimba"
+description = "Bimba MCP server."
+
+[tool-protocol]
+export_name = "bimba"
+
+[tool-protocol.server]
+command = "/Users/admin/Central/Work/epi/bimba-portable/bimba-mcp.sh"
+args = ["--stdio"]
+env = { BIMBA_PORT = "8899" }
+cwd = "/Users/admin/Central/Work/epi"
+"#;
+        let c = Capsule::from_toml_str(src).unwrap();
+        let section = c.tool_protocol().unwrap();
+        assert_eq!(section.export_name.as_deref(), Some("bimba"));
+        assert_eq!(
+            section.server.command.as_deref(),
+            Some("/Users/admin/Central/Work/epi/bimba-portable/bimba-mcp.sh")
+        );
+        assert_eq!(section.server.args, vec!["--stdio"]);
+        assert_eq!(section.server.env["BIMBA_PORT"], "8899");
+        assert_eq!(
+            section.server.cwd.as_deref(),
+            Some("/Users/admin/Central/Work/epi")
+        );
+        assert_eq!(section.server.url, None);
+    }
+
+    #[test]
+    fn a_url_only_tool_protocol_capsule_parses() {
+        let src = r#"
+schema = 1
+id = "tool-protocol/docs/search"
+kind = "tool-protocol"
+name = "Search"
+description = "Remote MCP search server."
+
+[tool-protocol.server]
+url = "https://mcp.example.com/sse"
+"#;
+        let c = Capsule::from_toml_str(src).unwrap();
+        let section = c.tool_protocol().unwrap();
+        assert_eq!(
+            section.server.url.as_deref(),
+            Some("https://mcp.example.com/sse")
+        );
+        assert_eq!(section.server.command, None);
+        assert_eq!(c.kind, Kind::ToolProtocol);
+    }
+
+    #[test]
+    fn a_tool_server_declaring_both_command_and_url_is_refused() {
+        let src = r#"
+schema = 1
+id = "tool-protocol/bimba/server"
+kind = "tool-protocol"
+name = "Bimba"
+description = "Declares both transports."
+
+[tool-protocol.server]
+command = "bimba-mcp"
+url = "https://mcp.example.com/sse"
+"#;
+        let err = Capsule::from_toml_str(src).unwrap_err();
+        assert_eq!(err.code(), "manifest.invalid");
+        assert!(err.message().contains("server.command"));
+        assert!(err.message().contains("server.url"));
+    }
+
+    #[test]
+    fn a_tool_server_declaring_neither_command_nor_url_is_refused() {
+        let src = r#"
+schema = 1
+id = "tool-protocol/bimba/server"
+kind = "tool-protocol"
+name = "Bimba"
+description = "Declares no transport."
+
+[tool-protocol.server]
+args = ["--stdio"]
+"#;
+        let err = Capsule::from_toml_str(src).unwrap_err();
+        assert_eq!(err.code(), "manifest.invalid");
+        assert!(err.message().contains("server.command"));
+        assert!(err.message().contains("server.url"));
+    }
+
+    #[test]
+    fn a_tool_protocol_export_name_defaults_to_the_capsule_leaf() {
+        let src = r#"
+schema = 1
+id = "tool-protocol/rust/cargo-mcp"
+kind = "tool-protocol"
+name = "cargo-mcp"
+description = "Cargo MCP server."
+
+[tool-protocol.server]
+command = "cargo-mcp"
+"#;
+        let c = Capsule::from_toml_str(src).unwrap();
+        assert_eq!(
+            c.tool_protocol().unwrap().export_name.as_deref(),
+            Some("cargo-mcp")
+        );
+    }
+
+    #[test]
+    fn a_tool_protocol_capsule_requires_trust_to_activate() {
+        // Projecting an MCP server record makes the harness launch or dial the
+        // server, which executes code — the same gate a hook sits behind.
+        assert!(Kind::ToolProtocol.requires_trust_to_activate());
+        assert!(!Kind::ToolProtocol.activation_meaning().is_empty());
+    }
+
+    #[test]
+    fn a_tool_protocol_capsule_parses_from_a_complete_manifest() {
+        let src = r#"
+schema = 1
+id = "tool-protocol/bimba/server"
+kind = "tool-protocol"
+name = "Bimba"
+description = "Bimba MCP server."
+tags = ["mcp", "tools"]
+targets = ["claude-code"]
+
+[tool-protocol.server]
+command = "bimba-mcp"
+args = ["--stdio"]
+
+[metadata.aikit]
+facing = "internal"
+
+[secrets]
+BIMBA_TOKEN = "op://Central/bimba/token"
+"#;
+        let c = Capsule::from_toml_str(src).unwrap();
+        assert_eq!(c.kind, Kind::ToolProtocol);
+        assert!(c.supports_target(&TargetId::new("claude-code")));
+        assert_eq!(
+            c.secrets["BIMBA_TOKEN"].to_string(),
+            "op://Central/bimba/token"
+        );
+        assert_eq!(c.facets.facing, Facing::Internal);
+        assert_eq!(
+            c.tool_protocol().unwrap().server.command.as_deref(),
+            Some("bimba-mcp")
+        );
     }
 
     #[test]
@@ -1249,7 +1496,10 @@ entry = "payload/run.sh"
 [[requires]]
 id = "script/test/thing"
 "#;
-        assert_eq!(Capsule::from_toml_str(src).unwrap_err().code(), "manifest.invalid");
+        assert_eq!(
+            Capsule::from_toml_str(src).unwrap_err().code(),
+            "manifest.invalid"
+        );
     }
 
     #[test]
@@ -1264,7 +1514,10 @@ description = "   "
 [script]
 entry = "payload/run.sh"
 "#;
-        assert_eq!(Capsule::from_toml_str(src).unwrap_err().code(), "manifest.invalid");
+        assert_eq!(
+            Capsule::from_toml_str(src).unwrap_err().code(),
+            "manifest.invalid"
+        );
     }
 
     #[test]
@@ -1287,7 +1540,10 @@ type = "path"
 name = "path"
 type = "string"
 "#;
-        assert_eq!(Capsule::from_toml_str(src).unwrap_err().code(), "manifest.invalid");
+        assert_eq!(
+            Capsule::from_toml_str(src).unwrap_err().code(),
+            "manifest.invalid"
+        );
     }
 
     #[test]

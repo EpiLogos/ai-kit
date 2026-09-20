@@ -22,8 +22,6 @@ pub mod actor_bootstrap;
 pub mod application_context;
 pub mod arg;
 pub mod capsule;
-pub mod continuity;
-pub mod domain;
 pub mod catalog;
 pub mod composition;
 pub mod composition_explain_history;
@@ -34,11 +32,11 @@ pub mod context;
 pub mod context_activation;
 pub mod context_resolution;
 pub mod context_source;
+pub mod continuity;
 pub mod credential;
 pub mod credential_world;
 pub mod doctor_world;
-pub mod workcell_world;
-pub mod secret_ref;
+pub mod domain;
 pub mod duration;
 pub mod effects;
 pub mod error;
@@ -50,13 +48,14 @@ pub mod flow_cognition;
 pub mod frecency;
 pub mod guidance;
 pub mod harness_admission;
+pub mod harness_profile;
 pub mod hooks;
 pub mod id;
 pub mod knowledge;
 pub mod knowledge_code;
 pub mod knowledge_entity_address;
+pub mod knowledge_facets;
 pub mod knowledge_ingest;
-pub mod knowledge_wiki_shape_v2;
 pub mod knowledge_living;
 pub mod knowledge_living_context;
 pub mod knowledge_living_relations;
@@ -70,11 +69,15 @@ pub mod knowledge_wiki;
 pub mod knowledge_wiki_index;
 pub mod knowledge_wiki_provider;
 pub mod knowledge_wiki_shape;
+pub mod knowledge_wiki_shape_v2;
 pub mod knowledge_wiki_write;
 pub mod lifecycle;
 pub mod live_activation_history;
 pub mod method;
+pub mod model_harness_binding;
+pub mod model_modality;
 pub mod model_runtime;
+pub mod now_contemplation;
 pub mod platform;
 pub mod policy;
 pub mod praxis;
@@ -93,6 +96,7 @@ pub mod resolve;
 pub mod resource;
 pub mod scope;
 pub mod search;
+pub mod secret_ref;
 pub mod session;
 pub mod session_ecology;
 pub mod session_lifecycle;
@@ -104,6 +108,7 @@ pub mod star;
 pub mod surface_material;
 pub mod surfacing;
 pub mod trust;
+pub mod workcell_world;
 pub mod working_environment;
 
 pub use error::{AikitError, Result};
@@ -113,14 +118,12 @@ pub use actor_bootstrap::{
     HarnessCompositionPointer, ResourceSetSummary, RuntimeBodyInspection, ACTOR_BOOTSTRAP_VERSION,
     BOOTSTRAP_RESOURCE_SAMPLE_LIMIT,
 };
-pub use application_context::{application_context_resolution, application_context_resolution_with_binding};
-pub use capsule::{
-    BypassPolicy, Capsule, ControlGround, ControlStanding, Facets, Facing, FailurePolicy, HookPhase,
-    Kind, LanguageFacet, Maturity, Payload, Requirement, Surface,
+pub use application_context::{
+    application_context_resolution, application_context_resolution_with_binding,
 };
-pub use continuity::{
-    CapabilityTuning, ContinuityTuning, ACTIVITY_EVIDENCE, CONTINUITY_NAMESPACE,
-    FLOOR_CAPABILITY, TURN_LEDGER,
+pub use capsule::{
+    BypassPolicy, Capsule, ControlGround, ControlStanding, Facets, Facing, FailurePolicy,
+    HookPhase, Kind, LanguageFacet, Maturity, Payload, Requirement, Surface,
 };
 pub use catalog::{Catalog, MemoryCatalog};
 pub use composition::{
@@ -165,6 +168,10 @@ pub use context_source::{
     ExternalEgress, Freshness, HorizonRequest, ProviderReadResult, RetrievalTarget, SearchAudience,
     StructuredAbsence, CONTEXT_SOURCE_INDEX_VERSION,
 };
+pub use continuity::{
+    CapabilityTuning, ContinuityTuning, ACTIVITY_EVIDENCE, CONTINUITY_NAMESPACE, FLOOR_CAPABILITY,
+    TURN_LEDGER,
+};
 pub use credential::{
     resolve_credential, resolve_registered_credential, CredentialBindingState,
     CredentialProviderRejection, CredentialRef, CredentialResolution, CredentialResolutionRequest,
@@ -180,10 +187,6 @@ pub use credential_world::{
 pub use doctor_world::{
     DoctorDisclosure, DoctorFinding, DoctorKnowledge, DoctorSeverity, DOCTOR_WORLD_VERSION,
 };
-pub use workcell_world::{
-    WorkcellDisclosure, WorkcellInstanceDisclosure, WorkcellKnowledge, WORKCELL_WORLD_VERSION,
-};
-pub use secret_ref::{SecretRef, SecretResolver};
 pub use duration::HumanDuration;
 pub use effects::{EffectClass, Effects};
 pub use explain_history::{
@@ -230,6 +233,14 @@ pub use harness_admission::{
     HarnessCompatibilityGap, HarnessEditionKind, HarnessFaculty, HarnessFacultyObservation,
     HarnessLifecyclePhase, HARNESS_ADAPTER_AUTHORING_SKILL, HARNESS_ADAPTER_SDK_VERSION,
 };
+pub use harness_profile::{
+    ActivationEffectName, GuidanceLayer, HarnessPresence, HarnessProfile, HarnessProfileError,
+    HookObserveDeclaration, HookProjectDeclaration, HooksLayer, LayerPosture, MergeGrammar,
+    MergePolicy, ModelDispatchPosture, SessionCapabilityFlags, SessionProtocol, SettingsLayer,
+    SkillsLayer, SkillsObserveDeclaration, ToolObserveDeclaration, ToolProjectDeclaration,
+    ToolsLayer, TrustSettingDeclaration, TrustSettingScope, TrustValueKind, TrustValueSchema,
+    HARNESS_PROFILE_SCHEMA,
+};
 pub use hooks::{
     build_chains, matches as hook_matches, BypassScope, BypassToken, Denial, Dispatcher,
     ExecutionGroup, HookChain, HookDecision, HookEvent, HookEventKind, HookStep, StepOutcome,
@@ -248,6 +259,14 @@ pub use knowledge::{
 pub use knowledge_code::{
     CodeContext, CodeImpact, CodeIndexCapabilities, CodeIndexProvider, CodeIndexStatus,
     CodeReference, CodeSearchHit, CodeTrace, GITNEXUS_TESTED_VERSION,
+};
+pub use knowledge_facets::{
+    attach_source_selector, parse_facets_from_extensions, parse_source_selector,
+    read_source_selector, write_facets_to_extensions, write_source_selector, FacetError,
+    PlaceFacet, PlaceGeometry, PlaceGeometryType, PlaceHierarchyEntry, PlaceIdentity, PlaceName,
+    PlacePrecision, SourceSelector, TechneFacetDeclaration, TechneFacets,
+    TechneSelectorDeclaration, TemporalFacet, TemporalInterval, TemporalKind, TemporalPrecision,
+    TECHNE_FACET_EXTENSION,
 };
 pub use knowledge_living::{
     build_integrative_reading, contemplate_preflight, deterministic_knowledge_impact,
@@ -278,8 +297,8 @@ pub use knowledge_living_relations::{
 pub use knowledge_living_transport::{parse_contemplate_generated, CONTEMPLATE_RETURN_VERSION};
 pub use knowledge_navigation::{
     KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation, KnowledgeProviderStatus,
-    KnowledgeRankingEvidence, KnowledgeSearchHit, KnowledgeSearchResult, SourcePoolBinding,
-    KNOWLEDGE_APPLICATION_VERSION,
+    KnowledgeRankingEvidence, KnowledgeSearchHit, KnowledgeSearchResult, PendingAuthoredTarget,
+    ProjectAuthoredPending, SourcePoolBinding, KNOWLEDGE_APPLICATION_VERSION,
 };
 pub use knowledge_okf::{validate_okf, OkfDocument, OKF_VERSION};
 pub use knowledge_operations::{
@@ -287,9 +306,10 @@ pub use knowledge_operations::{
 };
 pub use knowledge_resolution::{
     KnowledgeOpenReceipt, KnowledgeResolution, ResolutionKind, ResolutionRow, UnavailableProvider,
-    ACTION_CONTEMPLATE_FLOW, ACTION_KNOWLEDGE_EXPLAIN, ACTION_KNOWLEDGE_OPEN,
-    ACTION_KNOWLEDGE_READ, ACTION_KNOWLEDGE_RELATIONS, ACTION_KNOWLEDGE_ROUTE,
-    ACTION_KNOWLEDGE_SOURCES, ACTION_RUN, ACTION_SKILL_OVERLAY_SET, KNOWLEDGE_RESOLUTION_VERSION,
+    ACTION_CONTEMPLATE_FLOW, ACTION_CONTEMPLATE_NOW, ACTION_KNOWLEDGE_EXPLAIN,
+    ACTION_KNOWLEDGE_OPEN, ACTION_KNOWLEDGE_READ, ACTION_KNOWLEDGE_RELATIONS,
+    ACTION_KNOWLEDGE_ROUTE, ACTION_KNOWLEDGE_SOURCES, ACTION_RUN, ACTION_SKILL_OVERLAY_SET,
+    KNOWLEDGE_RESOLUTION_VERSION,
 };
 pub use knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceBinding, SourceHit, SourceMaterial,
@@ -302,19 +322,19 @@ pub use knowledge_wiki::{
     WikiNode, WikiObject, WikiProvenanceRef, WikiReading as SemanticWikiReading, WikiSpace,
     WikiSurfaceKind, OKF_WIKI_PROFILE,
 };
+pub use knowledge_wiki::{
+    project_id_from_space_ref, project_wiki_space_ref, PROJECT_WIKI_SPACE_REF_PREFIX,
+    ROOT_WIKI_SPACE_REF,
+};
 pub use knowledge_wiki_index::{
-    SemanticWikiIndex, WikiIndexStatus, WikiLocalWhole, WikiMutationProposal, WikiNeighbour,
-    WikiObjectEnvelope, WikiRelationDirection, WikiSearchAddress, WikiSearchHit,
-    WikiSearchHitKind, DEFAULT_WIKI_NEIGHBOUR_LIMIT, DEFAULT_WIKI_SEARCH_LIMIT,
-    SEMANTIC_WIKI_INDEX_VERSION,
+    repair_absence_lines, SemanticWikiIndex, WikiIndexRepair, WikiIndexStatus, WikiLocalWhole,
+    WikiMutationProposal, WikiNeighbour, WikiObjectEnvelope, WikiRelationDirection,
+    WikiSearchAddress, WikiSearchHit, WikiSearchHitKind, DEFAULT_WIKI_NEIGHBOUR_LIMIT,
+    DEFAULT_WIKI_SEARCH_LIMIT, SEMANTIC_WIKI_INDEX_VERSION,
 };
 pub use knowledge_wiki_provider::{
     SemanticWikiProvider, SemanticWikiProviderStatus, WikiExplanation,
     NATIVE_SEMANTIC_WIKI_PROVIDER,
-};
-pub use knowledge_wiki::{
-    project_id_from_space_ref, project_wiki_space_ref, PROJECT_WIKI_SPACE_REF_PREFIX,
-    ROOT_WIKI_SPACE_REF,
 };
 pub use knowledge_wiki_shape::{
     attribute_ql_relational_generation, attribute_ql_relational_generation_from_resolve,
@@ -339,9 +359,24 @@ pub use knowledge_wiki_write::{
 pub use lifecycle::{CapabilityLifecycle, LifecycleThresholds};
 pub use live_activation_history::live_activation_history_evidence;
 pub use method::{
-    resolve_method, resolve_skill_praxis_metadata, Method, MethodResolution,
-    MethodResolvedRef, MethodSkillRef, SituatedSkillRef, SkillPraxisMetadata,
-    SkillPraxisMetadataResolution, SkillPraxisResolvedRef, UsageOverlayRef, METHOD_VERSION,
+    resolve_method, resolve_skill_praxis_metadata, Method, MethodResolution, MethodResolvedRef,
+    MethodSkillRef, SituatedSkillRef, SkillPraxisMetadata, SkillPraxisMetadataResolution,
+    SkillPraxisResolvedRef, UsageOverlayRef, METHOD_VERSION,
+};
+pub use model_harness_binding::{HarnessModelDemand, HarnessProviderGate};
+pub use model_modality::{
+    compose_stage_modalities, diff_modality_contracts, explain_model_modality,
+    surface_interaction_support, surface_modality_support, ComposedModalityView,
+    ConnectionSemantics, CredentialScope, DeclaredSupport, InteractionCapability,
+    MaterialConstraints, ModalityContractDelta, ModalityDirection, ModalitySupport, ModelModality,
+    ModelModalityContract, ReconnectSupport, SurfaceAvailability, TransformCapability,
+    TransportKind, MODEL_MODALITY_VERSION,
+};
+pub use now_contemplation::{
+    explain_now_contemplate_preflight, explicit_now_contemplate, now_contemplate_preflight,
+    validate_now_contemplate_record, NowContemplateExecutor, NowContemplateRecord,
+    NowContemplation, NowContemplationPreflight, NowFixture, NowFixturesSeam, NowLearningProposal,
+    NOW_CONTEMPLATION_VERSION, THOUGHTS_READING_SCHEMA,
 };
 pub use platform::{MuxKind, Platform, TargetId};
 pub use policy::ManagedPolicy;
@@ -412,6 +447,7 @@ pub use search::{
     parse_query, score, DocStatus, FastPrefix, Query, RankingSignals, SearchDoc, StatusFilter,
     UsageStats,
 };
+pub use secret_ref::{SecretRef, SecretResolver};
 pub use session::{
     compile as compile_session, Attach, BackendSpec, Direction, Lifecycle, PaneSpec, PaneStep,
     Placement, Restart, SessionPlan, SessionSpec, Split, TaskSpec, ViewPlan, ViewSpec,
@@ -440,5 +476,8 @@ pub use skillset::{
 };
 pub use surfacing::{plan_surfacing, DisplayContext, SurfacingPlan};
 pub use trust::{TrustKey, TrustOracle, TrustState};
+pub use workcell_world::{
+    WorkcellDisclosure, WorkcellInstanceDisclosure, WorkcellKnowledge, WORKCELL_WORLD_VERSION,
+};
 
 pub mod recurrence;

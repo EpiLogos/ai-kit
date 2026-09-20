@@ -1,0 +1,27 @@
+{
+  "session": {
+    "type": "realtime",
+    "model": "gpt-realtime",
+    "output_modalities": ["audio", "text"],
+    "voice": "marin",
+    "instructions": "You are a helpful voice assistant.",
+    "input_audio_format": "pcm16",
+    "output_audio_format": "pcm16",
+    "input_audio_noise_reduction": { "type": "near_field" },
+    "input_audio_transcription": { "model": "gpt-4o-transcribe" },
+    "turn_detection": {
+      "type": "semantic_vad",
+      "interrupt_response": true,
+      "create_response": true
+    },
+    "tools": [
+      {
+        "type": "function",
+        "name": "look_up_schedule",
+        "description": "Look up an appointment",
+        "parameters": { "type": "object", "properties": {} }
+      }
+    ],
+    "tool_choice": "auto"
+  }
+}

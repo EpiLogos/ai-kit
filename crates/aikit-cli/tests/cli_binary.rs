@@ -113,8 +113,11 @@ fn search_json_finds_a_capability_by_name() {
 #[test]
 fn an_unknown_capability_is_a_resolution_failure_with_exit_code_three() {
     let (home, project) = scene();
-    let (output, value) =
-        run_json(home.path(), project.path(), &["explain", "script/no/such", "--json"]);
+    let (output, value) = run_json(
+        home.path(),
+        project.path(),
+        &["explain", "script/no/such", "--json"],
+    );
 
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "resolution.unknown_capability");
@@ -144,8 +147,161 @@ fn a_bad_scope_argument_is_a_usage_error_with_exit_code_two() {
     let (_output, value) = run_json(
         home.path(),
         project.path(),
-        &["enable", "script/demo/greet", "--scope", "nonsense", "--json"],
+        &[
+            "enable",
+            "script/demo/greet",
+            "--scope",
+            "nonsense",
+            "--json",
+        ],
     );
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "cli.usage");
+}
+
+#[test]
+fn flow_contemplates_a_now_stream_through_the_real_binary() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write(&project.path().join(".aikit/profile.toml"), "schema = 1\n");
+    let seam = project.path().join("now-stream.json");
+    write(
+        &seam,
+        r#"{
+  "schema": "central.thoughts-reading/v1",
+  "now_ref": "central:now:control:root:cli",
+  "total": 1,
+  "truncated": false,
+  "fixtures": [
+    {"file": "raw-2026-09-13.md", "revision": "central.content-fnv1a64/v1:1:aa", "conforming": true, "day": "2026-09-13", "actor": "agent:test", "actor_kind": "agent", "content": "raw body"}
+  ]
+}"#,
+    );
+    let run = |args: &[&str]| {
+        let output = std::process::Command::new(cargo_bin!("aikit"))
+            .env("AIKIT_HOME", home.path())
+            .current_dir(project.path())
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            serde_json::from_slice::<Value>(&output.stdout).ok(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (ok, json, stderr) = run(&[
+        "flow",
+        "preflight",
+        "--now-ref",
+        "central:now:control:root:cli",
+        "--fixtures",
+        seam.to_str().unwrap(),
+    ]);
+    assert!(ok, "{stderr}");
+    let data = json.unwrap();
+    assert_eq!(data["contemplation"]["state"], "unavailable");
+    assert_eq!(data["preflight"]["fixture_count"], 1);
+    assert!(data["preflight"]["invocation_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("now-contemplate/"));
+
+    // A stream that disagrees with the addressed NOW refuses outright.
+    let (ok, _, stderr) = run(&[
+        "flow",
+        "preflight",
+        "--now-ref",
+        "central:now:control:root:other",
+        "--fixtures",
+        seam.to_str().unwrap(),
+    ]);
+    assert!(!ok, "{stderr}");
+
+    // `--now-ref` without `--fixtures` refuses before any owner call.
+    let (ok, _, stderr) = run(&[
+        "flow",
+        "preflight",
+        "--now-ref",
+        "central:now:control:root:cli",
+    ]);
+    assert!(!ok, "{stderr}");
+}
+
+#[test]
+fn system_emits_the_wave5_owner_disclosure_descriptor() {
+    let (home, project) = scene();
+    let (output, value) = run_json(home.path(), project.path(), &["system", "--json"]);
+
+    assert!(output.status.success(), "system should succeed: {value}");
+
+    // The bare v2 descriptor is the document on stdout — no ActionResult
+    // envelope. Mounts read the top-level `schema` key and would otherwise
+    // degrade AIKit to unavailable.
+    assert_eq!(value["schema"], "oi.product-settings-disclosure/v2");
+    for envelope_key in ["ok", "context", "data", "warnings"] {
+        assert!(
+            value.get(envelope_key).is_none(),
+            "system must not wrap the descriptor in the ActionResult envelope (found top-level `{envelope_key}`)"
+        );
+    }
+
+    assert_eq!(value["product_id"], "ai-kit");
+    assert_eq!(value["contract_revision"], "wave-5/system.1");
+    assert_eq!(
+        value["owner"]["reading_command"],
+        serde_json::json!(["aikit", "system", "--json"])
+    );
+    assert_eq!(value["owner"]["owner_id"], "ai-kit");
+    // The canonical reading digest is a real SHA-256 hex fingerprint, not null.
+    let digest = value["owner"]["reading_digest"]
+        .as_str()
+        .expect("digest present");
+    assert_eq!(digest.len(), 64);
+    assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+
+    assert_eq!(value["availability"]["state"], "available");
+
+    // Every section exposes settings, and every setting exposes all five axes.
+    let sections = value["sections"].as_array().expect("sections present");
+    assert!(!sections.is_empty());
+    for section in sections {
+        for setting in section["settings"].as_array().unwrap() {
+            for axis in ["declared", "effective", "active", "staged"] {
+                assert!(
+                    setting["axes"][axis]["provenance"]["owner_ref"]
+                        .as_str()
+                        .is_some(),
+                    "axis {axis} must carry provenance in {setting}"
+                );
+            }
+            assert!(setting["axes"]["staged"]["stage_state"].as_str().is_some());
+            assert_eq!(setting["axes"]["expected_effect"]["ref"], "aikit diff");
+            assert_eq!(setting["mutable"], false);
+
+            // The declared axis is never a clone of effective (§4.8): where
+            // nothing was authored declared is null, and where something was
+            // authored it carries its own provenance path.
+            let declared = &setting["axes"]["declared"];
+            let effective = &setting["axes"]["effective"];
+            if !declared["value"].is_null() {
+                assert_ne!(
+                    declared["provenance"]["path"], effective["provenance"]["path"],
+                    "a non-null declared axis must not share effective's provenance: {setting}"
+                );
+            }
+        }
+    }
+
+    // Actions are disclosed or named as obligations, never rendered disabled.
+    let actions = value["actions"].as_array().expect("actions present");
+    assert!(actions.iter().any(|a| a["action_ref"] == "aikit.explain"));
+    assert!(actions
+        .iter()
+        .any(|a| a["action_ref"] == "aikit.session.attach"));
+
+    // Presence-only: the reading must never carry a secret value or marker.
+    let raw = value.to_string();
+    assert!(!raw.contains("SecretValue"));
+    assert!(!raw.contains("sk-"));
 }

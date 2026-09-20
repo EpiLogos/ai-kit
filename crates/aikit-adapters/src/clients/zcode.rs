@@ -119,9 +119,11 @@ impl TargetAdapter for ZcodeAdapter {
 
     fn capabilities(&self) -> TargetCapabilities {
         TargetCapabilities {
-            // The dispatch entries are read once at session start, and no native
-            // skill projection exists yet — capabilities are reached through the
-            // broker, which is also the honest isolation story.
+            // The dispatch entries are read once at session start, and AIKit
+            // projects no zcode skill seam: zcode loads skills natively from
+            // the codex-managed `~/.agents/skills` shared tree (codex's
+            // managed projection is zcode's delivery) and from plugin-shipped
+            // skills; the broker remains the isolation story.
             live_reload: false,
             symlinks: false,
             isolated_per_context: false,
@@ -135,8 +137,9 @@ impl TargetAdapter for ZcodeAdapter {
         Ok(ProjectionPlan::new(
             self.target(),
             ActivationEffect::brokered(
-                "no native skill projection is built for zcode; capabilities are reached \
-                 through AIKit's broker surfaces",
+                "zcode loads skills natively from the codex-managed ~/.agents/skills shared \
+                 tree, so AIKit projects no separate zcode skill seam; the broker is the \
+                 isolation path",
             ),
         )
         .with_note(
@@ -302,7 +305,7 @@ impl ClientAdapter for ZcodeAdapter {
                     "client.settings_unreadable",
                     format!("could not read {}: {e}", path.display()),
                 )
-                .with("path", path.display().to_string()))
+                .with("path", path.display().to_string()));
             }
         };
 
@@ -317,144 +320,37 @@ impl ClientAdapter for ZcodeAdapter {
 
 /// The command AIKit installs for one event.
 pub fn dispatch_command(event: &HookEventKind) -> String {
-    format!("aikit hook dispatch {CLIENT} {event}")
+    crate::layers::dispatch_command(CLIENT, event)
 }
 
-/// Is this an AIKit dispatcher entry — including a stale one from an older
-/// install that spelled the event differently?
-fn is_aikit_entry(command: &str) -> bool {
-    command
-        .trim()
-        .starts_with(&format!("aikit hook dispatch {CLIENT}"))
-}
-
-/// Merge AIKit's dispatcher entries into a zcode configuration document.
+/// Merge AIKit's dispatcher entries into a zcode configuration document,
+/// as the exact serialized JSON to write.
 ///
 /// The seam is the descriptor's: a top-level `hooks` block shaped
 /// `{ enabled: true, events: { <Event>: [ { matcher?, hooks: [...] } ] } }`.
-/// Configuration-file hooks are inert without `enabled: true`, so the merged
-/// document carries it — unless the user disabled hooks explicitly, in which
-/// case install refuses rather than silently re-enabling the user's own hooks
-/// alongside AIKit's.
-///
-/// Everything that is not AIKit's is preserved: unrelated top-level keys,
-/// foreign events, and the user's own hooks inside events AIKit also uses. A
-/// previous AIKit entry is *not* preserved, because leaving one behind next to
-/// a new one would fire the whole chain twice.
+/// The grammar — the `enabled` law, the user-disabled refusal, matcher
+/// omission, the stale sweep by dispatch-command identity, empty-event
+/// pruning — lives once in [`crate::layers`]; this is the string seam the
+/// adapter's install reads and writes whole files through.
 pub fn merge_dispatcher_entries(
     existing: Option<&str>,
     events: &DescriptorEvents,
 ) -> Result<String> {
-    let mut document: serde_json::Value = match existing {
-        None => serde_json::json!({}),
-        Some(raw) if raw.trim().is_empty() => serde_json::json!({}),
-        Some(raw) => serde_json::from_str(raw).map_err(|e| {
-            AikitError::new(
-                "client.settings_unreadable",
-                format!(
-                    "the existing zcode configuration is not valid JSON ({e}); AIKit will not \
-                     overwrite a file it cannot read"
-                ),
-            )
-        })?,
-    };
-
-    if !document.is_object() {
-        return Err(AikitError::new(
+    let document = crate::layers::parse_existing_document(existing, |e| {
+        AikitError::new(
             "client.settings_unreadable",
-            "the existing zcode configuration is not a JSON object",
-        ));
-    }
-
-    let hooks = document
-        .as_object_mut()
-        .and_then(|o| {
-            o.entry("hooks")
-                .or_insert_with(|| serde_json::json!({}))
-                .as_object_mut()
-        })
-        .ok_or_else(|| {
-            AikitError::new(
-                "client.settings_unreadable",
-                "the existing `hooks` value is not an object",
-            )
-        })?;
-
-    if hooks.get("enabled") == Some(&serde_json::Value::Bool(false)) {
-        return Err(AikitError::new(
-            "client.hooks_disabled_by_user",
-            "zcode's configuration-file hooks are explicitly disabled \
-             (`hooks.enabled: false`); enabling the runner would also activate hooks the \
-             user kept disabled, so AIKit refuses instead of flipping the flag",
-        ));
-    }
-    hooks.insert("enabled".to_string(), serde_json::Value::Bool(true));
-
-    let events_map = hooks
-        .entry("events".to_string())
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .ok_or_else(|| {
-            AikitError::new(
-                "client.settings_unreadable",
-                "the existing `hooks.events` value is not an object",
-            )
-        })?;
-
-    // A previous install may have written an entry under an event AIKit no
-    // longer dispatches, or under a misspelling. Sweep those first, everywhere.
-    for entries in events_map.values_mut() {
-        if let Some(matchers) = entries.as_array_mut() {
-            for matcher in matchers.iter_mut() {
-                if let Some(list) = matcher.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                    list.retain(|hook| {
-                        !hook
-                            .get("command")
-                            .and_then(|c| c.as_str())
-                            .is_some_and(is_aikit_entry)
-                    });
-                }
-            }
-            matchers.retain(|matcher| {
-                matcher
-                    .get("hooks")
-                    .and_then(|h| h.as_array())
-                    .is_none_or(|list| !list.is_empty())
-            });
-        }
-    }
-
-    for (event, native_name) in events {
-        // No matcher: omitted matches everything, and a matcher AIKit invented
-        // would narrow what the dispatcher sees.
-        let entry = serde_json::json!({
-            "hooks": [{ "type": "command", "command": dispatch_command(event) }]
-        });
-
-        let list = events_map
-            .entry(native_name.clone())
-            .or_insert_with(|| serde_json::json!([]));
-        match list.as_array_mut() {
-            Some(array) => array.push(entry),
-            None => {
-                return Err(AikitError::new(
-                    "client.settings_unreadable",
-                    format!("the existing `hooks.events.{event}` value is not an array"),
-                ))
-            }
-        }
-    }
-
-    // Remove any event key that ended up empty after the sweep, so an old install
-    // does not leave `"Stop": []` behind forever.
-    events_map.retain(|_, entries| entries.as_array().is_none_or(|a| !a.is_empty()));
-
-    let mut rendered = serde_json::to_string_pretty(&document).map_err(|e| {
+            format!(
+                "the existing zcode configuration is not valid JSON ({e}); AIKit will not \
+                 overwrite a file it cannot read"
+            ),
+        )
+    })?;
+    let (merged, _report) =
+        crate::layers::zcode_hook_wrapper(&document, events, CLIENT).map_err(AikitError::from)?;
+    crate::layers::render_document(&merged, |e| {
         AikitError::new(
             "client.settings_unreadable",
             format!("could not render the merged configuration: {e}"),
         )
-    })?;
-    rendered.push('\n');
-    Ok(rendered)
+    })
 }

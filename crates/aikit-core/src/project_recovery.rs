@@ -126,14 +126,17 @@ pub fn project_recovery(
             state: ProjectRecoveryStageState::Available,
             resources: reflected_canon.clone(),
             sources: Vec::new(),
-            note: "authored/canonical ProjectMap source is available without requiring ProjectCentral".into(),
+            note:
+                "authored/canonical ProjectMap source is available without requiring ProjectCentral"
+                    .into(),
         },
         None => ProjectRecoveryStage {
             kind: ProjectRecoveryStageKind::AuthoredGround,
             state: ProjectRecoveryStageState::OptionalAbsent,
             resources: Vec::new(),
             sources: Vec::new(),
-            note: "ordinary Projects remain valid without a Central-authored ground aperture".into(),
+            note: "ordinary Projects remain valid without a Central-authored ground aperture"
+                .into(),
         },
     };
     stages.push(ground_stage);
@@ -317,9 +320,13 @@ pub fn project_recovery(
 fn resolved_local_role(classification: &LocalSourceClassification) -> Option<LocalSourceRole> {
     match classification {
         LocalSourceClassification::Classified(evidence)
-            if !evidence.evidence.iter().all(|item| {
-                item == "conventional-filename-hint" || item == "path-hint"
-            }) => Some(evidence.role),
+            if !evidence
+                .evidence
+                .iter()
+                .all(|item| item == "conventional-filename-hint" || item == "path-hint") =>
+        {
+            Some(evidence.role)
+        }
         LocalSourceClassification::Classified(_)
         | LocalSourceClassification::Ambiguous(_)
         | LocalSourceClassification::Unresolved => None,

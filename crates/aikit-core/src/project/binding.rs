@@ -12,9 +12,15 @@ use super::{ProjectConstituentRef, ProjectRef};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ProjectBindingLocator {
-    LocalDirectory { path: PathBuf },
-    Repository { repository: String },
-    Remote { locator: String },
+    LocalDirectory {
+        path: PathBuf,
+    },
+    Repository {
+        repository: String,
+    },
+    Remote {
+        locator: String,
+    },
     /// An owner-admitted World is an operative ground even when it has no
     /// local child-Project directory. This locator preserves the native relation;
     /// it neither invents a working tree nor grants filesystem access.

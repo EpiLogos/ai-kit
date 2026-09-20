@@ -18,7 +18,9 @@ use aikit_cli::app::{
 };
 use aikit_cli::cli::*;
 use aikit_cli::json::{self, EnvelopeContext};
-use aikit_cli::{credential, hook, multicall, run, ui, SessionLifecycleServiceOps};
+use aikit_cli::{
+    credential, hook, multicall, run, ui, SessionLifecycleServiceOps,
+};
 use aikit_tui::{application_service::ApplicationService, ExplainHistoryApplicationService};
 
 use aikit_core::hooks::HookEvent;
@@ -106,6 +108,15 @@ enum Reply {
         /// reports `EXIT_OK`.
         exit_code: i32,
     },
+    /// A bare JSON document printed verbatim, never wrapped in the ActionResult
+    /// envelope. `system` uses this so the O:I mount reads a bare
+    /// `oi.product-settings-disclosure/v2` document on stdout (the L6 rule:
+    /// mounts never unwrap a product-specific envelope).
+    RawJson(Value),
+    /// A bare JSON document printed verbatim with its own exit status. The
+    /// configuration-plane verbs speak bare documents in both directions: a
+    /// failure is an `oi.config-error/v1` document on stdout, never an envelope.
+    RawJsonWithStatus(Value, i32),
     /// Raw text to print verbatim, envelope or not (`shell init`, an explanation).
     Text(String),
     /// A child process ran; its exit status is ours.
@@ -125,6 +136,7 @@ fn reply(service: &Service, data: Value, warnings: Vec<String>) -> Reply {
 
 fn diagnostic_warnings(service: &Service) -> Vec<String> {
     let mut warnings = service.load_warnings();
+    warnings.extend(service.context_composition_notes());
     warnings.extend(service.resolved().warnings.clone());
     warnings
 }
@@ -146,6 +158,22 @@ fn emit(reply: Reply, json_mode: bool) -> i32 {
                 }
             }
             exit_code
+        }
+        Reply::RawJson(value) => {
+            if json_mode {
+                println!("{}", json::line(&value));
+            } else {
+                println!("{}", json::pretty(&value));
+            }
+            json::EXIT_OK
+        }
+        Reply::RawJsonWithStatus(value, code) => {
+            if json_mode {
+                println!("{}", json::line(&value));
+            } else {
+                println!("{}", json::pretty(&value));
+            }
+            code
         }
         Reply::Text(text) => {
             println!("{text}");
@@ -189,7 +217,15 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Trust(a)) => cmd_trust(cwd, a),
         Some(Command::Wiki(c)) => cmd_wiki(cwd, c),
         Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),
-        Some(Command::Status(a)) => cmd_status(cwd, a),
+        Some(Command::Status(a)) => cmd_status(cwd, a, json_mode),
+        Some(Command::System(_)) => cmd_system(cwd),
+        Some(Command::ConfigContribution(_)) => Ok(Reply::RawJson(
+            aikit_cli::config_plane::contribution_document(cwd),
+        )),
+        Some(Command::Config(c)) => match aikit_cli::config_plane::dispatch(cwd, c) {
+            Ok(document) => Ok(Reply::RawJsonWithStatus(document, json::EXIT_OK)),
+            Err(failure) => Ok(Reply::RawJsonWithStatus(failure.doc, failure.exit)),
+        },
         Some(Command::Explain(a)) => cmd_explain(cwd, a),
         Some(Command::History(a)) => cmd_history(cwd, a),
         Some(Command::Run(a)) => cmd_run(cwd, a),
@@ -203,9 +239,27 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Task(c)) => cmd_task(cwd, c),
         Some(Command::Bypass(c)) => cmd_bypass(cwd, c),
         Some(Command::Bypasses(_)) => cmd_bypasses(cwd),
-        Some(Command::Hook(c)) => cmd_hook(cwd, c),
+        Some(Command::Hook(c)) => cmd_hook(cwd, c, json_mode),
         Some(Command::Capabilities(c)) => cmd_capabilities(cwd, c),
         Some(Command::Session(c)) => cmd_session(cwd, c),
+        // The folded companion surface (O-I #376): forward the trailing args to
+        // the one shared SessionSpace implementation and exit with its code.
+        // This arm diverges via `process::exit`, so it never produces a `Reply`.
+        //
+        // `--cwd`/`-C` is a global on the outer `aikit` parser, so it is consumed
+        // here rather than left in `args`; the folded surface has its own `-C`,
+        // so the resolved `cwd` is forwarded as `-C` to keep both invocations
+        // identical (when no `--cwd` was given, `cwd` is the process directory
+        // the folded surface would default to anyway).
+        Some(Command::SessionSpace { args }) => {
+            let mut argv: Vec<std::ffi::OsString> = vec![
+                "aikit-session-space".into(),
+                "-C".into(),
+                cwd.as_os_str().to_os_string(),
+            ];
+            argv.extend(args);
+            std::process::exit(aikit_cli::session_space_cli::run_from_args(argv));
+        }
         Some(Command::Compose(a)) => cmd_compose(cwd, a),
         Some(Command::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
@@ -703,8 +757,11 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
     };
     match command.command {
         SourceSub::BindCentral(args) => {
-            let spec=skill_sources::bind_central(home,&args.id,&args.root,&args.source_ref)?;
-            Ok(source_reply(jval!({"id":spec.id,"kind":"central","source_ref":args.source_ref,"next":"sync and promote"}),vec![]))
+            let spec = skill_sources::bind_central(home, &args.id, &args.root, &args.source_ref)?;
+            Ok(source_reply(
+                jval!({"id":spec.id,"kind":"central","source_ref":args.source_ref,"next":"sync and promote"}),
+                vec![],
+            ))
         }
         SourceSub::AddDirectory(args) => {
             let spec =
@@ -740,7 +797,8 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
             let spec = skill_sources::set_revision(home, &args.id, &args.revision)?;
             let revision = match spec.kind {
                 skill_sources::SourceKind::Git { revision, .. } => revision,
-                skill_sources::SourceKind::Directory { .. } | skill_sources::SourceKind::Central { .. } => unreachable!(),
+                skill_sources::SourceKind::Directory { .. }
+                | skill_sources::SourceKind::Central { .. } => unreachable!(),
             };
             Ok(source_reply(
                 jval!({
@@ -1643,7 +1701,9 @@ fn open_surface(
         // The palette left to hand an interactive flow to the restored terminal
         // (the launcher idiom, like `Run`). The alternate screen is already torn
         // down by the time we are here, so these run against the real terminal.
-        aikit_tui::PaletteOutcome::RunCredentialSetup => run_credential_setup_from_palette(&service),
+        aikit_tui::PaletteOutcome::RunCredentialSetup => {
+            run_credential_setup_from_palette(&service)
+        }
         aikit_tui::PaletteOutcome::RunDoctorFix => run_doctor_fix_from_palette(&service),
         aikit_tui::PaletteOutcome::Closed
         | aikit_tui::PaletteOutcome::Tree
@@ -1661,11 +1721,15 @@ fn run_credential_setup_from_palette(service: &Service) -> Result<Reply> {
     use aikit_core::resource::ModelRouteSet;
 
     let composed = service.compose_plan()?;
-    let route_sets: Vec<ModelRouteSet> =
-        serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
-            .map_err(|error| {
-                AikitError::new("palette.credential_setup_routes_unreadable", error.to_string())
-            })?;
+    let route_sets: Vec<ModelRouteSet> = serde_json::from_value(
+        composed.get("model_routes").cloned().unwrap_or_default(),
+    )
+    .map_err(|error| {
+        AikitError::new(
+            "palette.credential_setup_routes_unreadable",
+            error.to_string(),
+        )
+    })?;
     let requirements = credential_requirements_for_model_routes(&route_sets);
 
     let store = aikit_store::CredentialBindingStore::new(service.home());
@@ -1696,16 +1760,25 @@ fn run_credential_setup_from_palette(service: &Service) -> Result<Reply> {
         use std::io::Write;
         std::io::stderr().flush().ok();
         let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .map_err(|error| AikitError::new("palette.credential_setup_prompt", error.to_string()))?;
+        std::io::stdin().read_line(&mut line).map_err(|error| {
+            AikitError::new("palette.credential_setup_prompt", error.to_string())
+        })?;
         let choice = line.trim();
         if choice.eq_ignore_ascii_case("q") {
             return Ok(Reply::Status(0));
         }
-        match choice.parse::<usize>().ok().filter(|n| *n >= 1 && *n <= unresolved.len()) {
+        match choice
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n >= 1 && *n <= unresolved.len())
+        {
             Some(n) => &unresolved[n - 1],
-            None => return Err(AikitError::new("palette.credential_setup_choice", "not a listed option")),
+            None => {
+                return Err(AikitError::new(
+                    "palette.credential_setup_choice",
+                    "not a listed option",
+                ))
+            }
         }
     };
 
@@ -1911,10 +1984,50 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
 /// here always stops at the record gate with an `unavailable` reading unless
 /// a host kernel cell supplies the executor — Contemplate is never
 /// auto-invoked (#138 §7).
+/// Resolve the contemplate subject on the CLI surface: either the Flow node
+/// (`flow_ref`) or the NOW raw stream (`--now-ref` + `--fixtures`), never
+/// both and never neither.
+fn flow_subject(a: &FlowContemplateArgs) -> Result<aikit_core::resource::ResourceRef> {
+    let flow_ref = a.flow_ref.as_deref().ok_or_else(|| {
+        AikitError::new(
+            "flow.subject_required",
+            "contemplate requires a Flow node or `--now-ref` with `--fixtures`",
+        )
+    })?;
+    aikit_core::resource::ResourceRef::parse(flow_ref)
+}
+
+fn now_subject(a: &FlowContemplateArgs) -> Result<Option<(String, aikit_core::NowFixturesSeam)>> {
+    let Some(now_ref) = &a.now_ref else {
+        return Ok(None);
+    };
+    if a.flow_ref.is_some() {
+        return Err(AikitError::new(
+            "flow.subject_ambiguous",
+            "contemplate takes one subject: a Flow node or `--now-ref`, not both",
+        ));
+    }
+    let fixtures_path = a.fixtures.as_deref().ok_or_else(|| {
+        AikitError::new(
+            "now.fixtures_seam_required",
+            "`--now-ref` requires `--fixtures <file>`: the caller supplies the NOW's central.thoughts-reading/v1 stream verbatim",
+        )
+    })?;
+    let body = std::fs::read_to_string(fixtures_path).map_err(|error| {
+        AikitError::new(
+            "now.fixtures_seam_unreadable",
+            format!("cannot read {}: {error}", fixtures_path.display()),
+        )
+    })?;
+    Ok(Some((
+        now_ref.clone(),
+        aikit_core::NowFixturesSeam::parse(&body)?,
+    )))
+}
+
 fn cmd_flow(cwd: &std::path::Path, c: FlowCmd) -> Result<Reply> {
     use aikit_core::knowledge_living::KnowledgeChangeHorizon;
     use aikit_core::model_runtime::ModelRuntimeReadModel;
-    use aikit_core::resource::ResourceRef;
 
     fn read_json<T: serde::de::DeserializeOwned>(
         path: &std::path::Path,
@@ -1932,48 +2045,70 @@ fn cmd_flow(cwd: &std::path::Path, c: FlowCmd) -> Result<Reply> {
     let warnings = diagnostic_warnings(&service);
     let data = match c.command {
         FlowSub::Preflight(a) => {
-            let basis = FlowContemplateBasis {
-                horizon: a
-                    .horizon
-                    .as_deref()
-                    .map(|path| {
-                        read_json::<KnowledgeChangeHorizon>(path, "flow.horizon_unreadable")
-                    })
-                    .transpose()?,
-                runtime: a
-                    .runtime
-                    .as_deref()
-                    .map(|path| read_json::<ModelRuntimeReadModel>(path, "flow.runtime_unreadable"))
-                    .transpose()?,
-                agent: None,
-                agency: None,
-            };
-            let flow_ref = ResourceRef::parse(&a.flow_ref)?;
-            jval!(service.flow_contemplate_preflight(&flow_ref, &basis)?)
+            if let Some(subject) = now_subject(&a)? {
+                let (now_ref, seam) = subject;
+                jval!(service.now_contemplate_preflight_receipt(
+                    &now_ref,
+                    &seam,
+                    "preflight only; nothing was executed",
+                )?)
+            } else {
+                let basis = FlowContemplateBasis {
+                    horizon: a
+                        .horizon
+                        .as_deref()
+                        .map(|path| {
+                            read_json::<KnowledgeChangeHorizon>(path, "flow.horizon_unreadable")
+                        })
+                        .transpose()?,
+                    runtime: a
+                        .runtime
+                        .as_deref()
+                        .map(|path| {
+                            read_json::<ModelRuntimeReadModel>(path, "flow.runtime_unreadable")
+                        })
+                        .transpose()?,
+                    agent: None,
+                    agency: None,
+                };
+                let flow_ref = flow_subject(&a)?;
+                jval!(service.flow_contemplate_preflight(&flow_ref, &basis)?)
+            }
         }
         FlowSub::Contemplate(a) => {
-            let basis = FlowContemplateBasis {
-                horizon: a
-                    .horizon
-                    .as_deref()
-                    .map(|path| {
-                        read_json::<KnowledgeChangeHorizon>(path, "flow.horizon_unreadable")
-                    })
-                    .transpose()?,
-                runtime: a
-                    .runtime
-                    .as_deref()
-                    .map(|path| read_json::<ModelRuntimeReadModel>(path, "flow.runtime_unreadable"))
-                    .transpose()?,
-                agent: None,
-                agency: None,
-            };
-            let flow_ref = ResourceRef::parse(&a.flow_ref)?;
-            // The CLI surface never carries a host executor: the reading is
-            // produced through the same record gate and is explicitly
-            // `unavailable` — which is also why no familiarity observation is
-            // recorded here.
-            jval!(service.flow_contemplate(&flow_ref, &basis, None)?)
+            if let Some(subject) = now_subject(&a)? {
+                let (now_ref, seam) = subject;
+                jval!(service.now_contemplate_preflight_receipt(
+                    &now_ref,
+                    &seam,
+                    "no host executor supplied; contemplate is never auto-invoked and the CLI surface carries no Agent/model executor",
+                )?)
+            } else {
+                let basis = FlowContemplateBasis {
+                    horizon: a
+                        .horizon
+                        .as_deref()
+                        .map(|path| {
+                            read_json::<KnowledgeChangeHorizon>(path, "flow.horizon_unreadable")
+                        })
+                        .transpose()?,
+                    runtime: a
+                        .runtime
+                        .as_deref()
+                        .map(|path| {
+                            read_json::<ModelRuntimeReadModel>(path, "flow.runtime_unreadable")
+                        })
+                        .transpose()?,
+                    agent: None,
+                    agency: None,
+                };
+                let flow_ref = flow_subject(&a)?;
+                // The CLI surface never carries a host executor: the reading
+                // is produced through the same record gate and is explicitly
+                // `unavailable` — which is also why no familiarity observation
+                // is recorded here.
+                jval!(service.flow_contemplate(&flow_ref, &basis, None)?)
+            }
         }
         FlowSub::ChangedSince(a) => {
             let thought =
@@ -2247,40 +2382,173 @@ fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
     }
 }
 
-fn cmd_status(cwd: &std::path::Path, a: StatusArgs) -> Result<Reply> {
+/// `aikit system` — the owner settings-disclosure descriptor for the O:I System
+/// surface (Wave 5). Read-only: it projects the already-resolved composition
+/// truth into `oi.product-settings-disclosure/v2` and changes nothing.
+///
+/// Unlike every other command, `system` emits the descriptor as a bare
+/// document on stdout (never wrapped in the ActionResult envelope), exactly as
+/// `ctrl system --json` does. Mounts read the top-level `schema` key and would
+/// otherwise degrade AIKit to unavailable.
+fn cmd_system(cwd: &std::path::Path) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let data = aikit_cli::system::disclose(&service)?;
+    Ok(Reply::RawJson(data))
+}
+
+fn cmd_status(cwd: &std::path::Path, a: StatusArgs, json_mode: bool) -> Result<Reply> {
     let service = Service::discover(cwd)?;
     let view = service.resolved();
-    let active: Vec<Value> = view
-        .active
-        .values()
-        .map(|c| {
-            jval!({
-                "id": c.id.to_string(),
-                "kind": c.kind.as_str(),
-                "name": c.name,
-                "exports": c.exports,
+    let warnings = diagnostic_warnings(&service);
+    if json_mode {
+        let active: Vec<Value> = view
+            .active
+            .values()
+            .map(|c| {
+                jval!({
+                    "id": c.id.to_string(),
+                    "kind": c.kind.as_str(),
+                    "name": c.name,
+                    "exports": c.exports,
+                })
             })
-        })
-        .collect();
-    let properties = service.current_generation_properties();
-    let mut data = jval!({
-        "active": active,
-        "active_count": view.active.len(),
-        "hash": view.hash.to_string(),
-        "isolation": service.descriptor().isolation.as_str(),
-        "bypasses": bypass_summaries(&service)?,
-        "generation_label": properties.get("label"),
-        "generation_properties": properties,
-    });
-    if a.all {
-        let unavailable: Vec<Value> = view
-            .unavailable
-            .iter()
-            .map(|(id, reason)| jval!({ "id": id.to_string(), "reason": reason.describe() }))
             .collect();
-        data["unavailable"] = jval!(unavailable);
+        let properties = service.current_generation_properties();
+        let mut data = jval!({
+            "active": active,
+            "active_count": view.active.len(),
+            "hash": view.hash.to_string(),
+            "isolation": service.descriptor().isolation.as_str(),
+            "bypasses": bypass_summaries(&service)?,
+            "generation_label": properties.get("label"),
+            "generation_properties": properties,
+        });
+        if a.all {
+            let unavailable: Vec<Value> = view
+                .unavailable
+                .iter()
+                .map(|(id, reason)| jval!({ "id": id.to_string(), "reason": reason.describe() }))
+                .collect();
+            data["unavailable"] = jval!(unavailable);
+        }
+        return Ok(reply(&service, data, warnings));
     }
-    Ok(reply(&service, data, diagnostic_warnings(&service)))
+    let generation_properties = service.current_generation_properties();
+    let generation_label = generation_properties.get("label").map(String::as_str);
+    Ok(Reply::Text(status_summary(
+        service.descriptor(),
+        view,
+        a.all,
+        generation_label,
+        bypass_summaries(&service)?,
+        warnings,
+    )))
+}
+
+/// The person-facing reading of `aikit status`. The `--json` envelope is the
+/// machine contract and keeps its exact shape; this text is for the terminal.
+fn status_summary(
+    descriptor: &aikit_core::ContextDescriptor,
+    view: &aikit_core::resolve::ResolvedView,
+    include_unavailable: bool,
+    generation_label: Option<&str>,
+    bypasses: Vec<Value>,
+    warnings: Vec<String>,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let project_root = descriptor
+        .project_root
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(no project root)".to_owned());
+    lines.push(format!("AIKit status — {project_root}"));
+    lines.push(format!(
+        "Context {} · isolation {}",
+        descriptor.context_id,
+        descriptor.isolation.as_str()
+    ));
+
+    let mut by_kind: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for capability in view.active.values() {
+        *by_kind.entry(capability.kind.as_str()).or_default() += 1;
+    }
+    let counts = by_kind
+        .iter()
+        .map(|(kind, count)| format!("{count} {kind}{}", if *count == 1 { "" } else { "s" }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let counts = if counts.is_empty() {
+        "none".to_owned()
+    } else {
+        counts
+    };
+    lines.push(format!(
+        "Catalogued: {} capabilities",
+        view.catalog_index.len()
+    ));
+    lines.push(format!(
+        "Active capabilities: {} ({})",
+        view.active.len(),
+        counts
+    ));
+
+    let hash = view.hash.to_string();
+    let generation = match generation_label {
+        Some(label) => format!("Generation: {label}"),
+        None => "Generation: none".to_owned(),
+    };
+    lines.push(format!(
+        "{generation} · resolution hash {}",
+        &hash[..hash.len().min(12)]
+    ));
+
+    if bypasses.is_empty() {
+        lines.push("Hook bypasses: none open".to_owned());
+    } else {
+        lines.push(format!("Hook bypasses: {} open", bypasses.len()));
+        for bypass in &bypasses {
+            let capability = bypass["capability"].as_str().unwrap_or_default();
+            let for_clause = if capability.is_empty() {
+                String::new()
+            } else {
+                format!(" for {capability}")
+            };
+            lines.push(format!(
+                "  - {} ({}): {}{}",
+                bypass["bypass_id"].as_str().unwrap_or("?"),
+                bypass["scope"].as_str().unwrap_or("?"),
+                bypass["reason"].as_str().unwrap_or("?"),
+                for_clause
+            ));
+        }
+    }
+
+    if view.unavailable.is_empty() {
+        lines.push("Catalogued but inactive: none".to_owned());
+    } else if include_unavailable {
+        lines.push(format!(
+            "Catalogued but inactive: {}",
+            view.unavailable.len()
+        ));
+        for (id, reason) in &view.unavailable {
+            lines.push(format!("  - {id}: {}", reason.describe()));
+        }
+    } else {
+        lines.push(format!(
+            "Catalogued but inactive: {} hidden (run `aikit status --all` to list)",
+            view.unavailable.len()
+        ));
+    }
+
+    if warnings.is_empty() {
+        lines.push("Health findings: none".to_owned());
+    } else {
+        lines.push(format!("Health findings: {}", warnings.len()));
+        for warning in &warnings {
+            lines.push(format!("  - {warning}"));
+        }
+    }
+    lines.join("\n")
 }
 
 fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {
@@ -2476,12 +2744,29 @@ fn cmd_apply(cwd: &std::path::Path, a: ApplyArgs) -> Result<Reply> {
         toggles: vec![],
         label: a.label.clone(),
     })?;
+    // Materialising a project keeps its own managed hook seams current
+    // (codex's per-project `.codex/hooks.json`): the seam belongs to the
+    // working tree apply is materialising. A harness whose descriptor cannot
+    // be read is disclosed as a warning — never a failed apply.
+    let hook_seams = aikit_cli::client::install_project_hook_seams(&service);
+    let warnings: Vec<String> = hook_seams
+        .iter()
+        .filter(|outcome| outcome.state == "refused")
+        .map(|outcome| {
+            format!(
+                "{} hook seam not installed: {}",
+                outcome.client,
+                outcome.reason.as_deref().unwrap_or("reason unavailable")
+            )
+        })
+        .collect();
     let data = jval!({
         "generation": applied.id.to_string(),
         "replaced": applied.replaced.as_ref().map(|g| g.to_string()),
         "label": a.label,
+        "hook_seams": hook_seams,
     });
-    Ok(reply(&service, data, applied.warnings))
+    Ok(reply(&service, data, warnings))
 }
 
 fn cmd_rollback(cwd: &std::path::Path) -> Result<Reply> {
@@ -2880,7 +3165,7 @@ fn cmd_bypasses(cwd: &std::path::Path) -> Result<Reply> {
     ))
 }
 
-fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
+fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply> {
     let HookSub::Dispatch(a) = c.command;
     let service = Service::discover(cwd)?;
 
@@ -2889,6 +3174,18 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
     let decision = service.dispatch_hook(&event)?;
 
     let tuning = service.continuity_tuning();
+    let steps: Vec<Value> = decision
+        .steps
+        .iter()
+        .map(|step| {
+            jval!({
+                "capability": step.capsule.to_string(),
+                "phase": step.phase.as_str(),
+                "outcome": step.outcome.as_str(),
+                "bypassed": step.bypassed,
+            })
+        })
+        .collect();
     let data = jval!({
         "event": a.event,
         "client": a.client,
@@ -2898,8 +3195,43 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd) -> Result<Reply> {
         "bypassed": decision.was_bypassed(),
         "warnings": decision.warnings,
         "continuity": tuning.describe(),
+        // The chain, as dispatched: every planned step with its outcome.
+        // Guidance delivery is visible here as an `injected` step, so a
+        // guidance capsule that resolves but never delivers can no longer
+        // pass silently.
+        "steps": steps,
     });
-    Ok(reply(&service, data, vec![]))
+
+    // The dispatch boundary is where AIKit's verdict becomes the calling
+    // harness's protocol. The harness sees only this process's streams and
+    // exit status, so a denial must reach it as exit 2 (the block code both
+    // claude-code and zcode act on); the folded envelope alone would read as
+    // an allowance. `--json` keeps the machine envelope and now carries the
+    // verdict in its exit status; plain mode speaks the harness protocol
+    // itself (see `hook::translate_verdict`).
+    let denial_message = decision.denial.as_ref().map(|d| d.describe());
+    let verdict = hook::translate_verdict(
+        decision.allowed,
+        denial_message.as_deref(),
+        a.decision_json,
+        &a.event,
+    );
+
+    if json_mode {
+        Ok(Reply::Data {
+            context: EnvelopeContext::from_descriptor(service.descriptor()),
+            data,
+            warnings: vec![],
+            exit_code: verdict.exit_code,
+        })
+    } else if let Some(document) = verdict.stdout {
+        Ok(Reply::Text(document))
+    } else {
+        if let Some(message) = verdict.stderr {
+            eprintln!("{message}");
+        }
+        Ok(Reply::Status(verdict.exit_code))
+    }
 }
 
 fn cmd_capabilities(cwd: &std::path::Path, c: CapabilitiesCmd) -> Result<Reply> {
@@ -3728,6 +4060,12 @@ fn cmd_log(cwd: &std::path::Path, c: LogCmd) -> Result<Reply> {
     Ok(reply(&service, data, vec![]))
 }
 
+/// `aikit session-space` — the folded SessionSpace/encounter verb family
+/// (formerly the `aikit-session-space` companion binary, O-I #376). The
+/// companion's output contract is preserved: each verb's bare document on
+/// stdout in human mode (envelope-wrapped only under the global `--json`),
+/// and its human failure contract `<code>: <message>` on stderr with exit 1,
+/// which machine consumers such as O-I's cradle kernel parse.
 /// `aikit client install|launch|status`.
 fn cmd_client(cwd: &std::path::Path, c: ClientCmd) -> Result<Reply> {
     let service = Service::discover(cwd)?;

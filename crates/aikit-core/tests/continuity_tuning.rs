@@ -41,8 +41,11 @@ fn domain_activation_capsule() -> Capsule {
 }
 
 fn activity_evidence_capsule() -> Capsule {
-    hook_table("hook/continuity/activity-evidence", "",
-        "entry = \"payload/activity-evidence\"\nevents = [\"PostToolUse\"]")
+    hook_table(
+        "hook/continuity/activity-evidence",
+        "",
+        "entry = \"payload/activity-evidence\"\nevents = [\"PostToolUse\"]",
+    )
 }
 
 fn cid(s: &str) -> CapsuleId {
@@ -198,7 +201,9 @@ fn composing_domain_activation_is_exactly_that_delta() {
 
 #[test]
 fn activity_evidence_is_known_but_inoperative_until_composed() {
-    let view = Fixture::new(vec![activity_evidence_capsule()]).resolve().unwrap();
+    let view = Fixture::new(vec![activity_evidence_capsule()])
+        .resolve()
+        .unwrap();
     let tuning = ContinuityTuning::resolve(&view);
     assert!(tuning.not_composed.iter().any(|n| n == "activity-evidence"));
     assert!(!tuning.allows("activity-evidence"));
@@ -207,7 +212,10 @@ fn activity_evidence_is_known_but_inoperative_until_composed() {
 #[test]
 fn composing_activity_evidence_arms_only_that_reaction() {
     let fixture = Fixture::new(vec![activity_evidence_capsule()]).with_layers(vec![layer(
-        ScopeKind::Session, &["hook/continuity/activity-evidence"], &[])]);
+        ScopeKind::Session,
+        &["hook/continuity/activity-evidence"],
+        &[],
+    )]);
     let view = fixture.resolve().unwrap();
     let tuning = ContinuityTuning::resolve(&view);
     assert_eq!(tuning.composed, vec!["activity-evidence".to_string()]);

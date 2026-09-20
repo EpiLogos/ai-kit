@@ -145,7 +145,8 @@ fn moving_the_selection_refreshes_relation_and_inspector_but_never_the_backend_w
 
     surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
     assert_ne!(
-        surface.semantic().selected, first,
+        surface.semantic().selected,
+        first,
         "the second Down must move the selection to a different resource"
     );
 
@@ -166,8 +167,7 @@ fn moving_the_selection_refreshes_relation_and_inspector_but_never_the_backend_w
 }
 
 #[test]
-fn increasing_graph_depth_refreshes_the_relation_but_not_the_inspector_or_the_backend_wide_world()
-{
+fn increasing_graph_depth_refreshes_the_relation_but_not_the_inspector_or_the_backend_wide_world() {
     let (_dir, mut backend) = fixture();
     let mut surface = ApplicationSurfaceController::new(
         &mut backend,
@@ -193,7 +193,9 @@ fn increasing_graph_depth_refreshes_the_relation_but_not_the_inspector_or_the_ba
     let inspector_before = surface.inspector_refresh_count();
     let depth_before = surface.semantic().graph.depth;
 
-    surface.handle(&mut backend, key(KeyCode::Char('+'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('+')))
+        .unwrap();
     assert!(surface.semantic().graph.depth > depth_before);
 
     assert!(
@@ -234,9 +236,7 @@ fn invoking_a_contextual_action_refreshes_the_entire_backend_wide_world_because_
     // Capability exposes, so Insert invokes it directly
     // (`stage_selected`'s single-stageable-action branch) without a detour
     // through the Action search overlay.
-    surface
-        .handle(&mut backend, key(KeyCode::Insert))
-        .unwrap();
+    surface.handle(&mut backend, key(KeyCode::Insert)).unwrap();
     assert!(
         surface.semantic().staged.get(&id("skill/alpha")).is_some(),
         "Insert must have staged the Capability's one stageable Action"

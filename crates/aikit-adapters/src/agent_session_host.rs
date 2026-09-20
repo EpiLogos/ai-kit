@@ -46,7 +46,8 @@ use serde_json::Value;
 
 use crate::agent_connection::{
     CancelRequest, ConnectionCommand, ConnectionDescriptor, ConnectionSignal, ConnectionSignalKind,
-    NativePermissionRequest, NativeSessionBinding, PromptRequest, SessionOpenRequest,
+    NativeModelObservation, NativePermissionRequest, NativeSessionBinding, PromptRequest,
+    SessionOpenRequest,
 };
 use crate::connection_process::{
     ConnectionControl, ConnectionProcess, ConnectionReader, ConnectionWriter,
@@ -169,6 +170,17 @@ pub struct SessionIdentity {
     pub state: SessionLaneState,
 }
 
+/// A provider-confirmed change to an existing native session configuration.
+/// AgentSession identity is carried through, never reconstructed from the
+/// transport id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelConfigurationReceipt {
+    pub agent_session: ResourceRef,
+    pub native_session_id: String,
+    pub previous: NativeModelObservation,
+    pub current: NativeModelObservation,
+}
+
 /// Outcome of a bounded wait for a turn to finish.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WaitOutcome {
@@ -197,7 +209,7 @@ pub struct TurnHandle {
 /// encounter services supply this sink; the host orders writes before delivery.
 /// A failed append is a resource failure, never a provider cancellation.
 pub trait SessionEventJournal: Send + Sync {
-    fn append(&self, agent_session:&ResourceRef, event:&HostEvent) -> Result<()>;
+    fn append(&self, agent_session: &ResourceRef, event: &HostEvent) -> Result<()>;
 }
 
 pub struct AgentSessionHost {
@@ -227,11 +239,17 @@ struct LaneCore {
     journal: Option<Arc<dyn SessionEventJournal>>,
 }
 impl LaneCore {
-    fn deliver(&self,event:HostEvent) -> std::io::Result<()> {
-        if let Some(journal)=&self.journal {journal.append(&self.agent_session,&event).map_err(|e|std::io::Error::other(e.to_string()))?;}
+    fn deliver(&self, event: HostEvent) -> std::io::Result<()> {
+        if let Some(journal) = &self.journal {
+            journal
+                .append(&self.agent_session, &event)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
         self.queue.send(event)
     }
-    fn close(&self) { self.queue.close(); }
+    fn close(&self) {
+        self.queue.close();
+    }
 }
 
 #[derive(Default)]
@@ -278,13 +296,19 @@ enum ControlWaiter {
         lane: Arc<LaneCore>,
         loading_native_id: Option<String>,
     },
+    /// A provider config response for exactly one existing canonical lane.
+    Model {
+        sender: Sender<ControlDelivery>,
+        agent_session: ResourceRef,
+        native_session_id: String,
+    },
 }
 
 impl ControlWaiter {
     fn send(self, delivery: ControlDelivery) {
         let sender = match self {
             ControlWaiter::Handshake(sender) => sender,
-            ControlWaiter::Open { sender, .. } => sender,
+            ControlWaiter::Open { sender, .. } | ControlWaiter::Model { sender, .. } => sender,
         };
         let _ = sender.send(delivery);
     }
@@ -308,7 +332,7 @@ impl AgentSessionHost {
     where
         A: InteractiveAgentConnectionAdapter + Send + 'static,
     {
-        Self::launch_with_journal(adapter,argv,cwd,limits,None)
+        Self::launch_with_journal(adapter, argv, cwd, limits, None)
     }
 
     pub fn launch_with_journal<A>(
@@ -364,7 +388,7 @@ impl AgentSessionHost {
                 return Err(AikitError::new(
                     "agent_session_host.handshake_failed",
                     reason,
-                ))
+                ));
             }
         }
         let adapter = self.shared.adapter()?;
@@ -397,12 +421,13 @@ impl AgentSessionHost {
                 ));
             }
         }
-        let queue = EventQueue::new().map_err(|e|AikitError::new("agent_session_host.event_storage",e.to_string()))?;
+        let queue = EventQueue::new()
+            .map_err(|e| AikitError::new("agent_session_host.event_storage", e.to_string()))?;
         let lane = Arc::new(LaneCore {
             agent_session: canonical.clone(),
             events: Mutex::new(queue.clone()),
             queue,
-            journal:self.shared.journal.clone(),
+            journal: self.shared.journal.clone(),
         });
         let command = {
             let mut adapter = self.shared.adapter()?;
@@ -415,7 +440,7 @@ impl AgentSessionHost {
         let signals = match self.shared.await_control(control_receiver)? {
             ControlDelivery::Signals(signals) => signals,
             ControlDelivery::Failed(reason) => {
-                return Err(AikitError::new("agent_session_host.open_failed", reason))
+                return Err(AikitError::new("agent_session_host.open_failed", reason));
             }
         };
         let binding = signals
@@ -503,7 +528,11 @@ impl AgentSessionHost {
     /// owner journal retains the complete history beyond this memory window.
     pub fn interruptions(&self, agent_session: &ResourceRef) -> Result<Vec<TurnInterruption>> {
         let state = self.shared.state()?;
-        Ok(state.trail.get(agent_session).map(|trail|trail.iter().cloned().collect()).unwrap_or_default())
+        Ok(state
+            .trail
+            .get(agent_session)
+            .map(|trail| trail.iter().cloned().collect())
+            .unwrap_or_default())
     }
 
     /// The last finished turn of one session, if any.
@@ -648,6 +677,195 @@ impl SessionLane {
         })
     }
 
+    /// Select a provider-advertised model on this exact resident native
+    /// session. This is an ephemeral native configuration operation; it does
+    /// not open/fork a session or alter a durable model policy.
+    pub fn set_model(&self, provider_model_id: &str) -> Result<ModelConfigurationReceipt> {
+        let _gate = self.shared.gate()?;
+        let (native_session_id, previous) = {
+            let state = self.shared.state()?;
+            let record = state
+                .sessions
+                .get(&self.agent_session)
+                .ok_or_else(|| session_not_open(&self.agent_session))?;
+            if record.binding.native_session_id != self.binding.native_session_id {
+                return Err(AikitError::new(
+                    "agent_session_host.stale_lane",
+                    format!(
+                        "this lane was taken from native session {} but the host now binds native session {} for {}",
+                        self.binding.native_session_id,
+                        record.binding.native_session_id,
+                        self.agent_session
+                    ),
+                ));
+            }
+            if !matches!(
+                state.lane_state(&record.binding.native_session_id),
+                SessionLaneState::Resident
+            ) {
+                return Err(AikitError::new(
+                    "agent_session_host.model_configuration_busy",
+                    "provider model configuration requires an idle resident session",
+                ));
+            }
+            let previous = record.binding.model_observation.clone().ok_or_else(|| {
+                AikitError::new(
+                    "agent_session_host.model_selection_unsupported",
+                    "resident native session has no provider-advertised model observation",
+                )
+            })?;
+            (record.binding.native_session_id.clone(), previous)
+        };
+        let command = {
+            let mut adapter = self.shared.adapter()?;
+            adapter.set_session_model(&native_session_id, provider_model_id)?
+        };
+        let receiver = self.shared.register_model_control(
+            &command,
+            &self.agent_session,
+            &native_session_id,
+        )?;
+        self.shared.dispatch(&command)?;
+        match self.shared.await_control(receiver)? {
+            ControlDelivery::Signals(_) => {}
+            ControlDelivery::Failed(reason) => {
+                return Err(AikitError::new(
+                    "agent_session_host.model_configuration_failed",
+                    reason,
+                ));
+            }
+        }
+        let identity = {
+            let state = self.shared.state()?;
+            let record = state
+                .sessions
+                .get(&self.agent_session)
+                .ok_or_else(|| session_not_open(&self.agent_session))?;
+            if record.binding.native_session_id != native_session_id {
+                return Err(AikitError::new(
+                    "agent_session_host.stale_lane",
+                    "provider model response was not applied because the native binding changed",
+                ));
+            }
+            record.binding.clone()
+        };
+        let current = identity.model_observation.ok_or_else(|| {
+            AikitError::new(
+                "agent_session_host.model_configuration_unconfirmed",
+                "provider did not confirm a model configuration readback",
+            )
+        })?;
+        if current.current_model_id != provider_model_id {
+            return Err(AikitError::new(
+                "agent_session_host.model_configuration_unconfirmed",
+                format!(
+                    "provider read back {} instead of requested {provider_model_id}",
+                    current.current_model_id
+                ),
+            ));
+        }
+        Ok(ModelConfigurationReceipt {
+            agent_session: self.agent_session.clone(),
+            native_session_id,
+            previous,
+            current,
+        })
+    }
+
+    /// Select an exact provider-advertised execution budget on this resident session.
+    /// This is native configuration only; it does not alter durable policy or Agency.
+    pub fn set_reasoning_effort(
+        &self,
+        provider_reasoning_effort: &str,
+    ) -> Result<ModelConfigurationReceipt> {
+        let _gate = self.shared.gate()?;
+        let (native_session_id, previous) = {
+            let state = self.shared.state()?;
+            let record = state
+                .sessions
+                .get(&self.agent_session)
+                .ok_or_else(|| session_not_open(&self.agent_session))?;
+            if record.binding.native_session_id != self.binding.native_session_id {
+                return Err(AikitError::new(
+                    "agent_session_host.stale_lane",
+                    "native binding changed before reasoning effort configuration",
+                ));
+            }
+            if !matches!(
+                state.lane_state(&record.binding.native_session_id),
+                SessionLaneState::Resident
+            ) {
+                return Err(AikitError::new(
+                    "agent_session_host.reasoning_effort_configuration_busy",
+                    "provider reasoning effort configuration requires an idle resident session",
+                ));
+            }
+            let previous = record.binding.model_observation.clone().ok_or_else(|| {
+                AikitError::new(
+                    "agent_session_host.reasoning_effort_selection_unsupported",
+                    "resident native session has no provider-advertised model observation",
+                )
+            })?;
+            (record.binding.native_session_id.clone(), previous)
+        };
+        let command = {
+            let mut adapter = self.shared.adapter()?;
+            adapter.set_session_reasoning_effort(&native_session_id, provider_reasoning_effort)?
+        };
+        let receiver = self.shared.register_model_control(
+            &command,
+            &self.agent_session,
+            &native_session_id,
+        )?;
+        self.shared.dispatch(&command)?;
+        match self.shared.await_control(receiver)? {
+            ControlDelivery::Signals(_) => {}
+            ControlDelivery::Failed(reason) => {
+                return Err(AikitError::new(
+                    "agent_session_host.reasoning_effort_configuration_failed",
+                    reason,
+                ));
+            }
+        }
+        let identity = {
+            let state = self.shared.state()?;
+            let record = state
+                .sessions
+                .get(&self.agent_session)
+                .ok_or_else(|| session_not_open(&self.agent_session))?;
+            if record.binding.native_session_id != native_session_id {
+                return Err(AikitError::new(
+                    "agent_session_host.stale_lane",
+                    "provider response was not applied because the native binding changed",
+                ));
+            }
+            record.binding.clone()
+        };
+        let current = identity.model_observation.ok_or_else(|| {
+            AikitError::new(
+                "agent_session_host.reasoning_effort_configuration_unconfirmed",
+                "provider did not confirm reasoning effort configuration",
+            )
+        })?;
+        if current
+            .reasoning_effort
+            .as_ref()
+            .map(|selector| selector.current_value.as_str())
+            != Some(provider_reasoning_effort)
+        {
+            return Err(AikitError::new(
+                "agent_session_host.reasoning_effort_configuration_unconfirmed",
+                "provider did not read back the requested reasoning effort",
+            ));
+        }
+        Ok(ModelConfigurationReceipt {
+            agent_session: self.agent_session.clone(),
+            native_session_id,
+            previous,
+            current,
+        })
+    }
+
     /// Interrupt this lane's in-flight turn.
     pub fn interrupt(&self, reason: Option<String>) -> Result<InterruptReceipt> {
         self.shared.interrupt(&self.agent_session, reason)
@@ -689,9 +907,16 @@ impl SessionLane {
             .shared
             .lane_events(&self.lane)
             .expect("session lane event lock poisoned");
-        let result=read(&mut events);
+        let result = read(&mut events);
         drop(events);
-        if let Some(error)=self.lane.queue.error() {state_stop_bridge(&self.shared.state,&format!("agent_session_host.event_storage: {error}"),false);let _=self.shared.control.terminate();}
+        if let Some(error) = self.lane.queue.error() {
+            state_stop_bridge(
+                &self.shared.state,
+                &format!("agent_session_host.event_storage: {error}"),
+                false,
+            );
+            let _ = self.shared.control.terminate();
+        }
         result
     }
 }
@@ -733,7 +958,7 @@ impl TurnHandle {
                 None => {
                     return Err(self
                         .shared
-                        .transport_error("the session bridge stopped before the turn ended"))
+                        .transport_error("the session bridge stopped before the turn ended"));
                 }
             }
         }
@@ -751,14 +976,14 @@ impl TurnHandle {
             }
             match self.recv_timeout(remaining) {
                 Ok(HostEvent::TurnEnded(record)) => {
-                    return Ok(WaitOutcome::Finished(Box::new(record)))
+                    return Ok(WaitOutcome::Finished(Box::new(record)));
                 }
                 Ok(HostEvent::Signal(_)) => continue,
                 Err(RecvTimeoutError::Timeout) => return Ok(WaitOutcome::Timeout),
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(self
                         .shared
-                        .transport_error("the session bridge stopped before the turn ended"))
+                        .transport_error("the session bridge stopped before the turn ended"));
                 }
             }
         }
@@ -769,9 +994,16 @@ impl TurnHandle {
             .shared
             .lane_events(&self.lane)
             .expect("session lane event lock poisoned");
-        let result=read(&mut events);
+        let result = read(&mut events);
         drop(events);
-        if let Some(error)=self.lane.queue.error() {state_stop_bridge(&self.shared.state,&format!("agent_session_host.event_storage: {error}"),false);let _=self.shared.control.terminate();}
+        if let Some(error) = self.lane.queue.error() {
+            state_stop_bridge(
+                &self.shared.state,
+                &format!("agent_session_host.event_storage: {error}"),
+                false,
+            );
+            let _ = self.shared.control.terminate();
+        }
         result
     }
 }
@@ -845,6 +1077,19 @@ impl HostShared {
                 state_register_open(&self.state, &lane, &signals);
                 let _ = sender.send(ControlDelivery::Signals(signals));
             }
+            Some(ControlWaiter::Model {
+                sender,
+                agent_session,
+                native_session_id,
+            }) => {
+                state_apply_model_configuration(
+                    &self.state,
+                    &agent_session,
+                    &native_session_id,
+                    &signals,
+                );
+                let _ = sender.send(ControlDelivery::Signals(signals));
+            }
             None => self.route(signals),
         }
         true
@@ -853,7 +1098,7 @@ impl HostShared {
     /// Route interpreted signals to their lanes and turn bookkeeping.
     fn route(self: &Arc<Self>, signals: Vec<ConnectionSignal>) {
         let mut deliveries: Vec<(Arc<LaneCore>, HostEvent)> = Vec::new();
-        let mut limited=Vec::new();
+        let mut limited = Vec::new();
         {
             let Ok(mut state) = self.state.lock() else {
                 return;
@@ -890,7 +1135,9 @@ impl HostShared {
                 }
                 let terminal = matches!(
                     signal.kind,
-                    ConnectionSignalKind::Completed { .. } | ConnectionSignalKind::Cancelled | ConnectionSignalKind::Failed { .. }
+                    ConnectionSignalKind::Completed { .. }
+                        | ConnectionSignalKind::Cancelled
+                        | ConnectionSignalKind::Failed { .. }
                 );
                 deliveries.push((Arc::clone(&lane), HostEvent::Signal(signal.clone())));
                 if terminal {
@@ -898,7 +1145,8 @@ impl HostShared {
                         state.record_turn(&record);
                         deliveries.push((lane, HostEvent::TurnEnded(record)));
                     }
-                } else if state.reached_limit(&native_session_id,self.limits.max_signals_per_turn) {
+                } else if state.reached_limit(&native_session_id, self.limits.max_signals_per_turn)
+                {
                     limited.push(native_session_id);
                 }
             }
@@ -931,9 +1179,15 @@ impl HostShared {
 
     fn deliver(&self, deliveries: Vec<(Arc<LaneCore>, HostEvent)>) {
         for (lane, event) in deliveries {
-            if let Err(error)=lane.deliver(event) {
-                state_stop_bridge(&self.state,&format!("agent_session_host.event_storage: owner event storage failed: {error}"),false);
-                let _=self.control.terminate();
+            if let Err(error) = lane.deliver(event) {
+                state_stop_bridge(
+                    &self.state,
+                    &format!(
+                        "agent_session_host.event_storage: owner event storage failed: {error}"
+                    ),
+                    false,
+                );
+                let _ = self.control.terminate();
                 return;
             }
         }
@@ -980,6 +1234,38 @@ impl HostShared {
             ));
         }
         state.control.insert(token, waiter);
+        Ok(receiver)
+    }
+
+    fn register_model_control(
+        &self,
+        command: &ConnectionCommand,
+        agent_session: &ResourceRef,
+        native_session_id: &str,
+    ) -> Result<Receiver<ControlDelivery>> {
+        let token = control_token(&command.payload)?;
+        let (sender, receiver) = mpsc::channel();
+        let mut state = lock(&self.state)?;
+        if state.closed {
+            return Err(stopped_bridge_error(
+                &state,
+                "the session bridge has stopped",
+            ));
+        }
+        if state.control.contains_key(&token) {
+            return Err(AikitError::new(
+                "agent_session_host.control_id_conflict",
+                "provider control request id is already pending",
+            ));
+        }
+        state.control.insert(
+            token,
+            ControlWaiter::Model {
+                sender,
+                agent_session: agent_session.clone(),
+                native_session_id: native_session_id.to_owned(),
+            },
+        );
         Ok(receiver)
     }
 
@@ -1196,6 +1482,36 @@ fn state_register_open(
     }
 }
 
+/// Apply only a positive provider model-config readback to the exact canonical
+/// resident binding. A degraded/absent response leaves the previous observation
+/// intact and the caller returns an unconfirmed configuration error.
+fn state_apply_model_configuration(
+    state: &Mutex<HostState>,
+    agent_session: &ResourceRef,
+    native_session_id: &str,
+    signals: &[ConnectionSignal],
+) {
+    let Some(observation) = signals.iter().find_map(|signal| match &signal.kind {
+        ConnectionSignalKind::ModelConfigured { model_observation }
+            if signal.native_session_id.as_deref() == Some(native_session_id) =>
+        {
+            Some(model_observation.clone())
+        }
+        _ => None,
+    }) else {
+        return;
+    };
+    let Ok(mut state) = state.lock() else {
+        return;
+    };
+    let Some(record) = state.sessions.get_mut(agent_session) else {
+        return;
+    };
+    if record.binding.native_session_id == native_session_id {
+        record.binding.model_observation = Some(observation);
+    }
+}
+
 /// Close one turn because its prompt failed at the protocol level.
 fn state_fail_turn(
     state: &Mutex<HostState>,
@@ -1266,8 +1582,10 @@ impl HostState {
 
     fn record_turn(&mut self, record: &TurnRecord) {
         if let Some(interruption) = &record.interruption {
-            let trail=self.trail.entry(record.agent_session.clone()).or_default();
-            if trail.len()==128 {trail.pop_front();}
+            let trail = self.trail.entry(record.agent_session.clone()).or_default();
+            if trail.len() == 128 {
+                trail.pop_front();
+            }
             trail.push_back(interruption.clone());
         }
         self.last_turn
@@ -1281,13 +1599,19 @@ impl HostState {
         signal: &ConnectionSignal,
     ) -> Option<TurnRecord> {
         let turn = self.turns.remove(native_session_id)?;
-        let stop = if let Some(max_signals)=turn.operational_limit {TurnStop::OperationalLimit{max_signals}} else {match &signal.kind {
-            ConnectionSignalKind::Completed { stop_reason } => TurnStop::Completed {
-                stop_reason: stop_reason.clone(),
-            },
-            ConnectionSignalKind::Failed { reason } => TurnStop::Failed { reason: reason.clone() },
-            _ => TurnStop::Cancelled,
-        }};
+        let stop = if let Some(max_signals) = turn.operational_limit {
+            TurnStop::OperationalLimit { max_signals }
+        } else {
+            match &signal.kind {
+                ConnectionSignalKind::Completed { stop_reason } => TurnStop::Completed {
+                    stop_reason: stop_reason.clone(),
+                },
+                ConnectionSignalKind::Failed { reason } => TurnStop::Failed {
+                    reason: reason.clone(),
+                },
+                _ => TurnStop::Cancelled,
+            }
+        };
         let interruption = match (&turn.interrupt, &stop) {
             // A cancel was asked for and the provider stopped the turn: a human
             // interruption, however the stop was carried on the wire.
@@ -1358,10 +1682,15 @@ impl HostState {
 
     /// An explicit operational ceiling requests cancellation and leaves the
     /// turn in flight until a native terminal event is observed.
-    fn reached_limit(&mut self,native_session_id:&str,limit:usize)->bool {
-        let Some(turn)=self.turns.get_mut(native_session_id) else {return false;};
-        if limit==0 || turn.signals<=limit || turn.operational_limit.is_some(){return false;}
-        turn.operational_limit=Some(limit);true
+    fn reached_limit(&mut self, native_session_id: &str, limit: usize) -> bool {
+        let Some(turn) = self.turns.get_mut(native_session_id) else {
+            return false;
+        };
+        if limit == 0 || turn.signals <= limit || turn.operational_limit.is_some() {
+            return false;
+        }
+        turn.operational_limit = Some(limit);
+        true
     }
 
     fn binding_for(&self, native_session_id: &str) -> NativeSessionBinding {

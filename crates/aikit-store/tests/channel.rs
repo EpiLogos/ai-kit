@@ -31,7 +31,10 @@ fn a_published_item_is_redacted_before_storage_and_read_back_redacted() {
         "the secret must be redacted before storage: {}",
         item.body
     );
-    assert!(item.body.contains("[redacted"), "a redaction marker is present");
+    assert!(
+        item.body.contains("[redacted"),
+        "a redaction marker is present"
+    );
 
     // Read back through a fresh channel: the stored bytes are the redacted ones,
     // so the secret never reached the database.
@@ -55,9 +58,16 @@ fn publishing_with_a_dedup_key_is_idempotent() {
         )
         .unwrap();
 
-    assert_eq!(first.id, again.id, "the same dedup key returns the existing item");
+    assert_eq!(
+        first.id, again.id,
+        "the same dedup key returns the existing item"
+    );
     assert_eq!(again.title, first.title, "the existing item is unchanged");
-    assert_eq!(channel.items().unwrap().len(), 1, "no near-duplicate was filed");
+    assert_eq!(
+        channel.items().unwrap().len(),
+        1,
+        "no near-duplicate was filed"
+    );
 }
 
 #[test]
@@ -151,5 +161,8 @@ fn every_evidence_variant_is_redacted_not_just_the_summary() {
     // And it is redacted at rest, not merely on the way out.
     let reread = InboxChannel::new(&index).get(&item.id).unwrap().unwrap();
     let stored = serde_json::to_string(&reread.evidence).unwrap();
-    assert!(!stored.contains(token), "the stored bytes still hold a secret: {stored}");
+    assert!(
+        !stored.contains(token),
+        "the stored bytes still hold a secret: {stored}"
+    );
 }

@@ -150,17 +150,16 @@ mod tests {
 
     #[test]
     fn detected_count_ignores_declared_but_unverified_instances() {
-        let disclosure = WorkcellDisclosure::observed(
-            vec![instance("a", true, true), instance("b", false, false)],
-        );
+        let disclosure = WorkcellDisclosure::observed(vec![
+            instance("a", true, true),
+            instance("b", false, false),
+        ]);
         assert_eq!(disclosure.detected_count(), Some(1));
     }
 
     #[test]
     fn disclosure_round_trips_through_json() {
-        let disclosure = WorkcellDisclosure::observed(
-            vec![instance("a", true, false)],
-        );
+        let disclosure = WorkcellDisclosure::observed(vec![instance("a", true, false)]);
         let json = serde_json::to_string(&disclosure).unwrap();
         let back: WorkcellDisclosure = serde_json::from_str(&json).unwrap();
         assert_eq!(disclosure, back);

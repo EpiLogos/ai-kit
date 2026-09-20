@@ -1,6 +1,6 @@
 ---
 name: aikit-component-surface-authoring
-description: Extend AIKit working environments with Components and Surfaces through SessionSpace contribution and provider authority contracts.
+description: Author Components, Surfaces and SessionSpace contributions through the public contribution/provider lifecycle.
 ---
 
 # Component, Surface and working-environment authoring

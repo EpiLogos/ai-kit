@@ -5,7 +5,7 @@
 //! the TUI/backend adapter plus disclosure of ContextSource horizon state.
 
 use aikit_core::context_source::{ContextSourceEntry, ContextSourceIndex};
-use aikit_core::resource::{ResourceKind, ResourceIndex};
+use aikit_core::resource::{ResourceIndex, ResourceKind};
 use aikit_core::{
     application_context_resolution, disclose_project_world, ContextResolution,
     ProjectWorldReadModel, RequestedActors, Result,
@@ -41,8 +41,12 @@ pub fn context_resolution_from_resources(
 ) -> Result<ContextResolution> {
     if let Some(binding) = backend.project_binding()? {
         return aikit_core::application_context_resolution_with_binding(
-            backend.context(), backend.view(), backend.scope_layers().unwrap_or(&[]),
-            resources, actors, binding,
+            backend.context(),
+            backend.view(),
+            backend.scope_layers().unwrap_or(&[]),
+            resources,
+            actors,
+            binding,
         );
     }
     application_context_resolution(
@@ -55,7 +59,9 @@ pub fn context_resolution_from_resources(
 }
 
 /// Shared canonical resource join used by Context and situated Method resolution.
-pub fn resource_index(backend: &dyn PaletteBackend) -> Result<aikit_core::resource::ResourceSearchIndex> {
+pub fn resource_index(
+    backend: &dyn PaletteBackend,
+) -> Result<aikit_core::resource::ResourceSearchIndex> {
     resource_index_with_records(backend, backend.context_resource_records()?)
 }
 
@@ -68,18 +74,27 @@ pub fn resource_index_with_records(
     for record in records {
         let joined = if let Some(existing) = resources.resource(&record.descriptor.id) {
             if existing.descriptor.kind != record.descriptor.kind {
-                return Err(aikit_core::AikitError::new("context.source_kind_conflict",
-                    format!("Observed source kind conflicts with existing resource {}", record.descriptor.id)));
+                return Err(aikit_core::AikitError::new(
+                    "context.source_kind_conflict",
+                    format!(
+                        "Observed source kind conflicts with existing resource {}",
+                        record.descriptor.id
+                    ),
+                ));
             }
             let mut joined = existing.clone();
             for source in record.descriptor.sources {
-                if !joined.descriptor.sources.contains(&source) { joined.descriptor.sources.push(source); }
+                if !joined.descriptor.sources.contains(&source) {
+                    joined.descriptor.sources.push(source);
+                }
             }
-            for (key,value) in record.descriptor.annotations {
+            for (key, value) in record.descriptor.annotations {
                 joined.descriptor.annotations.entry(key).or_insert(value);
             }
             joined
-        } else { record };
+        } else {
+            record
+        };
         resources.insert_resource(joined, Vec::new());
     }
     Ok(resources)
@@ -240,9 +255,7 @@ mod tests {
     }
 
     impl PaletteBackend for Backend {
-        fn versioned_world(
-            &self,
-        ) -> Result<Option<aikit_core::resource::VersionedProjectWorld>> {
+        fn versioned_world(&self) -> Result<Option<aikit_core::resource::VersionedProjectWorld>> {
             match &self.versioned {
                 VersionedAnswer::Nothing => Ok(None),
                 VersionedAnswer::Observed(world) => Ok(Some(world.as_ref().clone())),
@@ -253,9 +266,7 @@ mod tests {
             }
         }
 
-        fn doctor_world(
-            &self,
-        ) -> Result<Option<aikit_core::doctor_world::DoctorDisclosure>> {
+        fn doctor_world(&self) -> Result<Option<aikit_core::doctor_world::DoctorDisclosure>> {
             match &self.doctor {
                 DoctorAnswer::Nothing => Ok(None),
                 DoctorAnswer::Observed(disclosure) => Ok(Some(disclosure.as_ref().clone())),
@@ -266,9 +277,7 @@ mod tests {
             }
         }
 
-        fn workcell_world(
-            &self,
-        ) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
+        fn workcell_world(&self) -> Result<Option<aikit_core::workcell_world::WorkcellDisclosure>> {
             match &self.workcell {
                 WorkcellAnswer::Nothing => Ok(None),
                 WorkcellAnswer::Observed(disclosure) => Ok(Some(disclosure.as_ref().clone())),
@@ -434,15 +443,16 @@ mod tests {
     /// A fixture observation for the Project the fake backend resolves to.
     fn observed(project: &str) -> aikit_core::resource::VersionedProjectWorld {
         use aikit_core::resource::{
-            GitRepositoryRelation, VersionRevision, VersionedProjectWorld,
-            GitWorkingState, VersionedWorldProviderDescriptor, VersionedWorldProviderStatus,
+            GitRepositoryRelation, GitWorkingState, VersionRevision, VersionedProjectWorld,
+            VersionedWorldProviderDescriptor, VersionedWorldProviderStatus,
             VERSIONED_WORLD_VERSION,
         };
         VersionedProjectWorld {
             version: VERSIONED_WORLD_VERSION.to_string(),
             project: aikit_core::project::ProjectRef::parse(project).unwrap(),
             provider: VersionedWorldProviderDescriptor {
-                provider: aikit_core::resource::ProviderRef::parse("provider:aikit.git-cli").unwrap(),
+                provider: aikit_core::resource::ProviderRef::parse("provider:aikit.git-cli")
+                    .unwrap(),
                 status: VersionedWorldProviderStatus::Available,
                 capabilities: Vec::new(),
                 implementation_version: Some("2.43.0".into()),
@@ -537,9 +547,7 @@ mod tests {
         );
     }
 
-    fn credential_world_from(
-        credential: CredentialAnswer,
-    ) -> aikit_core::ProjectWorldReadModel {
+    fn credential_world_from(credential: CredentialAnswer) -> aikit_core::ProjectWorldReadModel {
         let mut context = ContextDescriptor::for_project("/work/aikit");
         context.host = "test-host".into();
         let view = resolved(&context, Vec::new());
@@ -576,9 +584,7 @@ mod tests {
     /// carried the `not_attempted` default no matter what was bound.
     #[test]
     fn a_composed_credential_reading_reaches_the_reading() {
-        use aikit_core::credential_world::{
-            disclose_credential_world, ProviderRosterKnowledge,
-        };
+        use aikit_core::credential_world::{disclose_credential_world, ProviderRosterKnowledge};
         let disclosure = disclose_credential_world(
             ProviderRosterKnowledge::Observed { providers: vec![] },
             &[],
@@ -621,13 +627,14 @@ mod tests {
     #[test]
     fn a_health_reading_reaches_the_reading() {
         use aikit_core::doctor_world::{DoctorFinding, DoctorSeverity};
-        let disclosure = aikit_core::doctor_world::DoctorDisclosure::observed(vec![DoctorFinding {
-            check: "gateway.service".into(),
-            severity: DoctorSeverity::Note,
-            summary: "no agency gateway is running at the default endpoint".into(),
-            detail: None,
-            fixable: false,
-        }]);
+        let disclosure =
+            aikit_core::doctor_world::DoctorDisclosure::observed(vec![DoctorFinding {
+                check: "gateway.service".into(),
+                severity: DoctorSeverity::Note,
+                summary: "no agency gateway is running at the default endpoint".into(),
+                detail: None,
+                fixable: false,
+            }]);
         let world = doctor_world_from(DoctorAnswer::Observed(Box::new(disclosure)));
         assert!(world.doctor.was_attempted());
         assert_eq!(world.doctor.count(DoctorSeverity::Note), Some(1));

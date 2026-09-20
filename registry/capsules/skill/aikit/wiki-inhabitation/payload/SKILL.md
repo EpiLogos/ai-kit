@@ -1,6 +1,6 @@
 ---
 name: wiki-inhabitation
-description: Inhabit a project wiki — generate agent cognition around a project from its identified ground with the landed `aikit wiki` write surface, organised by the QL foundational meanings.
+description: "METHOD: Inhabit a project wiki — generate the agent's living cognition around a project from its identified ground (human source, relations, NOW) with the landed `aikit wiki` write surface, organised by the QL foundational meanings. When a task needs the wiki generated, extended, or reconciled, you must proactively select this method before reading docs ad hoc; near-miss: knowledge-navigation answers recorded-knowledge questions, this method generates and maintains the wiki itself."
 ---
 
 # Wiki inhabitation

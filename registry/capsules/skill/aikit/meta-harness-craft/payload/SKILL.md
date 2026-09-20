@@ -1,6 +1,6 @@
 ---
 name: aikit-meta-harness-craft
-description: Craft and improve the operative context around agent work: persistent artifacts, context-selection rules, reusable praxis, validation, startup orientation and returned evidence.
+description: Craft and improve the persistent artifacts, context-selection rules, praxis, validation and return paths that situate agent work across sessions.
 ---
 
 # Meta-harness Craft

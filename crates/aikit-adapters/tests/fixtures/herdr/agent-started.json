@@ -1,0 +1,12 @@
+{
+  "id": "cli:agent:start",
+  "result": {
+    "type": "agent_info",
+    "agent": {
+      "terminal_id": "term-2",
+      "name": "reviewer",
+      "pane_id": "w7:p2",
+      "agent_status": "idle"
+    }
+  }
+}

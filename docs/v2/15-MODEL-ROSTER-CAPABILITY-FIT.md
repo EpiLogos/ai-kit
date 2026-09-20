@@ -56,6 +56,10 @@ Actualisation composes a selected `(ModelRef, route)` into an `actuation.instant
 
 Ranking, below, is the policy layer inside selection. It does not mint Models, prove routes, or record usage as availability.
 
+## Modality surfaces
+
+What a resolved body can hear, say and do — input/output modalities, transform capabilities, interaction forms (streaming, full-duplex realtime, barge-in, turn detection, structured tool requests), transport and connection facts — is a contract each model surface declares on `model_surface.modality` (`aikit.model-modality/v1`). Queries answer four explicit states (supported / degraded / unsupported / unknown); realtime, cascade STT→text→TTS and hybrid bodies resolve through the ordinary composition resolver with per-stage relations and provenance. See `24-MODEL-MODALITY-AND-REALTIME-SURFACES.md`.
+
 ## Ownership
 
 - **Actuation** defines what situated model-bearing conditions mean, including the inference/control/interior distinctions represented by its `ModelAccessProfile` contract, and owns the instantiation evidence gate. The harness catalog r6 `model_dispatch` descriptor is Actuation's; AIKit consumes it as route evidence.
@@ -185,3 +189,43 @@ The #64 ranking suite still exercises:
 15. repository CI is the final conformance gate for this change.
 
 The #265 field suites sit beside that receipt: `model_route_availability_acceptance` carries one test per availability row; `model_realisation_end_to_end` walks Agent → selection → route → Actuation → Workcell → usage and holds that usage cannot feed availability.
+
+## Planned extension — situated model profiles and optimisation Return
+
+**Owner-authorised 13 September 2026; implementation and live proving pending.** This extends the existing field, not the meaning of its historical acceptance. It recovers the owner's early roster intention: models understood by class, known or discovered quirks, and usefulness relative to tasks and kinds of work. AIKit is the native home because Direct agents and other consumers need the same knowledge as Factory. Factory remains the developmental demand, experiment/Candidate and outcome owner. Central retains authored preferences and adoption; Actuation actual usage; Workcell actual material conditions.
+
+Use the full-suite [optimisation protocol](https://github.com/EpiLogos/O-I/blob/main/docs/experience/OPTIMISATION.md) under O-I#65; its publication/merge and installed loading have separate standing. Missing richness below is ordinary native development, not something a populated Markdown catalogue proves implemented.
+
+### A. Profile the model without flattening its execution conditions
+
+Support expandable, source-bearing descriptions over existing ModelRefs and variants. Classifications are independent facets, not one universal quality tier: family/generation and architecture or parameter scale where genuinely disclosed; reasoning/interaction regime; text/vision/audio or other modalities; generalist and demonstrated domain/task affinities; inference/control/interior access; operational efficiency conditions. Unknown or undisclosed internals remain unknown. Local/remote and API/router/harness access describe a route/material condition, not a new Model species. A price class is dated and context-relative, not an enduring capability claim.
+
+Keep provider-documented properties, community/imported reports, human-authored judgements, local observations and derived hypotheses separately attributable. Each assertion carries source/date/revision and validity/scope. Imported popularity or benchmark scores are not local proof or authority. Exact active model/variant/provider/engine/quantisation and supported settings remain inspectable; an alias whose backend revision is unknown says so.
+
+### B. Quirks are testable conditional claims
+
+A quirk record needs: the observed behaviour or limit; applicable model/variant and route/body/context/task conditions; evidence and counterexamples; observed versus hypothesised cause; current standing/freshness; useful workaround with its cost/side effects; retest, supersession or retirement relation. Preserve conflicting qualified observations rather than overwrite them into a universal warning.
+
+Representative *questions to test*, not claims about named models: tool/schema adherence; source fidelity and citation behaviour; long-context sensitivity; verbosity or truncation; parallel tool behaviour; refusal/permission handling; sensitivity to prompt/Skill construction; repair and uncertainty reporting; latency under load. Diagnose whether the effect belongs to a harness, tool contract, Skill/context, quantisation or provider before attributing it to the base model. No secret, private prompt or protected task content is copied into shared model knowledge by default.
+
+### C. Fitness describes a task and an actual body
+
+Compare useful work types such as implementation, debugging, review/verification, source-grounded research, writing/synthesis, planning/orchestration, structured transformation and interactive/multimodal work. These are extensible task facets, not a mandatory exhaustive taxonomy. Role, risk, output/fidelity requirement, context characteristics and authority matter as much as a task label.
+
+Extend current `FitnessScope` / `FitnessObservation` and catalogue/read-model seams as current code warrants. Retain exact model/variant/provider revision, harness/composition, Profile/SkillSet/Skill revisions, context/source basis and work type; material/settings/cache state where causal. Evidence carries sample/attempt denominators, task difficulty, verification method, independent lineage, uncertainty, failures and contrary findings. Cross-revision or cross-body transfer requires an explicit supported relation or retest, never silent averaging of incompatible evidence. Fresh unknown candidates are not intrinsically bad; any exploratory trial remains bounded and authorised.
+
+Cost/latency/reliability and outcome quality remain a vector. Use whole-task accounting including failed/rejected attempts, retries, reviewer/synthesis and learning overhead, with human effort separate. Keep provider spend and estimates distinct and avoid duplicate aggregation of the same invocation. No accepted results means cost-per-accepted-result is undefined. Do not silently turn authored preferences, frecency or usage into fitness, availability, trust or disclosure permission.
+
+### D. Close the native Return and consumer loop
+
+Persist or reference profile assertions and fitness through existing owner stores and provenance machinery, not a second model database. Factory `ExecutionDemand` → AIKit eligible roster/explanation → actual body/Activity → Factory work-unit/attempt/outcome → scoped fitness Return is one route. Direct work can supply properly attributed outcome observations without fabricated Factory Run ancestry. A successful response or model self-report alone does not establish the asserted task outcome.
+
+Explain why an observation applies, is excluded, is stale or remains uncertain. Human/TUI/desktop/structured-agent consumers use the same owner application reading; no terminal scraping or private Factory mirror. Retain original refs through catalogue refresh, route loss, provider replacement and evidence retirement. Profile publication is not source projection, installed practice or actual use. No unsupported roster-listing command is introduced by this plan.
+
+### E. Acceptance within the existing campaign
+
+Prove at least: two task types produce different explainable choices among eligible alternatives; a documented claim differs from a locally verified quirk; a contradictory/stale observation stays visible without silently overriding current evidence; variant/provider/harness mismatch cannot leak fitness across scope; unknown price and unavailable capability do not win as free/usable; Direct and Factory Return retain their distinct provenance; readers can expand a finding to exact evidence and a later fresh agent actually uses the admitted lesson through native discovery.
+
+Compare model/body arrangements under both equal total budgets and equal required outcome quality where useful. Preserve original failed attempts and independent negatives. Compare the selection or quirk-triage practice itself as an exact O0/O1 Candidate on fixed held-out work, including all improvement overhead; changing the evaluator or quality floor to win is a failure. This supplies a concrete native input/Return for Ta-Onta #94's Pleroma/Anima/Aletheia and AW3 optimisation-of-optimisation tests without making QL a dependency of ordinary model selection.
+
+Do not reopen completed #64 or describe #265 foundations as missing. Reconcile the exact current catalogue, roster, selection, actualisation and Factory adapter before implementing only the gaps above. Repository contract tests, actual provider experiments, installation/loading and human experience retain D/C/P/M/H evidence separately.

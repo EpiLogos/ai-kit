@@ -52,7 +52,9 @@ use aikit_tui::application_service::ApplicationService;
 use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
 use aikit_tui::backend::{JobOutput, PaletteBackend, Projected, PromotionDraft, RunIntent, Toggle};
 use aikit_tui::event::PaletteEvent;
-use aikit_tui::graph_layout::{layout as graph_layout, GraphLayoutRequest, GraphViewport, RelationBand};
+use aikit_tui::graph_layout::{
+    layout as graph_layout, GraphLayoutRequest, GraphViewport, RelationBand,
+};
 use aikit_tui::graph_presentation;
 use aikit_tui::host::UiHost;
 use aikit_tui::layout::Layout;
@@ -108,7 +110,12 @@ fn rendered_rows(terminal: &Terminal<TestBackend>) -> String {
 fn lines_to_text(lines: &[Line]) -> String {
     lines
         .iter()
-        .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -127,19 +134,32 @@ fn resolver_fixture() -> (tempfile::TempDir, Fixture) {
         "skill/alpha",
         "related_skills = [\"skill/beta\", \"skill/gamma\"]\n",
     );
-    let backend = Fixture::new(dir.path(), vec![alpha, skill("skill/beta"), skill("skill/gamma")]);
+    let backend = Fixture::new(
+        dir.path(),
+        vec![alpha, skill("skill/beta"), skill("skill/gamma")],
+    );
     (dir, backend)
 }
 
 /// Enter the Graph projection with `alpha` selected, exactly as a viewer
 /// would: resize, select the one search hit, then Ctrl+T through
 /// List -> Tree -> Graph.
-fn enter_graph(surface: &mut ApplicationSurfaceController, backend: &mut Fixture, width: u16, height: u16) {
-    surface.handle(backend, PaletteEvent::Resize(width, height)).unwrap();
+fn enter_graph(
+    surface: &mut ApplicationSurfaceController,
+    backend: &mut Fixture,
+    width: u16,
+    height: u16,
+) {
+    surface
+        .handle(backend, PaletteEvent::Resize(width, height))
+        .unwrap();
     surface.handle(backend, key(KeyCode::Down)).unwrap();
     for _ in 0..2 {
         surface
-            .handle(backend, PaletteEvent::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)))
+            .handle(
+                backend,
+                PaletteEvent::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            )
             .unwrap();
     }
     assert_eq!(surface.semantic().relation_view, RelationView::Graph);
@@ -147,7 +167,10 @@ fn enter_graph(surface: &mut ApplicationSurfaceController, backend: &mut Fixture
 
 fn ctrl_t(surface: &mut ApplicationSurfaceController, backend: &mut Fixture) {
     surface
-        .handle(backend, PaletteEvent::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)))
+        .handle(
+            backend,
+            PaletteEvent::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+        )
         .unwrap();
 }
 
@@ -163,20 +186,34 @@ fn selected_resource_survives_list_tree_graph_list_with_no_drift() {
         ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("alpha"),
     )
     .unwrap();
-    surface.handle(&mut backend, PaletteEvent::Resize(120, 30)).unwrap();
+    surface
+        .handle(&mut backend, PaletteEvent::Resize(120, 30))
+        .unwrap();
     surface.handle(&mut backend, key(KeyCode::Down)).unwrap();
 
     assert_eq!(surface.semantic().relation_view, RelationView::List);
-    let original = surface.semantic().selected.clone().expect("a selection exists");
+    let original = surface
+        .semantic()
+        .selected
+        .clone()
+        .expect("a selection exists");
     assert_eq!(original.as_str(), "skill/alpha");
 
     ctrl_t(&mut surface, &mut backend); // List -> Tree
     assert_eq!(surface.semantic().relation_view, RelationView::Tree);
-    assert_eq!(surface.semantic().selected, Some(original.clone()), "Tree must not drift selection");
+    assert_eq!(
+        surface.semantic().selected,
+        Some(original.clone()),
+        "Tree must not drift selection"
+    );
 
     ctrl_t(&mut surface, &mut backend); // Tree -> Graph
     assert_eq!(surface.semantic().relation_view, RelationView::Graph);
-    assert_eq!(surface.semantic().selected, Some(original.clone()), "Graph must not drift selection");
+    assert_eq!(
+        surface.semantic().selected,
+        Some(original.clone()),
+        "Graph must not drift selection"
+    );
 
     ctrl_t(&mut surface, &mut backend); // Graph -> List
     assert_eq!(surface.semantic().relation_view, RelationView::List);
@@ -231,7 +268,10 @@ fn recenter_changes_focus_and_pushes_history_and_back_restores_it() {
         Some(alpha.clone()),
         "Back must restore the prior focus"
     );
-    assert!(surface.semantic().graph.history.is_empty(), "the restored focus is popped, not retained");
+    assert!(
+        surface.semantic().graph.history.is_empty(),
+        "the restored focus is popped, not retained"
+    );
     assert_eq!(surface.relation().unwrap().subject, alpha);
 }
 
@@ -274,7 +314,10 @@ fn repeated_renders_of_unchanged_state_produce_byte_identical_geometry() {
 
     let first = rendered_rows(&draw(&surface, 120, 30));
     let second = rendered_rows(&draw(&surface, 120, 30));
-    assert_eq!(first, second, "drawing twice with nothing changed must render identically");
+    assert_eq!(
+        first, second,
+        "drawing twice with nothing changed must render identically"
+    );
 }
 
 #[test]
@@ -287,7 +330,10 @@ fn cursor_movement_alone_never_recomputes_the_cached_layout_but_a_genuine_change
     .unwrap();
     enter_graph(&mut surface, &mut backend, 120, 30);
     let after_entry = surface.graph_layout_recompute_count();
-    assert!(after_entry > 0, "entering Graph must compute a layout at least once");
+    assert!(
+        after_entry > 0,
+        "entering Graph must compute a layout at least once"
+    );
 
     // Cursor movement (arrow/hjkl) dispatches `GraphSelectNode`, which moves
     // `selected` but not `graph.focus` — the fetched relation view is
@@ -302,8 +348,12 @@ fn cursor_movement_alone_never_recomputes_the_cached_layout_but_a_genuine_change
 
     // A genuine change to the graph-local filter narrows the view fed to
     // `graph_layout::layout` — the cache key changes, so this must recompute.
-    surface.handle(&mut backend, key(KeyCode::Char('/'))).unwrap();
-    surface.handle(&mut backend, key(KeyCode::Char('b'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('/')))
+        .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('b')))
+        .unwrap();
     surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
     assert!(
         surface.graph_layout_recompute_count() > after_entry,
@@ -380,7 +430,11 @@ fn familiarity_context() -> FamiliarityContext {
     }
 }
 
-fn wiki_fixture() -> (SemanticWikiIndex, Vec<SourceMaterial>, NativeSourcePoolProvider) {
+fn wiki_fixture() -> (
+    SemanticWikiIndex,
+    Vec<SourceMaterial>,
+    NativeSourcePoolProvider,
+) {
     let objects = parse_wiki_objects(WIKI_FIXTURE_JSON).unwrap();
     let index = SemanticWikiIndex::rebuild(objects).unwrap();
     let material = vec![SourceMaterial {
@@ -490,11 +544,17 @@ fn find_edge<'a>(view: &'a KnowledgeRelationView, relation: &str) -> &'a aikit_c
     view.edges
         .iter()
         .find(|edge| edge.relation == relation)
-        .unwrap_or_else(|| panic!("fixture must contain a {relation:?} edge; got {:?}", view.edges))
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture must contain a {relation:?} edge; got {:?}",
+                view.edges
+            )
+        })
 }
 
 #[test]
-fn incoming_outgoing_and_contained_relations_land_in_their_documented_band_and_a_containment_lookalike_does_not() {
+fn incoming_outgoing_and_contained_relations_land_in_their_documented_band_and_a_containment_lookalike_does_not(
+) {
     let (index, material, sources) = wiki_fixture();
     let subject = ResourceRef::parse("wiki:space:root").unwrap();
     let address = KnowledgeAddress::Wiki(subject.clone());
@@ -511,14 +571,21 @@ fn incoming_outgoing_and_contained_relations_land_in_their_documented_band_and_a
 
     let service = ApplicationService::new(&mut backend);
     let relation = service.relations_at_depth(&subject, 1).unwrap();
-    assert_eq!(relation.view.query.focus, subject, "the real provider's own focus must survive untouched");
+    assert_eq!(
+        relation.view.query.focus, subject,
+        "the real provider's own focus must survive untouched"
+    );
     // Recomputed for the current fixture: root's own relations() call still
     // yields exactly cites, grounded-in, member, child-space and member-of —
     // root itself carries no `parent_space_refs`, so the enclosing-edge
     // faculty added in cc1e152 contributes nothing at *this* focus (it is
     // proven from `wiki:space:child`'s and `wiki:node:member`'s own focus
     // below, where it actually fires).
-    assert_eq!(relation.view.edges.len(), 5, "exactly the fixture's five authored edges, no more");
+    assert_eq!(
+        relation.view.edges.len(),
+        5,
+        "exactly the fixture's five authored edges, no more"
+    );
 
     let laid = graph_layout(&relation.view, &viewport_request(120, 30));
     let band_of = |relation_name: &str| {
@@ -635,7 +702,8 @@ fn child_space_relation_bands_differently_by_which_side_is_focused() {
 
     // The container's own focus: its child is Contained.
     let root_view =
-        KnowledgeOperations::relations(&app, &KnowledgeAddress::Wiki(root.clone()), 1, 96, 192).unwrap();
+        KnowledgeOperations::relations(&app, &KnowledgeAddress::Wiki(root.clone()), 1, 96, 192)
+            .unwrap();
     let root_edge = find_edge(&root_view, "child-space");
     assert_eq!(root_edge.from, root);
     assert_eq!(root_edge.to, child);
@@ -652,9 +720,13 @@ fn child_space_relation_bands_differently_by_which_side_is_focused() {
     // The child's own focus: its parent is Context — same relation string,
     // opposite band, because the focus is now the `to` endpoint.
     let child_view =
-        KnowledgeOperations::relations(&app, &KnowledgeAddress::Wiki(child.clone()), 1, 96, 192).unwrap();
+        KnowledgeOperations::relations(&app, &KnowledgeAddress::Wiki(child.clone()), 1, 96, 192)
+            .unwrap();
     let child_edge = find_edge(&child_view, "child-space");
-    assert_eq!(child_edge.from, root, "the same logical membership edge, from the Space");
+    assert_eq!(
+        child_edge.from, root,
+        "the same logical membership edge, from the Space"
+    );
     assert_eq!(child_edge.to, child);
     assert_eq!(child_edge.direction, RelationDirection::Incoming);
     assert_eq!(child_edge.origin.authority, SourceAuthority::Authored);
@@ -721,14 +793,26 @@ fn provider_lens_authority_and_revision_are_all_still_readable_at_the_inspector(
         &aikit_tui::theme::Theme::new(),
     );
     let text = lines_to_text(&inspector);
-    assert!(text.contains("member"), "the Inspector must name the relation:\n{text}");
-    assert!(text.contains("authority: Authored"), "authority must render:\n{text}");
+    assert!(
+        text.contains("member"),
+        "the Inspector must name the relation:\n{text}"
+    );
+    assert!(
+        text.contains("authority: Authored"),
+        "authority must render:\n{text}"
+    );
     assert!(
         text.contains(aikit_core::NATIVE_SEMANTIC_WIKI_PROVIDER),
         "provider must render:\n{text}"
     );
-    assert!(text.contains("lens: semantic-wiki"), "lens must render:\n{text}");
-    assert!(text.contains("revision: 3"), "revision must render, not just be present on the typed edge:\n{text}");
+    assert!(
+        text.contains("lens: semantic-wiki"),
+        "lens must render:\n{text}"
+    );
+    assert!(
+        text.contains("revision: 3"),
+        "revision must render, not just be present on the typed edge:\n{text}"
+    );
 
     // A second, independent real edge (SourcePool-cited provenance on a
     // plain node, reached through the same multi-provider
@@ -764,7 +848,11 @@ fn a_neighbourhood_at_the_core_relation_budgets_lays_out_and_renders_within_boun
     for i in 0..95 {
         let raw = format!("knowledge-node/n{i:03}");
         let node = RelationRefNode::parse(&raw);
-        assert!(view.push_node(RelationNode::new(node.clone(), ResourceKind::KnowledgeNode, &raw)));
+        assert!(view.push_node(RelationNode::new(
+            node.clone(),
+            ResourceKind::KnowledgeNode,
+            &raw
+        )));
         let (from, to, direction) = if i % 2 == 0 {
             (focus.clone(), node.clone(), RelationDirection::Outgoing)
         } else {
@@ -787,27 +875,50 @@ fn a_neighbourhood_at_the_core_relation_budgets_lays_out_and_renders_within_boun
         ))
         .unwrap();
     }
-    assert_eq!(view.nodes.len(), 96, "node budget saturated but not exceeded");
-    assert_eq!(view.edges.len(), 190, "edge count sits right up against the 192 edge budget too");
-    assert!(!view.truncated, "under budget: the provider itself never marks this truncated");
+    assert_eq!(
+        view.nodes.len(),
+        96,
+        "node budget saturated but not exceeded"
+    );
+    assert_eq!(
+        view.edges.len(),
+        190,
+        "edge count sits right up against the 192 edge budget too"
+    );
+    assert!(
+        !view.truncated,
+        "under budget: the provider itself never marks this truncated"
+    );
 
     // A generously wide but modest-height terminal: nowhere near enough
     // rows to show 95 Incoming/Outgoing rows at one node per row.
     let request = viewport_request(120, 24);
     let laid = graph_layout(&view, &request);
-    assert!(laid.truncated, "the viewport budget, not the provider, must be what truncates here");
+    assert!(
+        laid.truncated,
+        "the viewport budget, not the provider, must be what truncates here"
+    );
     assert!(laid.dropped.nodes_dropped > 0);
 
     let glyphs = aikit_tui::graph_layout::GraphGlyphs::unicode();
     let theme = aikit_tui::theme::Theme::new();
-    let rendered = graph_presentation::spatial_lines(&laid, None, &glyphs, &theme, GraphViewport::new(120, 24));
+    let rendered = graph_presentation::spatial_lines(
+        &laid,
+        None,
+        &glyphs,
+        &theme,
+        GraphViewport::new(120, 24),
+    );
 
     // Structural bound, not a timing assertion: the canvas portion of the
     // rendering is exactly the viewport's own row count regardless of how
     // many nodes the neighbourhood carries — the whole point of a bounded
     // layout is that rendering cost tracks the *screen*, not the graph.
     let canvas_rows = rendered.iter().take(24).count();
-    assert_eq!(canvas_rows, 24, "the canvas must stay exactly viewport-sized, never node-count-sized");
+    assert_eq!(
+        canvas_rows, 24,
+        "the canvas must stay exactly viewport-sized, never node-count-sized"
+    );
     assert!(
         rendered.len() < view.nodes.len() * 2,
         "the legend must stay close to one line per *visible* node, not blow up with the full 96-node neighbourhood: {} lines for {} nodes",
@@ -844,14 +955,24 @@ fn a_truncated_focus_only_view_with_warnings_renders_truthfully_in_both_projecti
     // required to say so, never to report an empty neighbourhood as if it
     // were complete.
     view.truncated = true;
-    view.warnings.push("provider truncated before any relation could be retrieved".into());
-    assert!(view.nodes.len() == 1 && view.edges.is_empty(), "provider returned only the focus node");
+    view.warnings
+        .push("provider truncated before any relation could be retrieved".into());
+    assert!(
+        view.nodes.len() == 1 && view.edges.is_empty(),
+        "provider returned only the focus node"
+    );
 
     let laid = graph_layout(&view, &viewport_request(80, 24));
     assert_eq!(laid.nodes.len(), 1);
     assert!(laid.edges.is_empty());
-    assert!(laid.truncated, "the layout must not silently drop the provider's own truncation");
-    assert!(laid.warnings.iter().any(|w| w.contains("provider truncated")));
+    assert!(
+        laid.truncated,
+        "the layout must not silently drop the provider's own truncation"
+    );
+    assert!(laid
+        .warnings
+        .iter()
+        .any(|w| w.contains("provider truncated")));
 
     let glyphs = aikit_tui::graph_layout::GraphGlyphs::unicode();
     let theme = aikit_tui::theme::Theme::new();
@@ -885,7 +1006,8 @@ fn a_truncated_focus_only_view_with_warnings_renders_truthfully_in_both_projecti
 // ===========================================================================
 
 #[test]
-fn narrowing_falls_back_to_grouped_projection_and_widening_restores_the_spatial_one_of_the_same_state() {
+fn narrowing_falls_back_to_grouped_projection_and_widening_restores_the_spatial_one_of_the_same_state(
+) {
     let (_dir, mut backend) = resolver_fixture();
     let mut surface = ApplicationSurfaceController::new(
         &mut backend,
@@ -893,28 +1015,64 @@ fn narrowing_falls_back_to_grouped_projection_and_widening_restores_the_spatial_
     )
     .unwrap();
     enter_graph(&mut surface, &mut backend, 120, 30);
-    surface.handle(&mut backend, key(KeyCode::Char('+'))).unwrap();
-    surface.handle(&mut backend, key(KeyCode::Char('/'))).unwrap();
-    surface.handle(&mut backend, key(KeyCode::Char('g'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('+')))
+        .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('/')))
+        .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('g')))
+        .unwrap();
     surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
     let depth = surface.semantic().graph.depth;
     let filter = surface.semantic().graph.filter.clone();
     assert_eq!(filter, "g");
     assert!(depth > 1);
 
-    surface.handle(&mut backend, PaletteEvent::Resize(40, 20)).unwrap();
-    assert_eq!(surface.semantic().relation_view, RelationView::Graph, "still semantically Graph");
-    assert_eq!(surface.semantic().graph.depth, depth, "depth survives narrowing");
-    assert_eq!(surface.semantic().graph.filter, filter, "filter survives narrowing");
+    surface
+        .handle(&mut backend, PaletteEvent::Resize(40, 20))
+        .unwrap();
+    assert_eq!(
+        surface.semantic().relation_view,
+        RelationView::Graph,
+        "still semantically Graph"
+    );
+    assert_eq!(
+        surface.semantic().graph.depth,
+        depth,
+        "depth survives narrowing"
+    );
+    assert_eq!(
+        surface.semantic().graph.filter,
+        filter,
+        "filter survives narrowing"
+    );
     let narrow_text = rendered_rows(&draw(&surface, 40, 20));
     assert!(narrow_text.contains("gamma") || narrow_text.contains("no typed resource relations"));
-    assert!(!narrow_text.contains("Inspector"), "narrow must use the grouped fallback:\n{narrow_text}");
+    assert!(
+        !narrow_text.contains("Inspector"),
+        "narrow must use the grouped fallback:\n{narrow_text}"
+    );
 
-    surface.handle(&mut backend, PaletteEvent::Resize(120, 30)).unwrap();
-    assert_eq!(surface.semantic().graph.depth, depth, "depth survives widening back");
-    assert_eq!(surface.semantic().graph.filter, filter, "filter survives widening back");
+    surface
+        .handle(&mut backend, PaletteEvent::Resize(120, 30))
+        .unwrap();
+    assert_eq!(
+        surface.semantic().graph.depth,
+        depth,
+        "depth survives widening back"
+    );
+    assert_eq!(
+        surface.semantic().graph.filter,
+        filter,
+        "filter survives widening back"
+    );
     let wide_text = rendered_rows(&draw(&surface, 120, 30));
-    assert!(wide_text.contains("Inspector"), "widening must restore the spatial canvas:\n{wide_text}");
+    assert!(
+        wide_text.contains("Inspector"),
+        "widening must restore the spatial canvas:\n{wide_text}"
+    );
 }
 
 // ===========================================================================
@@ -936,14 +1094,20 @@ fn clicking_a_node_and_keyboard_selecting_it_produce_the_same_semantic_action() 
     surface.handle(&mut backend, key(KeyCode::Right)).unwrap();
     let via_keyboard = surface.semantic().selected.clone().unwrap();
     assert_ne!(via_keyboard.as_str(), "skill/alpha");
-    assert_eq!(surface.semantic().graph.focus, Some(ResourceRef::parse("skill/alpha").unwrap()));
+    assert_eq!(
+        surface.semantic().graph.focus,
+        Some(ResourceRef::parse("skill/alpha").unwrap())
+    );
 
     // Reset the highlight back to the focus, then reach the exact same node
     // through a mouse click, using the controller's own documented
     // content-rect/canvas-viewport math (mirrored from `graph_content_rect`/
     // `graph_viewport`) so the click coordinate is real, not guessed.
     surface.handle(&mut backend, key(KeyCode::Left)).unwrap();
-    assert_eq!(surface.semantic().selected, Some(ResourceRef::parse("skill/alpha").unwrap()));
+    assert_eq!(
+        surface.semantic().selected,
+        Some(ResourceRef::parse("skill/alpha").unwrap())
+    );
 
     let inner = Rect::new(1, 1, 118, 28);
     let list = Layout::for_width(inner.width).split(inner).list;
@@ -960,7 +1124,10 @@ fn clicking_a_node_and_keyboard_selecting_it_produce_the_same_semantic_action() 
         (content.height * 3 / 5).max(MIN_CANVAS_HEIGHT)
     };
     let relation = surface.relation().unwrap().clone();
-    let laid = graph_layout(&relation.view, &viewport_request(content.width, canvas_height));
+    let laid = graph_layout(
+        &relation.view,
+        &viewport_request(content.width, canvas_height),
+    );
     let target = laid
         .nodes
         .iter()
@@ -969,7 +1136,9 @@ fn clicking_a_node_and_keyboard_selecting_it_produce_the_same_semantic_action() 
     let column = content.x + u16::try_from(target.position.x).unwrap();
     let row = content.y + u16::try_from(target.position.y).unwrap();
 
-    surface.handle(&mut backend, mouse(column, row, KeyModifiers::NONE)).unwrap();
+    surface
+        .handle(&mut backend, mouse(column, row, KeyModifiers::NONE))
+        .unwrap();
     let via_mouse = surface.semantic().selected.clone().unwrap();
     assert_eq!(
         via_mouse, via_keyboard,
@@ -989,7 +1158,9 @@ fn clicking_a_node_and_keyboard_selecting_it_produce_the_same_semantic_action() 
     surface.handle(&mut backend, key(KeyCode::Esc)).unwrap(); // back to alpha
     surface.handle(&mut backend, key(KeyCode::Right)).unwrap(); // reselect the same neighbour deterministically
     assert_eq!(surface.semantic().selected.as_ref(), Some(&via_keyboard));
-    surface.handle(&mut backend, mouse(column, row, KeyModifiers::SHIFT)).unwrap();
+    surface
+        .handle(&mut backend, mouse(column, row, KeyModifiers::SHIFT))
+        .unwrap();
     assert_eq!(
         surface.semantic().graph.focus,
         Some(via_keyboard),
@@ -1011,26 +1182,59 @@ fn resize_preserves_graph_focus_filter_depth_and_staged_state() {
     .unwrap();
     enter_graph(&mut surface, &mut backend, 120, 30);
 
-    surface.handle(&mut backend, key(KeyCode::Char('+'))).unwrap();
-    surface.handle(&mut backend, key(KeyCode::Char('/'))).unwrap();
-    surface.handle(&mut backend, key(KeyCode::Char('b'))).unwrap();
-    surface.handle(&mut backend, key(KeyCode::Char('e'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('+')))
+        .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('/')))
+        .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('b')))
+        .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('e')))
+        .unwrap();
     surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
     surface
-        .handle(&mut backend, PaletteEvent::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)))
+        .handle(
+            &mut backend,
+            PaletteEvent::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)),
+        )
         .unwrap(); // stage the selected (still-focus) resource
 
     let before = surface.semantic().clone();
     assert_eq!(before.graph.depth, 2);
     assert_eq!(before.graph.filter, "be");
-    assert_eq!(before.staged.len(), 1, "Ctrl+Space must have staged the selected resource");
+    assert_eq!(
+        before.staged.len(),
+        1,
+        "Ctrl+Space must have staged the selected resource"
+    );
 
-    surface.handle(&mut backend, PaletteEvent::Resize(60, 22)).unwrap();
+    surface
+        .handle(&mut backend, PaletteEvent::Resize(60, 22))
+        .unwrap();
 
-    assert_eq!(surface.semantic().graph.focus, before.graph.focus, "focus must survive a resize");
-    assert_eq!(surface.semantic().graph.filter, before.graph.filter, "filter must survive a resize");
-    assert_eq!(surface.semantic().graph.depth, before.graph.depth, "depth must survive a resize");
-    assert_eq!(surface.semantic().staged, before.staged, "staged changes must survive a resize");
+    assert_eq!(
+        surface.semantic().graph.focus,
+        before.graph.focus,
+        "focus must survive a resize"
+    );
+    assert_eq!(
+        surface.semantic().graph.filter,
+        before.graph.filter,
+        "filter must survive a resize"
+    );
+    assert_eq!(
+        surface.semantic().graph.depth,
+        before.graph.depth,
+        "depth must survive a resize"
+    );
+    assert_eq!(
+        surface.semantic().staged,
+        before.staged,
+        "staged changes must survive a resize"
+    );
     assert_eq!(surface.semantic().area, (60, 22));
 }
 
@@ -1144,7 +1348,8 @@ fn snapshot_degraded_truncated_focus_only_graph() {
     )
     .unwrap();
     view.truncated = true;
-    view.warnings.push("provider truncated before any relation could be retrieved".into());
+    view.warnings
+        .push("provider truncated before any relation could be retrieved".into());
     let laid = graph_layout(&view, &viewport_request(80, 24));
     let glyphs = aikit_tui::graph_layout::GraphGlyphs::unicode();
     let theme = aikit_tui::theme::Theme::new();

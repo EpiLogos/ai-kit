@@ -40,3 +40,6 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 serde_json = { workspace = true }
 ratatui = { workspace = true }
+# The configuration-plane contribution is validated against the frozen C0
+# JSON Schema (vendored at tests/fixtures/) exactly as O:I will validate it.
+jsonschema = { version = "0.30", default-features = false, features = ["resolve-file"] }

@@ -1,0 +1,6 @@
+{
+  "id": "cli:api:snapshot",
+  "error": {
+    "message": "no workspace manager is running on this socket"
+  }
+}

@@ -11,7 +11,9 @@
 //! standing up a whole `ApplicationSurfaceController`.
 
 use aikit_core::context::ContextDescriptor;
-use aikit_core::project::{ProjectBinding, ProjectBindingLocator, ProjectConstituentRef, ProjectRef};
+use aikit_core::project::{
+    ProjectBinding, ProjectBindingLocator, ProjectConstituentRef, ProjectRef,
+};
 use aikit_core::resource::{
     GitRepositoryRelation, GitWorkingState, GitWorktreeRelation, ProviderRef, VersionRevision,
     VersionedProjectWorld, VersionedWorldCapability, VersionedWorldProviderDescriptor,
@@ -29,7 +31,9 @@ fn binding(project_ref: &str) -> ProjectBinding {
     ProjectBinding::new(
         ProjectRef::parse(project_ref).unwrap(),
         ProjectConstituentRef::parse("source:working-tree").unwrap(),
-        ProjectBindingLocator::LocalDirectory { path: "/tmp/worlds-git-probe".into() },
+        ProjectBindingLocator::LocalDirectory {
+            path: "/tmp/worlds-git-probe".into(),
+        },
     )
 }
 
@@ -102,33 +106,46 @@ fn render(world: &ProjectWorldReadModel) -> Vec<String> {
 #[test]
 fn the_worlds_pane_renders_attached_git_material() {
     let project_ref = "project:worlds-git-probe";
-    let world = ProjectWorldReadModel::empty(binding(project_ref), ContextDescriptor::for_project("/tmp/worlds-git-probe"))
-        .with_versioned_world(versioned_world_with_material(project_ref))
-        .unwrap();
+    let world = ProjectWorldReadModel::empty(
+        binding(project_ref),
+        ContextDescriptor::for_project("/tmp/worlds-git-probe"),
+    )
+    .with_versioned_world(versioned_world_with_material(project_ref))
+    .unwrap();
 
     let lines = render(&world);
 
     assert!(
-        lines.iter().any(|line| line.contains("Branch") && line.contains("trunk")),
+        lines
+            .iter()
+            .any(|line| line.contains("Branch") && line.contains("trunk")),
         "expected a Branch row naming trunk, got: {lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("Head") && line.contains("abcdef012345")),
-        "expected a short-head Head row (not the full 40-char SHA), got: {lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| !line.contains("abcdef0123456789abcdef0123456789abcdef01")),
-        "the head revision must be shortened somewhere, not just echoed in full"
     );
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("Upstream") && line.contains("origin/trunk") && line.contains("ahead") && line.contains("behind")),
+            .any(|line| line.contains("Head") && line.contains("abcdef012345")),
+        "expected a short-head Head row (not the full 40-char SHA), got: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| !line.contains("abcdef0123456789abcdef0123456789abcdef01")),
+        "the head revision must be shortened somewhere, not just echoed in full"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Upstream")
+            && line.contains("origin/trunk")
+            && line.contains("ahead")
+            && line.contains("behind")),
         "expected an Upstream row with ahead/behind counts, got: {lines:#?}"
     );
     assert!(
         lines.iter().any(|line| {
-            line.contains("Working") && line.contains("staged") && line.contains("unstaged") && line.contains("untracked")
+            line.contains("Working")
+                && line.contains("staged")
+                && line.contains("unstaged")
+                && line.contains("untracked")
         }),
         "expected a Working row summarising the dirty tree, got: {lines:#?}"
     );
@@ -139,7 +156,9 @@ fn the_worlds_pane_renders_attached_git_material() {
         "expected the linked worktree to be named, got: {lines:#?}"
     );
     assert!(
-        !lines.iter().any(|line| line.contains("no versioned material provider")),
+        !lines
+            .iter()
+            .any(|line| line.contains("no versioned material provider")),
         "a Project with real Git material must not render the absence sentence"
     );
 }
@@ -150,7 +169,10 @@ fn the_worlds_pane_renders_attached_git_material() {
 #[test]
 fn the_worlds_pane_states_plainly_when_no_versioned_provider_is_attached() {
     let project_ref = "project:worlds-git-probe";
-    let world = ProjectWorldReadModel::empty(binding(project_ref), ContextDescriptor::for_project("/tmp/worlds-git-probe"));
+    let world = ProjectWorldReadModel::empty(
+        binding(project_ref),
+        ContextDescriptor::for_project("/tmp/worlds-git-probe"),
+    );
     assert!(world.versioned_world.is_none());
 
     let lines = render(&world);
@@ -166,7 +188,9 @@ fn the_worlds_pane_states_plainly_when_no_versioned_provider_is_attached() {
         "an absent provider must never be worded as though a clean repository was observed"
     );
     assert!(
-        !lines.iter().any(|line| line.contains("Branch") || line.contains("Upstream")),
+        !lines
+            .iter()
+            .any(|line| line.contains("Branch") || line.contains("Upstream")),
         "no repository rows should appear when nothing was observed, got: {lines:#?}"
     );
 }

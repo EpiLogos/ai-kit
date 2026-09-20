@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "herdr-provider-contract-suite-landed-39-2026-09-15",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode-session",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1789445284,
+  "subject": "Herdr provider contract suite landed: 39 tests, mutation-checked, suite green",
+  "result": "Branch agent/herdr-contract-tests (3cc8de6 on origin/main): crates/aikit-adapters/tests/herdr_contract.rs + tests/fixtures/herdr/ (shapes promoted verbatim from provider recordings; one within-grammar variation documented as such). Covers snapshot parsing/status vocabulary, all envelope failure paths, automation argv + response validation, agent-start name-drift and binding, canonical identity law (Herdr workspace != SessionSpace identity, pane != canonical Surface, agent name != canonical Agent), health degradation + single recreate, truthful capabilities, detach refusal, provenance with upstream pin. Mutation-checked (5 guards broken, each caught). cargo nextest adapters+core: 1539 passed/10 skipped; clippy clean. PR ai-kit#315. Open decisions for owner: pin 94f6d9c0 is provenance not compat gate (hard gate = provider change); event subscription unimplemented (provider polls api snapshot) — Herdr event stream is the path to working/blocked/done attention semantics on a Linux host.",
+  "status": "active"
+}

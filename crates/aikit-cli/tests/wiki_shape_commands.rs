@@ -122,7 +122,13 @@ fn a_declared_constellation_validates_against_the_pinned_contract() {
 
     let (code, envelope) = run(
         work.path(),
-        &["wiki-shape", "declare", "wiki:frame:arbitration", "--file", file.to_str().unwrap()],
+        &[
+            "wiki-shape",
+            "declare",
+            "wiki:frame:arbitration",
+            "--file",
+            file.to_str().unwrap(),
+        ],
         Some(&body),
     );
     assert_eq!(code, 0, "{envelope}");
@@ -133,7 +139,10 @@ fn a_declared_constellation_validates_against_the_pinned_contract() {
         &["wiki-shape", "validate", "--file", file.to_str().unwrap()],
         None,
     );
-    assert_eq!(code, 0, "a contract-conforming constellation validates: {envelope}");
+    assert_eq!(
+        code, 0,
+        "a contract-conforming constellation validates: {envelope}"
+    );
 }
 
 /// Conjugate-requires-direct comes from the contract, and the refusal must
@@ -150,12 +159,24 @@ fn a_conjugate_without_its_direct_is_refused_at_declare_time() {
 
     let (code, envelope) = run(
         work.path(),
-        &["wiki-shape", "declare", "wiki:frame:conjugate-only", "--file", file.to_str().unwrap()],
+        &[
+            "wiki-shape",
+            "declare",
+            "wiki:frame:conjugate-only",
+            "--file",
+            file.to_str().unwrap(),
+        ],
         Some(&body),
     );
-    assert_ne!(code, 0, "a conjugate without its direct must be refused: {envelope}");
+    assert_ne!(
+        code, 0,
+        "a conjugate without its direct must be refused: {envelope}"
+    );
     assert!(
-        envelope["error"]["code"].as_str().unwrap_or_default().starts_with("knowledge."),
+        envelope["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("knowledge."),
         "the refusal is a typed knowledge error: {envelope}"
     );
     assert_eq!(
@@ -179,10 +200,19 @@ fn an_unrecognised_future_shape_ref_is_preserved_not_refused() {
 
     let (code, envelope) = run(
         work.path(),
-        &["wiki-shape", "declare", "wiki:frame:evolved", "--file", file.to_str().unwrap()],
+        &[
+            "wiki-shape",
+            "declare",
+            "wiki:frame:evolved",
+            "--file",
+            file.to_str().unwrap(),
+        ],
         Some(&body),
     );
-    assert_eq!(code, 0, "a future shape ref does not need an engine release: {envelope}");
+    assert_eq!(
+        code, 0,
+        "a future shape ref does not need an engine release: {envelope}"
+    );
 
     let (code, envelope) = run(
         work.path(),
@@ -205,15 +235,26 @@ fn the_compression_yields_the_six_plus_six_prime_trinity() {
     );
     let (code, _) = run(
         work.path(),
-        &["wiki-shape", "declare", "wiki:frame:arbitration", "--file", file.to_str().unwrap()],
+        &[
+            "wiki-shape",
+            "declare",
+            "wiki:frame:arbitration",
+            "--file",
+            file.to_str().unwrap(),
+        ],
         Some(&body),
     );
     assert_eq!(code, 0);
 
     let (code, envelope) = run(
         work.path(),
-        &["wiki-shape", "compress", "wiki:node:t09:arbitration-whole",
-          "--file", file.to_str().unwrap()],
+        &[
+            "wiki-shape",
+            "compress",
+            "wiki:node:t09:arbitration-whole",
+            "--file",
+            file.to_str().unwrap(),
+        ],
         None,
     );
     assert_eq!(code, 0, "{envelope}");

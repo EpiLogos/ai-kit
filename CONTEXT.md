@@ -1,8 +1,14 @@
-# AIKit
+# AIKit — Project and Skill-Binding Vocabulary
 
-AIKit resolves and projects the agent capabilities appropriate to one working
-context. This language keeps reusable project configuration separate from the
-live checkout and session in which an agent is operating.
+This file defines the exact terms AIKit uses for reusable project
+configuration and skill binding, keeping that language separate from the
+live checkout and session in which an agent is operating. It is not a full
+product overview: for AIKit's current scope — the operative composition and
+disclosure layer, including ContextSources, Knowledge Navigation, Session
+space, runtime bodies and multi-Surface agency — see `README.md`; for the
+implementation-facing vocabulary (Capsule, Capability, Profile, Session
+space, Pool patch, Effective view, Projection, Generation, Procedure) see
+`docs/ARCHITECTURE.md` §1.
 
 ## Language
 

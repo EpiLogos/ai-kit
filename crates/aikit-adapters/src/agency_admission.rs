@@ -98,7 +98,9 @@ impl AdmittedAgency {
         let bytes = self.basis.read()?;
         let request: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
         if request["schema"] != AGENCY_ACTUALISATION_SCHEMA {
-            return Err(invalid("Expected an Actuation agency actualisation request source"));
+            return Err(invalid(
+                "Expected an Actuation agency actualisation request source",
+            ));
         }
         validate_receipt(&request, &self.receipt)?;
         for (field, expected) in [
@@ -109,7 +111,9 @@ impl AdmittedAgency {
             ("scope_ref", &self.scope_ref),
         ] {
             if request["differentiated_binding"][field].as_str() != Some(expected.as_str()) {
-                return Err(invalid(format!("Admitted {field} differs from its native source")));
+                return Err(invalid(format!(
+                    "Admitted {field} differs from its native source"
+                )));
             }
         }
         if self.scope_ref.as_str() != "scope:root" {

@@ -6,18 +6,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aikit_adapters::bkmr::BkmrSourcePoolProvider;
 use aikit_adapters::central_file_map::CentralFileMapProvider;
 use aikit_adapters::gitnexus::GitNexusCodeIndexProvider;
+use aikit_adapters::now_field::{NowFieldScope, NowFieldSourcePoolProvider};
 use aikit_adapters::runner::SystemRunner;
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
 use aikit_core::knowledge_code::CodeIndexProvider;
+use aikit_core::knowledge_navigation::ProjectAuthoredPending;
 use aikit_core::knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider,
 };
 use aikit_core::knowledge_wiki::{parse_wiki_objects, OkfWikiBundle, WikiObject};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
+use aikit_core::repair_absence_lines;
 use aikit_core::resource::{
-    parse_or_search_expression, resolve_subjects, ProviderRef, ResolveExpression, ResourceIndex,
-    ResourceKind, ResourceRef, SourceAuthority, SourceRef,
+    expression_scope_project, parse_or_search_expression_in_scope, resolve_subjects, ProviderRef,
+    ResolveExpression, ResourceIndex, ResourceKind, ResourceRef, SourceAuthority, SourceRef,
 };
 use aikit_core::{
     FamiliarityContext, ForgetScope, KnowledgeAddress, KnowledgeApplication, KnowledgeExplanation,
@@ -41,10 +44,26 @@ pub(super) struct KnowledgeRuntime {
     native_source: NativeSourcePoolProvider,
     bkmr: Option<BkmrSourcePoolProvider<SystemRunner>>,
     central: Option<CentralFileMapProvider<SystemRunner>>,
+    now_field: Option<NowFieldSourcePoolProvider<SystemRunner>>,
+    now_field_roster: Vec<SourceMaterial>,
     central_expected: bool,
     code: Option<GitNexusCodeIndexProvider<SystemRunner>>,
     project_map: ProjectMap,
     absences: Vec<String>,
+    /// Per-project rollups of pending authored relations. Search/resolve/frame
+    /// replies carry at most their own scope's rollup; status carries every
+    /// project plus per-target detail.
+    authored_pending: Vec<ProjectAuthoredPending>,
+    /// Authored edge ref → Work-relative project display, for scoped queries
+    /// to keep another project's authored edges out of their results.
+    authored_edge_projects: BTreeMap<String, String>,
+    /// Compiled folder-subject ref (folder node or its parent/contains edge)
+    /// → Work-relative project display, for scoped queries to keep another
+    /// project's folder basis out of their results.
+    folder_subject_projects: BTreeMap<String, String>,
+    /// This invocation's own project in Work-relative display (`Work/demo`),
+    /// when the invocation root sits in a Central Work project.
+    current_project: Option<String>,
 }
 
 impl KnowledgeRuntime {
@@ -54,6 +73,37 @@ impl KnowledgeRuntime {
         self.wiki.as_ref().map(SqliteWikiProvider::index)
     }
 
+    /// The Work-relative project display a reply's scope resolves to. An
+    /// explicit scope key matches a pending project (display, project id or
+    /// bare Work name) or this invocation's own project; a bare unknown name
+    /// names `Work/<name>` directly. Without ground for a key, nothing is
+    /// claimed and nothing is narrowed.
+    fn scoped_project_display(&self, explicit_scope: Option<&str>) -> Option<String> {
+        let Some(key) = explicit_scope else {
+            return self.current_project.clone();
+        };
+        if let Some(pending) = self
+            .authored_pending
+            .iter()
+            .find(|pending| pending.matches_key(key))
+        {
+            return Some(pending.project.clone());
+        }
+        if let Some(current) = &self.current_project {
+            if display_matches_key(current, key) {
+                return Some(current.clone());
+            }
+        }
+        let key = key.trim();
+        if key.contains("..") {
+            return None;
+        }
+        if let Some(rest) = key.strip_prefix("Work/") {
+            return (!rest.is_empty() && !rest.contains('/')).then(|| key.to_owned());
+        }
+        (!key.contains('/')).then(|| format!("Work/{key}"))
+    }
+
     pub(super) fn source_material(&self) -> &[SourceMaterial] {
         &self.material
     }
@@ -61,13 +111,18 @@ impl KnowledgeRuntime {
         self.central.as_ref().map(|p| p as &dyn SourcePoolProvider)
     }
     fn application(&self, context: FamiliarityContext) -> KnowledgeApplication<'_> {
-        let mut application = KnowledgeApplication::new(context)
-            .with_project_map(&self.project_map);
+        let mut application =
+            KnowledgeApplication::new(context).with_project_map(&self.project_map);
         if let Some(provider) = &self.wiki {
             application = application.with_wiki(provider);
         }
         if let Some(provider) = &self.central {
             application = application.with_source_pool(provider, provider.descriptors());
+        }
+        if let Some(provider) = &self.now_field {
+            // The NOW field is live owner ground searched in place; its
+            // roster carries identity only, and reads go back to the file.
+            application = application.with_source_pool(provider, &self.now_field_roster);
         }
         application = application.with_source_pool(&self.native_source, &self.material);
         if let Some(provider) = &self.bkmr {
@@ -106,7 +161,10 @@ impl Service {
         &self,
         operation: impl FnOnce(&KnowledgeRuntime, KnowledgeApplication<'_>) -> Result<T>,
     ) -> Result<T> {
-        let owner_backed = self.knowledge_runtime.borrow().as_ref()
+        let owner_backed = self
+            .knowledge_runtime
+            .borrow()
+            .as_ref()
             .is_some_and(|r| r.central_expected);
         if owner_backed {
             self.invalidate_knowledge_runtime();
@@ -124,7 +182,10 @@ impl Service {
     }
 
     pub fn knowledge_search(&self, query: &str, limit: usize) -> Result<KnowledgeSearchResult> {
-        let expression = parse_or_search_expression(query)?;
+        // A query asked inside a project stands in that project's world
+        // through the grammar itself (`: demo (@# @ text)`) — never a flag.
+        let expression =
+            parse_or_search_expression_in_scope(query, self.knowledge_scope_project().as_deref())?;
         let mut result = self.knowledge_resolve(&expression, limit)?;
         result.query = query.into();
         Ok(result)
@@ -136,17 +197,56 @@ impl Service {
         limit: usize,
     ) -> Result<KnowledgeSearchResult> {
         let candidate_limit = if limit == 0 { 0 } else { limit.max(256) };
+        // The scope that governs this reply's disclosure: an explicit `:`
+        // scope in the expression, else the invocation's own project.
+        let explicit_scope = expression_scope_project(expression).map(str::to_owned);
         let mut result = self.with_knowledge(|runtime, application| {
+            let scoped_display = runtime.scoped_project_display(explicit_scope.as_deref());
             let mut result = application.resolve(expression, candidate_limit);
             result.absences.extend(runtime.absences.clone());
+            // Pending authored relations are scoped: a query sees its own
+            // scope's rollup; other projects' pendings stay with
+            // `knowledge status`.
+            if let Some(pending) = scoped_display.as_deref().and_then(|display| {
+                runtime
+                    .authored_pending
+                    .iter()
+                    .find(|pending| pending.project == display)
+            }) {
+                result.absences.push(pending.rollup_line());
+            }
+            // A scoped query keeps another project's compiled authored edges
+            // — and its compiled folder subjects — out of its results;
+            // unattributable material passes through.
+            if explicit_scope.is_some() {
+                if let Some(display) = &scoped_display {
+                    let attributed_to_other_project =
+                        |attribution: &BTreeMap<String, String>, resource: &str| {
+                            attribution
+                                .get(resource)
+                                .is_some_and(|project| project != display)
+                        };
+                    result.hits.retain(|hit| match &hit.address {
+                        aikit_core::KnowledgeAddress::Wiki(resource) => {
+                            !attributed_to_other_project(
+                                &runtime.authored_edge_projects,
+                                resource.as_str(),
+                            ) && !attributed_to_other_project(
+                                &runtime.folder_subject_projects,
+                                resource.as_str(),
+                            )
+                        }
+                        _ => true,
+                    });
+                }
+            }
             Ok(result)
         })?;
         self.apply_learned_accessibility(&resolve_subjects(expression), &mut result)?;
         result.hits.truncate(limit);
         if let Err(error) = self.knowledge_store().remember_search_hits(&result.hits) {
             result.absences.push(format!(
-                "Knowledge address cache unavailable; live search results remain valid: {}",
-                error.message()
+                "Knowledge address cache unavailable; live search results remain valid: {error}"
             ));
         }
         Ok(result)
@@ -262,6 +362,60 @@ impl Service {
         Ok(())
     }
 
+    /// The invocation's own project in Work-relative display, when the
+    /// invocation stands inside a Central Work project. The member comes from
+    /// directory shape — the project root's Work member when the resolved root
+    /// sits under one, else the invocation cwd's member — so a Work directory
+    /// whose profile discovery collapsed onto the world root still scopes to
+    /// its own project.
+    fn current_project_display(&self) -> Option<String> {
+        let root = self
+            .descriptor
+            .project_root
+            .as_deref()
+            .unwrap_or(&self.invocation_cwd);
+        let central_root = root.ancestors().find(|candidate| {
+            candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
+        })?;
+        Some(format!(
+            "Work/{}",
+            self.invocation_project_member(central_root, root)?
+        ))
+    }
+
+    /// The Work member this invocation's project context belongs to, read from
+    /// directory shape alone. The resolved project root decides when it sits
+    /// under `Work/<member>` itself (a discovered, rescued or specified
+    /// project); otherwise the invocation cwd decides, which is exactly the
+    /// collapse case — a Work directory with no marker of its own under a world
+    /// root that carries one resolves its project root to the world root, and
+    /// only the cwd still names the project. A root outside `Work/` (the world
+    /// root itself, a Control location) contributes nothing, so a
+    /// Control-location invocation keeps world-root behaviour and nothing is
+    /// ever guessed from shape the ground does not carry. The cwd comparison
+    /// canonicalises both sides because a resolved project root can be
+    /// canonical while the cwd keeps its invoked spelling (or the reverse);
+    /// an unreadable path names nothing rather than guessing.
+    fn invocation_project_member(&self, central_root: &Path, root: &Path) -> Option<String> {
+        work_member(central_root, root).or_else(|| {
+            let cwd = std::fs::canonicalize(&self.invocation_cwd).ok()?;
+            let central = std::fs::canonicalize(central_root).ok()?;
+            work_member(&central, &cwd)
+        })
+    }
+
+    /// The bare Work name used as the lowered scope key (`demo` for
+    /// `Work/demo`) — the readable spelling of the project world.
+    fn knowledge_scope_project(&self) -> Option<String> {
+        self.current_project_display().and_then(|display| {
+            display
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        })
+    }
+
     pub fn knowledge_address(&self, resource: &ResourceRef) -> Result<Option<KnowledgeAddress>> {
         if let Some(address) = self.knowledge_store().address(resource)? {
             return Ok(Some(address));
@@ -340,6 +494,17 @@ impl Service {
         let mut frame = self.with_knowledge(|runtime, application| {
             let mut frame = application.context_pack(query, addresses);
             frame.absences.extend(runtime.absences.clone());
+            // A frame carries its own project's pending rollup, never other
+            // projects'.
+            if let Some(current) = &runtime.current_project {
+                if let Some(pending) = runtime
+                    .authored_pending
+                    .iter()
+                    .find(|pending| &pending.project == current)
+                {
+                    frame.absences.push(pending.rollup_line());
+                }
+            }
             Ok(frame)
         })?;
         frame.derive_uncertainty();
@@ -386,6 +551,12 @@ impl Service {
         self.with_knowledge(|runtime, application| {
             let mut status = application.status();
             status.absences.extend(runtime.absences.clone());
+            // Status is the only surface that carries every project's pending
+            // rollup and the full per-target detail.
+            for pending in &runtime.authored_pending {
+                status.absences.push(pending.rollup_line());
+            }
+            status.authored_pending = runtime.authored_pending.clone();
             Ok(status)
         })
     }
@@ -402,6 +573,9 @@ impl Service {
             .unwrap_or(&self.invocation_cwd);
         let mut absences = Vec::new();
         let mut wiki_registers = Vec::new();
+        let mut authored_pending = Vec::new();
+        let mut authored_edge_projects = BTreeMap::new();
+        let mut folder_subject_projects = BTreeMap::new();
         let central_root = root.ancestors().find(|candidate| {
             candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
         });
@@ -426,10 +600,7 @@ impl Service {
                     wiki_registers = reading.registers;
                     absences.extend(reading.absences);
                 }
-                Err(error) => absences.push(format!(
-                    "Central wiki discovery unavailable: {}",
-                    error.message()
-                )),
+                Err(error) => absences.push(format!("Central wiki discovery unavailable: {error}")),
             }
             // W10 V3: compiled entity materialisation joins the discovered
             // wiki before the index rebuild; colliding stand-in nodes adopt
@@ -447,12 +618,14 @@ impl Service {
             // ProjectCentral/user/** compiles its explicit [[wikilinks]]
             // into the same SemanticWiki as ordinary Compiled edges — never
             // as new WikiNodes. Unresolved links stay disclosed as
-            // absences, never as synthetic edges.
+            // per-project rollups, never as synthetic edges.
             let authored_wiki =
                 aikit_adapters::projectcentral_authored_wiki::compile_world_authored_wiki(
                     central_root,
                 );
             absences.extend(authored_wiki.absences);
+            authored_pending = authored_wiki.pending;
+            authored_edge_projects = authored_wiki.edge_projects;
             aikit_adapters::central_entities::adopt_into(
                 &mut discovered.wiki,
                 authored_wiki
@@ -461,16 +634,54 @@ impl Service {
                     .map(WikiObject::Edge)
                     .collect(),
             );
+            // SharedField SF4: the projected world's Explore discovery seed
+            // joins the same SemanticWiki — stable entry refs, typed
+            // relations, derived presentation edges and SharedField
+            // membership — so Search/Resolve reveals eligible presentations
+            // without a second store. An absent seed is ordinary (nothing
+            // projected yet); it never gates addressability.
+            if let Some(seed_path) = aikit_adapters::oi_explore::discovery_seed_path(central_root) {
+                match aikit_adapters::oi_explore::read_explore_discovery(&seed_path) {
+                    Ok(reading) => {
+                        absences.extend(reading.absences);
+                        aikit_adapters::central_entities::adopt_into(
+                            &mut discovered.wiki,
+                            reading.objects,
+                        );
+                    }
+                    Err(error) => {
+                        absences.push(format!("Explore discovery seed unreadable: {error}"))
+                    }
+                }
+            }
             // W10 V5: a project context binds the same entity refs through
             // Central's effective world sources — never a second subject;
             // declared exclusions withhold, per-hop provenance is recorded.
-            if let Some(project) = root.strip_prefix(central_root).ok().and_then(|relative| {
-                let mut parts = relative.components();
-                if parts.next()?.as_os_str() != "Work" {
-                    return None;
+            // The project is read from directory shape (the project root's
+            // Work member, else the invocation cwd's), so a Work directory
+            // whose discovery collapsed onto the world root still becomes a
+            // scoped context instead of running uncontextualised.
+            if let Some(project) = self.invocation_project_member(central_root, root) {
+                // Scoping does not depend on a manifest or a populated wiki: a
+                // Work member with no ProjectCentral at all still scopes, as
+                // `project:<name>`, and says so. No manifest also means no
+                // project record, so the root lineage applies by convention —
+                // the binding read below confirms it against Central and
+                // discloses the inheritance (or withholds, if Central is
+                // unreachable).
+                if !central_root
+                    .join("Work")
+                    .join(&project)
+                    .join("ProjectCentral/project.json")
+                    .exists()
+                {
+                    absences.push(format!(
+                        "Project Work/{project} has no ProjectCentral manifest; this context scopes as {} without a project wiki, and with no project record the root lineage applies",
+                        aikit_adapters::central_world_sources::project_world_ref(
+                            central_root, &project
+                        )
+                    ));
                 }
-                parts.next()?.as_os_str().to_str().map(str::to_owned)
-            }) {
                 let world_binding = aikit_adapters::central_world_sources::read_project_binding(
                     &SystemRunner::new(),
                     &executable,
@@ -498,28 +709,90 @@ impl Service {
                     // binding still enforces agent-readable source descriptors
                     // and .no-agent-retrieval; no World inheritance is assumed.
                     let project_root = central_root.join("Work").join(&project);
+                    let project_display = format!("Work/{project}");
                     let local_authored = aikit_adapters::ProjectCentralFilesystemBinding::inspect(
                         &project_root,
                         None,
                     )
                     .and_then(|binding| {
+                        let project_id = binding.semantic.project_id.clone();
                         aikit_adapters::projectcentral_authored_wiki::projectcentral_authored_wiki(
                             &binding,
                         )
+                        .map(|authored| (project_id, authored))
                     });
                     match local_authored {
-                        Ok(authored) => {
+                        Ok((project_id, authored)) => {
+                            // The world compile may already carry this
+                            // project's rollup; the local rebuild replaces it
+                            // so a project discloses exactly one.
+                            if let Some(rollup) =
+                                aikit_adapters::projectcentral_authored_wiki::pending_rollup(
+                                    project_display.clone(),
+                                    Some(project_id),
+                                    &authored.compilation.pending,
+                                )
+                            {
+                                authored_pending
+                                    .retain(|pending| pending.project != project_display);
+                                authored_pending.push(rollup);
+                            }
+                            for edge in &authored.compilation.edges {
+                                authored_edge_projects.insert(
+                                    edge.ref_id.as_str().to_owned(),
+                                    project_display.clone(),
+                                );
+                            }
+                            // The project's OWN authored wiki objects come
+                            // back with its edges: nodes and spaces restored
+                            // beside them, so the withheld context keeps the
+                            // project's own graph — a restored edge must not
+                            // point at a target the rebuild dropped.
+                            discovered.wiki.extend(authored.wiki_objects);
                             discovered.wiki.extend(
                                 authored.compilation.edges.into_iter().map(WikiObject::Edge),
                             );
                         }
-                        Err(error) => absences.push(format!(
-                            "Project-local authored graph unavailable: {}",
-                            error.message()
-                        )),
+                        Err(error) => absences
+                            .push(format!("Project-local authored graph unavailable: {error}")),
                     }
                 }
             }
+
+            // Folder subjects: each project's ProjectCentral register
+            // compiles as the directory BASIS of this context's graph —
+            // folder nodes under the project-root anchor, `contains`-wired
+            // to the file-level subjects already in this materialised set.
+            // A materialisation-time construct: nothing is written into
+            // Central's wiki. A project context (the shape-derived scoping)
+            // compiles its own project's folder basis only; a world context
+            // keeps every project's.
+            let materialised_refs: BTreeSet<String> = discovered
+                .wiki
+                .iter()
+                .map(|object| object.ref_id().as_str().to_owned())
+                .chain(discovered.wiki.iter().filter_map(|object| match object {
+                    WikiObject::Edge(edge) => Some(edge.to_ref.as_str().to_owned()),
+                    _ => None,
+                }))
+                .chain(discovered.wiki.iter().filter_map(|object| match object {
+                    WikiObject::Edge(edge) => Some(edge.from_ref.as_str().to_owned()),
+                    _ => None,
+                }))
+                .collect();
+            let folder_subjects =
+                aikit_adapters::projectcentral_folder_subjects::compile_world_folder_subjects(
+                    central_root,
+                    &materialised_refs,
+                    self.invocation_project_member(central_root, root)
+                        .as_deref(),
+                );
+            absences.extend(folder_subjects.absences);
+            folder_subject_projects = folder_subjects.subject_projects;
+            aikit_adapters::central_entities::adopt_into(
+                &mut discovered.wiki,
+                folder_subjects.objects,
+            );
         }
 
         let wiki = if discovered.wiki.is_empty() {
@@ -533,35 +806,71 @@ impl Service {
                 .join("knowledge/wiki")
                 .join(format!("{horizon}.sqlite3"));
             match SqliteWikiProvider::rebuild(&path, discovered.wiki, wiki_registers.clone()) {
-                Ok(provider) => Some(provider),
+                Ok(provider) => {
+                    // The read index materialised past dangling references;
+                    // every repair is disclosed as a named absence, one line
+                    // per distinct fault. Strict write gates are untouched.
+                    absences.extend(repair_absence_lines(provider.repairs()));
+                    Some(provider)
+                }
                 Err(error) => {
-                    absences.push(format!(
-                        "SemanticWiki materialisation degraded: {}",
-                        error.message()
-                    ));
+                    absences.push(format!("SemanticWiki materialisation degraded: {error}"));
                     None
                 }
             }
         };
 
         let central = if let Some(central_root) = central_root {
-            let project = root.strip_prefix(central_root).ok().and_then(|relative| {
-                let mut parts = relative.components();
-                if parts.next()?.as_os_str() != "Work" { return None; }
-                parts.next()?.as_os_str().to_str()
-            });
+            let project = self.invocation_project_member(central_root, root);
             // A missing map degrades this lens, not independent Wiki/code
             // faculties. Its absence never activates a disposable substitute.
-            match CentralFileMapProvider::connect(SystemRunner::new(),
-                aikit_adapters::central_file_map::executable(), central_root, project) {
+            match CentralFileMapProvider::connect(
+                SystemRunner::new(),
+                aikit_adapters::central_file_map::executable(),
+                central_root,
+                project.as_deref(),
+            ) {
                 Ok(provider) => Some(provider),
-                Err(error) => { absences.push(format!("Central file map unavailable: {}", error.message())); None }
+                Err(error) => {
+                    absences.push(format!("Central file map unavailable: {error}"));
+                    None
+                }
             }
-        } else { None };
+        } else {
+            None
+        };
+        let now_field = if let Some(central_root) = central_root {
+            if std::env::var_os("AIKIT_NOW_FIELD_SEARCH").is_some_and(|v| v == "off") {
+                absences.push("NOW-field search disabled by AIKIT_NOW_FIELD_SEARCH=off".into());
+                None
+            } else {
+                match NowFieldSourcePoolProvider::connect(
+                    aikit_adapters::now_field::default_runner(central_root),
+                    aikit_adapters::ripgrep::executable(),
+                    NowFieldScope::standard(central_root),
+                ) {
+                    Ok(provider) => Some(provider),
+                    Err(error) => {
+                        absences.push(format!("NOW-field search unavailable: {error}"));
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        };
         // Filesystem source shards are a standalone discovery mechanism. In a
         // Central World their copied bodies must not bypass the live source owner
         // (including a source withheld since an earlier cached corpus was written).
-        if central_root.is_some() { discovered.sources.clear(); }
+        // Central owns refs under its control-root source namespace. A Project's
+        // own generated SourcePool shard remains the owner of a corpus-local ref:
+        // dropping it would turn a cited source into a permanent unreadable
+        // citation even when no Central source owns it.
+        if central_root.is_some() {
+            discovered
+                .sources
+                .retain(|source, _| !source.as_str().starts_with("central:source:control:root:"));
+        }
         let mut material = Vec::new();
         let mut bindings = Vec::new();
         for item in discovered.sources.into_values() {
@@ -575,41 +884,44 @@ impl Service {
 
         let mut bkmr = None;
         if central_root.is_none() {
-        if let Some(config) = self.active_provider_config("tool/search/bkmr") {
-            let db = config.get("db").and_then(|value| value.as_str());
-            if let Some(db) = db {
-                if config.get("disposable").and_then(|v|v.as_bool()) != Some(true) {
-                    return Err(aikit_core::AikitError::new("knowledge.bkmr_adoption_required", "standalone bkmr rebuild requires disposable=true; existing native databases must be adopted by Central"));
-                }
-                let db_path = resolve_provider_path(root, db);
-                let embeddings = config
-                    .get("embeddings")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false);
-                let mut provider = BkmrSourcePoolProvider::new(
-                    SystemRunner::new().with_cwd(root),
-                    db_path,
-                    embeddings,
-                );
-                if provider.status().available {
-                    if let Err(error) = provider.rebuild(&material) {
-                        absences.push(format!("bkmr SourcePool degraded: {}", error.message()));
+            if let Some(config) = self.active_provider_config("tool/search/bkmr") {
+                let db = config.get("db").and_then(|value| value.as_str());
+                if let Some(db) = db {
+                    if config.get("disposable").and_then(|v| v.as_bool()) != Some(true) {
+                        return Err(aikit_core::AikitError::new("knowledge.bkmr_adoption_required", "standalone bkmr rebuild requires disposable=true; existing native databases must be adopted by Central"));
                     }
-                } else {
-                    absences.push(
-                        "bkmr SourcePool configured but provider executable is unavailable".into(),
+                    let db_path = resolve_provider_path(root, db);
+                    let embeddings = config
+                        .get("embeddings")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    let mut provider = BkmrSourcePoolProvider::new(
+                        SystemRunner::new().with_cwd(root),
+                        db_path,
+                        embeddings,
                     );
+                    if provider.status().available {
+                        if let Err(error) = provider.rebuild(&material) {
+                            absences.push(format!("bkmr SourcePool degraded: {error}"));
+                        }
+                    } else {
+                        absences.push(
+                            "bkmr SourcePool configured but provider executable is unavailable"
+                                .into(),
+                        );
+                    }
+                    bkmr = Some(provider);
+                } else {
+                    absences
+                        .push("bkmr is active but has no resolved `db` provider binding".into());
                 }
-                bkmr = Some(provider);
-            } else {
-                absences.push("bkmr is active but has no resolved `db` provider binding".into());
             }
-        }
-
         }
         // Only descriptors join the map; payloads are fetched by the live
         // source owner at read/context/Flow time, not copied into this cache.
-        if let Some(provider) = &central { material.extend(provider.descriptors().iter().cloned()); }
+        if let Some(provider) = &central {
+            material.extend(provider.descriptors().iter().cloned());
+        }
         let mut code = None;
         if let Some(project_id) = self.descriptor.project_id.as_ref() {
             let source = SourceRef::parse(format!("source:project-code:{project_id}"))?;
@@ -622,7 +934,7 @@ impl Service {
             let status = provider.status();
             if status.available && status.capabilities.index {
                 if let Err(error) = provider.index(root, false) {
-                    absences.push(format!("GitNexus CodeIndex degraded: {}", error.message()));
+                    absences.push(format!("GitNexus CodeIndex degraded: {error}"));
                 }
             } else {
                 absences.push("GitNexus CodeIndex unavailable for this Project".into());
@@ -635,16 +947,32 @@ impl Service {
         let project_map =
             self.build_project_map(wiki.as_ref().map(SqliteWikiProvider::index), &material)?;
 
+        let now_field_roster = now_field
+            .as_ref()
+            .map(NowFieldSourcePoolProvider::descriptors)
+            .unwrap_or_default();
+        let current_project = central_root.and_then(|central_root| {
+            Some(format!(
+                "Work/{}",
+                self.invocation_project_member(central_root, root)?
+            ))
+        });
         Ok(KnowledgeRuntime {
             wiki,
             material,
             native_source,
             bkmr,
             central,
+            now_field,
+            now_field_roster,
             central_expected: central_root.is_some(),
             code,
             project_map,
             absences,
+            authored_pending,
+            authored_edge_projects,
+            folder_subject_projects,
+            current_project,
         })
     }
 
@@ -850,9 +1178,8 @@ fn discover_material(
                     Err(collection_error) => match OkfWikiBundle::parse_json(&text) {
                         Ok(bundle) => discovered.wiki.push(bundle.wiki),
                         Err(_) => absences.push(format!(
-                            "self-identified SemanticWiki material at {} is invalid: {}",
-                            path.display(),
-                            collection_error.message()
+                            "self-identified SemanticWiki material at {} is invalid: {collection_error}",
+                            path.display()
                         )),
                     },
                 }
@@ -910,4 +1237,33 @@ fn exact_knowledge_hit(hit: &aikit_core::KnowledgeSearchHit, subjects: &[&str]) 
             && (hit.resource.as_str().eq_ignore_ascii_case(subject)
                 || hit.label.eq_ignore_ascii_case(subject))
     })
+}
+
+/// Whether a Work-relative project display answers a scope key exactly or by
+/// its bare Work name (`demo` answers `Work/demo`).
+fn display_matches_key(display: &str, key: &str) -> bool {
+    let key = key.trim().to_lowercase();
+    if key.is_empty() {
+        return false;
+    }
+    display.to_lowercase() == key
+        || display
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| segment.eq_ignore_ascii_case(&key))
+}
+
+/// The Work member a path sits in, from directory shape alone:
+/// `<central_root>/Work/<member>/…` names `<member>`; anything else — the
+/// world root itself, a Control location, a path outside the Central root —
+/// names nothing. No marker, registration or manifest timing participates:
+/// the directory shape is the scoping basis, so a project is scoped by where
+/// it stands, not by what it has been registered as.
+fn work_member(central_root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(central_root).ok()?;
+    let mut parts = relative.components();
+    if parts.next()?.as_os_str() != "Work" {
+        return None;
+    }
+    parts.next()?.as_os_str().to_str().map(str::to_owned)
 }

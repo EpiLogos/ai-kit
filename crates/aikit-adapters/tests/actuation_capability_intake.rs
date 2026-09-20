@@ -90,7 +90,16 @@ fn intake_runs_the_real_cli_route_and_returns_the_descriptor() {
     let runner = ScriptedRunner::succeeding(read_model_json());
     let outcome = intake_actuation_capability(&runner, "actuation", "claude-code");
 
-    assert_eq!(runner.argv(), vec!["actuation", "harness", "capability", "claude-code", "--json"]);
+    assert_eq!(
+        runner.argv(),
+        vec![
+            "actuation",
+            "harness",
+            "capability",
+            "claude-code",
+            "--json"
+        ]
+    );
     match outcome {
         CapabilityOutcome::Descriptor(capability) => {
             assert_eq!(capability.harness_slug, "claude-code");
@@ -119,7 +128,9 @@ fn dispatch_events_map_onto_boundaries_and_disclose_the_rest() {
 
 #[test]
 fn a_failing_cli_run_is_a_disclosed_unavailability_with_the_stderr() {
-    let runner = ScriptedRunner::failing("no such harness 'nonexistent'; declared: claude-code, codex, zcode");
+    let runner = ScriptedRunner::failing(
+        "no such harness 'nonexistent'; declared: claude-code, codex, zcode",
+    );
     match intake_actuation_capability(&runner, "actuation", "nonexistent") {
         CapabilityOutcome::Unavailable { reason } => {
             assert!(reason.contains("failed (1)"), "{reason}");
@@ -135,7 +146,10 @@ fn an_unparsable_or_wrong_schema_answer_is_disclosed_not_parsed_loosely() {
     let runner = ScriptedRunner::succeeding(wrong_document);
     match intake_actuation_capability(&runner, "actuation", "claude-code") {
         CapabilityOutcome::Unavailable { reason } => {
-            assert!(reason.contains("unexpected capability document"), "{reason}");
+            assert!(
+                reason.contains("unexpected capability document"),
+                "{reason}"
+            );
         }
         other => panic!("expected unavailability, got {other:?}"),
     }
@@ -152,7 +166,8 @@ fn an_unparsable_or_wrong_schema_answer_is_disclosed_not_parsed_loosely() {
 #[test]
 fn an_unknowable_event_name_never_maps_to_a_boundary() {
     // Guard the mapping table: only the eight declared boundaries route.
-    let json = read_model_json().replace("\"event\":\"pre-tool-use\"", "\"event\":\"mid-tool-use\"");
+    let json =
+        read_model_json().replace("\"event\":\"pre-tool-use\"", "\"event\":\"mid-tool-use\"");
     let runner = ScriptedRunner::succeeding(json);
     let outcome = intake_actuation_capability(&runner, "actuation", "claude-code");
     let (mapped, unrouted) = outcome.dispatch_events();

@@ -484,6 +484,8 @@ fn space_link(args: &WikiSpaceLinkArgs) -> Result<WikiOutcome> {
 /// Resolve every `child_space_refs` entry of the root Space against the
 /// filesystem. Read-only: a dangling child is a finding to act on with
 /// `wiki root prune` or `wiki root adopt`, never something rewritten here.
+/// The exit is non-zero when anything dangles, so a scheduled or scripted run
+/// that finds a broken federation is loud in the shell, not only in its JSON.
 fn root_doctor(cwd: &Path, args: &WikiRootArgs) -> Result<WikiOutcome> {
     let root = resolve_root_wiki(cwd, args.root.as_deref())?;
     let document = WikiDocument::parse(&read(&root)?)?;
@@ -535,6 +537,11 @@ fn root_doctor(cwd: &Path, args: &WikiRootArgs) -> Result<WikiOutcome> {
         }
     }
 
+    let exit_code = if dangling.is_empty() {
+        json::EXIT_OK
+    } else {
+        json::EXIT_GENERIC
+    };
     Ok(WikiOutcome::reported(
         jval!({
             "root": root.display().to_string(),
@@ -548,7 +555,7 @@ fn root_doctor(cwd: &Path, args: &WikiRootArgs) -> Result<WikiOutcome> {
             "dangling": dangling,
         }),
         Vec::new(),
-        json::EXIT_OK,
+        exit_code,
     ))
 }
 
@@ -979,9 +986,7 @@ impl QlAlignment {
                 if value > 5 {
                     return Err(AikitError::new(
                         "knowledge.wiki_stage_alignment",
-                        format!(
-                            "position {value} is out of range; a unit's positions run 0–5"
-                        ),
+                        format!("position {value} is out of range; a unit's positions run 0–5"),
                     ));
                 }
                 Some(value)
@@ -989,7 +994,12 @@ impl QlAlignment {
             None => None,
         };
         let unit = labels.remove("unit");
-        if position.is_some() && unit.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none()
+        if position.is_some()
+            && unit
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
         {
             return Err(AikitError::new(
                 "knowledge.wiki_stage_alignment",
@@ -1224,6 +1234,23 @@ fn walk_corpus(root: &Path, extension: &str) -> Result<WalkedCorpus> {
             continue;
         }
         let path = entry.path();
+        // The owner's `.no-agent-retrieval` marker prunes a subtree before
+        // any descendant is read — the same law the ProjectCentral binding
+        // and the NOW-field reader honour. Ingest is a read; a room the
+        // owner withheld from agent retrieval must not enter the wiki
+        // through the back door of a corpus walk.
+        let withheld = path
+            .ancestors()
+            .skip(1)
+            .take_while(|ancestor| *ancestor != root)
+            .any(|ancestor| {
+                ancestor
+                    .join(aikit_core::projectcentral::NO_AGENT_RETRIEVAL_MARKER)
+                    .exists()
+            });
+        if withheld {
+            continue;
+        }
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -1288,8 +1315,7 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
     let (raw_corpus, io_skipped) = (walked.files, walked.skipped);
     let selection = select_ingestable_records(&raw_corpus);
     let compiled = ingest_corpus(&selection.records, &selection.sources, args.room_depth)?;
-    let (objects, material, absences) =
-        (compiled.objects, compiled.material, compiled.absences);
+    let (objects, material, absences) = (compiled.objects, compiled.material, compiled.absences);
     let pool_dir = source_pool_dir(args);
 
     let mut warnings: Vec<String> = Vec::new();
@@ -1391,6 +1417,7 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
 
     let update = args.update;
     let file_display = args.file.display().to_string();
+    let mut unchanged = 0usize;
     let outcome = mutate_file(&args.file, |doc, ledger| {
         for object in objects {
             let ref_id = object.ref_id().clone();
@@ -1405,6 +1432,13 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
                     )
                     .with("ref", ref_id.to_string()));
                 }
+                // An unchanged corpus re-ingested must not masquerade as new
+                // knowledge: identical content, revision aside, keeps the
+                // held revision instead of advancing it.
+                if doc.holds_equivalent(&object) {
+                    unchanged += 1;
+                    continue;
+                }
                 doc.update_object(object)?
             } else {
                 doc.create_object(object)?
@@ -1415,6 +1449,7 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
     })?;
     let written = write_source_pool(&pool_dir, &material)?;
     summary["applied"] = jval!(true);
+    summary["unchanged"] = jval!(unchanged);
     summary["source_pool_files"] = jval!(written);
     summary["outcome"] = mutation_outcome(&outcome);
     let mut reply = WikiOutcome::wrote(summary, &outcome);

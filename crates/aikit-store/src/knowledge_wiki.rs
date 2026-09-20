@@ -3,7 +3,9 @@
 //! Register refs and object refs are copied from authored ground. SQLite row
 //! identifiers never cross this boundary. Exact per-register content revisions
 //! are the only cache-reuse key, and the core semantic rebuild validates both
-//! writes and reads before this provider serves the projection.
+//! writes and reads before this provider serves the projection — writes
+//! strictly (a dangling reference refuses), reads degrading (a dangling
+//! reference becomes a named repair on the provider, never a dead faculty).
 
 use std::path::Path;
 
@@ -11,7 +13,9 @@ use aikit_core::knowledge::{KnowledgeReading, KnowledgeRelationView, RelationQue
 use aikit_core::knowledge_wiki::{
     WikiEdge, WikiFrame, WikiNode, WikiObject, WikiProvenanceRef, WikiReading, WikiSpace,
 };
-use aikit_core::knowledge_wiki_index::{SemanticWikiIndex, WikiNeighbour, WikiSearchHit};
+use aikit_core::knowledge_wiki_index::{
+    SemanticWikiIndex, WikiIndexRepair, WikiNeighbour, WikiSearchHit,
+};
 use aikit_core::knowledge_wiki_provider::{
     SemanticWikiProvider, SemanticWikiProviderStatus, WikiExplanation, WikiProvider,
     WikiRegisterRevision,
@@ -26,6 +30,11 @@ const SCHEMA_VERSION: &str = "aikit.sqlite-wiki/v1";
 pub struct SqliteWikiProvider {
     index: SemanticWikiIndex,
     registers: Vec<WikiRegisterRevision>,
+    /// Read-side repairs the materialisation set aside: every dangling
+    /// reference the index rebuild repaired, disclosed by the caller, never
+    /// silently dropped. The canonical objects stored here stay untouched, so
+    /// the repairs re-derive identically on every open.
+    repairs: Vec<WikiIndexRepair>,
 }
 
 impl SqliteWikiProvider {
@@ -33,18 +42,28 @@ impl SqliteWikiProvider {
         &self.index
     }
 
+    /// The dangling references this projection's read index repaired.
+    pub fn repairs(&self) -> &[WikiIndexRepair] {
+        &self.repairs
+    }
+
     pub fn contains(&self, resource: &ResourceRef) -> bool {
         self.index.contains(resource)
     }
 
     /// Replace the materialisation transactionally after core validation.
+    ///
+    /// The index rebuild here is the read-side degrading one: a dangling
+    /// reference materialises as a named repair on the provider instead of
+    /// switching the whole Wiki faculty off. Duplicates and invalid objects
+    /// stay fatal, and the strict rebuild remains the write-time gate.
     pub fn rebuild(
         path: &Path,
         objects: impl IntoIterator<Item = WikiObject>,
         registers: impl IntoIterator<Item = WikiRegisterRevision>,
     ) -> Result<Self> {
         let objects = objects.into_iter().collect::<Vec<_>>();
-        let index = SemanticWikiIndex::rebuild(objects.clone())?;
+        let (index, repairs) = SemanticWikiIndex::rebuild_with_repairs(objects.clone())?;
         let registers = normalise_registers(registers);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| store_error("create", error))?;
@@ -89,7 +108,11 @@ impl SqliteWikiProvider {
         transaction
             .commit()
             .map_err(|error| store_error("commit", error))?;
-        Ok(Self { index, registers })
+        Ok(Self {
+            index,
+            registers,
+            repairs,
+        })
     }
 
     /// Open only when every owner-authored register revision still matches.
@@ -119,10 +142,11 @@ impl SqliteWikiProvider {
             let (kind, json) = row.map_err(|error| store_error("read object", error))?;
             objects.push(decode_object(&kind, &json)?);
         }
-        let index = SemanticWikiIndex::rebuild(objects)?;
+        let (index, repairs) = SemanticWikiIndex::rebuild_with_repairs(objects)?;
         Ok(Some(Self {
             index,
             registers: expected,
+            repairs,
         }))
     }
 
@@ -283,6 +307,99 @@ mod tests {
         }]
     }
 
+    /// A healthy node inside a space that declares one dangling child: the
+    /// commissioning fault, one bad ref that must never kill the faculty.
+    fn objects_with_one_dangling_child() -> Vec<WikiObject> {
+        vec![
+            WikiObject::Space(WikiSpace {
+                profile: aikit_core::OKF_WIKI_PROFILE.into(),
+                ref_id: ResourceRef::parse("wiki:space:root").unwrap(),
+                revision: 1,
+                provenance: Vec::new(),
+                title: Some("Root".into()),
+                parent_space_refs: Vec::new(),
+                child_space_refs: vec![ResourceRef::parse("wiki:space:ghost").unwrap()],
+                node_refs: vec![ResourceRef::parse("wiki:node:one").unwrap()],
+                anchor_ref: None,
+                extensions: Default::default(),
+            }),
+            WikiObject::Node(WikiNode {
+                profile: aikit_core::OKF_WIKI_PROFILE.into(),
+                ref_id: ResourceRef::parse("wiki:node:one").unwrap(),
+                revision: 1,
+                provenance: Vec::new(),
+                node_type: "Concept".into(),
+                title: Some("One".into()),
+                space_refs: vec![ResourceRef::parse("wiki:space:root").unwrap()],
+                source_refs: vec![SourceRef::parse("source:test:one").unwrap()],
+                local_space_ref: None,
+                extensions: Default::default(),
+            }),
+        ]
+    }
+
+    /// The read projection materialises past one dangling child ref and names
+    /// the repair; healthy content stays searchable, and the disclosure
+    /// survives a reopen because repairs re-derive from canonical objects.
+    #[test]
+    fn one_dangling_child_materialises_with_a_named_repair_and_stays_searchable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wiki.sqlite3");
+        let provider = SqliteWikiProvider::rebuild(
+            &path,
+            objects_with_one_dangling_child(),
+            revisions("blake3:a"),
+        )
+        .unwrap();
+        let repairs = provider.repairs();
+        assert_eq!(
+            repairs.len(),
+            1,
+            "one dangling ref, one repair: {repairs:?}"
+        );
+        assert_eq!(repairs[0].code, "knowledge.wiki_space_missing_child");
+        assert_eq!(repairs[0].subject, "wiki:space:root");
+        assert_eq!(repairs[0].other, "wiki:space:ghost");
+
+        assert_eq!(
+            provider.search("One", 8)[0]
+                .address
+                .as_curated()
+                .unwrap()
+                .as_str(),
+            "wiki:node:one",
+            "healthy content is searchable past the repair"
+        );
+        assert!(!provider
+            .discover()
+            .iter()
+            .any(|resource| resource.as_str() == "wiki:space:ghost"));
+
+        let reopened = SqliteWikiProvider::open_current(&path, revisions("blake3:a"))
+            .unwrap()
+            .expect("matching canonical revisions reuse the projection");
+        assert_eq!(
+            reopened.repairs(),
+            repairs,
+            "the repair is re-derived on reopen, never dropped"
+        );
+    }
+
+    /// Duplicates are canonical corruption, not topology drift: fatal here
+    /// exactly as on the strict path.
+    #[test]
+    fn duplicates_stay_fatal_in_the_store_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wiki.sqlite3");
+        let mut objects = objects();
+        objects.push(objects[1].clone());
+        let error = match SqliteWikiProvider::rebuild(&path, objects, revisions("blake3:a")) {
+            Ok(_) => panic!("duplicates must stay fatal in the store projection"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "knowledge.wiki_duplicate_ref");
+    }
+
     #[test]
     fn exact_register_revisions_gate_reuse_without_becoming_identity() {
         let directory = tempfile::tempdir().unwrap();
@@ -359,10 +476,9 @@ mod tests {
             == WikiSearchAddress::AuthoredSource {
                 source: SourceRef::parse("source:test:one").unwrap()
             }));
-        assert!(!hits
-            .iter()
-            .any(|hit| hit.address.as_curated().is_some_and(
-                |resource| resource.as_str() == "source:test:one"
-            )));
+        assert!(!hits.iter().any(|hit| hit
+            .address
+            .as_curated()
+            .is_some_and(|resource| resource.as_str() == "source:test:one")));
     }
 }

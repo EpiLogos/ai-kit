@@ -43,8 +43,16 @@ fn parse_status(text: &str) -> Value {
             continue;
         }
 
-        let unmerged = matches!((x, y),
-            ('D', 'D') | ('A', 'U') | ('U', 'D') | ('U', 'A') | ('D', 'U') | ('A', 'A') | ('U', 'U'));
+        let unmerged = matches!(
+            (x, y),
+            ('D', 'D')
+                | ('A', 'U')
+                | ('U', 'D')
+                | ('U', 'A')
+                | ('D', 'U')
+                | ('A', 'A')
+                | ('U', 'U')
+        );
         if unmerged {
             conflicts.push(path);
             continue;
@@ -74,7 +82,11 @@ fn parse_worktrees(text: &str) -> Vec<Value> {
     let mut branch: Option<String> = None;
     let mut detached = false;
 
-    let flush = |result: &mut Vec<Value>, path: &mut Option<String>, head: &mut Option<String>, branch: &mut Option<String>, detached: &mut bool| {
+    let flush = |result: &mut Vec<Value>,
+                 path: &mut Option<String>,
+                 head: &mut Option<String>,
+                 branch: &mut Option<String>,
+                 detached: &mut bool| {
         if let Some(worktree_path) = path.take() {
             result.push(json!({
                 "path": worktree_path,
@@ -88,13 +100,24 @@ fn parse_worktrees(text: &str) -> Vec<Value> {
 
     for line in text.lines().chain(std::iter::once("")) {
         if line.is_empty() {
-            flush(&mut result, &mut path, &mut head, &mut branch, &mut detached);
+            flush(
+                &mut result,
+                &mut path,
+                &mut head,
+                &mut branch,
+                &mut detached,
+            );
         } else if let Some(value) = line.strip_prefix("worktree ") {
             path = Some(value.to_string());
         } else if let Some(value) = line.strip_prefix("HEAD ") {
             head = Some(value.to_string());
         } else if let Some(value) = line.strip_prefix("branch ") {
-            branch = Some(value.strip_prefix("refs/heads/").unwrap_or(value).to_string());
+            branch = Some(
+                value
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(value)
+                    .to_string(),
+            );
         } else if line == "detached" {
             detached = true;
         }
@@ -108,8 +131,19 @@ fn observe(path: &Path) -> Result<Value, String> {
     let head = optional_git(&root_path, &["rev-parse", "HEAD"]);
     let branch = optional_git(&root_path, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
     let detached = head.is_some() && branch.is_none();
-    let upstream = optional_git(&root_path, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
-    let status = git(&root_path, &["status", "--porcelain=v1", "--untracked-files=all"])?;
+    let upstream = optional_git(
+        &root_path,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
+    let status = git(
+        &root_path,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    )?;
     let worktrees = git(&root_path, &["worktree", "list", "--porcelain"])?;
 
     Ok(json!({
@@ -132,10 +166,16 @@ fn observe(path: &Path) -> Result<Value, String> {
 }
 
 fn main() -> ExitCode {
-    let path = env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let path = env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     match observe(&path) {
         Ok(observation) => {
-            println!("{}", serde_json::to_string_pretty(&observation).expect("serialize observation"));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&observation).expect("serialize observation")
+            );
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -154,7 +194,11 @@ mod tests {
     fn status_preserves_dirty_material_beside_head() {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init"]).unwrap();
-        git(dir.path(), &["config", "user.email", "test@example.invalid"]).unwrap();
+        git(
+            dir.path(),
+            &["config", "user.email", "test@example.invalid"],
+        )
+        .unwrap();
         git(dir.path(), &["config", "user.name", "AIKit Test"]).unwrap();
         fs::write(dir.path().join("Ground.md"), "one\n").unwrap();
         git(dir.path(), &["add", "Ground.md"]).unwrap();
@@ -164,7 +208,10 @@ mod tests {
         let observation = observe(dir.path()).unwrap();
         assert!(observation["head"].is_string());
         assert_eq!(observation["difference"]["clean"], false);
-        assert_eq!(observation["identity_law"]["head_is_current_material_state"], false);
+        assert_eq!(
+            observation["identity_law"]["head_is_current_material_state"],
+            false
+        );
     }
 
     #[test]

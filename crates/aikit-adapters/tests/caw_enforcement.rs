@@ -19,7 +19,11 @@ struct Owner {
 }
 impl Owner {
     fn new(root: &std::path::Path) -> Self {
-        Self { root: root.canonicalize().unwrap(), revision: "rev/1", calls: Cell::new(0) }
+        Self {
+            root: root.canonicalize().unwrap(),
+            revision: "rev/1",
+            calls: Cell::new(0),
+        }
     }
 }
 impl PlacementOwner for Owner {
