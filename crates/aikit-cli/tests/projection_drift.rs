@@ -161,7 +161,25 @@ fn canonical_edited_after_projection_names_the_drifted_skill_with_both_paths() {
         "{summary}"
     );
     assert!(summary.contains(" vs "), "{summary}");
-    assert!(summary.ends_with(", canonical-newer)"), "{summary}");
+    assert!(summary.contains(", canonical-newer)"), "{summary}");
+
+    // The entry names the owning context and the exact native repair, so
+    // detection alone is enough to act on — the defect that motivated this
+    // read model was drift nobody could see, let alone repair.
+    let context_id = entry["context_id"]
+        .as_str()
+        .expect("entry names its context");
+    assert!(context_id.starts_with("ctx_"), "{context_id}");
+    let repair = entry["repair"].as_str().expect("entry carries its repair");
+    assert!(
+        repair.contains(&format!("AIKIT_CONTEXT_ID={context_id} aikit apply")),
+        "{repair}"
+    );
+    assert!(repair.contains("-C "), "{repair}");
+    assert!(
+        summary.contains(&format!("repair: AIKIT_CONTEXT_ID={context_id}")),
+        "{summary}"
+    );
 
     // Set membership cannot see any of this; the stage must stay quiet so the
     // two readings stay distinguishable.

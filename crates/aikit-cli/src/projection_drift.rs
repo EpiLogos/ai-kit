@@ -88,6 +88,12 @@ pub struct DriftEntry {
     pub source: PathBuf,
     /// A harness-visible projected copy (the projection symlink path).
     pub projected: PathBuf,
+    /// The context whose projection drifts, when the projected path names one.
+    pub context_id: Option<String>,
+    /// The exact native repair for this entry: re-materialise the owning
+    /// context from the current active sources. Absent when the projected
+    /// path is not a context projection.
+    pub repair: Option<String>,
     /// How many harness-visible copies of this skill drift in this way.
     pub drifted_copies: usize,
     pub direction: DriftDirection,
@@ -98,14 +104,20 @@ pub struct DriftEntry {
 impl DriftEntry {
     /// The one-line reading `aikit diff` reports:
     /// `content_drift: <skill-ref> (<source path> vs <projected path>, <direction>)`.
-    /// When several copies drift, the count rides along.
+    /// When several copies drift, the count rides along; when the owning
+    /// context is known, so does the repair.
     pub fn summary(&self) -> String {
         let copies = match self.drifted_copies {
             0 | 1 => String::new(),
             n => format!(" — {n} drifted copies"),
         };
+        let repair = self
+            .repair
+            .as_deref()
+            .map(|hint| format!("; repair: {hint}"))
+            .unwrap_or_default();
         format!(
-            "{}: {} ({} vs {}, {}{})",
+            "{}: {} ({} vs {}, {}{}){}",
             self.kind.as_str(),
             self.skill,
             self.source.display(),
@@ -114,9 +126,54 @@ impl DriftEntry {
                 DriftKind::CanonicalMissing => "canonical gone",
                 DriftKind::ContentDrift => self.direction.as_str(),
             },
-            copies
+            copies,
+            repair
         )
     }
+}
+
+/// The context id owning a projected path, e.g.
+/// `.../state/contexts/ctx_X/current/projections/...` → `ctx_X`.
+fn context_id_of(projected: &Path) -> Option<String> {
+    let mut components = projected.components();
+    while let Some(component) = components.next() {
+        if component.as_os_str() == "contexts" {
+            return components.next()?.as_os_str().to_str().map(String::from);
+        }
+    }
+    None
+}
+
+/// The native repair command for a drifted copy: re-materialise its owning
+/// context from the current active sources. The project root comes from the
+/// context's current resolution lock, so the regeneration resolves the same
+/// declarations the context was created with.
+fn repair_hint(projected: &Path) -> Option<String> {
+    let context_id = context_id_of(projected)?;
+    let mut context_dir = PathBuf::new();
+    for component in projected.components() {
+        context_dir.push(component);
+        if component.as_os_str() == "contexts" {
+            continue;
+        }
+        if context_dir
+            .file_name()
+            .is_some_and(|name| name.to_str() == Some(context_id.as_str()))
+        {
+            break;
+        }
+    }
+    let lock = fs::read_to_string(context_dir.join("current").join("resolution.lock.toml")).ok();
+    let project_root = lock.and_then(|lock| {
+        lock.lines()
+            .find(|line| line.trim_start().starts_with("project_root"))
+            .and_then(|line| line.split('"').nth(1))
+            .map(String::from)
+    });
+    Some(match project_root {
+        Some(root) => format!("AIKIT_CONTEXT_ID={context_id} aikit apply -C {root}"),
+        None => format!("AIKIT_CONTEXT_ID={context_id} aikit apply"),
+    })
 }
 
 /// A projected skill payload traced back to its source, before comparison.
@@ -211,11 +268,14 @@ pub fn detect(home: &AikitHome) -> Result<Vec<DriftEntry>> {
         if kind == DriftKind::CanonicalMissing {
             differing.clear();
         }
+        let projected = newest.projected.clone();
         entries.push(DriftEntry {
             skill,
             kind,
             source,
-            projected: newest.projected.clone(),
+            context_id: context_id_of(&projected),
+            repair: repair_hint(&projected),
+            projected,
             direction,
             differing_files: differing,
             drifted_copies: copies.len(),
@@ -518,6 +578,8 @@ mod tests {
             kind: DriftKind::ContentDrift,
             source: PathBuf::from("/canonical/central-placement"),
             projected: PathBuf::from("/projections/codex/.agents/skills/central-placement"),
+            context_id: None,
+            repair: None,
             drifted_copies: 1,
             direction: DriftDirection::CanonicalNewer,
             differing_files: vec!["SKILL.md".into()],
@@ -565,6 +627,30 @@ mod tests {
     }
 
     #[test]
+    fn drift_entries_name_their_context_and_native_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx_dir = temp
+            .path()
+            .join("state/contexts/ctx_TESTCONTEXT000000000000");
+        let projected =
+            ctx_dir.join("current/projections/codex/.agents/skills/central-placement/SKILL.md");
+        write(
+            &ctx_dir.join("current/resolution.lock.toml"),
+            "[context]\ncontext_id = \"ctx_TESTCONTEXT000000000000\"\nproject_root = \"/Users/admin/Central/Work/O-I\"\n",
+        );
+        assert_eq!(
+            context_id_of(&projected).as_deref(),
+            Some("ctx_TESTCONTEXT000000000000")
+        );
+        let hint = repair_hint(&projected).expect("a context projection has a repair");
+        assert!(hint.contains("AIKIT_CONTEXT_ID=ctx_TESTCONTEXT000000000000"));
+        assert!(hint.contains("aikit apply -C /Users/admin/Central/Work/O-I"));
+        // A path outside any context carries no repair — no invented command.
+        assert_eq!(context_id_of(Path::new("/usr/local/share/skill")), None);
+        assert_eq!(repair_hint(Path::new("/usr/local/share/skill")), None);
+    }
+
+    #[test]
     fn status_warning_names_the_count_and_points_at_diff() {
         assert!(warnings(&[]).is_empty());
         let one = DriftEntry {
@@ -572,6 +658,8 @@ mod tests {
             kind: DriftKind::ContentDrift,
             source: PathBuf::from("/a"),
             projected: PathBuf::from("/p/a"),
+            context_id: None,
+            repair: None,
             drifted_copies: 1,
             direction: DriftDirection::CanonicalNewer,
             differing_files: vec![],

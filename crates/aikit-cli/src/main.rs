@@ -4006,6 +4006,8 @@ fn cmd_diff(cwd: &std::path::Path) -> Result<Reply> {
             "kind": entry.kind.as_str(),
             "source": entry.source.display().to_string(),
             "projected": entry.projected.display().to_string(),
+            "context_id": entry.context_id,
+            "repair": entry.repair,
             "drifted_copies": entry.drifted_copies,
             "direction": entry.direction.as_str(),
             "differing_files": entry.differing_files,
