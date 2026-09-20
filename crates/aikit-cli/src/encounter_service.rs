@@ -12,9 +12,9 @@ use aikit_core::harness_admission::HarnessActivationObservation;
 use aikit_core::projection::ProjectionPlan;
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::{AikitError, ResourceRef, Result, SourceRevision};
-use aikit_store::{AikitHome, SessionSpaceApplicationStore, encounter::EncounterStore};
+use aikit_store::{encounter::EncounterStore, AikitHome, SessionSpaceApplicationStore};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -678,15 +678,13 @@ impl EncounterService {
                 p["cwd"] != json!(cwd)
                     || p["protocol"] != json!(configured.protocol)
                     || p["provider_argv_digest"]
-                        != json!(
-                            blake3::hash(
-                                serde_json::to_string(&configured.argv)
-                                    .expect("argv JSON")
-                                    .as_bytes()
-                            )
-                            .to_hex()
-                            .to_string()
+                        != json!(blake3::hash(
+                            serde_json::to_string(&configured.argv)
+                                .expect("argv JSON")
+                                .as_bytes()
                         )
+                        .to_hex()
+                        .to_string())
             })
         {
             return Err(AikitError::new(
@@ -794,7 +792,7 @@ impl EncounterService {
             negotiated.capabilities.mcp_servers,
             mcp_entries,
         );
-        let lane = host.open_session(crate::encounter_mcp::build_session_open_request(
+        let lane = match host.open_session(crate::encounter_mcp::build_session_open_request(
             if reconnect {
                 SessionOpenMode::Load
             } else if configured.protocol == EncounterProtocol::PiRpc {
@@ -816,7 +814,31 @@ impl EncounterService {
             &cwd.to_string_lossy(),
             mcp,
             Some(agent_session.clone()),
-        ))?;
+        )) {
+            Ok(lane) => lane,
+            Err(failure) => {
+                // The adapter can reject session/load before a SessionOpened
+                // binding exists. Retain that actual failure and confirmed
+                // cleanup without inventing a successful native continuation.
+                let cleanup = host.shutdown();
+                if cleanup.is_err() {
+                    self.shutdown_requested
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                self.store.append(
+                    &agent_session,
+                    &json!({
+                        "kind":"native-open-refused",
+                        "continuation_requested":reconnect,
+                        "error_code":failure.code,
+                        "cleanup_confirmed":cleanup.is_ok(),
+                        "binding_recorded":false,
+                        "turn_replayed":false
+                    }),
+                )?;
+                return Err(failure);
+            }
+        };
         let native = lane.binding().native_session_id.clone();
         if reconnect
             && previous
@@ -1078,14 +1100,13 @@ impl EncounterService {
                 let active = connection["state"] == "TurnInFlight";
                 view["schema"] = json!("aikit.encounter-view/v1");
                 view["connection"] = connection;
-                view["permissions"] = json!(
-                    self.permissions
-                        .lock()
-                        .map_err(error)?
-                        .get(&agent_session)
-                        .map(|r| r.values().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default()
-                );
+                view["permissions"] = json!(self
+                    .permissions
+                    .lock()
+                    .map_err(error)?
+                    .get(&agent_session)
+                    .map(|r| r.values().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default());
                 view["permission_authority"] = json!("native-provider-consent");
                 view["history_reclassifications"] =
                     json!(self.store.legacy_load_reclassifications(&agent_session)?);
@@ -1101,12 +1122,11 @@ impl EncounterService {
                 ]);
                 Ok(view)
             }
-            EncounterRequest::Providers => Ok(json!(
-                self.providers()?
-                    .into_iter()
-                    .map(|p| json!({"id":p.id,"label":p.label}))
-                    .collect::<Vec<_>>()
-            )),
+            EncounterRequest::Providers => Ok(json!(self
+                .providers()?
+                .into_iter()
+                .map(|p| json!({"id":p.id,"label":p.label}))
+                .collect::<Vec<_>>())),
             EncounterRequest::ClassifyLegacyLoadReplay { agent_session } => {
                 self.require_attached(&agent_session)?;
                 let classification = self.store.classify_legacy_load_replay(&agent_session)?;

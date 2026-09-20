@@ -243,8 +243,13 @@ def exercise(ctrl: Path, aikit: Path, evidence: Path | None = None) -> dict:
             until(lambda:request("status",agent_session=session).get("error"),"second disconnect not recorded")
             (base/"wrong-load").touch()
             refused=request("reconnect",False,**opening)
-            assert refused["error"]["code"]=="encounter.native_identity_changed",refused
-            assert "native-reconnect-identity-refused" in json.dumps(events(session))
+            assert refused["error"]["code"]=="agent_session_host.open_failed",refused
+            assert refused["error"]["message"]=="ACP load/resume contradicted the requested native identity",refused
+            held=events(session)
+            rejection=[row["event"] for row in held if row.get("event",{}).get("kind")=="native-open-refused"][-1]
+            assert rejection=={"kind":"native-open-refused","continuation_requested":True,"error_code":"agent_session_host.open_failed","cleanup_confirmed":True,"binding_recorded":False,"turn_replayed":False},rejection
+            bindings=[row["event"] for row in held if row.get("event",{}).get("kind")=="binding"]
+            assert bindings and all(row["native_session_id"]==native for row in bindings),bindings
             checks.append("A provider returning a different load identity is refused and never counted as continuation")
             (base/"wrong-load").unlink()
             skill_file.write_text(skill_body+"Changed after preparation\n")
