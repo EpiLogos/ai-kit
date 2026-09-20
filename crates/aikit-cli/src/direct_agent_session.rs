@@ -270,6 +270,7 @@ pub fn validate_review(
     let acceptance = &review["acceptance"];
     if review["schema"] != "central.agent-profile-review/v1"
         || review["accepted"] != true
+        || review["execution_authority_granted"] != false
         || profile.profile_ref.as_str() != request.profile_ref
         || &profile.agent_ref != agent
         || profile.revision != request.expected_revision
@@ -350,6 +351,23 @@ fn material(
 }
 
 /// Read the actual native ProjectBinding, without preparation or authority.
+/// Read actual effective parent-Skill eligibility without activating anything.
+pub fn skills(service: &Service) -> Result<Value> {
+    let view = service.resolved();
+    let rows: Vec<Value> = view.catalog_index.iter()
+        .filter(|(_, entry)| entry.kind == aikit_core::Kind::Skill)
+        .map(|(id, entry)| {
+            let material = service.effective_skill_markdown(id);
+            json!({"ref":id,"name":entry.name,"description":entry.description,
+                "revision":entry.revision,"source":view.active.get(id).and_then(|a|a.source.as_ref()),
+                "eligible":material.is_ok(),"reason_code":material.err().map(|e|e.code().to_owned())})
+        }).collect();
+    Ok(
+        json!({"schema":"aikit.direct-agent-skills/v1","catalogue_revision":view.catalog_revision,
+        "rows":rows,"activation_performed":false,"brokered_child_activation_observed":false}),
+    )
+}
+
 pub fn scope(service: &Service) -> Result<Value> {
     let cwd = std::fs::canonicalize(service.invocation_cwd()).map_err(io)?;
     let binding = aikit_tui::PaletteBackend::project_binding(service)?.ok_or_else(|| {
@@ -365,9 +383,44 @@ pub fn scope(service: &Service) -> Result<Value> {
         )
     })?;
     let central = std::fs::canonicalize(central).map_err(io)?;
+    let executable = std::env::var_os("CENTRAL_CTRL_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "ctrl".into());
+    let mut warnings = Vec::new();
+    let world = if cwd == central {
+        aikit_adapters::central_world_sources::read_world_binding(
+            &SystemRunner::new(),
+            &executable,
+            &central,
+            "root",
+            None,
+            "control:root",
+        )
+        .ok()
+    } else {
+        cwd.strip_prefix(central.join("Work"))
+            .ok()
+            .and_then(|p| p.to_str())
+            .and_then(|p| {
+                aikit_adapters::central_world_sources::read_project_binding(
+                    &SystemRunner::new(),
+                    &executable,
+                    &central,
+                    p,
+                    &mut warnings,
+                )
+            })
+    };
+    let readiness = match world {
+        Some(world) => {
+            json!({"ready":true,"world_ref":world.world_ref,"inherited_root_lineage":world.inherited_root_lineage})
+        }
+        None => json!({"ready":false,"owner":"central","action":"central.world-relations.save",
+            "requires_explicit_authored_source":true,"reason":"The effective native World declaration is absent or unavailable; inspect Central source before creating or changing it."}),
+    };
     Ok(
         json!({"schema":"aikit.direct-agent-scope/v1", "project_ref":binding.project,
-        "cwd":cwd, "central_root":central, "binding":binding,
+        "cwd":cwd, "central_root":central, "binding":binding,"world_readiness":readiness,
         "execution_authority_granted":false, "provider_started":false}),
     )
 }
@@ -574,12 +627,21 @@ pub fn reading(home: &AikitHome, session: &ResourceRef) -> Result<Value> {
     let Some(binding) = read(home, session)? else {
         return Ok(Value::Null);
     };
-    let state = SessionSpaceApplicationStore::new(home.clone()).load(&binding.space)?;
-    let ready = state.agent_sessions.contains_key(session)
-        && state.project_contexts.get(&binding.project_context.project)
-            == Some(&binding.project_context.context);
+    // A published binding can precede Space creation/attachment. Read that
+    // partial outcome without creating anything, so the same request can be
+    // explicitly continued rather than minting a replacement session.
+    let state = match SessionSpaceApplicationStore::new(home.clone()).load(&binding.space) {
+        Ok(state) => Some(state),
+        Err(e) if e.code() == "session_space.not_found" => None,
+        Err(e) => return Err(e),
+    };
+    let ready = state.as_ref().is_some_and(|state| {
+        state.agent_sessions.contains_key(session)
+            && state.project_contexts.get(&binding.project_context.project)
+                == Some(&binding.project_context.context)
+    });
     Ok(
-        json!({"schema":SCHEMA,"agent_ref":binding.agent_ref,"agent_session":session,"space":binding.space,"request_id":binding.request.request_id,"acceptance_ref":binding.request.expected_acceptance_ref,"profile_ref":binding.request.profile_ref,"profile_revision":binding.request.expected_revision,"project_ref":binding.project_context.project,"prepared":ready,"provider_started":false,"execution_authority_granted":false,"brokered_child_context":"not-established; child launch requires its own context/admission","skill_sources":binding.skill_digests}),
+        json!({"schema":SCHEMA,"agent_ref":binding.agent_ref,"agent_session":session,"space":binding.space,"request_id":binding.request.request_id,"acceptance_ref":binding.request.expected_acceptance_ref,"profile_ref":binding.request.profile_ref,"profile_revision":binding.request.expected_revision,"project_ref":binding.project_context.project,"prepared":ready,"resume_preparation_allowed":!ready,"provider_started":false,"execution_authority_granted":false,"brokered_child_context":"not-established; child launch requires its own context/admission","skill_sources":binding.skill_digests}),
     )
 }
 

@@ -12,7 +12,7 @@ fn fixture() -> (PrepareRequest, ResourceRef, Value) {
     };
     let agent = ResourceRef::parse("agent:test").unwrap();
     let profile = json!({"schema":"central.agent-profile/v1","ref":request.profile_ref,"revision":"r1","agent_ref":agent,"scope":"personal","world_ref":"central:root","ratified_world_refs":["central:root"],"purpose":"Read explicit sources","intent_provenance":{"schema":"central.agent-profile-provenance/v1","intent_expression":"Read explicit sources","origin_action":"agent-profile.express","authorship":"generated-proposal","recognition":"unrecognised"}});
-    let review = json!({"schema":"central.agent-profile-review/v1","accepted":true,"profile":profile,"scope_ref":"control:root","content_digest":request.expected_content_digest,"acceptance":{"schema":"central.agent-profile-acceptance/v1","acceptance_ref":request.expected_acceptance_ref,"profile_ref":request.profile_ref,"agent_ref":agent,"profile_revision":"r1","content_digest":request.expected_content_digest,"scope_ref":"control:root","principal_ref":"human:controlled-test","authority_ref":"authority:controlled-test","authority_revision":"policy:1"}});
+    let review = json!({"schema":"central.agent-profile-review/v1","accepted":true,"execution_authority_granted":false,"profile":profile,"scope_ref":"control:root","content_digest":request.expected_content_digest,"acceptance":{"schema":"central.agent-profile-acceptance/v1","acceptance_ref":request.expected_acceptance_ref,"profile_ref":request.profile_ref,"agent_ref":agent,"profile_revision":"r1","content_digest":request.expected_content_digest,"scope_ref":"control:root","principal_ref":"human:controlled-test","authority_ref":"authority:controlled-test","authority_revision":"policy:1"}});
     (request, agent, review)
 }
 #[test]
@@ -29,6 +29,7 @@ fn unaccepted_stale_or_different_identity_receipts_are_not_admission() {
     let (request, agent, review) = fixture();
     for (pointer, value) in [
         ("/accepted", json!(false)),
+        ("/execution_authority_granted", json!(true)),
         ("/profile/revision", json!("r2")),
         ("/content_digest", json!("sha256:changed")),
         ("/profile/agent_ref", json!("agent:other")),

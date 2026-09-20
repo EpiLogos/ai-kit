@@ -818,6 +818,24 @@ impl EncounterService {
             Some(agent_session.clone()),
         ))?;
         let native = lane.binding().native_session_id.clone();
+        if reconnect
+            && previous
+                .as_ref()
+                .and_then(|p| p["native_session_id"].as_str())
+                != Some(native.as_str())
+        {
+            let cleanup = host.shutdown();
+            if cleanup.is_err() {
+                // Refuse later effects if this body may still be live.
+                self.shutdown_requested
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.store.append(&agent_session, &json!({"kind":"native-reconnect-identity-refused", "cleanup_confirmed":cleanup.is_ok(), "turn_replayed":false}))?;
+            return Err(AikitError::new(
+                "encounter.native_identity_changed",
+                "The harness returned another native identity to session/load; no binding or successful continuation was recorded",
+            ));
+        }
         let model_observation = lane.binding().model_observation.clone();
         let model_reading = serde_json::to_value(&model).map_err(error)?;
         self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
@@ -847,7 +865,92 @@ impl EncounterService {
         )
     }
 
+    /// Reconnect a failed body under the exclusive owner lease. A view-only
+    /// reconnect cannot stop another session, replay a turn or mint a replacement.
+    fn reconnect_native(
+        &self,
+        space: SessionSpaceRef,
+        agent_session: ResourceRef,
+        provider: String,
+        cwd: PathBuf,
+    ) -> Result<Value> {
+        let mut lifecycle = self.lifecycle.write().map_err(error)?;
+        if self
+            .shutdown_requested
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || !matches!(*lifecycle, Lifecycle::Running)
+        {
+            return Err(AikitError::new(
+                "encounter.owner_stopped",
+                "Owner is stopping or requires cleanup repair",
+            ));
+        }
+        let cwd = std::fs::canonicalize(cwd).map_err(error)?;
+        self.require_attached(&agent_session)?;
+        crate::direct_agent_session::check(&self.home, &agent_session, &cwd)?;
+        let mut residents = self.residents.lock().map_err(error)?;
+        if let Some(held) = residents.get(&agent_session) {
+            if held.space != space || held.provider != provider || held.cwd != cwd {
+                return Err(AikitError::new(
+                    "encounter.reconnect_basis",
+                    "Reconnect cannot change the native session's Project, Space or provider",
+                ));
+            }
+            if held.host.transport_error().is_none() {
+                drop(residents);
+                return self.open_native(space, agent_session, provider, cwd, true, None);
+            }
+            if !held
+                .host
+                .descriptor()?
+                .capabilities
+                .supports(SessionOpenMode::Load)
+            {
+                return Err(AikitError::new(
+                    "encounter.load_unsupported",
+                    "This harness did not advertise native load; the failed session remains inspectable",
+                ));
+            }
+            self.store.append(&agent_session, &json!({"kind":"native-reconnect-requested", "native_session_id":held.lane.binding().native_session_id, "previous_turn_outcome":"unknown; not-replayed"}))?;
+            let removed = residents.remove(&agent_session).expect("held resident");
+            let removed = match Arc::try_unwrap(removed) {
+                Ok(resident) => resident,
+                Err(held) => {
+                    residents.insert(agent_session.clone(), held);
+                    return Err(AikitError::new(
+                        "encounter.resident_in_use",
+                        "The failed body is still borrowed; inspect and explicitly retry after it settles",
+                    ));
+                }
+            };
+            if let Err(failure) = removed.host.shutdown() {
+                let reason = format!("Failed body cleanup is uncertain: {failure}");
+                *lifecycle = Lifecycle::Failed(reason.clone());
+                let _ = self.store.append(
+                    &agent_session,
+                    &json!({"kind":"native-reconnect-cleanup-uncertain","reason":reason}),
+                );
+                return Err(AikitError::new("encounter.cleanup_uncertain", reason));
+            }
+            self.permissions
+                .lock()
+                .map_err(error)?
+                .remove(&agent_session);
+        }
+        drop(residents);
+        self.open_native(space, agent_session, provider, cwd, true, None)
+    }
+
     pub fn apply(&self, request: EncounterRequest) -> Result<Value> {
+        if let EncounterRequest::Reconnect {
+            space,
+            agent_session,
+            provider,
+            cwd,
+        } = request
+        {
+            return self.reconnect_native(space, agent_session, provider, cwd);
+        }
         if let EncounterRequest::Shutdown { expected_pid } = &request {
             return self.shutdown(*expected_pid);
         }
