@@ -398,3 +398,19 @@ fn source_address_overflow_is_explicit_not_unbounded_context() {
     let error = projection::context_blocks(&config, None, None).unwrap_err();
     assert_eq!(error.code(), "wiki_projection.source_budget");
 }
+
+#[test]
+fn feedback_preserves_yaml_frontmatter_and_exact_body_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let file = source(&root);
+    let body = "---\ntags: [guidance]\naliases: [Working together]\n---\n\n# Intent\n\nExplain research fully.\n";
+    let changed = revised(&file, body);
+    let raw = std::fs::read_to_string(&file).unwrap();
+    assert!(raw.starts_with(body));
+    assert!(raw.ends_with("\n-->\n"));
+    assert_eq!(projection::read(&file).unwrap().body, body);
+    assert_eq!(projection::read(&file).unwrap().revision, changed.revision);
+    assert_eq!(revised(&file, body).feedback.len(), 2);
+    assert_eq!(projection::read(&file).unwrap().body, body);
+}

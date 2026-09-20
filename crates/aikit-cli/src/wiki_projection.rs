@@ -161,6 +161,16 @@ pub fn read(path: &Path) -> Result<ProjectionReading> {
         let history: Vec<FeedbackBasis> = serde_json::from_str(history)
             .map_err(|e| error("wiki_projection.invalid_history", e))?;
         (history, body.to_string())
+    } else if let Some((body, history)) = raw.rsplit_once(&format!("\n\n{MARKER}")) {
+        let history = history.strip_suffix(END).ok_or_else(|| {
+            error(
+                "wiki_projection.invalid_history",
+                "unfinished trailing feedback history",
+            )
+        })?;
+        let history: Vec<FeedbackBasis> = serde_json::from_str(history)
+            .map_err(|e| error("wiki_projection.invalid_history", e))?;
+        (history, body.to_string())
     } else {
         (Vec::new(), raw.clone())
     };
@@ -252,7 +262,7 @@ pub fn update(
         .map_err(|e| error("wiki_projection.invalid_history", e))?
         .replace('<', "\\u003c")
         .replace('>', "\\u003e");
-    let rendered = format!("{MARKER}{history}{END}{body}");
+    let rendered = format!("{body}\n\n{MARKER}{history}{END}");
     if rendered.len() as u64 > MAX_BYTES {
         return Err(error("wiki_projection.history_budget", "feedback history exceeds source budget; retain it in source history before an explicit consolidation"));
     }
