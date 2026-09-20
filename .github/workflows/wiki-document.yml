@@ -33,6 +33,12 @@ jobs:
         run: |
           cargo test --locked -p aikit-adapters --lib okf -- --nocapture
           cargo test --locked -p aikit-adapters --lib authored_wiki -- --nocapture
+      - name: Prove native document and metadata graph readings
+        run: |
+          cargo test --locked -p aikit-adapters --lib wiki_document -- --nocapture
+          cargo test --locked -p aikit-adapters --lib wiki_graph -- --nocapture
+      - name: Prove the actual Knowledge CLI document loop
+        run: cargo test --locked -p aikit-cli --test wiki_document_end_to_end -- --nocapture
       - name: Build the actual Knowledge CLI for consumer verification
         run: cargo build --locked -p aikit-cli --bin aikit
       - name: Retain exact source and callable native cut
