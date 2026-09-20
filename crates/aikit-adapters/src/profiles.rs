@@ -2,13 +2,29 @@
 //! supported harness, embedded as TOML and parsed+validated once. The
 //! documents carry only what the per-harness censuses evidenced — the
 //! 2026-09-16 census for the first ten documents, the 2026-09-18
-//! harness-adapter sort-out for the additions, and the 2026-09-18 pi hooks
-//! census (each grounded in that harness's admission census in this package
-//! and, where installed, the live Omarchy machine) — an absent layer says
-//! nothing, a `none` model dispatch carries its reason, and machine-specific
-//! paths are home-relative so the data survives machines. Actuation's catalog
-//! stays the detection authority; these documents are AIKit's handling
-//! declarations joined to it by slug.
+//! harness-adapter sort-out for the additions, the 2026-09-18 pi hooks
+//! census, and the 2026-09-19 key-delivery census (each grounded in that
+//! harness's admission census in this package and, where installed, the live
+//! Omarchy machine) — an absent layer says nothing, a `none` model dispatch
+//! carries its reason, and machine-specific paths are home-relative so the
+//! data survives machines. Actuation's catalog stays the detection authority;
+//! these documents are AIKit's handling declarations joined to it by slug.
+//!
+//! ## Key delivery (2026-09-19 census)
+//!
+//! The models layer's `key-delivery` records, per provider a harness can
+//! serve, the env var its native launch reads for that provider's key — or
+//! the own-login fact that it authenticates through a store of its own. The
+//! launch path materialises a *bound* credential through the same seam the
+//! selected-model path uses and injects it under the declared variable into
+//! the scrubbed final-child environment. Where a provider is declared
+//! env-var-only (no own-login fact), an unbound key refuses the launch with
+//! the bind remediation rather than silently starting a body that cannot
+//! authenticate; where an own-login fact exists, an unbound key is absent and
+//! the harness's native login stands — availability disclosure already
+//! reports it. Coverage honesty beats coverage theater: zcode, opencode,
+//! openclaw, cursor-cli and ollama record why no env-var key path is declared
+//! for them, and no variable was invented to fill the table.
 //!
 //! ## Pi hooks (2026-09-18 census; carrier commissioned same day)
 //!
@@ -75,6 +91,10 @@ activation = "next-session-only"
 posture = "observed"
 dispatch = { native-provider-binding = { provider-ref = "provider:anthropic", selector-kind = "config-key", selector-name = "model" } }
 
+[models.key-delivery]
+env-var = [{ provider-ref = "provider:anthropic", env-var = "ANTHROPIC_API_KEY" }]
+own-login = [{ provider-ref = "provider:anthropic", note = "claude login keeps OAuth material in its own credential store (~/.claude/.credentials.json); the API key delivers only when credential:anthropic is bound" }]
+
 [sessions]
 posture = "observed"
 protocol = "process"
@@ -130,6 +150,10 @@ observe = [{ path = "~/.codex/config.toml", collection = "mcp_servers" }]
 [models]
 posture = "observed"
 dispatch = { native-provider-binding = { provider-ref = "provider:openai", selector-kind = "config-key", selector-name = "model" } }
+
+[models.key-delivery]
+env-var = [{ provider-ref = "provider:openai", env-var = "OPENAI_API_KEY" }]
+own-login = [{ provider-ref = "provider:openai", note = "codex login writes its own auth store (~/.codex/auth.json); the API key delivers only when credential:openai is bound" }]
 
 [sessions]
 posture = "observed"
@@ -190,6 +214,9 @@ activation = "next-session-only"
 [models]
 posture = "observed"
 dispatch = { none = { reason = "The catalog declares no native provider binding for zcode; declaring one would be a guess, not a reading." } }
+
+[models.key-delivery]
+note = "zcode authenticates through its own managed login; the 2026-09-19 machine reading found no key or auth entries in its CLI config and the catalog records no provider binding, so no env-var key path is declared."
 
 [sessions]
 posture = "observed"
@@ -257,6 +284,9 @@ posture = "observed"
 dispatch = "provider-plural"
 roster-note = "Provider and model chosen per invocation (--provider/--model); encounter model policy pins the native selector."
 
+[models.key-delivery]
+note = "pi keeps provider keys in its own auth store (~/.pi/agent/auth.json); a selected-model dispatch delivers its policy-named credential explicitly, so no blanket env-var key path is declared here."
+
 [sessions]
 posture = "observed"
 protocol = "rpc"
@@ -292,6 +322,10 @@ observe = [{ path = "~/.gemini/settings.json", collection = "mcpServers" }]
 posture = "observed"
 dispatch = "provider-plural"
 
+[models.key-delivery]
+env-var = [{ provider-ref = "provider:gemini", env-var = "GEMINI_API_KEY" }]
+own-login = [{ provider-ref = "provider:gemini", note = "Login with Google (OAuth) is Gemini CLI's default auth; the API key delivers only when credential:gemini is bound" }]
+
 [sessions]
 posture = "observed"
 protocol = "acp"
@@ -322,6 +356,9 @@ observe = [{ path = "~/.kimi/mcp.json", collection = "mcpServers" }]
 posture = "observed"
 dispatch = "provider-plural"
 compatibility-note = "Config carries a default model; candidates are gated by the harness compatibility facts of the kimi adapter census."
+
+[models.key-delivery]
+env-var = [{ provider-ref = "provider:moonshot", env-var = "MOONSHOT_API_KEY" }]
 
 [sessions]
 posture = "observed"
@@ -356,6 +393,9 @@ activation = "restart-client"
 posture = "observed"
 dispatch = { none = { reason = "The catalog capability descriptor is undeclared for openclaw; no provider binding is recorded." } }
 
+[models.key-delivery]
+note = "openclaw keeps model auth in its own config auth profiles (~/.openclaw/openclaw.json); no env-var key path is declared."
+
 [sessions]
 posture = "observed"
 protocol = "process"
@@ -388,6 +428,9 @@ observe = [{ path = "~/.cursor/mcp.json", collection = "mcpServers" }]
 posture = "observed"
 dispatch = { none = { reason = "Cursor's model surface is subscription-mediated; no config-key binding is recorded." } }
 
+[models.key-delivery]
+note = "cursor-agent authenticates through Cursor's own subscription login; no env-var key path is declared."
+
 [sessions]
 posture = "observed"
 protocol = "process"
@@ -414,6 +457,9 @@ posture = "observed"
 [models]
 posture = "observed"
 dispatch = "provider-plural"
+
+[models.key-delivery]
+env-var = [{ provider-ref = "provider:dashscope", env-var = "DASHSCOPE_API_KEY" }]
 
 [sessions]
 posture = "observed"
@@ -442,6 +488,9 @@ posture = "observed"
 posture = "observed"
 dispatch = "provider-plural"
 roster-note = "Local model serving; the models facet inventory reads /api/tags."
+
+[models.key-delivery]
+note = "local model serving reads no provider key; there is nothing to deliver."
 
 [sessions]
 posture = "observed"
@@ -680,6 +729,9 @@ observe = [{ path = "~/.config/opencode/opencode.json", collection = "mcp" }]
 posture = "observed"
 dispatch = { none = { reason = "The catalog declares no capability document for opencode and the census records no provider binding surface; no model dispatch is declared." } }
 
+[models.key-delivery]
+note = "opencode authenticates through its own per-provider auth store (opencode auth login) and per-provider config; no fixed env-var key path is declared for its native launch."
+
 [sessions]
 posture = "observed"
 protocol = "process"
@@ -707,6 +759,22 @@ fn parsed() -> &'static BTreeMap<&'static str, HarnessProfile> {
 /// The validated profile for one catalog slug, if this package carries one.
 pub fn for_slug(slug: &str) -> Option<&'static HarnessProfile> {
     parsed().get(slug)
+}
+
+/// The profile whose presence executables name this launch program. The join
+/// is the basename of the program AIKit was configured to spawn (`claude`,
+/// `pi`, `opencode`) against each profile's declared `presence.executables`.
+/// A bridge or wrapper program (a node launcher, a shell) joins nothing: an
+/// encounter that does not name the harness executable itself gets no
+/// key-delivery declarations, which is the honest absence.
+pub fn for_argv_program(program: &str) -> Option<&'static HarnessProfile> {
+    let name = std::path::Path::new(program).file_name()?.to_string_lossy();
+    parsed().values().find(|profile| {
+        profile
+            .presence
+            .as_ref()
+            .is_some_and(|presence| presence.executables.iter().any(|e| *e == name))
+    })
 }
 
 /// Every embedded profile, keyed by catalog slug.
@@ -1066,6 +1134,139 @@ mod tests {
                 "{slug}: target must have a profile"
             );
         }
+    }
+
+    #[test]
+    fn every_declared_key_delivery_variable_is_lawful_and_single_per_provider() {
+        // Validation runs at embedded-parse time (a bad declaration panics in
+        // parsed()); this test additionally pins the whole declared table so
+        // the delivery surface is legible in one place.
+        let expected: &[(&str, &str, &str)] = &[
+            ("claude-code", "provider:anthropic", "ANTHROPIC_API_KEY"),
+            ("codex", "provider:openai", "OPENAI_API_KEY"),
+            ("gemini", "provider:gemini", "GEMINI_API_KEY"),
+            ("kimi", "provider:moonshot", "MOONSHOT_API_KEY"),
+            ("qwen-code", "provider:dashscope", "DASHSCOPE_API_KEY"),
+        ];
+        for (slug, provider_ref, env_var) in expected {
+            let profile = for_slug(slug).unwrap_or_else(|| panic!("{slug} must resolve"));
+            let delivery = profile
+                .models
+                .as_ref()
+                .unwrap_or_else(|| panic!("{slug} must declare models"))
+                .key_delivery
+                .as_ref()
+                .unwrap_or_else(|| panic!("{slug} must declare key delivery"));
+            assert_eq!(
+                delivery.env_var.len(),
+                1,
+                "{slug}: exactly one declared delivery variable"
+            );
+            assert_eq!(delivery.env_var[0].provider_ref, *provider_ref);
+            assert_eq!(delivery.env_var[0].env_var, *env_var);
+        }
+    }
+
+    #[test]
+    fn env_var_only_declarations_name_their_own_login_fallbacks_where_they_exist() {
+        // claude, codex and gemini can serve their provider through their own
+        // login store, so an unbound key must not refuse their launch. kimi
+        // and qwen-code have no evidenced own-login store: their declared key
+        // is required, and an unbound binding refuses the launch loudly.
+        for slug in ["claude-code", "codex", "gemini"] {
+            let profile = for_slug(slug).unwrap();
+            let delivery = profile
+                .models
+                .as_ref()
+                .unwrap()
+                .key_delivery
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                delivery.own_login.len(),
+                1,
+                "{slug}: the own-login fallback must be declared"
+            );
+            assert_eq!(
+                delivery.own_login[0].provider_ref, delivery.env_var[0].provider_ref,
+                "{slug}: the fallback covers the declared provider"
+            );
+        }
+        for slug in ["kimi", "qwen-code"] {
+            let profile = for_slug(slug).unwrap();
+            let delivery = profile
+                .models
+                .as_ref()
+                .unwrap()
+                .key_delivery
+                .as_ref()
+                .unwrap();
+            assert!(
+                delivery.own_login.is_empty(),
+                "{slug}: no own-login store is evidenced, so none may be declared"
+            );
+        }
+    }
+
+    #[test]
+    fn harnesses_without_an_env_var_key_path_declare_the_fact_instead() {
+        // Coverage honesty beats coverage theater: no variable was invented
+        // for these harnesses; their key posture is a named note.
+        for slug in [
+            "zcode",
+            "pi",
+            "openclaw",
+            "cursor-cli",
+            "ollama",
+            "opencode",
+        ] {
+            let profile = for_slug(slug).unwrap_or_else(|| panic!("{slug} must resolve"));
+            let delivery = profile
+                .models
+                .as_ref()
+                .unwrap_or_else(|| panic!("{slug} must declare models"))
+                .key_delivery
+                .as_ref()
+                .unwrap_or_else(|| panic!("{slug} must declare its no-env-path fact"));
+            assert!(
+                delivery.env_var.is_empty(),
+                "{slug}: no env-var delivery may be invented"
+            );
+            let note = delivery
+                .note
+                .as_deref()
+                .unwrap_or_else(|| panic!("{slug}: the no-env-path fact must be stated"));
+            assert!(!note.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn pi_declares_no_env_var_delivery_keeping_its_policy_path_the_only_route() {
+        // The selected-model policy names pi's credential and its target
+        // variable explicitly; a profile-declared variable would silently
+        // add a second delivery route to a path whose law is explicitness.
+        let pi = for_slug("pi").unwrap();
+        let delivery = pi.models.as_ref().unwrap().key_delivery.as_ref().unwrap();
+        assert!(delivery.env_var.is_empty());
+    }
+
+    #[test]
+    fn launch_programs_join_to_profiles_by_basename() {
+        assert_eq!(
+            for_argv_program("/Users/admin/.local/bin/pi").map(|p| p.slug.as_str()),
+            Some("pi")
+        );
+        assert_eq!(
+            for_argv_program("claude").map(|p| p.slug.as_str()),
+            Some("claude-code")
+        );
+        assert_eq!(
+            for_argv_program("opencode").map(|p| p.slug.as_str()),
+            Some("opencode")
+        );
+        // A bridge or wrapper joins nothing: no declarations, no delivery.
+        assert!(for_argv_program("/opt/homebrew/bin/node").is_none());
+        assert!(for_argv_program("/bin/sh").is_none());
     }
 
     #[test]

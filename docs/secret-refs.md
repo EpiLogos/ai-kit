@@ -86,6 +86,7 @@ aikit credential setup <ref> --ref op://…    # declare an external location (n
 aikit credential setup <ref>                 # bind material into the OS secure store
 aikit credential rotate <ref> --ref op://…   # new material or location, same credential ref
 aikit credential revoke <ref>                # refuse at next use; operator stores stay put
+aikit credential verify <ref>                # one operator-invoked live check of the key
 ```
 
 Laws this surface keeps:
@@ -103,3 +104,44 @@ Laws this surface keeps:
 * The settings disclosure (`aikit system --json`, section `models`) renders
   the inventory as presence, refs and timestamps — there is no field a
   secret value could occupy.
+* `verify` is operator-invoked only — no launch, resolution or detection
+  path ever checks a key against its provider. One minimal read (usually the
+  provider's models endpoint) yields working / refused / unreachable plus
+  the HTTP status class, and the outcome records `last_verified_at` on the
+  binding only when it is definitive: the key worked, or the provider
+  refused it outright (401/403). A provider with no known check is refused
+  honestly; the key and the Authorization header are never printed, logged
+  or persisted.
+
+## Harness key delivery
+
+Each harness profile (`aikit.harness-profile/v1`, models layer,
+`key-delivery`) declares, per provider the harness can serve, the env var
+its native launch reads for the key — or the own-login fact that it
+authenticates through a store of its own, and the reason no env-var path is
+declared where that is the truth (zcode, opencode, openclaw, cursor-cli,
+ollama). Declared facts as of 2026-09-19:
+
+| Harness | Provider | Env var | Effect when the credential is bound |
+|---------|----------|---------|--------------------------------------|
+| claude-code | `provider:anthropic` | `ANTHROPIC_API_KEY` | injected into the scrubbed launch environment |
+| codex | `provider:openai` | `OPENAI_API_KEY` | injected into the scrubbed launch environment |
+| gemini | `provider:gemini` | `GEMINI_API_KEY` | injected into the scrubbed launch environment |
+| kimi | `provider:moonshot` | `MOONSHOT_API_KEY` | injected; unbound launches refuse with the bind remediation |
+| qwen-code | `provider:dashscope` | `DASHSCOPE_API_KEY` | injected; unbound launches refuse with the bind remediation |
+| pi | — | — | own auth store (`~/.pi/agent/auth.json`); selected-model policy delivers its credential explicitly |
+| zcode | — | — | own managed login; no env-var key path declared |
+| opencode | — | — | own per-provider store (`opencode auth login`); no fixed env-var path |
+| openclaw | — | — | auth profiles in its own config; no env-var key path |
+| cursor-cli | — | — | own subscription login; no env-var key path |
+| ollama | — | — | local serving reads no provider key |
+
+At launch, a bound credential materialises through the same seam the
+selected-model path uses (OS store, explicit `--from-env` import, or a
+declared ref through the resolver suite) and is injected under the declared
+variable into the scrubbed final-child environment — never an empty or
+ambient value. Where the profile records an own-login fact for the provider,
+an unbound key is an honest absence and the harness's native login stands;
+where it does not, an unbound key refuses the launch with the bind
+remediation instead of starting a body that cannot authenticate. A revoked
+or expired binding refuses either way.

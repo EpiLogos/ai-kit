@@ -179,6 +179,7 @@ mod tests {
             ),
             bound_at_unix_seconds: Some(1_700_000_000),
             last_rotated_at_unix_seconds: None,
+            last_verified_at_unix_seconds: None,
         };
 
         store.save(&state).unwrap();

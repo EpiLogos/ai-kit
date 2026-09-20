@@ -20,6 +20,14 @@
 //! the declaration, never the merge code. An [`ActivationEffectName`] mirrors
 //! the variants of [`crate::projection::ActivationEffect`] so activation truth
 //! can be verified against the existing `verify_activation_truth` law.
+//!
+//! The models layer may declare key delivery: per provider, the env var the
+//! harness's native launch reads (or the own-login fact that it takes no env
+//! key). A declared selector must satisfy the shared credential-variable
+//! shape law — [`crate::credential::valid_credential_variable`] — and is
+//! refused here otherwise; the launch path that consumes the declaration
+//! materialises through the same credential seam the selected-model path
+//! uses, never passing an empty or ambient value.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -238,6 +246,48 @@ pub enum ModelDispatchPosture {
     None { reason: String },
 }
 
+/// One declared env-var key delivery: the provider whose key this harness
+/// reads from the process environment at launch, and the exact variable name
+/// its native launch reads. The name is a delivery selector, never a value —
+/// a declaration cannot carry material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ModelKeyDelivery {
+    pub provider_ref: String,
+    pub env_var: String,
+}
+
+/// One declared own-login fact: the provider this harness can also serve
+/// through its own login store, with the census note. An own-login fact is
+/// what makes a missing binding survivable — where it is absent, an unbound
+/// declared key refuses the launch instead of silently starting a body that
+/// cannot authenticate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ModelOwnLogin {
+    pub provider_ref: String,
+    pub note: String,
+}
+
+/// Declared key-delivery facts of the models layer: which env var each served
+/// provider's launch reads, which providers the harness serves through its
+/// own login store, and — where no per-provider entry applies — an honest
+/// note saying so. A declaration is a delivery fact, never an availability
+/// claim: whether a key is presently bound stays with the credential store.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ModelKeyDeliveryLayer {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_var: Vec<ModelKeyDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own_login: Vec<ModelOwnLogin>,
+    /// Free-text disclosure of the harness's overall key posture where no
+    /// per-provider entry applies (own managed login, local serving, no key
+    /// read at all). Prose, like the skills layer's shared-tree disclosure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ModelsLayer {
@@ -252,6 +302,11 @@ pub struct ModelsLayer {
     /// (`harness_compatible` / `harness_capabilities`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compatibility_note: Option<String>,
+    /// Declared key delivery: the env var each served provider's launch
+    /// reads, and the own-login facts. Absent means the census recorded no
+    /// key-delivery fact for this harness at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_delivery: Option<ModelKeyDeliveryLayer>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -568,6 +623,11 @@ impl HarnessProfile {
         if let Some(hooks) = &self.hooks {
             validate_layer_project("hooks", hooks.posture, hooks.project.as_ref())?;
         }
+        if let Some(models) = &self.models {
+            if let Some(key_delivery) = &models.key_delivery {
+                validate_key_delivery(key_delivery)?;
+            }
+        }
         if let Some(settings) = &self.settings {
             for declaration in &settings.trust_settings {
                 declaration.validate().map_err(|error| {
@@ -579,6 +639,87 @@ impl HarnessProfile {
         }
         Ok(())
     }
+}
+
+/// Posture truth for the key-delivery declarations. A declared env-var
+/// selector must satisfy the shared credential-variable shape law
+/// ([`crate::credential::valid_credential_variable`]) — a selector that could
+/// not be lawfully injected is refused here, at validation, rather than at
+/// launch. One provider may not declare two different variables, and an
+/// own-login fact must actually say something about its provider.
+fn validate_key_delivery(delivery: &ModelKeyDeliveryLayer) -> Result<(), HarnessProfileError> {
+    let mut seen = BTreeMap::new();
+    for entry in &delivery.env_var {
+        if entry.provider_ref.trim().is_empty() {
+            return Err(HarnessProfileError::new(
+                "harness_profile.empty_key_delivery_provider",
+                "a key delivery must name the provider whose key it delivers; \
+                 set `provider-ref` to a `provider:<vendor>` ref",
+            )
+            .with("field", "provider-ref"));
+        }
+        if !crate::credential::valid_credential_variable(&entry.env_var) {
+            return Err(HarnessProfileError::new(
+                "harness_profile.invalid_key_env_var",
+                format!(
+                    "the declared key-delivery variable {:?} is not a lawful credential \
+                     variable; a provider key variable must end _API_KEY, _TOKEN or _KEY, \
+                     start with a letter or underscore, and never collide with AIKit's \
+                     own surfaces (CENTRAL_/WORKCELL_/AIKIT_/LD_/DYLD_)",
+                    entry.env_var
+                ),
+            )
+            .with("provider-ref", entry.provider_ref.clone())
+            .with("env-var", entry.env_var.clone()));
+        }
+        if let Some(previous) = seen.insert(entry.provider_ref.as_str(), entry.env_var.as_str()) {
+            return Err(HarnessProfileError::new(
+                "harness_profile.duplicate_key_delivery",
+                format!(
+                    "provider {} declares two delivery variables ({previous} and {}); \
+                     one provider is read through one variable — remove the entry that \
+                     is not what the harness actually reads",
+                    entry.provider_ref, entry.env_var,
+                ),
+            )
+            .with("provider-ref", entry.provider_ref.clone()));
+        }
+    }
+    for fact in &delivery.own_login {
+        if fact.provider_ref.trim().is_empty() {
+            return Err(HarnessProfileError::new(
+                "harness_profile.empty_key_delivery_provider",
+                "an own-login fact must name the provider it serves; set `provider-ref` \
+                 to a `provider:<vendor>` ref",
+            )
+            .with("field", "provider-ref"));
+        }
+        if fact.note.trim().is_empty() {
+            return Err(HarnessProfileError::new(
+                "harness_profile.empty_own_login_note",
+                "an own-login fact must carry its census note; say which store the \
+                 harness authenticates through",
+            )
+            .with("provider-ref", fact.provider_ref.clone())
+            .with("field", "note"));
+        }
+    }
+    if delivery.env_var.is_empty()
+        && delivery.own_login.is_empty()
+        && delivery
+            .note
+            .as_deref()
+            .is_none_or(|note| note.trim().is_empty())
+    {
+        return Err(HarnessProfileError::new(
+            "harness_profile.empty_key_delivery",
+            "the key-delivery layer declares nothing; a layer that says nothing is \
+             removed rather than kept empty — delete `key-delivery` or record the \
+             harness's actual key posture",
+        )
+        .with("field", "key-delivery"));
+    }
+    Ok(())
 }
 
 fn validate_layer_project<T>(
@@ -847,6 +988,78 @@ mcp-servers = false
         assert_eq!(error.code, "harness_profile.empty_slug");
     }
 
+    fn claude_shaped_profile() -> HarnessProfile {
+        let mut profile = openclaw_profile();
+        profile.models = Some(ModelsLayer {
+            posture: LayerPosture::Observed,
+            dispatch: ModelDispatchPosture::NativeProviderBinding {
+                provider_ref: "provider:anthropic".to_string(),
+                selector_kind: "config-key".to_string(),
+                selector_name: "model".to_string(),
+            },
+            roster_note: None,
+            compatibility_note: None,
+            key_delivery: Some(ModelKeyDeliveryLayer {
+                env_var: vec![ModelKeyDelivery {
+                    provider_ref: "provider:anthropic".to_string(),
+                    env_var: "ANTHROPIC_API_KEY".to_string(),
+                }],
+                own_login: vec![ModelOwnLogin {
+                    provider_ref: "provider:anthropic".to_string(),
+                    note: "claude login stores its own credential".to_string(),
+                }],
+                note: None,
+            }),
+        });
+        profile
+    }
+
+    #[test]
+    fn a_lawful_key_delivery_declaration_validates_and_round_trips() {
+        let profile = claude_shaped_profile();
+        profile
+            .validate()
+            .expect("a well-shaped key delivery satisfies posture truth");
+        let models = profile.models.as_ref().unwrap();
+        let delivery = models.key_delivery.as_ref().unwrap();
+        assert_eq!(
+            delivery.env_var.first().unwrap().env_var,
+            "ANTHROPIC_API_KEY"
+        );
+    }
+
+    #[test]
+    fn a_key_delivery_selector_that_fails_the_variable_law_is_refused_at_validation() {
+        for unlawful in [
+            "PATH",
+            "KEY",
+            "ANTHROPIC-API-KEY",
+            "AIKIT_GATEWAY_TOKEN",
+            "CENTRAL_NATIVE_TOKEN",
+            "DYLD_LIBRARY_KEY",
+        ] {
+            let mut profile = claude_shaped_profile();
+            profile
+                .models
+                .as_mut()
+                .unwrap()
+                .key_delivery
+                .as_mut()
+                .unwrap()
+                .env_var[0]
+                .env_var = unlawful.to_string();
+            let error = profile.validate().unwrap_err();
+            assert_eq!(
+                error.code, "harness_profile.invalid_key_env_var",
+                "{unlawful} must be refused"
+            );
+            assert!(
+                error.to_string().contains(unlawful),
+                "the refusal must name the offending variable: {error}"
+            );
+        }
+    }
+
     fn codex_trust_settings_layer() -> SettingsLayer {
         SettingsLayer {
             posture: LayerPosture::Observed,
@@ -876,6 +1089,67 @@ mcp-servers = false
                 },
             ],
         }
+    }
+
+    #[test]
+    fn one_provider_cannot_declare_two_delivery_variables() {
+        let mut profile = claude_shaped_profile();
+        let delivery = profile
+            .models
+            .as_mut()
+            .unwrap()
+            .key_delivery
+            .as_mut()
+            .unwrap();
+        delivery.env_var.push(ModelKeyDelivery {
+            provider_ref: "provider:anthropic".to_string(),
+            env_var: "ANTHROPIC_AUTH_TOKEN".to_string(),
+        });
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.duplicate_key_delivery");
+        assert!(error.to_string().contains("provider:anthropic"));
+    }
+
+    #[test]
+    fn an_own_login_fact_without_a_note_is_refused() {
+        let mut profile = claude_shaped_profile();
+        profile
+            .models
+            .as_mut()
+            .unwrap()
+            .key_delivery
+            .as_mut()
+            .unwrap()
+            .own_login[0]
+            .note = "   ".to_string();
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.empty_own_login_note");
+    }
+
+    #[test]
+    fn an_empty_key_delivery_layer_is_refused_rather_than_kept() {
+        let mut profile = claude_shaped_profile();
+        profile.models.as_mut().unwrap().key_delivery = Some(ModelKeyDeliveryLayer::default());
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.empty_key_delivery");
+    }
+
+    #[test]
+    fn a_note_only_key_delivery_declares_an_honest_no_env_path_fact() {
+        let mut profile = openclaw_profile();
+        let models = profile.models.as_mut().unwrap();
+        models.key_delivery = Some(ModelKeyDeliveryLayer {
+            env_var: vec![],
+            own_login: vec![],
+            note: Some(
+                "this harness authenticates through its own managed login; no env-var \
+                 key path is declared"
+                    .to_string(),
+            ),
+        });
+        profile
+            .validate()
+            .expect("a note-only delivery is a fact, not an omission");
     }
 
     #[test]

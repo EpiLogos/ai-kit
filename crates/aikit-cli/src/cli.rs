@@ -1547,6 +1547,8 @@ pub enum CredentialSub {
     Revoke(CredentialRevokeArgs),
     /// Surface candidate keys already on this machine (presence only).
     Discover(CredentialDiscoverArgs),
+    /// Run one operator-invoked live check against a bound provider key.
+    Verify(CredentialVerifyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -1608,6 +1610,12 @@ pub struct CredentialDiscoverArgs {
     /// An additional dotenv-shaped file to scan by name.
     #[arg(long, value_name = "FILE")]
     pub env_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct CredentialVerifyArgs {
+    #[arg(value_name = "CREDENTIAL")]
+    pub credential: String,
 }
 
 #[derive(Debug, Args)]

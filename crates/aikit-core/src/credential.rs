@@ -283,6 +283,23 @@ fn materialisation_rank(class: &SecretMaterialisationClass) -> u8 {
     }
 }
 
+/// Whether a variable name may carry a provider credential into a child
+/// process environment. One shape law shared by every seam that names a
+/// credential variable — model-policy delivery, harness-profile key delivery
+/// and profile validation — so it lives here, in the I/O-free core: a
+/// non-empty ASCII identifier ending `_API_KEY`/`_TOKEN`/`_KEY` that never
+/// collides with AIKit's own surfaces or the dynamic-linker escapes.
+pub fn valid_credential_variable(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && (name.ends_with("_API_KEY") || name.ends_with("_TOKEN") || name.ends_with("_KEY"))
+        && !["CENTRAL_", "WORKCELL_", "AIKIT_", "LD_", "DYLD_"]
+            .iter()
+            .any(|p| name.starts_with(p))
+}
+
 /// Raw material handed between a provider and the one materialisation operation
 /// that needs it. It is deliberately neither `Serialize` nor `Clone`; its `Debug`
 /// representation is always redacted so it cannot enter a read model or log by
@@ -337,8 +354,14 @@ pub struct CredentialBindingState {
     /// (a rotation or re-bind). Absent until the first rotation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_rotated_at_unix_seconds: Option<u64>,
+    /// Unix seconds of the last operator-invoked live check that returned a
+    /// definitive answer (the key worked, or the provider definitively
+    /// refused it). Only `aikit credential verify` writes it — never an
+    /// automatic path — and an inconclusive check (unreachable, rate-limited)
+    /// leaves it untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_verified_at_unix_seconds: Option<u64>,
 }
-
 impl CredentialBindingState {
     /// Stamp the lifecycle facts a binding flow owns onto a freshly produced
     /// provider state. The first bind sets `bound_at`; a rotation preserves
@@ -579,6 +602,7 @@ mod tests {
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
+            last_verified_at_unix_seconds: None,
         };
         let rotated = CredentialBindingState {
             revision_or_lease_class: Some("revision:v2".into()),
@@ -607,6 +631,7 @@ mod tests {
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
+            last_verified_at_unix_seconds: None,
         };
         let replacement = CredentialBindingState {
             credential_ref: first.credential_ref.clone(),
@@ -621,6 +646,7 @@ mod tests {
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
+            last_verified_at_unix_seconds: None,
         };
 
         assert_eq!(first.credential_ref, replacement.credential_ref);
@@ -643,6 +669,7 @@ mod tests {
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
+            last_verified_at_unix_seconds: None,
         };
 
         let first = provider_state.clone().with_lifecycle(None, false, 1_000);
@@ -668,6 +695,24 @@ mod tests {
         let rebound = provider_state.with_lifecycle(Some(&legacy_previous), false, 3_000);
         assert_eq!(rebound.bound_at_unix_seconds, Some(3_000));
         assert_eq!(rebound.last_rotated_at_unix_seconds, Some(900));
+    }
+
+    #[test]
+    fn credential_variable_shape_law_accepts_provider_keys_and_refuses_control_surfaces() {
+        assert!(valid_credential_variable("ANTHROPIC_API_KEY"));
+        assert!(valid_credential_variable("MOONSHOT_API_KEY"));
+        assert!(valid_credential_variable("GROQ_API_KEY"));
+        // The suffix law is exact, as it has always been on the pi delivery
+        // path: a name must END with one of the three lawful endings.
+        assert!(!valid_credential_variable("GROQ_API_KEY_2"));
+        assert!(!valid_credential_variable("PATH"));
+        assert!(!valid_credential_variable("KEY"));
+        assert!(!valid_credential_variable("2FA_TOKEN"));
+        assert!(!valid_credential_variable("AIKIT_GATEWAY_TOKEN"));
+        assert!(!valid_credential_variable("CENTRAL_NATIVE_TOKEN"));
+        assert!(!valid_credential_variable("WORKCELL_CONTROL_TOKEN"));
+        assert!(!valid_credential_variable("LD_PRELOAD_KEY"));
+        assert!(!valid_credential_variable("DYLD_LIBRARY_TOKEN"));
     }
 
     struct FakeProvider {

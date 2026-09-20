@@ -704,8 +704,9 @@ impl EncounterService {
             generation.clone(),
         )));
         let model = agency::model::prepare(&self.home, &agent_session, &configured)?;
+        let task_bound = self.is_task_bound(&agent_session)?;
         let launch_argv = if let Some(model) = &model {
-            if self.is_task_bound(&agent_session)? {
+            if task_bound {
                 configured.argv.clone()
             } else {
                 agency::model::direct_launcher(&agent_session, &configured, model)?
@@ -713,16 +714,27 @@ impl EncounterService {
         } else {
             configured.argv.clone()
         };
+        // Profile-declared key delivery rides the direct provider launch: the
+        // child is the real harness, so the declared key is injected into the
+        // scrubbed final-child environment here. The re-exec launchers
+        // (selected-model, task boundary) re-materialise at their final exec
+        // and take no environment from this spawn.
+        let launch_environment = if model.is_none() && !task_bound {
+            agency::model::profile_environment(&self.home, &agent_session, &configured)?
+        } else {
+            None
+        };
         let provenance = vec![format!("native encounter provider {provider}")];
         let host = match configured.protocol {
-            EncounterProtocol::Acp => AgentSessionHost::launch_with_journal(
+            EncounterProtocol::Acp => AgentSessionHost::launch_with_journal_and_environment(
                 AcpStableConnectionAdapter::new(connection, provenance),
                 &launch_argv,
                 Some(&cwd),
                 AgentSessionHostLimits::default(),
                 journal,
+                launch_environment.as_ref(),
             ),
-            EncounterProtocol::PiRpc => AgentSessionHost::launch_with_journal(
+            EncounterProtocol::PiRpc => AgentSessionHost::launch_with_journal_and_environment(
                 {
                     let adapter = aikit_adapters::pi_rpc_connection::PiRpcConnectionAdapter::new(
                         connection,
@@ -741,6 +753,7 @@ impl EncounterService {
                 Some(&cwd),
                 AgentSessionHostLimits::default(),
                 journal,
+                launch_environment.as_ref(),
             ),
         }?;
         let negotiated = host.initialize()?;
