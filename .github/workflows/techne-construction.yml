@@ -12,9 +12,9 @@ concurrency:
   cancel-in-progress: false
 jobs:
   register:
-    # Temporary source-delivery step, confined to this commissioned branch.
-    # It adds four bounded registrations and formats the three new files.
-    # Remove before final delivery. It never writes main or bypasses CI gates.
+    # Temporary bounded source delivery on this commissioned branch only.
+    # The registrations and one Clippy repair below must match exact source.
+    # Remove before final delivery; never write main or bypass normal gates.
     if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'codex/techne-native-construction-20260920'
     runs-on: ubuntu-latest
     permissions:
@@ -47,13 +47,32 @@ jobs:
               if after in source: continue
               assert source.count(before) == 1, f'concurrent registration change: {filename}'
               path.write_text(source.replace(before, after))
+          path = Path('crates/aikit-core/src/knowledge_construction.rs')
+          source = path.read_text()
+          before = '''        if let Some(selector) = read_source_selector(source)? {
+                      if let crate::knowledge_facets::SourceSelector::TextSpan { start, end, .. } = selector {
+                          if start >= end {
+                              return Err(err("selected passage must have a non-empty forward span"));
+                          }
+                      }
+                  }'''
+          # Dedent the literal continuation to the Rust file's indentation.
+          before = before.replace('\n          ', '\n')
+          after = '''        if let Some(crate::knowledge_facets::SourceSelector::TextSpan { start, end, .. }) = read_source_selector(source)? {
+                      if start >= end {
+                          return Err(err("selected passage must have a non-empty forward span"));
+                      }
+                  }'''.replace('\n          ', '\n')
+          if 'if let Some(selector) = read_source_selector(source)?' in source:
+              assert source.count(before) == 1, 'native selector validation changed concurrently'
+              path.write_text(source.replace(before, after))
           PY
-          rustfmt --edition 2021 crates/aikit-core/src/knowledge_construction.rs crates/aikit-core/src/knowledge_construction_tests.rs crates/aikit-cli/src/wiki_construct.rs
-          git add crates/aikit-core/src/knowledge_construction.rs crates/aikit-core/src/knowledge_construction_tests.rs crates/aikit-cli/src/wiki_construct.rs crates/aikit-core/src/lib.rs crates/aikit-cli/src/lib.rs crates/aikit-cli/src/cli.rs crates/aikit-cli/src/main.rs
+          rustfmt --edition 2021 crates/aikit-core/src/knowledge_construction.rs crates/aikit-core/src/knowledge_construction_tests.rs crates/aikit-cli/src/wiki_construct.rs crates/aikit-cli/tests/wiki_construct_commands.rs
+          git add crates/aikit-core/src/knowledge_construction.rs crates/aikit-core/src/knowledge_construction_tests.rs crates/aikit-cli/src/wiki_construct.rs crates/aikit-cli/tests/wiki_construct_commands.rs crates/aikit-core/src/lib.rs crates/aikit-cli/src/lib.rs crates/aikit-cli/src/cli.rs crates/aikit-cli/src/main.rs
           if ! git diff --cached --quiet; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(knowledge): register native construction and format its implementation'
+            git commit -m 'fix(knowledge): keep selector validation lint-clean and format native CLI proofs'
             git push origin HEAD:refs/heads/codex/techne-native-construction-20260920
           fi
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -72,7 +91,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Native core transactions, CLI build and lint
+      - name: Native transactions, real file restart, CLI build and lint
         shell: bash
         run: |
           set -euo pipefail
@@ -80,6 +99,7 @@ jobs:
           git rev-parse HEAD > "$RUNNER_TEMP/native-construction/revision"
           git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/native-construction/source.tar.gz"
           cargo test --locked -p aikit-core knowledge_construction -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-construction/core-tests.log"
+          cargo test --locked -p aikit-cli --test wiki_construct_commands -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-construction/cli-tests.log"
           cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee "$RUNNER_TEMP/native-construction/cli-build.log"
           cp target/debug/aikit "$RUNNER_TEMP/native-construction/"
           target/debug/aikit --json wiki-construct capabilities > "$RUNNER_TEMP/native-construction/capabilities.json"
