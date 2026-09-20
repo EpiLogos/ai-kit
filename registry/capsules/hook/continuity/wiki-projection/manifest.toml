@@ -1,0 +1,9 @@
+schema = 1
+id = "hook/continuity/wiki-projection"
+kind = "hook"
+name = "Live Wiki operational projection"
+description = "Reread explicitly selected Agent Wiki Markdown projections at session start and each prompt; feedback updates the source, not governance. Absent by default. Configure sources as project: or central: relative addresses. Delivery is not model acknowledgement."
+tags = ["aikit", "continuity", "wiki", "feedback"]
+[hook]
+entry = "payload/wiki-projection"
+events = ["SessionStart", "UserPromptSubmit"]

@@ -62,6 +62,7 @@ pub mod temporal;
 pub mod tree_build;
 pub mod ui;
 pub mod wiki;
+pub mod wiki_projection;
 pub mod wiki_shape;
 pub mod working_environment_field;
 

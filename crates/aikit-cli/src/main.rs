@@ -3379,13 +3379,7 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply>
     // an allowance. `--json` keeps the machine envelope and now carries the
     // verdict in its exit status; plain mode speaks the harness protocol
     // itself (see `hook::translate_verdict`).
-    let denial_message = decision.denial.as_ref().map(|d| d.describe());
-    let verdict = hook::translate_verdict(
-        decision.allowed,
-        denial_message.as_deref(),
-        a.decision_json,
-        &a.event,
-    );
+    let verdict = hook::translate_decision(&a.client, &a.event, a.decision_json, &decision);
 
     if json_mode {
         Ok(Reply::Data {
@@ -3394,13 +3388,15 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply>
             warnings: vec![],
             exit_code: verdict.exit_code,
         })
-    } else if let Some(document) = verdict.stdout {
-        Ok(Reply::Text(document))
     } else {
         if let Some(message) = verdict.stderr {
             eprintln!("{message}");
         }
-        Ok(Reply::Status(verdict.exit_code))
+        if let Some(document) = verdict.stdout {
+            Ok(Reply::Text(document))
+        } else {
+            Ok(Reply::Status(verdict.exit_code))
+        }
     }
 }
 

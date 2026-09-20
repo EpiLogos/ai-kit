@@ -80,6 +80,7 @@ impl WikiOutcome {
 pub fn run(cwd: &Path, command: WikiCmd) -> Result<WikiOutcome> {
     use crate::cli::{WikiEdgeSub, WikiNodeSub, WikiRootSub, WikiSpaceSub, WikiSub};
     match command.command {
+        WikiSub::Projection(args) => crate::wiki_projection::run(args),
         WikiSub::Validate(args) => validate(&args.path),
         WikiSub::Node(node) => match node.command {
             WikiNodeSub::Create(args) => node_create(&args),
