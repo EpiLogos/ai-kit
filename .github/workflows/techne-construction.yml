@@ -1,0 +1,93 @@
+name: Native constructive field
+on:
+  pull_request:
+    paths:
+      - 'crates/**'
+      - '.github/workflows/techne-construction.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-construction-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  register:
+    # Temporary source-delivery step, confined to this commissioned branch.
+    # It adds four bounded registrations and formats the three new files.
+    # Remove before final delivery. It never writes main or bypasses CI gates.
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'codex/techne-native-construction-20260920'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      revision: ${{ steps.register.outputs.revision }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt
+      - name: Register exactly the commissioned native modules
+        id: register
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          replacements = {
+              'crates/aikit-core/src/lib.rs': ('pub mod knowledge;\n', 'pub mod knowledge;\npub mod knowledge_construction;\n'),
+              'crates/aikit-cli/src/lib.rs': ('pub mod wiki_shape;\n', 'pub mod wiki_shape;\npub mod wiki_construct;\n'),
+              'crates/aikit-cli/src/cli.rs': ('    WikiShape(WikiShapeCmd),\n', '    WikiShape(WikiShapeCmd),\n    /// Construct revisioned native Wiki wholes and contextual participations.\n    WikiConstruct(crate::wiki_construct::ConstructArgs),\n'),
+              'crates/aikit-cli/src/main.rs': ('        Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),\n', '        Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),\n        Some(Command::WikiConstruct(c)) => Ok(Reply::Data {\n            context: EnvelopeContext {\n                context_id: None,\n                session_id: None,\n                project_root: Some(cwd.display().to_string()),\n            },\n            data: aikit_cli::wiki_construct::run(c)?,\n            warnings: vec![],\n            exit_code: json::EXIT_OK,\n        }),\n'),
+          }
+          for filename, (before, after) in replacements.items():
+              path = Path(filename)
+              source = path.read_text()
+              if after in source: continue
+              assert source.count(before) == 1, f'concurrent registration change: {filename}'
+              path.write_text(source.replace(before, after))
+          PY
+          rustfmt --edition 2021 crates/aikit-core/src/knowledge_construction.rs crates/aikit-core/src/knowledge_construction_tests.rs crates/aikit-cli/src/wiki_construct.rs
+          git add crates/aikit-core/src/knowledge_construction.rs crates/aikit-core/src/knowledge_construction_tests.rs crates/aikit-cli/src/wiki_construct.rs crates/aikit-core/src/lib.rs crates/aikit-cli/src/lib.rs crates/aikit-cli/src/cli.rs crates/aikit-cli/src/main.rs
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'feat(knowledge): register native construction and format its implementation'
+            git push origin HEAD:refs/heads/codex/techne-native-construction-20260920
+          fi
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  proof:
+    needs: register
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.register.outputs.revision }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Native core transactions, CLI build and lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/native-construction"
+          git rev-parse HEAD > "$RUNNER_TEMP/native-construction/revision"
+          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/native-construction/source.tar.gz"
+          cargo test --locked -p aikit-core knowledge_construction -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-construction/core-tests.log"
+          cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee "$RUNNER_TEMP/native-construction/cli-build.log"
+          cp target/debug/aikit "$RUNNER_TEMP/native-construction/"
+          target/debug/aikit --json wiki-construct capabilities > "$RUNNER_TEMP/native-construction/capabilities.json"
+          cargo clippy --locked -p aikit-core -p aikit-cli --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/native-construction/clippy.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-construction-${{ needs.register.outputs.revision }}
+          path: ${{ runner.temp }}/native-construction
+          retention-days: 7
+          if-no-files-found: error
