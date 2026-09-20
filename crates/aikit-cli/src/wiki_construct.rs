@@ -41,7 +41,7 @@ struct Input {
     document: Option<Value>,
     request: Request,
 }
-fn error(code: &str, detail: impl Into<String>) -> AikitError {
+fn error(code: &'static str, detail: impl Into<String>) -> AikitError {
     AikitError::new(code, detail)
 }
 fn io_error(e: impl std::fmt::Display) -> AikitError {
