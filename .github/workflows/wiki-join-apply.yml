@@ -16,7 +16,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           cache-on-failure: true
-      - name: Verify and apply the bounded patch and returned defect repairs
+      - name: Verify and apply bounded production patch and returned repairs
         run: |
           mkdir -p /tmp/wiki-native-join
           python3 - <<'PY'
@@ -38,9 +38,6 @@ jobs:
           repair('crates/aikit-adapters/src/wiki_document.rs',
             '.filter(|edge| edge.to == reading.resource)',
             '.filter(|edge| edge.to == reading.resource && edge.authored_relation.is_some())')
-          # An empty full-text query intentionally returns no SourcePool hits.
-          # Graph browse is an explicit metadata inventory, not a change to that
-          # search contract. Use only the runtime's already admitted descriptors.
           repair('crates/aikit-cli/src/app/knowledge.rs',
             '            Ok(aikit_adapters::wiki_graph::project_graph(&found.hits, &objects, &runtime.document_material(), max_nodes, max_edges, &found.absences))',
             '''            let material = runtime.document_material();
@@ -60,6 +57,9 @@ jobs:
                           }
                       }
                       Ok(aikit_adapters::wiki_graph::project_graph(&hits, &objects, &material, max_nodes, max_edges, &found.absences))''')
+          repair('crates/aikit-adapters/src/wiki_graph.rs',
+            '"address":hit.address',
+            '"address":source.map(|item|json!({"kind":"source","value":item.binding.source})).unwrap_or_else(||json!(hit.address))')
           repair('crates/aikit-cli/tests/wiki_document_end_to_end.rs',
             'assert!(graph["nodes"].as_array().unwrap().iter().any(|n|n["resource"]=="source:a"&&n["address"]["kind"]=="source"));',
             'assert!(graph["nodes"].as_array().unwrap().iter().any(|n|n["resource"]=="source:a"&&n["address"]["kind"]=="source"), "{graph}");')
