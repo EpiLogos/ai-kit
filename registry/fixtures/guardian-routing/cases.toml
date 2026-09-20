@@ -1,0 +1,38 @@
+schema = 1
+
+[[case]]
+id = "ordinary-source-lookup-does-not-summon-guardians"
+query = "where is the implementation of parse_manifest?"
+must_not_select = [
+  "central:skillset:guardian",
+  "actuation:skillset:guardian",
+  "aikit:skillset:guardian",
+  "factory:skillset:guardian",
+  "workcell:skillset:guardian",
+  "ql:skillset:guardian",
+]
+expected_disposition = "ordinary code search or product-understanding retrieval"
+
+[[case]]
+id = "suite-wide-operation-selects-oi-router"
+query = "verify the whole installed O:I suite after this update"
+expected_routes = ["oi:skill:operate-suite"]
+must_not_auto_expand = [
+  "central:skillset:guardian",
+  "actuation:skillset:guardian",
+  "factory:skillset:guardian",
+  "workcell:skillset:guardian",
+  "ql:skillset:guardian",
+]
+
+[[case]]
+id = "single-product-failure-selects-its-owner"
+query = "a Workcell provider install failed after a host restart"
+expected_routes = ["workcell:skillset:guardian"]
+must_not_auto_expand = [
+  "central:skillset:guardian",
+  "actuation:skillset:guardian",
+  "aikit:skillset:guardian",
+  "factory:skillset:guardian",
+  "ql:skillset:guardian",
+]

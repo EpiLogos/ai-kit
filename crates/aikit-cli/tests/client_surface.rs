@@ -1,13 +1,19 @@
-//! `aikit client status` derives its surface from live intake, never a
-//! hard-coded roster.
+//! `aikit client status` derives its surface from the live detection record,
+//! never a hard-coded roster.
 //!
-//! The acceptance law: every registered adapter answers with the state its
-//! intake outcomes support — a resolved capability descriptor is installable,
-//! a present harness whose descriptor is refused is a disclosed compatibility
-//! gap, a harness detection cannot see is absent with the evidence named, and
-//! an intake that cannot be read at all is disclosed as unavailable. A
-//! harness with resolved capability can never be missing from the output, and
-//! `client status pi` can never again come back empty.
+//! The acceptance law: every descriptor the detector reports answers with the
+//! state its intake outcomes support — a resolved capability descriptor plus
+//! an AIKit overlay is installable, a present harness whose descriptor is
+//! refused is a disclosed compatibility gap (or, with no AIKit adapter at
+//! all, the honest generic row), a harness detection cannot see is absent
+//! with the evidence named, and an intake that cannot be read at all is
+//! disclosed as unavailable. A harness with resolved capability can never be
+//! missing from the output, and `client status pi` can never again come back
+//! empty.
+//!
+//! The static overlay surface (the per-client detail AIKit carries) is named
+//! here so a change to it is a deliberate surface change. The harness rows
+//! themselves are the detector's, not this list's.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,25 +21,23 @@ use std::path::{Path, PathBuf};
 use assert_cmd::Command;
 use serde_json::Value;
 
-/// The pinned client surface. A change here is a deliberate surface change.
-const REGISTERED: &[&str] = &[
+/// The pinned overlay surface: the catalog slugs AIKit carries per-client
+/// detail for (adapters, admission censuses, dispatch decisions), by
+/// CLI-facing name. Harnesses without an overlay here still render — as the
+/// honest generic rows this file also pins.
+const OVERLAY_NAMES: &[&str] = &[
     "claude",
     "codex",
     "zcode",
-    "broker",
-    "aider",
-    "gemini-antigravity",
-    "cursor-cli",
-    "deepseek-harness",
     "gemini-cli",
-    "goose",
+    "pi",
+    "gemini-antigravity",
     "grok-bot",
     "kimi",
-    "opencode",
     "openclaw",
-    "pi",
-    "qwen-code",
     "ollama",
+    "hermes",
+    "hermes-acp",
 ];
 
 /// A stand-in `actuation` binary: serves fixture descriptors for the slugs a
@@ -114,12 +118,16 @@ fn write_descriptor_fixture(fixtures: &Path, slug: &str) {
     .unwrap();
 }
 
-/// The catalog slug a registered CLI name resolves to; `None` for the broker.
-fn catalog_slug_of(name: &str) -> Option<&str> {
+/// The catalog slug an overlay's CLI-facing name joins by; the claude and
+/// gemini precedents — the client name may differ, the join key must not.
+fn catalog_slug_of(name: &str) -> &str {
     match name {
-        "claude" => Some("claude-code"),
-        "broker" => None,
-        other => Some(other),
+        "claude" => "claude-code",
+        // The gemini client keeps the client name gemini-cli and joins by
+        // the catalog slug gemini (the same contract TargetId::GEMINI
+        // carries); fixtures stage descriptors under the join key.
+        "gemini-cli" => "gemini",
+        other => other,
     }
 }
 
@@ -166,8 +174,9 @@ fn by_name(rows: &[Value], name: &str) -> Value {
 }
 
 /// A fixture world plus a stub actuation that resolves descriptors only for
-/// `claude-code`, detects `claude-code` and `pi`, and reports `aider`
-/// not installed — the three-state spread in one scenario.
+/// `claude-code`, detects `claude-code`, `pi`, a slug AIKit carries no overlay
+/// for, and reports `aider` not installed — the three-state spread plus the
+/// generic-row path in one scenario.
 fn scenario_with_partial_intake() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     fs::create_dir_all(home.path().join("project/.aikit")).unwrap();
@@ -184,6 +193,8 @@ fn scenario_with_partial_intake() -> tempfile::TempDir {
             "probes": [{"kind": "config-dir", "result": "pass", "spec": "~/.claude"}]},
            {"slug": "pi", "harness_ref": "harness/pi", "state": "detected",
             "probes": [{"kind": "config-dir", "result": "pass", "spec": "~/.pi/agent"}]},
+           {"slug": "future-harness", "harness_ref": "harness/future-harness", "state": "detected",
+            "probes": [{"kind": "config-dir", "result": "pass", "spec": "~/.future"}]},
            {"slug": "aider", "harness_ref": "harness/aider", "state": "not-installed"}"#,
     );
     home
@@ -193,10 +204,12 @@ fn scenario_with_partial_intake() -> tempfile::TempDir {
 fn a_registered_adapter_with_a_descriptor_fixture_gets_its_row() {
     let home = scenario_with_partial_intake();
     let rows = rows_with_fixtures_env(&home, &["client", "status"]);
+    // The record's four entries (two overlaid, one generic, one not-installed)
+    // + the eight overlays the record does not name + the broker.
     assert_eq!(
         rows.len(),
-        REGISTERED.len(),
-        "every registered adapter answers"
+        4 + (OVERLAY_NAMES.len() - 2) + 1,
+        "every reported descriptor answers, overlaid or not"
     );
 
     let claude = by_name(&rows, "claude");
@@ -228,18 +241,33 @@ fn a_registered_adapter_with_a_descriptor_fixture_gets_its_row() {
         user_home.join(".pi/agent").display().to_string()
     );
 
+    // A descriptor the record reports with no AIKit overlay renders as the
+    // honest generic row: adapter-only, nothing planned, the missing contract
+    // named — never invented detail.
+    let generic = by_name(&rows, "future-harness");
+    assert_eq!(generic["harness"], "future-harness");
+    assert_eq!(generic["state"], "gap");
+    assert_eq!(generic["dispatch"], "adapter-only");
+    assert_eq!(generic["effect"], Value::Null);
+    assert_eq!(
+        generic["gap"]["missing_contract"],
+        "aikit.harness-adapter/v1"
+    );
+    assert_eq!(generic["detection"], "detected");
+
     // Detection's absence evidence is honoured even though capability refuses.
     let aider = by_name(&rows, "aider");
     assert_eq!(aider["state"], "absent");
     assert_eq!(aider["detection"], "not-installed");
 
-    // A slug the record does not name is disclosed absence, not silence.
-    let opencode = by_name(&rows, "opencode");
-    assert_eq!(opencode["state"], "absent");
-    assert!(opencode["detection_reason"]
+    // An overlay slug the record does not name is disclosed absence, not
+    // silence — AIKit's own integrations stay on the surface.
+    let codex = by_name(&rows, "codex");
+    assert_eq!(codex["state"], "absent");
+    assert!(codex["detection_reason"]
         .as_str()
         .unwrap()
-        .contains("names no entry for slug opencode"));
+        .contains("names no entry for slug codex"));
 
     // The broker is AIKit's own and stands outside the three-state law.
     let broker = by_name(&rows, "broker");
@@ -287,31 +315,26 @@ fn no_harness_with_resolved_capability_is_missing_from_status() {
     )
     .unwrap();
     let fixtures = stage_actuation(home.path());
-    // Every registered harness gets a descriptor under its catalog slug (the
-    // one the capability intake asks for): the surface must show all of them,
+    // Every overlay harness gets a descriptor under its catalog slug (the one
+    // the capability intake asks for): the surface must show all of them,
     // installable, with none missing.
-    for name in REGISTERED {
-        let slug = catalog_slug_of(name);
-        if let Some(slug) = slug {
-            write_descriptor_fixture(&fixtures, slug);
-        }
+    for name in OVERLAY_NAMES {
+        write_descriptor_fixture(&fixtures, catalog_slug_of(name));
     }
     write_detection_fixture(&fixtures, "");
 
     let rows = rows_with_fixtures_env(&home, &["client", "status"]);
 
-    for name in REGISTERED {
+    for name in OVERLAY_NAMES {
         let row = by_name(&rows, name);
-        if *name == "broker" {
-            assert_eq!(row["state"], "self");
-            continue;
-        }
         assert_eq!(
             row["state"], "installable",
             "{name} resolved capability but is missing or not installable: {row}"
         );
         assert_eq!(row["capability"], "descriptor");
     }
+    // The broker needs no descriptor: it is AIKit's own.
+    assert_eq!(by_name(&rows, "broker")["state"], "self");
 }
 
 #[test]
@@ -326,6 +349,11 @@ fn client_status_pi_answers_single_row() {
     assert_eq!(claude_rows.len(), 1);
     assert_eq!(claude_rows[0]["client"], "claude");
     assert_eq!(claude_rows[0]["state"], "installable");
+    // A generic record slug is addressable by its slug alone.
+    let generic_rows = rows_with_fixtures_env(&home, &["client", "status", "future-harness"]);
+    assert_eq!(generic_rows.len(), 1);
+    assert_eq!(generic_rows[0]["client"], "future-harness");
+    assert_eq!(generic_rows[0]["state"], "gap");
 }
 
 #[test]
@@ -339,7 +367,10 @@ fn with_actuation_absent_every_row_discloses_instead_of_vanishing() {
     .unwrap();
 
     let all_rows = rows(home.path(), None, None);
-    assert_eq!(all_rows.len(), REGISTERED.len());
+    // The overlays stay on the surface with their disclosure; no generic rows
+    // can exist (the record is unreadable and nothing is invented in its
+    // place); the broker closes the surface.
+    assert_eq!(all_rows.len(), OVERLAY_NAMES.len() + 1);
     for row in &all_rows {
         if row["client"] == "broker" {
             // The broker is AIKit's own client: no intake, no unavailability.
@@ -361,7 +392,7 @@ fn with_actuation_absent_every_row_discloses_instead_of_vanishing() {
 }
 
 #[test]
-fn install_refuses_for_registered_harnesses_without_a_dispatch_seam() {
+fn install_refuses_for_harnesses_without_a_dispatch_seam() {
     let home = scenario_with_partial_intake();
     let mut command = Command::cargo_bin("aikit").unwrap();
     command
@@ -403,4 +434,28 @@ fn install_refuses_for_registered_harnesses_without_a_dispatch_seam() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("client.capability_unavailable"), "{stdout}");
+
+    // A record-named slug with no AIKit overlay is not installable either —
+    // it is unknown to the dispatch surface, and the error says where the
+    // derived roster lives.
+    let mut command = Command::cargo_bin("aikit").unwrap();
+    command
+        .env("AIKIT_HOME", home.path().join("aikit-home"))
+        .env("HOME", home.path().join("user-home"))
+        .env(
+            "PATH",
+            format!(
+                "{}:/usr/bin:/bin",
+                home.path().join("actuation-bin").display()
+            ),
+        )
+        .env("FIXTURES", home.path().join("actuation-fixtures"))
+        .arg("--json")
+        .args(["client", "install", "future-harness"])
+        .current_dir(home.path().join("project"));
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("client.unknown"), "{stdout}");
+    assert!(stdout.contains("actuation harness detect"), "{stdout}");
 }

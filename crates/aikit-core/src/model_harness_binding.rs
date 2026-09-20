@@ -180,6 +180,92 @@ pub fn capabilities(models: &ModelsLayer) -> BTreeMap<String, bool> {
     ])
 }
 
+/// The composed roster facts a context's bound harnesses contribute,
+/// assembled from the harness profiles the composition binds. This is the
+/// single translation the demand side (`ModelRosterDemand.profile`) and the
+/// candidate side (`harness_compatible`, `harness_composition`) read, so a
+/// compose site never re-decides the conventions this module owns.
+///
+/// The composition laws, stated once:
+///
+/// - A composition binding no profiled harness imposes no gate. The absence
+///   of a constraint is not a failed one (the same law as [`HarnessProviderGate::Ungated`]);
+///   candidates pass with `harness_compatible = true` and no scope.
+/// - A composition binding exactly one profiled harness discloses its
+///   `harness-profile/<slug>` scope, so fitness observations can bind, and
+///   gates candidates through that profile's provider gate.
+/// - A composition binding several profiled harnesses gates a candidate
+///   through every bound profile (a candidate must be able to serve the
+///   whole composition) and discloses no single scope, because no single
+///   scope string is true of the composition.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HarnessCompositionFacts {
+    /// The `harness-profile/<slug>` scope of the one profiled harness this
+    /// composition binds, when exactly one is bound.
+    pub scope: Option<String>,
+    gates: Vec<(String, HarnessProviderGate)>,
+    capability_names: std::collections::BTreeSet<String>,
+}
+
+impl HarnessCompositionFacts {
+    /// Assemble the facts from the models layers of the bound profiles,
+    /// each named by its catalog slug.
+    pub fn from_layers(layers: &[(&str, &ModelsLayer)]) -> Self {
+        let mut gates = Vec::new();
+        let mut capability_names = std::collections::BTreeSet::new();
+        for (slug, models) in layers {
+            gates.push(((*slug).to_string(), provider_gate(models)));
+            for (name, supported) in capabilities(models) {
+                if supported {
+                    capability_names.insert(name);
+                }
+            }
+        }
+        let scope = if gates.len() == 1 {
+            Some(fitness_scope(&gates[0].0))
+        } else {
+            None
+        };
+        Self {
+            scope,
+            gates,
+            capability_names,
+        }
+    }
+
+    /// Whether any profiled harness is bound. A composition binding none
+    /// gates nothing and discloses nothing.
+    pub fn is_empty(&self) -> bool {
+        self.gates.is_empty()
+    }
+
+    /// Gate one candidate provider through every bound profile's gate.
+    /// Returns `(harness_compatible, why)` with the disclosed reasons of
+    /// every gate verdict carried, never swallowed.
+    pub fn gate(&self, candidate_provider_ref: Option<&str>) -> (bool, String) {
+        if self.gates.is_empty() {
+            return (
+                true,
+                "the composition binds no profiled harness; no harness gate applies".to_string(),
+            );
+        }
+        let mut all = true;
+        let mut whys = Vec::new();
+        for (slug, gate) in &self.gates {
+            let (compatible, why) = gate_candidate(gate, candidate_provider_ref);
+            whys.push(format!("{slug}: {why}"));
+            all &= compatible;
+        }
+        (all, whys.join("; "))
+    }
+
+    /// The capability names this composition carries (the union of the bound
+    /// profiles' supported dispatch capabilities).
+    pub fn capability_names(&self) -> std::collections::BTreeSet<String> {
+        self.capability_names.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +452,70 @@ mod tests {
             BTreeMap::from([
                 ("native-provider-binding".to_string(), false),
                 ("provider-plural".to_string(), false),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_composition_binding_no_harness_gates_nothing_and_discloses_no_scope() {
+        let facts = HarnessCompositionFacts::from_layers(&[]);
+        assert!(facts.is_empty());
+        assert_eq!(facts.scope, None);
+        let (compatible, why) = facts.gate(Some("provider:whatever"));
+        assert!(compatible, "no bound harness is no failed gate: {why}");
+        let (compatible, _) = facts.gate(None);
+        assert!(compatible);
+        assert!(facts.capability_names().is_empty());
+    }
+
+    #[test]
+    fn a_single_harness_composition_discloses_its_scope_and_gates_through_it() {
+        let models = native_binding_layer("provider:example");
+        let facts = HarnessCompositionFacts::from_layers(&[("solo", &models)]);
+        assert_eq!(facts.scope.as_deref(), Some("harness-profile/solo"));
+        let (compatible, _) = facts.gate(Some("provider:example"));
+        assert!(compatible);
+        let (compatible, why) = facts.gate(Some("provider:other"));
+        assert!(
+            !compatible,
+            "a foreign provider must fail the bound gate: {why}"
+        );
+        assert!(
+            why.contains("solo"),
+            "the verdict names the gating slug: {why}"
+        );
+        assert_eq!(
+            facts.capability_names(),
+            BTreeSet::from(["native-provider-binding".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_multi_harness_composition_gates_through_every_bound_profile_and_names_no_scope() {
+        let bound = native_binding_layer("provider:example");
+        let plural = provider_plural_layer();
+        let facts = HarnessCompositionFacts::from_layers(&[("bound", &bound), ("plural", &plural)]);
+        assert_eq!(
+            facts.scope, None,
+            "no single scope is true of the composition"
+        );
+        let (compatible, _) = facts.gate(Some("provider:example"));
+        assert!(compatible, "a candidate both profiles can serve passes");
+        let (compatible, why) = facts.gate(Some("provider:other"));
+        assert!(
+            !compatible,
+            "the bound profile refuses a foreign provider even when the other is plural: {why}"
+        );
+        assert!(
+            why.contains("bound") && why.contains("plural"),
+            "the verdict carries every gate's disclosure: {why}"
+        );
+        // Capability disclosure unions the bound profiles.
+        assert_eq!(
+            facts.capability_names(),
+            BTreeSet::from([
+                "native-provider-binding".to_string(),
+                "provider-plural".to_string()
             ])
         );
     }

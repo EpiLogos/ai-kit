@@ -32,11 +32,11 @@ policy changes. Unsupported protection fails closed.
 These are local owner configuration operations, not gateway/IPC mutation input:
 
 ```text
-aikit-session-space -C WORLD encounter-task-configure \
+aikit session-space -C WORLD encounter-task-configure \
   --agent-session agent-session/example --request-json @task.json \
   [--expected-revision task-binding/CURRENT]
 
-aikit-session-space -C WORLD encounter-task-read \
+aikit session-space -C WORLD encounter-task-read \
   --agent-session agent-session/example
 ```
 
@@ -148,8 +148,8 @@ the actual encounter owner's process. This check runs in the owner, not in a
 configuration client or its protocol child. Workcell's native provider still owns
 process-identity validation and liveness; the consumer does not invent those facts.
 
-A configured managed service can run the existing `aikit-session-space
-encounter-serve` owner with its real native socket and AIKit home. Closing the
+A configured managed service can run the existing `aikit session-space
+encounter-serve` owner (in the main `aikit` binary) with its real native socket and AIKit home. Closing the
 client does not cancel that service. Preparing it is not the same as proving its
 semantic readiness: successful native open/send/response is the operation proof.
 

@@ -3,8 +3,8 @@
   "result": {
     "type": "session_snapshot",
     "snapshot": {
-      "version": "0.9.1",
-      "protocol": 8,
+      "version": "0.8.2",
+      "protocol": 20,
       "focused_workspace_id": "w7",
       "focused_tab_id": "w7:t2",
       "focused_pane_id": "w7:p2",

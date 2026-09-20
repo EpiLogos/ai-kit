@@ -147,7 +147,19 @@ fn contribution_is_a_bare_conforming_document() {
         .iter()
         .map(|s| s["id"].as_str().unwrap())
         .collect();
-    assert_eq!(sections, vec!["resolution", "skills", "models"]);
+    // The owner's own sections, then the derived per-harness trust sections
+    // (embedded-profile order).
+    assert_eq!(
+        sections,
+        vec![
+            "resolution",
+            "skills",
+            "models",
+            "claude-code",
+            "codex",
+            "zcode"
+        ]
+    );
     for section in value["sections"].as_array().unwrap() {
         for setting in section["settings"].as_array().unwrap() {
             assert_eq!(setting["section_ref"], section["id"]);
@@ -155,6 +167,90 @@ fn contribution_is_a_bare_conforming_document() {
             assert_eq!(owner, "ai-kit");
             assert_eq!(part, section["id"].as_str().unwrap());
         }
+    }
+}
+
+/// The harness trust/permissions sections are the general pattern made
+/// concrete: each embedded profile's `settings.trust-settings` declarations
+/// surface as disclosure-only plane settings `ai-kit:<slug>:<key>`, so an
+/// authored `oi.profile/v1` can carry the machine's trust posture. This is
+/// the test the next harness satisfies by declaring its own settings.
+#[test]
+fn harness_trust_settings_surface_as_disclosure_only_plane_settings() {
+    let (home, project) = scene();
+    let (_, value) = run(
+        home.path(),
+        project.path(),
+        &["config-contribution", "--json"],
+    );
+
+    let setting = |reference: &str| -> Value {
+        value["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s["settings"].as_array().unwrap().iter().cloned())
+            .find(|s| s["setting_ref"] == reference)
+            .unwrap_or_else(|| panic!("{reference} is disclosed"))
+    };
+
+    for reference in [
+        "ai-kit:codex:projects.trust_level",
+        "ai-kit:codex:home.trust_level",
+        "ai-kit:claude-code:hooks.fs-guardrail",
+        "ai-kit:zcode:hooks.fs-guardrail",
+    ] {
+        let disclosed = setting(reference);
+        assert_eq!(disclosed["writable"], json!(false), "{reference}");
+        assert_eq!(disclosed["profileable"], json!(true), "{reference}");
+        assert_eq!(
+            disclosed["operations"]["apply"],
+            json!(false),
+            "{reference}"
+        );
+        assert_eq!(disclosed["operations"]["plan"], json!(false), "{reference}");
+    }
+
+    let codex_project = setting("ai-kit:codex:projects.trust_level");
+    assert_eq!(codex_project["value_schema"]["type"], "enum");
+    assert_eq!(
+        codex_project["value_schema"]["options"],
+        json!([{ "value": "trusted" }])
+    );
+    assert_eq!(
+        codex_project["allowed_scopes"],
+        json!([{ "scope_kind": "project", "scope_ref": null }])
+    );
+
+    let codex_home = setting("ai-kit:codex:home.trust_level");
+    assert_eq!(codex_home["value_schema"]["type"], "boolean");
+    assert_eq!(
+        codex_home["allowed_scopes"],
+        json!([{ "scope_kind": "machine", "scope_ref": null }])
+    );
+
+    // Each declaration names its own harness's native config file: Claude
+    // Code keeps settings in `settings.json`, zcode in `config.json` — the
+    // location named is the harness's, not a shared filename convention.
+    for (reference, native_config) in [
+        ("ai-kit:claude-code:hooks.fs-guardrail", "settings.json"),
+        ("ai-kit:zcode:hooks.fs-guardrail", "config.json"),
+    ] {
+        let guardrail = setting(reference);
+        assert_eq!(guardrail["value_schema"]["type"], "scalar");
+        assert_eq!(
+            guardrail["allowed_scopes"],
+            json!([{ "scope_kind": "machine", "scope_ref": null }])
+        );
+        assert!(
+            guardrail["native_ref"]
+                .as_str()
+                .unwrap()
+                .contains(native_config),
+            "the declaration names the harness-native config location \
+             ({native_config}): {}",
+            guardrail["native_ref"]
+        );
     }
 }
 

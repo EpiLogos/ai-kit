@@ -4,7 +4,8 @@ use serde_json::{json, Value};
 use std::{path::Path, process::Command};
 
 fn call(home: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+    Command::new(env!("CARGO_BIN_EXE_aikit"))
+        .arg("session-space")
         .env("AIKIT_HOME", home)
         .env_remove("AIKIT_CONTEXT_ID")
         .env_remove("AIKIT_ISOLATION")

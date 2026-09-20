@@ -113,6 +113,18 @@ pub enum Command {
     Continuity(ContinuityCmd),
     /// Bring up, attach to and reconcile session topologies.
     Session(SessionCmd),
+    /// Operate durable SessionSpace semantics (folded companion surface; O-I #376).
+    ///
+    /// A pure pass-through: everything after `session-space` (verbs, flags,
+    /// `--help`) is forwarded verbatim to the one folded companion surface. The
+    /// help flag is disabled here so `--help`/`-h` reach that surface instead of
+    /// this wrapper; run `aikit session-space --help` for the verb list.
+    #[command(name = "session-space", disable_help_flag = true)]
+    SessionSpace {
+        /// Everything after `session-space`, forwarded verbatim.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Compose the launch plan: Central profile + Actuation instantiation receipt → actor bootstrap.
     Compose(ComposeArgs),
     /// Read a Provider Source into the canonical Model catalogue, and read the catalogue back.
@@ -2387,6 +2399,13 @@ pub struct HookDispatchArgs {
     /// The event name, e.g. `PreToolUse`.
     #[arg(value_name = "EVENT")]
     pub event: String,
+    /// Speak claude-code's `hookSpecificOutput.permissionDecision` JSON on
+    /// stdout instead of exit codes alone. The default exit-code flavor is the
+    /// common denominator of claude-code and zcode and keeps stdout empty,
+    /// which zcode's strict hook-output schema requires; use this flag only
+    /// where the calling harness consumes the JSON protocol.
+    #[arg(long = "decision-json")]
+    pub decision_json: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -2471,4 +2490,162 @@ pub fn version_line() -> &'static str {
         }
         _ => env!("CARGO_PKG_VERSION").to_owned(),
     })
+}
+
+/// `aikit session-space` — durable SessionSpace semantics (list, show, stage,
+/// apply, working surfaces, …) and the encounter owner protocol, folded into
+/// the main binary from the former `aikit-session-space` companion (O-I #376:
+/// `oi install` places one executable per product). Every verb keeps the
+/// companion's name and JSON shape; only the invocation changed.
+#[derive(Debug, Subcommand)]
+pub enum SessionSpaceCommand {
+    /// Internal scoped Model launch; raw credential material never enters JSON.
+    EncounterModelExec {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        expected_model_basis: String,
+    },
+    /// Prepare a Central task and an exact Workcell boundary for this session.
+    EncounterTaskConfigure {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        request_json: String,
+        #[arg(long)]
+        expected_revision: Option<String>,
+    },
+    /// Read task preparation, including pending effects and native source bases.
+    EncounterTaskRead {
+        #[arg(long)]
+        agent_session: String,
+    },
+    /// Internal native protocol launch; emits no wrapper bytes to stdout.
+    EncounterTaskExec {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        expected_revision: String,
+    },
+    /// Start the native resident owner once, independently of this CLI client.
+    #[cfg(unix)]
+    EncounterStart,
+    /// Run the resident generic ACP owner. Client exit never stops providers.
+    #[cfg(unix)]
+    EncounterServe {
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+    /// Configure a native ACP provider. This operation is not exposed over IPC.
+    EncounterConfigure {
+        #[arg(long)]
+        provider_json: String,
+    },
+    /// Provision or withdraw a native Agency binding under an exact revision.
+    /// This is an owner-only operation, not gateway/IPC input.
+    EncounterAgencyConfigure {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        binding_json: String,
+        #[arg(long)]
+        expected_revision: Option<String>,
+    },
+    /// Correlate operator-reviewed native evidence for a stuck delivery; never replay it.
+    EncounterDeliveryReconcile {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        delivery_ref: String,
+        #[arg(long)]
+        evidence_ref: String,
+        #[arg(long)]
+        expected_phase: String,
+    },
+    /// Apply a canonical encounter action to the resident owner.
+    #[cfg(unix)]
+    Encounter {
+        #[arg(long)]
+        request_json: String,
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+    /// Read the current canonical Project + ContextResolution binding for typed stage intent.
+    ProjectContext,
+    /// List persisted SessionSpaces.
+    List,
+    /// Show one canonical SessionSpace semantic state.
+    Show { space: String },
+    /// Open persisted semantic state without claiming provider-native recovery.
+    Open { space: String },
+    /// Read, open, or focus one exact persisted provider working Surface.
+    WorkingSurface {
+        #[command(subcommand)]
+        command: SessionSpaceWorkingSurfaceCommand,
+    },
+    /// Discover SessionSpaces, optionally by exact ProjectRef.
+    Discover {
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Stage a new SessionSpace. This is write-free and returns a preview.
+    Create {
+        id: String,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Stage any typed SessionSpace mutation from JSON. Prefix with @ to read a file.
+    ///
+    /// `--print-schema` prints documented JSON templates instead of staging:
+    /// every mutation operation, each with the `intent` value to pass here and
+    /// field notes beside it — including the complete SessionPlan template a
+    /// bind-working-surface binding requires. Pass `--operation` for one.
+    Stage {
+        #[arg(long)]
+        space: Option<String>,
+        /// Print documented intent templates instead of staging.
+        #[arg(long = "print-schema", default_value_t = false)]
+        print_schema: bool,
+        /// With --print-schema: restrict the output to one operation
+        /// (kebab-case, e.g. bind-working-surface).
+        #[arg(long = "operation", value_name = "OPERATION")]
+        operation: Option<String>,
+        #[arg(long = "intent-json", value_name = "JSON|@FILE")]
+        intent_json: Option<String>,
+    },
+    /// Apply exactly a previously reviewed preview. Prefix with @ to read a file.
+    Apply {
+        #[arg(long = "preview-json", value_name = "JSON|@FILE")]
+        preview_json: String,
+    },
+    /// Show immutable SessionSpace application receipts.
+    History { space: String },
+    /// Compare two receipt-backed semantic states.
+    Compare {
+        space: String,
+        from_sequence: u64,
+        to_sequence: u64,
+    },
+    /// Stage restoration from a prior receipt through current authority.
+    RestorePreview { space: String, sequence: u64 },
+    /// Reconstruct using persisted semantic state only; absent live evidence stays unavailable.
+    Reconstruct { space: String },
+    /// Reconcile as a read of canonical-vs-observed state; with no supplied observations this is non-mutating.
+    Reconcile { space: String },
+    /// Explain persisted SessionSpace state and the receipt that last changed it.
+    Explain { space: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionSpaceWorkingSurfaceCommand {
+    /// Read the persisted binding and its current provider observation.
+    Observe { space: String, binding: String },
+    /// Explicitly create-or-attach the persisted provider plan for this Surface.
+    Open { space: String, binding: String },
+    /// Focus only the currently live persisted Surface; this never recreates it.
+    Focus { space: String, binding: String },
+    /// Replace this terminal client with attachment to the exact live provider Surface.
+    Attach { space: String, binding: String },
 }

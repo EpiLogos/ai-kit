@@ -228,6 +228,83 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Option<Duration>)
     }
 }
 
+// ---------------------------------------------------------------------------
+// The dispatch boundary: verdict -> harness protocol
+// ---------------------------------------------------------------------------
+
+/// The exit status a blocking verdict maps to. claude-code and zcode both block
+/// a PreToolUse tool call when its hook process exits 2; this is the common
+/// denominator of the two harnesses' protocols and needs no schema agreement.
+pub const HARNESS_BLOCK_EXIT: i32 = 2;
+
+/// The harness-facing streams of one translated dispatch verdict.
+///
+/// `None` means "print nothing on this stream": an empty stdout is a defined
+/// pass in both harnesses, and zcode strict-parses any stdout it does see as
+/// JSON (an extra key fails validation), so the default flavor never prints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessVerdict {
+    /// The process exit status this verdict maps to.
+    pub exit_code: i32,
+    /// Bytes for stdout, when the flavor prints a decision document.
+    pub stdout: Option<String>,
+    /// Bytes for stderr, when the flavor carries a message to the model/user.
+    pub stderr: Option<String>,
+}
+
+/// Translate one dispatch verdict into the calling harness's protocol.
+///
+/// A denial blocks through exit [`HARNESS_BLOCK_EXIT`] with the denial message
+/// on stderr — the channel claude-code feeds back to the model — and empty
+/// stdout, which zcode's strict hook-output schema treats as a clean run. An
+/// allowance passes with exit 0 and both streams silent. `decision_json` opts
+/// into claude-code's `hookSpecificOutput.permissionDecision` document instead
+/// (exit 0, decision carried in the JSON): use it only where the calling
+/// harness consumes that protocol, because zcode would reject the document's
+/// shape. An absent denial message still blocks, with a generic reason.
+pub fn translate_verdict(
+    allowed: bool,
+    denial: Option<&str>,
+    decision_json: bool,
+    event: &str,
+) -> HarnessVerdict {
+    let reason = denial.unwrap_or("denied by the composed hook chain");
+    match (allowed, decision_json) {
+        (true, false) => HarnessVerdict {
+            exit_code: 0,
+            stdout: None,
+            stderr: None,
+        },
+        (true, true) => HarnessVerdict {
+            exit_code: 0,
+            stdout: Some(decision_document(event, "allow", None)),
+            stderr: None,
+        },
+        (false, false) => HarnessVerdict {
+            exit_code: HARNESS_BLOCK_EXIT,
+            stdout: None,
+            stderr: Some(reason.to_string()),
+        },
+        (false, true) => HarnessVerdict {
+            exit_code: 0,
+            stdout: Some(decision_document(event, "deny", Some(reason))),
+            stderr: None,
+        },
+    }
+}
+
+/// claude-code's advanced JSON decision document for one verdict.
+fn decision_document(event: &str, decision: &str, reason: Option<&str>) -> String {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason.unwrap_or_default(),
+        }
+    })
+    .to_string()
+}
+
 /// Normalise a client event read from stdin into a [`HookEvent`].
 ///
 /// The payload is passed through verbatim; only the fields AIKit routes on — the
@@ -288,4 +365,69 @@ pub fn issue_bypass(
         token.issued_for = Some(CapsuleId::parse(capability)?);
     }
     index.issue_bypass(context, &token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DENY_MESSAGE: &str = "hook/central/fs-guardrail denied this event: BLOCKED by Central filesystem guardrail: '/home/frank/rogue.txt' is outside the allowed agent write roots.";
+
+    #[test]
+    fn denial_blocks_through_exit_codes_with_empty_stdout() {
+        let verdict = translate_verdict(false, Some(DENY_MESSAGE), false, "PreToolUse");
+        assert_eq!(verdict.exit_code, HARNESS_BLOCK_EXIT);
+        assert_eq!(verdict.stdout, None);
+        assert_eq!(verdict.stderr.as_deref(), Some(DENY_MESSAGE));
+    }
+
+    #[test]
+    fn allowance_passes_silently() {
+        let verdict = translate_verdict(true, None, false, "PreToolUse");
+        assert_eq!(verdict.exit_code, 0);
+        assert_eq!(verdict.stdout, None);
+        assert_eq!(verdict.stderr, None);
+    }
+
+    #[test]
+    fn denial_without_a_message_still_blocks() {
+        let verdict = translate_verdict(false, None, false, "PreToolUse");
+        assert_eq!(verdict.exit_code, HARNESS_BLOCK_EXIT);
+        assert!(verdict.stderr.is_some());
+    }
+
+    #[test]
+    fn decision_json_flavor_names_the_event_and_carries_the_deny_reason() {
+        let verdict = translate_verdict(false, Some(DENY_MESSAGE), true, "PreToolUse");
+        assert_eq!(verdict.exit_code, 0);
+        assert_eq!(verdict.stderr, None);
+        let doc: serde_json::Value = serde_json::from_str(
+            verdict
+                .stdout
+                .as_deref()
+                .expect("decision document on stdout"),
+        )
+        .expect("valid JSON document");
+        let output = &doc["hookSpecificOutput"];
+        assert_eq!(output["hookEventName"], "PreToolUse");
+        assert_eq!(output["permissionDecision"], "deny");
+        assert!(output["permissionDecisionReason"]
+            .as_str()
+            .expect("reason carried")
+            .contains("BLOCKED by Central filesystem guardrail"));
+    }
+
+    #[test]
+    fn decision_json_flavor_allows_explicitly() {
+        let verdict = translate_verdict(true, None, true, "PreToolUse");
+        assert_eq!(verdict.exit_code, 0);
+        let doc: serde_json::Value = serde_json::from_str(
+            verdict
+                .stdout
+                .as_deref()
+                .expect("decision document on stdout"),
+        )
+        .expect("valid JSON document");
+        assert_eq!(doc["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
 }

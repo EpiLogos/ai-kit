@@ -24,6 +24,7 @@ EXPECTED_SKILLS = {
     "skill/aikit/verification",
     "skill/aikit/meta-harness-craft",
     "skill/aikit/wiki-inhabitation",
+    "skill/aikit/experience-campaign",
 }
 EXPECTED_GUIDANCE = {
     "guidance/aikit/living-project-collaboration",
@@ -148,6 +149,7 @@ if seen_guidance != EXPECTED_GUIDANCE:
 if seen_carriers != EXPECTED_CARRIERS:
     raise SystemExit(f"first-party extension carrier corpus mismatch: {seen_carriers ^ EXPECTED_CARRIERS}")
 EXPECTED_HOOKS = {
+    "hook/central/fs-guardrail",
     "hook/aikit/knowledge-route",
     "hook/continuity/turn-ledger",
     "hook/continuity/entity-disclosure",
