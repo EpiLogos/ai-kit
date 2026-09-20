@@ -497,6 +497,12 @@ pub enum ProcedureKind {
     ClientInstall {
         client: TargetId,
     },
+    /// The managed tools-layer projection (`aikit apply`'s tools tail): the
+    /// resolved `tool-protocol` capability sources merged into one harness's
+    /// native MCP-server configuration, through the profile-declared seam.
+    ToolsProjection {
+        client: TargetId,
+    },
     MuxInstall {
         mux: MuxKind,
     },
@@ -531,6 +537,7 @@ impl ProcedureKind {
             ProcedureKind::Promote { .. } => "promote",
             ProcedureKind::Supersede { .. } => "supersede",
             ProcedureKind::ClientInstall { .. } => "client-install",
+            ProcedureKind::ToolsProjection { .. } => "tools-projection",
             ProcedureKind::MuxInstall { .. } => "mux-install",
             ProcedureKind::DoctorFix { .. } => "doctor-fix",
             ProcedureKind::IntegrationSetup { .. } => "integration-setup",

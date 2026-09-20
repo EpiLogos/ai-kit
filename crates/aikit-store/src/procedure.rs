@@ -1284,14 +1284,29 @@ fn git(repo: &Path, args: &[&str], code: &'static str) -> Result<()> {
     if output.status.success() {
         Ok(())
     } else {
+        // A child's explanation may live on either stream — `git commit` with
+        // nothing staged prints "nothing to commit" on stdout — so the refusal
+        // carries both, trimmed, and never ends in a colon with nothing after
+        // it.
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => stdout,
+            (true, false) => stderr,
+            (false, false) => format!("{stdout} | {stderr}"),
+        };
+        let status = output.status.code().unwrap_or(-1);
         Err(AikitError::new(
             code,
-            format!(
-                "`git {}` exited with status {}: {}",
-                args.join(" "),
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
+            if detail.is_empty() {
+                format!("`git {}` exited with status {status}", args.join(" "))
+            } else {
+                format!(
+                    "`git {}` exited with status {status}: {detail}",
+                    args.join(" ")
+                )
+            },
         ))
     }
 }
@@ -1629,3 +1644,53 @@ pub fn git_repo_of(path: &Path) -> Option<PathBuf> {
 
 /// Re-exported so callers can name the isolation without importing core directly.
 pub use aikit_core::procedure::MutationIsolation as Isolation;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A git refusal must carry the child's own explanation, whichever stream
+    /// printed it: `git commit` with nothing staged fails while its "nothing
+    /// to commit" explanation goes to **stdout**, so a formatter that captured
+    /// only stderr reported "exited with status 1:" and nothing after it.
+    #[test]
+    fn a_git_refusal_carries_the_childs_stdout_explanation() {
+        let repo = tempfile::tempdir().unwrap();
+        let setup = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(setup(&["init", "-q"]), "git init succeeds in the temp repo");
+
+        let error = git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=AIKit",
+                "-c",
+                "user.email=aikit@test",
+                "commit",
+                "-m",
+                "nothing staged",
+            ],
+            "procedure.git_test",
+        )
+        .unwrap_err();
+
+        assert!(
+            error.message().contains("nothing to commit"),
+            "the refusal carries the child's stdout explanation: {}",
+            error.message()
+        );
+        assert!(
+            !error.message().ends_with(':'),
+            "the refusal never ends in a colon with nothing after it: {}",
+            error.message()
+        );
+    }
+}

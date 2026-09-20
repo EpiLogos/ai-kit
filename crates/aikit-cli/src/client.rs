@@ -44,6 +44,7 @@ use aikit_adapters::clients::{
     zcode::ZcodeAdapter, ClientAdapter,
 };
 use aikit_adapters::runner::SystemRunner;
+use aikit_adapters::tool_sources::{plan_tools_projection, ToolsProjectionOutcome};
 
 use crate::app::Service;
 
@@ -817,6 +818,319 @@ pub fn install_project_hook_seams(service: &Service) -> Vec<HookSeamOutcome> {
                 edits: None,
                 reason: Some(error.message().to_string()),
             },
+        })
+        .collect()
+}
+
+/// One managed tools-layer projection, as `apply` reports it. Follows the
+/// tools layer's own posture truth — [`aikit_adapters::tool_sources::
+/// ToolsProjectionOutcome`]: `written` (the procedure applied the merge),
+/// `satisfied` (the merge output is already in place), `refused` (nothing
+/// written; the reason is a real refusal — resolution, plan or procedure
+/// error), or `not-projected` (nothing written; the profile's own posture or
+/// the empty composition says there was nothing to do). Both nothing-written
+/// states carry the reason in plain words: a caller that cannot tell "wrote
+/// nothing on purpose" from "wrote nothing by mistake" cannot disclose what
+/// it did.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ToolsLayerOutcome {
+    /// The CLI-facing name (`claude`, `zcode`, `openclaw`).
+    pub client: &'static str,
+    /// The Actuation catalog slug the harness profile is joined by.
+    pub slug: &'static str,
+    pub state: &'static str,
+    /// The native config file the merge lands in, when one was planned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub procedure: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub undo: Option<String>,
+    /// The merge report as counts: records added, replaced (owned
+    /// re-projections), removed (stale owned sweeps) and kept foreign.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept_foreign: Option<usize>,
+    /// When the harness sees the change, as the profile declares it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation: Option<aikit_core::harness_profile::ActivationEffectName>,
+    /// Why nothing was written (`refused` / `not-projected`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The registered harnesses whose profile declares a **managed tools layer**
+/// naming an `mcp-servers-record` seam — the seams `aikit apply` keeps
+/// current. Enabling a trusted `tool-protocol` capsule is what `aikit explain`
+/// discloses as "projected as an MCP server record", and that record belongs
+/// to the harness's native tool configuration; selection is derived, never a
+/// list: a harness qualifies when its embedded profile declares a managed
+/// tools layer whose project grammar the layer merge engine implements.
+fn managed_tools_clients() -> Vec<(&'static str, &'static str)> {
+    OVERLAYS
+        .iter()
+        .filter_map(|overlay| {
+            let profile = aikit_adapters::profiles::for_slug(overlay.catalog_slug)?;
+            let tools = profile.tools.as_ref()?;
+            if tools.posture != aikit_core::harness_profile::LayerPosture::Managed {
+                return None;
+            }
+            if !tools.project.as_ref().is_some_and(|project| {
+                project.format == aikit_core::harness_profile::MergeGrammar::McpServersRecord
+            }) {
+                return None;
+            }
+            Some((overlay.name, overlay.catalog_slug))
+        })
+        .collect()
+}
+
+/// Why nothing is composed for the tools layer, when no active tool-protocol
+/// capsule resolved. An enabled-but-unreviewed capsule is named as such, with
+/// the capsule and the way forward, because "reviewed" is exactly the fact the
+/// projection turns on; anything else is the plain no-composition truth.
+fn uncomposed_tools_reason(service: &Service) -> String {
+    let view = service.resolved();
+    let untrusted: Vec<String> = view
+        .catalog_index
+        .values()
+        .filter(|entry| {
+            entry.kind == Kind::ToolProtocol
+                && entry.trust != aikit_core::trust::TrustState::Trusted
+                && view.is_declared_enabled(&entry.id)
+        })
+        .map(|entry| entry.id.to_string())
+        .collect();
+    if untrusted.is_empty() {
+        "no tool-protocol capsule is enabled and trusted in this context, so there are no \
+         MCP server records to project"
+            .to_string()
+    } else {
+        format!(
+            "the enabled tool-protocol capsule{} {} {} not trusted, and AIKit projects MCP \
+             server records only from reviewed capsules — `aikit trust <capsule> record` \
+             reviews {}",
+            if untrusted.len() == 1 { "" } else { "s" },
+            untrusted.join(", "),
+            if untrusted.len() == 1 { "is" } else { "are" },
+            if untrusted.len() == 1 { "it" } else { "them" },
+        )
+    }
+}
+
+/// Project every managed tools layer (`aikit apply`'s tools tail). Each
+/// harness with a managed `mcp-servers-record` seam receives the one shared
+/// resolution of enabled+trusted `tool-protocol` capsules — the same
+/// application engine the encounter's ACP composition resolves through —
+/// merged into the native config through the profile-declared seam, staged as
+/// a real Procedure (planned, diffable, reversible, undo receipt) exactly like
+/// the hook seams. A refusal is an outcome, never a failed apply.
+pub fn project_tools_layers(service: &Service) -> Vec<ToolsLayerOutcome> {
+    let clients = managed_tools_clients();
+    if clients.is_empty() {
+        return Vec::new();
+    }
+    // One resolution feeds every harness: two capsules claiming one export
+    // name refuse here once, naming the collision, and every seam carries the
+    // refusal rather than a half-truth.
+    let entries = match crate::encounter_mcp::tool_source_entries_from_service(service) {
+        Ok(entries) => entries,
+        Err(error) => {
+            let reason = error.message().to_string();
+            return clients
+                .into_iter()
+                .map(|(client, slug)| ToolsLayerOutcome {
+                    client,
+                    slug,
+                    state: "refused",
+                    path: None,
+                    procedure: None,
+                    undo: None,
+                    added: None,
+                    replaced: None,
+                    removed: None,
+                    kept_foreign: None,
+                    activation: None,
+                    reason: Some(reason.clone()),
+                })
+                .collect();
+        }
+    };
+    // With nothing composed there is nothing a fresh document would carry, so
+    // a missing config stays missing — creating empty record files for
+    // harnesses that may not even be installed projects nothing.
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let tree = service
+        .descriptor()
+        .project_root
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("."));
+    let uncomposed = (entries.is_empty()).then(|| uncomposed_tools_reason(service));
+
+    clients
+        .into_iter()
+        .map(|(client, slug)| {
+            let refused = |reason: String| ToolsLayerOutcome {
+                client,
+                slug,
+                state: "refused",
+                path: None,
+                procedure: None,
+                undo: None,
+                added: None,
+                replaced: None,
+                removed: None,
+                kept_foreign: None,
+                activation: None,
+                reason: Some(reason),
+            };
+            // The profile facts the client was selected by; the join key came
+            // from the profile, so both are present.
+            let profile = aikit_adapters::profiles::for_slug(slug)
+                .expect("the overlay's catalog slug carries an embedded profile");
+            let tools = profile
+                .tools
+                .as_ref()
+                .expect("a managed tools client was derived from a tools layer");
+            let project = tools
+                .project
+                .as_ref()
+                .expect("a managed tools client was derived from a project declaration");
+
+            if let Some(reason) = &uncomposed {
+                if !expand_seam(&project.file, &home, &tree).exists() {
+                    return ToolsLayerOutcome {
+                        client,
+                        slug,
+                        state: "not-projected",
+                        path: None,
+                        procedure: None,
+                        undo: None,
+                        added: None,
+                        replaced: None,
+                        removed: None,
+                        kept_foreign: None,
+                        activation: None,
+                        reason: Some(reason.clone()),
+                    };
+                }
+                // A config already exists: the sweep of stale AIKit-owned
+                // records is real retraction work even with nothing composed.
+            }
+
+            let expanded = expand_seam(&project.file, &home, &tree);
+            let outcome = plan_tools_projection(entries.iter().cloned(), profile, |raw| {
+                match std::fs::read_to_string(expand_seam(raw, &home, &tree)) {
+                    Ok(contents) => Ok(Some(contents)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(error) => Err(error),
+                }
+            });
+            let plan = match outcome {
+                Err(error) => return refused(error.to_string()),
+                Ok(ToolsProjectionOutcome::NotProjected { reason }) => {
+                    return ToolsLayerOutcome {
+                        client,
+                        slug,
+                        state: "not-projected",
+                        path: None,
+                        procedure: None,
+                        undo: None,
+                        added: None,
+                        replaced: None,
+                        removed: None,
+                        kept_foreign: None,
+                        activation: None,
+                        reason: Some(reason),
+                    };
+                }
+                Ok(ToolsProjectionOutcome::Projected(plan)) => plan,
+            };
+            let ProjectionItem::Write { contents, .. } = &plan.item else {
+                return refused(format!(
+                    "the {client} tools layer planned an item that is not the merged config \
+                     write: {:?}",
+                    plan.item
+                ));
+            };
+
+            // The merge output is already exactly in place: nothing was
+            // written, so no procedure runs and no receipt is claimed.
+            if std::fs::read_to_string(&expanded).is_ok_and(|existing| existing == *contents) {
+                return ToolsLayerOutcome {
+                    client,
+                    slug,
+                    state: "satisfied",
+                    path: Some(expanded.display().to_string()),
+                    procedure: None,
+                    undo: None,
+                    added: Some(plan.report.added.len()),
+                    replaced: Some(plan.report.replaced.len()),
+                    removed: Some(plan.report.removed.len()),
+                    kept_foreign: Some(plan.report.kept_foreign.len()),
+                    activation: plan.activation,
+                    reason: None,
+                };
+            }
+
+            // Stage the write through the one Procedure engine: the inverse
+            // restores the previous bytes, or removes the file when there
+            // were none — undo is exact either way.
+            let inverse = if expanded.exists() {
+                Inverse::Restore {
+                    blob: aikit_core::procedure::BlobId::deferred(),
+                }
+            } else {
+                Inverse::Remove
+            };
+            let procedure_plan = Plan::new()
+                .with_note(format!(
+                    "project {client}'s managed tools layer into {}",
+                    expanded.display()
+                ))
+                .with_edit(WorldEdit::WriteFile {
+                    path: expanded.clone(),
+                    contents: contents.clone().into_bytes(),
+                    inverse,
+                });
+            let procedure = match aikit_store::procedure::plan_procedure(
+                service.home(),
+                ProcedureKind::ToolsProjection {
+                    client: TargetId::new(client),
+                },
+                procedure_plan,
+            ) {
+                Ok(procedure) => procedure,
+                Err(error) => return refused(error.message().to_string()),
+            };
+            match aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure) {
+                Ok(applied) => ToolsLayerOutcome {
+                    client,
+                    slug,
+                    state: if applied.already_satisfied {
+                        "satisfied"
+                    } else {
+                        "written"
+                    },
+                    path: Some(expanded.display().to_string()),
+                    procedure: Some(procedure.id.to_string()),
+                    undo: Some(format!("aikit procedure undo {}", procedure.id)),
+                    added: Some(plan.report.added.len()),
+                    replaced: Some(plan.report.replaced.len()),
+                    removed: Some(plan.report.removed.len()),
+                    kept_foreign: Some(plan.report.kept_foreign.len()),
+                    activation: plan.activation,
+                    reason: None,
+                },
+                Err(error) => refused(error.message().to_string()),
+            }
         })
         .collect()
 }
