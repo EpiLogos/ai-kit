@@ -1,0 +1,31 @@
+name: Native session regressions
+on:
+  push:
+    branches: [agent/native-session-controls-20260920]
+  pull_request:
+    paths:
+      - 'crates/aikit-adapters/src/interactive_connection.rs'
+      - 'crates/aikit-adapters/src/agent_session_host.rs'
+      - 'crates/aikit-adapters/tests/native_model_controls.rs'
+      - 'crates/aikit-cli/src/encounter_service.rs'
+      - 'crates/aikit-cli/tests/agent_session_protocol.rs'
+      - 'crates/aikit-cli/tests/support/agent_session_protocol.py'
+      - '.github/workflows/native-session-regression.yml'
+permissions:
+  contents: read
+jobs:
+  native-protocol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Adapter and resident-host regressions
+        run: cargo test --locked -p aikit-adapters --test native_model_controls --test interactive_connection_v2 --test agent_session_host_v2
+      - name: Production handler, context admission and shutdown regressions
+        run: cargo test --locked -p aikit-cli --test agent_session_protocol --test encounter_context_admission --test encounter_shutdown
