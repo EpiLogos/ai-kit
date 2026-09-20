@@ -20,84 +20,92 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Repair the three compiler errors on this isolated branch
+      - name: Publish bounded native scope join on the owned branch
         if: github.event_name == 'push'
+        shell: bash
         run: |
-          set -euo pipefail
           test "$GITHUB_REF_NAME" = agent/direct-accepted-agent-session-20260920
           python3 - <<'PY'
           from pathlib import Path
-          p=Path('crates/aikit-cli/src/direct_agent_session.rs');t=p.read_text()
-          bad='let output = runner.run(&executable, &args, None)?;'
-          if bad not in t: raise SystemExit(0)
-          assert t.count(bad)==2
-          t=t.replace(bad,'let mut argv = vec![executable];\n    argv.extend(args);\n    let output = runner.run(&argv)?;')
-          old='SessionSpaceRef::parse(format!("session-space/direct-{id}"))';assert t.count(old)==1
-          t=t.replace(old,'SessionSpaceRef::parse(&format!("session-space/direct-{id}"))');p.write_text(t)
+          p=Path('crates/aikit-cli/src/direct_agent_session.rs');s=p.read_text()
+          needle='pub fn prepare(service: &Service, request: PrepareRequest) -> Result<Value> {'
+          if 'pub fn scope(service:' not in s:
+              assert s.count(needle)==1
+              s=s.replace(needle,'''/// Read the actual native ProjectBinding, without preparation or authority.
+          pub fn scope(service: &Service) -> Result<Value> {
+              let cwd = std::fs::canonicalize(service.invocation_cwd()).map_err(io)?;
+              let binding = aikit_tui::PaletteBackend::project_binding(service)?.ok_or_else(||
+                  failure("direct_agent.scope_unbound", "No native Project binding at the disclosed location"))?;
+              let central = crate::temporal::central_root_enclosing(Some(&cwd)).ok_or_else(||
+                  failure("direct_agent.central_unbound", "The disclosed location is not in Central"))?;
+              let central = std::fs::canonicalize(central).map_err(io)?;
+              Ok(json!({"schema":"aikit.direct-agent-scope/v1", "project_ref":binding.project,
+                  "cwd":cwd, "central_root":central, "binding":binding,
+                  "execution_authority_granted":false, "provider_started":false}))
+          }
+          
+          '''+needle)
+              old='"profile_revision":binding.request.expected_revision,"prepared":ready'
+              assert s.count(old)==1
+              s=s.replace(old,'"profile_revision":binding.request.expected_revision,"project_ref":binding.project_context.project,"prepared":ready')
+              p.write_text(s)
+              p=Path('crates/aikit-cli/src/session_space_cli.rs');s=p.read_text()
+              assert s.count('enum Command {')==1
+              s=s.replace('enum Command {','enum Command {\n    /// Read the native ProjectBinding; no session or provider is created.\n    AgentSessionScope,',1)
+              needle='        Command::AgentSessionPrepare { request_json } => emit('
+              assert s.count(needle)==1
+              s=s.replace(needle,'        Command::AgentSessionScope => emit(&crate::direct_agent_session::scope(&service)?),\n'+needle)
+              p.write_text(s)
           PY
-          rustup component add rustfmt clippy
-          rustfmt --edition 2024 --config skip_children=true crates/aikit-cli/src/direct_agent_session.rs
+          rustfmt --edition 2024 --config skip_children=true crates/aikit-cli/src/direct_agent_session.rs crates/aikit-cli/src/session_space_cli.rs
           git config user.name Epii
           git config user.email agent-session@users.noreply.github.com
-          git add crates/aikit-cli/src/direct_agent_session.rs
+          git add crates/aikit-cli/src/direct_agent_session.rs crates/aikit-cli/src/session_space_cli.rs
           if ! git diff --cached --quiet; then
-            git commit -m 'fix(agent): use native argv seam and borrowed SessionSpace reference'
+            git commit -m 'feat(agent): disclose native root and child Project bindings for Direct session consumers'
             git push origin HEAD:refs/heads/agent/direct-accepted-agent-session-20260920
           fi
-      - name: Exact source and exit-preserving command recorder
-        if: always()
+      - name: Record exact committed source
         run: |
-          set -euo pipefail
           mkdir -p direct-agent-evidence
           git rev-parse HEAD > direct-agent-evidence/source-revision.txt
-          git diff > direct-agent-evidence/uncommitted.patch
+          git diff --exit-code
           git archive --format=tar.gz HEAD > direct-agent-evidence/source.tar.gz
-          cat > /tmp/direct-check.py <<'PY'
-          import json,pathlib,subprocess,sys
-          name,*command=sys.argv[1:]
-          root=pathlib.Path('direct-agent-evidence')
-          with (root/(name+'.log')).open('w') as log:
-              process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
-              for line in process.stdout:
-                  log.write(line);log.flush();sys.stdout.write(line);sys.stdout.flush()
-              status=process.wait()
-          (root/(name+'.exit.json')).write_text(json.dumps({'command':command,'exit_code':status}))
-          raise SystemExit(status)
-          PY
-      - name: Native Direct-session validation
+      - name: Direct-session validation
         id: direct
         continue-on-error: true
-        run: python3 /tmp/direct-check.py direct cargo test --locked -p aikit-cli --test direct_agent_session
-      - name: Real child-process authority boundary
+        shell: bash
+        run: cargo test --locked -p aikit-cli --test direct_agent_session 2>&1 | tee direct-agent-evidence/direct.log
+      - name: Actual child-process authority boundary
         id: environment
         continue-on-error: true
-        run: python3 /tmp/direct-check.py environment cargo test --locked -p aikit-adapters --test human_authority_environment
+        shell: bash
+        run: cargo test --locked -p aikit-adapters --test human_authority_environment 2>&1 | tee direct-agent-evidence/environment.log
       - name: Full native regression suite
         id: all
         continue-on-error: true
-        run: python3 /tmp/direct-check.py all cargo test --all-targets --locked
-      - name: Strict full native lint
+        shell: bash
+        run: cargo test --all-targets --locked 2>&1 | tee direct-agent-evidence/all.log
+      - name: Full native strict lint
         id: lint
         continue-on-error: true
-        run: python3 /tmp/direct-check.py clippy cargo clippy --all-targets --locked -- -D warnings
-      - name: Build executable for owner integration
+        shell: bash
+        run: cargo clippy --all-targets --locked -- -D warnings 2>&1 | tee direct-agent-evidence/clippy.log
+      - name: Build native CLI
         id: build
         continue-on-error: true
-        run: python3 /tmp/direct-check.py build cargo build --locked -p aikit-cli --bin aikit
+        shell: bash
+        run: |
+          cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee direct-agent-evidence/build.log
+          cp target/debug/aikit direct-agent-evidence/aikit
+          strip direct-agent-evidence/aikit
+          sha256sum direct-agent-evidence/aikit > direct-agent-evidence/binary-sha256.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: direct-agent-session-evidence
           path: direct-agent-evidence/
           retention-days: 7
-      - name: Assert every recorded command actually succeeded
-        if: always()
-        run: |
-          python3 - <<'PY'
-          import json,pathlib
-          root=pathlib.Path('direct-agent-evidence');failed=[]
-          for name in ['direct','environment','all','clippy','build']:
-              p=root/(name+'.exit.json')
-              if not p.exists() or json.loads(p.read_text())['exit_code']!=0: failed.append(name)
-          if failed: raise SystemExit('Failing or unexecuted checks: '+', '.join(failed))
-          PY
+      - name: Preserve every failed gate
+        if: steps.direct.outcome != 'success' || steps.environment.outcome != 'success' || steps.all.outcome != 'success' || steps.lint.outcome != 'success' || steps.build.outcome != 'success'
+        run: exit 1
