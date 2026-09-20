@@ -1,0 +1,70 @@
+name: Adaptive projection denial regression
+on:
+  push:
+    branches: [agent/adaptive-wiki-projection-20260920]
+    paths: [.github/workflows/adaptive-projection-denial.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: agent/adaptive-wiki-projection-20260920
+      - name: Retain real source errors within the reserved status budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/agent/adaptive-wiki-projection-20260920
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/aikit-cli/src/wiki_projection.rs')
+          s = p.read_text()
+          old = '''        let text = format!("[Wiki projection unavailable] {address}: unavailable or beyond context budget. Do not substitute a cached projection; resolve the current source before relying on it.");'''
+          new = '''        let result = address_path(address, project, central).and_then(|p| read(&p));
+                  let reason = result.as_ref().err().map(|e| e.code()).unwrap_or("wiki_projection.context_budget");
+                  let text = format!("[Wiki projection unavailable] {address}: {reason}. Do not substitute a cached projection; resolve the current source before relying on it.");'''
+          assert s.count(old) == 1
+          s = s.replace(old,new).replace('(text, cost)\n    }).collect();','(result, text, cost)\n    }).collect();')
+          s = s.replace('.fold(0_u32, |sum, (_, cost)| sum.saturating_add(*cost));','.fold(0_u32, |sum, (_, _, cost)| sum.saturating_add(*cost));')
+          s = s.replace('for (source, (notice, reserved_cost)) in sources.iter().zip(notices) {','for (source, (result, notice, reserved_cost)) in sources.iter().zip(notices) {')
+          old = '        let result = address_path(address, project, central).and_then(|p| read(&p));\n        let block = match result {'
+          assert old in s
+          s = s.replace(old, '        let block = match result {')
+          p.write_text(s)
+          PY
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+          rustfmt +1.98.0 --edition 2021 --config skip_children=true crates/aikit-cli/src/wiki_projection.rs
+          rm .github/workflows/adaptive-projection-denial.yml
+          git add crates/aikit-cli/src/wiki_projection.rs .github/workflows/adaptive-projection-denial.yml
+          git diff --cached --check
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: retain source denial reason in bounded next-act context'
+          git rev-parse HEAD > /tmp/adaptive-final-revision.txt
+          git archive --format=tar.gz HEAD -o /tmp/adaptive-final-source.tar.gz
+          git push origin HEAD:refs/heads/agent/adaptive-wiki-projection-20260920
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Verify source-to-harness loop and retained integration cases
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +1.98.0 test --locked -p aikit-cli --test wiki_projection --test guidance_delivery --test skill_overlay --test hook_stdout_inject --test hook_bypass 2>&1 | tee /tmp/adaptive-final-integration.log
+      - name: Verify complete CLI library
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +1.98.0 test --locked -p aikit-cli --lib 2>&1 | tee /tmp/adaptive-final-library.log
+      - name: Clippy
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +1.98.0 clippy --locked -p aikit-cli --lib --bin aikit --test wiki_projection -- -D warnings 2>&1 | tee /tmp/adaptive-final-clippy.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: adaptive-denial-${{ github.run_id }}
+          path: /tmp/adaptive-final-*
+          retention-days: 7
