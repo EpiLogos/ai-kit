@@ -374,22 +374,76 @@ fn native_provider_denial_and_disconnect_do_not_authorise_replay() {
         w.returned("one", "provider-denial")["data"]["phase"],
         "failed"
     );
+    // The denied delivery stays failed and re-requesting it is a duplicate.
     assert_eq!(w.request(denied)["data"]["duplicate"], true);
     assert_eq!(w.prompts("one").len(), 1);
+    // 2026-09-21 owner ruling on PR #387, denial case re-checked with the same
+    // lens: a denied TURN does not take the provider lane down — the fixture
+    // answers the denial and keeps running — so a fresh, separately-admitted
+    // send delivers live through the ordinary preflighted path. The queue is
+    // for a lane that cannot answer, not for a turn that failed.
+    let after_denial =
+        w.request(w.turn("one", "fresh-after-denial", "fresh turn after a denied one"));
+    assert_eq!(after_denial["ok"], true, "{after_denial}");
+    assert_eq!(after_denial["data"]["queued"], json!(null));
+    assert_eq!(after_denial["data"]["transport_accepted"], true);
+    assert_eq!(
+        w.returned("one", "fresh-after-denial")["data"]["phase"],
+        "returned"
+    );
+    assert_eq!(w.prompts("one").len(), 2);
     let disconnected = w.turn("one", "lost", "CONTROLLED_DISCONNECT");
     assert_eq!(w.request(disconnected.clone())["ok"], true);
     let settled = w.returned("one", "lost");
     assert_ne!(settled["data"]["phase"], "returned");
     assert_eq!(w.request(disconnected.clone())["data"]["duplicate"], true);
-    assert_eq!(w.prompts("one").len(), 2);
-    assert_eq!(
-        w.request(w.turn("one", "unsafe-retry", "must not reach failed transport"))["ok"],
-        false
-    );
+    assert_eq!(w.prompts("one").len(), 3);
+    // 2026-09-21 owner ruling on PR #387: a fresh, separately-admitted send
+    // while the provider is down is no longer refused — it queues durably
+    // (queueing a new message is not a replay of the failed one) and must
+    // never reach the dead transport. The failed and disconnected deliveries
+    // themselves are still never replayed: requesting them again stays a
+    // duplicate, forever.
+    let queued = w.request(w.turn("one", "unsafe-retry", "must not reach failed transport"));
+    assert_eq!(queued["ok"], true, "{queued}");
+    assert_eq!(queued["data"]["queued"], true, "{queued}");
+    assert!(queued["data"]["delivery"].is_object(), "{queued}");
+    // Load-bearing: nothing new reached the dead provider while it was down.
+    assert_eq!(w.prompts("one").len(), 3);
     w.stop();
     w.start();
+    // The disconnected delivery still cannot be replayed after the restart.
     assert_eq!(w.request(disconnected)["data"]["duplicate"], true);
-    assert_eq!(w.prompts("one").len(), 2);
+    // The queued wait survives the owner restart and stays off the dead lane.
+    let held = w.request(json!({"action":"delivery","agent_session":"agent-session/one","delivery_ref":"delivery/unsafe-retry"}));
+    assert_eq!(held["data"]["phase"], "queued", "{held}");
+    assert_eq!(w.prompts("one").len(), 3);
+    // The controlled provider reconnects on restart (session/load): the
+    // genuinely-ready lane drains the queued message through the same
+    // preflight, prompt path and lifecycle as a live send. If the fixture
+    // kept the provider disconnected across the restart instead, the law this
+    // test pins is: prompts stay at 3 and the row stays queued.
+    let reconnected = w.open("one", true);
+    assert_eq!(reconnected["ok"], true, "{reconnected}");
+    let delivered = reconnected["data"]["queued_drain"]["delivered"]
+        .as_array()
+        .expect("the reconnecting lane drains the waiting message");
+    assert_eq!(delivered.len(), 1, "{reconnected}");
+    assert_eq!(delivered[0]["delivery_ref"], "delivery/unsafe-retry");
+    assert_eq!(delivered[0]["transport_accepted"], true);
+    assert_eq!(
+        w.returned("one", "unsafe-retry")["data"]["phase"],
+        "returned"
+    );
+    let prompts = w.prompts("one");
+    assert_eq!(
+        prompts.len(),
+        4,
+        "the queued message delivered exactly once"
+    );
+    assert!(prompts[3]["params"]["prompt"]
+        .to_string()
+        .contains("must not reach failed transport"));
     w.stop();
 }
 

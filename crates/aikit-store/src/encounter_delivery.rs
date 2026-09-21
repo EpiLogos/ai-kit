@@ -29,35 +29,58 @@ pub(super) fn install(connection: &Connection) -> Result<()> {
         session TEXT NOT NULL, delivery TEXT NOT NULL, sender TEXT NOT NULL, request TEXT NOT NULL,
         phase TEXT NOT NULL, first_cursor INTEGER NOT NULL, terminal_cursor INTEGER, detail TEXT,
         PRIMARY KEY(session,delivery));
-        CREATE UNIQUE INDEX IF NOT EXISTS encounter_delivery_active ON encounter_deliveries(session)
-        WHERE phase IN ('dispatching','submitted','uncertain');",
+        DROP INDEX IF EXISTS encounter_delivery_active;
+        CREATE UNIQUE INDEX encounter_delivery_active ON encounter_deliveries(session)
+        WHERE phase IN ('dispatching','submitted','uncertain','queued');",
         )
         .map_err(failure)
+}
+/// The active phases: at most one of these per session may exist, so a queued
+/// wait holds the same single delivery slot a dispatch does.
+const ACTIVE_PHASES: &str = "('dispatching','submitted','uncertain','queued')";
+fn row_delivery(
+    session: &ResourceRef,
+    delivery: &str,
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<EncounterDelivery> {
+    let (sender, request, phase, first_cursor, terminal_cursor, detail) = (
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, u64>(3)?,
+        row.get::<_, Option<u64>>(4)?,
+        row.get::<_, Option<String>>(5)?,
+    );
+    Ok(EncounterDelivery {
+        agent_session: session.clone(),
+        delivery_ref: ResourceRef::parse(delivery).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        sender: ResourceRef::parse(sender).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        request: serde_json::from_str(&request).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        phase,
+        first_cursor,
+        terminal_cursor,
+        detail,
+    })
 }
 fn get(
     connection: &Connection,
     session: &ResourceRef,
     delivery: &ResourceRef,
 ) -> Result<Option<EncounterDelivery>> {
-    let row = connection.query_row(
-        "SELECT sender,request,phase,first_cursor,terminal_cursor,detail FROM encounter_deliveries WHERE session=?1 AND delivery=?2",
-        params![session.as_str(),delivery.as_str()], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,u64>(3)?,row.get::<_,Option<u64>>(4)?,row.get::<_,Option<String>>(5)?)),
-    ).optional().map_err(failure)?;
-    row.map(
-        |(sender, request, phase, first_cursor, terminal_cursor, detail)| {
-            Ok(EncounterDelivery {
-                agent_session: session.clone(),
-                delivery_ref: delivery.clone(),
-                sender: ResourceRef::parse(sender)?,
-                request: serde_json::from_str(&request).map_err(failure)?,
-                phase,
-                first_cursor,
-                terminal_cursor,
-                detail,
-            })
-        },
-    )
-    .transpose()
+    connection
+        .query_row(
+            "SELECT sender,request,phase,first_cursor,terminal_cursor,detail FROM encounter_deliveries WHERE session=?1 AND delivery=?2",
+            params![session.as_str(),delivery.as_str()],
+            |row| row_delivery(session, delivery.as_str(), row),
+        )
+        .optional()
+        .map_err(failure)
 }
 impl EncounterStore {
     /// Persist an intent *before* transport effects, under SQLite's writer lock.
@@ -70,6 +93,36 @@ impl EncounterStore {
         sender: &ResourceRef,
         request: &Value,
     ) -> Result<DeliveryReservation> {
+        self.reserve_with_phase(session, delivery, sender, request, "dispatching")
+    }
+    /// Durable wait for a recipient whose resident is not currently live. The
+    /// full sender-side admission has already run; this only records that the
+    /// bounded addressed turn now waits for the recipient's next ready turn
+    /// boundary. A queued row holds the session's single active delivery slot
+    /// exactly as a dispatch does, survives restarts, and is resolved through
+    /// the ordinary phase lifecycle once it is claimed for dispatch.
+    pub fn queue_delivery(
+        &self,
+        session: &ResourceRef,
+        delivery: &ResourceRef,
+        sender: &ResourceRef,
+        request: &Value,
+    ) -> Result<DeliveryReservation> {
+        self.reserve_with_phase(session, delivery, sender, request, "queued")
+    }
+    fn reserve_with_phase(
+        &self,
+        session: &ResourceRef,
+        delivery: &ResourceRef,
+        sender: &ResourceRef,
+        request: &Value,
+        phase: &str,
+    ) -> Result<DeliveryReservation> {
+        if !matches!(phase, "dispatching" | "queued") {
+            return Err(failure(
+                "A delivery is reserved only as dispatching or queued",
+            ));
+        }
         validate(session)?;
         ResourceRef::parse(delivery.as_str())?;
         ResourceRef::parse(sender.as_str())?;
@@ -90,9 +143,9 @@ impl EncounterStore {
                 delivery: held,
             });
         }
-        let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM encounter_deliveries WHERE session=?1 AND phase IN ('dispatching','submitted','uncertain'))", [session.as_str()], |r|r.get(0)).map_err(failure)?;
+        let pending: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM encounter_deliveries WHERE session=?1 AND phase IN {ACTIVE_PHASES})"), [session.as_str()], |r|r.get(0)).map_err(failure)?;
         if pending {
-            return Err(AikitError::new("encounter.delivery_pending", "This session has a submitted or uncertain machine delivery; reconcile its actual result before another effect"));
+            return Err(AikitError::new("encounter.delivery_pending", "This session has a queued, submitted or uncertain machine delivery; resolve or drain it before another effect"));
         }
         let event = json!({"kind":"agent-message","sender":sender,"delivery_ref":delivery,"request":request,"standing":"machine-request-not-human-authorship"});
         tx.execute(
@@ -101,7 +154,7 @@ impl EncounterStore {
         )
         .map_err(failure)?;
         let cursor = tx.last_insert_rowid() as u64;
-        tx.execute("INSERT INTO encounter_deliveries(session,delivery,sender,request,phase,first_cursor) VALUES(?1,?2,?3,?4,'dispatching',?5)", params![session.as_str(),delivery.as_str(),sender.as_str(),body,cursor]).map_err(failure)?;
+        tx.execute(&format!("INSERT INTO encounter_deliveries(session,delivery,sender,request,phase,first_cursor) VALUES(?1,?2,?3,?4,'{phase}',?5)"), params![session.as_str(),delivery.as_str(),sender.as_str(),body,cursor]).map_err(failure)?;
         let held =
             get(&tx, session, delivery)?.ok_or_else(|| failure("Reserved delivery disappeared"))?;
         tx.commit().map_err(failure)?;
@@ -109,6 +162,91 @@ impl EncounterStore {
             fresh: true,
             delivery: held,
         })
+    }
+    /// Queued deliveries for a session, oldest first. These are admitted
+    /// machine requests waiting for the recipient resident's next ready turn
+    /// boundary; they are transport state, never human authorship.
+    pub fn queued_deliveries(&self, session: &ResourceRef) -> Result<Vec<EncounterDelivery>> {
+        validate(session)?;
+        let connection = self.connection.lock().map_err(failure)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT sender,request,phase,first_cursor,terminal_cursor,detail,delivery FROM encounter_deliveries WHERE session=?1 AND phase='queued' ORDER BY first_cursor ASC",
+            )
+            .map_err(failure)?;
+        let rows = statement
+            .query_map([session.as_str()], |row| {
+                let delivery: String = row.get(6)?;
+                row_delivery(session, &delivery, row)
+            })
+            .map_err(failure)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(failure)
+    }
+    /// Claim one queued delivery for dispatch at a ready resident turn
+    /// boundary: queued → dispatching under the writer lock, recording the
+    /// connection generation so provider events attribute to this delivery
+    /// exactly as they do for a live send. From here the row resolves through
+    /// the ordinary lifecycle (ack, reconcile, provider-journal finish).
+    pub fn dispatch_queued_delivery(
+        &self,
+        session: &ResourceRef,
+        delivery: &ResourceRef,
+        connection_generation: &str,
+    ) -> Result<EncounterDelivery> {
+        validate(session)?;
+        let mut connection = self.connection.lock().map_err(failure)?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        let changed = tx.execute(
+            "UPDATE encounter_deliveries SET phase='dispatching',detail=NULL,request=json_set(request,'$.connection_generation',?3) WHERE session=?1 AND delivery=?2 AND phase='queued'",
+            params![session.as_str(), delivery.as_str(), connection_generation],
+        ).map_err(failure)?;
+        if changed != 1 {
+            return Err(AikitError::new(
+                "encounter.delivery_changed",
+                "The queued delivery is no longer waiting; reread it before dispatch",
+            ));
+        }
+        tx.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),json!({"kind":"queued-delivery-dispatched","delivery_ref":delivery,"connection_generation":connection_generation}).to_string()]).map_err(failure)?;
+        let held =
+            get(&tx, session, delivery)?.ok_or_else(|| failure("Queued delivery disappeared"))?;
+        tx.commit().map_err(failure)?;
+        Ok(held)
+    }
+    /// Terminal refusal of a queued delivery at drain: a recipient-side
+    /// admission or preparation check failed after the queue, so the message
+    /// must never be delivered. The refusal is journaled, the row becomes
+    /// failed (outside reconcile's reach), and the session's single active
+    /// slot is released.
+    pub fn refuse_queued_delivery(
+        &self,
+        session: &ResourceRef,
+        delivery: &ResourceRef,
+        code: &str,
+        reason: &str,
+    ) -> Result<EncounterDelivery> {
+        validate(session)?;
+        let reason: String = reason.chars().take(512).collect();
+        let mut connection = self.connection.lock().map_err(failure)?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        let existing =
+            get(&tx, session, delivery)?.ok_or_else(|| failure("No such queued delivery"))?;
+        if existing.phase != "queued" {
+            return Err(AikitError::new(
+                "encounter.delivery_changed",
+                "The queued delivery is no longer waiting; reread it",
+            ));
+        }
+        tx.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),json!({"kind":"queued-delivery-refused","delivery_ref":delivery,"code":code,"reason":reason,"standing":"admission-refused-at-drain-never-delivered"}).to_string()]).map_err(failure)?;
+        let cursor = tx.last_insert_rowid() as u64;
+        tx.execute("UPDATE encounter_deliveries SET phase='failed',terminal_cursor=?3,detail=?4 WHERE session=?1 AND delivery=?2 AND phase='queued'", params![session.as_str(),delivery.as_str(),cursor,format!("refused at drain: {code}")]).map_err(failure)?;
+        let held =
+            get(&tx, session, delivery)?.ok_or_else(|| failure("Queued delivery disappeared"))?;
+        tx.commit().map_err(failure)?;
+        Ok(held)
     }
     pub fn delivery(
         &self,

@@ -31,7 +31,8 @@ pub use agency::mint::{
 };
 pub use agency::model::EncounterModelOpen;
 pub use agency::{
-    EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket, EncounterGroupRecipient,
+    EncounterA2aFraming, EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket,
+    EncounterGroupRecipient,
 };
 
 #[path = "encounter_addressing.rs"]
@@ -672,7 +673,9 @@ impl EncounterService {
                 "Encounter directory is outside its authored local Project context; resolve and attach current native context first",
             ));
         }
-        let _agency_lock = self.lock_agency(&agent_session)?;
+        // Held for the whole launch; released just before the queued-delivery
+        // drain, which takes the same agency lock itself.
+        let agency_lock = self.lock_agency(&agent_session)?;
         self.check_agency(&agent_session)?;
         crate::direct_agent_session::check(&self.home, &agent_session, &cwd)?;
         let previous = self.store.last_native_binding(&agent_session)?;
@@ -684,9 +687,12 @@ impl EncounterService {
                 ));
             }
             self.check_resident_context(&agent_session, held, "resident-open")?;
-            return Ok(
-                json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"model_selection":held.model,"resident":true}),
-            );
+            let receipt = json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"model_selection":held.model,"resident":true});
+            drop(residents);
+            drop(agency_lock);
+            // An already-resident open is a readiness moment too: queued
+            // durable deliveries may now be deliverable.
+            return self.open_receipt_with_drain(agent_session, receipt);
         }
         if !reconnect && previous.is_some() {
             return Err(AikitError::new(
@@ -937,9 +943,38 @@ impl EncounterService {
                 model,
             }),
         );
-        Ok(
-            json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"resident":true,"inference_observed":false}),
-        )
+        drop(residents);
+        drop(agency_lock);
+        // The resident just became ready: this is the moment queued durable
+        // deliveries wait for. Drain before answering the open.
+        let receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"resident":true,"inference_observed":false});
+        self.open_receipt_with_drain(agent_session, receipt)
+    }
+
+    /// An open/reconnect makes the resident ready — the moment queued durable
+    /// deliveries wait for. Drain before answering so the caller sees what the
+    /// readiness admitted. Drain trouble never fails the open itself.
+    fn open_receipt_with_drain(
+        &self,
+        agent_session: ResourceRef,
+        mut receipt: Value,
+    ) -> Result<Value> {
+        match self.drain_queued_deliveries(&agent_session) {
+            Ok(drain) => {
+                let drained =
+                    |value: &Value| value.as_array().is_some_and(|entries| !entries.is_empty());
+                if drained(&drain["delivered"]) || drained(&drain["refused"]) {
+                    receipt["queued_drain"] = drain;
+                }
+            }
+            Err(failure) => {
+                let _ = self.store.append(
+                    &agent_session,
+                    &json!({"kind":"queued-drain-error","code":failure.code(),"reason":failure.message()}),
+                );
+            }
+        }
+        Ok(receipt)
     }
 
     /// Reconnect a failed body under the exclusive owner lease. A view-only

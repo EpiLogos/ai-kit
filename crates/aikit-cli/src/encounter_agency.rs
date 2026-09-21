@@ -6,6 +6,7 @@ use aikit_adapters::{
     runner::SystemRunner,
 };
 use aikit_core::{AikitError, ResourceRef, Result, SourceRevision};
+use aikit_store::encounter::EncounterDelivery;
 use aikit_store::{AikitHome, ContextLock, LockOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -13,6 +14,10 @@ use std::{collections::BTreeSet, path::PathBuf};
 
 #[path = "encounter_agency_mint.rs"]
 pub(crate) mod mint;
+
+#[cfg(test)]
+#[path = "encounter_agency_queue_tests.rs"]
+mod queue_tests;
 
 #[path = "encounter_model.rs"]
 pub(crate) mod model;
@@ -60,6 +65,64 @@ pub struct EncounterAddressedTurn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_task: Option<EncounterTaskExpectation>,
     pub packet: EncounterContextPacket,
+    /// Optional agent-to-agent message identity riding this addressed turn.
+    /// Identity only: it adds no authority, never bypasses the agency
+    /// preflight, and is refused unless its text is exactly the packet text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a2a: Option<EncounterA2aFraming>,
+}
+
+/// The A2A framing an addressed turn may carry so a sender receives a
+/// difference-shaped, identity-bearing answer — including for a delivery that
+/// waited queued while the recipient resident was not live.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncounterA2aFraming {
+    pub message_id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exchange_operation_id: Option<String>,
+}
+
+impl EncounterA2aFraming {
+    fn validate(&self, packet_text: &str) -> Result<()> {
+        if self.message_id.trim().is_empty() || self.message_id.len() > 256 {
+            return Err(AikitError::new(
+                "encounter.a2a_invalid",
+                "A2A message_id must be non-empty and at most 256 bytes",
+            ));
+        }
+        for (name, value) in [
+            ("purpose", &self.purpose),
+            ("exchange_operation_id", &self.exchange_operation_id),
+        ] {
+            if value
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty() || value.len() > 1024)
+            {
+                return Err(AikitError::new(
+                    "encounter.a2a_invalid",
+                    format!("A2A {name} must be absent or bounded non-empty text"),
+                ));
+            }
+        }
+        if self.text != packet_text {
+            return Err(AikitError::new(
+                "encounter.a2a_invalid",
+                "A2A framing text must be exactly the addressed packet text; the framing carries identity, never a second content channel",
+            ));
+        }
+        Ok(())
+    }
+    /// The operation this delivery answers under: the sender's explicit
+    /// exchange operation when supplied, else the delivery identity.
+    fn operation_id(&self, delivery: &ResourceRef) -> String {
+        self.exchange_operation_id
+            .clone()
+            .unwrap_or_else(|| delivery.as_str().to_owned())
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -126,6 +189,14 @@ fn native_admission(binding: &EncounterAgencyBinding) -> Result<AdmittedAgency> 
         context.verify()?;
     }
     Ok(admitted)
+}
+/// What one queued row became at a drain attempt. Refused rows are
+/// terminal admission failures (never delivered); deferred rows stay
+/// queued, in order, for the next ready turn boundary.
+enum QueuedOutcome {
+    Delivered(Value),
+    Refused(Value),
+    Deferred,
 }
 impl EncounterService {
     pub fn ensure_no_agency(home: &AikitHome, session: &ResourceRef) -> Result<()> {
@@ -313,6 +384,9 @@ impl EncounterService {
                 "Addressed request must contain bounded explicit text and audience",
             ));
         }
+        if let Some(a2a) = &turn.a2a {
+            a2a.validate(&turn.packet.text)?;
+        }
         Ok(binding)
     }
     pub(super) fn send_addressed(
@@ -323,7 +397,8 @@ impl EncounterService {
         let binding = self.preflight_addressed(&session, &turn)?;
         let request = json!({"turn":turn,"agent_ref":binding.agent_ref,"agency_ref":binding.agency_ref,"world_binding_ref":binding.world_binding_ref});
         // A replay reads its canonical receipt without needing a live process.
-        // It still passes current sender/disclosure checks above.
+        // It still passes current sender/disclosure checks above — including
+        // the replay of a delivery that is currently waiting queued.
         if let Some(held) = self.store.delivery(&session, &turn.delivery_ref)? {
             if held.sender != turn.sender || held.request.get("submission") != Some(&request) {
                 return Err(AikitError::new(
@@ -333,20 +408,42 @@ impl EncounterService {
             }
             return Ok(json!({"duplicate":true,"delivery":held}));
         }
-        let resident = self.resident(&session)?;
-        let _operation = resident.operations.lock().map_err(error)?;
+        // A resident that is not currently live is no longer an immediate
+        // refusal. Authority is settled here, at submit; only presence may be
+        // missing, and a missing presence becomes a durable queued delivery
+        // that is re-admitted and delivered at the next ready turn boundary.
+        let resident = self.resident(&session).ok();
+        let _operation = resident
+            .as_ref()
+            .map(|resident| resident.operations.lock().map_err(error))
+            .transpose()?;
         let _agency_lock = self.lock_agency(&session)?;
         self.preflight_addressed(&session, &turn)?;
-        if format!("{:?}", resident.host.identity(&session)?.state) != "Resident"
-            || resident.host.transport_error().is_some()
-            || !resident.host.is_running()?
-        {
-            return Err(AikitError::new(
-                "encounter.session_not_ready",
-                "The native session is not ready for a new machine turn; no delivery was reserved",
-            ));
+        let ready = match &resident {
+            Some(resident) => {
+                format!("{:?}", resident.host.identity(&session)?.state) == "Resident"
+                    && resident.host.transport_error().is_none()
+                    && resident.host.is_running()?
+            }
+            None => false,
+        };
+        if !ready {
+            let queued = json!({"submission":request,"queued":true});
+            let reservation =
+                self.store
+                    .queue_delivery(&session, &turn.delivery_ref, &turn.sender, &queued)?;
+            return Ok(json!({
+                "queued": true,
+                "fresh": reservation.fresh,
+                "delivery": reservation.delivery,
+                "exchange_ref": turn.a2a.as_ref().map(|framing| json!(format!("a2a-exchange:{}", framing.message_id))),
+                "standing": "durable queued delivery: full sender-side admission passed at submit; the recipient re-admits and delivers it at the next ready resident turn boundary",
+                "task_completion": "not-inferred",
+                "recognition": "not-performed"
+            }));
         }
-        self.check_resident_context(&session, &resident, "before-addressed-prompt")?;
+        let resident = resident.as_ref().expect("ready resident is present");
+        self.check_resident_context(&session, resident, "before-addressed-prompt")?;
         let text = self.prepare_agency_text(&session, &turn.packet.text)?;
         let reservation = self.store.reserve_delivery(
             &session,
@@ -372,6 +469,163 @@ impl EncounterService {
             json!({"duplicate":false,"transport_accepted":accepted,"delivery":delivery,"task_completion":"not-inferred","recognition":"not-performed"}),
         )
     }
+    /// Deliver this session's queued durable mail at a ready resident turn
+    /// boundary: oldest first, each row re-admitted through the full agency
+    /// preflight, claimed into the ordinary dispatch lifecycle, prompted
+    /// through the same resident lane as a live send, and resolved by the
+    /// provider journal exactly as a live send is. Authority is re-checked at
+    /// drain; queueing never bypassed it and drain never trusts the queue.
+    pub(super) fn drain_queued_deliveries(&self, session: &ResourceRef) -> Result<Value> {
+        let mut delivered = Vec::new();
+        let mut refused = Vec::new();
+        for row in self.store.queued_deliveries(session)? {
+            match self.drain_one_queued(session, &row) {
+                QueuedOutcome::Delivered(receipt) => delivered.push(receipt),
+                QueuedOutcome::Refused(receipt) => refused.push(receipt),
+                // The recipient is not ready (or the row moved underneath):
+                // keep the remaining queue exactly as it is, in order.
+                QueuedOutcome::Deferred => break,
+            }
+        }
+        Ok(json!({"delivered":delivered,"refused":refused}))
+    }
+    fn drain_one_queued(&self, session: &ResourceRef, row: &EncounterDelivery) -> QueuedOutcome {
+        let refuse = |failure: &AikitError| -> QueuedOutcome {
+            match self.store.refuse_queued_delivery(
+                session,
+                &row.delivery_ref,
+                failure.code(),
+                &failure.to_string(),
+            ) {
+                Ok(delivery) => QueuedOutcome::Refused(json!({
+                    "delivery_ref": delivery.delivery_ref,
+                    "phase": delivery.phase,
+                    "code": failure.code(),
+                    "reason": failure.message(),
+                    "standing": "queued delivery refused at drain; never delivered"
+                })),
+                Err(error) => QueuedOutcome::Refused(json!({
+                    "delivery_ref": row.delivery_ref,
+                    "code": error.code(),
+                    "reason": error.message()
+                })),
+            }
+        };
+        // The queued row must still parse as exactly the addressed turn that
+        // was admitted at submit.
+        let turn: EncounterAddressedTurn = match row
+            .request
+            .get("submission")
+            .and_then(|submission| submission.get("turn"))
+        {
+            Some(turn) => match serde_json::from_value(turn.clone()) {
+                Ok(turn) => turn,
+                Err(_) => {
+                    return refuse(&AikitError::new(
+                        "encounter.queued_unreadable",
+                        "Queued delivery no longer parses as its admitted addressed turn",
+                    ))
+                }
+            },
+            None => {
+                return refuse(&AikitError::new(
+                    "encounter.queued_unreadable",
+                    "Queued delivery carries no admitted addressed turn",
+                ))
+            }
+        };
+        // Recipient-side admission re-runs in full: attachment, native
+        // Actuation admission for encounter-send, binding revision equality,
+        // sender, audience, packet sources, text bound, A2A identity.
+        if let Err(failure) = self.preflight_addressed(session, &turn) {
+            return refuse(&failure);
+        }
+        // Presence is the only thing a queue may still wait for.
+        let Ok(resident) = self.resident(session) else {
+            return QueuedOutcome::Deferred;
+        };
+        let Ok(_operation) = resident.operations.lock() else {
+            return QueuedOutcome::Deferred;
+        };
+        let Ok(_agency_lock) = self.lock_agency(session) else {
+            return QueuedOutcome::Deferred;
+        };
+        // Readiness is the provider lane actually being usable, never just a
+        // resident that exists (2026-09-21 owner ruling on PR #387): no
+        // host-seen transport failure, a live provider process, no turn in
+        // flight, and a real protocol round-trip — the same native handshake
+        // the model path trusts before a prompt. A queued message never rides
+        // into a dead transport at restart; while the lane cannot answer, the
+        // row stays queued, in order, for the next boundary where the lane
+        // truly prompts again.
+        let ready = match resident.host.identity(session) {
+            Ok(identity) => {
+                format!("{:?}", identity.state) == "Resident"
+                    && resident.host.transport_error().is_none()
+                    && resident.host.is_running().unwrap_or(false)
+            }
+            Err(_) => false,
+        };
+        if !ready {
+            return QueuedOutcome::Deferred;
+        }
+        if resident.host.initialize().is_err() {
+            return QueuedOutcome::Deferred;
+        }
+        // The recipient's own context and model basis must still be exactly
+        // the admitted one; a queued message is never delivered into a
+        // replacement body or changed required context.
+        if let Err(failure) = self.check_resident_context(session, &resident, "queued-drain") {
+            return refuse(&failure);
+        }
+        // Claim queued → dispatching with this resident's connection
+        // generation, so provider events attribute to the drained delivery.
+        let claimed = match self.store.dispatch_queued_delivery(
+            session,
+            &turn.delivery_ref,
+            &resident.generation,
+        ) {
+            Ok(claimed) => claimed,
+            Err(_) => return QueuedOutcome::Deferred,
+        };
+        let text = match self.prepare_agency_text(session, &turn.packet.text) {
+            Ok(text) => text,
+            Err(failure) => return refuse(&failure),
+        };
+        let sent = resident.lane.prompt(resident.prompt_payload(&text));
+        let (accepted, detail) = match sent {
+            Ok(handle) => {
+                drop(handle);
+                (true, None)
+            }
+            Err(send_failure) => (false, Some(send_failure.code().to_owned())),
+        };
+        // An ack storage failure leaves the row dispatching under the ordinary
+        // uncertain/reconcile lifecycle; it is never silently re-queued.
+        let Ok(delivery) =
+            self.store
+                .delivery_ack(session, &claimed.delivery_ref, accepted, detail.as_deref())
+        else {
+            return QueuedOutcome::Deferred;
+        };
+        QueuedOutcome::Delivered(json!({
+            "delivery_ref": delivery.delivery_ref,
+            "phase": delivery.phase,
+            "transport_accepted": accepted,
+            "a2a": turn.a2a.as_ref().map(|framing| json!({
+                "message_id": framing.message_id,
+                "exchange_ref": format!("a2a-exchange:{}", framing.message_id),
+                "transport_result": {"kind":"turn","ref":delivery.delivery_ref.as_str()},
+                "exchange_authority": {
+                    "grant_ref": format!("exchange-grant:encounter-send:{}", framing.operation_id(&turn.delivery_ref)),
+                    "operation_id": framing.operation_id(&turn.delivery_ref)
+                },
+                "admission": "pending"
+            })),
+            "task_completion": "not-inferred",
+            "recognition": "not-performed"
+        }))
+    }
     pub(super) fn send_group(
         &self,
         delivery: ResourceRef,
@@ -384,7 +638,9 @@ impl EncounterService {
         }
         let mut sessions = BTreeSet::new();
         let mut agents = BTreeSet::new();
-        // Whole-group privacy admission before the first transport effect.
+        // Whole-group privacy admission before the first transport effect. A
+        // recipient whose resident is not currently live passes this loop and
+        // queues at its own send, exactly as a single addressed send does.
         for recipient in &recipients {
             if !sessions.insert(recipient.agent_session.clone()) {
                 return Err(error("Duplicate group recipient"));
@@ -395,10 +651,10 @@ impl EncounterService {
                 expected_binding_revision: recipient.expected_binding_revision.clone(),
                 expected_task: recipient.expected_task.clone(),
                 packet: packet.clone(),
+                a2a: None,
             };
             let binding = self.preflight_addressed(&recipient.agent_session, &turn)?;
             agents.insert(binding.agent_ref);
-            self.resident(&recipient.agent_session)?;
         }
         if agents != packet.audience {
             return Err(AikitError::new(
@@ -407,7 +663,7 @@ impl EncounterService {
             ));
         }
         let results=recipients.into_iter().map(|recipient| {
-            let turn=EncounterAddressedTurn{delivery_ref:delivery.clone(),sender:sender.clone(),expected_binding_revision:recipient.expected_binding_revision,expected_task:recipient.expected_task,packet:packet.clone()};
+            let turn=EncounterAddressedTurn{delivery_ref:delivery.clone(),sender:sender.clone(),expected_binding_revision:recipient.expected_binding_revision,expected_task:recipient.expected_task,packet:packet.clone(),a2a:None};
             match self.send_addressed(recipient.agent_session.clone(),turn) {
                 Ok(result)=>json!({"agent_session":recipient.agent_session,"result":result}),
                 Err(failure)=>json!({"agent_session":recipient.agent_session,"error":{"code":failure.code(),"message":failure.message()}}),
