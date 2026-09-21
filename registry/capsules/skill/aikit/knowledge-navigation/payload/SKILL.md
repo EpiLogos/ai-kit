@@ -302,4 +302,17 @@ An explicit correction can authorise its stated operational scope without anothe
 
 The selected `hook/continuity/wiki-projection`, with explicit `project:` or `central:` addresses in its `sources` config, rereads current Markdown on session start and each prompt. The entire Wiki is not a prompt. Inspect composed context and the actual hook transport: a capability being present, a source being stored, and emitted hook context are separate facts. Claude transport supports current-context output at those events; unsupported clients/events remain disclosed. After compaction, use the supported resumed SessionStart/next prompt, not an invented PreCompact loading claim.
 
+## Document tasks read the current reading first
+
+Before authoring or revising a document — a report, plan, README, design or
+return — run the knowledge route for the project's authored vision and exact
+sources, and read the current operational projection for the active scope
+(`aikit wiki projection read` on the project's or root's projection source).
+A correction recorded against the projection applies to the document task:
+write to the corrected interpretation, and name the sources and revision the
+writing stands on. One report's exception stays scoped to its own statement;
+it does not rewrite every writing skill. If the projection source is
+unavailable, say so and proceed on the authored sources — do not invent a
+stand-in reading.
+
 A stale revision requires rereading and reconciling, not overwriting. Replacing the body with an empty body clears that source's operative guidance while retaining its feedback history. A missing/denied/budget-withheld source is unavailable, not permission to reuse a stale reading. Native source history and accumulated feedback can support a later, separately reviewed governance diff. See `docs/WIKI-OPERATIONAL-PROJECTION.md` for the current implementation boundary and harness proof.
