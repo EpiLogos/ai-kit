@@ -1390,9 +1390,9 @@ mod tests {
     // Concurrency: the write gate against a peer that lands between read and
     // rename, mirroring `crates/aikit-cli/src/wiki.rs`'s own
     // `concurrency_tests` module for its write path (EpiLogos/ai-kit#215).
-    // `persist_agent_wiki` is not yet wired to any CLI command, but the wiki
-    // it writes is explicitly agent-maintained, so concurrent writers are the
-    // normal case the moment it is. These are unit tests, not integration
+    // `persist_agent_wiki` is the write leg of `aikit wiki maintenance`, and
+    // the wiki it writes is explicitly agent-maintained, so concurrent
+    // writers are the normal case. These are unit tests, not integration
     // tests, for the same reason #215's are: the race is a *sequence* — read
     // (capture base), a peer's independent read-mutate-persist, then this
     // writer's persist — and driving `load_project_wiki_for_maintenance` and

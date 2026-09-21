@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json as jval, Value};
 use sha2::Digest;
 
+use aikit_adapters::projectcentral::ProjectCentralFilesystemBinding;
 use aikit_core::knowledge_ingest::{ingest_corpus, select_ingestable_records};
 use aikit_core::knowledge_source_pool::SourceMaterial;
 use aikit_core::knowledge_wiki::{
@@ -31,14 +32,17 @@ use aikit_core::knowledge_wiki_write::{
     apply_wiki_mutation, project_id_from_space_ref, project_wiki_space_ref, WikiDocument,
     WikiMutationLedger, WikiMutationOutcome, ROOT_WIKI_SPACE_REF,
 };
-use aikit_core::projectcentral::{CENTRAL_ROOT_WIKI_SOURCE, PROJECTCENTRAL_WIKI_SOURCE};
+use aikit_core::projectcentral::{
+    plan_agent_wiki_maintenance, AgentWikiMaintenanceRequest, HumanSourceRevisionProposal,
+    CENTRAL_ROOT_WIKI_SOURCE, PROJECTCENTRAL_WIKI_SOURCE,
+};
 use aikit_core::resource::{ResourceRef, SourceRef};
-use aikit_core::{AikitError, Result, SemanticWikiIndex};
+use aikit_core::{AikitError, Result, SemanticRevision, SemanticWikiIndex};
 
 use crate::cli::{
-    WikiCmd, WikiEdgeArgs, WikiIngestArgs, WikiNodeArgs, WikiQueryRefArgs, WikiQuerySearchArgs,
-    WikiQuerySub, WikiRootAdoptArgs, WikiRootAnchorArgs, WikiRootArgs, WikiRootPruneArgs,
-    WikiSpaceCreateArgs, WikiSpaceLinkArgs, WikiStageArgs,
+    WikiCmd, WikiEdgeArgs, WikiIngestArgs, WikiMaintenanceArgs, WikiNodeArgs, WikiQueryRefArgs,
+    WikiQuerySearchArgs, WikiQuerySub, WikiRootAdoptArgs, WikiRootAnchorArgs, WikiRootArgs,
+    WikiRootPruneArgs, WikiSpaceCreateArgs, WikiSpaceLinkArgs, WikiStageArgs,
 };
 use crate::json;
 
@@ -106,6 +110,7 @@ pub fn run(cwd: &Path, command: WikiCmd) -> Result<WikiOutcome> {
             WikiQuerySub::Neighbours(args) => query_neighbours(&args),
             WikiQuerySub::Backlinks(args) => query_backlinks(&args),
         },
+        WikiSub::Maintenance(args) => maintenance(cwd, &args),
     }
 }
 
@@ -1925,6 +1930,99 @@ fn match_provenance(
     provenance_from_sources(requested)
 }
 
+// ---------------------------------------------------------------------------
+// maintenance
+// ---------------------------------------------------------------------------
+
+/// The maintenance request body: reviewed upserts plus the observations the
+/// plan needs. Shape mirrors [`plan_agent_wiki_maintenance`]'s request minus
+/// `current_objects`, which this verb always reads through the binding itself
+/// — the base-hash contract requires the plan and the compare-and-swap base
+/// to come from one and the same read, so a caller-supplied snapshot would
+/// undercut the concurrency guarantee.
+#[derive(Debug, serde::Deserialize)]
+struct WikiMaintenanceRequest {
+    #[serde(default)]
+    upserts: Vec<Value>,
+    #[serde(default)]
+    human_source_proposals: Vec<HumanSourceRevisionProposal>,
+    #[serde(default)]
+    observed_source_revisions: BTreeMap<SourceRef, SemanticRevision>,
+}
+
+/// `aikit wiki maintenance` — the one CLI owner verb for the canonical Agent
+/// Wiki maintenance contract (`ProjectCentral/agents/wiki/wiki.json`). The
+/// order is the contract: read the canonical wiki and capture the exact base
+/// hash; plan through `plan_agent_wiki_maintenance` (object validation,
+/// revision advancement, provenance, whole-document rebuild); persist through
+/// the binding's compare-and-swap write; then read back to prove the file
+/// holds exactly what the plan committed. Human source is never written here:
+/// proposals ride the receipt as decision pressure only, and a refused write
+/// leaves the file exactly as a peer left it.
+fn maintenance(cwd: &Path, args: &WikiMaintenanceArgs) -> Result<WikiOutcome> {
+    let binding = ProjectCentralFilesystemBinding::inspect(cwd, None)?;
+    let (current_objects, base_hash) = binding.load_project_wiki_for_maintenance()?;
+    let raw = if args.request.as_os_str() == "-" {
+        read_stdin()?
+    } else {
+        std::fs::read_to_string(&args.request).map_err(|error| {
+            AikitError::new(
+                "cli.usage",
+                format!(
+                    "could not read maintenance request {}: {error}",
+                    args.request.display()
+                ),
+            )
+        })?
+    };
+    let request: WikiMaintenanceRequest = serde_json::from_str(&raw).map_err(|error| {
+        AikitError::new(
+            "cli.usage",
+            format!("invalid maintenance request JSON: {error}"),
+        )
+    })?;
+    let upserts = request
+        .upserts
+        .iter()
+        .map(WikiObject::parse)
+        .collect::<Result<Vec<_>>>()?;
+    let plan = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
+        current_objects,
+        upserts,
+        observed_source_revisions: request.observed_source_revisions,
+        human_source_proposals: request.human_source_proposals,
+    })?;
+    binding.persist_agent_wiki(&plan, &base_hash)?;
+    let persisted = binding.load_project_wiki()?;
+    if persisted != plan.next_objects {
+        return Err(AikitError::new(
+            "knowledge.wiki_concurrent_write",
+            "readback after persist does not match the committed plan; a peer write landed in \
+             the window between the write and the readback — re-read and reconcile",
+        )
+        .with("wiki", PROJECTCENTRAL_WIKI_SOURCE));
+    }
+    let stale_resources = plan
+        .stale_resources
+        .iter()
+        .map(|resource| resource.to_string())
+        .collect::<Vec<_>>();
+    let human_source_proposals = serde_json::to_value(&plan.human_source_proposals)
+        .map_err(|error| AikitError::new("knowledge.wiki_write_failed", error.to_string()))?;
+    Ok(WikiOutcome {
+        data: jval!({
+            "state": "maintained",
+            "wiki": PROJECTCENTRAL_WIKI_SOURCE,
+            "objects": persisted.len(),
+            "current_index_revision": plan.current_index_revision,
+            "stale_resources": stale_resources,
+            "human_source_proposals": human_source_proposals,
+        }),
+        warnings: vec![],
+        exit_code: json::EXIT_OK,
+    })
+}
+
 fn read_stdin() -> Result<String> {
     use std::io::Read;
     let mut buffer = String::new();
@@ -2109,5 +2207,167 @@ mod concurrency_tests {
         // Re-committing the same content over that base is not a conflict.
         persist(&path, &original, &base_hash).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// maintenance tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    const MANIFEST: &str = r#"{
+      "schema":"central.project/v1",
+      "project_id":"epilogos/demo",
+      "human_source":"ProjectCentral/user",
+      "wiki":{
+        "profile":"okf-wiki/v1",
+        "source":"ProjectCentral/agents/wiki/wiki.json"
+      }
+    }"#;
+
+    /// One space plus one provenance-carrying node, in the same object form
+    /// the Wiki file and the maintenance request both speak.
+    fn wiki_document() -> String {
+        r#"{"profile":"okf-wiki/v1","objects":[
+          {"object":"space","profile":"okf-wiki/v1","ref":"wiki:space:project","revision":1,
+           "provenance":[],"title":"Project","parent_space_refs":[],
+           "child_space_refs":[],"node_refs":["wiki:node:purpose"]},
+          {"object":"node","profile":"okf-wiki/v1","ref":"wiki:node:purpose","revision":1,
+           "provenance":[{"source_ref":"central:project-source:epilogos/demo:purpose",
+                          "source_revision":"r1"}],
+           "type":"ProjectKnowledge","title":"Purpose",
+           "space_refs":["wiki:space:project"],
+           "source_refs":["central:project-source:epilogos/demo:purpose"]}
+        ]}"#
+        .to_string()
+    }
+
+    fn revision_two_upsert(title: &str) -> String {
+        format!(
+            r#"{{
+              "object":"node","profile":"okf-wiki/v1","ref":"wiki:node:purpose","revision":2,
+              "provenance":[{{"source_ref":"central:project-source:epilogos/demo:purpose",
+                             "source_revision":"r1",
+                             "producer_ref":"agent:test",
+                             "generation_ref":"run:test"}}],
+              "type":"ProjectKnowledge","title":"{title}",
+              "space_refs":["wiki:space:project"],
+              "source_refs":["central:project-source:epilogos/demo:purpose"]
+            }}"#
+        )
+    }
+
+    fn write(path: &Path, contents: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    /// A minimal ProjectCentral project: manifest plus canonical Agent Wiki.
+    fn fixture() -> (TempDir, PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path().join("Work/demo");
+        write(&project.join("ProjectCentral/project.json"), MANIFEST);
+        write(
+            &project.join("ProjectCentral/agents/wiki/wiki.json"),
+            &wiki_document(),
+        );
+        (temp, project)
+    }
+
+    fn request_file(upserts_json: &str) -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("request.json");
+        write(&path, &format!(r#"{{"upserts":[{upserts_json}]}}"#));
+        (dir, path)
+    }
+
+    #[test]
+    fn maintenance_applies_reviewed_upserts_through_the_contract() {
+        let (_temp, project) = fixture();
+        let (_request_dir, request) = request_file(&revision_two_upsert("Purpose returned"));
+        let outcome = maintenance(&project, &WikiMaintenanceArgs { request }).unwrap();
+        assert_eq!(outcome.exit_code, json::EXIT_OK);
+        assert_eq!(outcome.data["state"], "maintained");
+        assert_eq!(outcome.data["objects"], 2);
+
+        let wiki_path = project.join("ProjectCentral/agents/wiki/wiki.json");
+        let persisted = binding_objects(&wiki_path);
+        let index = SemanticWikiIndex::rebuild(persisted).unwrap();
+        assert_eq!(
+            index
+                .node(&ResourceRef::parse("wiki:node:purpose").unwrap())
+                .unwrap()
+                .revision,
+            2
+        );
+        assert_eq!(
+            index
+                .node(&ResourceRef::parse("wiki:node:purpose").unwrap())
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Purpose returned")
+        );
+    }
+
+    #[test]
+    fn maintenance_replay_with_no_upserts_keeps_the_document_whole() {
+        let (_temp, project) = fixture();
+        let (_request_dir, request) = request_file("");
+        let outcome = maintenance(&project, &WikiMaintenanceArgs { request }).unwrap();
+        assert_eq!(outcome.data["objects"], 2);
+        // An empty upsert set re-persists the same objects; the document is
+        // still whole and valid either way.
+        let index = SemanticWikiIndex::rebuild(binding_objects(
+            &project.join("ProjectCentral/agents/wiki/wiki.json"),
+        ))
+        .unwrap();
+        assert!(index
+            .node(&ResourceRef::parse("wiki:node:purpose").unwrap())
+            .is_some());
+    }
+
+    #[test]
+    fn maintenance_refuses_an_upsert_that_does_not_advance_the_revision() {
+        let (_temp, project) = fixture();
+        let stale_upsert =
+            revision_two_upsert("Purpose returned").replace("\"revision\":2", "\"revision\":1");
+        let (_request_dir, request) = request_file(&stale_upsert);
+        let Err(error) = maintenance(&project, &WikiMaintenanceArgs { request }) else {
+            panic!("an upsert that does not advance the revision must be refused");
+        };
+        assert_eq!(error.code(), "projectcentral.wiki_revision_not_advanced");
+        // The refusal leaves the on-disk wiki untouched.
+        let index = SemanticWikiIndex::rebuild(binding_objects(
+            &project.join("ProjectCentral/agents/wiki/wiki.json"),
+        ))
+        .unwrap();
+        assert_eq!(
+            index
+                .node(&ResourceRef::parse("wiki:node:purpose").unwrap())
+                .unwrap()
+                .revision,
+            1
+        );
+    }
+
+    #[test]
+    fn maintenance_requires_a_projectcentral_ground() {
+        let temp = TempDir::new().unwrap();
+        let (_request_dir, request) = request_file("");
+        let Err(error) = maintenance(temp.path(), &WikiMaintenanceArgs { request }) else {
+            panic!("maintenance outside a ProjectCentral ground must be refused");
+        };
+        assert_eq!(error.code(), "projectcentral.manifest_read");
+    }
+
+    fn binding_objects(wiki_path: &Path) -> Vec<WikiObject> {
+        let text = fs::read_to_string(wiki_path).unwrap();
+        aikit_core::parse_wiki_objects(&text).unwrap()
     }
 }
