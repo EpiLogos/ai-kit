@@ -1,24 +1,24 @@
 //! A selected, live Markdown projection in the existing Agent Wiki.
 //!
-//! The Markdown body is operational guidance, not human governance. Feedback
-//! changes that source through an explicit revision-checked update. A selected
-//! continuity capability rereads it at the next prompt; nothing scans the Wiki
-//! for instructions, silently promotes inference, or claims a harness loaded it.
+//! The Markdown body is operational guidance, not human governance. A
+//! correction is an ordinary revision-checked edit of that source; its
+//! provenance (evidence, actor, reason) is echoed on the receipt for the
+//! acting agent to record in its NOW field, and is never embedded in the
+//! source. A selected continuity capability delivers the reading at session
+//! start and whenever it changes; nothing scans the Wiki for instructions,
+//! silently promotes inference, or claims a harness loaded it.
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
 use aikit_store::{ContextLock, LockOptions};
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 pub const CAPABILITY: &str = "hook/continuity/wiki-projection";
-const MARKER: &str = "<!-- aikit:wiki-projection-history\n";
-const END: &str = "\n-->\n";
+const DELIVERED_STATE_DIR: &str = "wiki-projection";
 const MAX_BYTES: u64 = 131_072;
 const MAX_BODY_BYTES: usize = 16_384;
 const MAX_CONTEXT_TOKENS: u32 = 2_048;
@@ -36,8 +36,10 @@ pub enum ProjectionSub {
         #[arg(long)]
         file: PathBuf,
     },
-    /// Replace the body from stdin, retaining feedback provenance in the file.
+    /// Replace the body from stdin — an ordinary revision-checked source edit.
     /// Requires an existing Agent Wiki Markdown file and its exact read revision.
+    /// Evidence, actor and reason are echoed on the receipt for the acting
+    /// agent's attributed NOW return; they are not written into the source.
     Update {
         #[arg(long)]
         file: PathBuf,
@@ -54,23 +56,11 @@ pub enum ProjectionSub {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FeedbackBasis {
-    pub previous_revision: String,
-    pub body_revision: String,
-    pub evidence_ref: ResourceRef,
-    pub actor_ref: ResourceRef,
-    pub reason: String,
-    pub recorded_at_unix_seconds: u64,
-}
-
 #[derive(Debug, Serialize)]
 pub struct ProjectionReading {
     pub source: String,
     pub revision: String,
     pub body: String,
-    pub feedback: Vec<FeedbackBasis>,
 }
 
 fn error(code: &'static str, detail: impl std::fmt::Display) -> AikitError {
@@ -151,29 +141,7 @@ pub fn read(path: &Path) -> Result<ProjectionReading> {
             "source exceeds the byte limit or contains NUL",
         ));
     }
-    let (feedback, body) = if let Some(rest) = raw.strip_prefix(MARKER) {
-        let (history, body) = rest.split_once(END).ok_or_else(|| {
-            error(
-                "wiki_projection.invalid_history",
-                "unfinished feedback history",
-            )
-        })?;
-        let history: Vec<FeedbackBasis> = serde_json::from_str(history)
-            .map_err(|e| error("wiki_projection.invalid_history", e))?;
-        (history, body.to_string())
-    } else if let Some((body, history)) = raw.rsplit_once(&format!("\n\n{MARKER}")) {
-        let history = history.strip_suffix(END).ok_or_else(|| {
-            error(
-                "wiki_projection.invalid_history",
-                "unfinished trailing feedback history",
-            )
-        })?;
-        let history: Vec<FeedbackBasis> = serde_json::from_str(history)
-            .map_err(|e| error("wiki_projection.invalid_history", e))?;
-        (history, body.to_string())
-    } else {
-        (Vec::new(), raw.clone())
-    };
+    let body = raw.clone();
     if body.len() > MAX_BODY_BYTES {
         return Err(error(
             "wiki_projection.body_budget",
@@ -184,7 +152,6 @@ pub fn read(path: &Path) -> Result<ProjectionReading> {
         source: path.display().to_string(),
         revision: digest(raw.as_bytes()),
         body,
-        feedback,
     })
 }
 
@@ -196,8 +163,6 @@ pub fn update(
     path: &Path,
     expected: &str,
     body: &str,
-    evidence: &str,
-    actor: &str,
     reason: &str,
 ) -> Result<ProjectionReading> {
     if expected.len() != 64
@@ -212,17 +177,14 @@ pub fn update(
     }
     if body.len() > MAX_BODY_BYTES
         || body.contains('\0')
-        || body.contains(MARKER)
         || reason.trim().is_empty()
         || reason.len() > 4096
     {
         return Err(error(
             "wiki_projection.invalid_update",
-            "invalid body or missing/oversized feedback reason",
+            "invalid body or missing/oversized correction reason",
         ));
     }
-    let evidence_ref = ResourceRef::parse(evidence)?;
-    let actor_ref = ResourceRef::parse(actor)?;
     let path = checked_path(path)?;
     let lock_path = path.with_file_name(format!(
         ".{}.projection-lock",
@@ -240,31 +202,12 @@ pub fn update(
             .with_timeout(std::time::Duration::ZERO)
             .with_purpose("revise Wiki operational projection"),
     )?;
-    let mut current = read(&path)?;
+    let current = read(&path)?;
     if current.revision != expected {
         return Err(error(
             "wiki_projection.conflict",
             "projection changed since the supplied revision; reread and reconcile",
         ));
-    }
-    current.feedback.push(FeedbackBasis {
-        previous_revision: current.revision.clone(),
-        body_revision: digest(body.as_bytes()),
-        evidence_ref,
-        actor_ref,
-        reason: reason.to_string(),
-        recorded_at_unix_seconds: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    });
-    let history = serde_json::to_string(&current.feedback)
-        .map_err(|e| error("wiki_projection.invalid_history", e))?
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e");
-    let rendered = format!("{body}\n\n{MARKER}{history}{END}");
-    if rendered.len() as u64 > MAX_BYTES {
-        return Err(error("wiki_projection.history_budget", "feedback history exceeds source budget; retain it in source history before an explicit consolidation"));
     }
     let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap())
         .map_err(|e| error("wiki_projection.write", e))?;
@@ -275,7 +218,7 @@ pub fn update(
                 .permissions(),
         )
         .map_err(|e| error("wiki_projection.write", e))?;
-    temp.write_all(rendered.as_bytes())
+    temp.write_all(body.as_bytes())
         .and_then(|_| temp.as_file().sync_all())
         .map_err(|e| error("wiki_projection.write", e))?;
     if read(&path)?.revision != expected {
@@ -287,14 +230,16 @@ pub fn update(
     temp.persist(&path)
         .map_err(|e| error("wiki_projection.write", e))?;
     // Return exactly what this write committed, not a later writer's revision.
-    current.revision = digest(rendered.as_bytes());
-    current.body = body.to_string();
-    Ok(current)
+    Ok(ProjectionReading {
+        source: current.source,
+        revision: digest(body.as_bytes()),
+        body: body.to_string(),
+    })
 }
 
 pub fn run(command: ProjectionCmd) -> Result<crate::wiki::WikiOutcome> {
-    let (reading, state) = match command.command {
-        ProjectionSub::Read { file } => (read(&file)?, "read"),
+    let (reading, state, attribution) = match command.command {
+        ProjectionSub::Read { file } => (read(&file)?, "read", None),
         ProjectionSub::Update {
             file,
             expected_revision,
@@ -307,16 +252,26 @@ pub fn run(command: ProjectionCmd) -> Result<crate::wiki::WikiOutcome> {
                 .take(MAX_BODY_BYTES as u64 + 1)
                 .read_to_string(&mut body)
                 .map_err(|e| error("wiki_projection.stdin", e))?;
-            (
-                update(&file, &expected_revision, &body, &evidence, &actor, &reason)?,
-                "stored",
-            )
+            let reading = update(&file, &expected_revision, &body, &reason)?;
+            // Attribution rides the receipt, for the acting agent's NOW
+            // return. It is deliberately not persisted inside the source.
+            let attribution = serde_json::json!({
+                "evidence": evidence,
+                "actor": actor,
+                "reason": reason,
+                "provenance_home": "now-field",
+            });
+            (reading, "stored", Some(attribution))
         }
     };
+    let mut data = serde_json::json!({"projection":reading,"state":state,
+        "source_kind":"agent-maintained-operational-projection", "governance_changed":false,
+        "harness_loaded":false});
+    if let Some(attribution) = attribution {
+        data["correction_attribution"] = attribution;
+    }
     Ok(crate::wiki::WikiOutcome {
-        data: serde_json::json!({"projection":reading,"state":state,
-            "source_kind":"agent-maintained-operational-projection", "governance_changed":false,
-            "harness_loaded":false}),
+        data,
         warnings: vec![],
         exit_code: 0,
     })
@@ -427,4 +382,40 @@ pub fn context_blocks(
         blocks.push(block);
     }
     Ok((blocks, warnings))
+}
+
+/// What the last delivery of this context actually contained. Delivering the
+/// identical composition again would spend the model's context repeating an
+/// unchanged reading; a changed or newly unavailable reading must reach the
+/// next act. The state is a per-context fingerprint in AIKit's own state dir —
+/// a hint for delivery, never a substitute for the source.
+fn delivered_state_path(home: &aikit_store::AikitHome, context: &str) -> PathBuf {
+    home.state().join(DELIVERED_STATE_DIR).join(format!("{context}.json"))
+}
+
+pub fn load_last_delivered(home: &aikit_store::AikitHome, context: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(delivered_state_path(home, context)).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    parsed.get("fingerprint")?.as_str().map(str::to_string)
+}
+
+pub fn store_last_delivered(home: &aikit_store::AikitHome, context: &str, fingerprint: &str) {
+    let path = delivered_state_path(home, context);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let document = serde_json::json!({ "fingerprint": fingerprint });
+    let temp = path.with_extension("json.tmp");
+    if std::fs::write(&temp, document.to_string()).is_ok() {
+        let _ = std::fs::rename(&temp, &path);
+    }
+}
+
+pub fn delivery_fingerprint(blocks: &[String]) -> String {
+    let mut hasher = Sha256::new();
+    for block in blocks {
+        hasher.update(block.as_bytes());
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
 }

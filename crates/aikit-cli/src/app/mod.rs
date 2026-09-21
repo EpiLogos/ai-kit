@@ -2010,7 +2010,11 @@ impl Service {
         let tuning = ContinuityTuning::resolve(&self.view);
 
         // Explicit source selection is distinct from the entire Wiki being
-        // retrievable. Reread the operational projection on each causal turn.
+        // retrievable. The reading is delivered at session start and whenever
+        // its composition changes: an unchanged re-delivery would spend the
+        // model's context repeating standing guidance the session already
+        // holds, while a changed or newly unavailable reading must reach the
+        // next act without a restart.
         if matches!(event.kind, aikit_core::hooks::HookEventKind::SessionStart | aikit_core::hooks::HookEventKind::UserPromptSubmit)
             && tuning.allows("wiki-projection")
         {
@@ -2021,7 +2025,23 @@ impl Service {
                     &active.config, self.descriptor.project_root.as_deref(), central.as_deref(),
                 ) {
                     Ok((blocks, warnings)) => {
-                        decision.injected.extend(blocks);
+                        let fingerprint =
+                            crate::wiki_projection::delivery_fingerprint(&blocks);
+                        let deliver = event.kind == aikit_core::hooks::HookEventKind::SessionStart
+                            || crate::wiki_projection::load_last_delivered(
+                                &self.home,
+                                &self.descriptor.context_id.to_string(),
+                            )
+                            .as_deref()
+                            != Some(fingerprint.as_str());
+                        if deliver {
+                            crate::wiki_projection::store_last_delivered(
+                                &self.home,
+                                &self.descriptor.context_id.to_string(),
+                                &fingerprint,
+                            );
+                            decision.injected.extend(blocks);
+                        }
                         decision.warnings.extend(warnings);
                     }
                     Err(error) => decision.warnings.push(format!("Wiki projection unavailable: {}", error.message())),
