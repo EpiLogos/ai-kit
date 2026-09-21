@@ -553,7 +553,7 @@ impl OwnedChild {
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            use rustix::process::{WaitId, WaitIdOptions, waitid};
+            use rustix::process::{waitid, WaitId, WaitIdOptions};
             use std::os::unix::process::ExitStatusExt;
             let observed = waitid(
                 WaitId::Pid(self.pid()),
@@ -586,16 +586,15 @@ impl OwnedChild {
         {
             // Confirm the leader is still our unreaped child before using its
             // group identity. ECHILD refuses signalling if ownership was lost.
-            if self.poll_exit()?.is_some() {
-                // Already exited: a zombie-led group refuses SIGKILL with
-                // EPERM on macOS, and no signal is needed. Reaping is the
-                // whole remaining work.
-                let status = self.child.wait()?;
-                self.terminated = Some(status);
-                return Ok(status);
-            }
+            let leader_exit_observed = self.poll_exit()?;
             match rustix::process::kill_process_group(self.pid(), rustix::process::Signal::KILL) {
                 Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                // A group whose leader is an unreaped zombie refuses SIGKILL
+                // with EPERM on macOS even though nothing signalable remains;
+                // live descendants keep the group signalable, so after the
+                // leader's exit was observed an EPERM means the teardown work
+                // is already done and reaping is what is left.
+                Err(rustix::io::Errno::PERM) if leader_exit_observed.is_some() => {}
                 Err(error) => return Err(error.into()),
             }
         }
