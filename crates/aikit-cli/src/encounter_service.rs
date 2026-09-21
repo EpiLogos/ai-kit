@@ -26,6 +26,9 @@ use std::{
 
 #[path = "encounter_agency.rs"]
 mod agency;
+pub use agency::mint::{
+    mint_from_cli, mint_per_project_agency, mint_request_document, REQUIRED_MINTED_ACTIONS,
+};
 pub use agency::model::EncounterModelOpen;
 pub use agency::{
     EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket, EncounterGroupRecipient,

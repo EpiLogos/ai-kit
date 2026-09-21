@@ -95,6 +95,21 @@ enum Command {
         #[arg(long)]
         expected_revision: Option<String>,
     },
+    /// Mint a fresh per-project native Agency chain from the owner's standing
+    /// template, actualise it through the real native owner, and provision this
+    /// session's binding. Owner-only, like encounter-agency-configure.
+    EncounterAgencyMint {
+        #[arg(long)]
+        agent_session: String,
+        /// The project directory whose canonical identity this agency is bound
+        /// to; resolved through the same resolution `project-context` applies.
+        #[arg(long = "project-cwd", value_name = "DIR")]
+        project_cwd: PathBuf,
+        /// Explicit agent identity; otherwise the Central AgentProfile for the
+        /// project scope when exactly one exists, else a derived project agent.
+        #[arg(long)]
+        agent_ref: Option<String>,
+    },
     /// Correlate operator-reviewed native evidence for a stuck delivery; never replay it.
     EncounterDeliveryReconcile {
         #[arg(long)]
@@ -298,6 +313,22 @@ fn run(cli: Cli) -> Result<()> {
             emit(
                 &serde_json::json!({"configured":true,"standing":"native-owner-provisioning-not-default-selection"}),
             )
+        }
+        Command::EncounterAgencyMint {
+            agent_session,
+            project_cwd,
+            agent_ref,
+        } => {
+            let agent_ref = agent_ref
+                .as_deref()
+                .map(aikit_core::ResourceRef::parse)
+                .transpose()?;
+            emit(&crate::encounter_service::mint_from_cli(
+                service.home(),
+                &project_cwd,
+                &aikit_core::ResourceRef::parse(agent_session)?,
+                agent_ref,
+            )?)
         }
         Command::EncounterDeliveryReconcile {
             agent_session,
