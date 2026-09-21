@@ -11,7 +11,8 @@
 // TRUST POSTURE — read before trusting a revision. An extension runs with the
 // user's full permissions inside every pi session; that is pi's own model, not
 // something this carrier adds. What this carrier can do inside a session:
-//   - spawn `aikit hook dispatch pi <Event>` with the event JSON on stdin;
+//   - spawn `aikit --json hook dispatch pi <Event>` with the event JSON on
+//     stdin and read the verdict from the machine envelope's `data`;
 //   - forward a denial as a tool_call block (pi's { block: true, reason });
 //   - forward a denial of typed input as { action: "handled" } plus a notice
 //     (pi has no prompt-block-with-reason; this is the nearest honest stop);
@@ -60,6 +61,11 @@ interface AikitDecision {
  * Spawn the dispatcher for one event. Returns null on any system failure —
  * absent binary, timeout, crash, unparsable reply — which every caller
  * treats as "no verdict, continue". Only a parsed reply is a verdict.
+ *
+ * The dispatcher speaks its machine envelope (`--json`): plain mode is the
+ * calling harness's protocol and keeps stdout empty on an allowance, which
+ * no pi channel can read. The envelope arrives for both verdict shapes
+ * (exit 0 allow, exit 2 deny) with the verdict fields under `data`.
  */
 function dispatchAikit(event: string, payload: unknown): AikitDecision | null {
   let body: string;
@@ -69,17 +75,23 @@ function dispatchAikit(event: string, payload: unknown): AikitDecision | null {
     return null; // a payload that cannot serialise is not a verdict
   }
   try {
-    const result = spawnSync(AIKIT_BIN, ["hook", "dispatch", "pi", event], {
+    const result = spawnSync(AIKIT_BIN, ["--json", "hook", "dispatch", "pi", event], {
       input: body,
       timeout: DISPATCH_TIMEOUT_MS,
       maxBuffer: 4 * 1024 * 1024,
       encoding: "utf8",
       windowsHide: true,
     });
-    if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
+    if (result.error || typeof result.stdout !== "string") {
       return null;
     }
-    const reply = JSON.parse(result.stdout) as Record<string, unknown>;
+    // Exit 0 (allow) and exit 2 (deny) both carry the envelope; any other
+    // status is a dispatcher fault, not a verdict.
+    if (result.status !== 0 && result.status !== 2) {
+      return null;
+    }
+    const envelope = JSON.parse(result.stdout) as { data?: Record<string, unknown> };
+    const reply = (envelope.data ?? {}) as Record<string, unknown>;
     if (typeof reply.allowed !== "boolean") {
       return null;
     }

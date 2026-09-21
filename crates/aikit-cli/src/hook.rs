@@ -305,6 +305,12 @@ pub fn translate_decision(
     let event = HookEventKind::parse(event);
     let native = event.as_str();
     let claude = matches!(client, "claude" | "claude-code");
+    // zcode's own hooks schema (diagnosing-hooks, checked 2026-09-21) parses
+    // stdout as strict JSON and injects `additionalContext`; codex 0.155.1
+    // ships SessionStart/UserPromptSubmit command-output wires with the same
+    // `hookSpecificOutput.additionalContext` field. Both keep the exit-code
+    // denial path; neither gets claude's permissionDecision document.
+    let additional_context_clients = claude || matches!(client, "zcode" | "codex");
     let reason = decision.denial.as_ref().map(|d| d.describe());
     // permissionDecision is a PreToolUse-only schema. Other events retain the
     // established exit-code denial rather than emitting invalid JSON.
@@ -316,14 +322,28 @@ pub fn translate_decision(
     );
     let context = decision.injected_text();
     let mut warnings = decision.warnings.clone();
-    let supports_context = claude
-        && matches!(
-            event,
-            HookEventKind::SessionStart
-                | HookEventKind::UserPromptSubmit
-                | HookEventKind::PreToolUse
-                | HookEventKind::PostToolUse
-        );
+    let supports_context = additional_context_clients
+        && if claude {
+            matches!(
+                event,
+                HookEventKind::SessionStart
+                    | HookEventKind::UserPromptSubmit
+                    | HookEventKind::PreToolUse
+                    | HookEventKind::PostToolUse
+            )
+        } else {
+            // zcode reads additionalContext on the same four events; codex's
+            // verified command-output wires are the two lifecycle events.
+            let zcode = client == "zcode";
+            matches!(
+                event,
+                HookEventKind::SessionStart | HookEventKind::UserPromptSubmit
+            ) || (zcode
+                && matches!(
+                    event,
+                    HookEventKind::PreToolUse | HookEventKind::PostToolUse
+                ))
+        };
     if decision.allowed && !context.is_empty() {
         if supports_context {
             let mut document = verdict
@@ -534,12 +554,71 @@ mod context_transport_tests {
         }
     }
     #[test]
+    fn plain_zcode_orientation_and_tool_events_deliver_context() {
+        // zcode's own hooks schema (checked 2026-09-21) parses stdout as strict
+        // JSON and injects `additionalContext`; the installed config.json
+        // dispatches SessionStart/PreToolUse/PostToolUse to aikit.
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+        ] {
+            let output = translate_decision(
+                "zcode",
+                event,
+                false,
+                &decision(HookEventKind::parse(event)),
+            );
+            let wire: serde_json::Value =
+                serde_json::from_str(output.stdout.as_deref().unwrap()).unwrap();
+            assert_eq!(
+                wire["hookSpecificOutput"]["additionalContext"],
+                "current wiki correction"
+            );
+            assert_eq!(
+                wire["hookSpecificOutput"]["hookEventName"],
+                HookEventKind::parse(event).as_str()
+            );
+            assert!(wire["hookSpecificOutput"]
+                .get("permissionDecision")
+                .is_none());
+        }
+    }
+    #[test]
+    fn plain_codex_lifecycle_events_deliver_context_but_tool_events_do_not() {
+        // codex 0.155.1 ships SessionStart/UserPromptSubmit command-output
+        // wires carrying `hookSpecificOutput.additionalContext`; its
+        // PreToolUse wire needs codex's own permission schema, which is not
+        // emitted here.
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            let output = translate_decision(
+                "codex",
+                event,
+                false,
+                &decision(HookEventKind::parse(event)),
+            );
+            let wire: serde_json::Value =
+                serde_json::from_str(output.stdout.as_deref().unwrap()).unwrap();
+            assert_eq!(
+                wire["hookSpecificOutput"]["additionalContext"],
+                "current wiki correction"
+            );
+        }
+        let output =
+            translate_decision("codex", "PreToolUse", false, &decision(HookEventKind::PreToolUse));
+        assert!(output.stdout.is_none());
+        assert!(output.stderr.unwrap().contains("context not delivered"));
+    }
+    #[test]
     fn strict_unknown_harnesses_and_non_injecting_events_are_not_faked() {
         for (client, event) in [
-            ("zcode", "SessionStart"),
-            ("codex", "UserPromptSubmit"),
+            ("gemini", "SessionStart"),
+            ("opencode", "UserPromptSubmit"),
             ("claude", "PreCompact"),
             ("claude", "Stop"),
+            ("zcode", "PreCompact"),
+            ("codex", "Stop"),
         ] {
             let output =
                 translate_decision(client, event, false, &decision(HookEventKind::parse(event)));
