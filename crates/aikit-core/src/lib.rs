@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod a2a;
 pub mod actor_bootstrap;
 pub mod application_context;
 pub mod arg;
