@@ -821,8 +821,26 @@ impl EncounterService {
             Some(agent_session.clone()),
         ))?;
         let native = lane.binding().native_session_id.clone();
+        // A bound policy is delivered, never assumed. Pi RPC carried its
+        // selection into the session open through the adapter; an ACP
+        // resident receives it now, through the native session's own model
+        // configuration: the adapter refuses a harness that advertises no
+        // model selector or a model outside its advertised list, and
+        // confirms the readback — the readback semantics the old
+        // protocol-only gate said were unassumed are proven here, or the
+        // open fails.
+        let selected_configuration = match (&model, configured.protocol) {
+            (Some(model), EncounterProtocol::Acp) => {
+                let receipt = lane.set_model(&model.policy.provider_native_id)?;
+                Some((model.dispatch.clone(), receipt))
+            }
+            _ => None,
+        };
         let model_observation = lane.binding().model_observation.clone();
         let model_reading = serde_json::to_value(&model).map_err(error)?;
+        if let Some((dispatch, receipt)) = &selected_configuration {
+            self.store.append(&agent_session,&json!({"kind":"selected-model-configured","agent_session":agent_session,"native_session_id":receipt.native_session_id,"provider":provider,"dispatch":dispatch,"previous_model_observation":receipt.previous,"model_observation":receipt.current,"standing":"provider-confirmed-session-configuration-under-the-durable-model-policy"}))?;
+        }
         self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
         // The owner drains transport delivery; durable cursor readers are
         // independent views of the same canonical journal.

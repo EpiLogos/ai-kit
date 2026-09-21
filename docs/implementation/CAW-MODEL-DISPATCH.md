@@ -1,6 +1,6 @@
 # Selected catalogue model to native resident
 
-AIKit #294 continues #274/#275 on #291. This operation selects a deliberately configured native body for the already admitted Agent and World. The supported model-selection/readback path is Pi RPC. Ordinary ACP/Pi sessions without model selection remain separate; ACP does not inherit a fictitious Pi model setter.
+AIKit #294 continues #274/#275 on #291. This operation selects a deliberately configured native body for the already admitted Agent and World. How a bound policy reaches the harness is decided by the harness profile's declared models dispatch, joined by the launch program — never by protocol assumption: per-invocation argv flags where the census observed them (pi, `--provider`/`--model`), the native session's own model configuration where the harness selects through its `model` config key (claude-code and codex, which bind one provider natively; and the provider-plural ACP harnesses whose per-session selection the encounter decides). A `none` dispatch refuses with its declared reason, and a launch program that joins no profile refuses rather than delivering through an assumed surface. A bound policy is delivered or the open fails; it is never silently ignored.
 
 ## What determines eligibility
 
@@ -8,7 +8,7 @@ A configured body's `model_policy` is an exact `EncounterRequiredSource`: source
 
 A credential declaration has `requirement_ref`, `credential_ref`, `target_env` and optional `from_env`. It selects an existing native credential provider or an explicit environment import. Missing, revoked or expired material is a refusal, not a reason to pass an inventory reference as a secret. Only the selected key and retained runtime environment reach the final model child. Source import variables, unrelated ambient credentials and Central/Workcell control bearers are not inherited. No secret value is written into the persistent model record. Actual installed keychain and commercial-provider uptake remain separate proof.
 
-The Pi connection explicitly selects the native provider/model and checks its actual model-state response. An unknown or contradictory native state is not selected-model success. The source, catalogue, credential and native model basis are checked again before subsequent turns. This is provider-reported native state, not independent verification of a commercial inference backend.
+The Pi connection explicitly selects the native provider/model and checks its actual model-state response. An ACP resident receives the selection after the session exists, through the session's own model configuration: a harness that advertises no model selector, or a model outside its advertised list, refuses; the delivery is confirmed by provider readback. An unknown or contradictory native state is not selected-model success in either protocol. The source, catalogue, credential and native model basis are checked again before subsequent turns. This is provider-reported native state, not independent verification of a commercial inference backend.
 
 ## Existing public paths
 

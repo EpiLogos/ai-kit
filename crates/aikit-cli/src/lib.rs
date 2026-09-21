@@ -43,6 +43,7 @@ pub mod pressure;
 pub mod profile_ops;
 pub mod project_binding;
 pub mod project_recency;
+pub mod projection_drift;
 pub mod projects;
 pub mod recognised_praxis;
 pub mod route_launch;
