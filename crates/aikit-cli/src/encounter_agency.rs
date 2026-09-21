@@ -550,6 +550,14 @@ impl EncounterService {
         let Ok(_agency_lock) = self.lock_agency(session) else {
             return QueuedOutcome::Deferred;
         };
+        // Readiness is the provider lane actually being usable, never just a
+        // resident that exists (2026-09-21 owner ruling on PR #387): no
+        // host-seen transport failure, a live provider process, no turn in
+        // flight, and a real protocol round-trip — the same native handshake
+        // the model path trusts before a prompt. A queued message never rides
+        // into a dead transport at restart; while the lane cannot answer, the
+        // row stays queued, in order, for the next boundary where the lane
+        // truly prompts again.
         let ready = match resident.host.identity(session) {
             Ok(identity) => {
                 format!("{:?}", identity.state) == "Resident"
@@ -559,6 +567,9 @@ impl EncounterService {
             Err(_) => false,
         };
         if !ready {
+            return QueuedOutcome::Deferred;
+        }
+        if resident.host.initialize().is_err() {
             return QueuedOutcome::Deferred;
         }
         // The recipient's own context and model basis must still be exactly
