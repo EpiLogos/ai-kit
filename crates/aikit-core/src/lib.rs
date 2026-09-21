@@ -52,6 +52,7 @@ pub mod harness_profile;
 pub mod hooks;
 pub mod id;
 pub mod knowledge;
+pub mod knowledge_construction;
 pub mod knowledge_code;
 pub mod knowledge_entity_address;
 pub mod knowledge_facets;

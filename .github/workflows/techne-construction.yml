@@ -1,0 +1,100 @@
+name: Native constructive field
+on:
+  pull_request:
+    paths: ['crates/**', '.github/workflows/techne-construction.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-construction-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  register:
+    # Temporary bounded source transport; remove before final delivery.
+    # Only the commissioned branch may receive this exact patch and formatting.
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'codex/techne-native-construction-20260920'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      revision: ${{ steps.register.outputs.revision }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt
+      - name: Apply the exact native selector lint repair
+        id: register
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/aikit-core/src/knowledge_construction.rs')
+          source = path.read_text()
+          before = '\n'.join([
+              '        if let Some(selector) = read_source_selector(source)? {',
+              '            if let crate::knowledge_facets::SourceSelector::TextSpan { start, end, .. } = selector {',
+              '                if start >= end {',
+              '                    return Err(err("selected passage must have a non-empty forward span"));',
+              '                }',
+              '            }',
+              '        }',
+          ])
+          after = '\n'.join([
+              '        if let Some(crate::knowledge_facets::SourceSelector::TextSpan { start, end, .. }) = read_source_selector(source)? {',
+              '            if start >= end {',
+              '                return Err(err("selected passage must have a non-empty forward span"));',
+              '            }',
+              '        }',
+          ])
+          if 'if let Some(selector) = read_source_selector(source)?' in source:
+              assert source.count(before) == 1, 'native selector validation changed concurrently'
+              path.write_text(source.replace(before, after))
+          PY
+          rustfmt --edition 2021 crates/aikit-core/src/knowledge_construction.rs crates/aikit-core/src/knowledge_construction_tests.rs crates/aikit-cli/src/wiki_construct.rs crates/aikit-cli/tests/wiki_construct_commands.rs
+          git add crates/aikit-core/src/knowledge_construction.rs crates/aikit-core/src/knowledge_construction_tests.rs crates/aikit-cli/src/wiki_construct.rs crates/aikit-cli/tests/wiki_construct_commands.rs
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'fix(knowledge): format native constructive transactions and their file proofs'
+            git push origin HEAD:refs/heads/codex/techne-native-construction-20260920
+          fi
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  proof:
+    needs: register
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.register.outputs.revision }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Native transactions, real file restart, CLI build and lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/native-construction"
+          git rev-parse HEAD > "$RUNNER_TEMP/native-construction/revision"
+          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/native-construction/source.tar.gz"
+          cargo test --locked -p aikit-core knowledge_construction -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-construction/core-tests.log"
+          cargo test --locked -p aikit-cli --test wiki_construct_commands -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-construction/cli-tests.log"
+          cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee "$RUNNER_TEMP/native-construction/cli-build.log"
+          cp target/debug/aikit "$RUNNER_TEMP/native-construction/"
+          target/debug/aikit --json wiki-construct capabilities > "$RUNNER_TEMP/native-construction/capabilities.json"
+          cargo clippy --locked -p aikit-core -p aikit-cli --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/native-construction/clippy.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-construction-${{ needs.register.outputs.revision }}
+          path: ${{ runner.temp }}/native-construction
+          retention-days: 7
+          if-no-files-found: error

@@ -77,6 +77,8 @@ pub enum Command {
     /// surface, separate from `wiki` so this case never has to touch that
     /// command's dispatch).
     WikiShape(WikiShapeCmd),
+    /// Construct revisioned native Wiki wholes and contextual participations.
+    WikiConstruct(crate::wiki_construct::ConstructArgs),
     /// Show the effective view for the current context.
     Status(StatusArgs),
     /// Emit the owner settings-disclosure descriptor for the O:I System surface.
@@ -933,6 +935,8 @@ pub enum KnowledgeSub {
     Open(KnowledgeOpenArgs),
     Read(KnowledgeAddressArgs),
     Relations(KnowledgeRelationsArgs),
+    /// Metadata and exact native relations, with explicit completeness limits.
+    Graph(KnowledgeGraphArgs),
     Route(KnowledgeRouteArgs),
     Frame(KnowledgeRouteArgs),
     Sources(KnowledgeAddressArgs),
@@ -973,6 +977,16 @@ pub struct KnowledgeRelationsArgs {
     #[arg(long, default_value_t = 256)]
     pub max_nodes: usize,
     #[arg(long, default_value_t = 512)]
+    pub max_edges: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeGraphArgs {
+    #[arg(value_name = "QUERY", default_value = "")]
+    pub query: String,
+    #[arg(long, default_value_t = 4096)]
+    pub max_nodes: usize,
+    #[arg(long, default_value_t = 16384)]
     pub max_edges: usize,
 }
 

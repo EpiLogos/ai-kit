@@ -393,7 +393,7 @@ impl<'a> SemanticWikiProvider<'a> {
                 {
                     continue;
                 }
-                view.push_edge(RelationEdge::new(
+                let mut relation = RelationEdge::new(
                     from,
                     to,
                     neighbour.relation.clone(),
@@ -401,7 +401,17 @@ impl<'a> SemanticWikiProvider<'a> {
                     RelationOrigin::new(authority_for_neighbour(&neighbour))
                         .from_provider(self.provider.clone())
                         .in_lens("semantic-wiki"),
-                ))?;
+                );
+                if let Some(WikiObject::Edge(edge)) = self.index.resolve(&neighbour.edge_ref) {
+                    relation.reference = Some(edge.ref_id);
+                    relation.origin.revision = Some(edge.revision.to_string());
+                    relation.authored_relation = edge
+                        .extensions
+                        .get("authored_relation")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok());
+                }
+                view.push_edge(relation)?;
                 if seen.insert(other.clone()) {
                     queue.push_back((other, depth + 1));
                 }

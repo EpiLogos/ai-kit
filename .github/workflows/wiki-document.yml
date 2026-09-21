@@ -1,0 +1,65 @@
+name: Native Wiki document contract
+on:
+  pull_request:
+    paths:
+      - 'crates/aikit-*/src/**'
+      - 'crates/aikit-*/tests/**'
+      - 'crates/aikit-*/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/wiki-document.yml'
+permissions:
+  contents: read
+concurrency:
+  group: wiki-document-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  native-wiki:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Use the repository Rust toolchain
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Check source formatting without modifying the tested cut
+        run: cargo fmt --all -- --check
+      - name: Compile native Markdown and authored-link contracts
+        run: cargo test --locked -p aikit-adapters --lib markdown_document -- --nocapture
+      - name: Preserve existing source compilation and OKF round trips
+        run: |
+          cargo test --locked -p aikit-adapters --lib okf -- --nocapture
+          cargo test --locked -p aikit-adapters --lib authored_wiki -- --nocapture
+      - name: Prove native document and metadata graph readings
+        run: |
+          cargo test --locked -p aikit-adapters --lib wiki_document -- --nocapture
+          cargo test --locked -p aikit-adapters --lib wiki_graph -- --nocapture
+      - name: Prove the actual Knowledge CLI document loop
+        run: cargo test --locked -p aikit-cli --test wiki_document_end_to_end -- --nocapture
+      - name: Build the actual Knowledge CLI for consumer verification
+        run: cargo build --locked -p aikit-cli --bin aikit
+      - name: Retain exact source and callable native cut
+        if: always()
+        run: |
+          mkdir -p /tmp/wiki-native-review
+          git rev-parse HEAD > /tmp/wiki-native-review/source-revision.txt
+          git diff --exit-code -- Cargo.lock
+          git archive --format=tar.gz HEAD > /tmp/wiki-native-review/source.tar.gz
+          if [ -x target/debug/aikit ]; then
+            cp target/debug/aikit /tmp/wiki-native-review/aikit
+            strip --strip-debug /tmp/wiki-native-review/aikit
+            cd /tmp/wiki-native-review
+            tar -czf aikit-linux.tar.gz aikit
+            rm aikit
+          fi
+          cd /tmp/wiki-native-review
+          sha256sum *.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wiki-native-review-${{ github.run_id }}
+          path: /tmp/wiki-native-review/
+          retention-days: 7

@@ -215,6 +215,16 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Trust(a)) => cmd_trust(cwd, a),
         Some(Command::Wiki(c)) => cmd_wiki(cwd, c),
         Some(Command::WikiShape(c)) => cmd_wiki_shape(cwd, c),
+        Some(Command::WikiConstruct(c)) => Ok(Reply::Data {
+            context: EnvelopeContext {
+                context_id: None,
+                session_id: None,
+                project_root: Some(cwd.display().to_string()),
+            },
+            data: aikit_cli::wiki_construct::run(c)?,
+            warnings: vec![],
+            exit_code: json::EXIT_OK,
+        }),
         Some(Command::Status(a)) => cmd_status(cwd, a, json_mode),
         Some(Command::System(_)) => cmd_system(cwd),
         Some(Command::ConfigContribution(_)) => Ok(Reply::RawJson(
@@ -1967,11 +1977,14 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         }
         KnowledgeSub::Read(a) => {
             let address = parse_knowledge_address(&a.address)?;
-            jval!(service.knowledge_read(&address)?)
+            jval!(service.knowledge_read_document(&address)?)
         }
         KnowledgeSub::Relations(a) => {
             let address = parse_knowledge_address(&a.address)?;
             jval!(service.knowledge_relations(&address, a.depth, a.max_nodes, a.max_edges)?)
+        }
+        KnowledgeSub::Graph(a) => {
+            jval!(service.knowledge_graph(&a.query, a.max_nodes, a.max_edges)?)
         }
         KnowledgeSub::Route(a) => {
             let addresses = a
