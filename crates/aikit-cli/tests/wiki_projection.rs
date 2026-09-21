@@ -28,8 +28,6 @@ fn revised(file: &Path, body: &str) -> projection::ProjectionReading {
         file,
         &base.revision,
         body,
-        "dialogue:turn:correction-1",
-        "agent:guardian",
         "User explicitly requested substantive explanations for research",
     )
     .unwrap()
@@ -111,6 +109,7 @@ fn correction_changes_the_next_dispatch_without_restarting_service() {
         .as_str()
         .unwrap()
         .contains(&changed.revision));
+
     assert_eq!(
         std::fs::read_to_string(governance).unwrap(),
         "Authoritative human source remains untouched."
@@ -118,27 +117,78 @@ fn correction_changes_the_next_dispatch_without_restarting_service() {
 }
 
 #[test]
-fn stale_update_is_refused_and_feedback_history_survives_clear() {
+fn unchanged_reading_is_not_redelivered_but_a_change_reaches_the_next_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_, project, service) = scene(temp.path(), true);
+    let file = project.join("ProjectCentral/agents/wiki/projection.md");
+    let start = HookEvent::new(
+        "claude",
+        HookEventKind::SessionStart,
+        json!({"cwd": project}),
+    )
+    .in_cwd(&project);
+    // Session start always delivers: the fresh session holds nothing.
+    assert!(service
+        .dispatch_hook(&start)
+        .unwrap()
+        .injected_text()
+        .contains("Keep output brief"));
+    // The same reading at the next prompt is silence, not a repeat.
+    assert!(!service
+        .dispatch_hook(&prompt(&project))
+        .unwrap()
+        .injected_text()
+        .contains("Keep output brief"));
+    // A correction changes the composition, so the next prompt receives it.
+    revised(&file, "# Working together\n
+For research, explain the argument fully.\n");
+    let after = service.dispatch_hook(&prompt(&project)).unwrap();
+    assert!(after.injected_text().contains("explain the argument fully"));
+    // And it is not repeated again while unchanged.
+    assert!(!service
+        .dispatch_hook(&prompt(&project))
+        .unwrap()
+        .injected_text()
+        .contains("explain the argument fully"));
+}
+
+#[test]
+fn a_newly_unavailable_source_is_delivered_not_silently_dropped() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_, project, service) = scene(temp.path(), true);
+    assert!(service
+        .dispatch_hook(&prompt(&project))
+        .unwrap()
+        .injected_text()
+        .contains("Keep output brief"));
+    std::fs::remove_file(file_of(&project)).unwrap();
+    // The reading became unavailable: that change itself reaches the next act
+    // as an explicit notice rather than silence or a cached projection.
+    let decision = service.dispatch_hook(&prompt(&project)).unwrap();
+    assert!(decision
+        .injected_text()
+        .contains("Do not substitute a cached projection"));
+}
+
+fn file_of(project: &Path) -> PathBuf {
+    project.join("ProjectCentral/agents/wiki/projection.md")
+}
+
+#[test]
+fn stale_update_is_refused_and_an_empty_body_clears_explicitly() {
     let temp = tempfile::tempdir().unwrap();
     let file = source(&temp.path().canonicalize().unwrap());
     let first = projection::read(&file).unwrap();
     let second = revised(&file, "new reading");
-    let e = projection::update(
-        &file,
-        &first.revision,
-        "stale overwrite",
-        "dialogue:old",
-        "agent:other",
-        "stale",
-    )
-    .unwrap_err();
+    let e = projection::update(&file, &first.revision, "stale overwrite", "stale")
+        .unwrap_err();
     assert_eq!(e.code(), "wiki_projection.conflict");
     assert_eq!(projection::read(&file).unwrap().revision, second.revision);
+    // The source never accumulates embedded provenance: body in, body out.
     let cleared = revised(&file, "");
     assert!(cleared.body.is_empty());
-    assert_eq!(cleared.feedback.len(), 2);
-    assert_eq!(cleared.feedback[0].previous_revision, first.revision);
-    assert_eq!(projection::read(&file).unwrap().feedback.len(), 2);
+    let raw = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(raw, "");
 }
 
 #[test]
@@ -251,16 +301,9 @@ fn symlinked_sources_and_lock_targets_are_refused() {
     symlink(&file, file.with_file_name(".projection.md.projection-lock")).unwrap();
     let current = projection::read(&file).unwrap();
     assert_eq!(
-        projection::update(
-            &file,
-            &current.revision,
-            "new",
-            "dialogue:e",
-            "agent:a",
-            "reason"
-        )
-        .unwrap_err()
-        .code(),
+        projection::update(&file, &current.revision, "new", "reason")
+            .unwrap_err()
+            .code(),
         "wiki_projection.alias"
     );
 }
@@ -336,7 +379,7 @@ fn real_cli_update_and_plain_hook_stdout_form_the_same_loop() {
 }
 
 #[test]
-fn concurrent_feedback_writers_cannot_both_commit_the_same_basis() {
+fn concurrent_writers_cannot_both_commit_the_same_basis() {
     let temp = tempfile::tempdir().unwrap();
     let file = source(&temp.path().canonicalize().unwrap());
     let revision = projection::read(&file).unwrap().revision;
@@ -349,20 +392,14 @@ fn concurrent_feedback_writers_cannot_both_commit_the_same_basis() {
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                projection::update(
-                    &file,
-                    &revision,
-                    body,
-                    "dialogue:e",
-                    "agent:a",
-                    "correction",
-                )
+                projection::update(&file, &revision, body, "correction")
             })
         })
         .collect();
     let results: Vec<_> = threads.into_iter().map(|h| h.join().unwrap()).collect();
     assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
-    assert_eq!(projection::read(&file).unwrap().feedback.len(), 1);
+    let winner = results.into_iter().find(|r| r.is_ok()).unwrap().unwrap();
+    assert_eq!(projection::read(&file).unwrap().body, winner.body);
 }
 
 #[test]
@@ -400,17 +437,15 @@ fn source_address_overflow_is_explicit_not_unbounded_context() {
 }
 
 #[test]
-fn feedback_preserves_yaml_frontmatter_and_exact_body_bytes() {
+fn update_preserves_yaml_frontmatter_and_exact_body_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let file = source(&root);
     let body = "---\ntags: [guidance]\naliases: [Working together]\n---\n\n# Intent\n\nExplain research fully.\n";
     let changed = revised(&file, body);
+    // The file is exactly the body: no appended history, no hidden machinery.
     let raw = std::fs::read_to_string(&file).unwrap();
-    assert!(raw.starts_with(body));
-    assert!(raw.ends_with("\n-->\n"));
+    assert_eq!(raw, body);
     assert_eq!(projection::read(&file).unwrap().body, body);
     assert_eq!(projection::read(&file).unwrap().revision, changed.revision);
-    assert_eq!(revised(&file, body).feedback.len(), 2);
-    assert_eq!(projection::read(&file).unwrap().body, body);
 }
