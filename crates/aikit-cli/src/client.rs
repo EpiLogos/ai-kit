@@ -40,8 +40,8 @@ use aikit_adapters::actuation_harness_detection::{
 use aikit_adapters::clients::{
     antigravity::AntigravityAdapter, broker::BrokerAdapter, claude::ClaudeAdapter,
     codex::CodexAdapter, gemini::GeminiAdapter, grokbot::GrokbotAdapter, hermes::HermesAdapter,
-    kimi::KimiAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter, pi::PiAdapter,
-    zcode::ZcodeAdapter, ClientAdapter,
+    kimi::KimiAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter, opencode::OpencodeAdapter,
+    pi::PiAdapter, zcode::ZcodeAdapter, ClientAdapter,
 };
 use aikit_adapters::runner::SystemRunner;
 
@@ -308,6 +308,21 @@ static OVERLAYS: &[ClientOverlay] = &[
             build: |dirs| Box::new(GeminiAdapter::new(projection_dir(dirs, "gemini"))),
         },
         admission: |dirs| GeminiAdapter::new(projection_dir(dirs, "gemini")).admission(),
+    },
+    ClientOverlay {
+        name: TargetId::OPENCODE,
+        aliases: &[],
+        // The client name IS the catalog slug here: the embedded profile
+        // joins by `opencode` and Actuation's catalog (r10) detects it under
+        // the same key. One harness, one join key, both registries — this
+        // entry is what closes the roster-vs-profile drift the 2026-09-20
+        // SDK campaign found.
+        catalog_slug: TargetId::OPENCODE,
+        semantic: SemanticBasis::Skills,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(OpencodeAdapter::new(projection_dir(dirs, "opencode"))),
+        },
+        admission: |dirs| OpencodeAdapter::new(projection_dir(dirs, "opencode")).admission(),
     },
     ClientOverlay {
         name: TargetId::PI,

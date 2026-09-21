@@ -30,6 +30,7 @@ const OVERLAY_NAMES: &[&str] = &[
     "codex",
     "zcode",
     "gemini-cli",
+    "opencode",
     "pi",
     "gemini-antigravity",
     "grok-bot",
@@ -201,6 +202,74 @@ fn scenario_with_partial_intake() -> tempfile::TempDir {
 }
 
 #[test]
+fn an_opencode_detection_record_renders_the_honest_registered_row() {
+    // The 2026-09-20 SDK campaign found opencode carrying an embedded profile
+    // and an implemented adapter module while being absent from this roster:
+    // `client status opencode` returned [] and install returned
+    // client.unknown. The overlay entry closes the drift; this pins its row:
+    // detected by the record, capability intake refused, adapter-only
+    // dispatch — a named compatibility gap, never silence.
+    let home = scenario_with_partial_intake();
+    // Write the detection record the catalog (r10) carries: opencode is
+    // detected with a passing config-dir probe, while its capability
+    // descriptor is staged for no slug (the stand-in refuses unbudgeted
+    // lookups) — the intake outcome a real un-mirrored descriptor produces.
+    let fixtures = home.path().join("actuation-fixtures");
+    fs::write(
+        fixtures.join("detection.json"),
+        r#"{
+  "schema": "actuation.harness-detection/v1",
+  "detection_ref": "detection:fixture",
+  "observed_at": "2026-09-15T00:00:00Z",
+  "catalog_revision": 10,
+  "detector": {"implementation": "fixture"},
+  "harnesses": [
+    {"slug": "opencode", "harness_ref": "harness/opencode", "state": "detected",
+     "probes": [{"kind": "config-dir", "result": "pass", "spec": "~/.config/opencode"}]}
+  ],
+  "absent": [],
+  "availability": "complete"
+}"#,
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("aikit").unwrap();
+    command
+        .env("AIKIT_HOME", home.path().join("aikit-home"))
+        .env("HOME", home.path().join("user-home"))
+        .env(
+            "PATH",
+            format!(
+                "{}:/usr/bin:/bin",
+                home.path().join("actuation-bin").display()
+            ),
+        )
+        .env("FIXTURES", &fixtures)
+        .arg("--json")
+        .args(["client", "status", "opencode"])
+        .current_dir(home.path().join("project"));
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "status must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    let rows = value["data"]["clients"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "exactly the opencode row: {value}");
+    let row = &rows[0];
+    assert_eq!(row["client"], "opencode");
+    assert_eq!(row["state"], "gap");
+    assert_eq!(row["capability"], "unavailable");
+    assert_eq!(row["dispatch"], "adapter-only");
+    assert_eq!(
+        row["gap"]["target"], "opencode",
+        "the gap is first-class, not a roster miss"
+    );
+}
+
+#[test]
 fn a_client_honours_its_own_config_home_override_over_every_default() {
     // claude is detected with a resolved descriptor whose seam names
     // `~/seams/claude-code.json`; the harness's own documented env override
@@ -250,7 +319,7 @@ fn a_registered_adapter_with_a_descriptor_fixture_gets_its_row() {
     let home = scenario_with_partial_intake();
     let rows = rows_with_fixtures_env(&home, &["client", "status"]);
     // The record's four entries (two overlaid, one generic, one not-installed)
-    // + the eight overlays the record does not name + the broker.
+    // + the overlays the record does not name + the broker.
     assert_eq!(
         rows.len(),
         4 + (OVERLAY_NAMES.len() - 2) + 1,
