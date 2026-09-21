@@ -1,6 +1,11 @@
+---
+standing: implementation-fact
+register: episteme
+---
+
 # Wiki operational projection and the feedback loop
 
-Standing: owner-directed implementation, 20 September 2026. The O:I Wiki practice (#414), active Wiki implementation (#418) and constructive field (#420) remain their owners. This extends existing source and continuity operations rather than creating another Wiki, runtime or universal user-profile schema.
+Standing: owner-directed implementation, 20 September 2026. This reading updated 21 September 2026 recognising main after #373. The O:I Wiki practice (#414), active Wiki implementation (#418) and constructive field (#420) remain their owners. This extends existing source and continuity operations rather than creating another Wiki, runtime or universal user-profile schema.
 
 ## The distinction that makes adaptation possible
 
@@ -32,11 +37,15 @@ On SessionStart and UserPromptSubmit the source is reread, including when the Se
 
 ## Actual harness delivery, not an internal-only test
 
-The inspected command computed `HookDecision.injected`, but plain `aikit hook dispatch` translated only its allowed/denied bit. This dropped the prepared guidance on the actual process boundary even though internal Service tests passed. The repair serializes the complete decision into Claude's event-specific `hookSpecificOutput.additionalContext` for SessionStart, UserPromptSubmit, PreToolUse and PostToolUse. It preserves denial behaviour, keeps permissionDecision limited to PreToolUse and does not send Claude-specific JSON to a strict or unknown client. Other clients and PreCompact disclose unavailable context transport rather than claiming delivery.
+The original defect: the inspected command computed `HookDecision.injected`, but plain `aikit hook dispatch` translated only its allowed/denied bit. This dropped the prepared guidance on the actual process boundary even though internal Service tests passed.
 
-Primary protocol: https://code.claude.com/docs/en/hooks (consulted 20 September 2026). Existing Actuation capability descriptors still own which hooks are installed. This change does not invent a descriptor or bypass installation admission. `--json` remains the diagnostic machine envelope; plain mode is the harness-facing protocol. Emitted bytes are not proof that a running provider loaded or followed them.
+`translate_decision` now serializes the complete decision into `hookSpecificOutput.additionalContext` for the clients and events whose wires have been verified. Claude / claude-code: SessionStart, UserPromptSubmit, PreToolUse and PostToolUse. zcode: the same four events; its own hooks schema (diagnosing-hooks, checked 21 September 2026) parses stdout as strict JSON and injects `additionalContext`. Codex 0.155.1: SessionStart and UserPromptSubmit only, the two lifecycle command-output wires that carry the field; tool events still disclose non-delivery. `permissionDecision` remains Claude PreToolUse-only. Unknown clients (gemini, opencode, and others without a verified adapter) and non-injecting events (PreCompact, Stop, and the rest) disclose unavailable context transport rather than claiming delivery.
 
-The focused regression drives the actual binary: update Markdown with evidence, inspect its stored receipt, dispatch the next plain Claude hook and assert the exact new revision/body in additionalContext. Additional tests cover existing-Service refresh, unchanged governance, stale/concurrent writers, clear/history, unselected sources, two Projects, two Central roots, denied/missing sources, symlinks and whole-body budgets. The associated PR records actual execution results; this document alone is not passing evidence.
+Pi's extension carrier reads the `--json` machine envelope (`data.allowed/denial/injected`) rather than plain-mode stdout. `--json` is that envelope; plain mode remains the harness-facing protocol for clients that speak that wire.
+
+Primary protocol: https://code.claude.com/docs/en/hooks (consulted 20 September 2026). Existing Actuation capability descriptors still own which hooks are installed. This document does not invent a descriptor, rewrite Actuation's `context_channel` census, or bypass installation admission. Emitted bytes are not proof that a running provider loaded or followed them.
+
+The focused regression drives the actual binary: update Markdown with evidence, inspect its stored receipt, dispatch the next plain Claude hook and assert the exact new revision/body in additionalContext. Additional tests cover existing-Service refresh, unchanged governance, stale/concurrent writers, clear/history, unselected sources, two Projects, two Central roots, denied/missing sources, symlinks and whole-body budgets. #373 added zcode four-event and codex lifecycle emission tests at the translation boundary, and kept unknown/non-injecting clients disclosing. The associated PRs record actual execution results; this document alone is not passing evidence.
 
 ## Root identity and scope
 
@@ -50,4 +59,4 @@ The existing Context surface should expose Current guidance with source/revision
 
 Document skills consume the same selected operational reading, then retrieve the actual project vision, founding positions, relevant UX/Wayfinder and source material through native knowledge operations. Successful projection does not prove those sources were retrieved. Conversely, unavailable bkmr, ripgrep or rich QL providers do not justify pretending the ordinary corpus is absent. The knowledge-navigation skill now describes the concrete update/refresh path.
 
-Remaining integration work: Context/agent UI and native action discovery; typed session/user/guardian source selection and expiry/conflict policies; source-index invalidation/Return readback through #418; cross-workcell identity binding; other harness transports and live model acknowledgement; installed profile/capability admission. Existing source history owns prior complete versions; the in-file ledger retains reasons/bases, not every old body. Governance review must gather evidence and propose an explicit diff, never auto-rewrite it. General Flow cognition remains owner-read-only; this implementation does not claim to add a Flow writer.
+Remaining integration work: Context/agent UI and native action discovery; typed session/user/guardian source selection and expiry/conflict policies; source-index invalidation/Return readback through #418; cross-workcell identity binding; live model acknowledgement; remaining unverified harness transports (unknown clients still disclose); installed profile/capability admission. Existing source history owns prior complete versions; the in-file ledger retains reasons/bases, not every old body. Governance review must gather evidence and propose an explicit diff, never auto-rewrite it. General Flow cognition remains owner-read-only; this implementation does not claim to add a Flow writer.
