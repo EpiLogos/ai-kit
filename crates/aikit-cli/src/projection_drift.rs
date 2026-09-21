@@ -610,16 +610,24 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let canonical = temp.path().join("canonical");
         let payload = temp.path().join("payload");
-        // The payload is the snapshot: taken first, edited ground second.
+        // Write order does not decide on every filesystem — coarse or pooled
+        // mtimes can collapse program order — so the test sets explicit mtimes
+        // and asserts on the timestamps it named.
+        let set_mtime = |path: &std::path::Path, secs: u64| {
+            let file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .unwrap();
+        };
         write(&payload.join("SKILL.md"), "projected");
         write(&canonical.join("SKILL.md"), "canonical");
-        // Program order decides on every real filesystem: the later write has
-        // the later mtime.
+        // The payload is the snapshot: taken first, edited ground second.
+        set_mtime(&payload.join("SKILL.md"), 1_000);
+        set_mtime(&canonical.join("SKILL.md"), 2_000);
         assert_eq!(
             compare_direction(&canonical, &payload),
             DriftDirection::CanonicalNewer
         );
-        write(&payload.join("SKILL.md"), "projected again");
+        set_mtime(&payload.join("SKILL.md"), 3_000);
         assert_eq!(
             compare_direction(&canonical, &payload),
             DriftDirection::ProjectedNewer
