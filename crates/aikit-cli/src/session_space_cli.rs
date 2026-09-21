@@ -12,8 +12,8 @@
 
 use std::path::PathBuf;
 
-use crate::SessionSpaceServiceOps;
 use crate::app::Service;
+use crate::SessionSpaceServiceOps;
 use aikit_core::project::ProjectRef;
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
@@ -22,8 +22,8 @@ use aikit_core::session_space_application::{
 };
 use aikit_core::{AikitError, Result};
 use clap::{Parser, Subcommand};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 #[derive(Debug, Parser)]
 #[command(
