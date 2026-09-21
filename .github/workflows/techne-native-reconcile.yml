@@ -1,0 +1,44 @@
+name: Technē native owner reconciliation
+on:
+  push:
+    branches: ['codex/techne-native-construction-20260920']
+    paths: ['.github/workflows/techne-native-reconcile.yml']
+permissions:
+  contents: read
+jobs:
+  reconcile:
+    if: github.repository == 'EpiLogos/ai-kit' && github.ref == 'refs/heads/codex/techne-native-construction-20260920'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 100
+      - name: Join pinned native owners without force or main writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          main=2b6b89848aacadef7d8ec0b0e1a2b72b31ad639b
+          wiki=71bd634e02a9be6d0959cf9f38b9b9c2a50fe355
+          git fetch --depth=100 origin "$main" "$wiki"
+          if ! git merge-base --is-ancestor "$main" HEAD; then
+            git merge --no-ff "$main" -m 'merge: native construction onto current main'
+          fi
+          if ! git merge-base --is-ancestor "$wiki" HEAD; then
+            git merge --no-commit --no-ff "$wiki" || {
+              test "$(git diff --name-only --diff-filter=U)" = 'crates/aikit-cli/src/encounter_service.rs'
+            }
+            # This is main's existing encounter implementation; the inspected Wiki
+            # source differs here only in formatting. No encounter changes belong
+            # to this construction integration.
+            git checkout "$main" -- crates/aikit-cli/src/encounter_service.rs
+            test -z "$(git diff --name-only --diff-filter=U)"
+            git diff --cached --check
+            git commit -m 'merge: consume native Wiki reader and graph; preserve main encounter owner'
+          fi
+          git push origin HEAD:refs/heads/codex/techne-native-construction-20260920
+          git rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"
+          echo 'Native source join only. Ordinary PR compilation, regression and CLI gates remain required.' >> "$GITHUB_STEP_SUMMARY"
