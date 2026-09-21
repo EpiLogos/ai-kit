@@ -293,6 +293,62 @@ pub fn translate_verdict(
     }
 }
 
+/// Serialize a complete decision, not just its allowed/denied bit. Claude's
+/// additionalContext is event-specific; strict or unknown harnesses do not get
+/// a guessed schema. Neither emitted bytes nor --json inspection proves loading.
+pub fn translate_decision(
+    client: &str,
+    event: &str,
+    decision_json: bool,
+    decision: &HookDecision,
+) -> HarnessVerdict {
+    let event = HookEventKind::parse(event);
+    let native = event.as_str();
+    let claude = matches!(client, "claude" | "claude-code");
+    let reason = decision.denial.as_ref().map(|d| d.describe());
+    // permissionDecision is a PreToolUse-only schema. Other events retain the
+    // established exit-code denial rather than emitting invalid JSON.
+    let mut verdict = translate_verdict(
+        decision.allowed,
+        reason.as_deref(),
+        decision_json && claude && event == HookEventKind::PreToolUse,
+        native,
+    );
+    let context = decision.injected_text();
+    let mut warnings = decision.warnings.clone();
+    let supports_context = claude
+        && matches!(
+            event,
+            HookEventKind::SessionStart
+                | HookEventKind::UserPromptSubmit
+                | HookEventKind::PreToolUse
+                | HookEventKind::PostToolUse
+        );
+    if decision.allowed && !context.is_empty() {
+        if supports_context {
+            let mut document = verdict
+                .stdout
+                .as_ref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .unwrap_or_else(
+                    || serde_json::json!({"hookSpecificOutput":{"hookEventName":native}}),
+                );
+            document["hookSpecificOutput"]["additionalContext"] = context.into();
+            verdict.stdout = Some(document.to_string());
+        } else {
+            warnings.push(format!("context not delivered: {client}/{native} has no verified additional-context output adapter; use an explicit context read or supported lifecycle event"));
+        }
+    }
+    if !warnings.is_empty() {
+        let warning = warnings.join("\n");
+        verdict.stderr = Some(match verdict.stderr {
+            Some(reason) => format!("{reason}\n{warning}"),
+            None => warning,
+        });
+    }
+    verdict
+}
+
 /// claude-code's advanced JSON decision document for one verdict.
 fn decision_document(event: &str, decision: &str, reason: Option<&str>) -> String {
     serde_json::json!({
@@ -429,5 +485,81 @@ mod tests {
         )
         .expect("valid JSON document");
         assert_eq!(doc["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+}
+
+#[cfg(test)]
+mod context_transport_tests {
+    use super::*;
+    fn decision(kind: HookEventKind) -> HookDecision {
+        HookDecision {
+            event: kind,
+            allowed: true,
+            denial: None,
+            payload: serde_json::json!({}),
+            injected: vec!["current wiki correction".into()],
+            warnings: vec![],
+            steps: vec![],
+            groups: vec![],
+            bypass_consumed: false,
+        }
+    }
+    #[test]
+    fn plain_claude_orientation_and_tool_events_deliver_context() {
+        for event in [
+            "SessionStart",
+            "user-prompt-submit",
+            "PreToolUse",
+            "PostToolUse",
+        ] {
+            let output = translate_decision(
+                "claude",
+                event,
+                false,
+                &decision(HookEventKind::parse(event)),
+            );
+            let wire: serde_json::Value =
+                serde_json::from_str(output.stdout.as_deref().unwrap()).unwrap();
+            assert_eq!(
+                wire["hookSpecificOutput"]["additionalContext"],
+                "current wiki correction"
+            );
+            assert_eq!(
+                wire["hookSpecificOutput"]["hookEventName"],
+                HookEventKind::parse(event).as_str()
+            );
+            assert!(wire["hookSpecificOutput"]
+                .get("permissionDecision")
+                .is_none());
+        }
+    }
+    #[test]
+    fn strict_unknown_harnesses_and_non_injecting_events_are_not_faked() {
+        for (client, event) in [
+            ("zcode", "SessionStart"),
+            ("codex", "UserPromptSubmit"),
+            ("claude", "PreCompact"),
+            ("claude", "Stop"),
+        ] {
+            let output =
+                translate_decision(client, event, false, &decision(HookEventKind::parse(event)));
+            assert!(output.stdout.is_none());
+            assert!(output.stderr.unwrap().contains("context not delivered"));
+        }
+    }
+    #[test]
+    fn denial_stays_a_block_and_does_not_inject_context() {
+        let mut d = decision(HookEventKind::PreToolUse);
+        d.allowed = false;
+        let output = translate_decision("claude", "PreToolUse", false, &d);
+        assert_eq!(output.exit_code, 2);
+        assert!(output.stdout.is_none());
+        let output = translate_decision("claude", "PreToolUse", true, &d);
+        let wire: serde_json::Value =
+            serde_json::from_str(output.stdout.as_deref().unwrap()).unwrap();
+        assert_eq!(wire["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(wire["hookSpecificOutput"]
+            .get("additionalContext")
+            .is_none());
     }
 }

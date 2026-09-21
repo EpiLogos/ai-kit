@@ -1,0 +1,4 @@
+#!/bin/sh
+# Composition handle only. The native AIKit continuity engine reads selected
+# sources and uses the existing injected-context channel; this is not a gate.
+exit 0

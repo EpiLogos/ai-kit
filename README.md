@@ -251,3 +251,6 @@ git diff --check
 ## License
 
 Licensed at your option under either the Apache License, Version 2.0, or the MIT License.
+
+
+For the adaptive Wiki → operational projection → next-turn hook path, see [Wiki operational projection](docs/WIKI-OPERATIONAL-PROJECTION.md). Stored feedback, harness output and observed model use remain separate receipts.
