@@ -1063,6 +1063,19 @@ pub enum WikiSub {
     Ingest(WikiIngestArgs),
     /// Read a Wiki file's semantic index: search, neighbours, backlinks.
     Query(WikiQueryCmd),
+    /// Apply reviewed upserts to the project's canonical Agent Wiki through
+    /// the maintenance contract (plan, compare-and-swap persist, readback).
+    Maintenance(WikiMaintenanceArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WikiMaintenanceArgs {
+    /// Maintenance request JSON: `{"upserts": [WikiObject...],
+    /// "human_source_proposals": [...], "observed_source_revisions":
+    /// {"<source-ref>": "<revision>"}}` — the same object form the Wiki file
+    /// itself uses. `-` reads the request from stdin.
+    #[arg(long, value_name = "REQUEST_JSON")]
+    pub request: std::path::PathBuf,
 }
 
 /// `aikit wiki-shape` — CASE 18's product surface over the QL shape

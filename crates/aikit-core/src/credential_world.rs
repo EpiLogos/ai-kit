@@ -15,13 +15,10 @@
 //! `pub`, so a new field forces every exhaustive struct-literal constructor
 //! across the workspace -- including a `#[cfg(test)]` fixture in
 //! `crates/aikit-tui/src/project_workspace.rs` -- to be updated in the same
-//! change. Touching `aikit-tui` is out of scope for the task that introduced
-//! this module (two other agents were concurrently editing that crate), so
-//! `CredentialWorldDisclosure` is exposed at the crate boundary
-//! (`aikit_core::{CredentialWorldDisclosure, disclose_credential_world, ..}`)
-//! ready to be attached to `ProjectWorldReadModel` -- via a new field and a
-//! `with_credential_world`-style builder, mirroring `with_versioned_world`
-//! -- by whoever can safely touch that fixture next.
+//! change. It was therefore introduced freestanding; it has since been
+//! attached: `ProjectWorldReadModel` carries a `credential_world` field
+//! (built through `with_credential_world`), and `crates/aikit-cli/src/system.rs`
+//! wires the observed disclosure into that field for the System reading.
 //!
 //! `aikit-core` remains I/O-free: nothing here queries a live secret
 //! provider. Callers (adapters, the TUI application boundary) gather the
