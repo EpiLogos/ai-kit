@@ -2015,18 +2015,22 @@ impl Service {
         // model's context repeating standing guidance the session already
         // holds, while a changed or newly unavailable reading must reach the
         // next act without a restart.
-        if matches!(event.kind, aikit_core::hooks::HookEventKind::SessionStart | aikit_core::hooks::HookEventKind::UserPromptSubmit)
-            && tuning.allows("wiki-projection")
+        if matches!(
+            event.kind,
+            aikit_core::hooks::HookEventKind::SessionStart
+                | aikit_core::hooks::HookEventKind::UserPromptSubmit
+        ) && tuning.allows("wiki-projection")
         {
             let id = CapsuleId::parse(crate::wiki_projection::CAPABILITY)?;
             if let Some(active) = self.view.active.get(&id) {
                 let central = crate::temporal::central_root_enclosing(event.cwd.as_deref());
                 match crate::wiki_projection::context_blocks(
-                    &active.config, self.descriptor.project_root.as_deref(), central.as_deref(),
+                    &active.config,
+                    self.descriptor.project_root.as_deref(),
+                    central.as_deref(),
                 ) {
                     Ok((blocks, warnings)) => {
-                        let fingerprint =
-                            crate::wiki_projection::delivery_fingerprint(&blocks);
+                        let fingerprint = crate::wiki_projection::delivery_fingerprint(&blocks);
                         // The delivery state must survive the separate hook
                         // process, and hook dispatches share no context id —
                         // so the key is the resolved scope root, which is
@@ -2038,12 +2042,9 @@ impl Service {
                             .display()
                             .to_string();
                         let deliver = event.kind == aikit_core::hooks::HookEventKind::SessionStart
-                            || crate::wiki_projection::load_last_delivered(
-                                &self.home,
-                                &scope_key,
-                            )
-                            .as_deref()
-                            != Some(fingerprint.as_str());
+                            || crate::wiki_projection::load_last_delivered(&self.home, &scope_key)
+                                .as_deref()
+                                != Some(fingerprint.as_str());
                         if deliver {
                             crate::wiki_projection::store_last_delivered(
                                 &self.home,
@@ -2054,7 +2055,9 @@ impl Service {
                         }
                         decision.warnings.extend(warnings);
                     }
-                    Err(error) => decision.warnings.push(format!("Wiki projection unavailable: {}", error.message())),
+                    Err(error) => decision
+                        .warnings
+                        .push(format!("Wiki projection unavailable: {}", error.message())),
                 }
             }
         }

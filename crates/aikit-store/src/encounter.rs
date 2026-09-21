@@ -269,7 +269,12 @@ impl EncounterStore {
     }
     /// Serialise dispatch with the canonical draft and journal. Provider sink
     /// writes wait on this transaction, so no response can precede its prompt.
-    pub fn submit(&self, session: &ResourceRef, basis: u64, dispatch: impl FnOnce(&str) -> Result<()>) -> Result<EncounterDraft> {
+    pub fn submit(
+        &self,
+        session: &ResourceRef,
+        basis: u64,
+        dispatch: impl FnOnce(&str) -> Result<()>,
+    ) -> Result<EncounterDraft> {
         self.submit_context(session, basis, None, dispatch)
     }
     pub fn submit_context(
@@ -294,8 +299,8 @@ impl EncounterStore {
         let revision = basis
             .checked_add(1)
             .ok_or_else(|| failure("draft revision exhausted"))?;
-        let prepared=context::prepare_submission(&transaction,session,expectation)?;
-        let payload=context::compose(&draft.text,prepared.as_ref())?;
+        let prepared = context::prepare_submission(&transaction, session, expectation)?;
+        let payload = context::compose(&draft.text, prepared.as_ref())?;
         dispatch(&payload)?;
         let accepted = (|| -> Result<()> {
             transaction.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),serde_json::to_string(&serde_json::json!({"kind":"user-message","text":draft.text,"draft_revision":basis,"prepared_context":prepared,"payload_digest":format!("blake3:{}",blake3::hash(payload.as_bytes()).to_hex())})).map_err(failure)?]).map_err(failure)?;
@@ -310,7 +315,7 @@ impl EncounterStore {
                     params![session.as_str(), revision],
                 )
                 .map_err(failure)?;
-            context::clear_submitted(&transaction,prepared.as_ref())?;
+            context::clear_submitted(&transaction, prepared.as_ref())?;
             transaction.commit().map_err(failure)
         })();
         accepted.map_err(|error|AikitError::new("encounter.submission_uncertain",format!("Provider accepted the prompt but canonical persistence failed; do not resend automatically: {error}")))?;

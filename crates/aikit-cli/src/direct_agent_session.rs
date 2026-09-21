@@ -19,7 +19,7 @@ use aikit_core::session_space_application::{
 use aikit_core::{AikitError, CapsuleId, ResourceRef, Result};
 use aikit_store::{AikitHome, ContextLock, LockOptions, SessionSpaceApplicationStore};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
