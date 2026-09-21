@@ -586,7 +586,14 @@ impl OwnedChild {
         {
             // Confirm the leader is still our unreaped child before using its
             // group identity. ECHILD refuses signalling if ownership was lost.
-            self.poll_exit()?;
+            if self.poll_exit()?.is_some() {
+                // Already exited: a zombie-led group refuses SIGKILL with
+                // EPERM on macOS, and no signal is needed. Reaping is the
+                // whole remaining work.
+                let status = self.child.wait()?;
+                self.terminated = Some(status);
+                return Ok(status);
+            }
             match rustix::process::kill_process_group(self.pid(), rustix::process::Signal::KILL) {
                 Ok(()) | Err(rustix::io::Errno::SRCH) => {}
                 Err(error) => return Err(error.into()),
