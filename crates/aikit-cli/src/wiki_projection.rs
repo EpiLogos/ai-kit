@@ -390,7 +390,10 @@ pub fn context_blocks(
 /// next act. The state is a per-context fingerprint in AIKit's own state dir —
 /// a hint for delivery, never a substitute for the source.
 fn delivered_state_path(home: &aikit_store::AikitHome, context: &str) -> PathBuf {
-    home.state().join(DELIVERED_STATE_DIR).join(format!("{context}.json"))
+    // The context is a scope root — an absolute path. Joining it directly
+    // would replace the state directory, so the filename is derived from it.
+    let name = format!("{}.json", &digest(context.as_bytes())[..16]);
+    home.state().join(DELIVERED_STATE_DIR).join(name)
 }
 
 pub fn load_last_delivered(home: &aikit_store::AikitHome, context: &str) -> Option<String> {
