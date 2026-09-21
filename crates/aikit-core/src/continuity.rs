@@ -92,6 +92,7 @@ pub const CONTEXT_PRESSURE: &str = "context-pressure";
 /// asked even while it is not composed: the engine says "not composed"
 /// instead of staying silent about what it could do.
 pub const ENGINE_REACTIONS: &[&str] = &[
+    "wiki-projection",
     TURN_LEDGER,
     ENTITY_DISCLOSURE,
     DOMAIN_ACTIVATION,

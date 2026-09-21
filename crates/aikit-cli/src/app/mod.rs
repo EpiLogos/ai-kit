@@ -2009,6 +2009,26 @@ impl Service {
         // config.
         let tuning = ContinuityTuning::resolve(&self.view);
 
+        // Explicit source selection is distinct from the entire Wiki being
+        // retrievable. Reread the operational projection on each causal turn.
+        if matches!(event.kind, aikit_core::hooks::HookEventKind::SessionStart | aikit_core::hooks::HookEventKind::UserPromptSubmit)
+            && tuning.allows("wiki-projection")
+        {
+            let id = CapsuleId::parse(crate::wiki_projection::CAPABILITY)?;
+            if let Some(active) = self.view.active.get(&id) {
+                let central = crate::temporal::central_root_enclosing(event.cwd.as_deref());
+                match crate::wiki_projection::context_blocks(
+                    &active.config, self.descriptor.project_root.as_deref(), central.as_deref(),
+                ) {
+                    Ok((blocks, warnings)) => {
+                        decision.injected.extend(blocks);
+                        decision.warnings.extend(warnings);
+                    }
+                    Err(error) => decision.warnings.push(format!("Wiki projection unavailable: {}", error.message())),
+                }
+            }
+        }
+
         // The engine's own blocks are collected classified rather than pushed
         // straight at the decision, because the last stage — context pressure
         // — bounds ordinary payload and must never bound standing guidance.

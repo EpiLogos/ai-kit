@@ -1030,6 +1030,8 @@ pub struct WikiCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum WikiSub {
+    /// Read or revise a live Markdown operational projection in the Agent Wiki.
+    Projection(crate::wiki_projection::ProjectionCmd),
     /// Parse a Wiki file, rebuild the index over it and publish every finding.
     Validate(WikiValidateArgs),
     /// Write a WikiNode into a Wiki file.
