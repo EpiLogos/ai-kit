@@ -28,7 +28,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
 
@@ -613,17 +613,30 @@ mod tests {
         // The payload is the snapshot: taken first, edited ground second.
         write(&payload.join("SKILL.md"), "projected");
         write(&canonical.join("SKILL.md"), "canonical");
-        // Program order decides on every real filesystem: the later write has
-        // the later mtime.
+        // The mtimes are pinned explicitly. Two immediate writes can land in
+        // the same timestamp tick on coarse-grained runner filesystems, where
+        // the honest verdict is Undetermined — that outcome is production
+        // behaviour, and leaving the case to the clock would measure the
+        // machine, not the direction naming.
+        let earlier = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        set_mtime(&payload.join("SKILL.md"), earlier);
+        set_mtime(&canonical.join("SKILL.md"), earlier + Duration::from_secs(60));
         assert_eq!(
             compare_direction(&canonical, &payload),
             DriftDirection::CanonicalNewer
         );
         write(&payload.join("SKILL.md"), "projected again");
+        set_mtime(&payload.join("SKILL.md"), earlier + Duration::from_secs(120));
         assert_eq!(
             compare_direction(&canonical, &payload),
             DriftDirection::ProjectedNewer
         );
+    }
+
+    fn set_mtime(path: &Path, at: SystemTime) {
+        use std::fs::FileTimes;
+        let file = fs::File::options().append(true).open(path).unwrap();
+        file.set_times(FileTimes::new().set_modified(at)).unwrap();
     }
 
     #[test]

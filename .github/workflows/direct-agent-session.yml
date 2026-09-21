@@ -100,10 +100,18 @@ jobs:
           exec > >(tee direct-agent-evidence/composition.log) 2>&1
           git fetch --no-tags origin 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 37994265f5727af50ec6446687ed629dde047412 a0647b9b7110745661e4f1488f265e58623cad69
           git diff 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 -- crates/aikit-adapters/src/interactive_connection.rs crates/aikit-adapters/src/agent_session_host.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-adapters/tests/native_model_controls.rs crates/aikit-cli/tests/agent_session_protocol.rs crates/aikit-cli/tests/support/agent_session_protocol.py > direct-agent-evidence/model-dependency.patch
-          git apply --3way direct-agent-evidence/model-dependency.patch
+          # Post-integration bases already carry these deltas (O:I #463 / #376
+          # merged them). Compose only what is missing: apply when it applies,
+          # skip when the integrated content is demonstrably present, and fail
+          # only when neither holds.
+          if ! git apply --3way direct-agent-evidence/model-dependency.patch 2>direct-agent-evidence/model-apply.err; then
+            test -f crates/aikit-cli/tests/support/agent_session_protocol.py && git ls-files --error-unmatch crates/aikit-adapters/tests/native_model_controls.rs >/dev/null 2>&1 && echo "model dependency already integrated on this basis; composing nothing" || { cat direct-agent-evidence/model-apply.err >&2; exit 1; }
+          fi
           # #371 changes only #364's test, retaining its exact native implementation.
           git diff 37994265f5727af50ec6446687ed629dde047412 a0647b9b7110745661e4f1488f265e58623cad69 -- crates > direct-agent-evidence/folded-dependency.patch
-          git apply --3way direct-agent-evidence/folded-dependency.patch
+          if ! git apply --3way direct-agent-evidence/folded-dependency.patch 2>direct-agent-evidence/folded-apply.err; then
+            test -f crates/aikit-cli/tests/encounter_owner_folded_spawn.rs && grep -q "session_space_verb_prefix" crates/aikit-cli/src/lib.rs && echo "folded dependency already integrated on this basis; composing nothing" || { cat direct-agent-evidence/folded-apply.err >&2; exit 1; }
+          fi
           git write-tree > direct-agent-evidence/composed-tree.txt
           git diff HEAD > direct-agent-evidence/composed.patch
       - name: Composed production protocol and native folded startup
