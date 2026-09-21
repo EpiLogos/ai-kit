@@ -2027,17 +2027,27 @@ impl Service {
                     Ok((blocks, warnings)) => {
                         let fingerprint =
                             crate::wiki_projection::delivery_fingerprint(&blocks);
+                        // The delivery state must survive the separate hook
+                        // process, and hook dispatches share no context id —
+                        // so the key is the resolved scope root, which is
+                        // exactly what the selected sources hang from.
+                        let scope_key = central
+                            .as_deref()
+                            .or(self.descriptor.project_root.as_deref())
+                            .unwrap_or(&self.invocation_cwd)
+                            .display()
+                            .to_string();
                         let deliver = event.kind == aikit_core::hooks::HookEventKind::SessionStart
                             || crate::wiki_projection::load_last_delivered(
                                 &self.home,
-                                &self.descriptor.context_id.to_string(),
+                                &scope_key,
                             )
                             .as_deref()
                             != Some(fingerprint.as_str());
                         if deliver {
                             crate::wiki_projection::store_last_delivered(
                                 &self.home,
-                                &self.descriptor.context_id.to_string(),
+                                &scope_key,
                                 &fingerprint,
                             );
                             decision.injected.extend(blocks);
