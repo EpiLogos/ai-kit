@@ -314,6 +314,9 @@ fn spawn_parts(
     if let Some(environment) = environment.filter(|environment| !environment.is_empty()) {
         environment.apply(&mut command);
     }
+    // Human native-action authority is not a provider credential. Even an
+    // unscoped/login-backed harness must not inherit acceptance authority.
+    command.env_remove("CENTRAL_NATIVE_TOKEN");
     // A private group contains the adapter and ordinary inherited descendants.
     // It is a lifetime boundary, not a sandbox: deliberate setsid/setpgid escape
     // requires a stronger execution provider.
@@ -550,7 +553,7 @@ impl OwnedChild {
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            use rustix::process::{waitid, WaitId, WaitIdOptions};
+            use rustix::process::{WaitId, WaitIdOptions, waitid};
             use std::os::unix::process::ExitStatusExt;
             let observed = waitid(
                 WaitId::Pid(self.pid()),

@@ -12,8 +12,8 @@
 
 use std::path::PathBuf;
 
-use crate::app::Service;
 use crate::SessionSpaceServiceOps;
+use crate::app::Service;
 use aikit_core::project::ProjectRef;
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
@@ -22,8 +22,8 @@ use aikit_core::session_space_application::{
 };
 use aikit_core::{AikitError, Result};
 use clap::{Parser, Subcommand};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -41,6 +41,25 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Read the native ProjectBinding; no session or provider is created.
+    AgentSessionScope,
+    /// Read effective parent-Skill choices without activating or projecting.
+    AgentSessionSkills,
+    /// Prepare one accepted Central Agent and canonical Direct session.
+    AgentSessionPrepare {
+        #[arg(long)]
+        request_json: String,
+    },
+    /// Read a preparation without opening a provider or replaying work.
+    AgentSessionRead {
+        #[arg(long)]
+        agent_session: String,
+    },
+    /// Recover interrupted preparation by its original correlation.
+    AgentSessionFind {
+        #[arg(long)]
+        request_id: String,
+    },
     /// Internal scoped Model launch; raw credential material never enters JSON.
     EncounterModelExec {
         #[arg(long)]
@@ -241,6 +260,19 @@ fn run(cli: Cli) -> Result<()> {
     let service = Service::discover(&cwd)?;
 
     match cli.command {
+        Command::AgentSessionSkills => emit(&crate::direct_agent_session::skills(&service)?),
+        Command::AgentSessionScope => emit(&crate::direct_agent_session::scope(&service)?),
+        Command::AgentSessionPrepare { request_json } => emit(
+            &crate::direct_agent_session::prepare(&service, parse_json_arg(&request_json)?)?,
+        ),
+        Command::AgentSessionRead { agent_session } => emit(&crate::direct_agent_session::reading(
+            service.home(),
+            &aikit_core::ResourceRef::parse(agent_session)?,
+        )?),
+        Command::AgentSessionFind { request_id } => emit(&crate::direct_agent_session::find(
+            service.home(),
+            &request_id,
+        )?),
         Command::EncounterModelExec {
             agent_session,
             provider,
