@@ -1,14 +1,14 @@
 //! Selected-Agency provisioning of the canonical encounter. Configuration is an
 //! explicit native-owner operation, never something an imported message can do.
-use super::{EncounterContextAdmission, EncounterRequest, EncounterService, error};
+use super::{error, EncounterContextAdmission, EncounterRequest, EncounterService};
 use aikit_adapters::{
-    agency_admission::{AdmittedAgency, AgencySourceBasis, admit_agency},
+    agency_admission::{admit_agency, AdmittedAgency, AgencySourceBasis},
     runner::SystemRunner,
 };
 use aikit_core::{AikitError, ResourceRef, Result, SourceRevision};
 use aikit_store::{AikitHome, ContextLock, LockOptions};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{collections::BTreeSet, path::PathBuf};
 
 #[path = "encounter_agency_mint.rs"]

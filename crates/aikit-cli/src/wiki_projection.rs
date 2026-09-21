@@ -159,12 +159,7 @@ pub fn read(path: &Path) -> Result<ProjectionReading> {
 /// source is replaced atomically; an ordinary editor remains an independent
 /// writer, detected by the final revision check where possible. This does not
 /// claim a cross-process transaction with editors that ignore the lock.
-pub fn update(
-    path: &Path,
-    expected: &str,
-    body: &str,
-    reason: &str,
-) -> Result<ProjectionReading> {
+pub fn update(path: &Path, expected: &str, body: &str, reason: &str) -> Result<ProjectionReading> {
     if expected.len() != 64
         || !expected
             .bytes()

@@ -1,7 +1,7 @@
 //! Controlled native validation, not a person's Agent or live-model evidence.
-use aikit_cli::direct_agent_session::{PrepareRequest, find, validate_review};
+use aikit_cli::direct_agent_session::{find, validate_review, PrepareRequest};
 use aikit_core::ResourceRef;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 fn fixture() -> (PrepareRequest, ResourceRef, Value) {
     let request = PrepareRequest {
         request_id: "controlled-request-12345".into(),

@@ -140,8 +140,11 @@ fn unchanged_reading_is_not_redelivered_but_a_change_reaches_the_next_prompt() {
         .injected_text()
         .contains("Keep output brief"));
     // A correction changes the composition, so the next prompt receives it.
-    revised(&file, "# Working together\n
-For research, explain the argument fully.\n");
+    revised(
+        &file,
+        "# Working together\n
+For research, explain the argument fully.\n",
+    );
     let after = service.dispatch_hook(&prompt(&project)).unwrap();
     assert!(after.injected_text().contains("explain the argument fully"));
     // And it is not repeated again while unchanged.
@@ -180,8 +183,7 @@ fn stale_update_is_refused_and_an_empty_body_clears_explicitly() {
     let file = source(&temp.path().canonicalize().unwrap());
     let first = projection::read(&file).unwrap();
     let second = revised(&file, "new reading");
-    let e = projection::update(&file, &first.revision, "stale overwrite", "stale")
-        .unwrap_err();
+    let e = projection::update(&file, &first.revision, "stale overwrite", "stale").unwrap_err();
     assert_eq!(e.code(), "wiki_projection.conflict");
     assert_eq!(projection::read(&file).unwrap().revision, second.revision);
     // The source never accumulates embedded provenance: body in, body out.

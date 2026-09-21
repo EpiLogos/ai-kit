@@ -605,8 +605,12 @@ mod context_transport_tests {
                 "current wiki correction"
             );
         }
-        let output =
-            translate_decision("codex", "PreToolUse", false, &decision(HookEventKind::PreToolUse));
+        let output = translate_decision(
+            "codex",
+            "PreToolUse",
+            false,
+            &decision(HookEventKind::PreToolUse),
+        );
         assert!(output.stdout.is_none());
         assert!(output.stderr.unwrap().contains("context not delivered"));
     }
