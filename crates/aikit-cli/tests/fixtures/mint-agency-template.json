@@ -1,0 +1,92 @@
+{
+ "schema": "actuation.agency-actualisation/v1",
+ "request_ref": "actualisation-request:sf6-world-b",
+ "requester_ref": "human:sf6-owner",
+ "governing_binding": {
+  "schema": "actuation.agency/v1",
+  "binding_ref": "binding:sf6-governing",
+  "agent_ref": "agent:sf6-governor",
+  "agency_ref": "agency:sf6-governing",
+  "world_ref": "project:o-i",
+  "scope_ref": "scope:root",
+  "bounds_refs": [
+   "bound:sf6"
+  ],
+  "authority_refs": [
+   "authority:metagency",
+   "authority:sf6"
+  ],
+  "return_relation_ref": "return-relation:sf6-governing"
+ },
+ "metagency_grant": {
+  "schema": "actuation.agency/v1",
+  "grant_ref": "grant:sf6-agency",
+  "agency_ref": "agency:sf6-governing",
+  "world_binding_ref": "binding:sf6-governing",
+  "authority_ref": "authority:metagency",
+  "bounds_refs": [
+   "bound:sf6"
+  ],
+  "operations": [
+   "determine-agency",
+   "actualise-agency"
+  ]
+ },
+ "determination": {
+  "schema": "actuation.agency/v1",
+  "determination_ref": "determination:sf6-world-b",
+  "kind": "delegation",
+  "determining_agency_ref": "agency:sf6-governing",
+  "differentiated_agency_ref": "agency:sf6-world-b",
+  "world_binding_ref": "binding:sf6-world-b",
+  "bounds_refs": [
+   "bound:sf6"
+  ],
+  "authority_refs": [
+   "authority:sf6"
+  ],
+  "delegated_autonomy": {
+   "allowed_action_refs": [
+    "action/aikit/encounter-send",
+    "action/aikit/model-realise"
+   ],
+   "denied_action_refs": [
+    "action:source-mutation"
+   ],
+   "may_determine_within_bounds": false
+  },
+  "return_policy": {
+   "mode": "required",
+   "return_relation_ref": "return-relation:sf6-world-b"
+  }
+ },
+ "differentiated_binding": {
+  "schema": "actuation.agency/v1",
+  "binding_ref": "binding:sf6-world-b",
+  "agent_ref": "agent:sf6-world-b",
+  "agency_ref": "agency:sf6-world-b",
+  "world_ref": "project:o-i",
+  "scope_ref": "scope:root",
+  "determining_agency_ref": "agency:sf6-governing",
+  "bounds_refs": [
+   "bound:sf6"
+  ],
+  "authority_refs": [
+   "authority:sf6"
+  ],
+  "return_relation_ref": "return-relation:sf6-world-b",
+  "continuity_ref": "continuity:agent:sf6-world-b"
+ },
+ "agent_identity": {
+  "standing": "existing",
+  "evidence_refs": [
+   "evidence/sf3-hosted-acceptance-333"
+  ]
+ },
+ "provenance": {
+  "source_refs": [
+   "source/sf6-joined-acceptance"
+  ],
+  "context_refs": []
+ }
+}

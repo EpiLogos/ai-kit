@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, path::PathBuf};
 
+#[path = "encounter_agency_mint.rs"]
+pub(crate) mod mint;
+
 #[path = "encounter_model.rs"]
 pub(crate) mod model;
 
