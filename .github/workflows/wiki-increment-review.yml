@@ -1,0 +1,38 @@
+name: Wiki incremental native review
+on:
+  pull_request:
+    paths:
+      - 'crates/aikit-adapters/src/wiki_*.rs'
+      - '.github/workflows/wiki-increment-review.yml'
+permissions:
+  contents: read
+jobs:
+  graph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Test exact committed native graph
+        run: |
+          cargo test --locked -p aikit-adapters --lib wiki_graph -- --nocapture
+          cargo test --locked -p aikit-cli --test wiki_document_end_to_end
+      - name: Retain formatting patch without changing the tested source
+        if: always()
+        run: |
+          mkdir -p /tmp/wiki-increment
+          git rev-parse HEAD > /tmp/wiki-increment/revision
+          cargo fmt --all
+          git diff -- crates/aikit-adapters/src/wiki_graph.rs crates/aikit-adapters/src/wiki_graph_tests.rs crates/aikit-adapters/src/wiki_shape_catalog.rs crates/aikit-adapters/src/wiki_document.rs > /tmp/wiki-increment/format.diff
+          tar -czf /tmp/wiki-increment/formatted.tar.gz crates/aikit-adapters/src/wiki_graph.rs crates/aikit-adapters/src/wiki_graph_tests.rs crates/aikit-adapters/src/wiki_shape_catalog.rs crates/aikit-adapters/src/wiki_document.rs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wiki-increment-${{ github.run_id }}
+          path: /tmp/wiki-increment/
+          retention-days: 7

@@ -137,6 +137,12 @@ pub struct RelationEdge {
     /// containment opts in with [`RelationEdge::with_containment`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub containment: Option<ContainmentRole>,
+    /// Exact native edge identity. Equal endpoints do not collapse occurrences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<ResourceRef>,
+    /// Explicit source occurrence, never inferred from proximity or a label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authored_relation: Option<crate::knowledge_okf::AuthoredRelationEvidence>,
 }
 
 impl RelationEdge {
@@ -154,6 +160,8 @@ impl RelationEdge {
             direction,
             origin,
             containment: None,
+            reference: None,
+            authored_relation: None,
         }
     }
 

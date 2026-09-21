@@ -85,6 +85,14 @@ fn material(v: &Value, body: String) -> Result<SourceMaterial> {
             owners: vec![],
             media_type: if v["kind"] == "directory" {
                 "inode/directory"
+            } else if let Some(media_type) = v["media_type"].as_str() {
+                media_type
+            } else if std::path::Path::new(string(v, "path")?)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
+            {
+                "text/markdown"
             } else {
                 "text/plain"
             }
@@ -248,5 +256,34 @@ impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod wiki_media_tests {
+    use super::*;
+    #[test]
+    fn declared_markdown_locator_is_readable_but_never_grants_access() {
+        let mut value = json!({"source":{"ref":"source:note","agent_retrieval_allowed":true},"revision":"r1","title":"Note","tags":[],"path":"/world/Note.MD","kind":"file"});
+        assert_eq!(
+            material(&value, "# Note".into())
+                .unwrap()
+                .binding
+                .media_type,
+            "text/markdown"
+        );
+        value["media_type"] = json!("text/plain");
+        assert_eq!(
+            material(&value, "literal".into())
+                .unwrap()
+                .binding
+                .media_type,
+            "text/plain"
+        );
+        value["source"]["agent_retrieval_allowed"] = json!(false);
+        assert_eq!(
+            material(&value, "secret".into()).unwrap_err().code(),
+            "central.file_map_denied"
+        );
     }
 }
