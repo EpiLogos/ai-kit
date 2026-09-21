@@ -314,6 +314,9 @@ fn spawn_parts(
     if let Some(environment) = environment.filter(|environment| !environment.is_empty()) {
         environment.apply(&mut command);
     }
+    // Human native-action authority is not a provider credential. Even an
+    // unscoped/login-backed harness must not inherit acceptance authority.
+    command.env_remove("CENTRAL_NATIVE_TOKEN");
     // A private group contains the adapter and ordinary inherited descendants.
     // It is a lifetime boundary, not a sandbox: deliberate setsid/setpgid escape
     // requires a stronger execution provider.
@@ -583,9 +586,15 @@ impl OwnedChild {
         {
             // Confirm the leader is still our unreaped child before using its
             // group identity. ECHILD refuses signalling if ownership was lost.
-            self.poll_exit()?;
+            let leader_exit_observed = self.poll_exit()?;
             match rustix::process::kill_process_group(self.pid(), rustix::process::Signal::KILL) {
                 Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                // A group whose leader is an unreaped zombie refuses SIGKILL
+                // with EPERM on macOS even though nothing signalable remains;
+                // live descendants keep the group signalable, so after the
+                // leader's exit was observed an EPERM means the teardown work
+                // is already done and reaping is what is left.
+                Err(rustix::io::Errno::PERM) if leader_exit_observed.is_some() => {}
                 Err(error) => return Err(error.into()),
             }
         }

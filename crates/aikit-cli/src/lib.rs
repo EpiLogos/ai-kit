@@ -26,6 +26,7 @@ pub mod control_ground;
 pub mod credential;
 pub(crate) mod credential_delivery;
 pub mod discover;
+pub mod direct_agent_session;
 pub mod doctor;
 pub mod domain_activation;
 pub mod env;
