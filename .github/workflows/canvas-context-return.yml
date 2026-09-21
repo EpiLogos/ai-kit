@@ -1,0 +1,49 @@
+name: Prepared canvas context
+on:
+  pull_request:
+    paths:
+      - 'crates/aikit-store/src/encounter*'
+      - 'crates/aikit-store/tests/encounter_selected_context.rs'
+      - 'crates/aikit-cli/src/encounter_service.rs'
+      - '.github/workflows/canvas-context-return.yml'
+  push:
+    branches: [agent/canvas-context-20260920]
+permissions:
+  contents: read
+concurrency:
+  group: canvas-context-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  context:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Exact code identity and bounded source diff
+        run: |
+          git rev-parse HEAD | tee source-head.txt
+          git diff --binary 99306d858c255fa258d8cc419b314a433d3f92a4 HEAD > context-source.patch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canvas-native-source
+          path: |
+            source-head.txt
+            context-source.patch
+          retention-days: 1
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - name: Native selections and dispatch regressions
+        run: set -o pipefail; cargo test --locked -p aikit-store --test encounter_selected_context 2>&1 | tee context-tests.log
+      - name: Native CLI compatibility
+        run: set -o pipefail; cargo check --locked -p aikit-cli 2>&1 | tee context-cli.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canvas-native-context-proof
+          path: |
+            source-head.txt
+            context-tests.log
+            context-cli.log
+          retention-days: 7

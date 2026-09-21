@@ -541,15 +541,51 @@ impl<'a> ProcedureRunner<'a> {
                 &["rev-parse", "HEAD"],
                 "procedure.undo_failed",
             )?;
-            if current_branch.trim() != record.branch || current_head.trim() != record.commit {
+            if current_branch.trim() != record.branch {
                 return Err(AikitError::new(
                     "procedure.undo_drift",
-                    "the Git branch has advanced or changed since this Procedure; refusing to revert newer committed work",
+                    "the checkout is no longer on this Procedure's Git branch; refusing to undo from a different working context",
                 )
                 .with("expected_branch", record.branch)
                 .with("actual_branch", current_branch.trim())
                 .with("expected_head", record.commit)
                 .with("actual_head", current_head.trim()));
+            }
+            if current_head.trim() != record.commit {
+                // The branch advanced after this Procedure committed. Revert
+                // does not rewrite history, so advancement alone is safe; the
+                // danger is newer committed work that touches the Procedure's
+                // own paths and may depend on it.
+                if !git_succeeds(
+                    &record.repo,
+                    &[
+                        "merge-base",
+                        "--is-ancestor",
+                        &record.commit,
+                        current_head.trim(),
+                    ],
+                ) {
+                    return Err(AikitError::new(
+                        "procedure.undo_drift",
+                        "the recorded branch no longer contains this Procedure's commit; refusing to revert unseen history",
+                    )
+                    .with("expected_branch", record.branch)
+                    .with("expected_head", record.commit)
+                    .with("actual_head", current_head.trim()));
+                }
+                let overlapping = paths_touched_since(
+                    &record.repo,
+                    &record.commit,
+                    current_head.trim(),
+                    plan.touched_paths(),
+                )?;
+                if !overlapping.is_empty() {
+                    return Err(AikitError::new(
+                        "procedure.undo_drift",
+                        "commits after this Procedure touch the same paths and may depend on it; undo the newest one first, or sort the newer work out first",
+                    )
+                    .with("overlapping_paths", overlapping.join(", ")));
+                }
             }
             if let Err(error) = git(
                 &record.repo,
@@ -1284,14 +1320,29 @@ fn git(repo: &Path, args: &[&str], code: &'static str) -> Result<()> {
     if output.status.success() {
         Ok(())
     } else {
+        // A child's explanation may live on either stream — `git commit` with
+        // nothing staged prints "nothing to commit" on stdout — so the refusal
+        // carries both, trimmed, and never ends in a colon with nothing after
+        // it.
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => stdout,
+            (true, false) => stderr,
+            (false, false) => format!("{stdout} | {stderr}"),
+        };
+        let status = output.status.code().unwrap_or(-1);
         Err(AikitError::new(
             code,
-            format!(
-                "`git {}` exited with status {}: {}",
-                args.join(" "),
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
+            if detail.is_empty() {
+                format!("`git {}` exited with status {status}", args.join(" "))
+            } else {
+                format!(
+                    "`git {}` exited with status {status}: {detail}",
+                    args.join(" ")
+                )
+            },
         ))
     }
 }
@@ -1299,6 +1350,53 @@ fn git(repo: &Path, args: &[&str], code: &'static str) -> Result<()> {
 fn git_owned(repo: &Path, args: &[String], code: &'static str) -> Result<()> {
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     git(repo, &borrowed, code)
+}
+
+/// Some git commands answer a question with their exit status rather than
+/// output — `merge-base --is-ancestor` exits 0 for "yes" and non-zero for
+/// "no", so a plain failure check cannot be used to ask it.
+fn git_succeeds(repo: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// The procedure's paths that commits `from..to` touched, relative to the
+/// repository root. Empty means no later commit touched the Procedure's own
+/// work, so reverting its commit cannot disturb newer work.
+fn paths_touched_since(
+    repo: &Path,
+    from: &str,
+    to: &str,
+    touched: Vec<std::path::PathBuf>,
+) -> Result<Vec<String>> {
+    let mut args: Vec<String> = vec![
+        "log".to_owned(),
+        "--format=".to_owned(),
+        "--name-only".to_owned(),
+        format!("{from}..{to}"),
+        "--".to_owned(),
+    ];
+    for path in &touched {
+        match path.strip_prefix(repo) {
+            Ok(relative) => args.push(relative.display().to_string()),
+            Err(_) => args.push(path.display().to_string()),
+        }
+    }
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let listing = git_output(repo, &borrowed, "procedure.undo_failed")?;
+    let mut paths: Vec<String> = listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 fn git_output(repo: &Path, args: &[&str], code: &'static str) -> Result<String> {
@@ -1629,3 +1727,53 @@ pub fn git_repo_of(path: &Path) -> Option<PathBuf> {
 
 /// Re-exported so callers can name the isolation without importing core directly.
 pub use aikit_core::procedure::MutationIsolation as Isolation;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A git refusal must carry the child's own explanation, whichever stream
+    /// printed it: `git commit` with nothing staged fails while its "nothing
+    /// to commit" explanation goes to **stdout**, so a formatter that captured
+    /// only stderr reported "exited with status 1:" and nothing after it.
+    #[test]
+    fn a_git_refusal_carries_the_childs_stdout_explanation() {
+        let repo = tempfile::tempdir().unwrap();
+        let setup = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(setup(&["init", "-q"]), "git init succeeds in the temp repo");
+
+        let error = git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=AIKit",
+                "-c",
+                "user.email=aikit@test",
+                "commit",
+                "-m",
+                "nothing staged",
+            ],
+            "procedure.git_test",
+        )
+        .unwrap_err();
+
+        assert!(
+            error.message().contains("nothing to commit"),
+            "the refusal carries the child's stdout explanation: {}",
+            error.message()
+        );
+        assert!(
+            !error.message().ends_with(':'),
+            "the refusal never ends in a colon with nothing after it: {}",
+            error.message()
+        );
+    }
+}

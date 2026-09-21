@@ -199,6 +199,7 @@ fn collect_kind_refs(kind: &ProcedureKind, refs: &mut BTreeSet<ResourceRef>) {
         | ProcedureKind::Collate { .. }
         | ProcedureKind::Promote { .. }
         | ProcedureKind::ClientInstall { .. }
+        | ProcedureKind::ToolsProjection { .. }
         | ProcedureKind::MuxInstall { .. }
         | ProcedureKind::DoctorFix { .. }
         | ProcedureKind::IntegrationSetup { .. } => {}

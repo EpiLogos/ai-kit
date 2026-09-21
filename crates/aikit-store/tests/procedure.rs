@@ -706,7 +706,7 @@ fn a_post_commit_metadata_failure_drops_the_commit_and_restores_the_original_bra
 }
 
 #[test]
-fn git_undo_refuses_when_the_recorded_branch_has_advanced() {
+fn git_undo_reverts_the_procedure_commit_when_later_commits_are_disjoint() {
     let tmp = tempfile::tempdir().unwrap();
     let home = home(tmp.path());
     let repo = real_git_repo(tmp.path());
@@ -726,15 +726,112 @@ fn git_undo_refuses_when_the_recorded_branch_has_advanced() {
     let runner = ProcedureRunner::new(&home);
     runner.run(&procedure).unwrap();
 
+    // Later work lands on the branch after the Procedure — the normal
+    // post-apply state once anything else was committed. It does not touch
+    // the Procedure's paths, so reverting the Procedure's commit cannot
+    // disturb it.
     write(&repo.join("later.txt"), "intentional later commit\n");
     git(&repo, &["add", "later.txt"]);
     git(&repo, &["commit", "-m", "later work"]);
+
+    let undone = runner.undo(&procedure.id).unwrap();
+    assert_eq!(undone, 1);
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "original\n",
+        "the Procedure's own change is reverted"
+    );
+    assert_eq!(
+        fs::read_to_string(&repo.join("later.txt")).unwrap(),
+        "intentional later commit\n",
+        "later disjoint work is untouched"
+    );
+    assert!(git(&repo, &["status", "--porcelain"]).is_empty());
+    assert_eq!(git(&repo, &["log", "--oneline"]).lines().count(), 4);
+}
+
+#[test]
+fn git_undo_still_refuses_when_later_commits_touched_the_procedures_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = home(tmp.path());
+    let repo = real_git_repo(tmp.path());
+    let target = repo.join("file.txt");
+    let procedure = plan_procedure(
+        &home,
+        ProcedureKind::DoctorFix { checks: vec![] },
+        Plan::new().with_edit(WorldEdit::WriteFile {
+            path: target.clone(),
+            contents: b"procedure state\n".to_vec(),
+            inverse: Inverse::Restore {
+                blob: aikit_core::procedure::BlobId::deferred(),
+            },
+        }),
+    )
+    .unwrap();
+    let runner = ProcedureRunner::new(&home);
+    runner.run(&procedure).unwrap();
+
+    // Later commits touch the Procedure's own path but end at the exact
+    // recorded content, so the content-level preflight passes; the history
+    // check is what must refuse here — reverting under commits that touched
+    // the path could silently pull their work out.
+    write(&target, "a later experiment\n");
+    git(&repo, &["add", "file.txt"]);
+    git(&repo, &["commit", "-m", "experiment on the same path"]);
+    write(&target, "procedure state\n");
+    git(&repo, &["add", "file.txt"]);
+    git(&repo, &["commit", "-m", "restore the recorded content"]);
     let head = git(&repo, &["rev-parse", "HEAD"]);
 
     let error = runner.undo(&procedure.id).unwrap_err();
     assert_eq!(error.code(), "procedure.undo_drift");
+    assert!(
+        error.message().contains("same paths"),
+        "the refusal names the dependency risk: {}",
+        error.message()
+    );
     assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head);
     assert!(git(&repo, &["status", "--porcelain"]).is_empty());
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "procedure state\n",
+        "the newer committed work is preserved"
+    );
+    assert!(
+        !repo.join(".git/REVERT_HEAD").exists(),
+        "a refused undo never starts a revert"
+    );
+}
+
+#[test]
+fn git_undo_refuses_when_the_checkout_left_the_recorded_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = home(tmp.path());
+    let repo = real_git_repo(tmp.path());
+    let target = repo.join("file.txt");
+    let procedure = plan_procedure(
+        &home,
+        ProcedureKind::DoctorFix { checks: vec![] },
+        Plan::new().with_edit(WorldEdit::WriteFile {
+            path: target.clone(),
+            contents: b"procedure state\n".to_vec(),
+            inverse: Inverse::Restore {
+                blob: aikit_core::procedure::BlobId::deferred(),
+            },
+        }),
+    )
+    .unwrap();
+    let runner = ProcedureRunner::new(&home);
+    runner.run(&procedure).unwrap();
+
+    git(&repo, &["checkout", "-b", "elsewhere"]);
+    let error = runner.undo(&procedure.id).unwrap_err();
+    assert_eq!(error.code(), "procedure.undo_drift");
+    assert!(
+        error.message().contains("different working context"),
+        "the refusal explains the working-context risk: {}",
+        error.message()
+    );
     assert_eq!(fs::read_to_string(&target).unwrap(), "procedure state\n");
     assert!(
         !repo.join(".git/REVERT_HEAD").exists(),

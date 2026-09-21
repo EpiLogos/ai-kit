@@ -2910,6 +2910,12 @@ fn cmd_apply(cwd: &std::path::Path, a: ApplyArgs) -> Result<Reply> {
     // working tree apply is materialising. A harness whose descriptor cannot
     // be read is disclosed as a warning — never a failed apply.
     let hook_seams = aikit_cli::client::install_project_hook_seams(&service);
+    // Keeping the managed tools layers current is the other half of the same
+    // materialisation: an enabled+trusted tool-protocol capsule is what
+    // `aikit explain` discloses as "projected as an MCP server record", and
+    // apply is where that record reaches the harness configs the profiles
+    // declare managed.
+    let tools_projections = aikit_cli::client::project_tools_layers(&service);
     let warnings: Vec<String> = hook_seams
         .iter()
         .filter(|outcome| outcome.state == "refused")
@@ -2920,12 +2926,25 @@ fn cmd_apply(cwd: &std::path::Path, a: ApplyArgs) -> Result<Reply> {
                 outcome.reason.as_deref().unwrap_or("reason unavailable")
             )
         })
+        .chain(
+            tools_projections
+                .iter()
+                .filter(|outcome| outcome.state == "refused")
+                .map(|outcome| {
+                    format!(
+                        "{} tools layer not projected: {}",
+                        outcome.client,
+                        outcome.reason.as_deref().unwrap_or("reason unavailable")
+                    )
+                }),
+        )
         .collect();
     let data = jval!({
         "generation": applied.id.to_string(),
         "replaced": applied.replaced.as_ref().map(|g| g.to_string()),
         "label": a.label,
         "hook_seams": hook_seams,
+        "tools_projections": tools_projections,
     });
     Ok(reply(&service, data, warnings))
 }
