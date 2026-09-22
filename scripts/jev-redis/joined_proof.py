@@ -223,12 +223,15 @@ def main():
         "Factory capability relations and participant-specific disclosure.\n"
     )
     central_repo = pathlib.Path(args.central_repo).resolve()
+    matrix_manifest_origin = central_repo / "ProjectCentral/user/capability-matrix.json"
     matrix_origin = central_repo / "ProjectCentral/user/capability-matrix.csv"
     account_origin = central_repo / "ProjectCentral/user/central.html"
-    if not matrix_origin.is_file() or not account_origin.is_file():
+    if not matrix_manifest_origin.is_file() or not matrix_origin.is_file() or not account_origin.is_file():
         raise RuntimeError("current Central account/matrix carriers are unavailable")
+    matrix_manifest_path = central / "Control/user/capability-matrix.json"
     matrix_path = central / "Control/user/capability-matrix.csv"
     account_path = central / "Control/user/central.html"
+    matrix_manifest_path.write_bytes(matrix_manifest_origin.read_bytes())
     matrix_path.write_bytes(matrix_origin.read_bytes())
     account_path.write_bytes(account_origin.read_bytes())
 
@@ -236,6 +239,7 @@ def main():
     registered_sources = []
     for relative in [
         "Control/user/jev-redis-now-source.md",
+        "Control/user/capability-matrix.json",
         "Control/user/capability-matrix.csv",
         "Control/user/central.html",
     ]:
@@ -245,7 +249,7 @@ def main():
         }, env)
         registered_sources.append(registered["source_ref"])
         inspect, _ = ctrl_action(args.ctrl, central, "central.file-map.inspect", {}, env)
-    source_ref, matrix_source_ref, account_source_ref = registered_sources
+    source_ref, matrix_manifest_source_ref, matrix_source_ref, account_source_ref = registered_sources
 
     with matrix_path.open(newline="") as handle:
         matrix_rows = list(csv.DictReader(handle))
@@ -254,29 +258,12 @@ def main():
         if row.get("record_type") == "capability"
         and row.get("id") and row.get("need") and row.get("operation") and row.get("outcome")
     ]
-    if len(capabilities) < 3:
-        raise RuntimeError("Central capability matrix did not expose three usable capabilities")
-    # Use an explicit small selected inventory. Full-scope matrix assessment would
-    # account for every member; this bounded Factory proof records exactly which
-    # native rows it selected and the full catalogue size.
-    selected_matrix_rows = capabilities[:3]
+    if len(capabilities) < 3 or len(capabilities) > 64:
+        raise RuntimeError("Central capability matrix is outside the bounded full-scope proof")
     matrix_digest = "sha256:" + hashlib.sha256(matrix_path.read_bytes()).hexdigest()
+    # Capability candidates are no longer pre-shaped here. AIKit must read the
+    # real manifest + CSV through its native matrix preparation path.
     public_candidates = []
-    for row in selected_matrix_rows:
-        safe_id = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in row["id"])
-        public_candidates.append({
-            "source_ref": f"context-source/central-capability/{safe_id}",
-            "source_revision": matrix_digest,
-            "title": row["id"],
-            "excerpt": (
-                f"Need: {row['need']}\nOperation: {row['operation']}\n"
-                f"Outcome: {row['outcome']}\nImplementation: {row.get('implementation_status','')}\n"
-                f"Standing: {row.get('standing','')}"
-            ),
-            "route": f"{matrix_source_ref}#{row['id']}",
-            "agent_visibility": "payload",
-            "external_egress": "allowed",
-        })
 
     policy, _ = ctrl_action(args.ctrl, central, "central.work.policy", {}, env)
     participants = ["agent/comparison-worker", "agent/related-worker", "agent/verifier"]
@@ -284,7 +271,7 @@ def main():
         "task_ref": "task:oi-65-jev-redis-cloud-proof",
         "purpose": "Jev Redis NOW joined cloud proof",
         "participant_refs": participants,
-        "source_refs": [source_ref, matrix_source_ref, account_source_ref],
+        "source_refs": [source_ref, matrix_manifest_source_ref, matrix_source_ref, account_source_ref],
         "expected_policy_revision": policy["revision"],
     }, env)
     now_ref = allocation["now_ref"]
@@ -337,12 +324,21 @@ def main():
             "practice_refs": ["skill/aikit/operation", "skill/aikit/knowledge-navigation"],
             "central": {
                 "root": str(central), "project": None, "ctrl_bin": str(pathlib.Path(args.ctrl).resolve()),
-                "source_refs": [source_ref, matrix_source_ref, account_source_ref],
+                "source_refs": [source_ref, matrix_manifest_source_ref, matrix_source_ref, account_source_ref],
             },
             "factory": {
                 "state": str(pathlib.Path(args.factory_state).resolve()), "run_ref": run_ref,
                 "factory_bin": str(pathlib.Path(args.factory).resolve()),
                 "workflow_unit_refs": [unit_ref],
+            },
+            "matrix": {
+                "manifest": str(matrix_manifest_path),
+                "csv": str(matrix_path),
+                "view_id": None,
+                "capability_refs": [],
+                "full_scope": True,
+                "agent_visibility": "payload",
+                "external_egress": "allowed",
             },
             "wiki_queries": ["quartz"] if wiki_queries is None else wiki_queries,
             "candidate_items": candidates,
@@ -374,6 +370,11 @@ def main():
     factory_payload = redis_inspect["prepared"]["factory"]
     if not factory_payload or not factory_payload["workflow_units"][0]["capability_refs"]:
         raise RuntimeError("Prepared Redis arm did not retain Factory capability meaning")
+    matrix_payload = redis_result.get("matrix")
+    if not matrix_payload or len(matrix_payload["declaredCapabilityRefs"]) != len(capabilities):
+        raise RuntimeError("Prepared Redis arm did not account for the full declared matrix inventory")
+    if not matrix_payload["rowAxis"].get("members") or not matrix_payload["columnAxis"].get("members"):
+        raise RuntimeError("Prepared matrix omitted its declared axes")
 
     controlled = None
     server = None
@@ -761,11 +762,12 @@ def main():
         "conditions": {
             "task_ref": "task:oi-65-jev-redis-cloud-proof", "now_ref": now_ref,
             "central_source_ref": source_ref,
+            "central_matrix_manifest_source_ref": matrix_manifest_source_ref,
             "central_matrix_source_ref": matrix_source_ref,
             "central_account_source_ref": account_source_ref,
             "matrix_revision": matrix_digest,
             "matrix_total_capabilities": len(capabilities),
-            "selected_matrix_inventory": [row["id"] for row in selected_matrix_rows],
+            "declared_matrix_inventory": [row["id"] for row in capabilities],
             "factory_run_ref": run_ref,
             "factory_workflow_unit_ref": unit_refs[0], "worker_model": "not-invoked-in-controlled-comparison",
         },
