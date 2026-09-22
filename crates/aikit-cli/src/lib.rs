@@ -69,6 +69,7 @@ pub mod wiki_construct;
 pub mod wiki_projection;
 pub mod wiki_shape;
 pub mod working_environment_field;
+pub mod worktree_projection;
 
 pub use session_lifecycle_ops::SessionLifecycleServiceOps;
 pub use session_space_ops::SessionSpaceCliAdapter;
