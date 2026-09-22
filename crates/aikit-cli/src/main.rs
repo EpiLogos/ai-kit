@@ -207,6 +207,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
 
         Some(Command::Search(a)) => cmd_search(cwd, a),
         Some(Command::DevelopmentField(a)) => cmd_development_field(cwd, a),
+        Some(Command::Worktree(c)) => cmd_worktree(cwd, c),
         Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
         Some(Command::Flow(c)) => cmd_flow(cwd, c),
         Some(Command::Method(a)) => cmd_method(cwd, a),
@@ -336,6 +337,33 @@ fn parse_optional_development_field_revision(
         }
     })
     .transpose()
+}
+
+fn cmd_worktree(cwd: &std::path::Path, cmd: WorktreeCmd) -> Result<Reply> {
+    match cmd.command {
+        WorktreeSub::Project(args) => {
+            let service = Service::discover(cwd)?;
+            let suite = aikit_cli::worktree_projection::run(&args)?;
+            // The repositories still needing a human become the reply's warnings.
+            let warnings = suite
+                .attention()
+                .iter()
+                .map(|entry| entry.summary())
+                .collect::<Vec<_>>();
+            let mut data = serde_json::to_value(&suite).map_err(|error| {
+                AikitError::new(
+                    "cli.worktree_projection_encode_failed",
+                    format!("could not encode worktree projection: {error}"),
+                )
+            })?;
+            // Carry the plain reading alongside the structured entries so a
+            // screen and an agent read the same result.
+            if let Some(object) = data.as_object_mut() {
+                object.insert("summary".to_string(), Value::from(suite.summary_lines()));
+            }
+            Ok(reply(&service, data, warnings))
+        }
+    }
 }
 
 fn cmd_routine(command: RoutineCmd) -> Result<Reply> {

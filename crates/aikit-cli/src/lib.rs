@@ -47,6 +47,7 @@ pub mod project_binding;
 pub mod project_recency;
 pub mod projection_drift;
 pub mod projects;
+pub mod worktree_projection;
 pub mod recognised_praxis;
 pub mod route_launch;
 pub mod run;

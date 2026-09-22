@@ -9,11 +9,13 @@ use std::process::{Command, Output};
 
 use aikit_core::project::ProjectRef;
 use aikit_core::resource::{
-    CreateWorktreeRequest, DevelopmentFieldCurrentDiff, DevelopmentFieldGitBasis,
-    GitRepositoryRelation, GitWorkingState, GitWorktreeRelation, ProviderRef, VersionDiff,
-    VersionDiffRequest, VersionHistoryEntry, VersionHistoryRequest, VersionRevision,
-    VersionedProjectWorld, VersionedWorldCapability, VersionedWorldProvider,
-    VersionedWorldProviderDescriptor, VersionedWorldProviderStatus, VERSIONED_WORLD_VERSION,
+    decide, surface_reason, CreateWorktreeRequest, DevelopmentFieldCurrentDiff,
+    DevelopmentFieldGitBasis, Divergence, GitRepositoryRelation, GitWorkingState,
+    GitWorktreeRelation, ProjectionAction, ProjectionDecision, ProjectionTarget, ProviderRef,
+    RepoProjection, SuiteProjection, VersionDiff, VersionDiffRequest, VersionHistoryEntry,
+    VersionHistoryRequest, VersionRevision, VersionedProjectWorld, VersionedWorldCapability,
+    VersionedWorldProvider, VersionedWorldProviderDescriptor, VersionedWorldProviderStatus,
+    VERSIONED_WORLD_VERSION,
 };
 use aikit_core::{AikitError, Result};
 
@@ -162,6 +164,179 @@ impl NativeGitProvider {
             }
         };
         DevelopmentFieldGitBasis::new(world, base_revision, current_diff_from_base)
+    }
+
+    /// Fetch a remote so the projection target reflects canonical state. A
+    /// failure here is surfaced by `project_worktree`, never fatal to the
+    /// whole-suite reading — an offline machine still gets a stale-but-honest
+    /// projection against whatever it last fetched.
+    pub fn fetch(&self, locator: &str, remote: &str) -> Result<()> {
+        let output = self.output(locator, ["fetch", "--quiet", remote])?;
+        if !output.status.success() {
+            return Err(git_failure(output));
+        }
+        Ok(())
+    }
+
+    /// Resolve the projection target to a commit, or `None` when the ref is not
+    /// present here (unknown remote/branch, or never fetched).
+    fn resolve_target(
+        &self,
+        locator: &str,
+        target: &ProjectionTarget,
+    ) -> Result<Option<VersionRevision>> {
+        let commit = format!("{}^{{commit}}", target.qualified());
+        Ok(self
+            .optional(locator, ["rev-parse", "--verify", "--quiet", &commit])?
+            .map(VersionRevision::new))
+    }
+
+    /// `HEAD`'s (ahead, behind) counts relative to the target: `git rev-list
+    /// --left-right --count HEAD...<target>` reports left = commits on HEAD only
+    /// (ahead), right = commits on the target only (behind).
+    fn ahead_behind(&self, locator: &str, target_qualified: &str) -> Result<(u64, u64)> {
+        let spec = format!("HEAD...{target_qualified}");
+        let value = self.checked(locator, ["rev-list", "--left-right", "--count", &spec])?;
+        Ok(parse_ahead_behind(&value).unwrap_or((0, 0)))
+    }
+
+    /// The one allowed mutation: fast-forward HEAD to the target. `--ff-only`
+    /// changes nothing and returns non-zero unless the move is a true
+    /// fast-forward, so a change that landed since the read cannot cause a
+    /// clobber. Works on a detached HEAD (the whole-suite worktree case),
+    /// advancing it without leaving detached state.
+    fn fast_forward(&self, locator: &str, target_qualified: &str) -> Result<()> {
+        let output = self.output(locator, ["merge", "--ff-only", target_qualified])?;
+        if !output.status.success() {
+            return Err(git_failure(output));
+        }
+        Ok(())
+    }
+
+    /// Project one checkout onto the target, safely.
+    ///
+    /// Read-only unless `apply`; even then the only mutation is a fast-forward
+    /// of a **clean**, strictly-behind checkout. A dirty, ahead, or diverged
+    /// checkout is always surfaced untouched — projection never discards
+    /// uncommitted or unmerged work to force the target.
+    pub fn project_worktree(
+        &self,
+        project: &ProjectRef,
+        key: &str,
+        locator: &str,
+        target: &ProjectionTarget,
+        apply: bool,
+        fetch: bool,
+    ) -> Result<RepoProjection> {
+        let fetch_error = if fetch {
+            self.fetch(locator, &target.remote).err()
+        } else {
+            None
+        };
+        let mut head = VersionRevision::new(self.checked(locator, ["rev-parse", "HEAD"])?);
+        let branch = self.optional(locator, ["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+        let detached = branch.is_none();
+        let clean = self.working_state(locator)?.is_clean();
+        let qualified = target.qualified();
+        let target_revision = self.resolve_target(locator, target)?;
+
+        let (divergence, action) = match &target_revision {
+            None => {
+                let mut reason = surface_reason(&Divergence::TargetMissing, clean, &qualified);
+                if let Some(error) = &fetch_error {
+                    reason = format!("{reason} (git fetch failed: {})", error.message());
+                }
+                (
+                    Divergence::TargetMissing,
+                    ProjectionAction::Surfaced { reason },
+                )
+            }
+            Some(_) => {
+                let (ahead, behind) = self.ahead_behind(locator, &qualified)?;
+                let divergence = Divergence::classify(true, ahead, behind);
+                let action = match decide(&divergence, clean) {
+                    ProjectionDecision::AlreadyProjected => ProjectionAction::AlreadyProjected,
+                    ProjectionDecision::Surface => ProjectionAction::Surfaced {
+                        reason: surface_reason(&divergence, clean, &qualified),
+                    },
+                    ProjectionDecision::FastForward if apply => {
+                        let from = head.clone();
+                        match self.fast_forward(locator, &qualified) {
+                            Ok(()) => {
+                                head = VersionRevision::new(
+                                    self.checked(locator, ["rev-parse", "HEAD"])?,
+                                );
+                                ProjectionAction::FastForwarded {
+                                    from,
+                                    to: head.clone(),
+                                }
+                            }
+                            Err(error) => ProjectionAction::Failed {
+                                reason: format!(
+                                    "fast-forward to {qualified} failed: {}",
+                                    error.message()
+                                ),
+                            },
+                        }
+                    }
+                    ProjectionDecision::FastForward => ProjectionAction::WouldFastForward {
+                        to: target_revision.clone().unwrap_or_else(|| head.clone()),
+                    },
+                };
+                (divergence, action)
+            }
+        };
+
+        Ok(RepoProjection {
+            key: key.to_string(),
+            project: project.clone(),
+            locator: locator.to_string(),
+            target: qualified,
+            head,
+            target_revision,
+            branch,
+            detached,
+            clean,
+            divergence,
+            action,
+        })
+    }
+
+    /// Project a whole set of checkouts onto the target in one pass.
+    ///
+    /// Each entry is `(project, key, checkout_root)`. One checkout that cannot
+    /// even be read (not a git repository, empty, unreadable) is recorded as a
+    /// `Failed` entry with the reason attached — it never aborts the projection
+    /// of the others.
+    pub fn project_suite(
+        &self,
+        repos: &[(ProjectRef, String, String)],
+        target: &ProjectionTarget,
+        apply: bool,
+        fetch: bool,
+    ) -> SuiteProjection {
+        let entries = repos
+            .iter()
+            .map(|(project, key, locator)| {
+                self.project_worktree(project, key, locator, target, apply, fetch)
+                    .unwrap_or_else(|error| RepoProjection {
+                        key: key.clone(),
+                        project: project.clone(),
+                        locator: locator.clone(),
+                        target: target.qualified(),
+                        head: VersionRevision::new("unknown"),
+                        target_revision: None,
+                        branch: None,
+                        detached: false,
+                        clean: false,
+                        divergence: Divergence::Unknown,
+                        action: ProjectionAction::Failed {
+                            reason: error.message().to_string(),
+                        },
+                    })
+            })
+            .collect();
+        SuiteProjection::new(target.qualified(), apply, entries)
     }
 }
 
@@ -589,5 +764,342 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    // ---- Worktree projection (project-to-origin/main) integration ----
+
+    fn git_available() -> bool {
+        matches!(
+            NativeGitProvider::new().unwrap().descriptor().status,
+            VersionedWorldProviderStatus::Available
+        )
+    }
+
+    fn projection_root() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "aikit-projection-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn config_identity(repo: &Path) {
+        run(repo, ["config", "user.name", "AIKit Test"]);
+        run(repo, ["config", "user.email", "aikit@example.invalid"]);
+    }
+
+    /// A bare `origin` seeded with one `main` commit, plus a working clone whose
+    /// HEAD sits exactly on `origin/main`.
+    fn origin_with_clone(root: &Path) -> (PathBuf, PathBuf) {
+        fs::create_dir_all(root).unwrap();
+        let origin = root.join("origin.git");
+        run(root, ["init", "-q", "-b", "main", "--bare", "origin.git"]);
+        let seed = root.join("seed");
+        run(
+            root,
+            [
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
+        );
+        config_identity(&seed);
+        fs::write(seed.join("README.md"), "one\n").unwrap();
+        run(&seed, ["add", "README.md"]);
+        run(&seed, ["commit", "-qm", "c1"]);
+        run(&seed, ["push", "-q", "-u", "origin", "main"]);
+
+        let work = root.join("work");
+        run(
+            root,
+            [
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        config_identity(&work);
+        (origin, work)
+    }
+
+    /// Advance `origin/main` by one commit, via a throwaway clone.
+    fn advance_origin(root: &Path, origin: &Path) {
+        let mover = root.join(format!("mover-{}", std::process::id()));
+        run(
+            root,
+            [
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                mover.to_str().unwrap(),
+            ],
+        );
+        config_identity(&mover);
+        fs::write(mover.join("README.md"), "one\ntwo\n").unwrap();
+        run(&mover, ["commit", "-qam", "c2"]);
+        run(&mover, ["push", "-q", "origin", "main"]);
+        fs::remove_dir_all(&mover).unwrap();
+    }
+
+    fn project(work: &Path, apply: bool) -> RepoProjection {
+        let provider = NativeGitProvider::new().unwrap();
+        provider
+            .project_worktree(
+                &ProjectRef::parse("project:test").unwrap(),
+                "test",
+                &work.to_string_lossy(),
+                &ProjectionTarget::default(),
+                apply,
+                true,
+            )
+            .unwrap()
+    }
+
+    fn head_of(repo: &Path) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn observe_reports_a_behind_checkout_without_touching_it() {
+        if !git_available() {
+            return;
+        }
+        let root = projection_root();
+        let (origin, work) = origin_with_clone(&root);
+        let before = head_of(&work);
+        advance_origin(&root, &origin);
+
+        let projection = project(&work, false);
+        assert_eq!(projection.divergence, Divergence::Behind { by: 1 });
+        assert!(matches!(
+            projection.action,
+            ProjectionAction::WouldFastForward { .. }
+        ));
+        // Observe mode never moves HEAD.
+        assert_eq!(head_of(&work), before, "observe must not move HEAD");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_fast_forwards_a_clean_behind_checkout() {
+        if !git_available() {
+            return;
+        }
+        let root = projection_root();
+        let (origin, work) = origin_with_clone(&root);
+        advance_origin(&root, &origin);
+
+        let projection = project(&work, true);
+        assert_eq!(projection.divergence, Divergence::Behind { by: 1 });
+        match &projection.action {
+            ProjectionAction::FastForwarded { to, .. } => {
+                assert_eq!(head_of(&work), to.as_str(), "HEAD must land on the target");
+            }
+            other => panic!("expected fast-forward, got {other:?}"),
+        }
+        // The projected HEAD is exactly origin/main.
+        let origin_main = {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&work)
+                .args(["rev-parse", "origin/main"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        assert_eq!(head_of(&work), origin_main);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_fast_forwards_a_detached_head_and_stays_detached() {
+        if !git_available() {
+            return;
+        }
+        let root = projection_root();
+        let (origin, work) = origin_with_clone(&root);
+        // Detach HEAD, exactly as the whole-suite dev worktrees are.
+        run(&work, ["checkout", "-q", "--detach", "HEAD"]);
+        advance_origin(&root, &origin);
+
+        let projection = project(&work, true);
+        assert!(projection.detached, "the checkout began detached");
+        assert!(matches!(
+            projection.action,
+            ProjectionAction::FastForwarded { .. }
+        ));
+        // Still detached after the fast-forward (no branch was created).
+        let symbolic = Command::new("git")
+            .arg("-C")
+            .arg(&work)
+            .args(["symbolic-ref", "--quiet", "HEAD"])
+            .status()
+            .unwrap();
+        assert!(
+            !symbolic.success(),
+            "HEAD must remain detached after projection"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_dirty_behind_checkout_is_surfaced_and_never_reset() {
+        if !git_available() {
+            return;
+        }
+        let root = projection_root();
+        let (origin, work) = origin_with_clone(&root);
+        advance_origin(&root, &origin);
+        // Uncommitted local edit: the case a `reset --hard` would destroy.
+        fs::write(work.join("README.md"), "one\nLOCAL WORK\n").unwrap();
+        let before = head_of(&work);
+
+        let projection = project(&work, true);
+        assert!(!projection.clean);
+        match &projection.action {
+            ProjectionAction::Surfaced { reason } => {
+                assert!(reason.contains("uncommitted"), "reason: {reason}");
+            }
+            other => panic!("dirty-behind must be surfaced, got {other:?}"),
+        }
+        // The work is untouched: HEAD unmoved and the local edit intact.
+        assert_eq!(head_of(&work), before, "a dirty tree must never be moved");
+        assert_eq!(
+            fs::read_to_string(work.join("README.md")).unwrap(),
+            "one\nLOCAL WORK\n",
+            "uncommitted work must be preserved byte for byte"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_checkout_with_local_commits_is_surfaced_not_discarded() {
+        if !git_available() {
+            return;
+        }
+        let root = projection_root();
+        let (_origin, work) = origin_with_clone(&root);
+        // A committed local advance that is not on origin/main.
+        fs::write(work.join("feature.rs").as_path(), "// local\n").unwrap();
+        run(&work, ["add", "feature.rs"]);
+        run(&work, ["commit", "-qm", "local feature"]);
+        let before = head_of(&work);
+
+        let projection = project(&work, true);
+        assert_eq!(projection.divergence, Divergence::Ahead { by: 1 });
+        assert!(matches!(projection.action, ProjectionAction::Surfaced { .. }));
+        assert_eq!(head_of(&work), before, "a local commit must not be discarded");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_diverged_checkout_is_surfaced_not_rewritten() {
+        if !git_available() {
+            return;
+        }
+        let root = projection_root();
+        let (origin, work) = origin_with_clone(&root);
+        // Local history and remote history both move: divergence.
+        fs::write(work.join("local.rs"), "// local\n").unwrap();
+        run(&work, ["add", "local.rs"]);
+        run(&work, ["commit", "-qm", "local"]);
+        advance_origin(&root, &origin);
+        let before = head_of(&work);
+
+        let projection = project(&work, true);
+        assert!(matches!(projection.divergence, Divergence::Diverged { .. }));
+        assert!(matches!(projection.action, ProjectionAction::Surfaced { .. }));
+        assert_eq!(
+            head_of(&work),
+            before,
+            "diverged history must not be rewritten"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_up_to_date_checkout_needs_no_action() {
+        if !git_available() {
+            return;
+        }
+        let root = projection_root();
+        let (_origin, work) = origin_with_clone(&root);
+        let projection = project(&work, true);
+        assert_eq!(projection.divergence, Divergence::UpToDate);
+        assert_eq!(projection.action, ProjectionAction::AlreadyProjected);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_suite_reports_each_repo_and_never_aborts_on_a_bad_root() {
+        if !git_available() {
+            return;
+        }
+        let root = projection_root();
+        let (origin_a, behind) = origin_with_clone(&root.join("a"));
+        advance_origin(&root.join("a"), &origin_a);
+        let (_origin_b, current) = origin_with_clone(&root.join("b"));
+        // A path that is not a git checkout at all.
+        let not_a_repo = root.join("not-a-repo");
+        fs::create_dir_all(&not_a_repo).unwrap();
+
+        let provider = NativeGitProvider::new().unwrap();
+        let repos = vec![
+            (
+                ProjectRef::parse("project:behind").unwrap(),
+                "behind".to_string(),
+                behind.to_string_lossy().to_string(),
+            ),
+            (
+                ProjectRef::parse("project:current").unwrap(),
+                "current".to_string(),
+                current.to_string_lossy().to_string(),
+            ),
+            (
+                ProjectRef::parse("project:broken").unwrap(),
+                "broken".to_string(),
+                not_a_repo.to_string_lossy().to_string(),
+            ),
+        ];
+        let suite = provider.project_suite(&repos, &ProjectionTarget::default(), true, true);
+
+        assert_eq!(suite.entries.len(), 3);
+        let behind_entry = suite.entries.iter().find(|e| e.key == "behind").unwrap();
+        assert!(matches!(
+            behind_entry.action,
+            ProjectionAction::FastForwarded { .. }
+        ));
+        let current_entry = suite.entries.iter().find(|e| e.key == "current").unwrap();
+        assert_eq!(current_entry.action, ProjectionAction::AlreadyProjected);
+        let broken_entry = suite.entries.iter().find(|e| e.key == "broken").unwrap();
+        assert!(matches!(broken_entry.action, ProjectionAction::Failed { .. }));
+        assert_eq!(broken_entry.divergence, Divergence::Unknown);
+
+        // Two of three now sit on the target; the broken one still needs a human.
+        assert_eq!(suite.projected_count(), 2);
+        assert_eq!(suite.attention().len(), 1);
+        assert!(!suite.all_projected());
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
