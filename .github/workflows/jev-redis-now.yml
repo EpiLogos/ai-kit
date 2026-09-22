@@ -1,0 +1,106 @@
+name: Jev Redis NOW native integration
+
+on:
+  push:
+    branches: [agent/388-jev-redis-now]
+  pull_request:
+    paths:
+      - '.github/workflows/jev-redis-now.yml'
+      - 'crates/**'
+      - 'scripts/jev-redis/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jev-redis-now-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  basis:
+    name: Exact cloud source basis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Capture current native owners without touching an installed World
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/jev-now-basis/repos" "$RUNNER_TEMP/jev-now-basis/export"
+          git rev-parse HEAD > "$RUNNER_TEMP/jev-now-basis/aikit.sha"
+          for owner in Central Workcell Factory Actuation O-I QL-MEF; do
+            git clone --quiet --depth=1 --branch main "https://github.com/EpiLogos/$owner.git" "$RUNNER_TEMP/jev-now-basis/repos/$owner"
+          done
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, tarfile
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'jev-now-basis'
+          repos = {'ai-kit': pathlib.Path(os.environ['GITHUB_WORKSPACE'])}
+          repos.update({p.name: p for p in (root / 'repos').iterdir()})
+          basis = {}
+          with tarfile.open(root / 'native-source-basis.tar.gz', 'w:gz') as archive:
+              for name, repo in sorted(repos.items()):
+                  sha = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+                  basis[name] = {'revision': sha, 'source': 'current main' if name != 'ai-kit' else 'candidate head'}
+                  paths = subprocess.check_output(['git', '-C', str(repo), 'ls-files', '-z']).split(b'\0')
+                  for item in paths:
+                      if not item:
+                          continue
+                      path = repo / os.fsdecode(item)
+                      if not path.is_file() or path.is_symlink() or path.stat().st_size > 2_000_000:
+                          continue
+                      try:
+                          content = path.read_bytes()
+                          content.decode('utf-8')
+                      except (UnicodeError, OSError):
+                          continue
+                      if b'\0' not in content:
+                          archive.add(path, arcname=name + '/' + os.fsdecode(item), recursive=False)
+          (root / 'basis.json').write_text(json.dumps(basis, indent=2) + '\n')
+          print(json.dumps(basis, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jev-redis-now-source-basis
+          path: |
+            ${{ runner.temp }}/jev-now-basis/basis.json
+            ${{ runner.temp }}/jev-now-basis/native-source-basis.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  native-regression:
+    name: Native AIKit context regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install declared native Rust toolchain
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Exercise existing native core and storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p aikit-core -p aikit-store --lib -- --nocapture 2>&1 | tee "$RUNNER_TEMP/jev-now-native.log"
+      - name: Record actual source and toolchain
+        if: always()
+        run: |
+          { git rev-parse HEAD; rustc -Vv; cargo -V; } > "$RUNNER_TEMP/jev-now-toolchain.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jev-redis-now-native-regression
+          path: |
+            ${{ runner.temp }}/jev-now-native.log
+            ${{ runner.temp }}/jev-now-toolchain.txt
+          if-no-files-found: error
