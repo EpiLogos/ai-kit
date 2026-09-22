@@ -155,3 +155,36 @@ cache reads do not require Jev inference.
 Live Jev/model-provider behaviour remains a distinct environment observation:
 production code and controlled protocol tests do not impersonate a live
 credentialed provider episode.
+
+
+## External protocol and owner basis checked for this cut
+
+Checked against current public provider/owner sources on **22 September 2026**:
+
+- TypeSafe's published System One OpenAPI surface is `POST https://api.typesafe.ai/v1/systemone` with Bearer authentication and typed Noul / Choice / Score questions. Responses are admitted only when the requested answer set is complete and the provider supplies the actual returned `model` and `usage`. The public model-list route remains `GET /v1/models`.
+- TypeSafe's public Jev launch material states the launch input tariff as **$0.042 per million input tokens** with output free. AIKit records the exact tariff source/model in `JevLimits`, reserves finite worst-case spend before an attempt, and refuses to apply a tariff to a different returned model. The controlled cloud proof requests/returns `jev-1.13.0`; that is controlled protocol evidence, not a claim about which live model an installed credential will receive.
+- Redis material is consumed through Workcell's merged native owner slice, Workcell PR #98 / merge `9d627ff4d90de2cddf237b14f9854a64e1b5819e`. The reference profile targets the Redis OSS **8.10** series with AOF persistence, finite maxmemory, `noeviction`, loopback binding and explicit recovery/cleanup law.
+- Central's document/capability carrier is the existing `ql-capability-matrix/1` protocol. NOW preparation reads the declared manifest + CSV directly, retains the view question/axes/account links, supports either a bounded selected capability inventory or full declared scope, and revalidates both carrier revisions before publication. No second matrix registry is introduced.
+- Factory meaning comes from its current developmental Run/Journey/WorkflowUnit readers. Actuation attribution comes from its existing durable ActuationStream, model-usage and Activity contracts. These owner records remain authoritative; Redis retains only the operative projection.
+
+The installed live-provider episode must record the actual provider-returned model, usage and effective local service versions again. These dated external checks establish the implementation basis; they are not a substitute for that live observation.
+
+## Joined proof
+
+The reusable runner is:
+
+```sh
+python3 scripts/jev-redis/joined_proof.py --help
+```
+
+The hosted joined job builds the candidate AIKit plus **current Central, Factory and Actuation owner mains**, installs real **bkmr 7.6.7**, starts real **Redis 8.10**, and runs one disposable Factory undertaking through:
+
+1. ordinary owner discovery;
+2. Redis-prepared context with no Jev selection;
+3. Jev-assisted preparation using the production transport's explicitly controlled loopback standing.
+
+The episode registers ordinary source plus the current Central account and capability-matrix manifest/CSV through Central's real file-map/BKMR route. Its matrix arm uses AIKit's native matrix reader and accounts for the complete declared capability inventory in this bounded fixture, rather than passing a hand-shaped catalogue to Jev.
+
+It also proves distinct implementer/related-worker/verifier readings, verifier-private isolation, related Return/change delivery, fresh-session continuation, stale CAS refusal, source change while Jev is in flight, malformed-provider refusal, disclosure revocation, Redis-unavailable failure followed by persisted restart, durable Wiki/practice Return, later-participant reuse, and Jev invocation/usage attribution through Actuation. A fresh runner independently reviews the joined evidence artifact.
+
+The controlled comparison deliberately leaves worker-model performance, human corrections and live TypeSafe behavior unavailable. The same runner is the installed-world/live-provider acceptance runner; local integration replaces the controlled endpoint with the native real credential reference and supplies the admitted Agency/Actuation/session refs without changing the fixtures or acceptance logic.
