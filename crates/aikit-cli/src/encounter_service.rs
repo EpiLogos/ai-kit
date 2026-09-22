@@ -48,6 +48,7 @@ pub enum EncounterProtocol {
     #[default]
     Acp,
     PiRpc,
+    PrimeRpc,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +58,13 @@ pub struct EncounterProvider {
     pub id: String,
     pub label: String,
     pub argv: Vec<String>,
+    /// Optional resolved acting-body identity. This is provider configuration
+    /// provenance, not Agent identity; consumers may require an exact body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_ref: Option<String>,
+    /// Revision of the acting-body implementation when body_ref is supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_revision: Option<String>,
     /// Explicit owner-configured admission basis. Absence preserves optional context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_context: Option<EncounterContextAdmission>,
@@ -359,6 +367,8 @@ struct Resident {
     provider_label: String,
     operations: Mutex<()>,
     required_context: Option<EncounterContextAdmission>,
+    body_ref: Option<String>,
+    body_revision: Option<String>,
     protocol: EncounterProtocol,
     generation: String,
     cwd: PathBuf,
@@ -369,7 +379,7 @@ impl Resident {
     fn prompt_payload(&self, text: &str) -> Value {
         match self.protocol {
             EncounterProtocol::Acp => json!([{"type":"text","text":text}]),
-            EncounterProtocol::PiRpc => json!(text),
+            EncounterProtocol::PiRpc | EncounterProtocol::PrimeRpc => json!(text),
         }
     }
 }
@@ -409,9 +419,14 @@ impl EncounterService {
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
             || provider.argv.is_empty()
             || provider.argv[0].is_empty()
+            || provider.body_ref.as_ref().is_some_and(|value| {
+                value.trim().is_empty() || aikit_core::ResourceRef::parse(value).is_err()
+            })
+            || provider.body_revision.as_ref().is_some_and(|value| value.trim().is_empty())
+            || provider.body_ref.is_some() != provider.body_revision.is_some()
         {
             return Err(error(
-                "Provider requires a safe id and explicit native argv",
+                "Provider requires a safe id, explicit native argv, and either both body_ref/body_revision or neither",
             ));
         }
         let root = home.state().join("encounter-providers");
@@ -525,6 +540,8 @@ impl EncounterService {
         if current.required_context != resident.required_context
             || current.protocol != resident.protocol
             || current.argv != resident.argv
+            || current.body_ref != resident.body_ref
+            || current.body_revision != resident.body_revision
         {
             let failure = AikitError::new(
                 "encounter.context_changed",
@@ -764,7 +781,7 @@ impl EncounterService {
             EncounterProtocol::Acp => {
                 crate::encounter_mcp::active_tool_source_entries(&self.home, &cwd)?
             }
-            EncounterProtocol::PiRpc => Vec::new(),
+            EncounterProtocol::PiRpc | EncounterProtocol::PrimeRpc => Vec::new(),
         };
         let generation = ulid::Ulid::generate().to_string();
         let journal: Option<Arc<dyn SessionEventJournal>> = Some(Arc::new(Journal(
@@ -824,11 +841,33 @@ impl EncounterService {
                 journal,
                 launch_environment.as_ref(),
             ),
+            EncounterProtocol::PrimeRpc => AgentSessionHost::launch_with_journal_and_environment(
+                {
+                    let adapter = aikit_adapters::prime_rpc_connection::PrimeRpcConnectionAdapter::new(
+                        connection,
+                        cwd.to_string_lossy().into_owned(),
+                        provenance,
+                    );
+                    match &model {
+                        Some(model) => adapter.with_selected_model(
+                            &model.policy.native_provider,
+                            &model.policy.provider_native_id,
+                        )?,
+                        None => adapter,
+                    }
+                },
+                &launch_argv,
+                Some(&cwd),
+                AgentSessionHostLimits::default(),
+                journal,
+                launch_environment.as_ref(),
+            ),
         }?;
         let negotiated = host.initialize()?;
         let protocol_name = match configured.protocol {
             EncounterProtocol::Acp => "acp",
             EncounterProtocol::PiRpc => "pi-rpc",
+            EncounterProtocol::PrimeRpc => "prime-rpc",
         };
         let mcp = crate::encounter_mcp::session_mcp_resolution(
             protocol_name,
@@ -838,7 +877,7 @@ impl EncounterService {
         let lane = match host.open_session(crate::encounter_mcp::build_session_open_request(
             if reconnect {
                 SessionOpenMode::Load
-            } else if configured.protocol == EncounterProtocol::PiRpc {
+            } else if matches!(configured.protocol, EncounterProtocol::PiRpc | EncounterProtocol::PrimeRpc) {
                 SessionOpenMode::Attach
             } else {
                 SessionOpenMode::Create
@@ -921,7 +960,7 @@ impl EncounterService {
         if let Some((dispatch, receipt)) = &selected_configuration {
             self.store.append(&agent_session,&json!({"kind":"selected-model-configured","agent_session":agent_session,"native_session_id":receipt.native_session_id,"provider":provider,"dispatch":dispatch,"previous_model_observation":receipt.previous,"model_observation":receipt.current,"standing":"provider-confirmed-session-configuration-under-the-durable-model-policy"}))?;
         }
-        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
+        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
         // The owner drains transport delivery; durable cursor readers are
         // independent views of the same canonical journal.
         let drain = lane.clone();
@@ -936,6 +975,8 @@ impl EncounterService {
                 provider_label: configured.label,
                 operations: Mutex::new(()),
                 required_context: configured.required_context,
+                body_ref: configured.body_ref,
+                body_revision: configured.body_revision,
                 protocol: configured.protocol,
                 generation,
                 cwd,
@@ -947,7 +988,7 @@ impl EncounterService {
         drop(agency_lock);
         // The resident just became ready: this is the moment queued durable
         // deliveries wait for. Drain before answering the open.
-        let receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"resident":true,"inference_observed":false});
+        let receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"resident":true,"inference_observed":false});
         self.open_receipt_with_drain(agent_session, receipt)
     }
 
@@ -1219,7 +1260,7 @@ impl EncounterService {
                         let state = format!("{:?}", identity.state);
                         let ready = state == "Resident" && fault.is_none();
                         (
-                            json!({"resident":true,"native_session_id":identity.binding.native_session_id,"state":state,"error":fault,"provider":{"id":resident.provider,"label":resident.provider_label}}),
+                            json!({"resident":true,"native_session_id":identity.binding.native_session_id,"state":state,"error":fault,"provider":{"id":resident.provider,"label":resident.provider_label,"body_ref":resident.body_ref,"body_revision":resident.body_revision}}),
                             ready,
                         )
                     }
