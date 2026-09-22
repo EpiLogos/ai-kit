@@ -1,0 +1,73 @@
+name: Jev NOW product-ground reconcile
+
+on:
+  push:
+    branches: [agent/388-jev-redis-now]
+    paths:
+      - 'ProjectCentral/user/aikit.html'
+      - 'ProjectCentral/user/capability-matrix.csv'
+      - 'ProjectCentral/user/capability-matrix.json'
+      - 'ProjectCentral/user/capability-matrix.md'
+      - '.github/workflows/jev-now-product-ground-reconcile.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: jev-now-product-ground-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.repository == 'EpiLogos/ai-kit' && github.ref == 'refs/heads/agent/388-jev-redis-now'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reconcile through Central's canonical product-ground transaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth=1 --branch main https://github.com/EpiLogos/Central.git "$RUNNER_TEMP/Central"
+          tool="$RUNNER_TEMP/Central/tools/reconcile_product_ground.py"
+          check="$RUNNER_TEMP/Central/tools/check_product_ground.py"
+          python3 "$tool" plan \
+            --root "$GITHUB_WORKSPACE" \
+            --account aikit.html \
+            --namespace aikit \
+            --direction csv-to-html \
+            --out "$RUNNER_TEMP/jev-now-product-ground-plan.json"
+          mapfile -t reviewed < <(python3 - "$RUNNER_TEMP/jev-now-product-ground-plan.json" <<'PY'
+          import json,sys
+          for item in json.load(open(sys.argv[1]))["required_review"]:
+              print(item)
+          PY
+          )
+          args=()
+          if ((${#reviewed[@]})); then args=(--reviewed "${reviewed[@]}"); fi
+          python3 "$tool" apply "$RUNNER_TEMP/jev-now-product-ground-plan.json" \
+            "${args[@]}" \
+            --change-ref EpiLogos/ai-kit#388
+          python3 "$check" \
+            --root "$GITHUB_WORKSPACE" \
+            --account aikit.html \
+            --namespace aikit \
+            --product-index 2
+      - name: Publish regenerated companions if changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add ProjectCentral/user/aikit.html \
+                  ProjectCentral/user/capability-matrix.csv \
+                  ProjectCentral/user/capability-matrix.json \
+                  ProjectCentral/user/capability-matrix.md
+          if git diff --cached --quiet; then
+            echo "Product ground is already coherent."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'docs(product): reconcile Jev NOW account companions'
+          git push origin HEAD:refs/heads/agent/388-jev-redis-now
