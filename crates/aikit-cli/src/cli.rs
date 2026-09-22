@@ -65,6 +65,9 @@ pub enum Command {
     Search(SearchArgs),
     /// Read the bounded Development Field carrier/provenance/Git substrate.
     DevelopmentField(DevelopmentFieldArgs),
+    /// Project repository checkouts onto their canonical target (origin/main):
+    /// report drift, and with --apply fast-forward only the clean, behind ones.
+    Worktree(WorktreeCmd),
     /// Navigate provider-neutral project knowledge through the shared application faculty.
     Knowledge(KnowledgeCmd),
     /// Owner-side Flow cognition: explicit Contemplate(FlowRef) with
@@ -188,6 +191,41 @@ pub enum Command {
     Bypasses(BypassesArgs),
     /// Run, inspect and query the Agency Gateway service.
     Gateway(GatewayCmd),
+}
+
+/// `aikit worktree` — project repository checkouts onto their canonical target.
+#[derive(Debug, Args)]
+pub struct WorktreeCmd {
+    #[command(subcommand)]
+    pub command: WorktreeSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorktreeSub {
+    /// Report each checkout's drift from the target and, with --apply,
+    /// fast-forward the clean, behind ones. Dirty, ahead, and diverged
+    /// checkouts are surfaced untouched — projection never discards work.
+    Project(WorktreeProjectArgs),
+}
+
+/// `aikit worktree project` — whole-suite (or given-set) projection to a target.
+#[derive(Debug, Args)]
+pub struct WorktreeProjectArgs {
+    /// A checkout to project, as `KEY=PATH` (repeatable). `KEY` is the report
+    /// key (e.g. the dev-world project key); `PATH` is the checkout root. A bare
+    /// `PATH` uses the directory name as the key.
+    #[arg(long = "repo", value_name = "KEY=PATH", required = true)]
+    pub repos: Vec<String>,
+    /// The canonical target: `origin/main` (the default), or a bare ref that
+    /// resolves against `origin`.
+    #[arg(long, default_value = "origin/main")]
+    pub target: String,
+    /// Perform the safe fast-forwards. Without it, observe and report only.
+    #[arg(long)]
+    pub apply: bool,
+    /// Do not fetch the remote first; compare against the last-fetched target.
+    #[arg(long = "no-fetch")]
+    pub no_fetch: bool,
 }
 
 /// `aikit development-field` — bounded owner-native carrier reading.

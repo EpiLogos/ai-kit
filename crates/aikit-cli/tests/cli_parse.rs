@@ -6,6 +6,7 @@
 
 use aikit_cli::cli::{
     BypassSub, Cli, Command, ContextSub, FactorySub, HookSub, Isolation, MuxSub, TaskSub,
+    WorktreeSub,
 };
 use clap::Parser;
 
@@ -197,4 +198,34 @@ fn the_nested_command_groups_all_parse() {
     let HookSub::Dispatch(d) = h.command;
     assert_eq!(d.client, "claude");
     assert_eq!(d.event, "PreToolUse");
+}
+
+#[test]
+fn worktree_project_defaults_to_observe_and_fetch() {
+    let cli = parse(&[
+        "aikit",
+        "worktree",
+        "project",
+        "--repo",
+        "ai-kit=/work/ai-kit",
+    ]);
+    let Some(Command::Worktree(cmd)) = cli.command else {
+        panic!("expected a worktree command");
+    };
+    let WorktreeSub::Project(args) = cmd.command;
+    assert_eq!(args.repos, vec!["ai-kit=/work/ai-kit".to_string()]);
+    assert_eq!(
+        args.target, "origin/main",
+        "origin/main is the default target"
+    );
+    assert!(!args.apply, "observe is the default; --apply is opt-in");
+    assert!(!args.no_fetch, "fetching the remote is the default");
+}
+
+#[test]
+fn worktree_project_requires_at_least_one_repo() {
+    assert!(
+        Cli::try_parse_from(["aikit", "worktree", "project"]).is_err(),
+        "at least one --repo is required"
+    );
 }
