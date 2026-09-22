@@ -406,6 +406,9 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
                     unavailable: vec!["extension-ui".into()],
                 },
             }),
+            Some("rlm_child_update") => Some(ConnectionSignalKind::Status {
+                message: format!("prime-rlm-child:{}", message),
+            }),
             Some(
                 "agent_start"
                 | "turn_start"
