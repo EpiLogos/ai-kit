@@ -118,7 +118,11 @@ provider verb. The Epi-Logos Prime-QL product body also has
 `encounter-epi-prime-configure`, which resolves the installed Actuation
 launcher, Prime binary, QL binary/revision, inherited Skill and faculty
 configuration into one revisioned `prime-rpc` provider advertising
-`agent-body/epi-prime-ql`.
+`agent-body/epi-prime-ql`. AIKit passes its own installed executable to the
+Actuation launcher for native cheapest-eligible child resolution. Optional
+`--central-ctrl-bin/--central-root/--central-project` inputs carry the existing
+Central NOW owner into the inherited Skill for bounded handover/continuation;
+absence keeps that faculty unavailable rather than creating a substitute.
 
 That configuration action starts nothing. A later ordinary Encounter open
 creates the process for an attached AgentSession. Read back the resulting
