@@ -8,6 +8,11 @@ on:
     paths:
       - '.github/workflows/jev-redis-cloud-edit.yml'
       - 'scripts/jev-redis/cloud-edit.json'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/jev-redis-cloud-edit.yml'
+      - 'scripts/jev-redis/cloud-edit.json'
 permissions:
   contents: write
 concurrency:
@@ -15,13 +20,14 @@ concurrency:
   cancel-in-progress: false
 jobs:
   apply-native-edit:
-    if: github.repository == 'EpiLogos/ai-kit' && github.ref == 'refs/heads/agent/388-jev-redis-now'
+    if: github.repository == 'EpiLogos/ai-kit' && ((github.event_name == 'push' && github.ref == 'refs/heads/agent/388-jev-redis-now') || (github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'agent/388-jev-redis-now' && github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - name: Verify the exact native patch
         id: patch
         shell: bash
@@ -104,12 +110,14 @@ jobs:
                   if p.is_file() and not p.is_symlink():
                       archive.add(p, arcname=path, recursive=False)
           PY
-      - name: Compile and exercise the native Jev protocol
+      - name: Compile and exercise the native Jev/NOW path
         if: steps.patch.outputs.present == 'true'
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked -p aikit-core --test jev_protocol -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-edit-test.log"
+          cargo test --locked -p aikit-adapters --test jev_transport -- --nocapture 2>&1 | tee -a "$RUNNER_TEMP/native-edit-test.log"
+          cargo test --locked -p aikit-cli encounter_now --lib -- --nocapture 2>&1 | tee -a "$RUNNER_TEMP/native-edit-test.log"
           cargo check --locked -p aikit-cli 2>&1 | tee -a "$RUNNER_TEMP/native-edit-test.log"
       - uses: actions/upload-artifact@v4
         if: always() && steps.patch.outputs.present == 'true'
@@ -121,31 +129,3 @@ jobs:
             ${{ runner.temp }}/native-edit-source.tar.gz
           if-no-files-found: error
           retention-days: 14
-
-  public-native-toolchain:
-    if: github.run_number == 4
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-      - name: Fetch only the declared public toolchain and registry dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          export CARGO_HOME="$RUNNER_TEMP/jev-public-toolchain/cargo"
-          export RUSTUP_HOME="$RUNNER_TEMP/jev-public-toolchain/rustup"
-          rustup toolchain install 1.98.0 --profile minimal --component rustfmt
-          rustup default 1.98.0
-          cargo fetch --locked
-          tar -C "$RUNNER_TEMP/jev-public-toolchain" -czf "$RUNNER_TEMP/jev-public-toolchain.tar.gz" rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu cargo/registry
-          { rustc -Vv; cargo -V; } > "$RUNNER_TEMP/jev-public-toolchain.txt"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: jev-public-native-toolchain
-          path: |
-            ${{ runner.temp }}/jev-public-toolchain.tar.gz
-            ${{ runner.temp }}/jev-public-toolchain.txt
-          if-no-files-found: error
-          retention-days: 3
