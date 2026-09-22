@@ -29,6 +29,7 @@ const OVERLAY_NAMES: &[&str] = &[
     "claude",
     "codex",
     "zcode",
+    "opencode",
     "gemini-cli",
     "pi",
     "gemini-antigravity",

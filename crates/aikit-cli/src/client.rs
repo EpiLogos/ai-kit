@@ -40,8 +40,8 @@ use aikit_adapters::actuation_harness_detection::{
 use aikit_adapters::clients::{
     antigravity::AntigravityAdapter, broker::BrokerAdapter, claude::ClaudeAdapter,
     codex::CodexAdapter, gemini::GeminiAdapter, grokbot::GrokbotAdapter, hermes::HermesAdapter,
-    kimi::KimiAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter, pi::PiAdapter,
-    zcode::ZcodeAdapter, ClientAdapter,
+    kimi::KimiAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter, opencode::OpencodeAdapter,
+    pi::PiAdapter, zcode::ZcodeAdapter, ClientAdapter,
 };
 use aikit_adapters::runner::SystemRunner;
 use aikit_adapters::tool_sources::{plan_tools_projection, ToolsProjectionOutcome};
@@ -295,6 +295,21 @@ static OVERLAYS: &[ClientOverlay] = &[
             },
         },
         admission: |_dirs| ZcodeAdapter::new().admission(),
+    },
+    ClientOverlay {
+        name: TargetId::OPENCODE,
+        aliases: &[],
+        catalog_slug: TargetId::OPENCODE,
+        semantic: SemanticBasis::None,
+        // Brokered by design: the embedded profile and the adapter's own plan()
+        // own no representation on opencode's native surfaces — AIKit's skill
+        // reach is the project `.agents/skills` universal tree, which opencode
+        // 1.18.30 ingests directly (2026-09-22 probe). The admission census is
+        // the row's detail; there is no dispatch seam to install.
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(OpencodeAdapter::new(projection_dir(dirs, "opencode"))),
+        },
+        admission: |dirs| OpencodeAdapter::new(projection_dir(dirs, "opencode")).admission(),
     },
     ClientOverlay {
         name: TargetId::GEMINI_CLI,
