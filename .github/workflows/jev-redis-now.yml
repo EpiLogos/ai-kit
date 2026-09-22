@@ -152,6 +152,9 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/real-redis-now.log"
           cargo test --locked -p aikit-cli --lib -- --nocapture \
             2>&1 | tee -a "$RUNNER_TEMP/real-redis-now.log"
+          AIKIT_TEST_REDIS_ADDR=127.0.0.1:6381 \
+            cargo test --locked -p aikit-cli --test now_context_encounter -- --nocapture \
+            2>&1 | tee -a "$RUNNER_TEMP/real-redis-now.log"
           cargo build --locked -p aikit-cli
           target/debug/aikit jev --help | tee "$RUNNER_TEMP/jev-help.txt"
           target/debug/aikit now-context --help | tee "$RUNNER_TEMP/now-context-help.txt"
