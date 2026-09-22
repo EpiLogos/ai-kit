@@ -794,13 +794,13 @@ impl EncounterService {
         )));
         let model = agency::model::prepare(&self.home, &agent_session, &configured)?;
         let task_bound = self.is_task_bound(&agent_session)?;
-        if configured.protocol == EncounterProtocol::PrimeRpc {
-            if configured.body_ref.is_none() || configured.body_revision.is_none() {
-                return Err(AikitError::new(
-                    "encounter.prime_body_unresolved",
-                    "Prime RPC providers must name an exact body_ref and body_revision",
-                ));
-            }
+        if configured.protocol == EncounterProtocol::PrimeRpc
+            && (configured.body_ref.is_none() || configured.body_revision.is_none())
+        {
+            return Err(AikitError::new(
+                "encounter.prime_body_unresolved",
+                "Prime RPC providers must name an exact body_ref and body_revision",
+            ));
         }
         let mut launch_argv = if let Some(model) = &model {
             if task_bound {
