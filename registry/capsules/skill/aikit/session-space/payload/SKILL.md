@@ -110,6 +110,27 @@ provider/runtime lifecycle history
 
 Familiarity may explain learned ease or recency but is not trust, authored preference, fitness, or provider truth.
 
+## Encounter provider configuration
+
+Provider configuration is owner-only and separate from SessionSpace semantic
+mutation. `encounter-configure --provider-json` remains the generic native
+provider verb. The Epi-Logos Prime-QL product body also has
+`encounter-epi-prime-configure`, which resolves the installed Actuation
+launcher, Prime binary, QL binary/revision, inherited Skill and faculty
+configuration into one revisioned `prime-rpc` provider advertising
+`agent-body/epi-prime-ql`.
+
+That configuration action starts nothing. A later ordinary Encounter open
+creates the process for an attached AgentSession. Read back the resulting
+provider/body/native-session/model observation before describing the body as
+active. A configured body, a selected mode and a running body are distinct
+states.
+
+Do not encode provider identity as Agent identity, and do not treat a model
+observed from Prime's own configuration as an AIKit-authored model selection.
+An explicit model policy is a separate authored override and must be confirmed
+by native readback.
+
 ## Provider boundary
 
 Consume current cmux/tmux/IDE and ACP/classic provider observations through their native contracts. Do not encode mux keybindings, IDE layout rules, ACP framing, classic transport details, provider reconnect rules or Workcell materialisation semantics in this Skill.
