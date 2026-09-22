@@ -29,12 +29,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn project_evidence(project: &ProjectRef) -> ContextResolutionEvidence {
+fn project_evidence(project: &ProjectRef, root: &std::path::Path) -> ContextResolutionEvidence {
     let binding = ProjectBinding::new(
         project.clone(),
         ProjectConstituentRef::parse("source:working-tree").unwrap(),
-        ProjectBindingLocator::Remote {
-            locator: "https://example.invalid/redis-now-proof".into(),
+        ProjectBindingLocator::LocalDirectory {
+            path: root.to_path_buf(),
         },
     );
     let basis = ContextResolutionBasis {
@@ -156,7 +156,7 @@ fn redis_prepared_now_is_delivered_before_turn_and_verifier_context_is_isolated(
                 binding: Box::new(
                     SessionSpaceProjectContextBinding::new(
                         project.clone(),
-                        project_evidence(&project),
+                        project_evidence(&project, temp.path()),
                     )
                     .unwrap(),
                 ),
