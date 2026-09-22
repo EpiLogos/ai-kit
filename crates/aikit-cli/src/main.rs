@@ -1030,9 +1030,10 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
             Ok(source_reply(
                 jval!({
                     "id": removed.id,
-                    "removed": true,
+                    "removed": !removed.already_absent,
                     "forced": removed.forced,
                     "removed_snapshots": removed.removed_snapshots,
+                    "already_absent": removed.already_absent,
                 }),
                 vec![],
             ))

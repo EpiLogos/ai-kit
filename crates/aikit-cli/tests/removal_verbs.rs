@@ -258,3 +258,38 @@ fn a_forced_removal_under_a_project_enablement_stays_diagnosable_and_repairable(
         "nothing may remain unavailable after the repair: {reply}"
     );
 }
+/// L2-D3 / issue #394 K3: removing a source that is already gone is a named
+/// idempotent no-op, not a raw os-error dressed up as `source.unknown`.
+#[test]
+fn removing_an_already_removed_source_is_a_named_no_op() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let pack = temp.path().join("pack");
+    skill_pack(&pack);
+
+    for args in [
+        vec!["source", "add-directory", "testsrc", pack.to_str().unwrap()],
+        vec!["source", "sync", "testsrc"],
+        vec!["source", "promote", "testsrc"],
+        vec!["source", "remove", "testsrc", "--force"],
+    ] {
+        let (output, reply) = run(&home, temp.path(), &args);
+        assert!(output.status.success(), "{args:?} failed: {reply}");
+    }
+
+    let (retry, reply) = run(&home, temp.path(), &["source", "remove", "testsrc", "--force"]);
+    assert!(
+        retry.status.success(),
+        "a retry after removal must succeed: {reply}"
+    );
+    assert_eq!(reply["data"]["already_absent"], true);
+    assert_eq!(reply["data"]["removed"], false);
+    assert_eq!(reply["data"]["removed_snapshots"], 0);
+
+    let (never, reply) = run(&home, temp.path(), &["source", "remove", "never-added"]);
+    assert!(
+        never.status.success(),
+        "removing an unknown id is a named no-op too: {reply}"
+    );
+    assert_eq!(reply["data"]["already_absent"], true);
+}

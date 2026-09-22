@@ -610,6 +610,9 @@ pub struct RemovedSource {
     pub id: String,
     pub forced: bool,
     pub removed_snapshots: usize,
+    /// The source was already gone. Removal is idempotent: a retry after a
+    /// successful remove is a named no-op, not a raw missing-directory error.
+    pub already_absent: bool,
 }
 
 /// Remove a registered source entirely — its spec, its state and every
@@ -621,6 +624,16 @@ pub struct RemovedSource {
 /// evidence about capsule revisions; they outlive the source and are inert
 /// without it.
 pub fn remove(home: &AikitHome, id: &str, force: bool) -> Result<RemovedSource> {
+    validate_id(id)?;
+    let dir = source_dir(home, id);
+    if !dir.is_dir() {
+        return Ok(RemovedSource {
+            id: id.to_string(),
+            forced: force,
+            removed_snapshots: 0,
+            already_absent: true,
+        });
+    }
     let spec = load_spec(home, id)?;
     let state = load_state(home, id)?;
     if state.active_snapshot.is_some() && !force {
@@ -633,7 +646,6 @@ pub fn remove(home: &AikitHome, id: &str, force: bool) -> Result<RemovedSource> 
         )
         .with("source", id));
     }
-    let dir = source_dir(home, id);
     let removed_snapshots = fs::read_dir(dir.join("snapshots"))
         .map(|entries| entries.filter_map(std::result::Result::ok).count())
         .unwrap_or(0);
@@ -642,6 +654,7 @@ pub fn remove(home: &AikitHome, id: &str, force: bool) -> Result<RemovedSource> 
         id: spec.id,
         forced: force,
         removed_snapshots,
+        already_absent: false,
     })
 }
 
