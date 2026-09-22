@@ -385,3 +385,78 @@ jobs:
       - name: Remove disposable Redis
         if: always()
         run: docker rm --force aikit-jev-now-joined-redis >/dev/null 2>&1 || true
+
+
+  independent-joined-review:
+    name: Independent joined evidence review
+    needs: joined-native-proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: jev-redis-now-joined-proof
+          path: joined-proof
+      - name: Review joined evidence from a fresh runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          root = pathlib.Path("joined-proof")
+          proof_path = root / "joined-proof.json"
+          owners_path = root / "joined-owner-revisions.txt"
+          proof = json.loads(proof_path.read_text())
+          owners = owners_path.read_text().splitlines()
+
+          assert proof["schema"] == "aikit.jev-redis-now-joined-proof/v1"
+          assert proof["general_jev"]["standing"] == "controlled-protocol"
+          assert proof["participant_isolation"]["verifier_canary_isolated"] is True
+          assert proof["stale_version_refused"] is True
+          assert proof["source_change_during_jev_refused"] is True
+          assert proof["provider_malformed_refused"] is True
+          assert proof["revoked_read_refused"] is True
+          assert proof["durable_return"]["later_participant_used_revised_wiki"] is True
+          assert proof["durable_return"]["matrix_pressure"]["warranted"] is True
+          assert proof["actuation"]["activity"]["invocation_ref"] == proof["general_jev"]["invocation_ref"]
+          assert proof["actuation"]["activity"]["run_ref"] == proof["sources"]["factory_run_ref"]
+
+          arms = proof["comparison"]["arms"]
+          assert arms["ordinary"]["jev_calls"] == 0
+          assert arms["ordinary"]["redis_prepared"] is False
+          assert arms["redis_prepared_no_jev"]["jev_calls"] == 0
+          assert arms["redis_prepared_no_jev"]["redis_prepared"] is True
+          assert arms["jev_assisted"]["jev_calls"] == 1
+          assert arms["jev_assisted"]["redis_prepared"] is True
+
+          required_owners = ("ai-kit ", "Central ", "Factory ", "Actuation ")
+          for prefix in required_owners:
+              assert any(line.startswith(prefix) for line in owners), prefix
+
+          digest = hashlib.sha256(proof_path.read_bytes()).hexdigest()
+          review = {
+              "schema": "aikit.jev-redis-now-independent-review/v1",
+              "standing": "fresh-runner-controlled-evidence-review-not-human-acceptance",
+              "joined_proof_sha256": digest,
+              "owner_revisions": owners,
+              "checks": [
+                  "participant isolation",
+                  "stale version and source-basis refusal",
+                  "malformed provider refusal",
+                  "revocation",
+                  "durable Wiki Return and later-participant reuse",
+                  "matrix pressure kept proposal-only",
+                  "Actuation invocation/run attribution",
+                  "three matched comparison arms"
+              ],
+              "passed": True
+          }
+          pathlib.Path("independent-review.json").write_text(json.dumps(review, indent=2) + "\n")
+          print(json.dumps(review, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jev-redis-now-independent-review
+          path: independent-review.json
+          if-no-files-found: error
+          retention-days: 14
