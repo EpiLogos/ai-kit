@@ -184,6 +184,14 @@ jobs:
         run: |
           set -euo pipefail
           docker stop aikit-jev-now-redis
+          set +e
+          target/debug/aikit --json now-context status \
+            --config-file "$RUNNER_TEMP/redis-now-config.json" \
+            >"$RUNNER_TEMP/redis-unavailable.txt" 2>&1
+          unavailable_rc=$?
+          set -e
+          test "$unavailable_rc" -ne 0
+          printf 'exit_code=%s\n' "$unavailable_rc" >> "$RUNNER_TEMP/redis-unavailable.txt"
           docker rm aikit-jev-now-redis
           docker run --detach --name aikit-jev-now-redis \
             --publish 6381:6379 \
@@ -229,6 +237,7 @@ jobs:
             ${{ runner.temp }}/redis-dbsize-after.txt
             ${{ runner.temp }}/redis-status-before.json
             ${{ runner.temp }}/redis-status-after.json
+            ${{ runner.temp }}/redis-unavailable.txt
             ${{ runner.temp }}/jev-help.txt
             ${{ runner.temp }}/now-context-help.txt
           if-no-files-found: warn
@@ -321,6 +330,7 @@ jobs:
             --aikit "$PWD/target/debug/aikit" \
             --ctrl "$RUNNER_TEMP/Central/target/debug/ctrl" \
             --bkmr "$RUNNER_TEMP/bkmr/bin/bkmr" \
+            --central-repo "$RUNNER_TEMP/Central" \
             --factory "$RUNNER_TEMP/Factory/target/debug/factory" \
             --factory-state "$RUNNER_TEMP/Factory/contracts/factory/fixtures/oi-self-hosting-state.json" \
             --actuation "$RUNNER_TEMP/Actuation/target/debug/actuation" \
@@ -342,6 +352,10 @@ jobs:
           assert value["comparison"]["arms"]["redis_prepared_no_jev"]["redis_prepared"] is True
           assert value["comparison"]["arms"]["jev_assisted"]["jev_calls"] == 1
           assert value["general_jev"]["standing"] == "controlled-protocol"
+          declared = value["sources"]["declared_matrix_inventory"]
+          assert len(declared) == value["comparison"]["conditions"]["matrix_total_capabilities"]
+          assert declared == value["comparison"]["conditions"]["declared_matrix_inventory"]
+          assert len(declared) >= 3
           assert value["actuation"]["usage"]["event"]["kind"] == "model-usage"
           assert value["actuation"]["activity"]["invocation_ref"] == value["general_jev"]["invocation_ref"]
           assert value["actuation"]["activity"]["run_ref"] == value["sources"]["factory_run_ref"]
