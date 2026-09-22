@@ -12,6 +12,131 @@ fn composition(w: &World, target: &Value) -> Value {
     })
 }
 
+fn actual_pi_setup(w: &World) -> Value {
+    let pi = std::env::var_os("AIKIT_CAW_PI_BIN")
+        .map(PathBuf::from)
+        .expect("Run with the exact installed Pi executable");
+    assert_eq!(pi.file_name().and_then(|name| name.to_str()), Some("pi"));
+    let mut binding = w.attach("root", "pi");
+    let mut source: Value =
+        serde_json::from_slice(&fs::read(&binding.agency_source.path).unwrap()).unwrap();
+    source["determination"]["delegated_autonomy"]["allowed_action_refs"] =
+        json!(["action/aikit/encounter-send", "action/aikit/model-realise"]);
+    let bytes = serde_json::to_vec(&source).unwrap();
+    fs::write(&binding.agency_source.path, &bytes).unwrap();
+    binding.revision = rev("rev/2");
+    binding.agency_source.revision = rev("rev/native-2");
+    binding.agency_source.content_digest = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+    w.cli(&[
+        "encounter-agency-configure".into(),
+        "--agent-session".into(),
+        "agent-session/root".into(),
+        "--binding-json".into(),
+        serde_json::to_string(&binding).unwrap(),
+        "--expected-revision".into(),
+        "rev/1".into(),
+    ]);
+    publish_catalogue_fixture(
+        w,
+        &ModelCatalogueEntry {
+            model: r("model:deepseek-v4-pro"),
+            name: "DeepSeek V4 Pro".into(),
+            description: "Exact native Pi selection receipt proof".into(),
+            superseded_refs: Default::default(),
+            routes: vec![DeclaredRoute {
+                provider: ProviderRef::parse("provider:openrouter").unwrap(),
+                kind: ModelRouteKind::ProviderNative,
+                provider_native_ids: ["deepseek/deepseek-v4-pro".to_string()].into(),
+                endpoint: None,
+                credential: CredentialCondition::NotRequired,
+            }],
+            source: SourceRef::parse("source/actual-pi-selection-test").unwrap(),
+            freshness: None,
+            book: None,
+        },
+    );
+    let policy = json!({
+        "schema":"aikit.model-dispatch-policy/v1",
+        "agent_ref":"agent:root",
+        "world_ref":"central:root",
+        "authority_ref":"authority:project:delegation",
+        "bounds_refs":["bound:project:delegation"],
+        "model_ref":"model:deepseek-v4-pro",
+        "provider_ref":"provider:openrouter",
+        "native_provider":"openrouter",
+        "provider_native_id":"deepseek/deepseek-v4-pro",
+        "expires_at_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() + 300_000,
+        "credential":null,
+    });
+    let policy_path = w.temp.path().join("actual-pi-model-policy.json");
+    let policy_bytes = serde_json::to_vec(&policy).unwrap();
+    fs::write(&policy_path, &policy_bytes).unwrap();
+    let provider = json!({
+        "id":"root",
+        "label":"Actual installed Pi, no inference",
+        "protocol":"pi-rpc",
+        "argv":[pi,"--mode","rpc","--no-extensions","--session-dir",w.temp.path().join("pi-sessions")],
+        "model_policy":{
+            "source":"source/actual-pi-model-policy",
+            "revision":"rev/model-1",
+            "path":policy_path,
+            "content_digest":format!("blake3:{}",blake3::hash(&policy_bytes).to_hex()),
+        }
+    });
+    w.cli(&[
+        "encounter-configure".into(),
+        "--provider-json".into(),
+        provider.to_string(),
+    ]);
+    let admitted = admit_agency(
+        &SystemRunner::new(),
+        actuation().to_str().unwrap(),
+        &binding.agency_source,
+        &binding.agent_ref,
+        &binding.world_ref,
+    )
+    .unwrap();
+    json!({"action":"open-model","request":{
+        "space":"session-space/root",
+        "agent_session":"agent-session/root",
+        "cwd":w.temp.path(),
+        "model_ref":"model:deepseek-v4-pro",
+        "provider_ref":"provider:openrouter",
+        "body":"root",
+        "expected_agency":admitted,
+    }})
+}
+
+#[test]
+#[ignore = "requires pinned Actuation and actual installed Pi; opens/configures only, never prompts"]
+fn actual_pi_open_emits_factory_selection_without_inference() {
+    let mut w = World::new();
+    let target = actual_pi_setup(&w);
+    let service = aikit_cli::app::Service::open(w.home.clone(), w.temp.path(), |_| None).unwrap();
+    start_model(&mut w, false);
+    let result = service
+        .realise_model(
+            &composition(&w, &target),
+            "model:deepseek-v4-pro",
+            Some("provider:openrouter"),
+            None,
+        )
+        .unwrap();
+    let selection = &result["factory_selection"];
+    assert_eq!(selection["ranking_policy"], "EXPLICIT_PIN");
+    assert_eq!(result["resident"]["inference_observed"], false);
+    assert_eq!(
+        selection["ranking_explanation"]["basis"]["composition_target_basis"]
+            ["resident_body_basis"]["harness_profile"],
+        "pi"
+    );
+    if let Some(path) = std::env::var_os("AIKIT_FACTORY_SELECTION_FIXTURE_OUT") {
+        fs::write(path, serde_json::to_vec_pretty(selection).unwrap()).unwrap();
+    }
+    w.stop();
+    println!("ACTUAL_PI_FACTORY_SELECTION_EMITTED_WITHOUT_INFERENCE");
+}
+
 #[test]
 #[ignore = "requires pinned Actuation and native protocol owner; mandatory CAW lane"]
 fn application_realisation_dispatches_native_selected_model_and_requires_the_owner() {
@@ -52,6 +177,13 @@ fn application_realisation_dispatches_native_selected_model_and_requires_the_own
     assert_eq!(result["schema"], "aikit.model-realisation/v2");
     assert_eq!(result["selected"], true);
     assert_eq!(result["executed"], false);
+    assert!(result.get("factory_selection").is_none());
+    assert_eq!(result["resident"]["body_basis"]["protocol"], "pi-rpc");
+    assert_eq!(
+        result["resident"]["body_basis"]["harness_profile"],
+        Value::Null,
+        "a controlled protocol fixture must not be presented as an actual Pi composition"
+    );
     assert_eq!(
         result["resident"]["model_observation"]["current_model_id"],
         "controlled-model-v1"

@@ -30,6 +30,26 @@ aikit --json -C WORKING_COPY compose --agent AGENT --world WORLD \
 
 The result has schema `aikit.model-realisation/v2`. `selected:true` with `executed:false` means the selected native model/body has been observed and opened. An inference result requires existing addressed `send` followed by attributable delivery/response readback. Direct work has no mandatory Factory ancestry. Task-bound sessions retain #291's exact placement/material/expected-task guards and Workcell boundary at execution.
 
+For an explicitly pinned Pi body, this result also carries `factory_selection`.
+Its `aikit.explicit-model-selection/v1` receipt retains the exact model route,
+policy/catalogue basis, native session and SessionSpace, admitted Agency source
+and WorldBinding, and an existing `aikit.harness-composition/v2` determination.
+The composition target binds the Pi profile and actual underlying provider argv,
+owner launcher, cwd, required context and model-basis digests. A task launcher is
+not mistaken for the underlying harness. `aikit.sorted-json/v1` specifies
+recursive object-key ordering for the cross-owner BLAKE3 digests.
+
+The compatibility field `ranking_policy: EXPLICIT_PIN` means a deliberate source
+selection, not a ranking calculation. This thin Pi composition claims no ambient
+Skills, extensions or tools; empty component selections are explicit. Other
+protocols and controlled non-Pi launchers receive no Pi composition receipt.
+Factory validates the receipt and its exact participant/session/source join at
+attempt admission, then still uses the actual task/authority guards at dispatch.
+Opening and selecting the real Pi process proves neither inference nor remote
+provider credentials. The `actual_pi_open_emits_factory_selection_without_inference`
+case emits an actual owner receipt for the Factory consumer tests; controlled
+protocol nonregression and live provider execution retain separate evidence.
+
 ## Proof and remaining work
 
 The maintained `caw_native_delivery` target includes controlled model tests plus the public application and compose-CLI paths. They exercise scoped key delivery, profile-independent selection, actual native protocol response, changed catalogue/policy, revoked/missing credentials, unavailable authority, unknown or contradictory model facts, duplicate delivery, and removal of the running owner. Controlled keys and replies are not commercial-model or installed evidence. Only an actually executed exact-head CI result establishes the tests' standing.
