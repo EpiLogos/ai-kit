@@ -1,0 +1,84 @@
+name: Jev Redis NOW integration
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/jev-redis-now.yml'
+      - 'crates/**'
+      - 'tests/jev-redis-now/**'
+      - 'scripts/jev-redis-now*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jev-redis-now-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  inputs:
+    name: Reproducible native source inputs (not runtime proof)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          path: ai-kit
+          persist-credentials: false
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/Central
+          ref: 918fed159bee26b4fd1f20341f955cb6f60e1cbe
+          path: Central
+          persist-credentials: false
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/Workcell
+          ref: 58ceb4a6a0d4b8f25a6b2d01201798e5092b88c4
+          path: Workcell
+          persist-credentials: false
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/Factory
+          ref: e2d16dbdfabec4157e47028d1bbe7a8cf7b8fc59
+          path: Factory
+          persist-credentials: false
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/Actuation
+          ref: b88fa2a097f790222fd63f0ffd1b9b5a4cefde09
+          path: Actuation
+          persist-credentials: false
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/O-I
+          ref: fdb7958d16c94cc4538cc4208bf62f8192486ec2
+          path: O-I
+          persist-credentials: false
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: EpiLogos/QL-MEF
+          ref: 2bcdc78c2f97ce13312bf96011bd18bea7b73ea5
+          path: QL-MEF
+          persist-credentials: false
+      - name: Retain exact tracked inputs, without credentials or working state
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/inputs
+          for repo in ai-kit Central Workcell Factory Actuation O-I QL-MEF; do
+            revision=$(git -C "$repo" rev-parse HEAD)
+            printf '%s %s\n' "$repo" "$revision" >> evidence/inputs/revisions.txt
+            git -C "$repo" archive --format=tar --prefix="$repo/" HEAD | gzip -n > "evidence/inputs/$repo.tar.gz"
+          done
+          (cd evidence/inputs && sha256sum *.tar.gz > SHA256SUMS)
+          printf '%s\n' 'Source input receipt only. This job does not assert runtime integration.' >> "$GITHUB_STEP_SUMMARY"
+          cat evidence/inputs/revisions.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: jev-redis-now-cloud-inputs
+          path: evidence/inputs/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
