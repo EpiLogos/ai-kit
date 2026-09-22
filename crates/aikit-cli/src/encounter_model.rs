@@ -124,7 +124,7 @@ pub(crate) struct ModelDispatch {
 /// existing surface unchanged.
 pub(crate) fn dispatch_for(provider: &EncounterProvider) -> Result<ModelDispatch> {
     match provider.protocol {
-        EncounterProtocol::PiRpc => Ok(ModelDispatch {
+        EncounterProtocol::PiRpc | EncounterProtocol::PrimeRpc => Ok(ModelDispatch {
             native_provider_ref: None,
             delivery: ModelDispatchDelivery::Argv {
                 provider_flag: "--provider".into(),
