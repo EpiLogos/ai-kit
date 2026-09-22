@@ -326,6 +326,9 @@ pub struct JevInvokeArgs {
     pub invocation_ref: Option<String>,
     #[arg(long = "curl", value_name = "PATH")]
     pub curl: Option<std::path::PathBuf>,
+    /// Deterministic protocol proof only: explicit loopback endpoint. Omit for the official provider.
+    #[arg(long = "controlled-endpoint", value_name = "HOST:PORT")]
+    pub controlled_endpoint: Option<std::net::SocketAddr>,
     /// Permit a deliberately supplied env:// secret reference for this invocation only.
     #[arg(long = "allow-env-import")]
     pub allow_env_import: bool,
