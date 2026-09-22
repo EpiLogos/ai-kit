@@ -145,28 +145,51 @@ impl PrimeRpcConnectionAdapter {
                 "Attach requires an idle Prime session with no queued session actions",
             ));
         }
+        let observed_provider = data["model"]["provider"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                error(
+                    "connection.prime_rpc.model_unresolved",
+                    "Prime native state names no configured provider",
+                )
+            })?;
+        let observed_model = data["model"]["id"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                error(
+                    "connection.prime_rpc.model_unresolved",
+                    "Prime native state names no configured model",
+                )
+            })?;
         if let Some((provider, model)) = &self.expected_model {
-            if data["model"]["provider"].as_str() != Some(provider.as_str())
-                || data["model"]["id"].as_str() != Some(model.as_str())
-            {
+            if observed_provider != provider || observed_model != model {
                 return Err(error(
                     "connection.prime_rpc.model_mismatch",
-                    "Prime native state does not confirm the selected provider/model; no default or fallback is admitted",
+                    "Prime native state does not confirm the AIKit-selected provider/model; no fallback is admitted",
                 ));
             }
-            self.model_observation = Some(NativeModelObservation {
-                current_model_id: model.clone(),
-                available_models: vec![NativeAdvertisedModel {
-                    model_id: model.clone(),
-                    name: data["model"]["name"].as_str().unwrap_or(model).into(),
-                    description: Some(format!("Prime Agent {PRIME_AGENT_RELEASE} launch-selected model")),
-                }],
-                reasoning_effort: None,
-                standing: format!(
-                    "Prime native get_state at release {PRIME_AGENT_RELEASE}; provider={provider}; configuration, not inference proof"
-                ),
-            });
         }
+        self.model_observation = Some(NativeModelObservation {
+            current_model_id: observed_model.into(),
+            available_models: vec![NativeAdvertisedModel {
+                model_id: observed_model.into(),
+                name: data["model"]["name"].as_str().unwrap_or(observed_model).into(),
+                description: Some(format!(
+                    "Prime Agent {PRIME_AGENT_RELEASE} native configured model"
+                )),
+            }],
+            reasoning_effort: None,
+            standing: match &self.expected_model {
+                Some(_) => format!(
+                    "Prime native get_state confirms AIKit-selected provider={observed_provider}; configuration, not inference proof"
+                ),
+                None => format!(
+                    "Prime native get_state observes provider={observed_provider}; native configured default, not an AIKit selection or inference proof"
+                ),
+            },
+        });
         self.observed_session = Some(id.into());
         Ok(id.into())
     }
