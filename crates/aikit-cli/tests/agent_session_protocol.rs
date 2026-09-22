@@ -74,6 +74,7 @@ impl Rig {
                 ],
                 required_context: None,
                 model_policy: None,
+                now_context: None,
             },
         )
         .unwrap();
