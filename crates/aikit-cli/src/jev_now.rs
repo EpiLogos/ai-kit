@@ -133,10 +133,8 @@ pub fn jev_invoke(args: JevInvokeArgs) -> Result<Value> {
         .controlled_endpoint
         .map(JevEndpoint::Controlled)
         .unwrap_or(JevEndpoint::Official);
-    let provider = CurlJevProvider::new(
-        args.curl.unwrap_or_else(|| PathBuf::from("curl")),
-        endpoint,
-    );
+    let provider =
+        CurlJevProvider::new(args.curl.unwrap_or_else(|| PathBuf::from("curl")), endpoint);
     let cancellation = JevCancellation::default();
     let mut guard = |_: JevBoundary| -> Result<()> {
         // Re-resolve at every provider boundary: a rotated/revoked native
