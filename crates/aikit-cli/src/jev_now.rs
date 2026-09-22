@@ -879,10 +879,10 @@ pub fn now_prepare(cwd: &Path, args: NowPrepareArgs) -> Result<Value> {
     let last_delivery = store.last_delivery(&request.participant_ref, secret.as_ref())?;
     let change_cursor = ack.max(last_delivery.as_ref().map(|r| r.change_cursor).unwrap_or(0));
     let basis = NowContextBasis {
-        source_revisions: all_source_revisions,
+        source_revisions: all_source_revisions.clone(),
         dependency_revisions,
         disclosure_revision: request.disclosure_revision,
-        factory_revision,
+        factory_revision: factory_revision.clone(),
         change_cursor,
     };
     let jev_invocation_ref = selection
