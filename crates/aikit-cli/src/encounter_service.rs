@@ -801,12 +801,6 @@ impl EncounterService {
                     "Prime RPC providers must name an exact body_ref and body_revision",
                 ));
             }
-            if model.is_none() {
-                return Err(AikitError::new(
-                    "encounter.prime_model_unresolved",
-                    "Prime RPC providers require an admitted AIKit model policy; no harness default is used",
-                ));
-            }
         }
         let mut launch_argv = if let Some(model) = &model {
             if task_bound {
