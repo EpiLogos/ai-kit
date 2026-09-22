@@ -1,0 +1,42 @@
+name: Jev NOW public contract and service materials
+on:
+  pull_request:
+    paths: ['.github/workflows/jev-now-cloud-materials.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  materials:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Fetch public dependencies and current official API contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p materials/lib materials/docs materials/bkmr
+          sudo apt-get update -qq
+          sudo apt-get install -y liblzf1
+          cp -L /usr/lib/x86_64-linux-gnu/liblzf.so.1 materials/lib/
+          python -m pip install --target materials/bkmr 'bkmr==7.6.7'
+          python -m pip freeze --path materials/bkmr > materials/bkmr-versions.txt
+          # Public documentation only: no credentials, model calls or private data.
+          for spec in 'api https://docs.typesafe.ai/api.md' 'choice https://docs.typesafe.ai/primitives/choice.md' 'noul https://docs.typesafe.ai/primitives/noul.md' 'score https://docs.typesafe.ai/primitives/score.md' 'openapi https://api.typesafe.ai/openapi.json'; do
+            read -r name url <<< "$spec"
+            curl --proto '=https' --tlsv1.2 --fail --show-error --max-time 30 --retry 1 "$url" -o "materials/docs/$name" || printf '%s\n' "$url unavailable" >> materials/docs/unavailable.txt
+          done
+          test -s materials/docs/openapi || test -s materials/docs/api
+          date -u +%FT%TZ > materials/observed-at.txt
+          find materials -type f -print0 | sort -z | xargs -0 sha256sum > materials-SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: jev-now-public-contract-and-service-materials
+          path: |
+            materials/
+            materials-SHA256SUMS
+          if-no-files-found: error
+          retention-days: 3
