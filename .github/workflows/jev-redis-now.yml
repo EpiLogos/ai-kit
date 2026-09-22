@@ -253,10 +253,12 @@ jobs:
           set -euo pipefail
           git clone --quiet --depth=1 --branch main https://github.com/EpiLogos/Central.git "$RUNNER_TEMP/Central"
           git clone --quiet --depth=1 --branch main https://github.com/EpiLogos/Factory.git "$RUNNER_TEMP/Factory"
+          git clone --quiet --depth=1 --branch main https://github.com/EpiLogos/Actuation.git "$RUNNER_TEMP/Actuation"
           {
             printf 'ai-kit %s\n' "$(git rev-parse HEAD)"
             printf 'Central %s\n' "$(git -C "$RUNNER_TEMP/Central" rev-parse HEAD)"
             printf 'Factory %s\n' "$(git -C "$RUNNER_TEMP/Factory" rev-parse HEAD)"
+            printf 'Actuation %s\n' "$(git -C "$RUNNER_TEMP/Actuation" rev-parse HEAD)"
           } | tee "$RUNNER_TEMP/joined-owner-revisions.txt"
       - name: Install real BKMR 7.6.7 and native Rust
         shell: bash
@@ -278,6 +280,7 @@ jobs:
             . -> target
             ${{ runner.temp }}/Central -> target
             ${{ runner.temp }}/Factory -> target
+            ${{ runner.temp }}/Actuation -> target
       - name: Build actual owner and consumer binaries
         shell: bash
         run: |
@@ -285,10 +288,12 @@ jobs:
           cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee "$RUNNER_TEMP/joined-build.log"
           (cd "$RUNNER_TEMP/Central" && cargo build --locked -p ctrl) 2>&1 | tee -a "$RUNNER_TEMP/joined-build.log"
           (cd "$RUNNER_TEMP/Factory" && cargo build --locked -p factory --bin factory) 2>&1 | tee -a "$RUNNER_TEMP/joined-build.log"
+          (cd "$RUNNER_TEMP/Actuation" && cargo build --locked -p actuation-cli --bin actuation) 2>&1 | tee -a "$RUNNER_TEMP/joined-build.log"
           sha256sum \
             target/debug/aikit \
             "$RUNNER_TEMP/Central/target/debug/ctrl" \
             "$RUNNER_TEMP/Factory/target/debug/factory" \
+            "$RUNNER_TEMP/Actuation/target/debug/actuation" \
             | tee "$RUNNER_TEMP/joined-binaries.sha256"
       - name: Start disposable persistent Redis 8.10
         shell: bash
@@ -318,6 +323,7 @@ jobs:
             --bkmr "$RUNNER_TEMP/bkmr/bin/bkmr" \
             --factory "$RUNNER_TEMP/Factory/target/debug/factory" \
             --factory-state "$RUNNER_TEMP/Factory/contracts/factory/fixtures/oi-self-hosting-state.json" \
+            --actuation "$RUNNER_TEMP/Actuation/target/debug/actuation" \
             --redis-address 127.0.0.1:6382 \
             --jev-mode controlled \
             --output "$RUNNER_TEMP/joined-proof.json" \
@@ -336,6 +342,9 @@ jobs:
           assert value["comparison"]["arms"]["redis_prepared_no_jev"]["redis_prepared"] is True
           assert value["comparison"]["arms"]["jev_assisted"]["jev_calls"] == 1
           assert value["general_jev"]["standing"] == "controlled-protocol"
+          assert value["actuation"]["usage"]["event"]["kind"] == "model-usage"
+          assert value["actuation"]["activity"]["invocation_ref"] == value["general_jev"]["invocation_ref"]
+          assert value["actuation"]["activity"]["run_ref"] == value["sources"]["factory_run_ref"]
           PY
       - name: Preserve Redis restart evidence for the joined state
         shell: bash
