@@ -301,9 +301,9 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
                     binding.provenance = self.provenance.clone();
                     binding.model_observation = self.model_observation.clone();
                     self.binding = Some(binding.clone());
-                    Ok(vec![self.signal(ConnectionSignalKind::SessionOpened {
-                        binding,
-                    })])
+                    Ok(vec![
+                        self.signal(ConnectionSignalKind::SessionOpened { binding })
+                    ])
                 }
                 Pending::Prompt => Ok(Vec::new()),
                 Pending::Control => {
@@ -568,7 +568,9 @@ mod tests {
             ConnectionSignalKind::AgentMessageChunk { .. }
         ));
         adapter
-            .ingest(json!({"type":"message_end","message":{"role":"assistant","stopReason":"aborted"}}))
+            .ingest(
+                json!({"type":"message_end","message":{"role":"assistant","stopReason":"aborted"}}),
+            )
             .unwrap();
         let ended = adapter.ingest(json!({"type":"agent_end"})).unwrap();
         assert!(matches!(ended[0].kind, ConnectionSignalKind::Cancelled));
