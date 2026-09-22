@@ -581,6 +581,26 @@ fn detection_config_dir(recorded: &DetectionEntry) -> Option<String> {
         .and_then(|probe| probe.spec.clone())
 }
 
+/// The edition the detection record observed for a slug, when it reports one.
+fn detection_version(detection: &DetectionOutcome, slug: &str) -> Option<String> {
+    match detection {
+        DetectionOutcome::Record(record) => record
+            .harnesses
+            .iter()
+            .find(|entry| entry.slug == slug)
+            .and_then(|entry| entry.version.clone()),
+        DetectionOutcome::Unavailable { .. } => None,
+    }
+}
+
+/// Edition spellings compared without their decoration: a leading `v` and
+/// surrounding whitespace carry no edition meaning (`v1.18.29` and `1.18.29`
+/// are the same edition).
+fn normalise_edition(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    trimmed.strip_prefix('v').unwrap_or(trimmed)
+}
+
 /// The derived surface state of an overlaid harness, from the two intake legs.
 /// Capability resolved means the install leg is satisfiable; a harness that is
 /// present while its descriptor is refused is a compatibility gap, not an
@@ -1322,6 +1342,30 @@ fn overlaid_row(
         .map(|p| p.notes.clone())
         .unwrap_or_default();
 
+    // The admission read model's edition honesty. The contract declares the
+    // adapter's version/source revision as facts about the edition its
+    // evidence was gathered on — not a gate. When the installed product
+    // reports a different edition, the divergence is surfaced as a named note
+    // (and as row fields), so a consumer can weigh the census's claims
+    // against their pinning; the mismatch is never normalised away and never
+    // silently treated as proof about the installed edition.
+    let admission = (overlay.admission)(dirs);
+    let detected_version = detection_version(detection, overlay.catalog_slug);
+    let pinned_edition = admission
+        .native_version
+        .as_deref()
+        .or(admission.source_revision.as_deref());
+    if let (Some(pinned), Some(detected)) = (pinned_edition, detected_version.as_deref()) {
+        if normalise_edition(pinned) != normalise_edition(detected) {
+            notes.push(format!(
+                "{}'s admission knowledge is pinned to edition {} while the installed \
+                 product reports {}; the census's compatibility claims are evidence for \
+                 {}, not for the installed edition",
+                overlay.name, pinned, detected, pinned
+            ));
+        }
+    }
+
     let (state, gap) = match kind {
         SurfaceKind::Installable => ("installable", None),
         SurfaceKind::Absent => ("absent", None),
@@ -1356,6 +1400,11 @@ fn overlaid_row(
         "capability_reason": capability_reason,
         "detection": detection_name,
         "detection_reason": detection_reason,
+        "admission": {
+            "native_version": admission.native_version,
+            "source_revision": admission.source_revision,
+        },
+        "detected_version": detected_version,
         "gap": gap,
         "notes": notes,
         "error": planned.as_ref().err().map(|e| e.message().to_string()),
