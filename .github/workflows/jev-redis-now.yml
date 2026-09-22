@@ -296,7 +296,7 @@ jobs:
           set -euo pipefail
           cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee "$RUNNER_TEMP/joined-build.log"
           (cd "$RUNNER_TEMP/Central" && cargo build --locked -p ctrl) 2>&1 | tee -a "$RUNNER_TEMP/joined-build.log"
-          (cd "$RUNNER_TEMP/Factory" && cargo build --locked -p factory --bin factory) 2>&1 | tee -a "$RUNNER_TEMP/joined-build.log"
+          (cd "$RUNNER_TEMP/Factory" && cargo build --locked -p epilogos-factory --bin factory) 2>&1 | tee -a "$RUNNER_TEMP/joined-build.log"
           (cd "$RUNNER_TEMP/Actuation" && cargo build --locked -p actuation-cli --bin actuation) 2>&1 | tee -a "$RUNNER_TEMP/joined-build.log"
           sha256sum \
             target/debug/aikit \
