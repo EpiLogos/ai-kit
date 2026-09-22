@@ -277,7 +277,11 @@ fn removing_an_already_removed_source_is_a_named_no_op() {
         assert!(output.status.success(), "{args:?} failed: {reply}");
     }
 
-    let (retry, reply) = run(&home, temp.path(), &["source", "remove", "testsrc", "--force"]);
+    let (retry, reply) = run(
+        &home,
+        temp.path(),
+        &["source", "remove", "testsrc", "--force"],
+    );
     assert!(
         retry.status.success(),
         "a retry after removal must succeed: {reply}"
