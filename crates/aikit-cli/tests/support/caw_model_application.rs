@@ -397,13 +397,19 @@ fn canonical_root_agency_composes_from_a_nested_material_checkout() {
     fs::write(&basis_path, serde_json::to_vec(&basis).unwrap()).unwrap();
 
     let native = actuation();
-    let mut paths = vec![native.parent().unwrap().to_path_buf()];
+    let ctrl =
+        PathBuf::from(std::env::var_os("AIKIT_CAW_CTRL_BIN").expect("pinned native Central"));
+    let mut paths = vec![
+        native.parent().unwrap().to_path_buf(),
+        ctrl.parent().unwrap().to_path_buf(),
+    ];
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
     let output = Command::new(env!("CARGO_BIN_EXE_aikit"))
         .env("AIKIT_HOME", w.home.root())
         .env("CENTRAL_ROOT", &central)
+        .env("CENTRAL_CTRL_BIN", &ctrl)
         .env("PATH", std::env::join_paths(paths).unwrap())
         .arg("--json")
         .arg("-C")
