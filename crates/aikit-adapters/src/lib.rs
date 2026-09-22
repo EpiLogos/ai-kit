@@ -53,6 +53,7 @@ pub mod okf;
 pub mod openai_realtime;
 pub mod place_technology;
 pub mod profiles;
+pub mod prime_rpc_connection;
 pub mod projectcentral;
 pub mod projectcentral_authored_wiki;
 pub mod provider_catalog_source;
@@ -236,3 +237,8 @@ pub mod agency_admission;
 pub mod central_file_map;
 pub mod central_placement;
 pub mod placement_enforcement;
+
+pub use prime_rpc_connection::{
+    PrimeRpcConnectionAdapter, PRIME_AGENT_RELEASE, PRIME_AGENT_RELEASE_REVISION,
+    PRIME_RPC_ADAPTER_VERSION,
+};
