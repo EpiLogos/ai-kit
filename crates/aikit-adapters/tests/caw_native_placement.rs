@@ -8,14 +8,21 @@ use std::{fs, path::PathBuf};
 fn world() -> (tempfile::TempDir, CentralTaskRequest) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
-    for path in ["Control/user", "Control/relations", "Work/demo/src"] {
+    for path in [
+        "Control/user",
+        "Control/relations",
+        "Work/demo/src",
+        "Work/demo/ProjectCentral",
+        "Work/sibling",
+    ] {
         fs::create_dir_all(root.join(path)).unwrap();
     }
     let path = "Control/user/placement.json";
     let source = format!("central:source:control:root:{path}");
     fs::write(root.join(path), json!({
         "schema":"central.work-placement-policy/v1", "scope_ref":"control:root",
-        "writable":[{"path":"Work/demo", "class":"repository"}], "protected":[],
+        "writable":[{"path":"Work/demo", "class":"repository"}],
+        "protected":["Work/demo/ProjectCentral"],
         "enforcement":"material-filesystem", "required_coverage":["file-content", "file-creation", "file-removal", "rename-link", "truncate", "descendant-processes"],
         "lease_seconds":300
     }).to_string()).unwrap();
@@ -51,6 +58,22 @@ fn native_policy_now_validation_and_workcell_prepare_are_connected() {
     assert_eq!(task.allocation["revision"], again.allocation["revision"]);
     assert_eq!(again.allocation["created"], false);
     let source = request.central_root.join("Work/demo/src");
+    let working_directory = request.central_root.join("Work/demo");
+    assert!(owner.validate_write(&task, &working_directory).is_err());
+    let working_anchor = owner
+        .working_directory_anchor(&task, &working_directory)
+        .unwrap();
+    assert_eq!(
+        working_anchor["schema"],
+        "aikit.task-working-directory-anchor/v1"
+    );
+    assert_eq!(working_anchor["path"], json!(working_directory));
+    for refused in [
+        request.central_root.join("Work/demo/ProjectCentral"),
+        request.central_root.join("Work/sibling"),
+    ] {
+        assert!(owner.working_directory_anchor(&task, &refused).is_err());
+    }
     let result = owner
         .validate_write(&task, &source.join("answer.txt"))
         .unwrap();
@@ -96,6 +119,28 @@ fn native_policy_now_validation_and_workcell_prepare_are_connected() {
     assert_eq!(native["requirements"], requirements);
     assert_eq!(native["state"], "prepared-not-executed");
     println!("NATIVE_CENTRAL_WORKCELL_PREPARATION: actual owners, no installed/model claim");
+}
+
+#[test]
+#[ignore = "requires exact source-built Central; mandatory in CAW workflow"]
+fn native_working_directory_anchor_refuses_removal_and_replacement() {
+    let (_dir, request) = world();
+    let owner = NativeCentralPlacement::new(SystemRunner::new());
+    let task = owner.allocate(&request).unwrap();
+    let working_directory = request.central_root.join("Work/demo");
+    owner
+        .working_directory_anchor(&task, &working_directory)
+        .unwrap();
+    let moved = request.central_root.join("Work/demo-before");
+    fs::rename(&working_directory, &moved).unwrap();
+    assert!(owner
+        .working_directory_anchor(&task, &working_directory)
+        .is_err());
+    fs::create_dir_all(working_directory.join("src")).unwrap();
+    fs::create_dir_all(working_directory.join("ProjectCentral")).unwrap();
+    assert!(owner
+        .working_directory_anchor(&task, &working_directory)
+        .is_err());
 }
 
 #[test]

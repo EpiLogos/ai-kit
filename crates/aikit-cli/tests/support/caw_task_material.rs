@@ -199,7 +199,7 @@ fn persistent_storage_reentry_and_release_govern_real_turns_without_duplicate_wo
         prepared["allocation"]["allocation"]["writable_destination"]
     );
     w.start();
-    assert_eq!(w.open(&prepared, &w.root.join("Work/demo/src"))["ok"], true);
+    assert_eq!(w.open(&prepared, &w.root.join("Work/demo"))["ok"], true);
     assert_eq!(w.send("one")["ok"], true);
     await_delivery(&w, "one");
     let log = w.root.join("Work/demo/src/protocol.log");
@@ -251,7 +251,7 @@ fn workcell_really_hosts_the_native_encounter_owner_and_its_protected_response()
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(w.open(&prepared, &w.root.join("Work/demo/src"))["ok"], true);
+    assert_eq!(w.open(&prepared, &w.root.join("Work/demo"))["ok"], true);
     assert_eq!(w.send("one")["ok"], true);
     await_delivery(&w, "one");
     let before = fs::read(w.root.join("Work/demo/src/protocol.log")).unwrap();
@@ -283,7 +283,7 @@ fn workcell_really_hosts_the_native_encounter_owner_and_its_protected_response()
     assert_eq!(evidence["workcell_token_present"], false);
     assert_eq!(evidence["central_token_present"], false);
     assert_eq!(evidence["selected_context"], true);
-    assert_eq!(evidence["cwd"], json!(w.root.join("Work/demo/src")));
+    assert_eq!(evidence["cwd"], json!(w.root.join("Work/demo")));
     println!("TASK_NATIVE_WORKCELL_HOSTED_ENCOUNTER_EXECUTED");
 }
 
@@ -345,10 +345,7 @@ fn a_healthy_unrelated_process_cannot_satisfy_encounter_hosting() {
     let prepared = host.prepare(&w, true);
     w.start();
     assert_ne!(host.managed_pid, Some(w.child.as_ref().unwrap().id()));
-    assert_eq!(
-        w.open(&prepared, &w.root.join("Work/demo/src"))["ok"],
-        false
-    );
+    assert_eq!(w.open(&prepared, &w.root.join("Work/demo"))["ok"], false);
     assert!(!w.root.join("Work/demo/src/protocol.log").exists());
     // The fake service is only a negative witness; do not send it an owner shutdown.
     host.managed_pid = None;

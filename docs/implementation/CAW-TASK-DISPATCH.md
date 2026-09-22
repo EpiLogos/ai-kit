@@ -20,6 +20,18 @@ AIKit neither guesses a task directory nor filters inconvenient protected paths.
 A protected descendant beneath a requested writable ancestor is an unsupported
 material request, not permission to discard that protection.
 
+The invocation `cwd` is an identity-anchored read/material location inside one
+of Central's native repository, worktree or NOW grants. It is not itself a
+write grant: a registered checkout root remains a valid `cwd` when Central
+correctly refuses ambiguous write/remove approval for that root because
+`.git`, `.central` or `ProjectCentral` is protected below it. Only the explicit
+selected directories and allocated NOW contents enter the Workcell writable
+boundary. AIKit retains the `cwd` device/inode/path identity and rechecks it at
+configuration, continuation and launch; removal, replacement, a protected or
+sibling directory, or changed Central basis refuses before provider start.
+Bindings prepared with the former write-destination anchor format require an
+explicit reprepare of the same task request rather than silent conversion.
+
 The native write boundary is supported unprivileged Linux Landlock. It protects
 the documented regular-file write/create/remove/rename-link/truncate operations
 and descendants, not reads, network/delegated services, metadata, privileged
