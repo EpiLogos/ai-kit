@@ -51,6 +51,33 @@ ql_root = Path(ql_root_raw).expanduser().resolve() if ql_root_raw else None
 if ql_root is not None and not ql_root.is_dir():
     raise RuntimeError("EPI_QL_SOURCE_ROOT must be an existing directory when supplied")
 
+central_raw = os.environ.get("EPI_CENTRAL_CTRL_BINARY", "").strip()
+central_root_raw = os.environ.get("EPI_CENTRAL_ROOT", "").strip()
+central_project = os.environ.get("EPI_CENTRAL_PROJECT", "").strip()
+central_enabled = bool(central_raw or central_root_raw or central_project)
+central_ctrl = None
+central_root = None
+lane_repo = os.environ.get("EPI_ACCEPTANCE_REPO", "").strip()
+lane_branch = os.environ.get("EPI_ACCEPTANCE_BRANCH", "").strip()
+lane_worktree = os.environ.get("EPI_ACCEPTANCE_WORKTREE", "").strip()
+if central_enabled:
+    if not (central_raw and central_root_raw and central_project):
+        raise RuntimeError(
+            "EPI_CENTRAL_CTRL_BINARY, EPI_CENTRAL_ROOT and EPI_CENTRAL_PROJECT "
+            "must be supplied together"
+        )
+    central_ctrl = Path(central_raw).expanduser().resolve()
+    central_root = Path(central_root_raw).expanduser().resolve()
+    if not central_ctrl.is_file() or not central_root.is_dir():
+        raise RuntimeError("Central acceptance paths are unavailable")
+    if not (lane_repo and lane_branch and lane_worktree):
+        raise RuntimeError(
+            "EPI_ACCEPTANCE_REPO, EPI_ACCEPTANCE_BRANCH and "
+            "EPI_ACCEPTANCE_WORKTREE are required for native continuation proof"
+        )
+    if not Path(lane_worktree).expanduser().resolve().is_dir():
+        raise RuntimeError("EPI_ACCEPTANCE_WORKTREE must be an existing directory")
+
 faculty = json.loads(faculty_config.read_text())
 evidence_root_raw = faculty.get("evidence_root")
 if not isinstance(evidence_root_raw, str) or not evidence_root_raw.strip():
@@ -62,6 +89,7 @@ stamp = f"{int(time.time())}-{os.getpid()}"
 provider_id = f"epi-prime-ql-acceptance-{stamp}"
 space = f"session-space/epi-prime-ql-acceptance-{stamp}"
 session = f"agent-session/epi-prime-ql-acceptance-{stamp}"
+handoff_id = f"epi-prime-ql-continuation-{stamp}"
 out_dir = Path(
     os.environ.get(
         "EPI_ACCEPTANCE_OUTPUT",
@@ -240,6 +268,15 @@ configure = [
 ]
 if ql_root is not None:
     configure.extend(["--ql-root", str(ql_root)])
+if central_enabled:
+    configure.extend([
+        "--central-ctrl-bin",
+        str(central_ctrl),
+        "--central-root",
+        str(central_root),
+        "--central-project",
+        central_project,
+    ])
 configured = cli(*configure)
 if configured.get("body_ref") != "agent-body/epi-prime-ql":
     raise RuntimeError(f"unexpected configured body: {configured}")
@@ -314,8 +351,36 @@ try:
     child_task = (
         "Import ql_relational. Call await ql_relational.anuttara_read("
         "'M0-2-9', max_relations=8). Refuse unless the returned language "
-        "coordinate is M0-2-9 and declared relations are present. Then use "
-        "the available agent_message capability to send exactly CHILD_QL_OK "
+        "coordinate is M0-2-9 and declared relations are present. "
+    )
+    if central_enabled:
+        child_task += (
+            "Then call await ql_relational.central_now_handover("
+            + json.dumps("Prime child continuation")
+            + ", "
+            + json.dumps("M0-2-9 was read with declared relations; continue from the named source/evidence and lane refs.")
+            + ", actor="
+            + json.dumps("prime-child/ql-child-proof")
+            + ", project="
+            + json.dumps(central_project)
+            + ", handoff_id="
+            + json.dumps(handoff_id)
+            + ", source_refs=["
+            + json.dumps(f"ql-mef:{ql_revision}:M0-2-9")
+            + "], evidence_refs=["
+            + json.dumps(f"actuation:{actuation_revision}:faculty:#0")
+            + "], work_refs=[{'repo':"
+            + json.dumps(lane_repo)
+            + ",'branch':"
+            + json.dumps(lane_branch)
+            + ",'worktree_path':"
+            + json.dumps(str(Path(lane_worktree).expanduser().resolve()))
+            + "}]). Refuse unless the returned handoff id is "
+            + json.dumps(handoff_id)
+            + ". "
+        )
+    child_task += (
+        "Then use the available agent_message capability to send exactly CHILD_QL_OK "
         "to your parent with receiver_role='parent'. Do not edit files, "
         "create a worktree/clone, spawn another child, or claim live Bimba mutation."
     )
@@ -387,6 +452,88 @@ try:
     if not saw_child_message:
         raise RuntimeError("child did not return the explicit CHILD_QL_OK message")
 
+    replacement = None
+    replacement_message_observed = False
+    if central_enabled:
+        replacement_task = (
+            "Import ql_relational. Read the exact Central NOW handoff with "
+            "await ql_relational.central_now_handoff_read("
+            + json.dumps(handoff_id)
+            + ", project="
+            + json.dumps(central_project)
+            + "). Refuse unless its id, repo, branch and worktree_path equal "
+            + json.dumps({
+                "id": handoff_id,
+                "repo": lane_repo,
+                "branch": lane_branch,
+                "worktree_path": str(Path(lane_worktree).expanduser().resolve()),
+            }, sort_keys=True)
+            + ". Continue only from that handoff's source/evidence/work refs; "
+            "do not reconstruct the parent investigation. Then send exactly "
+            "REPLACEMENT_NOW_OK to the parent with receiver_role='parent'."
+        )
+        replacement_prompt = (
+            "Use the installed ql_relational Skill. Call "
+            "await ql_relational.spawn_child_cheapest("
+            + json.dumps(replacement_task)
+            + ", name='ql-child-replacement', use_type='agent-child'). "
+            "After admission reply exactly ROOT_REPLACEMENT_ADMITTED."
+        )
+        page = event_page(cursor)
+        draft = request(
+            "draft",
+            agent_session=session,
+            basis=page["draft"]["revision"],
+            text=replacement_prompt,
+        )
+        request("prompt", agent_session=session, draft_revision=draft["revision"])
+        cursor, root_text, terminal, _ = wait_turn(cursor)
+        if "Completed" not in terminal or root_text.strip() != "ROOT_REPLACEMENT_ADMITTED":
+            raise RuntimeError(
+                f"replacement admission failed: {terminal} / {root_text!r}"
+            )
+
+        replacement_updates = []
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            page = event_page(cursor)
+            for item in page["events"]:
+                cursor = max(cursor, item["cursor"])
+                event = item["event"]
+                if "REPLACEMENT_NOW_OK" in json.dumps(event, sort_keys=True):
+                    replacement_message_observed = True
+                host = event.get("event", {})
+                row = host.get("Signal", {}).get("kind", {})
+                if row.get("kind") == "status":
+                    message = row.get("message", "")
+                    if message.startswith("prime-rlm-child:"):
+                        candidate = json.loads(
+                            message[len("prime-rlm-child:"):]
+                        ).get("child")
+                        if (
+                            isinstance(candidate, dict)
+                            and candidate.get("sessionName") == "ql-child-replacement"
+                        ):
+                            replacement_updates.append(candidate)
+            cursor = page["next_cursor"]
+            completed = [
+                row
+                for row in replacement_updates
+                if row.get("status") in {"done", "completed"}
+            ]
+            if completed and replacement_message_observed:
+                break
+            time.sleep(0.1)
+        if not replacement_updates or not replacement_message_observed:
+            raise RuntimeError(
+                "replacement child did not continue from the native NOW handoff"
+            )
+        replacement = replacement_updates[-1]
+        if replacement.get("model") != expected_child_selector:
+            raise RuntimeError(
+                f"replacement child model mismatch: {replacement.get('model')!r}"
+            )
+
     # Cancellation must stop the live effect without destroying the session.
     page = event_page(cursor)
     basis = page["draft"]["revision"]
@@ -451,6 +598,21 @@ try:
             "cancelled": True,
             "same_native_session": True,
             "marker": continuation.strip(),
+            "native_now_handover": (
+                {
+                    "id": handoff_id,
+                    "project": central_project,
+                    "repo": lane_repo,
+                    "branch": lane_branch,
+                    "worktree_path_sha256": hashlib.sha256(
+                        str(Path(lane_worktree).expanduser().resolve()).encode()
+                    ).hexdigest(),
+                    "replacement_child_id": replacement.get("id") if replacement else None,
+                    "replacement_message_observed": replacement_message_observed,
+                }
+                if central_enabled
+                else {"standing": "not-exercised; Central inputs not supplied"}
+            ),
         },
         "binary_sha256": {
             "aikit": hashlib.sha256(aikit.read_bytes()).hexdigest(),
