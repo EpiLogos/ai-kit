@@ -774,7 +774,6 @@ fn emit<T: Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod epi_prime_cli_tests {
     use super::*;
@@ -784,18 +783,30 @@ mod epi_prime_cli_tests {
         let cli = Cli::try_parse_from([
             "aikit-session-space",
             "encounter-epi-prime-configure",
-            "--provider-id", "epi-prime-ql",
-            "--launcher", "/opt/actuation-epi-prime",
-            "--prime-bin", "/opt/prime-agent",
-            "--ql-bin", "/opt/ql",
-            "--ql-revision", "89ca4088ea47fe626c23c2b11efe2d38bdfcd1f7",
-            "--body-revision", "161b869740c54dc325ad1d6aef765dbf32920073",
-            "--skill-path", "/opt/ql-relational",
-            "--research-bin", "/opt/actuation-research",
-            "--faculty-config", "/opt/faculty.json",
-            "--central-ctrl-bin", "/opt/ctrl",
-            "--central-root", "/opt/Central",
-            "--central-project", "O-I",
+            "--provider-id",
+            "epi-prime-ql",
+            "--launcher",
+            "/opt/actuation-epi-prime",
+            "--prime-bin",
+            "/opt/prime-agent",
+            "--ql-bin",
+            "/opt/ql",
+            "--ql-revision",
+            "89ca4088ea47fe626c23c2b11efe2d38bdfcd1f7",
+            "--body-revision",
+            "161b869740c54dc325ad1d6aef765dbf32920073",
+            "--skill-path",
+            "/opt/ql-relational",
+            "--research-bin",
+            "/opt/actuation-research",
+            "--faculty-config",
+            "/opt/faculty.json",
+            "--central-ctrl-bin",
+            "/opt/ctrl",
+            "--central-root",
+            "/opt/Central",
+            "--central-project",
+            "O-I",
         ])
         .expect("Prime-QL configure grammar parses");
 
@@ -803,10 +814,7 @@ mod epi_prime_cli_tests {
             panic!("expected Prime-QL configure command");
         };
         assert_eq!(args.provider_id, "epi-prime-ql");
-        assert_eq!(
-            args.ql_revision,
-            "89ca4088ea47fe626c23c2b11efe2d38bdfcd1f7"
-        );
+        assert_eq!(args.ql_revision, "89ca4088ea47fe626c23c2b11efe2d38bdfcd1f7");
         assert_eq!(
             args.body_revision,
             "161b869740c54dc325ad1d6aef765dbf32920073"
