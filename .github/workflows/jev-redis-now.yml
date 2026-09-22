@@ -474,3 +474,159 @@ jobs:
           path: independent-review.json
           if-no-files-found: error
           retention-days: 14
+
+
+  workcell-redis-lifecycle:
+    name: Workcell-owned Redis lifecycle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout current Workcell owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth=1 --branch main https://github.com/EpiLogos/Workcell.git "$RUNNER_TEMP/Workcell"
+          git -C "$RUNNER_TEMP/Workcell" rev-parse HEAD | tee "$RUNNER_TEMP/workcell-revision.txt"
+      - name: Install native Rust and build Workcell
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+          cd "$RUNNER_TEMP/Workcell"
+          cargo test --locked -p epilogos-workcell-runtime redis_now -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/workcell-redis-tests.log"
+          cargo build --locked -p epilogos-workcell-cli --bin workcell \
+            2>&1 | tee -a "$RUNNER_TEMP/workcell-redis-tests.log"
+      - name: Prepare Workcell-owned target service declaration
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/workcell-now"
+          data="$root/data"
+          mkdir -p "$root" "$data"
+          chmod 0777 "$data"
+          cat > "$root/status.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          test "$(docker inspect -f '{{.State.Running}}' workcell-redis-now 2>/dev/null)" = true
+          docker exec workcell-redis-now redis-cli --raw PING | grep -qx PONG
+          SH
+          cat > "$root/start.sh" <<SH
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if docker inspect workcell-redis-now >/dev/null 2>&1; then
+            docker start workcell-redis-now >/dev/null
+          else
+            docker run --detach --name workcell-redis-now \
+              --publish 6383:6379 \
+              --volume "$data:/data" \
+              redis:8.10 redis-server \
+                --appendonly yes --appendfsync everysec --save 60 1 \
+                --maxmemory 134217728 --maxmemory-policy noeviction >/dev/null
+          fi
+          SH
+          cat > "$root/stop.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          docker stop workcell-redis-now >/dev/null
+          SH
+          cat > "$root/restart.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          docker restart workcell-redis-now >/dev/null
+          SH
+          chmod 0755 "$root/"*.sh
+          cat > "$root/services.json" <<JSON
+          {
+            "schema": "workcell.service-declaration/v1",
+            "services": [{
+              "logical_ref": "service:redis-now/cloud-proof",
+              "endpoint": "redis://127.0.0.1:6383",
+              "lifetime": "target-owned",
+              "acquisition": "ensure-running",
+              "status": {"program": "$root/status.sh", "args": []},
+              "readiness": {
+                "program": "$root/status.sh", "args": [],
+                "timeout_ms": 5000, "interval_ms": 50
+              },
+              "start": {"program": "$root/start.sh", "args": []},
+              "stop": {"program": "$root/stop.sh", "args": []},
+              "restart": {"program": "$root/restart.sh", "args": []},
+              "metadata": {
+                "target": "redis",
+                "target_minimum_series": "8.10",
+                "configuration_owner": "workcell",
+                "semantic_state_owner": "central+aikit+factory",
+                "persistence_policy": "aof+operator-rdb",
+                "eviction_policy": "noeviction",
+                "binding": "loopback"
+              }
+            }]
+          }
+          JSON
+      - name: Materialise Redis through Workcell and prove command-exit persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/workcell-now"
+          wc="$RUNNER_TEMP/Workcell/target/debug/workcell"
+          "$wc" --state-root "$root/state" --services "$root/services.json" --json discover \
+            | tee "$RUNNER_TEMP/workcell-discover-before.json"
+          "$wc" --state-root "$root/state" --services "$root/services.json" \
+            --receipt "$root/world.json" --json prepare \
+            --demand-ref demand:redis-now-cloud \
+            --connect service:redis-now/cloud-proof \
+            --persistence workcell --retention release \
+            | tee "$RUNNER_TEMP/workcell-prepare.json"
+          "$root/status.sh"
+          docker exec workcell-redis-now redis-cli SET oi65-proof retained | grep -qx OK
+          "$wc" --state-root "$root/state" --services "$root/services.json" \
+            --receipt "$root/world.json" --json observe \
+            | tee "$RUNNER_TEMP/workcell-observe-before.json"
+          docker exec workcell-redis-now redis-server --version \
+            | tee "$RUNNER_TEMP/workcell-redis-version.txt"
+      - name: Lose the process, recover through Workcell, then owner-release it
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/workcell-now"
+          wc="$RUNNER_TEMP/Workcell/target/debug/workcell"
+          docker stop workcell-redis-now >/dev/null
+          if "$root/status.sh"; then
+            echo "stopped Redis unexpectedly remained healthy" >&2
+            exit 1
+          fi
+          "$wc" --state-root "$root/state" --services "$root/services.json" \
+            --receipt "$root/world.json" --json recover \
+            | tee "$RUNNER_TEMP/workcell-recover.json"
+          "$root/status.sh"
+          test "$(docker exec workcell-redis-now redis-cli --raw GET oi65-proof)" = retained
+          "$wc" --state-root "$root/state" --services "$root/services.json" \
+            --receipt "$root/world.json" --json release \
+            | tee "$RUNNER_TEMP/workcell-release.json"
+          if "$root/status.sh"; then
+            echo "owner-scoped release failed to stop Workcell-started Redis" >&2
+            exit 1
+          fi
+          docker rm workcell-redis-now >/dev/null
+          test -d "$root/data"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jev-redis-now-workcell-lifecycle
+          path: |
+            ${{ runner.temp }}/workcell-revision.txt
+            ${{ runner.temp }}/workcell-redis-tests.log
+            ${{ runner.temp }}/workcell-discover-before.json
+            ${{ runner.temp }}/workcell-prepare.json
+            ${{ runner.temp }}/workcell-observe-before.json
+            ${{ runner.temp }}/workcell-redis-version.txt
+            ${{ runner.temp }}/workcell-recover.json
+            ${{ runner.temp }}/workcell-release.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Cleanup disposable Workcell Redis material
+        if: always()
+        shell: bash
+        run: docker rm --force workcell-redis-now >/dev/null 2>&1 || true
