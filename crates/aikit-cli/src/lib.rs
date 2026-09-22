@@ -47,7 +47,6 @@ pub mod project_binding;
 pub mod project_recency;
 pub mod projection_drift;
 pub mod projects;
-pub mod worktree_projection;
 pub mod recognised_praxis;
 pub mod route_launch;
 pub mod run;
@@ -70,6 +69,7 @@ pub mod wiki_construct;
 pub mod wiki_projection;
 pub mod wiki_shape;
 pub mod working_environment_field;
+pub mod worktree_projection;
 
 pub use session_lifecycle_ops::SessionLifecycleServiceOps;
 pub use session_space_ops::SessionSpaceCliAdapter;

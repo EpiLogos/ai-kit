@@ -50,7 +50,12 @@ fn origin_with_clone(root: &Path) -> (PathBuf, PathBuf) {
     let seed = root.join("seed");
     git(
         root,
-        &["clone", "-q", origin.to_str().unwrap(), seed.to_str().unwrap()],
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            seed.to_str().unwrap(),
+        ],
     );
     fs::write(seed.join("README.md"), "one\n").unwrap();
     git(&seed, &["add", "README.md"]);
@@ -59,7 +64,12 @@ fn origin_with_clone(root: &Path) -> (PathBuf, PathBuf) {
     let work = root.join("work");
     git(
         root,
-        &["clone", "-q", origin.to_str().unwrap(), work.to_str().unwrap()],
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            work.to_str().unwrap(),
+        ],
     );
     (origin, work)
 }
@@ -68,7 +78,12 @@ fn advance_origin(root: &Path, origin: &Path) {
     let mover = root.join("mover");
     git(
         root,
-        &["clone", "-q", origin.to_str().unwrap(), mover.to_str().unwrap()],
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            mover.to_str().unwrap(),
+        ],
     );
     fs::write(mover.join("README.md"), "one\ntwo\n").unwrap();
     git(&mover, &["commit", "-qam", "c2"]);
@@ -124,7 +139,11 @@ fn observe_reports_drift_without_touching_the_checkout() {
 
     let (home, project) = isolated_home();
     let repo = format!("demo={}", work.display());
-    let (ok, envelope) = run_aikit(home.path(), project.path(), &["worktree", "project", "--repo", &repo]);
+    let (ok, envelope) = run_aikit(
+        home.path(),
+        project.path(),
+        &["worktree", "project", "--repo", &repo],
+    );
     assert!(ok, "observe must succeed: {envelope}");
     assert_eq!(envelope["ok"], Value::Bool(true));
     let entry = only_entry(&envelope);
@@ -188,7 +207,10 @@ fn apply_surfaces_and_preserves_a_dirty_checkout() {
         project.path(),
         &["worktree", "project", "--apply", "--repo", &repo],
     );
-    assert!(ok, "the command itself succeeds even when a repo is surfaced: {envelope}");
+    assert!(
+        ok,
+        "the command itself succeeds even when a repo is surfaced: {envelope}"
+    );
     let entry = only_entry(&envelope);
     assert_eq!(entry["action"]["action"], "surfaced");
     assert_eq!(entry["clean"], Value::Bool(false));

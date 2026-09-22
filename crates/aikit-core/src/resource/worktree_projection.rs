@@ -353,7 +353,10 @@ mod tests {
             Divergence::classify(true, 0, 3),
             Divergence::Behind { by: 3 }
         );
-        assert_eq!(Divergence::classify(true, 2, 0), Divergence::Ahead { by: 2 });
+        assert_eq!(
+            Divergence::classify(true, 2, 0),
+            Divergence::Ahead { by: 2 }
+        );
         assert_eq!(
             Divergence::classify(true, 2, 3),
             Divergence::Diverged {
@@ -435,7 +438,12 @@ mod tests {
         assert!(missing.contains("fetch"));
     }
 
-    fn entry(key: &str, action: ProjectionAction, divergence: Divergence, clean: bool) -> RepoProjection {
+    fn entry(
+        key: &str,
+        action: ProjectionAction,
+        divergence: Divergence,
+        clean: bool,
+    ) -> RepoProjection {
         RepoProjection {
             key: key.into(),
             project: ProjectRef::parse(&format!("project:{key}")).unwrap(),
@@ -530,6 +538,8 @@ mod tests {
             Divergence::Behind { by: 2 },
             true,
         );
-        assert!(would.summary().contains("fast-forward to a3b1169bbbbb with --apply"));
+        assert!(would
+            .summary()
+            .contains("fast-forward to a3b1169bbbbb with --apply"));
     }
 }

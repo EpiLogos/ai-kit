@@ -780,10 +780,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "aikit-projection-{}-{unique}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("aikit-projection-{}-{unique}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         root
     }
@@ -1004,8 +1002,15 @@ mod tests {
 
         let projection = project(&work, true);
         assert_eq!(projection.divergence, Divergence::Ahead { by: 1 });
-        assert!(matches!(projection.action, ProjectionAction::Surfaced { .. }));
-        assert_eq!(head_of(&work), before, "a local commit must not be discarded");
+        assert!(matches!(
+            projection.action,
+            ProjectionAction::Surfaced { .. }
+        ));
+        assert_eq!(
+            head_of(&work),
+            before,
+            "a local commit must not be discarded"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1026,7 +1031,10 @@ mod tests {
 
         let projection = project(&work, true);
         assert!(matches!(projection.divergence, Divergence::Diverged { .. }));
-        assert!(matches!(projection.action, ProjectionAction::Surfaced { .. }));
+        assert!(matches!(
+            projection.action,
+            ProjectionAction::Surfaced { .. }
+        ));
         assert_eq!(
             head_of(&work),
             before,
@@ -1092,7 +1100,10 @@ mod tests {
         let current_entry = suite.entries.iter().find(|e| e.key == "current").unwrap();
         assert_eq!(current_entry.action, ProjectionAction::AlreadyProjected);
         let broken_entry = suite.entries.iter().find(|e| e.key == "broken").unwrap();
-        assert!(matches!(broken_entry.action, ProjectionAction::Failed { .. }));
+        assert!(matches!(
+            broken_entry.action,
+            ProjectionAction::Failed { .. }
+        ));
         assert_eq!(broken_entry.divergence, Divergence::Unknown);
 
         // Two of three now sit on the target; the broken one still needs a human.
