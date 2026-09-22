@@ -93,6 +93,29 @@ fn expand_seam(seam_path: &str, home: &Path, tree: &Path) -> PathBuf {
     }
 }
 
+/// Config-home overrides the harnesses themselves document and honour. When
+/// one is set, the harness reads its configuration there, so every read
+/// model and install target must follow it — a hardcoded `~/` default would
+/// describe (and wire) a different installation than the one that will run.
+/// Together with `AIKIT_HOME` this is what makes the whole client surface
+/// exercisable in a clean, isolated receiving scope.
+fn config_env_override(client: &str) -> Option<PathBuf> {
+    let var = match client {
+        "claude" | "claude-code" => "CLAUDE_CONFIG_DIR",
+        "codex" => "CODEX_HOME",
+        _ => return None,
+    };
+    std::env::var_os(var)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The config home this client honours right now: its own env override when
+/// set, otherwise the resolved default.
+fn effective_config_dir(client: &str, resolved: PathBuf) -> PathBuf {
+    config_env_override(client).unwrap_or(resolved)
+}
+
 /// Everything the adapter factories need, computed once per command.
 struct ClientDirs {
     /// The context's projection root (adapter projections live under it).
@@ -621,11 +644,15 @@ fn adapter_for(
     match reach {
         Reach::SelfOwned { build } => {
             let (adapter, config_dir) = build(&dirs)?;
-            Ok((adapter, None, config_dir))
+            Ok((adapter, None, effective_config_dir(client, config_dir)))
         }
         Reach::Client { build } => {
             let (adapter, config_dir) = build(&dirs, capability.clone())?;
-            Ok((adapter, capability, config_dir))
+            Ok((
+                adapter,
+                capability,
+                effective_config_dir(client, config_dir),
+            ))
         }
         Reach::AdapterOnly { .. } => Err(not_dispatchable(
             overlay.expect("only the broker is overlay-less"),
@@ -1268,6 +1295,7 @@ fn overlaid_row(
             (build(dirs), config_dir)
         }
     };
+    let config_dir = config_dir.map(|path| effective_config_dir(overlay.name, path));
 
     let planned = adapter.plan(rc);
     let semantic_items = match overlay.semantic {

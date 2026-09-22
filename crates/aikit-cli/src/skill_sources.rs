@@ -604,6 +604,47 @@ pub fn rollback(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
     Ok(record)
 }
 
+/// What removing a source took with it.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemovedSource {
+    pub id: String,
+    pub forced: bool,
+    pub removed_snapshots: usize,
+}
+
+/// Remove a registered source entirely — its spec, its state and every
+/// immutable snapshot it owns. A promoted snapshot feeds the shared catalog,
+/// so removing an active source without `force` refuses; with `force` the
+/// reply is the receipt of a deliberate loss: catalogued capsules vanish,
+/// enabled declarations resolve unavailable, and the next apply rebuilds the
+/// projections without the source. Recorded trust decisions are review
+/// evidence about capsule revisions; they outlive the source and are inert
+/// without it.
+pub fn remove(home: &AikitHome, id: &str, force: bool) -> Result<RemovedSource> {
+    let spec = load_spec(home, id)?;
+    let state = load_state(home, id)?;
+    if state.active_snapshot.is_some() && !force {
+        return Err(AikitError::new(
+            "source.still_active",
+            format!(
+                "source `{id}` still has an active snapshot feeding the catalog; \
+                 pass --force to remove it anyway and accept the loss of its offers"
+            ),
+        )
+        .with("source", id));
+    }
+    let dir = source_dir(home, id);
+    let removed_snapshots = fs::read_dir(dir.join("snapshots"))
+        .map(|entries| entries.filter_map(std::result::Result::ok).count())
+        .unwrap_or(0);
+    fs::remove_dir_all(&dir).map_err(|error| io("source.remove_failed", &dir, error))?;
+    Ok(RemovedSource {
+        id: spec.id,
+        forced: force,
+        removed_snapshots,
+    })
+}
+
 fn restore_previously_reviewed_trust(home: &AikitHome, id: &str, digest: &str) -> Result<()> {
     let index = Index::open(&home.database())?;
     let store = TrustStore::new(&index);

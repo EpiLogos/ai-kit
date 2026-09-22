@@ -595,6 +595,74 @@ fn git_branch_isolation_refuses_a_dirty_repo_before_touching_the_target() {
 }
 
 #[test]
+fn git_branch_isolation_ignores_aikits_own_untracked_project_writes() {
+    // Apply writes the project profile and the project skill projection
+    // BEFORE staging a Procedure. Untracked entries under `.aikit/` and
+    // `.agents/` are AIKit-generated state, not unrecorded human work: a
+    // refusal here was a chicken-and-egg that made the codex hook seam
+    // unreachable on any git project.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = home(tmp.path());
+    let repo = real_git_repo(tmp.path());
+    write(&repo.join(".aikit/profile.toml"), "[scopes]\n");
+    write(&repo.join(".agents/skills/review/SKILL.md"), "projected\n");
+    let target = repo.join("file.txt");
+    let procedure = plan_procedure(
+        &home,
+        ProcedureKind::DoctorFix { checks: vec![] },
+        Plan::new().with_edit(WorldEdit::WriteFile {
+            path: target.clone(),
+            contents: b"procedure output\n".to_vec(),
+            inverse: Inverse::Restore {
+                blob: aikit_core::procedure::BlobId::deferred(),
+            },
+        }),
+    )
+    .unwrap();
+
+    ProcedureRunner::new(&home).run(&procedure).unwrap();
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "procedure output\n",
+        "the Procedure proceeds despite AIKit's own untracked writes"
+    );
+    assert!(
+        fs::read_to_string(&repo.join(".aikit/profile.toml")).is_ok(),
+        "AIKit-owned state is not the Procedure's to clean"
+    );
+}
+
+#[test]
+fn git_branch_isolation_still_refuses_foreign_untracked_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = home(tmp.path());
+    let repo = real_git_repo(tmp.path());
+    write(&repo.join(".aikit/profile.toml"), "[scopes]\n");
+    write(&repo.join("draft-notes.txt"), "human scratch\n");
+    let target = repo.join("file.txt");
+    let procedure = plan_procedure(
+        &home,
+        ProcedureKind::DoctorFix { checks: vec![] },
+        Plan::new().with_edit(WorldEdit::WriteFile {
+            path: target.clone(),
+            contents: b"procedure output\n".to_vec(),
+            inverse: Inverse::Restore {
+                blob: aikit_core::procedure::BlobId::deferred(),
+            },
+        }),
+    )
+    .unwrap();
+
+    let error = ProcedureRunner::new(&home).run(&procedure).unwrap_err();
+    assert_eq!(error.code(), "procedure.git_dirty");
+    assert_eq!(
+        fs::read_to_string(&repo.join("draft-notes.txt")).unwrap(),
+        "human scratch\n",
+        "foreign untracked work still refuses and is untouched"
+    );
+}
+
+#[test]
 fn an_inverse_capture_failure_restores_the_original_git_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let home = home(tmp.path());

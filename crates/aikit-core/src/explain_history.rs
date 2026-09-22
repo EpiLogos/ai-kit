@@ -28,6 +28,7 @@ pub enum HistoryKind {
     SessionSpace,
     Procedure,
     LiveActivation,
+    Source,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

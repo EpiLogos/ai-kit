@@ -101,9 +101,9 @@ pub use generation::{
 };
 pub use generation_history::{compare_generation_worlds, GenerationWorldComparison};
 pub use history_evidence::{
-    familiarity_history_evidence_model, generation_history_evidence,
-    knowledge_application_receipt_evidence, session_space_history_evidence,
-    session_space_receipt_evidence,
+    all_contexts_generation_history_evidence, familiarity_history_evidence_model,
+    generation_history_evidence, knowledge_application_receipt_evidence,
+    session_space_history_evidence, session_space_receipt_evidence, source_history_evidence,
 };
 pub use home::AikitHome;
 pub use inbox::{Candidate, CandidateState, Capture, Inbox, PromotionEdits, Similarity};

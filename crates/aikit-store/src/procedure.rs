@@ -1234,13 +1234,40 @@ fn write_replacing_symlink(path: &Path, contents: &[u8]) -> Result<()> {
     write_file(path, contents)
 }
 
+/// AIKit's own project-visible working paths. Apply writes the project
+/// profile (`.aikit/`) and the project skill projection (`.agents/`) before a
+/// GitBranch-isolated Procedure stages, so an unfiltered dirty check always
+/// saw AIKit's own writes and refused — a chicken-and-egg that made the
+/// codex hook seam unreachable on every git project. Untracked entries under
+/// these roots are generated state, never unrecorded human work; everything
+/// else (modified or staged tracked files anywhere, untracked files outside
+/// these roots) still refuses.
+const AIKIT_PROJECT_PATHS: [&str; 2] = [".aikit", ".agents"];
+
+fn aikit_owned_untracked(line: &str) -> bool {
+    let Some(path) = line.strip_prefix("?? ") else {
+        return false;
+    };
+    let path = path.trim_start();
+    AIKIT_PROJECT_PATHS.iter().any(|root| {
+        path == *root
+            || path
+                .strip_prefix(root)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
 fn ensure_git_clean(repo: &Path) -> Result<()> {
     let status = git_output(
         repo,
         &["status", "--porcelain"],
         "procedure.git_setup_failed",
     )?;
-    if status.trim().is_empty() {
+    let dirt: Vec<&str> = status
+        .lines()
+        .filter(|line| !aikit_owned_untracked(line))
+        .collect();
+    if dirt.is_empty() {
         Ok(())
     } else {
         Err(AikitError::new(
@@ -1251,7 +1278,7 @@ fn ensure_git_clean(repo: &Path) -> Result<()> {
             ),
         )
         .with("repo", repo.display().to_string())
-        .with("status", status))
+        .with("status", dirt.join("\n")))
     }
 }
 

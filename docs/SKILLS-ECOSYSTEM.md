@@ -101,9 +101,14 @@ how the CLI advertises itself to agents).
    and **writes no canonical copy at all**.
 6. Write the lock entry.
 
-Agents whose skills dir *is* `.agents/skills` (Codex, Cursor, OpenCode, Gemini
-CLI, Copilot, Cline, Zed, Warp, Amp…) are "universal": for them the canonical
+Agents whose skills dir *is* `.agents/skills` (Codex, Cursor, Gemini CLI,
+Copilot, Cline, Zed, Warp, Amp…) are "universal": for them the canonical
 store *is* the install location, no symlink needed. Everyone else gets a link.
+
+OpenCode is not universal: since 1.x it canonically ingests
+`$XDG_CONFIG_HOME/opencode/skill(s)/<name>/` (global) and `.opencode/skill(s)/`
+(project), and scans `.claude`/`.agents` only as deliberate external sources.
+Projected skills must land in OpenCode's own directories to be first-class.
 
 This is exactly what is on disk here: `~/.claude/skills` contains 14 relative
 symlinks into `~/.agents/skills` interleaved with 25 hand-made real directories

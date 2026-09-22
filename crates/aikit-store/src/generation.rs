@@ -684,13 +684,21 @@ impl StagedGeneration {
             // edit must update, never mint (PRIOR-ART-ACTIONS #9).
             carry_properties(&self.staging, &final_dir)?;
             self.discard_staging();
-        } else {
-            self.metadata.base_generation = actual.clone();
-            write_metadata(&self.staging, &self.metadata)?;
-            fs::rename(&self.staging, &final_dir)
-                .map_err(|e| io_error("generation.commit_failed", &final_dir, &e))?;
-            self.committed = true;
+            // Nothing changed, so the pointers stay exactly as they are.
+            // Rewriting `previous` here would alias it to `current` — the
+            // generation it names IS current — and a rollback would then swap
+            // a symlink with itself while reporting success. Re-applied
+            // declarations must never cost the user their undo.
+            return Ok(CommittedGeneration {
+                id: self.id.clone(),
+                path: final_dir,
+                replaced: None,
+            });
         }
+        self.metadata.base_generation = actual.clone();
+        write_metadata(&self.staging, &self.metadata)?;
+        fs::rename(&self.staging, &final_dir)
+            .map_err(|e| io_error("generation.commit_failed", &final_dir, &e))?;
         self.committed = true;
 
         // `previous` first: see the module header for why this order.
@@ -828,12 +836,28 @@ pub fn rollback(context_dir: &Path) -> Result<RollbackOutcome> {
             "this context has no generation to roll back from",
         );
     };
-    let Some(now_current) = previous(context_dir)? else {
-        return err(
+    let mut now_current = previous(context_dir)?.ok_or_else(|| {
+        AikitError::new(
             "generation.no_previous",
-            "this context has only one generation, so there is nothing to roll back to",
-        );
-    };
+            "this context has no previous generation to roll back to",
+        )
+    })?;
+    if now_current == was_current {
+        // A history that aliased `previous` to `current` (a defect when an
+        // apply reproduced the current content) must not turn a rollback into
+        // a reported no-op. The generation metadata still records the base
+        // this content truly replaced; heal the chain from that record.
+        let metadata = read_metadata(&context_dir.join(GENERATIONS).join(was_current.as_str()))?;
+        match metadata.base_generation {
+            Some(base) => now_current = base,
+            None => {
+                return err(
+                    "generation.no_previous",
+                    "this context has only one generation, so there is nothing to roll back to",
+                )
+            }
+        }
+    }
 
     set_pointer(context_dir, PREVIOUS, &was_current)?;
     set_pointer(context_dir, CURRENT, &now_current)?;

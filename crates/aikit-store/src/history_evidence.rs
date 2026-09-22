@@ -56,6 +56,14 @@ pub fn generation_history_evidence(
         let subject = ResourceRef::parse(&format!("generation/{}", metadata.generation_id))?;
         let mut canonical_refs = BTreeSet::new();
         canonical_refs.insert(subject.clone());
+        // The lock names every capsule this generation actually carried, so a
+        // skill's history answers through the generations that enabled it —
+        // `history --resource skill/…` was empty before this joined them.
+        for capsule in resolved.active.keys() {
+            if let Ok(reference) = ResourceRef::parse(&capsule.to_string()) {
+                canonical_refs.insert(reference);
+            }
+        }
         if let Some(project) = resolved.context.project_id.as_ref() {
             canonical_refs.insert(ResourceRef::parse(&format!("project/{project}"))?);
         }
@@ -114,6 +122,238 @@ pub fn generation_history_evidence(
             .cmp(&left.occurred_at_unix_ms)
             .then_with(|| right.id.cmp(&left.id))
     });
+    Ok(entries)
+}
+
+/// Generation evidence across every context recorded under this home.
+///
+/// Applies historically minted a fresh context whenever the resolution
+/// identity changed, so reading only the caller's current context hid most of
+/// the lifecycle from `aikit history`. Generations are immutable,
+/// content-addressed evidence; sweeping contexts changes no authority and
+/// loses nothing. Identical content minted into two contexts is one
+/// generation here: deduplicated by id, with the context carried in details.
+pub fn all_contexts_generation_history_evidence(home: &AikitHome) -> Result<Vec<HistoryEvidence>> {
+    let mut entries: Vec<HistoryEvidence> = Vec::new();
+    let mut seen = BTreeSet::new();
+    let Ok(contexts) = fs::read_dir(home.contexts()) else {
+        return Ok(entries);
+    };
+    let mut names: Vec<String> = contexts
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .collect();
+    names.sort();
+    for name in names {
+        let Ok(context) = ContextId::parse(&name) else {
+            continue;
+        };
+        for mut entry in generation_history_evidence(home, &context)? {
+            if seen.insert(entry.id.clone()) {
+                // Name the context DIRECTORY that holds this generation: it
+                // is the location identity the sweep adds over a single-
+                // context read.
+                entry.details.insert("context".into(), name.clone());
+                entries.push(entry);
+            }
+        }
+    }
+    entries.sort_by(|left, right| {
+        right
+            .occurred_at_unix_ms
+            .cmp(&left.occurred_at_unix_ms)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    Ok(entries)
+}
+
+/// Read-only projections of the registered skill sources: one entry per
+/// registration and one per immutable snapshot, with every snapshot's skill
+/// ids carried as canonical refs so a skill's history reaches back to its
+/// promotion. Snapshot persistence records no wall-clock time, so these
+/// entries carry none rather than inventing one.
+pub fn source_history_evidence(home: &AikitHome) -> Result<Vec<HistoryEvidence>> {
+    let mut entries = Vec::new();
+    let sources = home.root().join("sources");
+    let Ok(ids) = fs::read_dir(&sources) else {
+        return Ok(entries);
+    };
+    let mut ids: Vec<String> = ids
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .collect();
+    ids.sort();
+
+    for id in ids {
+        let subject = ResourceRef::parse(&format!("source/{id}"))?;
+        let spec_text =
+            fs::read_to_string(sources.join(&id).join("source.toml")).map_err(|error| {
+                AikitError::new(
+                    "history.source_unreadable",
+                    format!("could not read the registration of source `{id}`: {error}"),
+                )
+            })?;
+        let spec: toml::Value = toml::from_str(&spec_text).map_err(|error| {
+            AikitError::new(
+                "history.source_unreadable",
+                format!("the registration of source `{id}` is not readable TOML: {error}"),
+            )
+        })?;
+
+        let kind = spec
+            .get("kind")
+            .and_then(|kind| kind.as_table())
+            .and_then(|table| table.iter().next())
+            .map(|(name, value)| (name.to_string(), value.clone()));
+        let mut details = BTreeMap::new();
+        if let Some((name, value)) = &kind {
+            details.insert("kind".into(), name.clone());
+            if let Some(repository) = value.get("repository").and_then(|v| v.as_str()) {
+                details.insert("repository".into(), repository.to_string());
+            }
+            if let Some(revision) = value.get("revision").and_then(|v| v.as_str()) {
+                details.insert("revision".into(), revision.to_string());
+            }
+            if let Some(path) = value.get("path").and_then(|v| v.as_str()) {
+                details.insert("path".into(), path.to_string());
+            }
+        }
+
+        entries.push(HistoryEvidence {
+            schema: EXPLAIN_HISTORY_VERSION.into(),
+            id: format!("source:{id}"),
+            kind: HistoryKind::Source,
+            subject: subject.clone(),
+            authorities: vec![SourceAuthority::Generated],
+            occurred_at_unix_ms: None,
+            summary: match &kind {
+                Some((name, value)) => {
+                    let repository = value.get("repository").and_then(|v| v.as_str());
+                    let revision = value.get("revision").and_then(|v| v.as_str());
+                    let path = value.get("path").and_then(|v| v.as_str());
+                    match (name.as_str(), repository, revision, path) {
+                        ("git", Some(repo), Some(rev), _) => {
+                            format!(
+                                "skill source `{id}` registered · git {repo} @ {}",
+                                &rev[..rev.len().min(12)]
+                            )
+                        }
+                        ("directory", _, _, Some(path)) => {
+                            format!("skill source `{id}` registered · directory {path}")
+                        }
+                        _ => format!("skill source `{id}` registered"),
+                    }
+                }
+                None => format!("skill source `{id}` registered"),
+            },
+            canonical_refs: vec![subject.clone()],
+            provenance: Vec::new(),
+            recoverability: HistoryRecoverability::InspectOnly,
+            details,
+        });
+
+        // Snapshots: candidate first, then whatever the state marks active,
+        // then the rest — but every snapshot is projected, promoted or not.
+        let state: toml::Value = toml::from_str(
+            &fs::read_to_string(sources.join(&id).join("state.toml")).unwrap_or_default(),
+        )
+        .unwrap_or(toml::Value::Table(toml::map::Map::new()));
+        let active = state
+            .get("active_snapshot")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let candidate = state
+            .get("candidate_snapshot")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let rollback_points = state
+            .get("history")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+
+        let snapshot_files = fs::read_dir(sources.join(&id).join("snapshots"));
+        let mut digests: Vec<String> = match snapshot_files {
+            Ok(files) => files
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| entry.path().is_dir())
+                .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        digests.sort();
+
+        for digest in digests {
+            let record_text = fs::read_to_string(
+                sources
+                    .join(&id)
+                    .join("snapshots")
+                    .join(&digest)
+                    .join("snapshot.toml"),
+            )
+            .unwrap_or_default();
+            let record: toml::Value =
+                toml::from_str(&record_text).unwrap_or(toml::Value::Table(toml::map::Map::new()));
+            let mut canonical_refs = BTreeSet::new();
+            canonical_refs.insert(subject.clone());
+            if let Some(skills) = record.get("skills").and_then(|v| v.as_array()) {
+                for skill in skills {
+                    if let Some(skill_id) = skill.get("id").and_then(|v| v.as_str()) {
+                        if let Ok(reference) = ResourceRef::parse(skill_id) {
+                            canonical_refs.insert(reference);
+                        }
+                    }
+                }
+            }
+            let skill_count = record
+                .get("skills")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let mut details = BTreeMap::new();
+            details.insert("digest".into(), digest.clone());
+            details.insert(
+                "state".into(),
+                if active.as_deref() == Some(digest.as_str()) {
+                    "active".to_string()
+                } else if candidate.as_deref() == Some(digest.as_str()) {
+                    "candidate".to_string()
+                } else {
+                    "retained".to_string()
+                },
+            );
+            if rollback_points > 0 {
+                details.insert("rollbackPoints".into(), rollback_points.to_string());
+            }
+            entries.push(HistoryEvidence {
+                schema: EXPLAIN_HISTORY_VERSION.into(),
+                id: format!("source:{id}:{digest}"),
+                kind: HistoryKind::Source,
+                subject: subject.clone(),
+                authorities: vec![SourceAuthority::Generated],
+                occurred_at_unix_ms: None,
+                summary: format!(
+                    "snapshot {} · {} skill{} · {}",
+                    &digest[..digest.len().min(12)],
+                    skill_count,
+                    if skill_count == 1 { "" } else { "s" },
+                    if active.as_deref() == Some(digest.as_str()) {
+                        "active"
+                    } else if candidate.as_deref() == Some(digest.as_str()) {
+                        "candidate"
+                    } else {
+                        "retained"
+                    },
+                ),
+                canonical_refs: canonical_refs.into_iter().collect(),
+                provenance: Vec::new(),
+                recoverability: HistoryRecoverability::InspectOnly,
+                details,
+            });
+        }
+    }
     Ok(entries)
 }
 

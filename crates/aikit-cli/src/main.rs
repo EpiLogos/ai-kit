@@ -725,6 +725,17 @@ fn require_agent_skill(service: &Service, id: &CapsuleId) -> Result<()> {
 fn cmd_project(cwd: &std::path::Path, command: ProjectCmd) -> Result<Reply> {
     let service = Service::discover(cwd)?;
     match command.command {
+        ProjectSub::Unbind(args) => {
+            aikit_cli::projects::unbind(service.home(), &args.id)?;
+            Ok(reply(
+                &service,
+                jval!({
+                    "project": args.id,
+                    "unbound": true,
+                }),
+                vec![],
+            ))
+        }
         ProjectSub::Bind(args) => {
             let spec = aikit_cli::projects::bind(
                 service.home(),
@@ -942,6 +953,18 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     "id": args.id,
                     "active_snapshot": snapshot.digest,
                     "skills": snapshot.skills.len(),
+                }),
+                vec![],
+            ))
+        }
+        SourceSub::Remove(args) => {
+            let removed = skill_sources::remove(home, &args.id, args.force)?;
+            Ok(source_reply(
+                jval!({
+                    "id": removed.id,
+                    "removed": true,
+                    "forced": removed.forced,
+                    "removed_snapshots": removed.removed_snapshots,
                 }),
                 vec![],
             ))
