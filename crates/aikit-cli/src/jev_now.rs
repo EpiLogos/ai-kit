@@ -1561,6 +1561,7 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
 mod tests {
     use super::*;
     use aikit_core::context_source::{AgentVisibility, ExternalEgress};
+    use std::io::Write as _;
 
     fn candidate(name: &str, egress: ExternalEgress) -> NowContextItem {
         NowContextItem {
@@ -1589,5 +1590,88 @@ mod tests {
         let encoded = serde_json::to_string(&request).unwrap();
         assert!(encoded.contains("allowed body"));
         assert!(!encoded.contains("denied body"));
+    }
+
+
+    fn matrix_fixture() -> (tempfile::TempDir, MatrixPrepare) {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = temp.path().join("matrix.json");
+        let csv = temp.path().join("matrix.csv");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec_pretty(&json!({
+                "protocol":"ql-capability-matrix/1",
+                "matrix_id":"matrix.test",
+                "anchor_ref":"test:account:whole",
+                "default_view":"product-field",
+                "views":[{
+                    "id":"product-field",
+                    "title":"Test seed × field",
+                    "semantics":"Which declared capability contributes here?",
+                    "row_axis":{"id":"seed","label":"Seed","members":[{"id":"q0","label":"Why?","source_ref":"test:seed:q0"}]},
+                    "column_axis":{"id":"field","label":"Field","members":[{"id":"S2","label":"AIKit"}]}
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &csv,
+            concat!(
+                "id,record_type,view_id,row_id,column_id,capability_refs,need,operation,outcome,implementation_status,standing,source_refs,code_refs,test_refs,account_ref,relation,coverage,extensions,question\n",
+                "cap.one,capability,,,,[],Need one,operate one,outcome one,implemented,implementation-fact,source/one,,,account.html#q1,,,,\n",
+                "cap.two,capability,,,,[],Need two,operate two,outcome two,intended,design-commitment,source/two,,,account.html#q2,,,,\n",
+                "rel.one,relation,product-field,q0,S2,\"[\"\"cap.one\"\"]\",,,,,,,,,contributes,covered,{},Does cap one contribute?\n"
+            ),
+        )
+        .unwrap();
+        let config = MatrixPrepare {
+            manifest,
+            csv,
+            view_id: None,
+            capability_refs: Vec::new(),
+            full_scope: true,
+            agent_visibility: AgentVisibility::Payload,
+            external_egress: ExternalEgress::Allowed,
+        };
+        (temp, config)
+    }
+
+    #[test]
+    fn declared_matrix_full_scope_preserves_axes_need_operation_outcome_and_account_routes() {
+        let (_temp, config) = matrix_fixture();
+        let (items, evidence) = read_matrix(&config).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(evidence.declared_capability_refs, ["cap.one", "cap.two"]);
+        assert_eq!(evidence.whole_account_ref, "test:account:whole");
+        assert_eq!(evidence.view_id, "product-field");
+        assert_eq!(evidence.row_axis["members"][0]["id"], "q0");
+        assert_eq!(evidence.column_axis["members"][0]["id"], "S2");
+        assert!(evidence.questions.iter().any(|q| q == "Does cap one contribute?"));
+        assert!(evidence.expanded_account_refs.iter().any(|r| r == "account.html#q1"));
+        assert!(items[0].excerpt.contains("\"need\":\"Need one\""));
+        assert!(items[0].excerpt.contains("\"operation\":\"operate one\""));
+        assert!(items[0].excerpt.contains("\"outcome\":\"outcome one\""));
+        assert!(items[0].excerpt.contains("\"implementation_status\":\"implemented\""));
+        assert!(items[0].excerpt.contains("\"standing\":\"implementation-fact\""));
+        assert!(items[0].excerpt.contains("Does cap one contribute?"));
+    }
+
+    #[test]
+    fn matrix_scope_is_exact_and_semantic_change_invalidates_the_preparation_basis() {
+        let (_temp, mut config) = matrix_fixture();
+        config.full_scope = false;
+        config.capability_refs = vec!["cap.two".into()];
+        let (items, evidence) = read_matrix(&config).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(evidence.declared_capability_refs, ["cap.two"]);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&config.csv)
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        let error = revalidate_matrix(&config, &evidence).unwrap_err();
+        assert_eq!(error.code(), "now_context.matrix_stale");
     }
 }
