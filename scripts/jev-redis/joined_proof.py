@@ -177,6 +177,22 @@ def main():
     central = base / "Central"
     (central / "Control/user").mkdir(parents=True)
     (central / "Work").mkdir()
+    wiki_dir = central / "Control/agents/wiki"
+    wiki_dir.mkdir(parents=True)
+    wiki_file = wiki_dir / "wiki.json"
+    write_json(wiki_file, {
+        "objects": [{
+            "object": "space",
+            "profile": "okf-wiki/v1",
+            "ref": "central:wiki:root",
+            "revision": 1,
+            "provenance": [],
+            "title": "Central",
+            "parent_space_refs": [],
+            "child_space_refs": [],
+            "node_refs": []
+        }]
+    })
     home = base / "home"; home.mkdir()
     aikit_home = base / "aikit-home"
     env = {k:v for k,v in os.environ.items()
@@ -252,7 +268,7 @@ def main():
     )
 
     def prep_request(config, participant, session, unit_ref, selection, candidates,
-                     expected=0, continuation=None):
+                     expected=0, continuation=None, wiki_queries=None):
         return {
             "schema": "aikit.now-preparation-request/v1", "redis": config,
             "project_ref": project_ref, "now_ref": now_ref,
@@ -269,7 +285,7 @@ def main():
                 "factory_bin": str(pathlib.Path(args.factory).resolve()),
                 "workflow_unit_refs": [unit_ref],
             },
-            "wiki_queries": ["quartz"],
+            "wiki_queries": ["quartz"] if wiki_queries is None else wiki_queries,
             "candidate_items": candidates,
             "continuation": continuation, "expected_version": expected,
             "external_provider": False, "allow_redis_env_import": False,
@@ -493,6 +509,70 @@ def main():
         args.aikit, ["now-context", "inspect", "--config-file", str(work/"episode-redis.json"),
                      "--participant-ref", "agent/verifier"], env, central, ok=False)
 
+    # Durable Return: the acting field may update agent-maintained Wiki/practice
+    # knowledge, but it does not silently rewrite human-authored account/matrix
+    # ground. Record the catalogue gap as explicit pressure and write the
+    # authorised practice Return through AIKit's CAS-validated Wiki owner.
+    wiki_return, wiki_write_ms = aikit_json(
+        args.aikit, [
+            "wiki", "node", "create", "wiki:node:jev-redis-now-return",
+            "--file", str(wiki_file),
+            "--space", "central:wiki:root",
+            "--type", "practice-return",
+            "--title", "Jev Redis NOW Return: revalidate source and disclosure at delivery",
+            "--source", source_ref,
+        ], env, central)
+    wiki_validate, wiki_validate_ms = aikit_json(
+        args.aikit, ["wiki", "validate", str(wiki_file)], env, central)
+    if wiki_validate.get("valid") is not True:
+        raise RuntimeError("durable Wiki Return failed whole-document validation")
+    wiki_query, wiki_query_ms = aikit_json(
+        args.aikit, [
+            "wiki", "query", "search",
+            "Jev Redis NOW Return",
+            "--file", str(wiki_file),
+        ], env, central)
+    if "jev-redis-now-return" not in json.dumps(wiki_query):
+        raise RuntimeError("native Wiki Return was not queryable after write")
+
+    later_req = prep_request(
+        episode_cfg, "agent/later-participant", "agent-session/later-participant",
+        unit_refs[0], {"mode": "all"}, public_candidates, expected=0,
+        continuation="later fresh participant enters after durable Wiki/practice Return",
+        wiki_queries=["Jev Redis NOW Return"]
+    )
+    write_json(work/"later-participant.json", later_req)
+    later_prepare, _ = aikit_json(
+        args.aikit, ["now-context", "prepare", "--request-file", str(work/"later-participant.json")],
+        env, central)
+    later_inspect, _ = aikit_json(
+        args.aikit, [
+            "now-context", "inspect", "--config-file", str(work/"episode-redis.json"),
+            "--participant-ref", "agent/later-participant"
+        ], env, central)
+    later_used_revised_wiki = "Jev Redis NOW Return" in json.dumps(later_inspect)
+    if not later_used_revised_wiki:
+        raise RuntimeError("later fresh participant did not receive revised Wiki knowledge")
+
+    durable_return = {
+        "wiki_write": wiki_return,
+        "wiki_validate": wiki_validate,
+        "wiki_query": wiki_query,
+        "wiki_write_ms": wiki_write_ms,
+        "wiki_validate_ms": wiki_validate_ms,
+        "wiki_query_ms": wiki_query_ms,
+        "later_prepare": later_prepare,
+        "later_participant_used_revised_wiki": later_used_revised_wiki,
+        "matrix_pressure": {
+            "warranted": bool(
+                jev_result is not None
+                and jev_result["selection"]["catalogue_sufficient_noul"] < 0.5
+            ),
+            "standing": "proposal-pressure-not-silent-authorship",
+            "reason": "controlled multi-capability need was judged insufficiently represented; human-authored account/matrix ground remains an explicit source decision"
+        }
+    }
+
     comparison = {
         "schema": "aikit.jev-redis-now-comparison/v1",
         "standing": "controlled-actor observation; no worker-model performance claim",
@@ -549,6 +629,7 @@ def main():
         "provider_malformed_refused": provider_failure is not None,
         "revocation": revoke,
         "revoked_read_refused": revoked_inspect["returncode"] != 0,
+        "durable_return": durable_return,
         "comparison": comparison,
         "knowledge_search": knowledge,
         "environment_only_remaining": (
