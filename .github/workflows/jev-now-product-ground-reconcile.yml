@@ -50,11 +50,21 @@ jobs:
           python3 "$tool" apply "$RUNNER_TEMP/jev-now-product-ground-plan.json" \
             "${args[@]}" \
             --change-ref EpiLogos/ai-kit#388
-          python3 "$check" \
+          # Re-plan the same authoritative direction.  This checks companion
+          # coherence without requiring unrelated sibling repositories or the
+          # historical recovery mirror to be present in this isolated runner.
+          python3 "$tool" plan \
             --root "$GITHUB_WORKSPACE" \
             --account aikit.html \
             --namespace aikit \
-            --product-index 2
+            --direction csv-to-html \
+            --out "$RUNNER_TEMP/jev-now-product-ground-after.json"
+          python3 - "$RUNNER_TEMP/jev-now-product-ground-after.json" <<'PY'
+          import json, sys
+          plan = json.load(open(sys.argv[1]))
+          if plan["changed_records"]:
+              raise SystemExit("product-ground reconciliation did not converge: " + ", ".join(plan["changed_records"]))
+          PY
       - name: Publish regenerated companions if changed
         shell: bash
         run: |
