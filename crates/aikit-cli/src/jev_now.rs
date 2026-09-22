@@ -29,6 +29,7 @@ use aikit_store::now_context::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -195,6 +196,11 @@ enum SelectionMode {
         allow_env_import: bool,
         #[serde(default)]
         curl: Option<PathBuf>,
+        /// Deterministic protocol proof only. The transport enforces loopback
+        /// and the fixed non-secret controlled marker; omitted means the
+        /// official TypeSafe endpoint.
+        #[serde(default)]
+        controlled_endpoint: Option<SocketAddr>,
     },
 }
 fn default_threshold() -> f64 {
@@ -762,6 +768,7 @@ fn select_candidates(
             relevance_threshold,
             allow_env_import,
             curl,
+            controlled_endpoint,
         } => {
             if !relevance_threshold.is_finite() || !(0.0..=1.0).contains(relevance_threshold) {
                 return Err(fail(
@@ -796,9 +803,12 @@ fn select_candidates(
             };
             let secret = resolver.resolve(&secret_ref)?;
             let initial_material_digest = blake3::hash(secret.expose().as_bytes());
+            let endpoint = controlled_endpoint
+                .map(JevEndpoint::Controlled)
+                .unwrap_or(JevEndpoint::Official);
             let provider = CurlJevProvider::new(
                 curl.clone().unwrap_or_else(|| PathBuf::from("curl")),
-                JevEndpoint::Official,
+                endpoint,
             );
             let cancellation = JevCancellation::default();
             let invocation_ref = minted_invocation_ref(&request)?;
