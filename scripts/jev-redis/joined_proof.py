@@ -14,10 +14,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 CONTROLLED_KEY = "aikit-controlled-protocol-only"
 MODEL = "jev-1.13.0"
 
-def run(cmd, *, env=None, cwd=None, ok=True):
+def run(cmd, *, env=None, cwd=None, ok=True, input_text=None):
     started = time.perf_counter()
     p = subprocess.run([str(x) for x in cmd], env=env, cwd=cwd, text=True,
-                       capture_output=True, timeout=120)
+                       input=input_text, capture_output=True, timeout=120)
     elapsed = (time.perf_counter() - started) * 1000.0
     if ok and p.returncode != 0:
         raise RuntimeError(f"command failed {cmd}\nstdout={p.stdout}\nstderr={p.stderr}")
@@ -50,6 +50,13 @@ def factory_json(factory, args, env):
 
 def aikit_json(aikit, args, env, cwd, *, ok=True):
     p, ms = run([aikit, "--json", "-C", cwd, *args], env=env, ok=ok)
+    if not ok:
+        return {"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr}, ms
+    return parse_json(p), ms
+
+def actuation_json(actuation, args, payload, env, *, ok=True):
+    p, ms = run([actuation, *args, "--json"], env=env, ok=ok,
+                input_text=json.dumps(payload, separators=(",", ":")))
     if not ok:
         return {"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr}, ms
     return parse_json(p), ms
@@ -163,6 +170,12 @@ def main():
     ap.add_argument("--bkmr", required=True)
     ap.add_argument("--factory", required=True)
     ap.add_argument("--factory-state", required=True)
+    ap.add_argument("--actuation")
+    ap.add_argument("--agency-ref", default="agency:oi65-controlled")
+    ap.add_argument("--actuation-ref", default="actuation:oi65-controlled")
+    ap.add_argument("--activity-ref", default="activity:oi65-jev")
+    ap.add_argument("--actuation-stream-ref", default="stream:oi65-jev")
+    ap.add_argument("--actuation-session-ref", default="session:oi65-jev")
     ap.add_argument("--redis-address", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--jev-mode", choices=["controlled", "live", "skip"], default="controlled")
@@ -335,6 +348,7 @@ def main():
         allow_env = False
 
     general_jev = None
+    actuation_evidence = None
     jev_result = None
     jev_inspect = None
     jev_ms = None
@@ -365,6 +379,128 @@ def main():
         expected_standing = "controlled-protocol" if controlled else "provider-protocol"
         if general_jev["standing"] != expected_standing:
             raise RuntimeError(f"Jev standing mismatch: {general_jev['standing']}")
+
+        if args.actuation:
+            # Actuation owns the durable Activity/usage relation. The cloud
+            # defaults are explicitly controlled identities; installed live
+            # episodes pass the admitted Agency/Actuation/Session refs.
+            store = base / "actuation-streams"
+            store.mkdir()
+            observed = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            opening = {
+                "stream_ref": args.actuation_stream_ref,
+                "actuation_ref": args.actuation_ref,
+                "agency_ref": args.agency_ref,
+                "agent_session_ref": args.actuation_session_ref,
+                "provenance": ["aikit.jev-invocation/v1"],
+                "started_at": observed,
+            }
+            opened, _ = actuation_json(
+                args.actuation, ["stream", "open", "--store", str(store), "-"],
+                opening, jev_env)
+            invocation_ref = general_jev["invocation_ref"]
+            usage_ref = "model-usage:jev:" + invocation_ref.split("/")[-1]
+            usage = general_jev["answer"]["usage"]
+            model = general_jev["answer"]["model"]
+            observation = {
+                "schema": "actuation.model-usage/v1",
+                "usage_ref": usage_ref,
+                "actuation_ref": args.actuation_ref,
+                "invocation_ref": invocation_ref,
+                "correlation": {
+                    "agency_ref": args.agency_ref,
+                    "agent_session_ref": args.actuation_session_ref,
+                    "external_refs": [run_ref, now_ref],
+                },
+                "provider": {
+                    "standing": "normalized-from-native",
+                    "name": "typesafe-systemone" if not controlled else "typesafe-systemone-controlled",
+                },
+                "model": {"standing": "provider-reported", "name": model},
+                "tokens": {
+                    "standing": "provider-reported",
+                    "input": usage["input_tokens"],
+                    "output": usage["output_tokens"],
+                },
+                "cache": {"standing": "not-reported"},
+                "timing": {
+                    "latency": {
+                        "standing": "observed",
+                        "milliseconds": general_jev["elapsed_ms"],
+                    }
+                },
+                # AIKit retains the bounded tariff calculation. Actuation does
+                # not call it observed monetary cost without an exact effective
+                # pricing basis.
+                "cost": {"standing": "unavailable"},
+                "outcome": {
+                    "state": "completed",
+                    "standing": "observed",
+                    "reason": "jev-completed",
+                },
+                "provenance": {
+                    "reporter_ref": "aikit:jev",
+                    "native_event_ref": invocation_ref,
+                    "native_request_ref": invocation_ref,
+                    "native_schema": "aikit.jev-invocation/v1",
+                    "observed_at": observed,
+                    "raw_evidence_refs": [invocation_ref],
+                },
+            }
+            occurrence = {
+                "adapter": "observation",
+                "stream_ref": args.actuation_stream_ref,
+                "event_ref": "event:jev-usage",
+                "native_event": observation,
+            }
+            usage_receipt, _ = actuation_json(
+                args.actuation, ["stream", "usage", "--store", str(store), "-"],
+                occurrence, jev_env)
+            replay, _ = run(
+                [args.actuation, "stream", "replay", args.actuation_stream_ref,
+                 "--store", str(store), "--json"], env=jev_env)
+            replay_value = parse_json(replay)
+            activity = {
+                "schema": "actuation.activity/v1",
+                "activity_ref": args.activity_ref,
+                "actor": {"agency_ref": args.agency_ref},
+                "agent_session_ref": args.actuation_session_ref,
+                "run_ref": run_ref,
+                "subject_ref": "task:oi-65-jev-redis-cloud-proof",
+                "native_owner": "actuation",
+                "action_ref": "action/model/decide",
+                "invocation_ref": invocation_ref,
+                "actuation_ref": args.actuation_ref,
+                "usage_refs": [usage_ref],
+                "verb": "classified",
+                "object": "general-jev-question",
+                "summary": "General typed Jev decision attributed through Actuation",
+                "phase": "completed",
+                "outcome": "succeeded",
+                "salience": "normal",
+                "needs_attention": False,
+                "trace": {
+                    "stream_ref": args.actuation_stream_ref,
+                    "event_refs": ["event:jev-usage"],
+                    "from_sequence": 1,
+                    "through_sequence": 1,
+                },
+                "started_at": observed,
+                "updated_at": observed,
+                "completed_at": observed,
+                "metadata": {
+                    "standing": "controlled-actor" if controlled else "live-owner-supplied",
+                    "now_ref": now_ref,
+                },
+            }
+            activity_value, _ = actuation_json(
+                args.actuation, ["activity", "-"], activity, jev_env)
+            actuation_evidence = {
+                "opening": opened,
+                "usage": usage_receipt,
+                "replay": replay_value,
+                "activity": activity_value,
+            }
 
         selection = {
             "mode": "jev", "credential_ref": credential_ref,
@@ -614,6 +750,7 @@ def main():
             "factory_run_ref": run_ref, "workflow_unit_refs": unit_refs,
         },
         "general_jev": general_jev,
+        "actuation": actuation_evidence,
         "redis_arm": redis_result,
         "jev_arm": jev_result,
         "participant_isolation": {
