@@ -471,7 +471,7 @@ fn matrix_axis(view: &Value, key: &str) -> Result<Value> {
 }
 
 fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvidence)> {
-    if config.full_scope == config.capability_refs.is_empty() {
+    if config.full_scope == !config.capability_refs.is_empty() {
         return Err(fail(
             "now_context.matrix_scope",
             "Matrix scope must select exactly one of full_scope or capability_refs",
@@ -1655,6 +1655,23 @@ mod tests {
         assert!(items[0].excerpt.contains("\"implementation_status\":\"implemented\""));
         assert!(items[0].excerpt.contains("\"standing\":\"implementation-fact\""));
         assert!(items[0].excerpt.contains("Does cap one contribute?"));
+    }
+
+    #[test]
+    fn matrix_scope_rejects_both_or_neither_selection_forms() {
+        let (_temp, mut config) = matrix_fixture();
+        config.capability_refs = vec!["cap.one".into()];
+        assert_eq!(
+            read_matrix(&config).unwrap_err().code(),
+            "now_context.matrix_scope"
+        );
+
+        config.full_scope = false;
+        config.capability_refs.clear();
+        assert_eq!(
+            read_matrix(&config).unwrap_err().code(),
+            "now_context.matrix_scope"
+        );
     }
 
     #[test]
