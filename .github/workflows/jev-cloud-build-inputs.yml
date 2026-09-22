@@ -28,7 +28,7 @@ jobs:
           Central 918fed159bee26b4fd1f20341f955cb6f60e1cbe
           Workcell 58ceb4a6a0d4b8f25a6b2d01201798e5092b88c4
           Factory e2d16dbdfabec4157e47028d1bbe7a8cf7b8fc59
-          Actuation b88fa2a097f790222fd63f0ffd1b9b5a4cefde09
+          Actuation 8459d503542e3707dc03919ba6f467abb9f60e09
           QL-MEF 2bcdc78c2f97ce13312bf96011bd18bea7b73ea5
           PINS
       - name: Collect the pinned Rust toolchain and lockfile-selected dependencies
@@ -43,7 +43,10 @@ jobs:
           rustup run 1.98.0 cargo -V >> evidence/rust-version.txt
           toolchain=$(dirname "$(dirname "$(rustup which --toolchain 1.98.0 rustc)")")
           tar -C "$toolchain" -czf evidence/rust-toolchain.tar.gz bin lib libexec share
-          tar -C "$HOME/.cargo" -czf evidence/cargo-public-inputs.tar.gz registry git
+          cargo_inputs=(registry)
+          if test -d "$HOME/.cargo/git"; then cargo_inputs+=(git); fi
+          tar -C "$HOME/.cargo" -czf evidence/cargo-public-inputs.tar.gz "${cargo_inputs[@]}"
+          git -C sources/Actuation archive --prefix=Actuation/ HEAD | gzip -n > evidence/Actuation-source.tar.gz
       - name: Collect Redis executables and non-glibc runtime dependencies
         shell: bash
         run: |
