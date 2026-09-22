@@ -694,6 +694,7 @@ mod tests {
             argv: vec![program.to_string()],
             required_context: None,
             model_policy: None,
+            now_context: None,
         }
     }
 
@@ -783,6 +784,7 @@ mod tests {
             argv: argv.iter().map(|s| s.to_string()).collect(),
             required_context: None,
             model_policy: None,
+            now_context: None,
         }
     }
 
