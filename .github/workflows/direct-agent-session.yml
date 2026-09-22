@@ -100,10 +100,20 @@ jobs:
           exec > >(tee direct-agent-evidence/composition.log) 2>&1
           git fetch --no-tags origin 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 37994265f5727af50ec6446687ed629dde047412 a0647b9b7110745661e4f1488f265e58623cad69
           git diff 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 -- crates/aikit-adapters/src/interactive_connection.rs crates/aikit-adapters/src/agent_session_host.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-adapters/tests/native_model_controls.rs crates/aikit-cli/tests/agent_session_protocol.rs crates/aikit-cli/tests/support/agent_session_protocol.py > direct-agent-evidence/model-dependency.patch
-          git apply --3way direct-agent-evidence/model-dependency.patch
+          if git apply --reverse --check direct-agent-evidence/model-dependency.patch; then
+            printf '%s\n' 'model dependency already represented in tested source; reverse-check passed' | tee direct-agent-evidence/model-dependency-standing.txt
+          else
+            git apply --3way direct-agent-evidence/model-dependency.patch
+            printf '%s\n' 'model dependency applied for composed test only' | tee direct-agent-evidence/model-dependency-standing.txt
+          fi
           # #371 changes only #364's test, retaining its exact native implementation.
           git diff 37994265f5727af50ec6446687ed629dde047412 a0647b9b7110745661e4f1488f265e58623cad69 -- crates > direct-agent-evidence/folded-dependency.patch
-          git apply --3way direct-agent-evidence/folded-dependency.patch
+          if git apply --reverse --check direct-agent-evidence/folded-dependency.patch; then
+            printf '%s\n' 'folded startup dependency already represented in tested source; reverse-check passed' | tee direct-agent-evidence/folded-dependency-standing.txt
+          else
+            git apply --3way direct-agent-evidence/folded-dependency.patch
+            printf '%s\n' 'folded startup dependency applied for composed test only' | tee direct-agent-evidence/folded-dependency-standing.txt
+          fi
           git write-tree > direct-agent-evidence/composed-tree.txt
           git diff HEAD > direct-agent-evidence/composed.patch
       - name: Composed production protocol and native folded startup
