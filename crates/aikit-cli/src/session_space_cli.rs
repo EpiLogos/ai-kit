@@ -419,6 +419,12 @@ fn run(cli: Cli) -> Result<()> {
             let ql_root = ql_root
                 .map(|path| directory(path, "QL source root"))
                 .transpose()?;
+            let aikit_bin = std::env::current_exe().map_err(|error| {
+                AikitError::new(
+                    "encounter.prime_configuration",
+                    format!("could not resolve the installed AIKit executable: {error}"),
+                )
+            })?;
             let mut argv = vec![
                 launcher.display().to_string(),
                 "--prime-bin".into(),
@@ -433,6 +439,8 @@ fn run(cli: Cli) -> Result<()> {
                 research_bin.display().to_string(),
                 "--faculty-config".into(),
                 faculty_config.display().to_string(),
+                "--aikit-bin".into(),
+                aikit_bin.display().to_string(),
             ];
             if let Some(root) = ql_root {
                 argv.extend(["--ql-root".into(), root.display().to_string()]);
