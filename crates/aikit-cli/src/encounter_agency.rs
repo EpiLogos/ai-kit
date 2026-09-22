@@ -398,9 +398,34 @@ impl EncounterService {
                 .as_ref()
                 .map(|reference| SuiteSecretResolver::default().resolve(reference))
                 .transpose()?;
-            let Some(view) =
-                redis.read_prepared(&participant, config.external_provider, secret.as_ref())?
-            else {
+            let mut view =
+                redis.read_prepared(&participant, config.external_provider, secret.as_ref())?;
+            let needs_prepare = view
+                .as_ref()
+                .is_none_or(|prepared| prepared.agent_session != *session);
+            if needs_prepare {
+                if let Some(request) = &config.prepare_request {
+                    let request = if request.is_absolute() {
+                        request.clone()
+                    } else {
+                        resident.cwd.join(request)
+                    };
+                    crate::jev_now::prepare_for_encounter(
+                        &resident.cwd,
+                        &request,
+                        &config.redis,
+                        &participant,
+                        session,
+                        config.external_provider,
+                    )?;
+                    view = redis.read_prepared(
+                        &participant,
+                        config.external_provider,
+                        secret.as_ref(),
+                    )?;
+                }
+            }
+            let Some(view) = view else {
                 return Ok(None);
             };
             if view.agent_session != *session || view.participant_ref != participant {

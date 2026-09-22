@@ -55,6 +55,12 @@ pub enum EncounterProtocol {
 #[serde(deny_unknown_fields)]
 pub struct EncounterNowContextConfig {
     pub redis: RedisNowConfig,
+    /// Optional owner-authored preparation request. When selected, a missing
+    /// view (or a fresh AgentSession for the same participant) is prepared
+    /// synchronously before the first provider turn through the same native
+    /// `now-context prepare` implementation. Warm reads never invoke Jev.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepare_request: Option<PathBuf>,
     #[serde(default)]
     pub required: bool,
     #[serde(default = "default_external_provider")]

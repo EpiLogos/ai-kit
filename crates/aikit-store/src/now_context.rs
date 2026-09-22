@@ -6,7 +6,7 @@
 //! directly so the Redis boundary adds no second runtime/service dependency.
 use aikit_core::context_source::{AgentVisibility, ExternalEgress};
 use aikit_core::secret_ref::SecretRef;
-use aikit_core::{AikitError, ResourceRef, Result, SecretValue};
+use aikit_core::{AikitError, KnowledgeContextPack, ResourceRef, Result, SecretValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -19,6 +19,7 @@ pub const NOW_DELIVERY_SCHEMA: &str = "aikit.now-context-delivery/v1";
 const MAX_JSON: usize = 1024 * 1024;
 const MAX_ITEMS: usize = 64;
 const MAX_NEIGHBOURS: usize = 64;
+const MAX_KNOWLEDGE_FRAMES: usize = 32;
 const MAX_CHANGES: usize = 64;
 
 fn fail(code: &'static str, message: impl Into<String>) -> AikitError {
@@ -238,6 +239,12 @@ pub struct PreparedNowContext {
     pub items: Vec<NowContextItem>,
     #[serde(default)]
     pub neighbours: Vec<NowNeighbour>,
+    /// Source-linked Wiki/Knowledge reading selected through AIKit's existing
+    /// Knowledge application. This is a derived operative reading, never a
+    /// second Wiki or source registry. External-provider views retain routes,
+    /// revisions and evidence while payload content is stripped at preparation.
+    #[serde(default)]
+    pub knowledge_frames: Vec<KnowledgeContextPack>,
     #[serde(default)]
     pub continuation: Option<String>,
     #[serde(default)]
@@ -266,6 +273,17 @@ impl PreparedNowContext {
             || self.practice_refs.len() > 64
             || self.items.len() > MAX_ITEMS
             || self.neighbours.len() > MAX_NEIGHBOURS
+            || self.knowledge_frames.len() > MAX_KNOWLEDGE_FRAMES
+            || serde_json::to_vec(&self.knowledge_frames)
+                .map(|bytes| bytes.len() > MAX_JSON / 2)
+                .unwrap_or(true)
+            || (external_provider
+                && self.knowledge_frames.iter().any(|frame| {
+                    frame
+                        .readings
+                        .iter()
+                        .any(|reading| reading.content.is_some())
+                }))
             || self
                 .continuation
                 .as_ref()
@@ -978,6 +996,7 @@ mod tests {
                 external_egress: ExternalEgress::Denied,
             }],
             neighbours: vec![],
+            knowledge_frames: vec![],
             continuation: None,
             jev_invocation_ref: None,
             prepared_at_unix_ms: 1,

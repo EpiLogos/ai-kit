@@ -790,6 +790,42 @@ pub fn now_revoke(args: NowRevokeArgs) -> Result<Value> {
 pub fn now_prepare(cwd: &Path, args: NowPrepareArgs) -> Result<Value> {
     let request: NowPrepareRequest =
         read_json(&args.request_file, "NOW preparation request", 1024 * 1024)?;
+    now_prepare_request(cwd, request)
+}
+
+/// Configured encounter entry uses the same native preparation path as the CLI.
+/// It may refresh the volatile delivery/session/version basis, but never changes
+/// the prepared participant, Project, NOW, disclosure or owner-source selection.
+pub(super) fn prepare_for_encounter(
+    cwd: &Path,
+    request_file: &Path,
+    redis: &RedisNowConfig,
+    participant: &ResourceRef,
+    session: &ResourceRef,
+    external_provider: bool,
+) -> Result<Value> {
+    let mut request: NowPrepareRequest = read_json(
+        request_file,
+        "NOW encounter preparation request",
+        1024 * 1024,
+    )?;
+    if request.redis != *redis
+        || request.participant_ref != *participant
+        || request.external_provider != external_provider
+    {
+        return Err(fail(
+            "now_context.encounter_prepare_mismatch",
+            "Configured encounter preparation does not match this Redis/participant/provider boundary",
+        ));
+    }
+    let secret = resolve_secret(&request.redis, request.allow_redis_env_import)?;
+    request.expected_version =
+        RedisNowStore::new(request.redis.clone())?.current_version(participant, secret.as_ref())?;
+    request.agent_session = session.clone();
+    now_prepare_request(cwd, request)
+}
+
+fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> {
     if request.schema != PREPARE_SCHEMA
         || request.concern.trim().is_empty()
         || request.candidate_items.len() > MAX_CANDIDATES
@@ -833,14 +869,32 @@ pub fn now_prepare(cwd: &Path, args: NowPrepareArgs) -> Result<Value> {
         .map(|f| f.dependency_revisions.clone())
         .unwrap_or_default();
 
-    let mut knowledge = Vec::new();
+    let mut knowledge_frames = Vec::new();
     if !request.wiki_queries.is_empty() {
-        let service = Service::discover(cwd)?;
+        let mut service = Service::discover(cwd)?;
         for query in &request.wiki_queries {
-            knowledge.push(
-                serde_json::to_value(service.knowledge_search(query, 32)?)
-                    .map_err(|e| fail("now_context.knowledge_invalid", e.to_string()))?,
-            );
+            let found = service.knowledge_search(query, 32)?;
+            let addresses = found
+                .hits
+                .iter()
+                .map(|hit| hit.address.clone())
+                .collect::<Vec<_>>();
+            let mut frame = service.knowledge_frame(Some(query), &addresses)?;
+            if request.external_provider {
+                // The Knowledge application has selected useful owner-backed
+                // routes, but its generic reading does not carry ContextSource
+                // external-egress policy. Preserve relationships/revisions and
+                // evidence while withholding payload. Egress-approved passages
+                // enter through NowContextItem, which has the explicit privacy
+                // contract and is revalidated below.
+                for reading in &mut frame.readings {
+                    reading.content = None;
+                }
+                frame.explanations.clear();
+                frame.contradictions.clear();
+                frame.open_questions.clear();
+            }
+            knowledge_frames.push(frame);
         }
     }
 
@@ -910,6 +964,7 @@ pub fn now_prepare(cwd: &Path, args: NowPrepareArgs) -> Result<Value> {
             .as_ref()
             .map(|f| f.neighbours.clone())
             .unwrap_or_default(),
+        knowledge_frames,
         continuation: request.continuation,
         jev_invocation_ref,
         prepared_at_unix_ms: now_ms()?,
@@ -929,7 +984,7 @@ pub fn now_prepare(cwd: &Path, args: NowPrepareArgs) -> Result<Value> {
         "agentSession":view.agent_session,
         "sourceCount":view.items.len(),
         "neighbourCount":view.neighbours.len(),
-        "knowledge":knowledge,
+        "knowledge":view.knowledge_frames,
         "factory":factory.as_ref().map(|f|json!({"run":f.run,"workflowUnits":f.workflow_units})),
         "selection":selection,
         "standing":"prepared and atomically published against revalidated native source/Factory basis"
