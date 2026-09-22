@@ -800,10 +800,11 @@ def main():
         "schema": "aikit.jev-redis-now-joined-proof/v1",
         "sources": {
             "central_root": str(central), "central_source_ref": source_ref,
+            "central_matrix_manifest_source_ref": matrix_manifest_source_ref,
             "central_matrix_source_ref": matrix_source_ref,
             "central_account_source_ref": account_source_ref,
             "central_matrix_revision": matrix_digest,
-            "selected_matrix_inventory": [row["id"] for row in selected_matrix_rows],
+            "declared_matrix_inventory": [row["id"] for row in capabilities],
             "central_now_ref": now_ref, "factory_project_ref": project_ref,
             "factory_run_ref": run_ref, "workflow_unit_refs": unit_refs,
         },
