@@ -119,6 +119,82 @@ fn native_pi_discovers_and_confirms_the_exact_current_model_without_inference() 
 }
 
 #[test]
+#[ignore = "requires OI_PI_BIN naming a real installed Pi 0.84 harness; pinned-state refusal performs no inference"]
+fn native_pinned_pi_initialization_refuses_an_unconfirmed_model_without_inference() {
+    let executable = PathBuf::from(
+        std::env::var_os("OI_PI_BIN").expect("OI_PI_BIN must name the actual Pi executable"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().to_string_lossy().into_owned();
+    let argv = vec![
+        executable.to_string_lossy().into_owned(),
+        "--mode".into(),
+        "rpc".into(),
+        "--no-session".into(),
+        "--no-tools".into(),
+        "--no-extensions".into(),
+    ];
+    let observed_host = AgentSessionHost::launch(
+        PiRpcConnectionAdapter::new(
+            ResourceRef::parse("connection/native-pi-pinned-basis-read").unwrap(),
+            cwd.clone(),
+            vec!["installed Pi native state read; no inference".into()],
+        ),
+        &argv,
+        Some(root.path()),
+        AgentSessionHostLimits::default(),
+    )
+    .unwrap();
+    observed_host.initialize().unwrap();
+    let observed_lane = observed_host
+        .open_session(SessionOpenRequest {
+            mode: SessionOpenMode::Attach,
+            native_session_id: None,
+            cwd: cwd.clone(),
+            additional_directories: vec![],
+            mcp_servers: vec![],
+            agent_session: Some(
+                ResourceRef::parse("agent-session/native-pi-pinned-basis-read").unwrap(),
+            ),
+        })
+        .unwrap();
+    let current = observed_lane
+        .binding()
+        .model_observation
+        .as_ref()
+        .unwrap()
+        .current_model_id
+        .clone();
+    let (provider, model_id) = current
+        .split_once('/')
+        .expect("Pi selection identity must preserve exact provider/model");
+    let unconfirmed_model = format!("{model_id}-aikit-intentionally-unconfirmed");
+    observed_host.shutdown().unwrap();
+
+    let pinned = PiRpcConnectionAdapter::new(
+        ResourceRef::parse("connection/native-pi-pinned-refusal").unwrap(),
+        cwd,
+        vec!["installed Pi pinned native state check; no inference".into()],
+    )
+    .with_selected_model(provider, &unconfirmed_model)
+    .unwrap();
+    let pinned_host = AgentSessionHost::launch(
+        pinned,
+        &argv,
+        Some(root.path()),
+        AgentSessionHostLimits::default(),
+    )
+    .unwrap();
+    let error = pinned_host.initialize().unwrap_err();
+    assert_eq!(error.code(), "agent_session_host.handshake_failed");
+    assert_eq!(
+        error.message(),
+        "Pi native state does not confirm the selected provider/model; no default or fallback is admitted"
+    );
+    pinned_host.shutdown().unwrap();
+}
+
+#[test]
 #[ignore = "requires OI_PI_BIN naming a real installed Pi 0.84 harness and configured provider; run explicitly for native acceptance"]
 fn native_pi_stream_interrupt_and_resident_identity_survive_view_handle_drop() {
     let executable = PathBuf::from(

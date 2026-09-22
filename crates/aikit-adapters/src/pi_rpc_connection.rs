@@ -325,7 +325,12 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
     }
 
     fn initialize(&mut self) -> Result<ConnectionCommand> {
-        Ok(self.request("get_available_models", json!({}), Pending::Initialize))
+        let operation = if self.expected_model.is_some() {
+            "get_state"
+        } else {
+            "get_available_models"
+        };
+        Ok(self.request(operation, json!({}), Pending::Initialize))
     }
 
     fn open_session(&mut self, request: SessionOpenRequest) -> Result<ConnectionCommand> {
@@ -355,7 +360,7 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                 "Pi context belongs to its native process launch; this adapter cannot change directories or MCP configuration",
             ));
         }
-        if !self.models_discovered {
+        if self.expected_model.is_none() && !self.models_discovered {
             return Err(error(
                 "connection.pi_rpc.not_initialized",
                 "Discover Pi native models before attachment",
@@ -417,8 +422,16 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
             }
             return match pending {
                 Pending::Initialize => {
-                    self.discover_models(&message["data"])?;
-                    Ok(vec![self.signal(ConnectionSignalKind::Status { message: "Pi native model catalogue observed; model configuration is not an inference receipt".into() })])
+                    let status = if self.expected_model.is_some() {
+                        self.observe_state(&message["data"])?;
+                        "Pi native session and pinned provider/model observed; configuration is not an inference receipt"
+                    } else {
+                        self.discover_models(&message["data"])?;
+                        "Pi native model catalogue observed; model configuration is not an inference receipt"
+                    };
+                    Ok(vec![self.signal(ConnectionSignalKind::Status {
+                        message: status.into(),
+                    })])
                 }
                 Pending::Attach {
                     canonical,

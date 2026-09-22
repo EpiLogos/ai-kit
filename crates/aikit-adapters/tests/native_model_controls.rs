@@ -78,9 +78,8 @@ fn only_exact_advertised_acp_session_controls_are_writable() {
 }
 fn open_pi(adapter: &mut PiRpcConnectionAdapter) -> Value {
     let init = adapter.initialize().unwrap();
-    assert_eq!(init.operation, "get_available_models");
-    adapter
-        .ingest(json!({
+    let response = match init.operation.as_str() {
+        "get_available_models" => json!({
             "type":"response",
             "id":init.payload["id"],
             "command":"get_available_models",
@@ -89,8 +88,23 @@ fn open_pi(adapter: &mut PiRpcConnectionAdapter) -> Value {
                 {"provider":"provider-a","id":"same-id","name":"Model A"},
                 {"provider":"provider-b","id":"same-id","name":"Model B"}
             ]}
-        }))
-        .unwrap();
+        }),
+        "get_state" => json!({
+            "type":"response",
+            "id":init.payload["id"],
+            "command":"get_state",
+            "success":true,
+            "data":{
+                "sessionId":"native-test",
+                "isStreaming":false,
+                "isCompacting":false,
+                "pendingMessageCount":0,
+                "model":{"provider":"provider-a","id":"same-id","name":"Model A"}
+            }
+        }),
+        other => panic!("unexpected Pi initialization operation {other}"),
+    };
+    adapter.ingest(response).unwrap();
     let open = adapter
         .open_session(SessionOpenRequest {
             mode: SessionOpenMode::Attach,
@@ -212,6 +226,24 @@ fn pi_owner_pinned_model_keeps_raw_provider_id_and_stays_read_only() {
             .code(),
         "connection.pi_rpc.model_selection_unsupported"
     );
+    let verify = adapter.initialize().unwrap();
+    assert_eq!(verify.operation, "get_state");
+    let error = adapter
+        .ingest(json!({
+            "type":"response",
+            "id":verify.payload["id"],
+            "command":"get_state",
+            "success":true,
+            "data":{
+                "sessionId":"native-test",
+                "isStreaming":false,
+                "isCompacting":false,
+                "pendingMessageCount":0,
+                "model":{"provider":"provider-b","id":"same-id","name":"Model B"}
+            }
+        }))
+        .unwrap_err();
+    assert_eq!(error.code(), "connection.pi_rpc.model_mismatch");
 }
 
 #[test]
