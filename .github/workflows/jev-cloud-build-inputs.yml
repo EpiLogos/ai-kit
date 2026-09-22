@@ -1,0 +1,74 @@
+name: Jev cloud native build inputs
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/jev-cloud-build-inputs.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  native-build-inputs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Fetch pinned public native owners without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sources evidence
+          while read -r repo revision; do
+            git init -q "sources/$repo"
+            git -C "sources/$repo" fetch --depth=1 "https://github.com/EpiLogos/$repo.git" "$revision"
+            git -C "sources/$repo" checkout --detach FETCH_HEAD
+            printf '%s %s\n' "$repo" "$(git -C "sources/$repo" rev-parse HEAD)" >> evidence/revisions.txt
+          done <<'PINS'
+          ai-kit c24d7392dd63fb6e667a072ddd1fba2ee538b591
+          Central 918fed159bee26b4fd1f20341f955cb6f60e1cbe
+          Workcell 58ceb4a6a0d4b8f25a6b2d01201798e5092b88c4
+          Factory e2d16dbdfabec4157e47028d1bbe7a8cf7b8fc59
+          Actuation b88fa2a097f790222fd63f0ffd1b9b5a4cefde09
+          QL-MEF 2bcdc78c2f97ce13312bf96011bd18bea7b73ea5
+          PINS
+      - name: Collect the pinned Rust toolchain and lockfile-selected dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+          for repo in ai-kit Central Workcell Factory Actuation QL-MEF; do
+            (cd "sources/$repo" && cargo +1.98.0 fetch --locked --target x86_64-unknown-linux-gnu)
+          done
+          rustup run 1.98.0 rustc -Vv > evidence/rust-version.txt
+          rustup run 1.98.0 cargo -V >> evidence/rust-version.txt
+          toolchain=$(dirname "$(dirname "$(rustup which --toolchain 1.98.0 rustc)")")
+          tar -C "$toolchain" -czf evidence/rust-toolchain.tar.gz bin lib libexec share
+          tar -C "$HOME/.cargo" -czf evidence/cargo-public-inputs.tar.gz registry git
+      - name: Collect Redis executables and non-glibc runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y redis-server redis-tools
+          mkdir -p redis/bin redis/lib
+          cp /usr/bin/redis-server /usr/bin/redis-cli redis/bin/
+          for binary in redis/bin/*; do
+            ldd "$binary" | awk '/=> \/.* \(/ {print $3}' | while read -r library; do
+              case "$(basename "$library")" in
+                libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*) ;;
+                *) cp -L "$library" redis/lib/ ;;
+              esac
+            done
+          done
+          redis-server --version > evidence/redis-version.txt
+          redis-cli --version >> evidence/redis-version.txt
+          tar -czf evidence/redis-native.tar.gz redis
+          (cd evidence && sha256sum *.tar.gz > SHA256SUMS)
+          printf '%s\n' 'Build inputs only; no provider call or runtime-integration verdict.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: jev-native-build-inputs
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
