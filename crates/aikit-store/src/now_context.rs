@@ -1119,6 +1119,7 @@ mod tests {
                 external_egress: ExternalEgress::Denied,
             }],
             neighbours: vec![],
+            factory: None,
             knowledge_frames: vec![],
             continuation: None,
             jev_invocation_ref: None,
