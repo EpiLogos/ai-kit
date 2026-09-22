@@ -791,7 +791,21 @@ impl EncounterService {
         )));
         let model = agency::model::prepare(&self.home, &agent_session, &configured)?;
         let task_bound = self.is_task_bound(&agent_session)?;
-        let launch_argv = if let Some(model) = &model {
+        if configured.protocol == EncounterProtocol::PrimeRpc {
+            if configured.body_ref.is_none() || configured.body_revision.is_none() {
+                return Err(AikitError::new(
+                    "encounter.prime_body_unresolved",
+                    "Prime RPC providers must name an exact body_ref and body_revision",
+                ));
+            }
+            if model.is_none() {
+                return Err(AikitError::new(
+                    "encounter.prime_model_unresolved",
+                    "Prime RPC providers require an admitted AIKit model policy; no harness default is used",
+                ));
+            }
+        }
+        let mut launch_argv = if let Some(model) = &model {
             if task_bound {
                 configured.argv.clone()
             } else {
@@ -800,6 +814,12 @@ impl EncounterService {
         } else {
             configured.argv.clone()
         };
+        if configured.protocol == EncounterProtocol::PrimeRpc {
+            launch_argv.extend([
+                "--agent-session".into(),
+                agent_session.to_string(),
+            ]);
+        }
         // Profile-declared key delivery rides the direct provider launch: the
         // child is the real harness, so the declared key is injected into the
         // scrubbed final-child environment here. The re-exec launchers
