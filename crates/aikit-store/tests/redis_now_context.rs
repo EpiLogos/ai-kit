@@ -52,6 +52,7 @@ fn view(version: u64, disclosure: &str, change_cursor: u64) -> PreparedNowContex
             external_egress: ExternalEgress::Allowed,
         }],
         neighbours: vec![],
+        factory: None,
         knowledge_frames: vec![],
         continuation: Some("continue from retained Run evidence".into()),
         jev_invocation_ref: Some(ResourceRef::parse("invocation/jev-test").unwrap()),
