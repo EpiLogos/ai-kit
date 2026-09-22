@@ -1,0 +1,123 @@
+name: Jev NOW cloud native edit
+
+# Bounded cloud checkout helper. This never writes main or another branch.
+# Patches are consumed into ordinary native source commits; PR checks/review
+# still run on the resulting commit. No runtime depends on this helper.
+on:
+  push:
+    branches: [agent/388-jev-redis-now]
+    paths:
+      - '.github/workflows/jev-redis-cloud-edit.yml'
+      - 'scripts/jev-redis/cloud-edit.patch'
+permissions:
+  contents: write
+concurrency:
+  group: jev-now-cloud-edit
+  cancel-in-progress: false
+jobs:
+  apply-native-edit:
+    if: github.repository == 'EpiLogos/ai-kit' && github.ref == 'refs/heads/agent/388-jev-redis-now'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 2
+      - name: Check for an exact native patch
+        id: patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f scripts/jev-redis/cloud-edit.patch; then
+            git apply --check scripts/jev-redis/cloud-edit.patch
+            git apply --numstat -z scripts/jev-redis/cloud-edit.patch > "$RUNNER_TEMP/native-edit-paths.raw"
+            python3 - <<'PY'
+          import os, pathlib
+          raw = (pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-edit-paths.raw').read_bytes()
+          paths = []
+          for row in raw.split(b'\0'):
+              if not row:
+                  continue
+              path = row.split(b'\t', 2)[2].decode('utf-8')
+              if not path.startswith(('crates/', 'docs/', 'scripts/jev-redis/', '.aikit/', 'skills/')) or '..' in pathlib.PurePosixPath(path).parts or '\n' in path:
+                  raise SystemExit('Patch path is outside the commissioned native edit scope')
+              paths.append(path)
+          (pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-edit-paths').write_bytes(b'\0'.join(p.encode() for p in paths) + b'\0')
+          PY
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install native Rust
+        if: steps.patch.outputs.present == 'true'
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt
+          rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
+        if: steps.patch.outputs.present == 'true'
+      - name: Publish ordinary native source on this branch only
+        if: steps.patch.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply scripts/jev-redis/cloud-edit.patch
+          cargo fmt --all
+          xargs -0 git add -- < "$RUNNER_TEMP/native-edit-paths"
+          git rm scripts/jev-redis/cloud-edit.patch
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(now): publish commissioned native Jev/NOW implementation increment' -m 'Commission: EpiLogos/ai-kit#388; EpiLogos/O-I#220 and #65. Candidate source only; runtime and joined acceptance require their actual test receipts.'
+          # Restore any formatter-only change outside the explicitly supplied
+          # patch paths. Tests must exercise exactly the published tree.
+          git restore --worktree .
+          git push origin HEAD:refs/heads/agent/388-jev-redis-now
+          git rev-parse HEAD | tee "$RUNNER_TEMP/native-edit-cut.txt"
+          git diff HEAD^ HEAD --stat
+      - name: Compile and exercise the native Jev protocol
+        if: steps.patch.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p aikit-core --test jev_protocol -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-edit-test.log"
+          cargo check --locked -p aikit-cli 2>&1 | tee -a "$RUNNER_TEMP/native-edit-test.log"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.patch.outputs.present == 'true'
+        with:
+          name: jev-now-native-edit-evidence
+          path: |
+            ${{ runner.temp }}/native-edit-cut.txt
+            ${{ runner.temp }}/native-edit-test.log
+          if-no-files-found: error
+          retention-days: 14
+
+  public-native-toolchain:
+    # One public toolchain/cache export permits fast offline native edits in
+    # the disposable cloud container. No machine, credential, .git directory,
+    # general HOME or Cargo configuration is included in this artifact.
+    if: github.run_number == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_HOME: ${{ runner.temp }}/jev-public-toolchain/cargo
+      RUSTUP_HOME: ${{ runner.temp }}/jev-public-toolchain/rustup
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch only the declared public toolchain and registry dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt
+          rustup default 1.98.0
+          cargo fetch --locked
+          tar -C "$RUNNER_TEMP/jev-public-toolchain" -czf "$RUNNER_TEMP/jev-public-toolchain.tar.gz" rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu cargo/registry
+          { rustc -Vv; cargo -V; } > "$RUNNER_TEMP/jev-public-toolchain.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jev-public-native-toolchain
+          path: |
+            ${{ runner.temp }}/jev-public-toolchain.tar.gz
+            ${{ runner.temp }}/jev-public-toolchain.txt
+          if-no-files-found: error
+          retention-days: 3
