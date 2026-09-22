@@ -1,0 +1,39 @@
+name: Jev NOW reconcile current main
+on:
+  push:
+    branches: [agent/388-jev-redis-now]
+    paths: ['.github/workflows/jev-now-reconcile-main.yml']
+permissions:
+  contents: read
+jobs:
+  rehearse:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Rehearse exact current-main merge
+        shell: bash
+        run: |
+          set +e
+          git fetch --no-tags origin main
+          git merge --no-commit --no-ff origin/main
+          status=$?
+          mkdir -p "$RUNNER_TEMP/reconcile"
+          git status --porcelain=v1 > "$RUNNER_TEMP/reconcile/status.txt"
+          git diff --name-only --diff-filter=U > "$RUNNER_TEMP/reconcile/conflicts.txt"
+          git diff --cc > "$RUNNER_TEMP/reconcile/conflicts.diff"
+          while IFS= read -r path; do
+            test -n "$path" || continue
+            mkdir -p "$RUNNER_TEMP/reconcile/files/$(dirname "$path")"
+            cp "$path" "$RUNNER_TEMP/reconcile/files/$path"
+          done < "$RUNNER_TEMP/reconcile/conflicts.txt"
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jev-now-current-main-reconcile
+          path: ${{ runner.temp }}/reconcile
+          if-no-files-found: warn
+          retention-days: 3
