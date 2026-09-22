@@ -128,6 +128,15 @@ enum Command {
         faculty_config: PathBuf,
         #[arg(long)]
         ql_root: Option<PathBuf>,
+        /// Optional native Central owner for pithy NOW handover/continuation.
+        #[arg(long)]
+        central_ctrl_bin: Option<PathBuf>,
+        /// Central root paired with --central-ctrl-bin.
+        #[arg(long)]
+        central_root: Option<PathBuf>,
+        /// Optional Project key used as the Prime Skill's default NOW scope.
+        #[arg(long)]
+        central_project: Option<String>,
     },
     /// Provision or withdraw a native Agency binding under an exact revision.
     /// This is an owner-only operation, not gateway/IPC input.
@@ -363,6 +372,9 @@ fn run(cli: Cli) -> Result<()> {
             research_bin,
             faculty_config,
             ql_root,
+            central_ctrl_bin,
+            central_root,
+            central_project,
         } => {
             fn exact_revision(value: &str, label: &str) -> Result<()> {
                 if value.len() == 40
@@ -444,6 +456,17 @@ fn run(cli: Cli) -> Result<()> {
             ];
             if let Some(root) = ql_root {
                 argv.extend(["--ql-root".into(), root.display().to_string()]);
+            }
+            if let (Some(ctrl), Some(root)) = (central_ctrl_bin, central_root) {
+                argv.extend([
+                    "--central-ctrl-bin".into(),
+                    ctrl.display().to_string(),
+                    "--central-root".into(),
+                    root.display().to_string(),
+                ]);
+            }
+            if let Some(project) = central_project {
+                argv.extend(["--central-project".into(), project]);
             }
             crate::encounter_service::EncounterService::configure(
                 service.home(),
