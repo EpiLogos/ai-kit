@@ -422,7 +422,10 @@ impl EncounterService {
             || provider.body_ref.as_ref().is_some_and(|value| {
                 value.trim().is_empty() || aikit_core::ResourceRef::parse(value).is_err()
             })
-            || provider.body_revision.as_ref().is_some_and(|value| value.trim().is_empty())
+            || provider
+                .body_revision
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty())
             || provider.body_ref.is_some() != provider.body_revision.is_some()
         {
             return Err(error(
@@ -815,10 +818,7 @@ impl EncounterService {
             configured.argv.clone()
         };
         if configured.protocol == EncounterProtocol::PrimeRpc {
-            launch_argv.extend([
-                "--agent-session".into(),
-                agent_session.to_string(),
-            ]);
+            launch_argv.extend(["--agent-session".into(), agent_session.to_string()]);
         }
         // Profile-declared key delivery rides the direct provider launch: the
         // child is the real harness, so the declared key is injected into the
@@ -863,11 +863,12 @@ impl EncounterService {
             ),
             EncounterProtocol::PrimeRpc => AgentSessionHost::launch_with_journal_and_environment(
                 {
-                    let adapter = aikit_adapters::prime_rpc_connection::PrimeRpcConnectionAdapter::new(
-                        connection,
-                        cwd.to_string_lossy().into_owned(),
-                        provenance,
-                    );
+                    let adapter =
+                        aikit_adapters::prime_rpc_connection::PrimeRpcConnectionAdapter::new(
+                            connection,
+                            cwd.to_string_lossy().into_owned(),
+                            provenance,
+                        );
                     match &model {
                         Some(model) => adapter.with_selected_model(
                             &model.policy.native_provider,
@@ -897,7 +898,10 @@ impl EncounterService {
         let lane = match host.open_session(crate::encounter_mcp::build_session_open_request(
             if reconnect {
                 SessionOpenMode::Load
-            } else if matches!(configured.protocol, EncounterProtocol::PiRpc | EncounterProtocol::PrimeRpc) {
+            } else if matches!(
+                configured.protocol,
+                EncounterProtocol::PiRpc | EncounterProtocol::PrimeRpc
+            ) {
                 SessionOpenMode::Attach
             } else {
                 SessionOpenMode::Create
