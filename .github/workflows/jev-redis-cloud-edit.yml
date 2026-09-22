@@ -1,14 +1,14 @@
 name: Jev NOW cloud native edit
 
-# Bounded cloud checkout helper. This never writes main or another branch.
-# Patches are consumed into ordinary native source commits; PR checks/review
-# still run on the resulting commit. No runtime depends on this helper.
+# Temporary bounded cloud checkout helper, never a runtime dependency. It
+# consumes a digest-checked patch into normal native source commits on this
+# commissioned branch only. Main and other branches are never written here.
 on:
   push:
     branches: [agent/388-jev-redis-now]
     paths:
       - '.github/workflows/jev-redis-cloud-edit.yml'
-      - 'scripts/jev-redis/cloud-edit.patch'
+      - 'scripts/jev-redis/cloud-edit.json'
 permissions:
   contents: write
 concurrency:
@@ -23,17 +23,31 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 2
-      - name: Check for an exact native patch
+      - name: Decode and verify the exact native patch
         id: patch
         shell: bash
         run: |
           set -euo pipefail
-          if test -f scripts/jev-redis/cloud-edit.patch; then
-            git apply --check scripts/jev-redis/cloud-edit.patch
-            git apply --numstat -z scripts/jev-redis/cloud-edit.patch > "$RUNNER_TEMP/native-edit-paths.raw"
+          if test -f scripts/jev-redis/cloud-edit.json; then
             python3 - <<'PY'
-          import os, pathlib
-          raw = (pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-edit-paths.raw').read_bytes()
+          import base64, gzip, hashlib, io, json, os, pathlib, subprocess
+          packet_path = pathlib.Path('scripts/jev-redis/cloud-edit.json')
+          if packet_path.stat().st_size > 2_000_000:
+              raise SystemExit('Cloud edit packet exceeds bound')
+          packet = json.loads(packet_path.read_text())
+          if packet['schema'] != 'aikit.cloud-native-edit/v1':
+              raise SystemExit('Unrecognised edit packet')
+          parent = subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip()
+          if parent != packet['base_revision']:
+              raise SystemExit('Remote source basis moved; reconcile, never force')
+          with gzip.GzipFile(fileobj=io.BytesIO(base64.b64decode(packet['patch_gzip_base64'], validate=True))) as compressed:
+              patch = compressed.read(8_000_001)
+          if len(patch) > 8_000_000 or hashlib.sha256(patch).hexdigest() != packet['patch_sha256']:
+              raise SystemExit('Native patch digest or byte bound failed')
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          (root / 'native-edit.patch').write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', str(root / 'native-edit.patch')], check=True)
+          raw = subprocess.check_output(['git', 'apply', '--numstat', '-z', str(root / 'native-edit.patch')])
           paths = []
           for row in raw.split(b'\0'):
               if not row:
@@ -42,7 +56,12 @@ jobs:
               if not path.startswith(('crates/', 'docs/', 'scripts/jev-redis/', '.aikit/', 'skills/')) or '..' in pathlib.PurePosixPath(path).parts or '\n' in path:
                   raise SystemExit('Patch path is outside the commissioned native edit scope')
               paths.append(path)
-          (pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-edit-paths').write_bytes(b'\0'.join(p.encode() for p in paths) + b'\0')
+          (root / 'native-edit-paths').write_bytes(b'\0'.join(p.encode() for p in paths) + b'\0')
+          message = packet['message']
+          if not isinstance(message, str) or not 1 <= len(message) <= 300 or '\n' in message:
+              raise SystemExit('Invalid commit message')
+          (root / 'native-edit-message').write_text(message + '\n')
+          print('Native source paths:', *paths, sep='\n')
           PY
             echo 'present=true' >> "$GITHUB_OUTPUT"
           else
@@ -55,24 +74,34 @@ jobs:
           rustup default 1.98.0
       - uses: Swatinem/rust-cache@v2.9.2
         if: steps.patch.outputs.present == 'true'
-      - name: Publish ordinary native source on this branch only
+      - name: Publish native source on the commissioned branch only
         if: steps.patch.outputs.present == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          git apply scripts/jev-redis/cloud-edit.patch
+          git apply "$RUNNER_TEMP/native-edit.patch"
           cargo fmt --all
           xargs -0 git add -- < "$RUNNER_TEMP/native-edit-paths"
-          git rm scripts/jev-redis/cloud-edit.patch
+          git rm scripts/jev-redis/cloud-edit.json
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'feat(now): publish commissioned native Jev/NOW implementation increment' -m 'Commission: EpiLogos/ai-kit#388; EpiLogos/O-I#220 and #65. Candidate source only; runtime and joined acceptance require their actual test receipts.'
-          # Restore any formatter-only change outside the explicitly supplied
-          # patch paths. Tests must exercise exactly the published tree.
+          git commit -F "$RUNNER_TEMP/native-edit-message"
+          # Do not include formatter-only changes outside the declared patch.
+          # The following tests run the exact published native source tree.
           git restore --worktree .
           git push origin HEAD:refs/heads/agent/388-jev-redis-now
           git rev-parse HEAD | tee "$RUNNER_TEMP/native-edit-cut.txt"
           git diff HEAD^ HEAD --stat
+          python3 - <<'PY'
+          import os, pathlib, tarfile
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          paths = [os.fsdecode(p) for p in (root / 'native-edit-paths').read_bytes().split(b'\0') if p]
+          with tarfile.open(root / 'native-edit-source.tar.gz', 'w:gz') as archive:
+              for path in paths:
+                  p = pathlib.Path(path)
+                  if p.is_file() and not p.is_symlink():
+                      archive.add(p, arcname=path, recursive=False)
+          PY
       - name: Compile and exercise the native Jev protocol
         if: steps.patch.outputs.present == 'true'
         shell: bash
@@ -87,13 +116,13 @@ jobs:
           path: |
             ${{ runner.temp }}/native-edit-cut.txt
             ${{ runner.temp }}/native-edit-test.log
+            ${{ runner.temp }}/native-edit-source.tar.gz
           if-no-files-found: error
           retention-days: 14
 
   public-native-toolchain:
-    # One public toolchain/cache export permits fast offline native edits in
-    # the disposable cloud container. No machine, credential, .git directory,
-    # general HOME or Cargo configuration is included in this artifact.
+    # Public build tools only; no machine, credential, .git, general HOME or
+    # Cargo configuration is included. This is disposable cloud build material.
     if: github.run_number == 1
     runs-on: ubuntu-24.04
     timeout-minutes: 20
