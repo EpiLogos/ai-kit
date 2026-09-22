@@ -39,6 +39,39 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Debug, clap::Args)]
+struct EpiPrimeConfigureArgs {
+    #[arg(long, default_value = "epi-prime-ql")]
+    provider_id: String,
+    #[arg(long)]
+    launcher: PathBuf,
+    #[arg(long)]
+    prime_bin: PathBuf,
+    #[arg(long)]
+    ql_bin: PathBuf,
+    #[arg(long)]
+    ql_revision: String,
+    #[arg(long)]
+    body_revision: String,
+    #[arg(long)]
+    skill_path: PathBuf,
+    #[arg(long)]
+    research_bin: PathBuf,
+    #[arg(long)]
+    faculty_config: PathBuf,
+    #[arg(long)]
+    ql_root: Option<PathBuf>,
+    /// Optional native Central owner for pithy NOW handover/continuation.
+    #[arg(long)]
+    central_ctrl_bin: Option<PathBuf>,
+    /// Central root paired with --central-ctrl-bin.
+    #[arg(long)]
+    central_root: Option<PathBuf>,
+    /// Optional Project key used as the Prime Skill's default NOW scope.
+    #[arg(long)]
+    central_project: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Read the native ProjectBinding; no session or provider is created.
@@ -108,35 +141,8 @@ enum Command {
     /// Paths are resolved now; mode selection later starts nothing until the
     /// ordinary Encounter open/first-Send boundary.
     EncounterEpiPrimeConfigure {
-        #[arg(long, default_value = "epi-prime-ql")]
-        provider_id: String,
-        #[arg(long)]
-        launcher: PathBuf,
-        #[arg(long)]
-        prime_bin: PathBuf,
-        #[arg(long)]
-        ql_bin: PathBuf,
-        #[arg(long)]
-        ql_revision: String,
-        #[arg(long)]
-        body_revision: String,
-        #[arg(long)]
-        skill_path: PathBuf,
-        #[arg(long)]
-        research_bin: PathBuf,
-        #[arg(long)]
-        faculty_config: PathBuf,
-        #[arg(long)]
-        ql_root: Option<PathBuf>,
-        /// Optional native Central owner for pithy NOW handover/continuation.
-        #[arg(long)]
-        central_ctrl_bin: Option<PathBuf>,
-        /// Central root paired with --central-ctrl-bin.
-        #[arg(long)]
-        central_root: Option<PathBuf>,
-        /// Optional Project key used as the Prime Skill's default NOW scope.
-        #[arg(long)]
-        central_project: Option<String>,
+        #[command(flatten)]
+        args: Box<EpiPrimeConfigureArgs>,
     },
     /// Provision or withdraw a native Agency binding under an exact revision.
     /// This is an owner-only operation, not gateway/IPC input.
@@ -361,21 +367,22 @@ fn run(cli: Cli) -> Result<()> {
             )?;
             emit(&serde_json::json!({"configured":true}))
         }
-        Command::EncounterEpiPrimeConfigure {
-            provider_id,
-            launcher,
-            prime_bin,
-            ql_bin,
-            ql_revision,
-            body_revision,
-            skill_path,
-            research_bin,
-            faculty_config,
-            ql_root,
-            central_ctrl_bin,
-            central_root,
-            central_project,
-        } => {
+        Command::EncounterEpiPrimeConfigure { args } => {
+            let EpiPrimeConfigureArgs {
+                provider_id,
+                launcher,
+                prime_bin,
+                ql_bin,
+                ql_revision,
+                body_revision,
+                skill_path,
+                research_bin,
+                faculty_config,
+                ql_root,
+                central_ctrl_bin,
+                central_root,
+                central_project,
+            } = *args;
             fn exact_revision(value: &str, label: &str) -> Result<()> {
                 if value.len() == 40
                     && value
@@ -431,12 +438,20 @@ fn run(cli: Cli) -> Result<()> {
             let ql_root = ql_root
                 .map(|path| directory(path, "QL source root"))
                 .transpose()?;
-            let aikit_bin = std::env::current_exe().map_err(|error| {
-                AikitError::new(
+            if central_ctrl_bin.is_some() != central_root.is_some()
+                || central_ctrl_bin.is_some() != central_project.is_some()
+            {
+                return Err(AikitError::new(
                     "encounter.prime_configuration",
-                    format!("could not resolve the installed AIKit executable: {error}"),
-                )
-            })?;
+                    "Central ctrl binary, root and project must be supplied together",
+                ));
+            }
+            let central_ctrl_bin = central_ctrl_bin
+                .map(|path| file(path, "Central ctrl binary"))
+                .transpose()?;
+            let central_root = central_root
+                .map(|path| directory(path, "Central root"))
+                .transpose()?;
             let aikit_bin = file(
                 std::env::current_exe().map_err(|error| {
                     AikitError::new(
