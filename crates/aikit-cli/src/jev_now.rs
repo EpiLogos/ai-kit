@@ -23,8 +23,8 @@ use aikit_core::knowledge_source_pool::SourcePoolProvider;
 use aikit_core::secret_ref::{SecretRef, SecretResolver};
 use aikit_core::{AikitError, ResourceRef, Result, SourceRef};
 use aikit_store::now_context::{
-    NowContextBasis, NowContextChange, NowContextItem, NowNeighbour, PreparedNowContext,
-    RedisNowConfig, RedisNowStore, NOW_PREPARED_SCHEMA,
+    NowContextBasis, NowContextChange, NowContextItem, NowNeighbour, PreparedFactoryContext,
+    PreparedFactoryUnit, PreparedNowContext, RedisNowConfig, RedisNowStore, NOW_PREPARED_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -251,8 +251,77 @@ struct FactoryEvidence {
     run: Value,
     journeys: Vec<Value>,
     workflow_units: Vec<Value>,
+    prepared: PreparedFactoryContext,
     neighbours: Vec<NowNeighbour>,
     dependency_revisions: BTreeMap<String, String>,
+}
+
+fn factory_text(value: &Value, field: &str) -> Result<String> {
+    value[field]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            fail(
+                "now_context.factory_invalid",
+                format!("Factory reading omitted required field {field}"),
+            )
+        })
+}
+
+fn factory_texts(value: &Value, field: &str) -> Result<Vec<String>> {
+    let values = value[field].as_array().ok_or_else(|| {
+        fail(
+            "now_context.factory_invalid",
+            format!("Factory reading omitted required array {field}"),
+        )
+    })?;
+    values
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    fail(
+                        "now_context.factory_invalid",
+                        format!("Factory {field} contains a non-string or empty value"),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn factory_optional_texts(value: &Value, field: &str) -> Result<Vec<String>> {
+    if value[field].is_null() {
+        Ok(Vec::new())
+    } else {
+        factory_texts(value, field)
+    }
+}
+
+fn prepared_factory_unit(unit: &Value) -> Result<PreparedFactoryUnit> {
+    Ok(PreparedFactoryUnit {
+        workflow_unit_ref: factory_text(unit, "workflowUnitRef")?,
+        subject_ref: factory_text(unit, "subjectRef")?,
+        basis_revision: factory_text(unit, "basisRevision")?,
+        developmental_concern: factory_text(unit, "developmentalConcern")?,
+        required_difference: factory_text(unit, "requiredDifference")?,
+        required_return_contract: factory_text(&unit["requiredReturn"], "contract")?,
+        required_return_address: factory_text(&unit["requiredReturn"], "address")?,
+        required_verification: factory_texts(unit, "requiredVerification")?,
+        agent_refs: factory_texts(&unit["agentRequirements"], "agentRefs")?,
+        agent_set_refs: factory_texts(&unit["agentRequirements"], "agentSetRefs")?,
+        agency_refs: factory_texts(&unit["agentRequirements"], "agencyRefs")?,
+        praxis_refs: factory_texts(unit, "praxisRefs")?,
+        capability_refs: factory_texts(unit, "capabilityRefs")?,
+        dependencies: factory_texts(unit, "dependencies")?,
+        independence_from: factory_texts(unit, "independenceFrom")?,
+        permitted_effects: factory_texts(unit, "permittedEffects")?,
+        stop_conditions: factory_text(unit, "stopConditions")?,
+        escalation_conditions: factory_text(unit, "escalationConditions")?,
+        current_agency_refs: factory_optional_texts(&unit["currentCorrelation"], "agencyRefs")?,
+    })
 }
 
 fn bounded_text(value: &str, max: usize) -> String {
@@ -369,8 +438,8 @@ fn factory_evidence(config: &FactoryPrepare) -> Result<FactoryEvidence> {
         .factory_bin
         .clone()
         .unwrap_or_else(|| "factory".into());
-    let (run, journeys, revision) = factory_owner_basis(config)?;
-    let revision = Some(revision);
+    let (run, journeys, owner_basis_revision) = factory_owner_basis(config)?;
+    let revision = Some(owner_basis_revision.clone());
     let list = factory_read(
         &factory,
         &[
@@ -425,6 +494,39 @@ fn factory_evidence(config: &FactoryPrepare) -> Result<FactoryEvidence> {
         }
         workflow_units.push(unit);
     }
+    let prepared_units = workflow_units
+        .iter()
+        .map(prepared_factory_unit)
+        .collect::<Result<Vec<_>>>()?;
+    let journey_refs = run["owningJourneyRefs"]
+        .as_array()
+        .ok_or_else(|| {
+            fail(
+                "now_context.factory_invalid",
+                "Factory Run reading omitted owningJourneyRefs",
+            )
+        })?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    fail(
+                        "now_context.factory_invalid",
+                        "Factory owningJourneyRefs contains an invalid value",
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let prepared = PreparedFactoryContext {
+        run_ref: config.run_ref.clone(),
+        owner_basis_revision,
+        journey_refs,
+        workflow_units: prepared_units,
+    };
+
     let mut neighbours = Vec::new();
     if let Some(agencies) = run["agencies"].as_array() {
         for agency in agencies.iter().take(64) {
@@ -464,6 +566,7 @@ fn factory_evidence(config: &FactoryPrepare) -> Result<FactoryEvidence> {
         run,
         journeys,
         workflow_units,
+        prepared,
         neighbours,
         dependency_revisions,
     })
@@ -988,6 +1091,7 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
             .as_ref()
             .map(|f| f.neighbours.clone())
             .unwrap_or_default(),
+        factory: factory.as_ref().map(|f| f.prepared.clone()),
         knowledge_frames,
         continuation: request.continuation,
         jev_invocation_ref,
