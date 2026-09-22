@@ -184,6 +184,39 @@ struct FactoryPrepare {
     workflow_unit_refs: Vec<String>,
 }
 
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatrixPrepare {
+    manifest: PathBuf,
+    csv: PathBuf,
+    #[serde(default)]
+    view_id: Option<String>,
+    #[serde(default)]
+    capability_refs: Vec<String>,
+    #[serde(default)]
+    full_scope: bool,
+    agent_visibility: AgentVisibility,
+    external_egress: ExternalEgress,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MatrixEvidence {
+    matrix_id: String,
+    whole_account_ref: String,
+    view_id: String,
+    view_title: String,
+    view_semantics: String,
+    row_axis: Value,
+    column_axis: Value,
+    declared_capability_refs: Vec<String>,
+    expanded_account_refs: Vec<String>,
+    questions: Vec<String>,
+    manifest_digest: String,
+    csv_digest: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "mode", deny_unknown_fields)]
 enum SelectionMode {
@@ -225,6 +258,8 @@ struct NowPrepareRequest {
     central: CentralPrepare,
     #[serde(default)]
     factory: Option<FactoryPrepare>,
+    #[serde(default)]
+    matrix: Option<MatrixPrepare>,
     #[serde(default)]
     wiki_queries: Vec<String>,
     #[serde(default)]
@@ -330,6 +365,365 @@ fn prepared_factory_unit(unit: &Value) -> Result<PreparedFactoryUnit> {
         escalation_conditions: factory_text(unit, "escalationConditions")?,
         current_agency_refs: factory_optional_texts(&unit["currentCorrelation"], "agencyRefs")?,
     })
+}
+
+
+fn file_digest(path: &Path, label: &str, max: usize) -> Result<(Vec<u8>, String)> {
+    let bytes = read_bytes(path, label, max)?;
+    let digest = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+    Ok((bytes, digest))
+}
+
+fn parse_csv_rows(input: &str) -> Result<Vec<Vec<String>>> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    let mut chars = input.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        if quoted {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    quoted = false;
+                }
+            } else {
+                field.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '"' if field.is_empty() => quoted = true,
+            ',' => {
+                row.push(std::mem::take(&mut field));
+            }
+            '\n' => {
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+            }
+            '\r' if chars.peek() == Some(&'\n') => {}
+            '\r' => {
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+            }
+            _ => field.push(ch),
+        }
+    }
+    if quoted {
+        return Err(fail(
+            "now_context.matrix_invalid",
+            "Capability matrix CSV ends inside a quoted field",
+        ));
+    }
+    if !field.is_empty() || !row.is_empty() {
+        row.push(field);
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn csv_header_index(headers: &[String], name: &str) -> Result<usize> {
+    headers.iter().position(|value| value == name).ok_or_else(|| {
+        fail(
+            "now_context.matrix_invalid",
+            format!("Capability matrix CSV is missing required column {name}"),
+        )
+    })
+}
+
+fn csv_field<'a>(row: &'a [String], index: usize) -> &'a str {
+    row.get(index).map(String::as_str).unwrap_or("")
+}
+
+fn matrix_ref_list(raw: &str) -> Vec<String> {
+    if raw.trim().is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str::<Vec<String>>(raw)
+        .unwrap_or_else(|_| {
+            raw.split(';')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+}
+
+fn matrix_axis(view: &Value, key: &str) -> Result<Value> {
+    let axis = view.get(key).and_then(Value::as_object).ok_or_else(|| {
+        fail(
+            "now_context.matrix_invalid",
+            format!("Capability matrix view is missing {key}"),
+        )
+    })?;
+    if axis.get("id").and_then(Value::as_str).is_none()
+        || axis.get("label").and_then(Value::as_str).is_none()
+        || axis.get("members").and_then(Value::as_array).is_none()
+    {
+        return Err(fail(
+            "now_context.matrix_invalid",
+            format!("Capability matrix {key} has no id/label/members"),
+        ));
+    }
+    Ok(Value::Object(axis.clone()))
+}
+
+fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvidence)> {
+    if config.full_scope == config.capability_refs.is_empty() {
+        return Err(fail(
+            "now_context.matrix_scope",
+            "Matrix scope must select exactly one of full_scope or capability_refs",
+        ));
+    }
+    if config.capability_refs.len() > MAX_CANDIDATES {
+        return Err(fail(
+            "now_context.matrix_scope",
+            "Selected matrix capability scope exceeds the bounded candidate limit",
+        ));
+    }
+
+    let (manifest_bytes, manifest_digest) =
+        file_digest(&config.manifest, "capability matrix manifest", 2 * 1024 * 1024)?;
+    let manifest: Value = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| fail("now_context.matrix_invalid", e.to_string()))?;
+    if manifest["protocol"] != "ql-capability-matrix/1" {
+        return Err(fail(
+            "now_context.matrix_invalid",
+            "Capability matrix manifest has an unsupported protocol",
+        ));
+    }
+    let matrix_id = manifest["matrix_id"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| fail("now_context.matrix_invalid", "Matrix manifest has no matrix_id"))?
+        .to_owned();
+    let whole_account_ref = manifest["anchor_ref"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| fail("now_context.matrix_invalid", "Matrix manifest has no anchor_ref"))?
+        .to_owned();
+    let view_id = config
+        .view_id
+        .as_deref()
+        .or_else(|| manifest["default_view"].as_str())
+        .ok_or_else(|| fail("now_context.matrix_invalid", "Matrix manifest has no default_view"))?
+        .to_owned();
+    let view = manifest["views"]
+        .as_array()
+        .and_then(|views| {
+            views
+                .iter()
+                .find(|view| view["id"].as_str() == Some(view_id.as_str()))
+        })
+        .ok_or_else(|| {
+            fail(
+                "now_context.matrix_invalid",
+                format!("Matrix manifest has no declared view {view_id}"),
+            )
+        })?;
+    let view_title = view["title"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| fail("now_context.matrix_invalid", "Matrix view has no title"))?
+        .to_owned();
+    let view_semantics = view["semantics"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| fail("now_context.matrix_invalid", "Matrix view has no semantics"))?
+        .to_owned();
+    let row_axis = matrix_axis(view, "row_axis")?;
+    let column_axis = matrix_axis(view, "column_axis")?;
+
+    let (csv_bytes, csv_digest) =
+        file_digest(&config.csv, "capability matrix CSV", 8 * 1024 * 1024)?;
+    let csv_text = std::str::from_utf8(&csv_bytes)
+        .map_err(|e| fail("now_context.matrix_invalid", e.to_string()))?;
+    let rows = parse_csv_rows(csv_text)?;
+    let headers = rows
+        .first()
+        .ok_or_else(|| fail("now_context.matrix_invalid", "Capability matrix CSV is empty"))?;
+    let id_i = csv_header_index(headers, "id")?;
+    let type_i = csv_header_index(headers, "record_type")?;
+    let view_i = csv_header_index(headers, "view_id")?;
+    let row_i = csv_header_index(headers, "row_id")?;
+    let col_i = csv_header_index(headers, "column_id")?;
+    let refs_i = csv_header_index(headers, "capability_refs")?;
+    let need_i = csv_header_index(headers, "need")?;
+    let operation_i = csv_header_index(headers, "operation")?;
+    let outcome_i = csv_header_index(headers, "outcome")?;
+    let status_i = csv_header_index(headers, "implementation_status")?;
+    let standing_i = csv_header_index(headers, "standing")?;
+    let sources_i = csv_header_index(headers, "source_refs")?;
+    let account_i = csv_header_index(headers, "account_ref")?;
+    let relation_i = csv_header_index(headers, "relation")?;
+    let coverage_i = csv_header_index(headers, "coverage")?;
+    let question_i = csv_header_index(headers, "question")?;
+
+    let capability_rows = rows
+        .iter()
+        .skip(1)
+        .filter(|row| csv_field(row, type_i) == "capability")
+        .collect::<Vec<_>>();
+    if capability_rows.is_empty() {
+        return Err(fail(
+            "now_context.matrix_invalid",
+            "Capability matrix declares no capability records",
+        ));
+    }
+
+    let selected_ids = if config.full_scope {
+        capability_rows
+            .iter()
+            .map(|row| csv_field(row, id_i).to_owned())
+            .collect::<Vec<_>>()
+    } else {
+        config.capability_refs.clone()
+    };
+    if selected_ids.is_empty() || selected_ids.len() > MAX_CANDIDATES {
+        return Err(fail(
+            "now_context.matrix_scope",
+            "Selected matrix scope is empty or exceeds the bounded candidate limit",
+        ));
+    }
+    let selected_set = selected_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if selected_set.len() != selected_ids.len() {
+        return Err(fail(
+            "now_context.matrix_scope",
+            "Selected matrix scope repeats a capability identity",
+        ));
+    }
+
+    let mut capabilities = BTreeMap::new();
+    for row in &capability_rows {
+        let id = csv_field(row, id_i);
+        if id.trim().is_empty() {
+            return Err(fail(
+                "now_context.matrix_invalid",
+                "Capability record has no stable id",
+            ));
+        }
+        capabilities.insert(id.to_owned(), *row);
+    }
+    for id in &selected_ids {
+        if !capabilities.contains_key(id) {
+            return Err(fail(
+                "now_context.matrix_scope",
+                format!("Selected capability {id} is absent from the matrix inventory"),
+            ));
+        }
+    }
+
+    let relation_rows = rows
+        .iter()
+        .skip(1)
+        .filter(|row| {
+            csv_field(row, type_i) != "capability"
+                && csv_field(row, view_i) == view_id
+        })
+        .collect::<Vec<_>>();
+    let mut account_refs = BTreeSet::new();
+    let mut questions = BTreeSet::new();
+    let mut items = Vec::new();
+
+    for id in &selected_ids {
+        let row = capabilities[id];
+        let account_ref = csv_field(row, account_i).trim().to_owned();
+        if !account_ref.is_empty() {
+            account_refs.insert(account_ref.clone());
+        }
+        let relations = relation_rows
+            .iter()
+            .filter(|relation| matrix_ref_list(csv_field(relation, refs_i)).contains(id))
+            .map(|relation| {
+                let question = csv_field(relation, question_i).trim().to_owned();
+                if !question.is_empty() {
+                    questions.insert(question.clone());
+                }
+                json!({
+                    "row_id": csv_field(relation, row_i),
+                    "column_id": csv_field(relation, col_i),
+                    "relation": csv_field(relation, relation_i),
+                    "coverage": csv_field(relation, coverage_i),
+                    "question": question,
+                })
+            })
+            .collect::<Vec<_>>();
+        let excerpt = serde_json::to_string(&json!({
+            "matrix_id": matrix_id,
+            "whole_account_ref": whole_account_ref,
+            "view": {
+                "id": view_id,
+                "title": view_title,
+                "semantics": view_semantics,
+                "row_axis": row_axis,
+                "column_axis": column_axis,
+            },
+            "capability": {
+                "id": id,
+                "need": csv_field(row, need_i),
+                "operation": csv_field(row, operation_i),
+                "outcome": csv_field(row, outcome_i),
+                "implementation_status": csv_field(row, status_i),
+                "standing": csv_field(row, standing_i),
+                "source_refs": matrix_ref_list(csv_field(row, sources_i)),
+                "account_ref": account_ref,
+            },
+            "relations": relations,
+        }))
+        .map_err(|e| fail("now_context.matrix_invalid", e.to_string()))?;
+        let identity = blake3::hash(format!("{matrix_id}:{id}").as_bytes()).to_hex();
+        items.push(NowContextItem {
+            source_ref: ResourceRef::parse(format!(
+                "context-source/matrix/{}",
+                &identity.as_str()[..24]
+            ))?,
+            source_revision: csv_digest.clone(),
+            title: bounded_text(
+                &format!("{id} — {}", csv_field(row, need_i)),
+                4096,
+            ),
+            excerpt: bounded_text(&excerpt, MAX_SOURCE_BYTES),
+            route: Some(format!(
+                "matrix:{matrix_id};view:{view_id};capability:{id};account:{account_ref}"
+            )),
+            agent_visibility: config.agent_visibility.clone(),
+            external_egress: config.external_egress.clone(),
+        });
+    }
+
+    Ok((
+        items,
+        MatrixEvidence {
+            matrix_id,
+            whole_account_ref,
+            view_id,
+            view_title,
+            view_semantics,
+            row_axis,
+            column_axis,
+            declared_capability_refs: selected_ids,
+            expanded_account_refs: account_refs.into_iter().collect(),
+            questions: questions.into_iter().collect(),
+            manifest_digest,
+            csv_digest,
+        },
+    ))
+}
+
+fn revalidate_matrix(config: &MatrixPrepare, evidence: &MatrixEvidence) -> Result<()> {
+    let (_, manifest_digest) =
+        file_digest(&config.manifest, "capability matrix manifest", 2 * 1024 * 1024)?;
+    let (_, csv_digest) =
+        file_digest(&config.csv, "capability matrix CSV", 8 * 1024 * 1024)?;
+    if manifest_digest != evidence.manifest_digest || csv_digest != evidence.csv_digest {
+        return Err(fail(
+            "now_context.matrix_stale",
+            "Capability matrix manifest/CSV changed during context preparation",
+        ));
+    }
+    Ok(())
 }
 
 fn bounded_text(value: &str, max: usize) -> String {
@@ -968,6 +1362,10 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
     if request.schema != PREPARE_SCHEMA
         || request.concern.trim().is_empty()
         || request.candidate_items.len() > MAX_CANDIDATES
+        || request
+            .matrix
+            .as_ref()
+            .is_some_and(|matrix| matrix.capability_refs.len() > MAX_CANDIDATES)
         || request.wiki_queries.len() > 32
     {
         return Err(fail(
@@ -1008,6 +1406,30 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
         .map(|f| f.dependency_revisions.clone())
         .unwrap_or_default();
 
+    let matrix = request.matrix.as_ref().map(read_matrix).transpose()?;
+    let (matrix_candidates, matrix_evidence) = match matrix {
+        Some((items, evidence)) => (items, Some(evidence)),
+        None => (Vec::new(), None),
+    };
+    let mut selection_candidates = matrix_candidates;
+    selection_candidates.extend(request.candidate_items.clone());
+    if selection_candidates.len() > MAX_CANDIDATES {
+        return Err(fail(
+            "now_context.matrix_scope",
+            "Combined matrix and explicit candidate scope exceeds the bounded candidate limit",
+        ));
+    }
+    if let Some(evidence) = &matrix_evidence {
+        all_source_revisions.insert(
+            format!("matrix:{}:manifest", evidence.matrix_id),
+            evidence.manifest_digest.clone(),
+        );
+        all_source_revisions.insert(
+            format!("matrix:{}:csv", evidence.matrix_id),
+            evidence.csv_digest.clone(),
+        );
+    }
+
     let mut knowledge_frames = Vec::new();
     if !request.wiki_queries.is_empty() {
         let mut service = Service::discover(cwd)?;
@@ -1047,12 +1469,15 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
                 .collect(),
         )?;
         revalidate_factory(request.factory.as_ref(), factory_revision.as_deref())?;
+        if let (Some(config), Some(evidence)) = (request.matrix.as_ref(), matrix_evidence.as_ref()) {
+            revalidate_matrix(config, evidence)?;
+        }
         Ok(())
     };
     revalidate()?;
     let (selected_candidates, selection) = select_candidates(
         &request.selection,
-        &request.candidate_items,
+        &selection_candidates,
         &mut revalidate,
     )?;
     revalidate()?;
@@ -1126,6 +1551,7 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
         "neighbourCount":view.neighbours.len(),
         "knowledge":view.knowledge_frames,
         "factory":factory.as_ref().map(|f|json!({"run":f.run,"journeys":f.journeys,"workflowUnits":f.workflow_units})),
+        "matrix":matrix_evidence,
         "selection":selection,
         "standing":"prepared and atomically published against revalidated native source/Factory basis"
     }))
