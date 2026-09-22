@@ -12,8 +12,8 @@ use aikit_core::{
     scope::ScopeKind,
     session_space::SessionSpaceRef,
     session_space_application::{
-        ContextResolutionBasis, ContextResolutionEvidence,
-        SessionSpaceAgentAttachmentIntent, SessionSpaceMutation, SessionSpaceProjectContextBinding,
+        ContextResolutionBasis, ContextResolutionEvidence, SessionSpaceAgentAttachmentIntent,
+        SessionSpaceMutation, SessionSpaceProjectContextBinding,
     },
     ProjectRef, ResourceRef,
 };
