@@ -21,6 +21,7 @@ const MAX_ITEMS: usize = 64;
 const MAX_NEIGHBOURS: usize = 64;
 const MAX_KNOWLEDGE_FRAMES: usize = 32;
 const MAX_CHANGES: usize = 64;
+const MAX_FACTORY_UNITS: usize = 64;
 
 fn fail(code: &'static str, message: impl Into<String>) -> AikitError {
     AikitError::new(code, message.into())
@@ -223,6 +224,120 @@ impl NowNeighbour {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PreparedFactoryUnit {
+    pub workflow_unit_ref: String,
+    pub subject_ref: String,
+    pub basis_revision: String,
+    pub developmental_concern: String,
+    pub required_difference: String,
+    pub required_return_contract: String,
+    pub required_return_address: String,
+    #[serde(default)]
+    pub required_verification: Vec<String>,
+    #[serde(default)]
+    pub agent_refs: Vec<String>,
+    #[serde(default)]
+    pub agent_set_refs: Vec<String>,
+    #[serde(default)]
+    pub agency_refs: Vec<String>,
+    #[serde(default)]
+    pub praxis_refs: Vec<String>,
+    #[serde(default)]
+    pub capability_refs: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub independence_from: Vec<String>,
+    #[serde(default)]
+    pub permitted_effects: Vec<String>,
+    pub stop_conditions: String,
+    pub escalation_conditions: String,
+    #[serde(default)]
+    pub current_agency_refs: Vec<String>,
+}
+impl PreparedFactoryUnit {
+    fn validate(&self) -> Result<()> {
+        let required = [
+            &self.workflow_unit_ref,
+            &self.subject_ref,
+            &self.basis_revision,
+            &self.developmental_concern,
+            &self.required_difference,
+            &self.required_return_contract,
+            &self.required_return_address,
+            &self.stop_conditions,
+            &self.escalation_conditions,
+        ];
+        let sets = [
+            &self.required_verification,
+            &self.agent_refs,
+            &self.agent_set_refs,
+            &self.agency_refs,
+            &self.praxis_refs,
+            &self.capability_refs,
+            &self.dependencies,
+            &self.independence_from,
+            &self.permitted_effects,
+            &self.current_agency_refs,
+        ];
+        if required.iter().any(|value| !bounded(value, 64 * 1024))
+            || sets.iter().any(|values| {
+                values.len() > 64 || values.iter().any(|value| !bounded(value, 16 * 1024))
+            })
+        {
+            return Err(fail(
+                "now_context.factory_unit_invalid",
+                "Prepared Factory WorkflowUnit is malformed or unbounded",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedFactoryContext {
+    pub run_ref: String,
+    pub owner_basis_revision: String,
+    #[serde(default)]
+    pub journey_refs: Vec<String>,
+    #[serde(default)]
+    pub workflow_units: Vec<PreparedFactoryUnit>,
+}
+impl PreparedFactoryContext {
+    fn validate(&self) -> Result<()> {
+        if !bounded(&self.run_ref, 4096)
+            || !bounded(&self.owner_basis_revision, 4096)
+            || self.journey_refs.len() > 64
+            || self
+                .journey_refs
+                .iter()
+                .any(|value| !bounded(value, 4096))
+            || self.workflow_units.len() > MAX_FACTORY_UNITS
+        {
+            return Err(fail(
+                "now_context.factory_invalid",
+                "Prepared Factory context is malformed or unbounded",
+            ));
+        }
+        for unit in &self.workflow_units {
+            unit.validate()?;
+        }
+        if serde_json::to_vec(self)
+            .map(|bytes| bytes.len() > MAX_JSON / 2)
+            .unwrap_or(true)
+        {
+            return Err(fail(
+                "now_context.factory_invalid",
+                "Prepared Factory context exceeds its bounded share of the NOW payload",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreparedNowContext {
     pub schema: String,
     pub project_ref: ResourceRef,
@@ -239,6 +354,11 @@ pub struct PreparedNowContext {
     pub items: Vec<NowContextItem>,
     #[serde(default)]
     pub neighbours: Vec<NowNeighbour>,
+    /// Factory-owned developmental meaning retained from the exact selected
+    /// Run/Journey/WorkflowUnit readings. This is an operative projection, not
+    /// another Factory state store.
+    #[serde(default)]
+    pub factory: Option<PreparedFactoryContext>,
     /// Source-linked Wiki/Knowledge reading selected through AIKit's existing
     /// Knowledge application. This is a derived operative reading, never a
     /// second Wiki or source registry. External-provider views retain routes,
@@ -299,6 +419,9 @@ impl PreparedNowContext {
         }
         for relation in &self.neighbours {
             relation.validate()?;
+        }
+        if let Some(factory) = &self.factory {
+            factory.validate()?;
         }
         let encoded =
             serde_json::to_vec(self).map_err(|e| fail("now_context.encode", e.to_string()))?;
