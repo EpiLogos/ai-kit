@@ -22,7 +22,8 @@ def required_path(name: str, *, directory: bool = False) -> Path:
     if not raw:
         raise RuntimeError(f"{name} is required")
     path = Path(raw).expanduser().resolve()
-    if (not path.is_dir()) if directory else (not path.is_file()):
+    present = path.is_dir() if directory else path.is_file()
+    if not present:
         kind = "directory" if directory else "file"
         raise RuntimeError(f"{name} must name an existing {kind}")
     return path
