@@ -236,3 +236,141 @@ jobs:
       - name: Remove disposable Redis container
         if: always()
         run: docker rm --force aikit-jev-now-redis >/dev/null 2>&1 || true
+
+  joined-native-proof:
+    name: Joined Central BKMR Factory Redis Jev episode
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Resolve current native owner mains
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth=1 --branch main https://github.com/EpiLogos/Central.git "$RUNNER_TEMP/Central"
+          git clone --quiet --depth=1 --branch main https://github.com/EpiLogos/Factory.git "$RUNNER_TEMP/Factory"
+          {
+            printf 'ai-kit %s\n' "$(git rev-parse HEAD)"
+            printf 'Central %s\n' "$(git -C "$RUNNER_TEMP/Central" rev-parse HEAD)"
+            printf 'Factory %s\n' "$(git -C "$RUNNER_TEMP/Factory" rev-parse HEAD)"
+          } | tee "$RUNNER_TEMP/joined-owner-revisions.txt"
+      - name: Install real BKMR 7.6.7 and native Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/bkmr"
+          "$RUNNER_TEMP/bkmr/bin/pip" install --disable-pip-version-check 'bkmr==7.6.7'
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+          {
+            "$RUNNER_TEMP/bkmr/bin/bkmr" --version
+            rustc -Vv
+            cargo -V
+          } | tee "$RUNNER_TEMP/joined-toolchain.txt"
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: jev-now-joined
+          workspaces: |
+            . -> target
+            ${{ runner.temp }}/Central -> target
+            ${{ runner.temp }}/Factory -> target
+      - name: Build actual owner and consumer binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked -p aikit-cli --bin aikit 2>&1 | tee "$RUNNER_TEMP/joined-build.log"
+          (cd "$RUNNER_TEMP/Central" && cargo build --locked -p ctrl) 2>&1 | tee -a "$RUNNER_TEMP/joined-build.log"
+          (cd "$RUNNER_TEMP/Factory" && cargo build --locked -p factory --bin factory) 2>&1 | tee -a "$RUNNER_TEMP/joined-build.log"
+          sha256sum \
+            target/debug/aikit \
+            "$RUNNER_TEMP/Central/target/debug/ctrl" \
+            "$RUNNER_TEMP/Factory/target/debug/factory" \
+            | tee "$RUNNER_TEMP/joined-binaries.sha256"
+      - name: Start disposable persistent Redis 8.10
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/joined-redis"
+          chmod 0777 "$RUNNER_TEMP/joined-redis"
+          docker run --detach --name aikit-jev-now-joined-redis \
+            --publish 6382:6379 \
+            --volume "$RUNNER_TEMP/joined-redis:/data" \
+            redis:8.10 redis-server \
+              --appendonly yes --appendfsync everysec --save 60 1 \
+              --maxmemory 134217728 --maxmemory-policy noeviction
+          for _ in $(seq 1 80); do
+            docker exec aikit-jev-now-joined-redis redis-cli PING | grep -qx PONG && break
+            sleep 0.25
+          done
+          docker exec aikit-jev-now-joined-redis redis-cli PING | grep -qx PONG
+          docker exec aikit-jev-now-joined-redis redis-server --version | tee "$RUNNER_TEMP/joined-redis-version.txt"
+      - name: Run joined controlled episode through native binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/jev-redis/joined_proof.py \
+            --aikit "$PWD/target/debug/aikit" \
+            --ctrl "$RUNNER_TEMP/Central/target/debug/ctrl" \
+            --bkmr "$RUNNER_TEMP/bkmr/bin/bkmr" \
+            --factory "$RUNNER_TEMP/Factory/target/debug/factory" \
+            --factory-state "$RUNNER_TEMP/Factory/contracts/factory/fixtures/oi-self-hosting-state.json" \
+            --redis-address 127.0.0.1:6382 \
+            --jev-mode controlled \
+            --output "$RUNNER_TEMP/joined-proof.json" \
+            2>&1 | tee "$RUNNER_TEMP/joined-proof.log"
+          python3 - <<'PY'
+          import json, os, pathlib
+          p = pathlib.Path(os.environ["RUNNER_TEMP"]) / "joined-proof.json"
+          value = json.loads(p.read_text())
+          assert value["participant_isolation"]["verifier_canary_isolated"] is True
+          assert value["stale_version_refused"] is True
+          assert value["source_change_during_jev_refused"] is True
+          assert value["provider_malformed_refused"] is True
+          assert value["revoked_read_refused"] is True
+          assert value["comparison"]["arms"]["redis_prepared_no_jev"]["redis_prepared"] is True
+          assert value["comparison"]["arms"]["jev_assisted"]["jev_calls"] == 1
+          assert value["general_jev"]["standing"] == "controlled-protocol"
+          PY
+      - name: Preserve Redis restart evidence for the joined state
+        shell: bash
+        run: |
+          set -euo pipefail
+          before="$(docker exec aikit-jev-now-joined-redis redis-cli DBSIZE)"
+          docker stop aikit-jev-now-joined-redis
+          docker rm aikit-jev-now-joined-redis
+          docker run --detach --name aikit-jev-now-joined-redis \
+            --publish 6382:6379 \
+            --volume "$RUNNER_TEMP/joined-redis:/data" \
+            redis:8.10 redis-server \
+              --appendonly yes --appendfsync everysec --save 60 1 \
+              --maxmemory 134217728 --maxmemory-policy noeviction
+          for _ in $(seq 1 80); do
+            docker exec aikit-jev-now-joined-redis redis-cli PING | grep -qx PONG && break
+            sleep 0.25
+          done
+          after="$(docker exec aikit-jev-now-joined-redis redis-cli DBSIZE)"
+          test "$before" -gt 0
+          test "$after" -ge "$before"
+          printf 'before=%s\nafter=%s\n' "$before" "$after" | tee "$RUNNER_TEMP/joined-redis-restart.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jev-redis-now-joined-proof
+          path: |
+            ${{ runner.temp }}/joined-owner-revisions.txt
+            ${{ runner.temp }}/joined-toolchain.txt
+            ${{ runner.temp }}/joined-build.log
+            ${{ runner.temp }}/joined-binaries.sha256
+            ${{ runner.temp }}/joined-redis-version.txt
+            ${{ runner.temp }}/joined-redis-restart.txt
+            ${{ runner.temp }}/joined-proof.json
+            ${{ runner.temp }}/joined-proof.log
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Remove disposable Redis
+        if: always()
+        run: docker rm --force aikit-jev-now-joined-redis >/dev/null 2>&1 || true
