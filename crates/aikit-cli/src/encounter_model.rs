@@ -692,6 +692,8 @@ mod tests {
             id: "probe".into(),
             label: "probe".into(),
             argv: vec![program.to_string()],
+            body_ref: None,
+            body_revision: None,
             required_context: None,
             model_policy: None,
         }
@@ -781,6 +783,8 @@ mod tests {
             id: "probe".into(),
             label: "probe".into(),
             argv: argv.iter().map(|s| s.to_string()).collect(),
+            body_ref: None,
+            body_revision: None,
             required_context: None,
             model_policy: None,
         }
