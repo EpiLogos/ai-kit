@@ -1,8 +1,7 @@
 name: Jev NOW cloud native edit
 
-# Temporary bounded cloud checkout helper, never a runtime dependency. It
-# consumes a digest-checked patch into normal native source commits on this
-# commissioned branch only. Main and other branches are never written here.
+# Temporary cloud checkout helper, not a runtime dependency. Only this
+# commissioned branch may be written. No main update or protection bypass.
 on:
   push:
     branches: [agent/388-jev-redis-now]
@@ -22,8 +21,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          fetch-depth: 2
-      - name: Decode and verify the exact native patch
+          fetch-depth: 0
+      - name: Verify the exact native patch
         id: patch
         shell: bash
         run: |
@@ -37,9 +36,14 @@ jobs:
           packet = json.loads(packet_path.read_text())
           if packet['schema'] != 'aikit.cloud-native-edit/v1':
               raise SystemExit('Unrecognised edit packet')
-          parent = subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip()
-          if parent != packet['base_revision']:
-              raise SystemExit('Remote source basis moved; reconcile, never force')
+          base = packet['base_revision']
+          if len(base) != 40 or any(c not in '0123456789abcdef' for c in base):
+              raise SystemExit('Invalid source revision')
+          subprocess.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
+          changed = subprocess.check_output(['git', 'diff', '--name-only', '-z', base, 'HEAD']).split(b'\0')
+          allowed = {b'.github/workflows/jev-redis-cloud-edit.yml', b'scripts/jev-redis/cloud-edit.json'}
+          if any(p and p not in allowed for p in changed):
+              raise SystemExit('Native source basis moved; reconcile, never force')
           with gzip.GzipFile(fileobj=io.BytesIO(base64.b64decode(packet['patch_gzip_base64'], validate=True))) as compressed:
               patch = compressed.read(8_000_001)
           if len(patch) > 8_000_000 or hashlib.sha256(patch).hexdigest() != packet['patch_sha256']:
@@ -86,8 +90,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -F "$RUNNER_TEMP/native-edit-message"
-          # Do not include formatter-only changes outside the declared patch.
-          # The following tests run the exact published native source tree.
           git restore --worktree .
           git push origin HEAD:refs/heads/agent/388-jev-redis-now
           git rev-parse HEAD | tee "$RUNNER_TEMP/native-edit-cut.txt"
@@ -121,14 +123,9 @@ jobs:
           retention-days: 14
 
   public-native-toolchain:
-    # Public build tools only; no machine, credential, .git, general HOME or
-    # Cargo configuration is included. This is disposable cloud build material.
-    if: github.run_number == 1
+    if: github.run_number == 4
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    env:
-      CARGO_HOME: ${{ runner.temp }}/jev-public-toolchain/cargo
-      RUSTUP_HOME: ${{ runner.temp }}/jev-public-toolchain/rustup
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -137,6 +134,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export CARGO_HOME="$RUNNER_TEMP/jev-public-toolchain/cargo"
+          export RUSTUP_HOME="$RUNNER_TEMP/jev-public-toolchain/rustup"
           rustup toolchain install 1.98.0 --profile minimal --component rustfmt
           rustup default 1.98.0
           cargo fetch --locked
