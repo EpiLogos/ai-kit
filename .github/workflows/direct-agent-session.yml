@@ -92,8 +92,17 @@ jobs:
         continue-on-error: true
         shell: bash
         run: python3 tests/direct_agent_native_join.py --ctrl /tmp/central-agent-owner/target/debug/ctrl --aikit "$PWD/target/debug/aikit" --evidence direct-agent-evidence/join 2>&1 | tee direct-agent-evidence/native-join.log
-      - name: Compose published model and folded-startup dependencies for testing only
+      - name: Current-head production protocol
+        id: current_protocol
+        if: github.event.pull_request.head.ref != 'agent/direct-accepted-agent-session-20260920' && github.ref != 'refs/heads/agent/direct-accepted-agent-session-20260920'
+        continue-on-error: true
+        shell: bash
+        run: |
+          cargo test --locked -p aikit-cli --test encounter_owner_folded_spawn --test agent_session_protocol 2>&1 | tee direct-agent-evidence/current-protocol.log
+          cargo test --locked -p aikit-adapters --test native_model_controls 2>&1 | tee direct-agent-evidence/current-model-controls.log
+      - name: Compose published model and folded-startup dependencies for historical campaign testing only
         id: compose
+        if: github.event.pull_request.head.ref == 'agent/direct-accepted-agent-session-20260920' || github.ref == 'refs/heads/agent/direct-accepted-agent-session-20260920'
         continue-on-error: true
         shell: bash
         run: |
@@ -136,8 +145,18 @@ jobs:
           name: direct-agent-joined-evidence
           path: direct-agent-evidence/
           retention-days: 7
-      - name: Preserve every failed or unexecuted gate
+      - name: Preserve every applicable gate
         if: always()
         env:
-          OUTCOMES: ${{ steps.direct.outcome }},${{ steps.build.outcome }},${{ steps.join.outcome }},${{ steps.compose.outcome }},${{ steps.protocol.outcome }},${{ steps.composed.outcome }}
-        run: test "$OUTCOMES" = 'success,success,success,success,success,success'
+          BASE_OUTCOMES: ${{ steps.direct.outcome }},${{ steps.build.outcome }},${{ steps.join.outcome }}
+          CURRENT_OUTCOME: ${{ steps.current_protocol.outcome }}
+          HISTORICAL_OUTCOMES: ${{ steps.compose.outcome }},${{ steps.protocol.outcome }},${{ steps.composed.outcome }}
+          HISTORICAL: ${{ github.event.pull_request.head.ref == 'agent/direct-accepted-agent-session-20260920' || github.ref == 'refs/heads/agent/direct-accepted-agent-session-20260920' }}
+        shell: bash
+        run: |
+          test "$BASE_OUTCOMES" = 'success,success,success'
+          if test "$HISTORICAL" = 'true'; then
+            test "$HISTORICAL_OUTCOMES" = 'success,success,success'
+          else
+            test "$CURRENT_OUTCOME" = 'success'
+          fi
