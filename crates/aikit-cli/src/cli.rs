@@ -83,6 +83,8 @@ pub enum Command {
     Status(StatusArgs),
     /// Emit the owner settings-disclosure descriptor for the O:I System surface.
     System(SystemArgs),
+    /// Resolve the shipped six-product Guardian family against this machine's registered sources.
+    Family(FamilyArgs),
     /// Emit the owner configuration contribution for the O:I configuration plane.
     ConfigContribution(ConfigContributionArgs),
     /// Owner-native configuration verbs for the O:I configuration plane.
@@ -1451,6 +1453,11 @@ pub struct StatusArgs {
 
 #[derive(Debug, Args)]
 pub struct SystemArgs {}
+
+/// The Guardian family reading takes no arguments: it discloses the whole
+/// shipped family against every registered source.
+#[derive(Debug, Args)]
+pub struct FamilyArgs {}
 
 /// The owner configuration contribution: a bare `oi.configuration-contribution/v1`
 /// document on stdout, exactly like `system --json` (no envelope, never wrapped).

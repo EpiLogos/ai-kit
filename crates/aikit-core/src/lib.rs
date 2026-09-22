@@ -47,6 +47,7 @@ pub mod familiarity;
 pub mod flow;
 pub mod flow_cognition;
 pub mod frecency;
+pub mod guardian_family;
 pub mod guidance;
 pub mod harness_admission;
 pub mod harness_profile;
