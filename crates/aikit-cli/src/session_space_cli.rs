@@ -437,6 +437,15 @@ fn run(cli: Cli) -> Result<()> {
                     format!("could not resolve the installed AIKit executable: {error}"),
                 )
             })?;
+            let aikit_bin = file(
+                std::env::current_exe().map_err(|error| {
+                    AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("AIKit current executable is unavailable: {error}"),
+                    )
+                })?,
+                "AIKit current executable",
+            )?;
             let mut argv = vec![
                 launcher.display().to_string(),
                 "--prime-bin".into(),
