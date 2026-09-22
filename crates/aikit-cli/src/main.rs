@@ -271,6 +271,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             std::process::exit(aikit_cli::session_space_cli::run_from_args(argv));
         }
         Some(Command::Compose(a)) => cmd_compose(cwd, a),
+        Some(Command::ModelResolve(a)) => cmd_model_resolve(cwd, a),
         Some(Command::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
         Some(Command::Inbox(a)) => cmd_inbox(cwd, a),
@@ -714,6 +715,14 @@ fn cmd_compose(cwd: &std::path::Path, args: ComposeArgs) -> Result<Reply> {
         warnings.extend(extra_warnings);
         return Ok(reply(&service, data, warnings));
     }
+    Ok(reply(&service, data, diagnostic_warnings(&service)))
+}
+
+fn cmd_model_resolve(cwd: &std::path::Path, args: ModelResolveArgs) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let composed = service.compose_selected_plan(None)?;
+    let policy = aikit_core::resource::ModelRankingPolicy::parse_name(&args.ranking_policy)?;
+    let data = service.resolve_model(&composed, &args.use_type, policy)?;
     Ok(reply(&service, data, diagnostic_warnings(&service)))
 }
 

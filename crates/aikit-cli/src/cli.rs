@@ -134,6 +134,8 @@ pub enum Command {
     },
     /// Compose the launch plan: Central profile + Actuation instantiation receipt → actor bootstrap.
     Compose(ComposeArgs),
+    /// Resolve one Model through the current roster without actualising it.
+    ModelResolve(ModelResolveArgs),
     /// Read a Provider Source into the canonical Model catalogue, and read the catalogue back.
     ModelCatalogue(ModelCatalogueCmd),
     /// Spawn, list and close agent tasks.
@@ -387,6 +389,17 @@ pub struct ComposeArgs {
     /// LOCAL_INSPECTABILITY.
     #[arg(long)]
     pub ranking_policy: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ModelResolveArgs {
+    /// The kind of work this child/model is for.
+    #[arg(long, default_value = "agent-child")]
+    pub use_type: String,
+    /// The roster policy to apply. Prime-QL descendants normally request
+    /// CHEAPEST_ELIGIBLE; other callers may explicitly choose another policy.
+    #[arg(long, default_value = "CHEAPEST_ELIGIBLE")]
+    pub ranking_policy: String,
 }
 
 #[derive(Debug, Args)]

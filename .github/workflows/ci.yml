@@ -36,6 +36,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
       - name: Install tmux
         run: brew install tmux
+      - name: Validate installed Prime-QL acceptance runner
+        run: python3 -m py_compile scripts/verify-epi-prime-ql.py
       - name: Verify repository
         shell: bash
         run: |

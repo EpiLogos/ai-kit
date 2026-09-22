@@ -22,6 +22,7 @@ pub enum ConnectionProtocolFamily {
     Acp,
     ClassicProcess,
     PiRpc,
+    PrimeRpc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
