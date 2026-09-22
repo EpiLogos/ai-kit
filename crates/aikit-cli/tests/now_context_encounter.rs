@@ -94,6 +94,7 @@ fn prepared(
             external_egress: ExternalEgress::Denied,
         }],
         neighbours: vec![],
+        factory: None,
         knowledge_frames: vec![],
         continuation: Some("continue from the exact prepared version".into()),
         jev_invocation_ref: None,
