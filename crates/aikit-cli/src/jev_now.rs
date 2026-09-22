@@ -184,7 +184,6 @@ struct FactoryPrepare {
     workflow_unit_refs: Vec<String>,
 }
 
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MatrixPrepare {
@@ -367,7 +366,6 @@ fn prepared_factory_unit(unit: &Value) -> Result<PreparedFactoryUnit> {
     })
 }
 
-
 fn file_digest(path: &Path, label: &str, max: usize) -> Result<(Vec<u8>, String)> {
     let bytes = read_bytes(path, label, max)?;
     let digest = format!("blake3:{}", blake3::hash(&bytes).to_hex());
@@ -425,12 +423,15 @@ fn parse_csv_rows(input: &str) -> Result<Vec<Vec<String>>> {
 }
 
 fn csv_header_index(headers: &[String], name: &str) -> Result<usize> {
-    headers.iter().position(|value| value == name).ok_or_else(|| {
-        fail(
-            "now_context.matrix_invalid",
-            format!("Capability matrix CSV is missing required column {name}"),
-        )
-    })
+    headers
+        .iter()
+        .position(|value| value == name)
+        .ok_or_else(|| {
+            fail(
+                "now_context.matrix_invalid",
+                format!("Capability matrix CSV is missing required column {name}"),
+            )
+        })
 }
 
 fn csv_field<'a>(row: &'a [String], index: usize) -> &'a str {
@@ -441,14 +442,13 @@ fn matrix_ref_list(raw: &str) -> Vec<String> {
     if raw.trim().is_empty() {
         return Vec::new();
     }
-    serde_json::from_str::<Vec<String>>(raw)
-        .unwrap_or_else(|_| {
-            raw.split(';')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_else(|_| {
+        raw.split(';')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect()
+    })
 }
 
 fn matrix_axis(view: &Value, key: &str) -> Result<Value> {
@@ -484,8 +484,11 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
         ));
     }
 
-    let (manifest_bytes, manifest_digest) =
-        file_digest(&config.manifest, "capability matrix manifest", 2 * 1024 * 1024)?;
+    let (manifest_bytes, manifest_digest) = file_digest(
+        &config.manifest,
+        "capability matrix manifest",
+        2 * 1024 * 1024,
+    )?;
     let manifest: Value = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| fail("now_context.matrix_invalid", e.to_string()))?;
     if manifest["protocol"] != "ql-capability-matrix/1" {
@@ -497,18 +500,33 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
     let matrix_id = manifest["matrix_id"]
         .as_str()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| fail("now_context.matrix_invalid", "Matrix manifest has no matrix_id"))?
+        .ok_or_else(|| {
+            fail(
+                "now_context.matrix_invalid",
+                "Matrix manifest has no matrix_id",
+            )
+        })?
         .to_owned();
     let whole_account_ref = manifest["anchor_ref"]
         .as_str()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| fail("now_context.matrix_invalid", "Matrix manifest has no anchor_ref"))?
+        .ok_or_else(|| {
+            fail(
+                "now_context.matrix_invalid",
+                "Matrix manifest has no anchor_ref",
+            )
+        })?
         .to_owned();
     let view_id = config
         .view_id
         .as_deref()
         .or_else(|| manifest["default_view"].as_str())
-        .ok_or_else(|| fail("now_context.matrix_invalid", "Matrix manifest has no default_view"))?
+        .ok_or_else(|| {
+            fail(
+                "now_context.matrix_invalid",
+                "Matrix manifest has no default_view",
+            )
+        })?
         .to_owned();
     let view = manifest["views"]
         .as_array()
@@ -541,9 +559,12 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
     let csv_text = std::str::from_utf8(&csv_bytes)
         .map_err(|e| fail("now_context.matrix_invalid", e.to_string()))?;
     let rows = parse_csv_rows(csv_text)?;
-    let headers = rows
-        .first()
-        .ok_or_else(|| fail("now_context.matrix_invalid", "Capability matrix CSV is empty"))?;
+    let headers = rows.first().ok_or_else(|| {
+        fail(
+            "now_context.matrix_invalid",
+            "Capability matrix CSV is empty",
+        )
+    })?;
     let id_i = csv_header_index(headers, "id")?;
     let type_i = csv_header_index(headers, "record_type")?;
     let view_i = csv_header_index(headers, "view_id")?;
@@ -618,10 +639,7 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
     let relation_rows = rows
         .iter()
         .skip(1)
-        .filter(|row| {
-            csv_field(row, type_i) != "capability"
-                && csv_field(row, view_i) == view_id
-        })
+        .filter(|row| csv_field(row, type_i) != "capability" && csv_field(row, view_i) == view_id)
         .collect::<Vec<_>>();
     let mut account_refs = BTreeSet::new();
     let mut questions = BTreeSet::new();
@@ -680,10 +698,7 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
                 &identity.as_str()[..24]
             ))?,
             source_revision: csv_digest.clone(),
-            title: bounded_text(
-                &format!("{id} — {}", csv_field(row, need_i)),
-                4096,
-            ),
+            title: bounded_text(&format!("{id} — {}", csv_field(row, need_i)), 4096),
             excerpt: bounded_text(&excerpt, MAX_SOURCE_BYTES),
             route: Some(format!(
                 "matrix:{matrix_id};view:{view_id};capability:{id};account:{account_ref}"
@@ -713,10 +728,12 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
 }
 
 fn revalidate_matrix(config: &MatrixPrepare, evidence: &MatrixEvidence) -> Result<()> {
-    let (_, manifest_digest) =
-        file_digest(&config.manifest, "capability matrix manifest", 2 * 1024 * 1024)?;
-    let (_, csv_digest) =
-        file_digest(&config.csv, "capability matrix CSV", 8 * 1024 * 1024)?;
+    let (_, manifest_digest) = file_digest(
+        &config.manifest,
+        "capability matrix manifest",
+        2 * 1024 * 1024,
+    )?;
+    let (_, csv_digest) = file_digest(&config.csv, "capability matrix CSV", 8 * 1024 * 1024)?;
     if manifest_digest != evidence.manifest_digest || csv_digest != evidence.csv_digest {
         return Err(fail(
             "now_context.matrix_stale",
@@ -1469,17 +1486,15 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
                 .collect(),
         )?;
         revalidate_factory(request.factory.as_ref(), factory_revision.as_deref())?;
-        if let (Some(config), Some(evidence)) = (request.matrix.as_ref(), matrix_evidence.as_ref()) {
+        if let (Some(config), Some(evidence)) = (request.matrix.as_ref(), matrix_evidence.as_ref())
+        {
             revalidate_matrix(config, evidence)?;
         }
         Ok(())
     };
     revalidate()?;
-    let (selected_candidates, selection) = select_candidates(
-        &request.selection,
-        &selection_candidates,
-        &mut revalidate,
-    )?;
+    let (selected_candidates, selection) =
+        select_candidates(&request.selection, &selection_candidates, &mut revalidate)?;
     revalidate()?;
 
     exact_items.extend(selected_candidates);
@@ -1592,7 +1607,6 @@ mod tests {
         assert!(!encoded.contains("denied body"));
     }
 
-
     fn matrix_fixture() -> (tempfile::TempDir, MatrixPrepare) {
         let temp = tempfile::tempdir().unwrap();
         let manifest = temp.path().join("matrix.json");
@@ -1621,7 +1635,7 @@ mod tests {
                 "id,record_type,view_id,row_id,column_id,capability_refs,need,operation,outcome,implementation_status,standing,source_refs,code_refs,test_refs,account_ref,relation,coverage,extensions,question\n",
                 "cap.one,capability,,,,[],Need one,operate one,outcome one,implemented,implementation-fact,source/one,,,account.html#q1,,,,\n",
                 "cap.two,capability,,,,[],Need two,operate two,outcome two,intended,design-commitment,source/two,,,account.html#q2,,,,\n",
-                "rel.one,relation,product-field,q0,S2,\"[\"\"cap.one\"\"]\",,,,,,,,,contributes,covered,{},Does cap one contribute?\n"
+                "rel.one,relation,product-field,q0,S2,\"[\"\"cap.one\"\"]\",,,,,,,,,,contributes,covered,{},Does cap one contribute?\n"
             ),
         )
         .unwrap();
@@ -1647,13 +1661,23 @@ mod tests {
         assert_eq!(evidence.view_id, "product-field");
         assert_eq!(evidence.row_axis["members"][0]["id"], "q0");
         assert_eq!(evidence.column_axis["members"][0]["id"], "S2");
-        assert!(evidence.questions.iter().any(|q| q == "Does cap one contribute?"));
-        assert!(evidence.expanded_account_refs.iter().any(|r| r == "account.html#q1"));
+        assert!(evidence
+            .questions
+            .iter()
+            .any(|q| q == "Does cap one contribute?"));
+        assert!(evidence
+            .expanded_account_refs
+            .iter()
+            .any(|r| r == "account.html#q1"));
         assert!(items[0].excerpt.contains("\"need\":\"Need one\""));
         assert!(items[0].excerpt.contains("\"operation\":\"operate one\""));
         assert!(items[0].excerpt.contains("\"outcome\":\"outcome one\""));
-        assert!(items[0].excerpt.contains("\"implementation_status\":\"implemented\""));
-        assert!(items[0].excerpt.contains("\"standing\":\"implementation-fact\""));
+        assert!(items[0]
+            .excerpt
+            .contains("\"implementation_status\":\"implemented\""));
+        assert!(items[0]
+            .excerpt
+            .contains("\"standing\":\"implementation-fact\""));
         assert!(items[0].excerpt.contains("Does cap one contribute?"));
     }
 

@@ -217,6 +217,40 @@ def main():
         "CENTRAL_BKMR_BIN": str(pathlib.Path(args.bkmr).resolve()), "NO_COLOR": "1",
     })
 
+    # Central deliberately ships no implicit writable root policy. This
+    # disposable cloud World therefore records the same explicit, recognised
+    # human-adopted placement basis used by Central's native controlled tests
+    # before asking the real `central.work.policy` / `central.now.allocate`
+    # Actions to admit work. The fixture grants only this temporary Work member.
+    proof_work = central / "Work/jev-redis-proof"
+    proof_work.mkdir(parents=True)
+    placement_path = central / "Control/user/placement.json"
+    write_json(placement_path, {
+        "schema": "central.work-placement-policy/v1",
+        "scope_ref": "control:root",
+        "writable": [{"path": "Work/jev-redis-proof", "class": "repository"}],
+        "enforcement": "native-actions",
+        "required_coverage": ["file-content"],
+        "lease_seconds": 300,
+    })
+    relations_dir = central / "Control/relations"
+    relations_dir.mkdir(parents=True)
+    write_json(relations_dir / "source-relations.json", {
+        "schema": "central.control.ground-relations/v1",
+        "project_id": "control:root",
+        "relations": [{
+            "ref": "central:source:control:root:Control/user/placement.json",
+            "path": "Control/user/placement.json",
+            "roles": ["work-placement-policy"],
+            "provenance": "human-adopted",
+            "standing": "architecture-contract",
+            "treatment": "projectcentral-user",
+            "recognition": "explicit-controlled-cloud-fixture-not-personal-adoption",
+            "recorded_at_unix_seconds": 1,
+            "agent_retrieval_allowed": True,
+        }],
+    })
+
     source_path = central / "Control/user/jev-redis-now-source.md"
     source_path.write_text(
         "# Operative source\n\nquartz operative context: preserve exact source revision, "
