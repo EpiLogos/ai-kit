@@ -12,7 +12,7 @@ use aikit_core::{
     scope::ScopeKind,
     session_space::SessionSpaceRef,
     session_space_application::{
-        ContextResolutionBasis, ContextResolutionEvidence, ContextResolutionRef,
+        ContextResolutionBasis, ContextResolutionEvidence,
         SessionSpaceAgentAttachmentIntent, SessionSpaceMutation, SessionSpaceProjectContextBinding,
     },
     ProjectRef, ResourceRef,
@@ -51,13 +51,12 @@ fn project_evidence(project: &ProjectRef) -> ContextResolutionEvidence {
         context_activations: vec![],
         observed_source_resources: vec![],
     };
-    ContextResolutionEvidence {
-        reference: ContextResolutionRef(
-            ResourceRef::parse("context-resolution/redis-now-proof").unwrap(),
-        ),
-        basis,
-        provenance: vec!["controlled Redis NOW encounter proof".into()],
-    }
+    serde_json::from_value(serde_json::json!({
+        "reference": "context-resolution/redis-now-proof",
+        "basis": basis,
+        "provenance": ["controlled Redis NOW encounter proof"],
+    }))
+    .unwrap()
 }
 
 fn prepared(
