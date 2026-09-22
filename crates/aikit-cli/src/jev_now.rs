@@ -129,9 +129,13 @@ pub fn jev_invoke(args: JevInvokeArgs) -> Result<Value> {
         .map(ResourceRef::parse)
         .transpose()?
         .unwrap_or(minted_invocation_ref(&request)?);
+    let endpoint = args
+        .controlled_endpoint
+        .map(JevEndpoint::Controlled)
+        .unwrap_or(JevEndpoint::Official);
     let provider = CurlJevProvider::new(
         args.curl.unwrap_or_else(|| PathBuf::from("curl")),
-        JevEndpoint::Official,
+        endpoint,
     );
     let cancellation = JevCancellation::default();
     let mut guard = |_: JevBoundary| -> Result<()> {
