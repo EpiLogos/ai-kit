@@ -73,8 +73,18 @@ aikit session-space -C <project> encounter-epi-prime-configure \
   --body-revision <40-hex Actuation revision> \
   --skill-path <abs>/ql-relational \
   --research-bin <abs>/actuation-research \
-  --faculty-config <abs>/faculty.json
+  --faculty-config <abs>/faculty.json \
+  [--central-ctrl-bin <abs>/ctrl --central-root <abs>/Central \
+   --central-project <Project-key>]
 ```
+
+AIKit also inserts its own current executable into the Actuation launcher so
+Prime descendants can call the native `model-resolve` roster even when model
+credential delivery uses a scrubbed final-child environment. When the optional
+Central triple is supplied, Actuation carries only those explicit non-secret
+owner paths/project key into Prime. The inherited Skill may then write/read
+Central's existing `projectcentral.now.return` handoff records; no NOW store
+or transcript is copied into AIKit.
 
 The command records configuration only. It starts no provider and acquires no
 credential. The existing Encounter open/first-Send boundary launches the body.
