@@ -8,7 +8,7 @@ the official provider with a native credential reference and finite budget.
 """
 from __future__ import annotations
 
-import argparse, json, os, pathlib, subprocess, sys, tempfile, threading, time
+import argparse, csv, hashlib, json, os, pathlib, subprocess, sys, tempfile, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CONTROLLED_KEY = "aikit-controlled-protocol-only"
@@ -168,6 +168,7 @@ def main():
     ap.add_argument("--aikit", required=True)
     ap.add_argument("--ctrl", required=True)
     ap.add_argument("--bkmr", required=True)
+    ap.add_argument("--central-repo", required=True)
     ap.add_argument("--factory", required=True)
     ap.add_argument("--factory-state", required=True)
     ap.add_argument("--actuation")
@@ -221,19 +222,69 @@ def main():
         "# Operative source\n\nquartz operative context: preserve exact source revision, "
         "Factory capability relations and participant-specific disclosure.\n"
     )
+    central_repo = pathlib.Path(args.central_repo).resolve()
+    matrix_origin = central_repo / "ProjectCentral/user/capability-matrix.csv"
+    account_origin = central_repo / "ProjectCentral/user/central.html"
+    if not matrix_origin.is_file() or not account_origin.is_file():
+        raise RuntimeError("current Central account/matrix carriers are unavailable")
+    matrix_path = central / "Control/user/capability-matrix.csv"
+    account_path = central / "Control/user/central.html"
+    matrix_path.write_bytes(matrix_origin.read_bytes())
+    account_path.write_bytes(account_origin.read_bytes())
+
     inspect, _ = ctrl_action(args.ctrl, central, "central.file-map.inspect", {}, env)
-    registered, _ = ctrl_action(args.ctrl, central, "central.file-map.register", {
-        "path": "Control/user/jev-redis-now-source.md",
-        "expected_revision": inspect["revision"],
-    }, env)
-    source_ref = registered["source_ref"]
+    registered_sources = []
+    for relative in [
+        "Control/user/jev-redis-now-source.md",
+        "Control/user/capability-matrix.csv",
+        "Control/user/central.html",
+    ]:
+        registered, _ = ctrl_action(args.ctrl, central, "central.file-map.register", {
+            "path": relative,
+            "expected_revision": inspect["revision"],
+        }, env)
+        registered_sources.append(registered["source_ref"])
+        inspect, _ = ctrl_action(args.ctrl, central, "central.file-map.inspect", {}, env)
+    source_ref, matrix_source_ref, account_source_ref = registered_sources
+
+    with matrix_path.open(newline="") as handle:
+        matrix_rows = list(csv.DictReader(handle))
+    capabilities = [
+        row for row in matrix_rows
+        if row.get("record_type") == "capability"
+        and row.get("id") and row.get("need") and row.get("operation") and row.get("outcome")
+    ]
+    if len(capabilities) < 3:
+        raise RuntimeError("Central capability matrix did not expose three usable capabilities")
+    # Use an explicit small selected inventory. Full-scope matrix assessment would
+    # account for every member; this bounded Factory proof records exactly which
+    # native rows it selected and the full catalogue size.
+    selected_matrix_rows = capabilities[:3]
+    matrix_digest = "sha256:" + hashlib.sha256(matrix_path.read_bytes()).hexdigest()
+    public_candidates = []
+    for row in selected_matrix_rows:
+        safe_id = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in row["id"])
+        public_candidates.append({
+            "source_ref": f"context-source/central-capability/{safe_id}",
+            "source_revision": matrix_digest,
+            "title": row["id"],
+            "excerpt": (
+                f"Need: {row['need']}\nOperation: {row['operation']}\n"
+                f"Outcome: {row['outcome']}\nImplementation: {row.get('implementation_status','')}\n"
+                f"Standing: {row.get('standing','')}"
+            ),
+            "route": f"{matrix_source_ref}#{row['id']}",
+            "agent_visibility": "payload",
+            "external_egress": "allowed",
+        })
+
     policy, _ = ctrl_action(args.ctrl, central, "central.work.policy", {}, env)
     participants = ["agent/comparison-worker", "agent/related-worker", "agent/verifier"]
     allocation, _ = ctrl_action(args.ctrl, central, "central.now.allocate", {
         "task_ref": "task:oi-65-jev-redis-cloud-proof",
         "purpose": "Jev Redis NOW joined cloud proof",
         "participant_refs": participants,
-        "source_refs": [source_ref],
+        "source_refs": [source_ref, matrix_source_ref, account_source_ref],
         "expected_policy_revision": policy["revision"],
     }, env)
     now_ref = allocation["now_ref"]
@@ -270,11 +321,6 @@ def main():
     baseline_calls.append({"owner": "aikit", "operation": "knowledge.search", "elapsed_ms": ms})
     ordinary_ms = (time.perf_counter() - t0) * 1000.0
 
-    public_candidates = [
-        candidate("context-source/capability-a", "Capability A", "Provides source revision validation and BKMR location."),
-        candidate("context-source/capability-b", "Capability B", "Provides participant-specific delivery and continuation."),
-        candidate("context-source/irrelevant", "Irrelevant", "A capability unrelated to the present undertaking."),
-    ]
     verifier_canary = candidate(
         "context-source/verifier-canary", "Verifier-only expectation",
         "VERIFIER_EXPECTATION_CANARY: independently check the returned Factory basis.", "denied"
@@ -291,7 +337,7 @@ def main():
             "practice_refs": ["skill/aikit/operation", "skill/aikit/knowledge-navigation"],
             "central": {
                 "root": str(central), "project": None, "ctrl_bin": str(pathlib.Path(args.ctrl).resolve()),
-                "source_refs": [source_ref],
+                "source_refs": [source_ref, matrix_source_ref, account_source_ref],
             },
             "factory": {
                 "state": str(pathlib.Path(args.factory_state).resolve()), "run_ref": run_ref,
@@ -714,7 +760,13 @@ def main():
         "standing": "controlled-actor observation; no worker-model performance claim",
         "conditions": {
             "task_ref": "task:oi-65-jev-redis-cloud-proof", "now_ref": now_ref,
-            "central_source_ref": source_ref, "factory_run_ref": run_ref,
+            "central_source_ref": source_ref,
+            "central_matrix_source_ref": matrix_source_ref,
+            "central_account_source_ref": account_source_ref,
+            "matrix_revision": matrix_digest,
+            "matrix_total_capabilities": len(capabilities),
+            "selected_matrix_inventory": [row["id"] for row in selected_matrix_rows],
+            "factory_run_ref": run_ref,
             "factory_workflow_unit_ref": unit_refs[0], "worker_model": "not-invoked-in-controlled-comparison",
         },
         "arms": {
@@ -746,6 +798,10 @@ def main():
         "schema": "aikit.jev-redis-now-joined-proof/v1",
         "sources": {
             "central_root": str(central), "central_source_ref": source_ref,
+            "central_matrix_source_ref": matrix_source_ref,
+            "central_account_source_ref": account_source_ref,
+            "central_matrix_revision": matrix_digest,
+            "selected_matrix_inventory": [row["id"] for row in selected_matrix_rows],
             "central_now_ref": now_ref, "factory_project_ref": project_ref,
             "factory_run_ref": run_ref, "workflow_unit_refs": unit_refs,
         },
