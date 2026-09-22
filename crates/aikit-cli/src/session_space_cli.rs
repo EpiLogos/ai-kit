@@ -104,6 +104,31 @@ enum Command {
         #[arg(long)]
         provider_json: String,
     },
+    /// Configure the installable Epi-Logos Prime-QL body over Prime RPC.
+    /// Paths are resolved now; mode selection later starts nothing until the
+    /// ordinary Encounter open/first-Send boundary.
+    EncounterEpiPrimeConfigure {
+        #[arg(long, default_value = "epi-prime-ql")]
+        provider_id: String,
+        #[arg(long)]
+        launcher: PathBuf,
+        #[arg(long)]
+        prime_bin: PathBuf,
+        #[arg(long)]
+        ql_bin: PathBuf,
+        #[arg(long)]
+        ql_revision: String,
+        #[arg(long)]
+        body_revision: String,
+        #[arg(long)]
+        skill_path: PathBuf,
+        #[arg(long)]
+        research_bin: PathBuf,
+        #[arg(long)]
+        faculty_config: PathBuf,
+        #[arg(long)]
+        ql_root: Option<PathBuf>,
+    },
     /// Provision or withdraw a native Agency binding under an exact revision.
     /// This is an owner-only operation, not gateway/IPC input.
     EncounterAgencyConfigure {
@@ -326,6 +351,114 @@ fn run(cli: Cli) -> Result<()> {
                 parse_json_arg(&provider_json)?,
             )?;
             emit(&serde_json::json!({"configured":true}))
+        }
+        Command::EncounterEpiPrimeConfigure {
+            provider_id,
+            launcher,
+            prime_bin,
+            ql_bin,
+            ql_revision,
+            body_revision,
+            skill_path,
+            research_bin,
+            faculty_config,
+            ql_root,
+        } => {
+            fn exact_revision(value: &str, label: &str) -> Result<()> {
+                if value.len() == 40
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    Ok(())
+                } else {
+                    Err(AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} must be a lowercase 40-hex revision"),
+                    ))
+                }
+            }
+            fn file(path: PathBuf, label: &str) -> Result<PathBuf> {
+                let path = path.canonicalize().map_err(|error| {
+                    AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} is unavailable: {error}"),
+                    )
+                })?;
+                if !path.is_file() {
+                    return Err(AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} must be a file"),
+                    ));
+                }
+                Ok(path)
+            }
+            fn directory(path: PathBuf, label: &str) -> Result<PathBuf> {
+                let path = path.canonicalize().map_err(|error| {
+                    AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} is unavailable: {error}"),
+                    )
+                })?;
+                if !path.is_dir() {
+                    return Err(AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} must be a directory"),
+                    ));
+                }
+                Ok(path)
+            }
+            exact_revision(&ql_revision, "QL revision")?;
+            exact_revision(&body_revision, "Actuation body revision")?;
+            let launcher = file(launcher, "Prime-QL launcher")?;
+            let prime_bin = file(prime_bin, "Prime Agent binary")?;
+            let ql_bin = file(ql_bin, "QL binary")?;
+            let skill_path = directory(skill_path, "Prime QL relational skill")?;
+            let research_bin = file(research_bin, "Actuation research binary")?;
+            let faculty_config = file(faculty_config, "Actuation faculty configuration")?;
+            let ql_root = ql_root
+                .map(|path| directory(path, "QL source root"))
+                .transpose()?;
+            let mut argv = vec![
+                launcher.display().to_string(),
+                "--prime-bin".into(),
+                prime_bin.display().to_string(),
+                "--ql-bin".into(),
+                ql_bin.display().to_string(),
+                "--ql-revision".into(),
+                ql_revision.clone(),
+                "--skill-path".into(),
+                skill_path.display().to_string(),
+                "--research-bin".into(),
+                research_bin.display().to_string(),
+                "--faculty-config".into(),
+                faculty_config.display().to_string(),
+            ];
+            if let Some(root) = ql_root {
+                argv.extend(["--ql-root".into(), root.display().to_string()]);
+            }
+            crate::encounter_service::EncounterService::configure(
+                service.home(),
+                crate::encounter_service::EncounterProvider {
+                    protocol: crate::encounter_service::EncounterProtocol::PrimeRpc,
+                    id: provider_id.clone(),
+                    label: "Epi-Logos Prime-QL".into(),
+                    argv,
+                    body_ref: Some("agent-body/epi-prime-ql".into()),
+                    body_revision: Some(body_revision.clone()),
+                    required_context: None,
+                    model_policy: None,
+                },
+            )?;
+            emit(&serde_json::json!({
+                "configured":true,
+                "provider":provider_id,
+                "body_ref":"agent-body/epi-prime-ql",
+                "body_revision":body_revision,
+                "ql_revision":ql_revision,
+                "model_selection":"Prime native configured model unless an explicit AIKit model policy overrides it",
+                "standing":"configured-not-started"
+            }))
         }
         Command::EncounterAgencyConfigure {
             agent_session,
