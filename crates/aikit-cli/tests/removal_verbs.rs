@@ -137,3 +137,124 @@ fn a_project_binding_can_be_removed_and_releases_its_projection_link() {
     );
     assert_eq!(reply["error"]["code"], "project.unknown");
 }
+
+/// L2-D1 / issue #394 K1: a forced `source remove` under a project enablement
+/// used to wedge every aikit verb in that directory behind
+/// `resolution.unknown_capability`, with hand-editing `.aikit/profile.toml` as
+/// the only recovery. The removal contract promises the other half: "enabled
+/// declarations resolve unavailable". `status` must keep working and name the
+/// absent capability, `doctor` must report the stale enablement as fixable,
+/// and `doctor --fix` must clear it.
+#[test]
+fn a_forced_removal_under_a_project_enablement_stays_diagnosable_and_repairable() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let pack = temp.path().join("pack");
+    let project = temp.path().join("demo-project");
+    fs::create_dir_all(&project).unwrap();
+    write(&project.join(".aikit/profile.toml"), "schema = 1\n");
+    skill_pack(&pack);
+
+    for args in [
+        vec!["source", "add-directory", "testsrc", pack.to_str().unwrap()],
+        vec!["source", "sync", "testsrc"],
+        vec!["source", "promote", "testsrc"],
+    ] {
+        let (output, reply) = run(&home, &project, &args);
+        assert!(output.status.success(), "{args:?} failed: {reply}");
+    }
+
+    let (bound, reply) = run(
+        &home,
+        &project,
+        &[
+            "project",
+            "bind",
+            "demo",
+            "--directory",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert!(bound.status.success(), "bind failed: {reply}");
+
+    let (enabled, reply) = run(
+        &home,
+        &project,
+        &["enable", "skill/testsrc/alpha", "--scope", "project"],
+    );
+    assert!(enabled.status.success(), "enable failed: {reply}");
+    let profile = fs::read_to_string(project.join(".aikit/profile.toml")).unwrap();
+    assert!(
+        profile.contains("skill/testsrc/alpha"),
+        "the enablement must be declared in the project profile: {profile}"
+    );
+
+    // The exact wedge sequence from the acceptance campaign.
+    let (unbound, reply) = run(&home, &project, &["project", "unbind", "demo"]);
+    assert!(unbound.status.success(), "unbind failed: {reply}");
+    let (removed, reply) = run(&home, &project, &["source", "remove", "testsrc", "--force"]);
+    assert!(removed.status.success(), "forced remove failed: {reply}");
+
+    // status works and names the absent capability honestly.
+    let (status, reply) = run(&home, &project, &["status", "--all"]);
+    assert!(status.status.success(), "status must not wedge: {reply}");
+    let unavailable = reply["data"]["unavailable"]
+        .as_array()
+        .expect("status --all carries the unavailable set");
+    assert!(
+        unavailable.iter().any(|entry| {
+            entry["id"] == "skill/testsrc/alpha"
+                && entry["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("not present in any registry"))
+        }),
+        "the absent capability must be named: {reply}"
+    );
+    assert!(
+        reply["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|w| w
+                .as_str()
+                .is_some_and(|text| text.contains("skill/testsrc/alpha")))),
+        "the stale enablement must be named in the warnings: {reply}"
+    );
+
+    // doctor reports it as a fixable finding.
+    let (doctor, reply) = run(&home, &project, &["doctor"]);
+    assert!(doctor.status.success(), "doctor must not wedge: {reply}");
+    let findings = reply["data"]["findings"].as_array().unwrap();
+    let stale = findings
+        .iter()
+        .find(|f| {
+            f["check"] == "resolution.unavailable"
+                && f["summary"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("skill/testsrc/alpha"))
+        })
+        .unwrap_or_else(|| panic!("doctor must report the stale enablement: {reply}"));
+    assert_eq!(stale["fixable"], true, "the finding must carry a fix");
+
+    // And the fix performs the repair.
+    let (fix, reply) = run(&home, &project, &["doctor", "--fix", "--yes"]);
+    assert!(fix.status.success(), "doctor --fix failed: {reply}");
+    assert_eq!(reply["data"]["applied"], true, "{reply}");
+
+    let profile = fs::read_to_string(project.join(".aikit/profile.toml")).unwrap();
+    assert!(
+        !profile.contains("skill/testsrc/alpha"),
+        "the repair must clear the stale enablement: {profile}"
+    );
+    let (status, reply) = run(&home, &project, &["status", "--all"]);
+    assert!(status.status.success(), "status must stay healthy: {reply}");
+    let still_named = reply["data"]["unavailable"]
+        .as_array()
+        .is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry["id"] == "skill/testsrc/alpha")
+        });
+    assert!(
+        !still_named,
+        "nothing may remain unavailable after the repair: {reply}"
+    );
+}

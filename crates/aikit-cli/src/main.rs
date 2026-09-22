@@ -3003,6 +3003,17 @@ fn cmd_toggle(cwd: &std::path::Path, a: ToggleArgs, enable: bool) -> Result<Repl
     use aikit_tui::backend::Toggle;
     let mut service = Service::discover(cwd)?;
     let id = CapsuleId::parse(&a.capability)?;
+    // Typos surface here, where they are typed, rather than as a stale
+    // declaration that shadows every later command. A capability that was
+    // catalogued once and lost its source since is a doctor repair, not an
+    // enable error — this check only refuses what no registry carries now.
+    if aikit_core::catalog::Catalog::get(service.snapshot(), &id).is_none() {
+        return Err(AikitError::new(
+            "resolution.unknown_capability",
+            format!("{id} is not present in any registry"),
+        )
+        .with("capability", id.to_string()));
+    }
     let scope = resolve_scope(&service, a.scope.as_deref())?;
     let applied = service.apply(ApplyRequest {
         scope,

@@ -27,7 +27,10 @@ use aikit_core::profile::{PoolPatch, SkillUsageOverlayPatch};
 use aikit_core::projection::{
     ActivationEffect, ProjectionItem, ProjectionPlan, ResolvedContext, TargetAdapter,
 };
-use aikit_core::resolve::{resolve_diagnostic, ResolveRequest as CoreResolveRequest, ResolvedView};
+use aikit_core::resolve::{
+    resolve_diagnostic, DeclaredState, ResolveRequest as CoreResolveRequest, ResolvedView,
+    UnavailableReason,
+};
 use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
 use aikit_core::trust::TrustOracle;
@@ -3828,6 +3831,17 @@ fn override_layer(toggles: &[Toggle]) -> ScopeLayer {
 
 /// Resolve, preferring a produced view but turning a fatal problem into the very
 /// error the JSON envelope and exit codes are built to carry.
+///
+/// One fatal is deliberately recovered here: `resolution.unknown_capability`
+/// means a scope declared a capability enabled that no registry carries any
+/// more — the state a forced `source remove` leaves behind in every scope that
+/// enabled its capsules (`skill_sources::remove` promises exactly this:
+/// "enabled declarations resolve unavailable"). The context is re-resolved
+/// without those declarations, the capabilities are marked unavailable and
+/// named in a warning instead of wedging everything, so read verbs keep
+/// answering and `doctor` reports and repairs the stale enablement. A
+/// capability that was never there is still refused where it is typed: the
+/// `enable` and `use` verbs check the catalogue before writing a declaration.
 fn resolve_or_explain(
     catalog: &Snapshot,
     trust: &TrustSnapshot,
@@ -3841,10 +3855,127 @@ fn resolve_or_explain(
         policy: policy.clone(),
     };
     let diagnosis = resolve_diagnostic(catalog, trust, &request);
-    if let Some(fatal) = diagnosis.problems.iter().find(|p| p.fatal) {
-        return Err(fatal.error.clone());
+    let view = match diagnosis.view {
+        Some(view) => view,
+        None => {
+            let orphaned = orphaned_capabilities(&diagnosis.problems);
+            if orphaned.is_empty() {
+                return Err(diagnosis
+                    .problems
+                    .iter()
+                    .find(|p| p.fatal)
+                    .map(|p| p.error.clone())
+                    .unwrap_or_else(|| {
+                        AikitError::new("resolution.failed", "resolution produced no view")
+                    }));
+            }
+            let ids: Vec<CapsuleId> = orphaned.iter().map(|orphan| orphan.id.clone()).collect();
+            let mut recovered = view_at_recovery(&ids, catalog, trust, descriptor, layers, policy)?;
+            let named = ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            for orphan in &orphaned {
+                recovered
+                    .unavailable
+                    .insert(orphan.id.clone(), UnavailableReason::NotInCatalog);
+                // The failed resolution would have declared the capsule enabled
+                // from its own scope; carry those facts into the recovered view
+                // so `declared` stays the honest record of what the scopes ask
+                // for, and doctor can point the repair at the declaring file.
+                recovered.declared.insert(
+                    orphan.id.clone(),
+                    DeclaredState {
+                        enabled: true,
+                        scope: orphan.scope.unwrap_or(ScopeKind::Project),
+                        origin: LayerOrigin::new(
+                            orphan
+                                .origin
+                                .clone()
+                                .unwrap_or_else(|| "an unknown scope".to_string()),
+                        ),
+                        via_profile: None,
+                    },
+                );
+            }
+            recovered.warnings.push(format!(
+                "{named} is enabled here but not present in any registry — its source was \
+                 removed; `aikit doctor` reports and repairs the stale enablement"
+            ));
+            recovered
+        }
+    };
+    Ok(view)
+}
+
+/// A declared-enabled capability no registry carries, with the scope facts the
+/// resolver recorded about the declaration.
+struct OrphanedCapability {
+    id: CapsuleId,
+    scope: Option<ScopeKind>,
+    origin: Option<String>,
+}
+
+/// The capabilities a fatal `resolution.unknown_capability` names — but only
+/// when every fatal problem in the diagnosis is of that recoverable kind.
+fn orphaned_capabilities(problems: &[aikit_core::resolve::Problem]) -> Vec<OrphanedCapability> {
+    let mut orphaned = Vec::new();
+    for problem in problems {
+        if !problem.fatal {
+            continue;
+        }
+        if problem.code() != "resolution.unknown_capability" {
+            return Vec::new();
+        }
+        let details = problem.error.details();
+        let Some(id) = details
+            .get("capability")
+            .and_then(|raw| CapsuleId::parse(raw).ok())
+        else {
+            return Vec::new();
+        };
+        let scope = details
+            .get("scope")
+            .and_then(|raw| ScopeKind::ALL.iter().copied().find(|k| k.as_str() == raw));
+        let origin = details.get("origin").cloned();
+        orphaned.push(OrphanedCapability { id, scope, origin });
     }
-    diagnosis
+    orphaned
+}
+
+/// Re-resolve with the orphaned capsules' declarations stripped from every
+/// layer, so the rest of the context still resolves. Stripping cannot
+/// introduce new conflicts; a layer left empty by it is simply absent.
+fn view_at_recovery(
+    orphaned: &[CapsuleId],
+    catalog: &Snapshot,
+    trust: &TrustSnapshot,
+    descriptor: &ContextDescriptor,
+    layers: &[ScopeLayer],
+    policy: &ManagedPolicy,
+) -> Result<ResolvedView> {
+    let stripped: Vec<ScopeLayer> = layers
+        .iter()
+        .map(|layer| {
+            let mut patch = layer.patch.clone();
+            patch.enable.retain(|id| !orphaned.contains(id));
+            patch.disable.retain(|id| !orphaned.contains(id));
+            let mut recovered = ScopeLayer::new(layer.kind, layer.origin.clone(), patch);
+            recovered.depth = layer.depth;
+            recovered
+        })
+        .collect();
+    let request = CoreResolveRequest {
+        context: descriptor.clone(),
+        layers: stripped,
+        policy: policy.clone(),
+    };
+    let recovery = resolve_diagnostic(catalog, trust, &request);
+    if let Some(problem) = recovery.problems.iter().find(|p| p.fatal) {
+        return Err(problem.error.clone());
+    }
+    recovery
         .view
         .ok_or_else(|| AikitError::new("resolution.failed", "resolution produced no view"))
 }
