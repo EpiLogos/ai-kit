@@ -1328,7 +1328,61 @@ impl EncounterService {
                         "The requested provider model conflicts with this resident's explicit durable model policy; reopen through the policy owner",
                     ));
                 }
-                let before = resident.host.identity(&agent_session)?;
+                let controls = resident.lane.model_controls()?;
+                if !controls.model_selection {
+                    return Err(AikitError::new(
+                        "encounter.model_selection_unavailable",
+                        controls.reason.clone().unwrap_or_else(|| {
+                            "The resident native session exposes no model selector".into()
+                        }),
+                    ));
+                }
+                let model_observation =
+                    observed.binding.model_observation.as_ref().ok_or_else(|| {
+                        AikitError::new(
+                            "encounter.model_selection_unavailable",
+                            "The resident native session exposes no model observation",
+                        )
+                    })?;
+                if !model_observation
+                    .available_models
+                    .iter()
+                    .any(|model| model.model_id == provider_model_id)
+                {
+                    return Err(AikitError::new(
+                        "encounter.model_not_advertised",
+                        "The requested model was not advertised by this resident native session",
+                    ));
+                }
+                if let Some(requested_effort) = provider_reasoning_effort.as_deref() {
+                    if !controls.reasoning_effort_selection {
+                        return Err(AikitError::new(
+                            "encounter.reasoning_effort_selection_unavailable",
+                            controls.reason.clone().unwrap_or_else(|| {
+                                "The resident native session exposes no reasoning-effort selector"
+                                    .into()
+                            }),
+                        ));
+                    }
+                    let selector =
+                        model_observation.reasoning_effort.as_ref().ok_or_else(|| {
+                            AikitError::new(
+                                "encounter.reasoning_effort_selection_unavailable",
+                                "The resident native session exposes no reasoning-effort selector",
+                            )
+                        })?;
+                    if !selector
+                        .options
+                        .iter()
+                        .any(|option| option.value == requested_effort)
+                    {
+                        return Err(AikitError::new(
+                            "encounter.reasoning_effort_not_advertised",
+                            "The requested reasoning effort was not advertised by this resident native session",
+                        ));
+                    }
+                }
+                let before = observed;
                 self.store.append(&agent_session, &json!({
                     "kind":"native-model-configuration-requested",
                     "agent_session":agent_session,
@@ -1336,19 +1390,25 @@ impl EncounterService {
                     "provider":resident.provider,
                     "requested_provider_model_id":provider_model_id,
                     "requested_provider_reasoning_effort":provider_reasoning_effort,
-                    "authority":"provider-advertised-session-config; not-durable-model-policy-or-agency"
+                    "authority":"provider-advertised-session-config; sequential provider writes are not atomic and do not alter durable model policy or Agency"
                 }))?;
-                let mut receipt = resident.lane.set_model(&provider_model_id)?;
+                let model_receipt = resident.lane.set_model(&provider_model_id)?;
+                self.store.append(&agent_session, &json!({
+                    "kind":"native-model-configuration-confirmed",
+                    "receipt":model_receipt,
+                    "authority":"provider-confirmed model configuration; reasoning effort, durable model policy, and Agency are unchanged"
+                })).map_err(|e| AikitError::new("encounter.model_configuration_uncertain", format!("Provider confirmed model configuration but receipt persistence failed; do not resend automatically: {e}")))?;
+                let mut receipt = model_receipt;
                 if let Some(provider_reasoning_effort) = provider_reasoning_effort.as_deref() {
                     receipt = resident
                         .lane
                         .set_reasoning_effort(provider_reasoning_effort)?;
+                    self.store.append(&agent_session, &json!({
+                        "kind":"native-reasoning-effort-configuration-confirmed",
+                        "receipt":receipt,
+                        "authority":"provider-confirmed reasoning-effort configuration after a separately confirmed model configuration; durable model policy and Agency are unchanged"
+                    })).map_err(|e| AikitError::new("encounter.reasoning_effort_configuration_uncertain", format!("Provider confirmed reasoning-effort configuration but receipt persistence failed; do not resend automatically: {e}")))?;
                 }
-                self.store.append(&agent_session, &json!({
-                    "kind":"native-model-configuration-confirmed",
-                    "receipt":receipt,
-                    "authority":"provider-confirmed-session-config; not-durable-model-policy-or-agency"
-                })).map_err(|e| AikitError::new("encounter.model_configuration_uncertain", format!("Provider confirmed configuration but receipt persistence failed; do not resend automatically: {e}")))?;
                 Ok(json!({
                     "agent_session":receipt.agent_session,
                     "native_session_id":receipt.native_session_id,
@@ -1356,7 +1416,7 @@ impl EncounterService {
                     "model_observation":receipt.current,
                     "selected":true,
                     "inference_observed":false,
-                    "standing":"provider-confirmed-native-session-configuration; durable-model-policy-and-agency-unchanged"
+                    "standing":"provider-confirmed sequential native-session configuration; durable model policy and Agency unchanged; no inference observed"
                 }))
             }
             EncounterRequest::Open {

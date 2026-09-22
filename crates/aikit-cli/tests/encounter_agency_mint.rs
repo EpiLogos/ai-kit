@@ -5,7 +5,7 @@
 //! this suite; here the structural law is what is pinned.
 #![cfg(unix)]
 use aikit_adapters::{
-    agency_admission::{admit_agency, AgencySourceBasis},
+    agency_admission::{admit_agency, AdmittedAgency, AgencySourceBasis},
     runner::{CommandRunner, Output, SystemRunner},
 };
 use aikit_cli::encounter_service::{mint_per_project_agency, mint_request_document};
@@ -401,6 +401,7 @@ fn mint_provisions_the_session_binding_through_the_real_native_seam() {
     let basis: AgencySourceBasis =
         serde_json::from_value(binding["agency_source"].clone()).unwrap();
     assert_eq!(basis.path, source_path);
+    assert_eq!(output["data"]["agency_source"], binding["agency_source"]);
     let admitted = admit_agency(
         &SystemRunner::new(),
         &world.actuation_bin.to_string_lossy(),
@@ -409,6 +410,9 @@ fn mint_provisions_the_session_binding_through_the_real_native_seam() {
         &r("project:mint-fixture"),
     )
     .unwrap();
+    let returned_admission: AdmittedAgency =
+        serde_json::from_value(output["data"]["agency_admission"].clone()).unwrap();
+    assert_eq!(returned_admission, admitted);
     assert_eq!(admitted.agency_ref.as_str(), output["data"]["agency_ref"]);
     assert!(admitted.authorises(&r("action/aikit/encounter-send")));
     assert!(admitted.authorises(&r("action/aikit/model-realise")));

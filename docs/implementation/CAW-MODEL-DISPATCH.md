@@ -35,3 +35,12 @@ The result has schema `aikit.model-realisation/v2`. `selected:true` with `execut
 The maintained `caw_native_delivery` target includes controlled model tests plus the public application and compose-CLI paths. They exercise scoped key delivery, profile-independent selection, actual native protocol response, changed catalogue/policy, revoked/missing credentials, unavailable authority, unknown or contradictory model facts, duplicate delivery, and removal of the running owner. Controlled keys and replies are not commercial-model or installed evidence. Only an actually executed exact-head CI result establishes the tests' standing.
 
 This connection does not complete other protocol-specific model adapters, gateway/Routine invocation, Central reviewed receiving, Factory full-feature verification, installed material acceptance or human Recognition. Those remain the existing programme's operations, not consequences inferred from opening a resident. No whole-feature or local-testing readiness verdict is issued here.
+
+
+## Ordinary Pi session model controls (O:I #65 successor)
+
+An unpinned Pi RPC session now discovers its actual `get_available_models` catalogue before attachment and exposes exact provider/model selections through the existing native session selector. `set_model` must confirm the same provider and model before the owner records configuration. Launch-pinned sessions retain their admitted selection and expose no mutable selector. No bounded reasoning-effort selector is advertised by this adapter.
+
+The encounter owner rejects unadvertised model or reasoning requests before mutation and retains separate confirmations for sequential model and reasoning writes. These writes are not atomic: a later failure cannot erase an earlier confirmed model change. This changes session configuration, not Agency authority or durable model policy, and establishes no inference evidence.
+
+The native Pi 0.84.4 no-inference replay discovers models, rejects unsupported reasoning without mutation, and selects the already-current model with exact confirmation. The controlled protocol tests cover malformed/ambiguous model identities and refusal paths; they are not commercial provider coverage. Installed desktop replay remains a separate campaign obligation.

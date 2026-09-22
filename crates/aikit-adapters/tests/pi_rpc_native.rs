@@ -42,6 +42,83 @@ fn completed_text(lane: &SessionLane) -> String {
 }
 
 #[test]
+#[ignore = "requires OI_PI_BIN naming a real installed Pi 0.84 harness; discovery and setting the already-current model perform no inference"]
+fn native_pi_discovers_and_confirms_the_exact_current_model_without_inference() {
+    let executable = PathBuf::from(
+        std::env::var_os("OI_PI_BIN").expect("OI_PI_BIN must name the actual Pi executable"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().to_string_lossy().into_owned();
+    let canonical = ResourceRef::parse("agent-session/native-pi-model-controls").unwrap();
+    let adapter = PiRpcConnectionAdapter::new(
+        ResourceRef::parse("connection/native-pi-model-controls").unwrap(),
+        cwd.clone(),
+        vec![
+            "installed Pi; isolated temporary cwd; native model configuration; no inference".into(),
+        ],
+    );
+    let argv = vec![
+        executable.to_string_lossy().into_owned(),
+        "--mode".into(),
+        "rpc".into(),
+        "--no-session".into(),
+        "--no-tools".into(),
+        "--no-extensions".into(),
+    ];
+    let host = AgentSessionHost::launch(
+        adapter,
+        &argv,
+        Some(root.path()),
+        AgentSessionHostLimits::default(),
+    )
+    .unwrap();
+    host.initialize().unwrap();
+    let lane = host
+        .open_session(SessionOpenRequest {
+            mode: SessionOpenMode::Attach,
+            native_session_id: None,
+            cwd,
+            additional_directories: vec![],
+            mcp_servers: vec![],
+            agent_session: Some(canonical),
+        })
+        .unwrap();
+    let before = lane.binding().model_observation.clone().unwrap();
+    assert!(!before.available_models.is_empty());
+    assert!(before
+        .available_models
+        .iter()
+        .any(|model| model.model_id == before.current_model_id));
+    let controls = lane.model_controls().unwrap();
+    assert!(controls.model_selection);
+    assert!(!controls.reasoning_effort_selection);
+    let unsupported = lane.set_reasoning_effort("high").unwrap_err();
+    assert_eq!(
+        unsupported.code(),
+        "connection.pi_rpc.reasoning_effort_selection_unsupported"
+    );
+    assert_eq!(
+        host.identity(lane.agent_session())
+            .unwrap()
+            .binding
+            .model_observation,
+        Some(before.clone()),
+        "unsupported Pi reasoning must not mutate native model configuration"
+    );
+    let receipt = lane.set_model(&before.current_model_id).unwrap();
+    assert_eq!(receipt.previous, before);
+    assert_eq!(receipt.current.current_model_id, before.current_model_id);
+    assert_eq!(
+        host.identity(lane.agent_session())
+            .unwrap()
+            .binding
+            .model_observation,
+        Some(receipt.current)
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
 #[ignore = "requires OI_PI_BIN naming a real installed Pi 0.84 harness and configured provider; run explicitly for native acceptance"]
 fn native_pi_stream_interrupt_and_resident_identity_survive_view_handle_drop() {
     let executable = PathBuf::from(
