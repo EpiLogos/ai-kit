@@ -93,6 +93,15 @@ flush an existing database.
     "ctrl_bin": "/resolved/bin/ctrl",
     "source_refs": ["source/example"]
   },
+  "matrix": {
+    "manifest": "/resolved/ProjectCentral/user/capability-matrix.json",
+    "csv": "/resolved/ProjectCentral/user/capability-matrix.csv",
+    "view_id": null,
+    "capability_refs": [],
+    "full_scope": true,
+    "agent_visibility": "payload",
+    "external_egress": "allowed"
+  },
   "factory": {
     "state": "/resolved/factory-state",
     "run_ref": "run/example",
@@ -114,6 +123,18 @@ credential reference, bounded `JevLimits`, caller-supplied state and optional
 relevance threshold. Direct agent-formulated Jev questions remain available
 through `aikit jev invoke`; document/Wiki selection is one application of the
 same protocol.
+
+The optional `matrix` block reads the existing `ql-capability-matrix/1`
+manifest and CSV directly. Choose exactly one scope: `full_scope: true` or an
+explicit `capability_refs` list. Full scope enumerates every declared
+capability before relevance selection. The prepared candidate retains the
+view title/semantics, ordered row/column axes, whole-account anchor,
+need/operation/outcome, implementation status, standing, source/account routes
+and relation questions. Manifest and CSV digests join the preparation basis, so
+a matrix edit while Jev is running refuses the late publication. Egress is an
+explicit input because a public matrix and a private authored matrix are not
+the same disclosure boundary.
+
 
 ## Delivery and invalidation
 
