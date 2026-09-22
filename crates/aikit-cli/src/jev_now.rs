@@ -249,6 +249,7 @@ struct SelectionEvidence {
 struct FactoryEvidence {
     revision: Option<String>,
     run: Value,
+    journeys: Vec<Value>,
     workflow_units: Vec<Value>,
     neighbours: Vec<NowNeighbour>,
     dependency_revisions: BTreeMap<String, String>,
@@ -317,6 +318,46 @@ fn factory_read(factory: &Path, args: &[String]) -> Result<Value> {
         .map_err(|e| fail("now_context.factory_invalid", e.to_string()))
 }
 
+fn factory_owner_basis(config: &FactoryPrepare) -> Result<(Value, Vec<Value>, String)> {
+    let factory = config
+        .factory_bin
+        .clone()
+        .unwrap_or_else(|| "factory".into());
+    let state = config.state.to_string_lossy().into_owned();
+    let run = factory_read(
+        &factory,
+        &["run".into(), state.clone(), config.run_ref.clone()],
+    )?;
+    let mut journeys = Vec::new();
+    let mut basis = BTreeMap::new();
+    if let Some(revision) = run["revision"].as_str() {
+        basis.insert(format!("run:{}", config.run_ref), revision.to_owned());
+    }
+    for journey_ref in run["owningJourneyRefs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        let journey = factory_read(
+            &factory,
+            &["journey".into(), state.clone(), journey_ref.to_owned()],
+        )?;
+        let revision = journey["revision"].as_str().ok_or_else(|| {
+            fail(
+                "now_context.factory_invalid",
+                "Factory Journey reading omitted its revision",
+            )
+        })?;
+        basis.insert(format!("journey:{journey_ref}"), revision.to_owned());
+        journeys.push(journey);
+    }
+    let encoded = serde_json::to_vec(&basis)
+        .map_err(|e| fail("now_context.factory_invalid", e.to_string()))?;
+    let revision = format!("blake3:{}", blake3::hash(&encoded).to_hex());
+    Ok((run, journeys, revision))
+}
+
 fn factory_evidence(config: &FactoryPrepare) -> Result<FactoryEvidence> {
     if config.workflow_unit_refs.len() > MAX_WORKFLOW_UNITS {
         return Err(fail(
@@ -328,15 +369,8 @@ fn factory_evidence(config: &FactoryPrepare) -> Result<FactoryEvidence> {
         .factory_bin
         .clone()
         .unwrap_or_else(|| "factory".into());
-    let run = factory_read(
-        &factory,
-        &[
-            "run".into(),
-            config.state.to_string_lossy().into_owned(),
-            config.run_ref.clone(),
-        ],
-    )?;
-    let revision = run["revision"].as_str().map(str::to_owned);
+    let (run, journeys, revision) = factory_owner_basis(config)?;
+    let revision = Some(revision);
     let list = factory_read(
         &factory,
         &[
@@ -428,6 +462,7 @@ fn factory_evidence(config: &FactoryPrepare) -> Result<FactoryEvidence> {
     Ok(FactoryEvidence {
         revision,
         run,
+        journeys,
         workflow_units,
         neighbours,
         dependency_revisions,
@@ -539,22 +574,11 @@ fn revalidate_factory(
     let (Some(config), Some(expected)) = (config, expected_revision) else {
         return Ok(());
     };
-    let factory = config
-        .factory_bin
-        .clone()
-        .unwrap_or_else(|| "factory".into());
-    let run = factory_read(
-        &factory,
-        &[
-            "run".into(),
-            config.state.to_string_lossy().into_owned(),
-            config.run_ref.clone(),
-        ],
-    )?;
-    if run["revision"].as_str() != Some(expected) {
+    let (_, _, current) = factory_owner_basis(config)?;
+    if current != expected {
         return Err(fail(
             "now_context.factory_stale",
-            "Factory Run revision changed during context preparation",
+            "Factory Run/Journey basis changed during context preparation",
         ));
     }
     Ok(())
@@ -985,7 +1009,7 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
         "sourceCount":view.items.len(),
         "neighbourCount":view.neighbours.len(),
         "knowledge":view.knowledge_frames,
-        "factory":factory.as_ref().map(|f|json!({"run":f.run,"workflowUnits":f.workflow_units})),
+        "factory":factory.as_ref().map(|f|json!({"run":f.run,"journeys":f.journeys,"workflowUnits":f.workflow_units})),
         "selection":selection,
         "standing":"prepared and atomically published against revalidated native source/Factory basis"
     }))
