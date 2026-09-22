@@ -156,6 +156,8 @@ fn native_acp_owner_shutdown_reaps_provider_and_preserves_history() {
             id: "native-shutdown".into(),
             label: "Actual installed ACP lifecycle".into(),
             argv,
+            body_ref: None,
+            body_revision: None,
             required_context: None,
             now_context: None,
         },

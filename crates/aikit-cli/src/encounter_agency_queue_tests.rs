@@ -222,6 +222,8 @@ impl QueueWorld {
                     "acp".into(),
                     self.cwd.join(format!("{id}.log")).display().to_string(),
                 ],
+                body_ref: None,
+                body_revision: None,
                 required_context: None,
                 model_policy: None,
                 now_context: None,

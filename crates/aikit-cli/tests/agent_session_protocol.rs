@@ -72,6 +72,8 @@ impl Rig {
                     script.display().to_string(),
                     mode.into(),
                 ],
+                body_ref: None,
+                body_revision: None,
                 required_context: None,
                 model_policy: None,
                 now_context: None,

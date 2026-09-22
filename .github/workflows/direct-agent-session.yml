@@ -92,27 +92,39 @@ jobs:
         continue-on-error: true
         shell: bash
         run: python3 tests/direct_agent_native_join.py --ctrl /tmp/central-agent-owner/target/debug/ctrl --aikit "$PWD/target/debug/aikit" --evidence direct-agent-evidence/join 2>&1 | tee direct-agent-evidence/native-join.log
-      - name: Current-head production protocol
-        id: current_protocol
-        if: github.event.pull_request.head.ref != 'agent/direct-accepted-agent-session-20260920' && github.ref != 'refs/heads/agent/direct-accepted-agent-session-20260920'
-        continue-on-error: true
-        shell: bash
-        run: |
-          cargo test --locked -p aikit-cli --test encounter_owner_folded_spawn --test agent_session_protocol 2>&1 | tee direct-agent-evidence/current-protocol.log
-          cargo test --locked -p aikit-adapters --test native_model_controls 2>&1 | tee direct-agent-evidence/current-model-controls.log
-      - name: Compose published model and folded-startup dependencies for historical campaign testing only
+      - name: Compose published model and folded-startup dependencies for testing only
         id: compose
-        if: github.event.pull_request.head.ref == 'agent/direct-accepted-agent-session-20260920' || github.ref == 'refs/heads/agent/direct-accepted-agent-session-20260920'
         continue-on-error: true
         shell: bash
         run: |
           exec > >(tee direct-agent-evidence/composition.log) 2>&1
           git fetch --no-tags origin 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 37994265f5727af50ec6446687ed629dde047412 a0647b9b7110745661e4f1488f265e58623cad69
           git diff 99306d858c255fa258d8cc419b314a433d3f92a4 8290196495e83605fdcafa986c2130939a19fc64 -- crates/aikit-adapters/src/interactive_connection.rs crates/aikit-adapters/src/agent_session_host.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-adapters/tests/native_model_controls.rs crates/aikit-cli/tests/agent_session_protocol.rs crates/aikit-cli/tests/support/agent_session_protocol.py > direct-agent-evidence/model-dependency.patch
-          git apply --3way direct-agent-evidence/model-dependency.patch
+          if grep -q 'pub struct NativeModelControls' crates/aikit-adapters/src/interactive_connection.rs \
+             && grep -q 'pub fn model_controls(&self)' crates/aikit-adapters/src/agent_session_host.rs \
+             && grep -q 'expected_native_session_id' crates/aikit-cli/src/encounter_service.rs \
+             && test -f crates/aikit-adapters/tests/native_model_controls.rs; then
+            printf '%s\n' 'model dependency already represented semantically in tested source; historical patch not replayed over newer session code' | tee direct-agent-evidence/model-dependency-standing.txt
+          elif git apply --reverse --check direct-agent-evidence/model-dependency.patch; then
+            printf '%s\n' 'model dependency already represented byte-for-byte; reverse-check passed' | tee direct-agent-evidence/model-dependency-standing.txt
+          else
+            git apply --3way direct-agent-evidence/model-dependency.patch
+            printf '%s\n' 'model dependency applied for composed test only' | tee direct-agent-evidence/model-dependency-standing.txt
+          fi
           # #371 changes only #364's test, retaining its exact native implementation.
           git diff 37994265f5727af50ec6446687ed629dde047412 a0647b9b7110745661e4f1488f265e58623cad69 -- crates > direct-agent-evidence/folded-dependency.patch
-          git apply --3way direct-agent-evidence/folded-dependency.patch
+          if grep -q 'pub fn session_space_verb_prefix' crates/aikit-cli/src/lib.rs \
+             && grep -q 'session_space_verb_prefix' crates/aikit-cli/src/encounter_service.rs \
+             && grep -q 'session_space_verb_prefix' crates/aikit-cli/src/encounter_model.rs \
+             && grep -q 'session_space_verb_prefix' crates/aikit-cli/src/encounter_task.rs \
+             && test -f crates/aikit-cli/tests/encounter_owner_folded_spawn.rs; then
+            printf '%s\n' 'folded startup dependency already represented semantically in tested source; historical patch not replayed over current self-invocation helper' | tee direct-agent-evidence/folded-dependency-standing.txt
+          elif git apply --reverse --check direct-agent-evidence/folded-dependency.patch; then
+            printf '%s\n' 'folded startup dependency already represented byte-for-byte; reverse-check passed' | tee direct-agent-evidence/folded-dependency-standing.txt
+          else
+            git apply --3way direct-agent-evidence/folded-dependency.patch
+            printf '%s\n' 'folded startup dependency applied for composed test only' | tee direct-agent-evidence/folded-dependency-standing.txt
+          fi
           git write-tree > direct-agent-evidence/composed-tree.txt
           git diff HEAD > direct-agent-evidence/composed.patch
       - name: Composed production protocol and native folded startup
@@ -145,18 +157,8 @@ jobs:
           name: direct-agent-joined-evidence
           path: direct-agent-evidence/
           retention-days: 7
-      - name: Preserve every applicable gate
+      - name: Preserve every failed or unexecuted gate
         if: always()
         env:
-          BASE_OUTCOMES: ${{ steps.direct.outcome }},${{ steps.build.outcome }},${{ steps.join.outcome }}
-          CURRENT_OUTCOME: ${{ steps.current_protocol.outcome }}
-          HISTORICAL_OUTCOMES: ${{ steps.compose.outcome }},${{ steps.protocol.outcome }},${{ steps.composed.outcome }}
-          HISTORICAL: ${{ github.event.pull_request.head.ref == 'agent/direct-accepted-agent-session-20260920' || github.ref == 'refs/heads/agent/direct-accepted-agent-session-20260920' }}
-        shell: bash
-        run: |
-          test "$BASE_OUTCOMES" = 'success,success,success'
-          if test "$HISTORICAL" = 'true'; then
-            test "$HISTORICAL_OUTCOMES" = 'success,success,success'
-          else
-            test "$CURRENT_OUTCOME" = 'success'
-          fi
+          OUTCOMES: ${{ steps.direct.outcome }},${{ steps.build.outcome }},${{ steps.join.outcome }},${{ steps.compose.outcome }},${{ steps.protocol.outcome }},${{ steps.composed.outcome }}
+        run: test "$OUTCOMES" = 'success,success,success,success,success,success'

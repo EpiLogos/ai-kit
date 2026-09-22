@@ -39,6 +39,39 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Debug, clap::Args)]
+struct EpiPrimeConfigureArgs {
+    #[arg(long, default_value = "epi-prime-ql")]
+    provider_id: String,
+    #[arg(long)]
+    launcher: PathBuf,
+    #[arg(long)]
+    prime_bin: PathBuf,
+    #[arg(long)]
+    ql_bin: PathBuf,
+    #[arg(long)]
+    ql_revision: String,
+    #[arg(long)]
+    body_revision: String,
+    #[arg(long)]
+    skill_path: PathBuf,
+    #[arg(long)]
+    research_bin: PathBuf,
+    #[arg(long)]
+    faculty_config: PathBuf,
+    #[arg(long)]
+    ql_root: Option<PathBuf>,
+    /// Optional native Central owner for pithy NOW handover/continuation.
+    #[arg(long)]
+    central_ctrl_bin: Option<PathBuf>,
+    /// Central root paired with --central-ctrl-bin.
+    #[arg(long)]
+    central_root: Option<PathBuf>,
+    /// Optional Project key used as the Prime Skill's default NOW scope.
+    #[arg(long)]
+    central_project: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Read the native ProjectBinding; no session or provider is created.
@@ -103,6 +136,13 @@ enum Command {
     EncounterConfigure {
         #[arg(long)]
         provider_json: String,
+    },
+    /// Configure the installable Epi-Logos Prime-QL body over Prime RPC.
+    /// Paths are resolved now; mode selection later starts nothing until the
+    /// ordinary Encounter open/first-Send boundary.
+    EncounterEpiPrimeConfigure {
+        #[command(flatten)]
+        args: Box<EpiPrimeConfigureArgs>,
     },
     /// Provision or withdraw a native Agency binding under an exact revision.
     /// This is an owner-only operation, not gateway/IPC input.
@@ -326,6 +366,154 @@ fn run(cli: Cli) -> Result<()> {
                 parse_json_arg(&provider_json)?,
             )?;
             emit(&serde_json::json!({"configured":true}))
+        }
+        Command::EncounterEpiPrimeConfigure { args } => {
+            let EpiPrimeConfigureArgs {
+                provider_id,
+                launcher,
+                prime_bin,
+                ql_bin,
+                ql_revision,
+                body_revision,
+                skill_path,
+                research_bin,
+                faculty_config,
+                ql_root,
+                central_ctrl_bin,
+                central_root,
+                central_project,
+            } = *args;
+            fn exact_revision(value: &str, label: &str) -> Result<()> {
+                if value.len() == 40
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    Ok(())
+                } else {
+                    Err(AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} must be a lowercase 40-hex revision"),
+                    ))
+                }
+            }
+            fn file(path: PathBuf, label: &str) -> Result<PathBuf> {
+                let path = path.canonicalize().map_err(|error| {
+                    AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} is unavailable: {error}"),
+                    )
+                })?;
+                if !path.is_file() {
+                    return Err(AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} must be a file"),
+                    ));
+                }
+                Ok(path)
+            }
+            fn directory(path: PathBuf, label: &str) -> Result<PathBuf> {
+                let path = path.canonicalize().map_err(|error| {
+                    AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} is unavailable: {error}"),
+                    )
+                })?;
+                if !path.is_dir() {
+                    return Err(AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} must be a directory"),
+                    ));
+                }
+                Ok(path)
+            }
+            exact_revision(&ql_revision, "QL revision")?;
+            exact_revision(&body_revision, "Actuation body revision")?;
+            let launcher = file(launcher, "Prime-QL launcher")?;
+            let prime_bin = file(prime_bin, "Prime Agent binary")?;
+            let ql_bin = file(ql_bin, "QL binary")?;
+            let skill_path = directory(skill_path, "Prime QL relational skill")?;
+            let research_bin = file(research_bin, "Actuation research binary")?;
+            let faculty_config = file(faculty_config, "Actuation faculty configuration")?;
+            let ql_root = ql_root
+                .map(|path| directory(path, "QL source root"))
+                .transpose()?;
+            if central_ctrl_bin.is_some() != central_root.is_some()
+                || central_ctrl_bin.is_some() != central_project.is_some()
+            {
+                return Err(AikitError::new(
+                    "encounter.prime_configuration",
+                    "Central ctrl binary, root and project must be supplied together",
+                ));
+            }
+            let central_ctrl_bin = central_ctrl_bin
+                .map(|path| file(path, "Central ctrl binary"))
+                .transpose()?;
+            let central_root = central_root
+                .map(|path| directory(path, "Central root"))
+                .transpose()?;
+            let aikit_bin = file(
+                std::env::current_exe().map_err(|error| {
+                    AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("AIKit current executable is unavailable: {error}"),
+                    )
+                })?,
+                "AIKit current executable",
+            )?;
+            let mut argv = vec![
+                launcher.display().to_string(),
+                "--prime-bin".into(),
+                prime_bin.display().to_string(),
+                "--ql-bin".into(),
+                ql_bin.display().to_string(),
+                "--ql-revision".into(),
+                ql_revision.clone(),
+                "--skill-path".into(),
+                skill_path.display().to_string(),
+                "--research-bin".into(),
+                research_bin.display().to_string(),
+                "--faculty-config".into(),
+                faculty_config.display().to_string(),
+                "--aikit-bin".into(),
+                aikit_bin.display().to_string(),
+            ];
+            if let Some(root) = ql_root {
+                argv.extend(["--ql-root".into(), root.display().to_string()]);
+            }
+            if let (Some(ctrl), Some(root)) = (central_ctrl_bin, central_root) {
+                argv.extend([
+                    "--central-ctrl-bin".into(),
+                    ctrl.display().to_string(),
+                    "--central-root".into(),
+                    root.display().to_string(),
+                ]);
+            }
+            if let Some(project) = central_project {
+                argv.extend(["--central-project".into(), project]);
+            }
+            crate::encounter_service::EncounterService::configure(
+                service.home(),
+                crate::encounter_service::EncounterProvider {
+                    protocol: crate::encounter_service::EncounterProtocol::PrimeRpc,
+                    id: provider_id.clone(),
+                    label: "Epi-Logos Prime-QL".into(),
+                    argv,
+                    body_ref: Some("agent-body/epi-prime-ql".into()),
+                    body_revision: Some(body_revision.clone()),
+                    required_context: None,
+                    model_policy: None,
+                },
+            )?;
+            emit(&serde_json::json!({
+                "configured":true,
+                "provider":provider_id,
+                "body_ref":"agent-body/epi-prime-ql",
+                "body_revision":body_revision,
+                "ql_revision":ql_revision,
+                "model_selection":"Prime native configured model unless an explicit AIKit model policy overrides it",
+                "standing":"configured-not-started"
+            }))
         }
         Command::EncounterAgencyConfigure {
             agent_session,
@@ -584,4 +772,53 @@ fn emit<T: Serialize>(value: &T) -> Result<()> {
     })?;
     println!("{text}");
     Ok(())
+}
+
+#[cfg(test)]
+mod epi_prime_cli_tests {
+    use super::*;
+
+    #[test]
+    fn epi_prime_configuration_parses_as_boxed_owner_arguments() {
+        let cli = Cli::try_parse_from([
+            "aikit-session-space",
+            "encounter-epi-prime-configure",
+            "--provider-id",
+            "epi-prime-ql",
+            "--launcher",
+            "/opt/actuation-epi-prime",
+            "--prime-bin",
+            "/opt/prime-agent",
+            "--ql-bin",
+            "/opt/ql",
+            "--ql-revision",
+            "89ca4088ea47fe626c23c2b11efe2d38bdfcd1f7",
+            "--body-revision",
+            "161b869740c54dc325ad1d6aef765dbf32920073",
+            "--skill-path",
+            "/opt/ql-relational",
+            "--research-bin",
+            "/opt/actuation-research",
+            "--faculty-config",
+            "/opt/faculty.json",
+            "--central-ctrl-bin",
+            "/opt/ctrl",
+            "--central-root",
+            "/opt/Central",
+            "--central-project",
+            "O-I",
+        ])
+        .expect("Prime-QL configure grammar parses");
+
+        let Command::EncounterEpiPrimeConfigure { args } = cli.command else {
+            panic!("expected Prime-QL configure command");
+        };
+        assert_eq!(args.provider_id, "epi-prime-ql");
+        assert_eq!(args.ql_revision, "89ca4088ea47fe626c23c2b11efe2d38bdfcd1f7");
+        assert_eq!(
+            args.body_revision,
+            "161b869740c54dc325ad1d6aef765dbf32920073"
+        );
+        assert_eq!(args.central_project.as_deref(), Some("O-I"));
+    }
 }

@@ -635,7 +635,10 @@ fn parse_history(raw: &str) -> Vec<VersionHistoryEntry> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static PROJECTION_ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn porcelain_parser_separates_working_states() {
@@ -776,12 +779,15 @@ mod tests {
     }
 
     fn projection_root() -> PathBuf {
-        let unique = SystemTime::now()
+        let instant = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("aikit-projection-{}-{unique}", std::process::id()));
+        let sequence = PROJECTION_ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "aikit-projection-{}-{instant}-{sequence}",
+            std::process::id()
+        ));
         fs::create_dir_all(&root).unwrap();
         root
     }
