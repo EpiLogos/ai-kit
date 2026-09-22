@@ -119,6 +119,18 @@ where
             }
         }
     }
+
+    // A material checkout may live elsewhere beneath Central (for example a
+    // managed worktree) while inheriting Central's root `.aikit` marker. Keep
+    // its narrower profile layers, but recognise the semantic meta-project
+    // already named by that discovered root. A separately rooted checkout is
+    // left alone and cannot acquire root standing from location alone.
+    if discovered
+        .as_ref()
+        .is_some_and(|project| project.root == root)
+    {
+        return Ok((discovered, Some(root)));
+    }
     Ok((discovered, None))
 }
 
@@ -174,6 +186,34 @@ fn invalid(message: impl Into<String>) -> AikitError {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_material_checkout_keeps_its_layers_and_recognises_the_discovered_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Central");
+        let checkout = root.join("worktrees/env-2/o-i");
+        for path in [
+            root.join(".aikit"),
+            root.join("Control"),
+            root.join("Work"),
+            checkout.join(".aikit"),
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let discovered = crate::discover::discover_project(&checkout).unwrap();
+        let (project, meta_root) = discover(
+            &checkout,
+            &|key| (key == "CENTRAL_ROOT").then(|| root.display().to_string()),
+            Some(discovered),
+        )
+        .unwrap();
+        let canonical = root.canonicalize().unwrap();
+        assert_eq!(meta_root.as_ref(), Some(&canonical));
+        let project = project.unwrap();
+        assert_eq!(project.root, canonical);
+        assert_eq!(project.chain.len(), 2);
+        assert_eq!(project.chain[1].dir, checkout.canonicalize().unwrap());
+    }
 
     #[test]
     fn aliased_root_entry_keeps_the_existing_profile_chain_and_specification() {

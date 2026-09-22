@@ -44,6 +44,18 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install the exact native Pi protocol owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global @earendil-works/pi-coding-agent@0.84.4
+          PI_BIN="$(command -v pi)"
+          test -x "$PI_BIN"
+          test "$(pi --version)" = "0.84.4"
+          echo "AIKIT_CAW_PI_BIN=$PI_BIN" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Actuation

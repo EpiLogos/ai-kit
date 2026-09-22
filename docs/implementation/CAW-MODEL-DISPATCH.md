@@ -28,6 +28,14 @@ aikit --json -C WORKING_COPY compose --agent AGENT --world WORLD \
 
 `TARGET_JSON_FILE` contains the resident target object described above. Composition supplies the actual Agency admission; the target only identifies where this deliberate selection is to become resident. An absent owner or target cannot be replaced by an instantiation record.
 
+For a current Central root admission, both the admitted `world_ref` and
+`scope_ref` are `control:root`. That native WorldBinding supplies the semantic
+`project_binding`, including its exact source revision and digest, even when
+`WORKING_COPY` is a managed checkout beneath Central. The compose receipt keeps
+that checkout separately as `invocation_cwd`; native model/task opening uses it
+for material placement. A local fallback such as `project:Central` is not an
+equivalent root binding, and a child Project cannot borrow the root admission.
+
 The result has schema `aikit.model-realisation/v2`. `selected:true` with `executed:false` means the selected native model/body has been observed and opened. An inference result requires existing addressed `send` followed by attributable delivery/response readback. Direct work has no mandatory Factory ancestry. Task-bound sessions retain #291's exact placement/material/expected-task guards and Workcell boundary at execution.
 
 For an explicitly pinned Pi body, this result also carries `factory_selection`.

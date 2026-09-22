@@ -365,6 +365,96 @@ fn native_central_root_composes_without_a_profile_or_child_project() {
 
 #[test]
 #[ignore = "requires pinned Actuation; mandatory CAW lane"]
+fn canonical_root_agency_composes_from_a_nested_material_checkout() {
+    let w = World::new();
+    let central = w.temp.path().join("Central");
+    let checkout = central.join("worktrees/env-2/o-i");
+    for directory in [
+        central.join(".aikit"),
+        central.join("Control"),
+        central.join("Work"),
+        checkout.join(".aikit"),
+    ] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    let central = central.canonicalize().unwrap();
+    let checkout = checkout.canonicalize().unwrap();
+
+    let source_path = w.temp.path().join("canonical-root-agency.json");
+    let mut source: Value =
+        serde_json::from_str(include_str!("../fixtures/caw-agency-request.json")).unwrap();
+    source["differentiated_binding"]["world_ref"] = json!("control:root");
+    source["differentiated_binding"]["scope_ref"] = json!("control:root");
+    let source_bytes = serde_json::to_vec(&source).unwrap();
+    fs::write(&source_path, &source_bytes).unwrap();
+    let basis = AgencySourceBasis {
+        source_ref: r("source/canonical-root-agency"),
+        revision: rev("rev/canonical-root-1"),
+        path: source_path.canonicalize().unwrap(),
+        content_digest: format!("blake3:{}", blake3::hash(&source_bytes).to_hex()),
+    };
+    let basis_path = w.temp.path().join("canonical-root-basis.json");
+    fs::write(&basis_path, serde_json::to_vec(&basis).unwrap()).unwrap();
+
+    let native = actuation();
+    let mut paths = vec![native.parent().unwrap().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_aikit"))
+        .env("AIKIT_HOME", w.home.root())
+        .env("CENTRAL_ROOT", &central)
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .arg("--json")
+        .arg("-C")
+        .arg(&checkout)
+        .args(["compose", "--agency-source"])
+        .arg(&basis_path)
+        .args(["--agent", "agent:existing-1", "--world", "control:root"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reading: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        reading["data"]["project_binding"]["project"],
+        "control:root"
+    );
+    assert_eq!(
+        reading["data"]["project_binding"]["locator"]["kind"],
+        "native-world"
+    );
+    assert_eq!(
+        reading["data"]["project_binding"]["locator"]["world"],
+        "control:root"
+    );
+    assert_eq!(
+        reading["data"]["project_binding"]["locator"]["scope"],
+        "control:root"
+    );
+    assert_eq!(reading["data"]["root_meta_project"], true);
+    assert_eq!(
+        reading["data"]["project_root"],
+        central.display().to_string()
+    );
+    assert_eq!(
+        reading["data"]["invocation_cwd"],
+        checkout.display().to_string()
+    );
+    assert_eq!(
+        reading["data"]["plan"]["project"],
+        reading["data"]["project_binding"]
+    );
+    assert!(reading["data"]["realisation"].is_null());
+    println!("CANONICAL_ROOT_AGENCY_NESTED_MATERIAL_COMPOSED_WITHOUT_INFERENCE");
+}
+
+#[test]
+#[ignore = "requires pinned Actuation; mandatory CAW lane"]
 fn root_admission_cannot_borrow_an_unrelated_child_context() {
     let w = World::new();
     let target = model_setup(&w, "normal", true);
