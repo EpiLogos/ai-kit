@@ -35,6 +35,7 @@ pub mod foreign;
 pub mod gateway_ops;
 pub mod guardian_family;
 pub mod hook;
+pub mod jev_now;
 pub mod json;
 pub mod jump;
 pub mod model_roster;

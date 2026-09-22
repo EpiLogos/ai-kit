@@ -679,16 +679,17 @@ impl RedisNowStore {
         let prefix = self.change_key_prefix(participant);
         for cursor in after.saturating_add(1)..=end {
             let key = format!("{prefix}{cursor}");
-            let raw =
-                match self.command(secret, vec![b"GET".to_vec(), key.into_bytes()])? {
-                    Resp::Bulk(None) => return Err(fail(
+            let raw = match self.command(secret, vec![b"GET".to_vec(), key.into_bytes()])? {
+                Resp::Bulk(None) => {
+                    return Err(fail(
                         "now_context.change_gap",
                         format!(
                             "NOW change cursor {cursor} is unavailable; do not silently advance"
                         ),
-                    )),
-                    v => bulk_utf8(v)?,
-                };
+                    ))
+                }
+                v => bulk_utf8(v)?,
+            };
             let change = serde_json::from_str::<NowContextChange>(&raw)
                 .map_err(|e| fail("now_context.redis_corrupt", e.to_string()))?;
             change.validate()?;
@@ -696,6 +697,23 @@ impl RedisNowStore {
         }
         Ok(out)
     }
+    pub fn ack_cursor(
+        &self,
+        participant: &ResourceRef,
+        secret: Option<&SecretValue>,
+    ) -> Result<u64> {
+        let key = self.key("ack", participant);
+        match self.command(secret, vec![b"GET".to_vec(), key.into_bytes()])? {
+            Resp::Bulk(None) => Ok(0),
+            value => bulk_utf8(value)?.parse::<u64>().map_err(|_| {
+                fail(
+                    "now_context.redis_corrupt",
+                    "Participant acknowledgement cursor is not an unsigned integer",
+                )
+            }),
+        }
+    }
+
     pub fn ack_changes(
         &self,
         participant: &ResourceRef,

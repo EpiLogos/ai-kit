@@ -108,9 +108,22 @@ fn redis_preserves_versioned_participant_context_changes_revocation_and_delivery
         .unwrap();
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].cursor, cursor);
+    assert_eq!(store.ack_cursor(&first.participant_ref, None).unwrap(), 0);
     assert_eq!(
         store
             .ack_changes(&first.participant_ref, cursor, None)
+            .unwrap(),
+        cursor
+    );
+    assert_eq!(
+        store.ack_cursor(&first.participant_ref, None).unwrap(),
+        cursor
+    );
+    // A replayed older acknowledgement can never move this participant's
+    // independent consumption position backwards.
+    assert_eq!(
+        store
+            .ack_changes(&first.participant_ref, cursor.saturating_sub(1), None)
             .unwrap(),
         cursor
     );

@@ -417,8 +417,17 @@ impl EncounterService {
                     "Prepared NOW view names a Project outside this SessionSpace",
                 ));
             }
-            let changes =
-                redis.read_changes(&participant, view.basis.change_cursor, 64, secret.as_ref())?;
+            // Each participant owns an independent consumption position. A
+            // delivery receipt is authoritative evidence that a provider turn
+            // crossed the boundary even when a later Redis ack write was
+            // uncertain; the explicit ack cursor is the normal fast path.
+            let acknowledged = redis.ack_cursor(&participant, secret.as_ref())?;
+            let delivered = redis
+                .last_delivery(&participant, secret.as_ref())?
+                .map(|receipt| receipt.change_cursor)
+                .unwrap_or(0);
+            let after = view.basis.change_cursor.max(acknowledged).max(delivered);
+            let changes = redis.read_changes(&participant, after, 64, secret.as_ref())?;
             let delivered_cursor = changes
                 .last()
                 .map(|change| change.cursor)
@@ -515,6 +524,17 @@ impl EncounterService {
         if let Err(failure) = redis.mark_delivered(&delivery.receipt, secret.as_ref()) {
             let _ = self.store.append(session, &json!({"kind":"now-context-delivery-uncertain","prepared_version":delivery.receipt.prepared_version,"prepared_digest":delivery.receipt.prepared_digest,"code":failure.code(),"reason":failure.message(),"turn_replay_permitted":false}));
             return Err(AikitError::new("encounter.submission_uncertain", format!("Provider accepted the turn but Redis NOW delivery acknowledgement failed; do not replay automatically: {failure}")));
+        }
+        if let Err(failure) = redis.ack_changes(
+            &delivery.receipt.participant_ref,
+            delivery.receipt.change_cursor,
+            secret.as_ref(),
+        ) {
+            // The durable delivery receipt above prevents replay even if the
+            // independent cursor write was interrupted. Preserve uncertainty
+            // rather than treating a provider-accepted turn as unsent.
+            let _ = self.store.append(session, &json!({"kind":"now-context-cursor-uncertain","prepared_version":delivery.receipt.prepared_version,"prepared_digest":delivery.receipt.prepared_digest,"change_cursor":delivery.receipt.change_cursor,"code":failure.code(),"reason":failure.message(),"turn_replay_permitted":false}));
+            return Err(AikitError::new("encounter.submission_uncertain", format!("Provider accepted the turn and its delivery receipt was retained, but the Redis NOW participant cursor acknowledgement failed; do not replay automatically: {failure}")));
         }
         self.store.append(session, &json!({"kind":"now-context-delivered","receipt":delivery.receipt,"standing":"provider-turn-delivery-accepted; not a claim of model response"}))?;
         Ok(())
