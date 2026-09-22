@@ -10,7 +10,7 @@ use aikit_core::{AikitError, ResourceRef, Result, SecretValue};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 pub const NOW_REDIS_CONFIG_SCHEMA: &str = "aikit.redis-now-config/v1";
@@ -489,7 +489,7 @@ impl RedisNowStore {
     ) -> Result<u64> {
         let meta = self.key("meta", participant);
         match self.command(secret, vec![b"GET".to_vec(), meta.into_bytes()])? {
-            Resp::Nil => Ok(0),
+            Resp::Bulk(None) => Ok(0),
             value => {
                 let raw = bulk_utf8(value)?;
                 let v: serde_json::Value = serde_json::from_str(&raw)
@@ -561,7 +561,7 @@ impl RedisNowStore {
         let revoked_value =
             match self.command(secret, vec![b"GET".to_vec(), revoked.into_bytes()])? {
                 Resp::Bulk(Some(value)) => Some(value),
-                Resp::Nil => None,
+                Resp::Bulk(None) => None,
                 other => {
                     return Err(fail(
                         "now_context.redis_protocol",
@@ -570,13 +570,13 @@ impl RedisNowStore {
                 }
             };
         let raw = match self.command(secret, vec![b"GET".to_vec(), prepared.into_bytes()])? {
-            Resp::Nil if revoked_value.is_some() => {
+            Resp::Bulk(None) if revoked_value.is_some() => {
                 return Err(fail(
                     "now_context.disclosure_revoked",
                     "Prepared NOW material was revoked and removed from the hot cache",
                 ))
             }
-            Resp::Nil => return Ok(None),
+            Resp::Bulk(None) => return Ok(None),
             v => bulk_utf8(v)?,
         };
         let view: PreparedNowContext = serde_json::from_str(&raw)
@@ -669,7 +669,7 @@ impl RedisNowStore {
         let limit = limit.clamp(1, MAX_CHANGES);
         let cursor_key = self.key("cursor", participant);
         let current = match self.command(secret, vec![b"GET".to_vec(), cursor_key.into_bytes()])? {
-            Resp::Nil => 0,
+            Resp::Bulk(None) => 0,
             v => bulk_utf8(v)?
                 .parse::<u64>()
                 .map_err(|_| fail("now_context.redis_corrupt", "NOW cursor is not an integer"))?,
@@ -681,7 +681,7 @@ impl RedisNowStore {
             let key = format!("{prefix}{cursor}");
             let raw =
                 match self.command(secret, vec![b"GET".to_vec(), key.into_bytes()])? {
-                    Resp::Nil => return Err(fail(
+                    Resp::Bulk(None) => return Err(fail(
                         "now_context.change_gap",
                         format!(
                             "NOW change cursor {cursor} is unavailable; do not silently advance"
@@ -748,7 +748,7 @@ impl RedisNowStore {
     ) -> Result<Option<NowDeliveryReceipt>> {
         let key = self.key("delivery", participant);
         match self.command(secret, vec![b"GET".to_vec(), key.into_bytes()])? {
-            Resp::Nil => Ok(None),
+            Resp::Bulk(None) => Ok(None),
             v => {
                 let raw = bulk_utf8(v)?;
                 let receipt = serde_json::from_str::<NowDeliveryReceipt>(&raw)
