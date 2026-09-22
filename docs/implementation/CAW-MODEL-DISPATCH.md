@@ -28,10 +28,47 @@ aikit --json -C WORKING_COPY compose --agent AGENT --world WORLD \
 
 `TARGET_JSON_FILE` contains the resident target object described above. Composition supplies the actual Agency admission; the target only identifies where this deliberate selection is to become resident. An absent owner or target cannot be replaced by an instantiation record.
 
+For a current Central root admission, both the admitted `world_ref` and
+`scope_ref` are `control:root`. That native WorldBinding supplies the semantic
+`project_binding`, including its exact source revision and digest, even when
+`WORKING_COPY` is a managed checkout beneath Central. The compose receipt keeps
+that checkout separately as `invocation_cwd`; native model/task opening uses it
+for material placement. A local fallback such as `project:Central` is not an
+equivalent root binding, and a child Project cannot borrow the root admission.
+
 The result has schema `aikit.model-realisation/v2`. `selected:true` with `executed:false` means the selected native model/body has been observed and opened. An inference result requires existing addressed `send` followed by attributable delivery/response readback. Direct work has no mandatory Factory ancestry. Task-bound sessions retain #291's exact placement/material/expected-task guards and Workcell boundary at execution.
+
+For an explicitly pinned Pi body, this result also carries `factory_selection`.
+Its `aikit.explicit-model-selection/v1` receipt retains the exact model route,
+policy/catalogue basis, native session and SessionSpace, admitted Agency source
+and WorldBinding, and an existing `aikit.harness-composition/v2` determination.
+The composition target binds the Pi profile and actual underlying provider argv,
+owner launcher, cwd, required context and model-basis digests. A task launcher is
+not mistaken for the underlying harness. `aikit.sorted-json/v1` specifies
+recursive object-key ordering for the cross-owner BLAKE3 digests.
+
+The compatibility field `ranking_policy: EXPLICIT_PIN` means a deliberate source
+selection, not a ranking calculation. This thin Pi composition claims no ambient
+Skills, extensions or tools; empty component selections are explicit. Other
+protocols and controlled non-Pi launchers receive no Pi composition receipt.
+Factory validates the receipt and its exact participant/session/source join at
+attempt admission, then still uses the actual task/authority guards at dispatch.
+Opening and selecting the real Pi process proves neither inference nor remote
+provider credentials. The `actual_pi_open_emits_factory_selection_without_inference`
+case emits an actual owner receipt for the Factory consumer tests; controlled
+protocol nonregression and live provider execution retain separate evidence.
 
 ## Proof and remaining work
 
 The maintained `caw_native_delivery` target includes controlled model tests plus the public application and compose-CLI paths. They exercise scoped key delivery, profile-independent selection, actual native protocol response, changed catalogue/policy, revoked/missing credentials, unavailable authority, unknown or contradictory model facts, duplicate delivery, and removal of the running owner. Controlled keys and replies are not commercial-model or installed evidence. Only an actually executed exact-head CI result establishes the tests' standing.
 
 This connection does not complete other protocol-specific model adapters, gateway/Routine invocation, Central reviewed receiving, Factory full-feature verification, installed material acceptance or human Recognition. Those remain the existing programme's operations, not consequences inferred from opening a resident. No whole-feature or local-testing readiness verdict is issued here.
+
+
+## Ordinary Pi session model controls (O:I #65 successor)
+
+An unpinned Pi RPC session now discovers its actual `get_available_models` catalogue before attachment and exposes exact provider/model selections through the existing native session selector. `set_model` must confirm the same provider and model before the owner records configuration. Launch-pinned sessions retain their admitted selection and expose no mutable selector. No bounded reasoning-effort selector is advertised by this adapter.
+
+The encounter owner rejects unadvertised model or reasoning requests before mutation and retains separate confirmations for sequential model and reasoning writes. These writes are not atomic: a later failure cannot erase an earlier confirmed model change. This changes session configuration, not Agency authority or durable model policy, and establishes no inference evidence.
+
+The native Pi 0.84.4 no-inference replay discovers models, rejects unsupported reasoning without mutation, and selects the already-current model with exact confirmation. The controlled protocol tests cover malformed/ambiguous model identities and refusal paths; they are not commercial provider coverage. Installed desktop replay remains a separate campaign obligation.

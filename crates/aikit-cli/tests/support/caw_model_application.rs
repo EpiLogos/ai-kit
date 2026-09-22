@@ -12,6 +12,131 @@ fn composition(w: &World, target: &Value) -> Value {
     })
 }
 
+fn actual_pi_setup(w: &World) -> Value {
+    let pi = std::env::var_os("AIKIT_CAW_PI_BIN")
+        .map(PathBuf::from)
+        .expect("Run with the exact installed Pi executable");
+    assert_eq!(pi.file_name().and_then(|name| name.to_str()), Some("pi"));
+    let mut binding = w.attach("root", "pi");
+    let mut source: Value =
+        serde_json::from_slice(&fs::read(&binding.agency_source.path).unwrap()).unwrap();
+    source["determination"]["delegated_autonomy"]["allowed_action_refs"] =
+        json!(["action/aikit/encounter-send", "action/aikit/model-realise"]);
+    let bytes = serde_json::to_vec(&source).unwrap();
+    fs::write(&binding.agency_source.path, &bytes).unwrap();
+    binding.revision = rev("rev/2");
+    binding.agency_source.revision = rev("rev/native-2");
+    binding.agency_source.content_digest = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+    w.cli(&[
+        "encounter-agency-configure".into(),
+        "--agent-session".into(),
+        "agent-session/root".into(),
+        "--binding-json".into(),
+        serde_json::to_string(&binding).unwrap(),
+        "--expected-revision".into(),
+        "rev/1".into(),
+    ]);
+    publish_catalogue_fixture(
+        w,
+        &ModelCatalogueEntry {
+            model: r("model:deepseek-v4-pro"),
+            name: "DeepSeek V4 Pro".into(),
+            description: "Exact native Pi selection receipt proof".into(),
+            superseded_refs: Default::default(),
+            routes: vec![DeclaredRoute {
+                provider: ProviderRef::parse("provider:openrouter").unwrap(),
+                kind: ModelRouteKind::ProviderNative,
+                provider_native_ids: ["deepseek/deepseek-v4-pro".to_string()].into(),
+                endpoint: None,
+                credential: CredentialCondition::NotRequired,
+            }],
+            source: SourceRef::parse("source/actual-pi-selection-test").unwrap(),
+            freshness: None,
+            book: None,
+        },
+    );
+    let policy = json!({
+        "schema":"aikit.model-dispatch-policy/v1",
+        "agent_ref":"agent:root",
+        "world_ref":"central:root",
+        "authority_ref":"authority:project:delegation",
+        "bounds_refs":["bound:project:delegation"],
+        "model_ref":"model:deepseek-v4-pro",
+        "provider_ref":"provider:openrouter",
+        "native_provider":"openrouter",
+        "provider_native_id":"deepseek/deepseek-v4-pro",
+        "expires_at_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() + 300_000,
+        "credential":null,
+    });
+    let policy_path = w.temp.path().join("actual-pi-model-policy.json");
+    let policy_bytes = serde_json::to_vec(&policy).unwrap();
+    fs::write(&policy_path, &policy_bytes).unwrap();
+    let provider = json!({
+        "id":"root",
+        "label":"Actual installed Pi, no inference",
+        "protocol":"pi-rpc",
+        "argv":[pi,"--mode","rpc","--no-extensions","--session-dir",w.temp.path().join("pi-sessions")],
+        "model_policy":{
+            "source":"source/actual-pi-model-policy",
+            "revision":"rev/model-1",
+            "path":policy_path,
+            "content_digest":format!("blake3:{}",blake3::hash(&policy_bytes).to_hex()),
+        }
+    });
+    w.cli(&[
+        "encounter-configure".into(),
+        "--provider-json".into(),
+        provider.to_string(),
+    ]);
+    let admitted = admit_agency(
+        &SystemRunner::new(),
+        actuation().to_str().unwrap(),
+        &binding.agency_source,
+        &binding.agent_ref,
+        &binding.world_ref,
+    )
+    .unwrap();
+    json!({"action":"open-model","request":{
+        "space":"session-space/root",
+        "agent_session":"agent-session/root",
+        "cwd":w.temp.path(),
+        "model_ref":"model:deepseek-v4-pro",
+        "provider_ref":"provider:openrouter",
+        "body":"root",
+        "expected_agency":admitted,
+    }})
+}
+
+#[test]
+#[ignore = "requires pinned Actuation and actual installed Pi; opens/configures only, never prompts"]
+fn actual_pi_open_emits_factory_selection_without_inference() {
+    let mut w = World::new();
+    let target = actual_pi_setup(&w);
+    let service = aikit_cli::app::Service::open(w.home.clone(), w.temp.path(), |_| None).unwrap();
+    start_model(&mut w, false);
+    let result = service
+        .realise_model(
+            &composition(&w, &target),
+            "model:deepseek-v4-pro",
+            Some("provider:openrouter"),
+            None,
+        )
+        .unwrap();
+    let selection = &result["factory_selection"];
+    assert_eq!(selection["ranking_policy"], "EXPLICIT_PIN");
+    assert_eq!(result["resident"]["inference_observed"], false);
+    assert_eq!(
+        selection["ranking_explanation"]["basis"]["composition_target_basis"]
+            ["resident_body_basis"]["harness_profile"],
+        "pi"
+    );
+    if let Some(path) = std::env::var_os("AIKIT_FACTORY_SELECTION_FIXTURE_OUT") {
+        fs::write(path, serde_json::to_vec_pretty(selection).unwrap()).unwrap();
+    }
+    w.stop();
+    println!("ACTUAL_PI_FACTORY_SELECTION_EMITTED_WITHOUT_INFERENCE");
+}
+
 #[test]
 #[ignore = "requires pinned Actuation and native protocol owner; mandatory CAW lane"]
 fn application_realisation_dispatches_native_selected_model_and_requires_the_owner() {
@@ -52,6 +177,13 @@ fn application_realisation_dispatches_native_selected_model_and_requires_the_own
     assert_eq!(result["schema"], "aikit.model-realisation/v2");
     assert_eq!(result["selected"], true);
     assert_eq!(result["executed"], false);
+    assert!(result.get("factory_selection").is_none());
+    assert_eq!(result["resident"]["body_basis"]["protocol"], "pi-rpc");
+    assert_eq!(
+        result["resident"]["body_basis"]["harness_profile"],
+        Value::Null,
+        "a controlled protocol fixture must not be presented as an actual Pi composition"
+    );
     assert_eq!(
         result["resident"]["model_observation"]["current_model_id"],
         "controlled-model-v1"
@@ -229,6 +361,102 @@ fn native_central_root_composes_without_a_profile_or_child_project() {
     assert!(!central.join(".aikit").exists());
     assert!(!central.join("ProjectCentral").exists());
     println!("CENTRAL_ROOT_META_PROJECT_COMPOSE_EXECUTED");
+}
+
+#[test]
+#[ignore = "requires pinned Actuation; mandatory CAW lane"]
+fn canonical_root_agency_composes_from_a_nested_material_checkout() {
+    let w = World::new();
+    let central = w.temp.path().join("Central");
+    let checkout = central.join("worktrees/env-2/o-i");
+    for directory in [
+        central.join(".aikit"),
+        central.join("Control"),
+        central.join("Work"),
+        checkout.join(".aikit"),
+    ] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    let central = central.canonicalize().unwrap();
+    let checkout = checkout.canonicalize().unwrap();
+
+    let source_path = w.temp.path().join("canonical-root-agency.json");
+    let mut source: Value =
+        serde_json::from_str(include_str!("../fixtures/caw-agency-request.json")).unwrap();
+    source["differentiated_binding"]["world_ref"] = json!("control:root");
+    source["differentiated_binding"]["scope_ref"] = json!("control:root");
+    let source_bytes = serde_json::to_vec(&source).unwrap();
+    fs::write(&source_path, &source_bytes).unwrap();
+    let basis = AgencySourceBasis {
+        source_ref: r("source/canonical-root-agency"),
+        revision: rev("rev/canonical-root-1"),
+        path: source_path.canonicalize().unwrap(),
+        content_digest: format!("blake3:{}", blake3::hash(&source_bytes).to_hex()),
+    };
+    let basis_path = w.temp.path().join("canonical-root-basis.json");
+    fs::write(&basis_path, serde_json::to_vec(&basis).unwrap()).unwrap();
+
+    let native = actuation();
+    let ctrl =
+        PathBuf::from(std::env::var_os("AIKIT_CAW_CTRL_BIN").expect("pinned native Central"));
+    let mut paths = vec![
+        native.parent().unwrap().to_path_buf(),
+        ctrl.parent().unwrap().to_path_buf(),
+    ];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_aikit"))
+        .env("AIKIT_HOME", w.home.root())
+        .env("CENTRAL_ROOT", &central)
+        .env("CENTRAL_CTRL_BIN", &ctrl)
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .arg("--json")
+        .arg("-C")
+        .arg(&checkout)
+        .args(["compose", "--agency-source"])
+        .arg(&basis_path)
+        .args(["--agent", "agent:existing-1", "--world", "control:root"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reading: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        reading["data"]["project_binding"]["project"],
+        "control:root"
+    );
+    assert_eq!(
+        reading["data"]["project_binding"]["locator"]["kind"],
+        "native-world"
+    );
+    assert_eq!(
+        reading["data"]["project_binding"]["locator"]["world"],
+        "control:root"
+    );
+    assert_eq!(
+        reading["data"]["project_binding"]["locator"]["scope"],
+        "control:root"
+    );
+    assert_eq!(reading["data"]["root_meta_project"], true);
+    assert_eq!(
+        reading["data"]["project_root"],
+        central.display().to_string()
+    );
+    assert_eq!(
+        reading["data"]["invocation_cwd"],
+        checkout.display().to_string()
+    );
+    assert_eq!(
+        reading["data"]["plan"]["project"],
+        reading["data"]["project_binding"]
+    );
+    assert!(reading["data"]["realisation"].is_null());
+    println!("CANONICAL_ROOT_AGENCY_NESTED_MATERIAL_COMPOSED_WITHOUT_INFERENCE");
 }
 
 #[test]

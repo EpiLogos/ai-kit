@@ -37,6 +37,8 @@ for line in sys.stdin:
     elif method=='session/load':
         emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':m['params']['sessionId'],'update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'FIXTURE_REPLAY_BEFORE_LOAD'}}}})
         reply(m,None)
+    elif method=='get_available_models':
+        reply(m,{'models':[{'provider':'fixture','id':'controlled-model','name':'Controlled protocol fixture'}]})
     elif method=='get_state': reply(m,{'sessionId':'fixture-pi-stable','isStreaming':False,'isCompacting':False,'pendingMessageCount':0})
     elif method in ('session/prompt','prompt'):
         text=m['message'] if mode=='pi' else ''.join(p.get('text','') for p in m['params']['prompt'])

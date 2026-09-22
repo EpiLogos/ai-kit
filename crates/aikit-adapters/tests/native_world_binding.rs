@@ -9,11 +9,14 @@ fn fixture(path: &Path) -> AdmittedAgency {
     fixture_at_scope(path, "scope:root")
 }
 fn fixture_at_scope(path: &Path, scope: &str) -> AdmittedAgency {
+    fixture_at_world_scope(path, "central:root", scope)
+}
+fn fixture_at_world_scope(path: &Path, world: &str, scope: &str) -> AdmittedAgency {
     let mut source: Value = serde_json::from_str(include_str!(
         "../../aikit-cli/tests/fixtures/caw-agency-request.json"
     ))
     .unwrap();
-    source["differentiated_binding"]["world_ref"] = json!("central:root");
+    source["differentiated_binding"]["world_ref"] = json!(world);
     source["differentiated_binding"]["scope_ref"] = json!(scope);
     let bytes = serde_json::to_vec(&source).unwrap();
     std::fs::write(path, &bytes).unwrap();
@@ -40,9 +43,33 @@ fn fixture_at_scope(path: &Path, scope: &str) -> AdmittedAgency {
                 .unwrap(),
         )
         .unwrap(),
-        &ResourceRef::parse("central:root").unwrap(),
+        &ResourceRef::parse(world).unwrap(),
     )
     .unwrap()
+}
+
+#[test]
+fn current_control_root_identity_projects_as_its_native_world() {
+    let temp = tempfile::tempdir().unwrap();
+    let admitted = fixture_at_world_scope(
+        &temp.path().join("source.json"),
+        "control:root",
+        "control:root",
+    );
+    let binding = serde_json::to_value(admitted.context_binding().unwrap()).unwrap();
+    assert_eq!(binding["project"], "control:root");
+    assert_eq!(binding["locator"]["world"], "control:root");
+    assert_eq!(binding["locator"]["scope"], "control:root");
+
+    let foreign = fixture_at_world_scope(
+        &temp.path().join("foreign.json"),
+        "world:foreign",
+        "control:root",
+    );
+    assert_eq!(
+        foreign.context_binding().unwrap_err().code(),
+        "agency_admission.project_binding_required"
+    );
 }
 #[test]
 fn owner_identity_and_revision_are_retained_without_inventing_a_directory() {

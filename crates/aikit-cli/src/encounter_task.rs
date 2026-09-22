@@ -243,9 +243,9 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
         .ok_or_else(|| error("Missing native NOW"))?;
     let owner = NativeCentralPlacement::new(OwnerRunner);
     owner.revalidate(task)?;
-    let decision = owner.validate_write(task, &record.request.cwd)?;
-    if decision.get("destination_anchor") != record.cwd_anchor.as_ref() {
-        return Err(error("Task working directory changed since preparation"));
+    let cwd_anchor = owner.working_directory_anchor(task, &record.request.cwd)?;
+    if Some(&cwd_anchor) != record.cwd_anchor.as_ref() {
+        return Err(error("Task working directory changed since preparation or retains a legacy write-destination anchor; explicitly prepare the same task request again"));
     }
     let requirements = owner.write_boundary_requirements(
         task,
@@ -414,8 +414,7 @@ impl EncounterService {
         if task.allocation["policy"]["scope_ref"] != json!(binding.world_ref) {
             return Err(error("Central task scope differs from the native Agency World; an explicit owner-backed relation is required"));
         }
-        record.cwd_anchor =
-            Some(owner.validate_write(&task, &record.request.cwd)?["destination_anchor"].clone());
+        record.cwd_anchor = Some(owner.working_directory_anchor(&task, &record.request.cwd)?);
         let requirements = owner.write_boundary_requirements(
             &task,
             &record.request.authority_ref,

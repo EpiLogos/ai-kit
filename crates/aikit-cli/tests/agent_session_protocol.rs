@@ -191,6 +191,68 @@ fn native_selector_read_confirm_and_stale_identity_guard() {
         receipt["model_observation"]["reasoning_effort"]["currentValue"],
         "high"
     );
+    let events = rig
+        .service
+        .apply(EncounterRequest::Read {
+            agent_session: rig.session.clone(),
+            after: 0,
+            limit: 100,
+        })
+        .unwrap();
+    let confirmed = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["event"]["kind"].as_str())
+        .filter(|kind| kind.ends_with("configuration-confirmed"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        confirmed,
+        vec![
+            "native-model-configuration-confirmed",
+            "native-reasoning-effort-configuration-confirmed"
+        ],
+        "each provider-confirmed sequential write must be retained in order"
+    );
+    rig.stop();
+}
+
+#[test]
+fn unadvertised_reasoning_is_rejected_before_any_model_mutation_or_request_record() {
+    let rig = Rig::new("normal");
+    let before = rig.model();
+    let error = rig
+        .service
+        .apply(EncounterRequest::ModelSelect {
+            agent_session: rig.session.clone(),
+            provider_model_id: "test/b".into(),
+            provider_reasoning_effort: Some("not-advertised".into()),
+            expected_native_session_id: Some("controlled-native".into()),
+        })
+        .unwrap_err();
+    assert_eq!(error.code(), "encounter.reasoning_effort_not_advertised");
+    let after = rig.model();
+    assert_eq!(
+        after["model_observation"], before["model_observation"],
+        "a rejected reasoning option must not change the model or reasoning effort"
+    );
+    let events = rig
+        .service
+        .apply(EncounterRequest::Read {
+            agent_session: rig.session.clone(),
+            after: 0,
+            limit: 100,
+        })
+        .unwrap();
+    assert_eq!(
+        events["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["event"]["kind"] == "native-model-configuration-requested")
+            .count(),
+        0
+    );
     rig.stop();
 }
 #[test]
