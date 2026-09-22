@@ -51,3 +51,48 @@ never synthesize provider responses. Permission acceptance additionally checks
 real tool execution or native sandbox refusal, offered-choice validation and
 stale/wrong-session refusal. Unit protocol regressions are not substitutes for
 these live provider receipts.
+
+
+## Prime RPC acting-body providers
+
+A configured Encounter provider may use `prime-rpc` when the provider process
+is Prime Agent's pinned JSONL RPC surface rather than ACP or Pi-RPC. This does
+not create another AgentSession or model identity. AIKit still owns the
+canonical AgentSession; the adapter observes Prime's native session id,
+binds it explicitly and records the provider's exact `body_ref` and
+`body_revision` in the resident reading.
+
+The current Epi-Logos body is configured through:
+
+```sh
+aikit session-space -C <project> encounter-epi-prime-configure \
+  --launcher <abs>/actuation-epi-prime \
+  --prime-bin <abs>/prime-agent \
+  --ql-bin <abs>/ql \
+  --ql-revision <40-hex QL-MEF revision> \
+  --body-revision <40-hex Actuation revision> \
+  --skill-path <abs>/ql-relational \
+  --research-bin <abs>/actuation-research \
+  --faculty-config <abs>/faculty.json
+```
+
+The command records configuration only. It starts no provider and acquires no
+credential. The existing Encounter open/first-Send boundary launches the body.
+
+If an explicit AIKit model dispatch policy is present, the resolved native
+provider/model is appended to the Actuation launcher and Prime `get_state`
+must read back that same pair. If no model override is authored, Prime may use
+its own configured model; AIKit records the model/provider observed from
+`get_state` and does not misreport that as an AIKit selection.
+
+Cancellation maps to Prime's native `abort`; ordered text/tool events and
+`agent_end` map into the same Encounter journal/signals used by the other
+protocols. Restart never trusts a persisted `active` flag: native identity,
+body revision and model observation are re-resolved. An explicit body mismatch,
+missing body revision, changed native session or selected-model disagreement is
+a refusal, never a generic fallback.
+
+For the Epi-Logos mode this provider advertises
+`agent-body/epi-prime-ql`. O:I requests that semantic body only for a new
+conversation in the Epi world; it does not hard-code this provider id and it
+preserves explicit user provider overrides.
