@@ -331,6 +331,8 @@ jobs:
           assert value["source_change_during_jev_refused"] is True
           assert value["provider_malformed_refused"] is True
           assert value["revoked_read_refused"] is True
+          assert value["durable_return"]["later_participant_used_revised_wiki"] is True
+          assert value["durable_return"]["matrix_pressure"]["warranted"] is True
           assert value["comparison"]["arms"]["redis_prepared_no_jev"]["redis_prepared"] is True
           assert value["comparison"]["arms"]["jev_assisted"]["jev_calls"] == 1
           assert value["general_jev"]["standing"] == "controlled-protocol"
