@@ -309,10 +309,7 @@ impl PreparedFactoryContext {
         if !bounded(&self.run_ref, 4096)
             || !bounded(&self.owner_basis_revision, 4096)
             || self.journey_refs.len() > 64
-            || self
-                .journey_refs
-                .iter()
-                .any(|value| !bounded(value, 4096))
+            || self.journey_refs.iter().any(|value| !bounded(value, 4096))
             || self.workflow_units.len() > MAX_FACTORY_UNITS
         {
             return Err(fail(
