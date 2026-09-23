@@ -55,6 +55,7 @@ pub mod route_launch;
 pub mod run;
 pub mod scoped_invocation;
 pub mod session_lifecycle_ops;
+pub mod session_provider_reconcile;
 pub mod session_space_cli;
 pub mod session_space_ops;
 pub mod session_space_schema;
