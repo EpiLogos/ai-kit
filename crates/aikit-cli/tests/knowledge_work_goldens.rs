@@ -419,9 +419,17 @@ fn the_three_acceptance_queries_hit_the_live_world() {
 }
 
 /// The user-system guarantee (addendum A-5), gated like the other
-/// real-world goldens: standing at the Central root, Control/user and
-/// Control/agents prose still reach the surface through central-bkmr or the
-/// NOW field, and Work coverage never displaces them.
+/// real-world goldens: standing at the Central root — the root register's
+/// own posture — Control/user and Control/agents prose still reach the
+/// surface through central-bkmr or the NOW field, and Work coverage never
+/// displaces them.
+///
+/// The service opens the way production does at the root: the discovered
+/// (real) AIKit home and the real environment. A scratch home cannot stand
+/// in: the root register's `.aikit/profile.local.toml` enables a capability
+/// that only the provisioned home's source snapshots resolve. The searches
+/// themselves are read-only; the home gains only the regenerable caches any
+/// owner run writes.
 #[test]
 fn the_user_system_stays_first_class_in_the_live_world() {
     if std::env::var("AIKIT_KNOWLEDGE_GOLDENS").as_deref() != Ok("real") {
@@ -439,8 +447,7 @@ fn the_user_system_stays_first_class_in_the_live_world() {
             central.display()
         );
     }
-    let scratch = TempDir::new().unwrap();
-    let home = AikitHome::at(scratch.path().join("aikit-home"));
+    let home = AikitHome::discover().expect("resolve the production AIKit home");
     let service = Service::open(home, &central, |key| std::env::var(key).ok())
         .expect("open the production service from the live Central root");
 

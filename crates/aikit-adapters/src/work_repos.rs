@@ -412,6 +412,12 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
     /// escaped query terms, grouped per file and scored by how many distinct
     /// terms the file carries. Files matching every term outrank partial
     /// matches; within a class, more matching lines is more evidence.
+    ///
+    /// The score is mapped into `[0, 0.5)` — strictly below the shared
+    /// default the pre-existing pools answer at — so Work coverage ranks
+    /// after Control/user and Control/agents material instead of flooding
+    /// the surfaced limit (addendum A-5). Within the pool the order is the
+    /// raw score's.
     fn search_project(
         &self,
         project: &WorkRepoProject,
@@ -509,7 +515,16 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
                     0.0
                 };
                 let mass = (evidence.lines.min(16) as f64) * 0.01;
-                (coverage + complete + mass, relative, evidence)
+                // Raw scores reach 1 + 1 + 0.16 = 2.16; the shared surface
+                // answers 0.5 for unscored pools, so this pool publishes
+                // under that floor.
+                const SHARED_FLOOR: f64 = 0.5;
+                const RAW_CEILING: f64 = 2.2;
+                (
+                    SHARED_FLOOR * (coverage + complete + mass) / RAW_CEILING,
+                    relative,
+                    evidence,
+                )
             })
             .collect();
         scored.sort_by(|left, right| {
@@ -833,6 +848,51 @@ mod tests {
         assert_eq!(hits[0].provider.as_str(), WORK_REPOS_PROVIDER_REF);
         assert!(hits[0].tags.contains(&"work-repos".to_string()));
         assert!(hits.iter().all(|hit| hit.title.contains('.')));
+    }
+
+    #[test]
+    fn published_scores_stay_under_the_shared_floor_so_control_pools_keep_priority() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let provider = WorkReposSourcePoolProvider::connect(
+            scripted_matches(
+                root,
+                &[
+                    (
+                        "src/routine.rs",
+                        3,
+                        "automations drive the cron scheduled gate",
+                    ),
+                    ("docs/plan.md", 9, "automations cron"),
+                ],
+            ),
+            "rg",
+            vec![project(root)],
+        );
+        let hits = provider
+            .search(
+                "automations cron scheduled",
+                SourceSearchMode::Fulltext,
+                &[],
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        for hit in &hits {
+            let score = hit.score.expect("work-repos hits carry a score");
+            assert!(
+                score < 0.5,
+                "a score at or above the shared 0.5 floor would rank this pool \
+                 ahead of the pre-existing pools: {hits:?}"
+            );
+            assert!(score > 0.0, "scores stay positive: {hits:?}");
+        }
+        let first = hits[0].score.unwrap();
+        let second = hits[1].score.unwrap();
+        assert!(
+            first > second,
+            "within-pool order still follows match quality: {hits:?}"
+        );
     }
 
     #[test]
