@@ -2,7 +2,7 @@ schema = 1
 id = "skill/aikit/named-praxis"
 kind = "skill"
 name = "AIKit named praxis"
-description = "METHOD: Recognise a successfully performed, verified path and bind it to a reusable named Routine through the real aikit method prove -> aikit routine create/enable/run-now chain; use after a real result was actually checked, never to pre-register a hoped-for pattern."
+description = "METHOD: Recognise a successfully performed, verified path and bind it to a reusable named Routine through the real `aikit method prove` -> `aikit routine create`/`enable`/`run-now` chain; use after a real result was actually checked, never to pre-register a hoped-for pattern."
 maturity = "experimental"
 tags = ["aikit", "routine", "method", "named-praxis", "ta-onta-xp09"]
 

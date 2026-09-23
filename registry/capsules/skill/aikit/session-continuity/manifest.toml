@@ -2,7 +2,7 @@ schema = 1
 id = "skill/aikit/session-continuity"
 kind = "skill"
 name = "AIKit session continuity"
-description = "METHOD: Preserve and recover time, source, subject and session identity across re-entry through the real aikit now-context, aikit-session-space and aikit continuity surfaces plus Central Day/NOW, distinguishing replay from a later reading and a cancelled action from an uncertain one."
+description = "METHOD: Preserve and recover time, source, subject and session identity across re-entry through the real `aikit now-context`, `aikit-session-space` and `aikit continuity` surfaces plus Central Day/NOW, distinguishing replay from a later reading and a cancelled action from an uncertain one."
 maturity = "experimental"
 tags = ["aikit", "now-context", "session-space", "continuity", "ta-onta-xp10"]
 
