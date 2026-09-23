@@ -202,10 +202,16 @@ fn regex_escape(text: &str) -> String {
 /// (`**/<relative>/**`). Marked directories are found by walking the project
 /// before any search runs — the before-processing half of authorisation: a
 /// pruned path is never opened.
+///
+/// `ProjectCentral/**` is excluded outright: the register (manifest, human
+/// ground, governance, wiki, now records) is aperture owned by the
+/// ProjectCentral binding, the Central file map and the NOW-field pool — the
+/// live pool covers everything else in the repo (addendum A-4's join order).
 fn marker_exclude_globs(project_root: &Path) -> Vec<String> {
     let mut globs = vec![
         format!("**/{NO_AGENT_RETRIEVAL_MARKER}"),
         "**/.DS_Store".into(),
+        "**/ProjectCentral/**".into(),
     ];
     for name in IGNORED_DIR_NAMES {
         globs.push(format!("**/{name}/**"));
@@ -622,10 +628,11 @@ impl<R: CommandRunner> SourcePoolProvider for WorkReposSourcePoolProvider<R> {
     fn status(&self) -> SourceProviderStatus {
         let capabilities = self.capabilities();
         let version = capabilities.version.clone();
-        // Each per-project glob list is the two fixed exclusions (marker file,
-        // .DS_Store), the five ignored directory names, then one glob per
-        // marked subtree — so anything beyond seven names a marked subtree.
-        const FIXED_GLOBS: usize = 7;
+        // Each per-project glob list is the three fixed exclusions (marker
+        // file, .DS_Store, ProjectCentral aperture), the five ignored
+        // directory names, then one glob per marked subtree — anything beyond
+        // eight names a marked subtree.
+        const FIXED_GLOBS: usize = 8;
         let marked: usize = self
             .marker_globs
             .values()
@@ -869,6 +876,10 @@ mod tests {
             "the marked subtree is named as an exclude glob: {globs:?}"
         );
         assert!(globs.contains(&"**/.DS_Store".to_string()));
+        assert!(
+            globs.contains(&"**/ProjectCentral/**".to_string()),
+            "the register aperture belongs to the binding lens, not the live pool"
+        );
         assert!(globs.iter().any(|glob| glob.ends_with("target/**")));
     }
 
